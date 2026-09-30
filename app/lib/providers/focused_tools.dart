@@ -6,6 +6,7 @@ import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
+import 'host_status.dart' show hostUpGenerationProvider;
 import 'new_session_picker.dart';
 
 /// The `agent:tools` advert for the machine hosting the FOCUSED project.
@@ -51,6 +52,9 @@ final focusedMachineToolsProvider = FutureProvider<FocusedTools>((ref) async {
   if (ref.watch(demoModeProvider)) return const FocusedTools();
 
   if (target.isLocal) {
+    // The catch below caches a failed spawn as "no tools" until focus moves,
+    // so a focus made before the warm-up supplied a bootstrap needs this.
+    ref.watch(hostUpGenerationProvider);
     try {
       final host = await ref.watch(hostControllerProvider).ensureHost();
       final client = HostControlClient(

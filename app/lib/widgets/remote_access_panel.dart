@@ -146,17 +146,32 @@ class _AccessSection extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: AbTokens.space6),
-          Text(
-            policy == null
-                ? "Couldn't read this machine's setting. It stays as it was."
-                : 'Any device signed in to your account — phone, tablet or '
-                      'another desktop — can open and drive every project on '
-                      'this machine.',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXxs,
-              color: policy == null ? p.error : p.textMuted,
+          if (policy == null)
+            _Note(
+              text: "Couldn't read this machine's setting. It stays as it was.",
+              color: p.error,
+              // The switch is inert without a value, so without this a read
+              // that failed for good leaves nothing to press but an app
+              // restart.
+              action: async.hasError && !async.isLoading
+                  ? AbButton(
+                      key: const Key('remote-access-retry'),
+                      label: 'Retry',
+                      compact: true,
+                      onTap: () => ref.invalidate(remoteAccessPolicyProvider),
+                    )
+                  : null,
+            )
+          else
+            Text(
+              'Any device signed in to your account — phone, tablet or '
+              'another desktop — can open and drive every project on this '
+              'machine.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: p.textMuted,
+              ),
             ),
-          ),
           const SizedBox(height: AbTokens.space10),
           // The nullable policy, not the coerced `enabled` above: this row
           // says what the bit does RIGHT NOW, and "remote access is off" is a
