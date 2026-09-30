@@ -589,15 +589,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
-    // Consumed here, not from a state listener: this screen is unmounted while
-    // another pane shows, so a link followed then has no listener to reach and
-    // the next mount builds its controllers from here.
-    final previewService = state.tabs.isEmpty
-        ? null
-        : focusedCheckoutServiceOrNull(
-            ref.container,
-            (s) => s.previewService,
-          );
+    // Followed links are taken here rather than from a state listener: this
+    // screen is unmounted while another pane shows, and its next build is the
+    // only place a link followed meanwhile can still land.
+    final previewService = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.previewService,
+    );
     for (final tab in state.tabs) {
       final initialUrl =
           tab.currentUrl ?? 'http://localhost:${tab.localPort}';

@@ -5,15 +5,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/screens/preview_screen.dart';
 import 'package:antgrid/services/preview_handoff.dart';
 import 'package:antgrid/services/preview_service.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:webview_platform_interface/webview_platform_interface.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 
 // PreviewService queues a followed link's load and hands it to whichever
 // PreviewScreen builds the tab's webview next; these tests pin the screen's
@@ -47,11 +46,11 @@ class _RecordingPlatform extends WebViewPlatform {
 class _RecordingController extends PlatformWebViewController {
   _RecordingController(super.params) : super.implementation();
 
-  final loads = <Uri>[];
+  final loadedUrls = <String>[];
 
   @override
   Future<void> loadRequest(LoadRequestParams params) async =>
-      loads.add(params.uri);
+      loadedUrls.add(params.uri.toString());
 
   @override
   Future<void> setBackgroundColor(Color color) async {}
@@ -125,15 +124,6 @@ class _BlankWebViewWidget extends PlatformWebViewWidget {
   Widget build(BuildContext context) => const SizedBox.expand();
 }
 
-extension on _RecordingController {
-  Iterable<String> get loadedUrls => loads.map((u) => u.toString());
-}
-
-class _LocalFakeTransport extends FakeAgentTransport {
-  @override
-  bool get isLocal => true;
-}
-
 const _kPort = 3000;
 const _kOtherPort = 4000;
 const _kOrigin = 'http://localhost:3000';
@@ -159,17 +149,9 @@ void main() {
   Future<({ProviderContainer container, PreviewService preview})> boot(
     WidgetTester tester,
   ) async {
-    final session = await tester.runAsync(() async {
-      final cache = await CachedSessionsStore.open();
-      final transport = _LocalFakeTransport();
-      return ProjectSession(
-        projectId: 'p',
-        transport: transport,
-        mode: ProjectSessionMode.local,
-        cachedSessionsStore: cache,
-        onClose: () async => await transport.dispose(),
-      );
-    });
+    final session = await tester.runAsync(
+      () => newFakeProjectSession(LocalFakeAgentTransport()),
+    );
     addTearDown(() => tester.runAsync(session!.close));
     final container = ProviderContainer(
       overrides: [
@@ -202,6 +184,16 @@ void main() {
     expect(preview.currentState.tabs.map((t) => t.port), contains(port));
   }
 
+  // Opens a second tab and refocuses the first: two emissions that rebuild the
+  // screen for real, where setActiveTab on the already-active tab emits
+  // nothing.
+  Future<void> forceRebuilds(WidgetTester tester, PreviewService preview) async {
+    await openLocalTab(preview, _kOtherPort);
+    await tester.pump();
+    preview.setActiveTab(_kPort);
+    await tester.pump();
+  }
+
   group('PreviewScreen followed-link consumption', () {
     testWidgets(
       'a link queued before the screen mounts is the fresh controller\'s '
@@ -225,10 +217,7 @@ void main() {
 
         // A later emission for the same tab set must neither rebuild the
         // controller nor replay the link.
-        await openLocalTab(rig.preview, _kOtherPort);
-        await tester.pump();
-        rig.preview.setActiveTab(_kPort);
-        await tester.pump();
+        await forceRebuilds(tester, rig.preview);
 
         expect(platform.controllers, hasLength(2));
         expect(platform.controllers.first.loadedUrls, ['$_kOrigin$_kLink']);
@@ -266,10 +255,7 @@ void main() {
         // nor a remount may load it again. setActiveTab on the tab that is
         // already active emits nothing, so a second tab is what makes the
         // follow-up rebuilds real.
-        await openLocalTab(rig.preview, _kOtherPort);
-        await tester.pump();
-        rig.preview.setActiveTab(_kPort);
-        await tester.pump();
+        await forceRebuilds(tester, rig.preview);
         expect(platform.controllers, hasLength(2));
         expect(first.loadedUrls, [_kOrigin, '$_kOrigin$_kLink']);
 
@@ -280,7 +266,7 @@ void main() {
 
         expect(platform.controllers, hasLength(4));
         expect(
-          platform.controllers.skip(2).map((c) => c.loadedUrls.toList()),
+          platform.controllers.skip(2).map((c) => c.loadedUrls),
           [
             [_kOrigin],
             ['http://localhost:$_kOtherPort'],
@@ -310,10 +296,7 @@ void main() {
 
       // The reopen above emits nothing on the already-active tab, so force
       // real rebuilds: a queued load would surface on either of them.
-      await openLocalTab(rig.preview, _kOtherPort);
-      await tester.pump();
-      rig.preview.setActiveTab(_kPort);
-      await tester.pump();
+      await forceRebuilds(tester, rig.preview);
 
       expect(platform.controllers, hasLength(2));
       expect(controller.loadedUrls, [_kOrigin]);

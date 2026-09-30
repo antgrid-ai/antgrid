@@ -5,27 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/models/preview_models.dart';
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_handoff.dart';
 import 'package:antgrid/services/preview_service.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import '../helpers/free_port.dart';
 import '../helpers/prefs_test_mock.dart';
-
-Future<ProjectSession> _newSession(
-  FakeAgentTransport t, {
-  String projectId = 'p',
-}) async {
-  final cache = await CachedSessionsStore.open();
-  return ProjectSession(
-    projectId: projectId,
-    transport: t,
-    mode: ProjectSessionMode.local,
-    cachedSessionsStore: cache,
-    onClose: () async => await t.dispose(),
-  );
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -39,7 +24,7 @@ void main() {
     test(
       'explicit navigation preserves paths on an existing local tab',
       () async {
-        final session = await _newSession(_LocalFakeTransport());
+        final session = await newFakeProjectSession(LocalFakeAgentTransport());
         addTearDown(session.close);
         final svc = session.previewService;
         await svc.openTab(3000, scheme: 'https', path: '/dashboard');
@@ -84,7 +69,7 @@ void main() {
           0,
         );
         addTearDown(occupied.close);
-        final session = await _newSession(FakeAgentTransport());
+        final session = await newFakeProjectSession(FakeAgentTransport());
         addTearDown(session.close);
         final svc = session.previewService;
         await svc.openTab(occupied.port);
@@ -105,7 +90,7 @@ void main() {
 
     test('preview:snapshot (heavy) populates state.ports', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       // Subscribe to heavyStream so the focus-state gate fires.
@@ -135,7 +120,7 @@ void main() {
       // (the bridge re-sends when a port's scheme is detected after the first
       // entry went out) updates in place instead of duplicating the port.
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -167,7 +152,7 @@ void main() {
 
     test('ports:update (status) populates state.ports', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       t.emitJson({
@@ -193,8 +178,8 @@ void main() {
     test(
       'openTab in local mode sets the tab currentUrl to localhost:port',
       () async {
-        final t = _LocalFakeTransport();
-        final session = await _newSession(t);
+        final t = LocalFakeAgentTransport();
+        final session = await newFakeProjectSession(t);
         final svc = session.previewService;
 
         await svc.openTab(3000);
@@ -214,8 +199,8 @@ void main() {
     test(
       'openTab with a path lands the tab there, not just the origin',
       () async {
-        final t = _LocalFakeTransport();
-        final session = await _newSession(t);
+        final t = LocalFakeAgentTransport();
+        final session = await newFakeProjectSession(t);
         final svc = session.previewService;
 
         await svc.openTab(3000, path: '/dashboard');
@@ -231,7 +216,7 @@ void main() {
 
     test('openTab (relay) probes, then forwards the exact port', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -251,7 +236,7 @@ void main() {
 
     test('a TLS probe opens an https tab and a path lands behind it', () async {
       final t = FakeAgentTransport()..probeTls = true;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -270,7 +255,7 @@ void main() {
     test('a browser connection on the forwarded port opens a tunnel stream',
         () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -294,7 +279,7 @@ void main() {
       final handoff = PreviewHandoff();
       addTearDown(handoff.clear);
       final oldT = FakeAgentTransport()..probeTls = true;
-      final oldSession = await _newSession(oldT);
+      final oldSession = await newFakeProjectSession(oldT);
       final oldSvc = PreviewService.fromSession(oldSession, handoff: handoff);
       final port = await freePort();
       await oldSvc.openTab(port, path: '/dashboard');
@@ -308,7 +293,7 @@ void main() {
       expect(oldT.tunnelTcpOpens, hasLength(1));
 
       final newT = FakeAgentTransport();
-      final newSession = await _newSession(newT);
+      final newSession = await newFakeProjectSession(newT);
       final newSvc = PreviewService.fromSession(newSession, handoff: handoff);
       expect(newSvc.currentState.tabs.single.currentUrl, tab.currentUrl);
       expect(newSvc.currentState.activeTabId, port);
@@ -328,13 +313,13 @@ void main() {
         () async {
       final handoff = PreviewHandoff();
       addTearDown(handoff.clear);
-      final oldSession = await _newSession(FakeAgentTransport());
+      final oldSession = await newFakeProjectSession(FakeAgentTransport());
       final oldSvc = PreviewService.fromSession(oldSession, handoff: handoff);
       final port = await freePort();
       await oldSvc.openTab(port);
 
       final newT = FakeAgentTransport();
-      final newSession = await _newSession(newT);
+      final newSession = await newFakeProjectSession(newT);
       final newSvc = PreviewService.fromSession(newSession, handoff: handoff);
       expect(newSvc.currentState.tabs, isEmpty);
       await oldSvc.dispose();
@@ -352,7 +337,7 @@ void main() {
     test('a parked preview nobody claims releases its port', () async {
       final handoff = PreviewHandoff(grace: const Duration(milliseconds: 50));
       addTearDown(handoff.clear);
-      final session = await _newSession(FakeAgentTransport());
+      final session = await newFakeProjectSession(FakeAgentTransport());
       final svc = PreviewService.fromSession(session, handoff: handoff);
       final port = await freePort();
       await svc.openTab(port);
@@ -375,7 +360,7 @@ void main() {
           'UNREACHABLE',
           message: 'connection refused',
         );
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       await svc.openTab(3000);
@@ -389,7 +374,7 @@ void main() {
 
     test('openTab re-detecting an already-open port is a no-op', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -409,7 +394,7 @@ void main() {
     test('openTab binds a different local port when the port is taken',
         () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final blocker = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -431,7 +416,7 @@ void main() {
 
     test('closing a tab releases its forwarded port', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -454,8 +439,8 @@ void main() {
       // (no real socket bind to wait on), so the fire-and-forget
       // `unawaited(openTab(...))` inside `_handlePortDetected` has already
       // applied by the time the message-emit call returns.
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -498,8 +483,8 @@ void main() {
     });
 
     test('a silent or ignored detected port does not open a tab', () async {
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -525,8 +510,8 @@ void main() {
     });
 
     test('demo ports remain listed without opening a localhost tab', () async {
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t, projectId: kDemoProjectId);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t, projectId: kDemoProjectId);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -553,8 +538,8 @@ void main() {
       // event — the port only ever reached state.ports via the ports:update/
       // preview:snapshot hydration, which never opened a tab, forcing the
       // user through manual entry despite the port being known.
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -576,8 +561,8 @@ void main() {
 
     test('ports:update does not auto-open a port with no declared onDetect '
         "field the same as 'notify'", () async {
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -598,8 +583,8 @@ void main() {
     });
 
     test('ports:update never auto-opens a silent or ignored port', () async {
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -620,8 +605,8 @@ void main() {
     });
 
     test('ports:update never reopens a port the user already closed', () async {
-      final t = _LocalFakeTransport();
-      final session = await _newSession(t);
+      final t = LocalFakeAgentTransport();
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
 
@@ -654,7 +639,7 @@ void main() {
 
     test('a probed https tab is reused when the caller hints http', () async {
       final t = FakeAgentTransport()..probeTls = true;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -675,7 +660,7 @@ void main() {
     test('concurrent opens of one port share a single probe and forwarder',
         () async {
       final t = FakeAgentTransport()..probeTls = null;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -697,7 +682,7 @@ void main() {
 
     test('closing a tab while its probe is pending keeps it closed', () async {
       final t = FakeAgentTransport()..probeTls = null;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -715,7 +700,7 @@ void main() {
 
     test('a reopen after a close supersedes the stale open', () async {
       final t = FakeAgentTransport()..probeTls = null;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final port = await freePort();
@@ -743,7 +728,7 @@ void main() {
         () async {
       final t = FakeAgentTransport()
         ..probeFailure = const TunnelExchangeFailure('UNREACHABLE');
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
       final sub = session.heavyStream.listen((_) {});
       final port = await freePort();
@@ -772,7 +757,7 @@ void main() {
 
     test('a probe that never answers times out with an error', () async {
       final t = FakeAgentTransport()..probeTls = null;
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = PreviewService.fromSession(
         session,
         probeTimeout: const Duration(milliseconds: 50),
@@ -790,7 +775,7 @@ void main() {
 
     test('closing the active tab reassigns focus to a remaining tab', () async {
       final t = FakeAgentTransport();
-      final session = await _newSession(t);
+      final session = await newFakeProjectSession(t);
       final svc = session.previewService;
 
       final portA = await freePort();
@@ -820,7 +805,7 @@ void main() {
           0,
         );
         addTearDown(occupied.close);
-        final session = await _newSession(FakeAgentTransport());
+        final session = await newFakeProjectSession(FakeAgentTransport());
         addTearDown(session.close);
         final svc = session.previewService;
         await svc.openTab(occupied.port);
@@ -832,38 +817,36 @@ void main() {
           path: '/dashboard?q=1#top',
           navigateExisting: true,
         );
-        final first = svc.currentState.navRequest!;
-        expect(first.port, occupied.port);
-        expect(first.url, Uri.parse('http://localhost:$localPort/dashboard?q=1#top'));
-
-        await svc.openTab(
-          occupied.port,
-          path: '/dashboard?q=1#top',
-          navigateExisting: true,
+        expect(
+          svc.takeNavRequest(occupied.port),
+          Uri.parse('http://localhost:$localPort/dashboard?q=1#top'),
         );
-        expect(svc.currentState.navRequest!.seq, greaterThan(first.seq));
-        expect(svc.takeNavRequest(occupied.port), first.url);
 
         await svc.closeTab(occupied.port);
       },
     );
 
     test('local mode queues a load on the localhost origin', () async {
-      final session = await _newSession(_LocalFakeTransport());
+      final session = await newFakeProjectSession(LocalFakeAgentTransport());
       addTearDown(session.close);
       final svc = session.previewService;
       await svc.openTab(3000, path: '/start');
+      final emissions = <PreviewState>[];
+      final sub = svc.stateStream.listen(emissions.add);
+      addTearDown(sub.cancel);
 
       await svc.openTab(3000, path: '/a/b?x=1#f', navigateExisting: true);
       await svc.openTab(3000, path: '/a/b?x=1#f', navigateExisting: true);
+      await Future<void>.delayed(Duration.zero);
 
-      expect(svc.currentState.navRequest!.seq, 2);
+      // The same link twice must still reach a mounted screen twice.
+      expect(emissions, hasLength(2));
       expect(svc.takeNavRequest(3000), Uri.parse('http://localhost:3000/a/b?x=1#f'));
     });
 
     test('a queued load is taken once, replaced by a newer one, and dropped on '
         'close', () async {
-      final session = await _newSession(_LocalFakeTransport());
+      final session = await newFakeProjectSession(LocalFakeAgentTransport());
       addTearDown(session.close);
       final svc = session.previewService;
       await svc.openTab(3000);
@@ -884,11 +867,10 @@ void main() {
       await svc.openTab(4000, path: '/gone', navigateExisting: true);
       await svc.closeTab(4000);
       expect(svc.takeNavRequest(4000), isNull);
-      expect(svc.currentState.navRequest, isNull);
     });
 
     test('focus decides whether the tab is activated', () async {
-      final session = await _newSession(_LocalFakeTransport());
+      final session = await newFakeProjectSession(LocalFakeAgentTransport());
       addTearDown(session.close);
       final svc = session.previewService;
       await svc.openTab(3000);
@@ -910,7 +892,7 @@ void main() {
 
     test('a local scheme mismatch reopens the tab instead of queuing a load',
         () async {
-      final session = await _newSession(_LocalFakeTransport());
+      final session = await newFakeProjectSession(LocalFakeAgentTransport());
       addTearDown(session.close);
       final svc = session.previewService;
       await svc.openTab(3000);
@@ -922,7 +904,6 @@ void main() {
         navigateExisting: true,
       );
 
-      expect(svc.currentState.navRequest, isNull);
       expect(svc.takeNavRequest(3000), isNull);
       expect(svc.currentState.tabs.single.scheme, 'https');
       expect(
@@ -932,7 +913,7 @@ void main() {
     });
 
     test('without navigateExisting an open tab is left where it is', () async {
-      final session = await _newSession(_LocalFakeTransport());
+      final session = await newFakeProjectSession(LocalFakeAgentTransport());
       addTearDown(session.close);
       final svc = session.previewService;
       await svc.openTab(3000);
@@ -940,19 +921,11 @@ void main() {
 
       await svc.openTab(4000, path: '/ignored');
 
-      expect(svc.currentState.navRequest, isNull);
       expect(svc.takeNavRequest(4000), isNull);
       expect(svc.currentState.activeTabId, 4000);
       expect(svc.currentState.tabs.last.currentUrl, 'http://localhost:4000');
     });
   });
-}
-
-/// Local-mode fake transport variant for testing the `isLocal` branch in
-/// [PreviewService.openTab].
-class _LocalFakeTransport extends FakeAgentTransport {
-  @override
-  bool get isLocal => true;
 }
 
 Future<void> _waitUntil(bool Function() condition) async {

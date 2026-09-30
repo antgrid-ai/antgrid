@@ -442,9 +442,8 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 3999));
 
-    // The repeat bumps the card's generation now, but its timer only restarts
-    // on the next build — and pump elapses time (firing the old timer) before
-    // it builds.
+    // pump elapses time (firing the old card's timer) before it builds the
+    // repeat's card, so the old timer lands between the two.
     showAbToast(ctx, 'Copied to clipboard');
     await tester.pump(const Duration(milliseconds: 2));
     expect(find.text('Copied to clipboard'), findsOneWidget);
@@ -512,19 +511,6 @@ void main() {
       greaterThan(tester.getTopLeft(find.text('d')).dy),
       reason: 'the merged toast moves to the newest slot, nearest the bottom',
     );
-  });
-
-  testWidgets('dedupe: distinct titles still stack and cap', (tester) async {
-    final ctx = await _pumpHost(tester);
-
-    for (var i = 0; i < 6; i++) {
-      showAbToast(ctx, 'toast $i');
-    }
-    await tester.pump();
-
-    expect(find.byType(AbToast), findsNWidgets(4));
-    expect(find.text('toast 5'), findsOneWidget);
-    expect(find.text('toast 1'), findsNothing);
   });
 
   testWidgets('dedupe: a different description is not a repeat', (

@@ -526,3 +526,10 @@ class _StreamFlaggedAttachment implements TerminalAttachment {
   @override
   Future<void> close() => _inner.close();
 }
+
+/// [FakeAgentTransport] on the loopback path, for code that branches on
+/// [AgentTransport.isLocal].
+class LocalFakeAgentTransport extends FakeAgentTransport {
+  @override
+  bool get isLocal => true;
+}

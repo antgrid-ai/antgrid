@@ -38,7 +38,6 @@ class PreviewService {
   bool _disposed = false;
 
   final _stateController = StreamController<PreviewState>.broadcast();
-  int _navSeq = 0;
   PreviewState _state = const PreviewState();
 
   /// Relay-mode forwarders, one per open tab, keyed by dev-server port. Local
@@ -59,7 +58,7 @@ class PreviewService {
   /// is unmounted whenever another pane is showing, and a listener-only
   /// delivery would be lost with nothing mounted to hear it. The load must be
   /// applied by whichever screen builds the tab's webview next.
-  final Map<int, PreviewNavRequest> _pendingNav = {};
+  final Map<int, Uri> _pendingNav = {};
 
   /// Ports already weighed for auto-open — via a live [PortDetectedMessage]
   /// or a `ports:update` snapshot — so each port is only ever auto-opened
@@ -331,18 +330,11 @@ class PreviewService {
           ? existingTabNavigationUrl(port, scheme: scheme, path: path)
           : null;
       if (target != null) {
-        final request = PreviewNavRequest(
-          port: port,
-          url: target,
-          seq: ++_navSeq,
-        );
-        _pendingNav[port] = request;
-        _setState(
-          _state.copyWith(
-            activeTabId: focus ? port : null,
-            navRequest: request,
-          ),
-        );
+        _pendingNav[port] = target;
+        // Emitted even when nothing visible changed: every emission is a new
+        // state, and that is what makes a mounted screen rebuild and take the
+        // load.
+        _setState(_state.copyWith(activeTabId: focus ? port : null));
       } else if (focus) {
         setActiveTab(port);
       }
@@ -371,7 +363,7 @@ class PreviewService {
   /// Hands over, once, the load a followed link asked of [port]'s tab, or null
   /// when none is waiting. Deliberately emits no state: the caller is the
   /// screen's build, where publishing would modify a provider mid-build.
-  Uri? takeNavRequest(int port) => _pendingNav.remove(port)?.url;
+  Uri? takeNavRequest(int port) => _pendingNav.remove(port);
 
   /// Resolves an address-bar navigation through the tab's actual origin,
   /// including an ephemeral forwarder port when the local one was taken.
@@ -540,7 +532,6 @@ class PreviewService {
     _setState(
       _state.copyWith(
         tabs: tabs,
-        clearNavRequest: _state.navRequest?.port == port,
         activeTabId: wasActive && tabs.isNotEmpty
             ? tabs.first.port
             : _state.activeTabId,

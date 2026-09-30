@@ -430,6 +430,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // to the row's own context where there is no Navigator (widget tests).
     final refusalHost =
         Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
+    void notifyNoAnswer() {
+      if (refusalHost.mounted) showAbToast(refusalHost, _startNoAnswerMessage);
+    }
+
     final liveId = ref.read(selectedRegistrationIdProvider);
     if (widget.entryId == liveId) {
       // Same project — local fast path. For a same-project remote `liveId`
@@ -479,15 +483,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // spawned the PTY anyway (`session:updated` then reconciles the row).
           // Leaving the activeSessionId set while the surface never switches is
           // the worst of both — a tap that visibly did nothing.
-          if (refusalHost.mounted) {
-            showAbToast(refusalHost, _startNoAnswerMessage);
-          }
+          notifyNoAnswer();
         } on SessionDownException {
           // Same "may still be coming up" shape as the timeout above — the
           // machine went away, not the bridge refusing.
-          if (refusalHost.mounted) {
-            showAbToast(refusalHost, _startNoAnswerMessage);
-          }
+          notifyNoAnswer();
         }
         // A different project can be activated while start() is in flight. The
         // writes below (focus, surface, nav entry) all belong to THIS project,

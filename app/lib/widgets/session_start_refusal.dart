@@ -47,12 +47,9 @@ void reportStartRefusal(
 /// navigator's context. Falls back to [context] where there is no Navigator
 /// (widget tests).
 void reportSessionNotice(BuildContext context, String message) {
-  final host = Navigator.maybeOf(context, rootNavigator: true)?.context;
-  if (host != null && host.mounted) {
+  final navigator = Navigator.maybeOf(context, rootNavigator: true)?.context;
+  final host = navigator != null && navigator.mounted ? navigator : context;
+  if (host.mounted) {
     showAbToast(host, message, duration: const Duration(seconds: 8));
-    return;
-  }
-  if (context.mounted) {
-    showAbToast(context, message, duration: const Duration(seconds: 8));
   }
 }

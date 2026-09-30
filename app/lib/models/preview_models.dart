@@ -90,20 +90,12 @@ class PreviewState {
   final bool isLoading;
   final String? error;
 
-  /// The latest explicit "go to this URL" aimed at an already-open tab (a link
-  /// clicked in the terminal). It is only the change signal that makes a
-  /// mounted screen rebuild: the load itself is handed over once through
-  /// [PreviewService.takeNavRequest], which works whether or not a screen was
-  /// mounted when the link was clicked.
-  final PreviewNavRequest? navRequest;
-
   const PreviewState({
     this.ports = const [],
     this.tabs = const [],
     this.activeTabId,
     this.isLoading = false,
     this.error,
-    this.navRequest,
   });
 
   PreviewTab? get activeTab {
@@ -123,8 +115,6 @@ class PreviewState {
     bool? isLoading,
     String? error,
     bool clearError = false,
-    PreviewNavRequest? navRequest,
-    bool clearNavRequest = false,
   }) {
     return PreviewState(
       ports: ports ?? this.ports,
@@ -134,25 +124,8 @@ class PreviewState {
           : (activeTabId ?? this.activeTabId),
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
-      navRequest: clearNavRequest ? null : (navRequest ?? this.navRequest),
     );
   }
-}
-
-/// [url] is absolute and already anchored on the tab's own origin, so the
-/// page the webview happens to be showing never influences where it lands.
-/// [seq] is monotonic so the same link clicked twice still reads as a new
-/// request (state equality alone would swallow the second one).
-class PreviewNavRequest {
-  final int port;
-  final Uri url;
-  final int seq;
-
-  const PreviewNavRequest({
-    required this.port,
-    required this.url,
-    required this.seq,
-  });
 }
 
 class PortsUpdateMessage {

@@ -202,19 +202,9 @@ class _ToastStack {
 class _ActiveToast {
   _ActiveToast(this.toast, this.duration);
   final AbToast toast;
-  Duration duration;
-
-  /// Bumped when an identical toast is shown again, so the card's own timer
-  /// (owned by [_DismissingToastState]) restarts without the card being
-  /// rebuilt from scratch.
-  int generation = 0;
-
-  /// Set once a swipe commits to dismissing the card. Its removal is already
-  /// scheduled, so a repeat merged into it would vanish with it.
-  bool exiting = false;
+  final Duration duration;
 
   bool isRepeatOf(AbToast other) =>
-      !exiting &&
       toast.actionLabel == null &&
       other.actionLabel == null &&
       toast.title == other.title &&
@@ -225,7 +215,7 @@ class _ActiveToast {
 
 /// A burst (a held key auto-repeating) must not fill the screen; the oldest
 /// toast is dropped first since the newest is closest to the trigger. Only
-/// distinct toasts count: an identical repeat is merged into its card.
+/// distinct toasts count: an identical repeat replaces its card.
 const int _kMaxStackedToasts = 4;
 
 final Expando<_ToastStack> _toastStacks = Expando<_ToastStack>();
@@ -257,9 +247,9 @@ void showAbToast(
 /// added, instead of stacking above them.
 ///
 /// A toast with the same title, description and icon as one already showing,
-/// and no action on either, is not added again: the existing card restarts its
-/// timer and moves to the newest position. A toast with an action is never
-/// merged, since each carries its own callback.
+/// and no action on either, replaces that card: one card, with a full timer,
+/// in the newest position. A toast with an action never replaces another,
+/// since each carries its own callback.
 ///
 /// Falls back to the ROOT navigator's own overlay when [context] doesn't
 /// resolve one directly — callers deliberately hand this a `NavigatorState`'s
@@ -303,19 +293,12 @@ void showAbToastOn(
   final stack = _toastStacks[overlay] ??= _ToastStack();
   if (clearPrevious) _clearStack(stack);
 
-  for (final existing in stack.active) {
-    if (!existing.isRepeatOf(toast)) continue;
-    stack.active
-      ..remove(existing)
-      ..add(existing);
-    existing.duration = duration;
-    existing.generation++;
-    stack.entry?.markNeedsBuild();
-    return;
-  }
-
-  final active = _ActiveToast(toast, duration);
-  stack.active.add(active);
+  // A repeat REPLACES its card rather than updating it: the fresh entry gets a
+  // fresh widget state and so a fresh timer, while the old card's pending
+  // timer or swipe-out lands on an entry no longer in the stack and does
+  // nothing (see [_dismissOne]).
+  stack.active.removeWhere((existing) => existing.isRepeatOf(toast));
+  stack.active.add(_ActiveToast(toast, duration));
   while (stack.active.length > _kMaxStackedToasts) {
     stack.active.removeAt(0);
   }
@@ -374,13 +357,14 @@ class _ToastStackView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final media = MediaQuery.of(context);
     // Bottom, not top: the top-right corner holds the window's caption buttons
     // and the context panel's tab bar on desktop. padding excludes whatever
     // the keyboard already covers, so padding + viewInsets is the larger of
     // the system inset and the keyboard rather than their sum.
     final bottom =
-        media.padding.bottom + media.viewInsets.bottom + AbTokens.space16;
+        MediaQuery.paddingOf(context).bottom +
+        MediaQuery.viewInsetsOf(context).bottom +
+        AbTokens.space16;
     final touch = isMobilePlatform;
     // The overlay theater hands a bottom/right-only Positioned unbounded
     // width, and the toast's flex children assert without a finite max —
@@ -389,7 +373,8 @@ class _ToastStackView extends StatelessWidget {
     // (invalid) constraints.
     final column = ConstrainedBox(
       constraints: BoxConstraints(
-        maxWidth: (media.size.width - AbTokens.space16 * 2).clamp(0.0, 360.0),
+        maxWidth: (MediaQuery.sizeOf(context).width - AbTokens.space16 * 2)
+            .clamp(0.0, 360.0),
       ),
       child: Material(
         color: Colors.transparent,
@@ -410,7 +395,6 @@ class _ToastStackView extends StatelessWidget {
                 padding: const EdgeInsets.only(top: AbTokens.space8),
                 child: _DismissingToast(
                   active: a,
-                  generation: a.generation,
                   onExpire: () => _dismissOne(stack, a),
                 ),
               ),
@@ -443,18 +427,9 @@ class _ToastStackView extends StatelessWidget {
 /// happens: it expires, its close button is tapped, [clearAbToasts] wipes the
 /// stack, or the Overlay itself is torn down.
 class _DismissingToast extends StatefulWidget {
-  const _DismissingToast({
-    required this.active,
-    required this.generation,
-    required this.onExpire,
-  });
+  const _DismissingToast({required this.active, required this.onExpire});
 
   final _ActiveToast active;
-
-  /// [active]'s generation at build time. [active] is one mutable object, so
-  /// the state can only see a repeat by comparing this against the previous
-  /// widget's copy.
-  final int generation;
   final VoidCallback onExpire;
 
   @override
@@ -463,7 +438,6 @@ class _DismissingToast extends StatefulWidget {
 
 class _DismissingToastState extends State<_DismissingToast> {
   Timer? _timer;
-  bool _hovered = false;
 
   // Touch has no hover, so a touch card carries no close button (see
   // AbToast) — swipe is its dismiss gesture instead, tracked here rather
@@ -483,16 +457,6 @@ class _DismissingToastState extends State<_DismissingToast> {
   }
 
   @override
-  void didUpdateWidget(_DismissingToast oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // A hovered card stays paused: the pointer leaving restarts the full
-    // duration anyway, so a repeat has nothing to add.
-    if (oldWidget.generation != widget.generation && !_hovered) {
-      _startTimer();
-    }
-  }
-
-  @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
@@ -500,30 +464,14 @@ class _DismissingToastState extends State<_DismissingToast> {
 
   void _startTimer() {
     _timer?.cancel();
-    final generation = widget.active.generation;
-    _timer = Timer(widget.active.duration, () {
-      // A repeat bumps the generation synchronously but restarts this timer
-      // only on the next build; firing in between must not drop the card the
-      // repeat was just merged into.
-      if (widget.active.generation != generation) {
-        _startTimer();
-      } else {
-        widget.onExpire();
-      }
-    });
+    _timer = Timer(widget.active.duration, widget.onExpire);
   }
 
-  void _pauseTimer() {
-    _hovered = true;
-    _timer?.cancel();
-  }
+  void _pauseTimer() => _timer?.cancel();
 
   // Restarts the full duration rather than the remainder: the user just
   // showed attention, so a fresh window beats a sliver.
-  void _resumeTimer() {
-    _hovered = false;
-    _startTimer();
-  }
+  void _resumeTimer() => _startTimer();
 
   void _dismissNow() {
     _timer?.cancel();
@@ -551,7 +499,6 @@ class _DismissingToastState extends State<_DismissingToast> {
     // — but let the exit animation (driven by the AnimatedContainer below)
     // finish before actually removing it from the stack.
     _timer?.cancel();
-    widget.active.exiting = true;
     final direction = _dragExtent != 0
         ? _dragExtent.sign
         : (velocity < 0 ? -1.0 : 1.0);
