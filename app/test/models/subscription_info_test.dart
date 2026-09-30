@@ -302,4 +302,22 @@ void main() {
       );
     });
   });
+
+  group('iosManageSubscriptionUrl', () {
+    String url(String? provider) => iosManageSubscriptionUrl(
+      provider: provider,
+      licenseApiUrl: 'https://app.example.com/',
+    );
+
+    test('never lands on a purchase page', () {
+      for (final p in [null, '', 'paddle', 'razorpay', 'dev']) {
+        expect(url(p), 'https://app.example.com/dashboard?hidePricing=1');
+      }
+    });
+
+    test('sends a store subscription to that store', () {
+      expect(url('app_store'), 'https://apps.apple.com/account/subscriptions');
+      expect(url('play_store'), startsWith('https://play.google.com/'));
+    });
+  });
 }

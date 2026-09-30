@@ -141,7 +141,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref.container);
+        if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
         showAbSnackBar(
           context,

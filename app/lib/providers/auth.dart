@@ -3,11 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../analytics/events.dart';
 import '../config/environment.dart';
+import '../models/subscription_info.dart';
 import '../services/account_api.dart';
 import '../services/auth_service.dart';
 import '../services/devices_api.dart' show DeviceCapInfo;
 import 'analytics.dart';
 import 'provider_retry.dart';
+import 'subscription.dart';
 import 'value_controller.dart';
 
 /// License/account API base URL. Precedence: a `LICENSE_API_URL` dart-define
@@ -103,6 +105,32 @@ Future<void> openAccountInBrowser(ProviderContainer ref) async {
   await launchUrl(
     Uri.parse(onIos ? '$base/account?hidePricing=1' : '$base/account'),
     mode: onIos ? LaunchMode.inAppBrowserView : LaunchMode.externalApplication,
+  );
+}
+
+/// Opens where the subscription blocking account deletion is cancelled. iOS
+/// keeps clear of the pricing page ([iosManageSubscriptionUrl]).
+Future<void> openManageSubscription(ProviderContainer ref) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) {
+    return openUpgradeInBrowser(ref);
+  }
+  String? provider;
+  try {
+    provider = (await ref.read(subscriptionProvider.future))?.provider;
+  } catch (_) {
+    // Unknown provider still has a safe destination: the web dashboard.
+  }
+  final api = ref.read(licenseApiUrlProvider);
+  final url = Uri.parse(
+    iosManageSubscriptionUrl(provider: provider, licenseApiUrl: api),
+  );
+  // Our own pages stay in the in-app sheet, like openAccountInBrowser; a store
+  // URL goes out so the App Store app handles it.
+  await launchUrl(
+    url,
+    mode: url.host == Uri.parse(api).host
+        ? LaunchMode.inAppBrowserView
+        : LaunchMode.externalApplication,
   );
 }
 
