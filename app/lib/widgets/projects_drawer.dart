@@ -533,6 +533,14 @@ class _EntryWithSessions extends ConsumerWidget {
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
         : !ref.watch(collapsedDrawerIdsProvider).contains(entry.id);
+    final isLocal = entry.kind == EntryKind.local;
+    if (isLocal && ref.watch(localMachineCollapsedProvider)) {
+      // The band stays on the first local row; every other local row folds to
+      // nothing but keeps its keyed slot so the reorder indices stay valid.
+      return showLocalBand
+          ? LocalMachineBand(showRule: showRule)
+          : const SizedBox.shrink();
+    }
     final entryRow = machineUuid != null
         ? MachineDrawerHeaderRow(entry, showRule: showRule)
         : DrawerEntryRow(entry);

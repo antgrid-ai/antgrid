@@ -25,6 +25,7 @@ import 'dart:convert';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -1629,9 +1630,7 @@ void main() {
         await drop();
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);
@@ -1683,9 +1682,7 @@ void main() {
         await onPicked(picked);
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);
@@ -1740,9 +1737,7 @@ void main() {
         await onPicked(picked);
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);

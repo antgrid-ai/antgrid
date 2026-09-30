@@ -490,7 +490,7 @@ void main() {
     );
     // Tapping the disabled Chat row must not change the mode, and must not
     // close the menu. (On the default Android test platform the tap surfaces
-    // the reason as a snack bar — pump past its duration so its dismiss timer
+    // the reason as a toast — pump past its duration so its dismiss timer
     // isn't pending at test end.)
     await _openModeMenu(tester);
     await tester.tap(find.byKey(const Key('new-session-mode-chat')));
@@ -848,7 +848,7 @@ void main() {
         await tester.tapAt(const Offset(5, 5));
         await tester.pumpAndSettle();
         expect(_selectedMode(tester), 'terminal');
-        // Drain the disabled-tap snack bar's dismiss timer (Android default
+        // Drain the disabled-tap toast's dismiss timer (Android default
         // test platform takes the mobile feedback path).
         await tester.pump(const Duration(seconds: 5));
         await tester.pumpAndSettle();
@@ -1208,7 +1208,7 @@ void main() {
   });
 
   group('create-time isolation refusals', () {
-    /// Submits, then settles far enough for the refusal's snack bar to render.
+    /// Submits, then settles far enough for the refusal's toast to render.
     Future<void> submitPrompt(WidgetTester tester) async {
       await tester.enterText(
         find.byKey(const Key('new-session-prompt-field')),
@@ -1219,8 +1219,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
     }
 
-    /// Drains the 8s snack bar so its dismiss timer can't outlive the test.
-    Future<void> drainSnackBar(WidgetTester tester) async {
+    /// Drains the 8s toast so its dismiss timer can't outlive the test.
+    Future<void> drainToast(WidgetTester tester) async {
       await tester.pump(const Duration(seconds: 8));
       await tester.pump(const Duration(milliseconds: 300));
     }
@@ -1253,7 +1253,7 @@ void main() {
       expect(find.textContaining('Failed to start session'), findsNothing);
       expect(find.textContaining('unknown base branch'), findsNothing);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('an unmapped code keeps the bridge message', (tester) async {
@@ -1270,7 +1270,7 @@ void main() {
 
       expect(find.text('fatal: invalid reference: nope'), findsOneWidget);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('a refusal carrying neither falls back', (tester) async {
@@ -1282,7 +1282,7 @@ void main() {
 
       expect(find.text('Could not start the session.'), findsOneWidget);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('the composer stays put with the prompt intact', (
@@ -1308,7 +1308,7 @@ void main() {
         findsOneWidget,
       );
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('an unexpected launch failure uses generic actionable copy', (
@@ -1335,7 +1335,7 @@ void main() {
       expect(find.textContaining('FormatException'), findsNothing);
       expect(find.textContaining('provider executable exploded'), findsNothing);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('a launch failure after disposal does not read widget ref', (
@@ -1649,7 +1649,7 @@ void main() {
       // Flipping the prompt to readOnly closes the platform input connection on
       // a touch platform, so the soft keyboard collapses on Send and — with
       // focus still on the field — springs back the instant the start ends,
-      // over a form the user was not typing in and over the snackbar saying
+      // over a form the user was not typing in and over the toast saying
       // why. Dropping focus makes that close deliberate and one-way.
       expect(isMobilePlatform, isTrue);
       final node = await focusedPrompt(tester);

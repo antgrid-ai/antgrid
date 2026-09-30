@@ -8,7 +8,7 @@ import '../ab_colors.dart';
 import '../ab_tokens.dart';
 import '../widgets/ab_chip.dart';
 import '../widgets/ab_icon.dart';
-import '../widgets/ab_snack_bar.dart';
+import '../widgets/ab_toast.dart';
 import '../widgets/ab_tooltip.dart';
 
 abstract class AbMenuEntry {
@@ -232,7 +232,7 @@ class AbLiveMenuRow extends StatelessWidget {
     void activate() {
       if (!live) {
         final reason = enabled ? null : disabledReason;
-        if (reason != null) showAbSnackBar(context, reason);
+        if (reason != null) showAbToast(context, reason);
         return;
       }
       onTap!();
@@ -881,7 +881,7 @@ class _MenuItemTileState extends State<_MenuItemTile> {
     final i = widget.item;
     if (!i.enabled) {
       final reason = i.disabledReason;
-      if (reason != null) showAbSnackBar(context, reason);
+      if (reason != null) showAbToast(context, reason);
       return;
     }
     i.onTap?.call();

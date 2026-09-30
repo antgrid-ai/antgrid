@@ -9,7 +9,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
@@ -199,7 +199,7 @@ class _AgentReachRow extends ConsumerWidget {
       next,
     ) {
       if (next is AsyncError && prev is! AsyncError) {
-        showAbSnackBar(context, 'Could not update agent reach. Try again.');
+        showAbToast(context, 'Could not update agent reach. Try again.');
       }
     });
     final async = ref.watch(agentReachPolicyProvider);
@@ -404,7 +404,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     if (!mounted) return;
     setState(() => _busy = false);
     if (!revoked) {
-      showAbSnackBar(context, "Couldn't sign $name out. It still has access.");
+      showAbToast(context, "Couldn't sign $name out. It still has access.");
     }
   }
 

@@ -14,7 +14,7 @@ import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
@@ -74,7 +74,7 @@ class AgentPanel extends ConsumerWidget {
       if (!revoked) return;
       // Reset so a subsequent auth_revoked event re-notifies.
       ref.read(authRevokedBannerProvider.notifier).set(false);
-      showAbSnackBar(
+      showAbToast(
         context,
         "This device's access was revoked. Reopen the project to "
         'provision a new device; sign in again if prompted.',
@@ -1105,7 +1105,7 @@ class _EditableSessionLeafState extends ConsumerState<EditableSessionLeaf> {
     // never happened.
     void report(String reason) {
       if (mounted) {
-        showAbSnackBar(context, "Couldn't rename the session — $reason");
+        showAbToast(context, "Couldn't rename the session — $reason");
       }
     }
 

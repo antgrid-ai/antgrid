@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
 import 'package:antgrid/widgets/session_delete_flow.dart';
@@ -76,9 +77,7 @@ Future<void> _tap(WidgetTester tester, String label) async {
 
 /// Clears a reported refusal so its dismissal timer cannot outlive the test.
 Future<void> _dismissToast(WidgetTester tester) async {
-  ScaffoldMessenger.of(
-    tester.element(find.byType(Scaffold)),
-  ).removeCurrentSnackBar();
+  clearAbToasts(tester.element(find.byType(Scaffold)));
   await tester.pumpAndSettle();
 }
 

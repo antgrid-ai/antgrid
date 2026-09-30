@@ -19,7 +19,7 @@ import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_segmented.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
@@ -145,7 +145,9 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // sits on its "loading history..." placeholder forever — that is exactly
     // the state a service which never asked reports, and nothing asks again.
     // `loadHistory` touches no BuildContext; a disposed service drops it.
-    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadHistory());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => fileService.loadHistory(),
+    );
   }
 
   /// Same lazy, once-per-service-lifetime fetch as [_maybeLoadHistory], for
@@ -156,7 +158,9 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // Unguarded for the same reason as [_maybeLoadHistory], and it matters
     // more here: nothing else in the app ever calls `loadStashes` again, so a
     // spent claim with no send hides the stash banner for good.
-    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadStashes());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => fileService.loadStashes(),
+    );
   }
 
   /// Steps out ONE level: the file opened from a diff, then the diff itself.
@@ -264,9 +268,7 @@ class _GitHeaderCounts {
   /// name before the slash is not a folder row and counting it as one leaves
   /// [changedFolders] holding a folder nothing can ever collapse.
   static Iterable<String> _ancestorsOf(String path) sync* {
-    var dir = path.endsWith('/')
-        ? path.substring(0, path.length - 1)
-        : path;
+    var dir = path.endsWith('/') ? path.substring(0, path.length - 1) : path;
     var slash = dir.lastIndexOf('/');
     while (slash >= 0) {
       dir = dir.substring(0, slash);
@@ -638,7 +640,11 @@ class _GitChangesHeader extends StatelessWidget {
     // tree, these two act on the branch's relationship to a remote. Sharing a
     // border would read as one control.
     if (git.sync.hasRemote) ...[
-      _SyncControl(sync: git.sync, syncing: git.syncing, fileService: fileService),
+      _SyncControl(
+        sync: git.sync,
+        syncing: git.syncing,
+        fileService: fileService,
+      ),
       const SizedBox(width: AbTokens.space6),
     ],
     if (counts.hasChanges) ...[
@@ -977,12 +983,20 @@ class _SyncCounts extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (sync.behind > 0) ...[
-            AbIcon(AbIcons.arrowDown, size: AbTokens.fontXs, color: colors.textMuted),
+            AbIcon(
+              AbIcons.arrowDown,
+              size: AbTokens.fontXs,
+              color: colors.textMuted,
+            ),
             Text('${sync.behind}', style: style),
           ],
           if (sync.ahead > 0) ...[
             if (sync.behind > 0) const SizedBox(width: AbTokens.space4),
-            AbIcon(AbIcons.arrowUp, size: AbTokens.fontXs, color: colors.textMuted),
+            AbIcon(
+              AbIcons.arrowUp,
+              size: AbTokens.fontXs,
+              color: colors.textMuted,
+            ),
             Text('${sync.ahead}', style: style),
           ],
         ],
@@ -1736,7 +1750,7 @@ class _CommitHeaderRow extends StatelessWidget {
     await Clipboard.setData(
       ClipboardData(text: action == 'sha' ? commit.sha : commit.shortSha),
     );
-    if (context.mounted) showAbSnackBar(context, 'Copied to clipboard');
+    if (context.mounted) showAbToast(context, 'Copied to clipboard');
   }
 
   @override
@@ -1982,16 +1996,11 @@ class _CommitFileRow extends StatelessWidget {
         message: file.path,
         child: Text(
           file.path,
-          style: AbTokens.monoStyle(
-            color: selected ? p.accent : p.textPrimary,
-          ),
+          style: AbTokens.monoStyle(color: selected ? p.accent : p.textPrimary),
         ),
       ),
       subtitle: file.oldPath != null
-          ? AbTooltip(
-              message: file.oldPath!,
-              child: Text(file.oldPath!),
-            )
+          ? AbTooltip(message: file.oldPath!, child: Text(file.oldPath!))
           : null,
       trailing: (file.additions > 0 || file.deletions > 0)
           ? AbDiffStat(

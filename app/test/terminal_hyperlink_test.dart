@@ -146,7 +146,7 @@ void main() {
     });
 
     // The predicate group above covers the decision; these cover what the app
-    // DOES with it — the SnackBar, the launch, and the swallowed throw are the
+    // DOES with it — the toast, the launch, and the swallowed throw are the
     // only behaviour this function adds, and none of it is reachable from a
     // pure test.
     Future<BuildContext> pumpHost(WidgetTester tester) async {
@@ -357,25 +357,29 @@ void main() {
     // touch. Asking the CALLER what it showed cannot answer that wrongly --
     // and it covers the Shift chord and a link scrolled out from under a
     // resting pointer, which the platform test missed for the same reason.
-    testWidgets('asks on desktop when nothing was on screen', (tester) async {
-      final context = await pumpHost(tester);
-      var launched = 0;
-      var asked = 0;
+    testWidgets(
+      'asks on desktop when nothing was on screen',
+      (tester) async {
+        final context = await pumpHost(tester);
+        var launched = 0;
+        var asked = 0;
 
-      await openTerminalHyperlink(
-        context,
-        'https://example.com/a',
-        open: (_, _) async => launched++,
-        confirm: (_, _) async {
-          asked++;
-          return false;
-        },
-      );
-      await tester.pump();
+        await openTerminalHyperlink(
+          context,
+          'https://example.com/a',
+          open: (_, _) async => launched++,
+          confirm: (_, _) async {
+            asked++;
+            return false;
+          },
+        );
+        await tester.pump();
 
-      expect(asked, 1);
-      expect(launched, 0);
-    }, variant: TargetPlatformVariant.desktop());
+        expect(asked, 1);
+        expect(launched, 0);
+      },
+      variant: TargetPlatformVariant.desktop(),
+    );
   });
 
   group('showTerminalHyperlinkSheet', () {

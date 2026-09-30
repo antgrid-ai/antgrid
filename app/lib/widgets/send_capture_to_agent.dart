@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../providers/composer_handoff.dart';
 import '../providers/providers.dart';
 import '../providers/session_mode.dart';
@@ -65,7 +65,7 @@ Future<bool> sendCaptureToAgent({
   );
   if (termSvc == null) {
     if (context.mounted) {
-      showAbSnackBar(context, 'Not connected to the agent — could not send');
+      showAbToast(context, 'Not connected to the agent — could not send');
     }
     return false;
   }
@@ -78,7 +78,7 @@ Future<bool> sendCaptureToAgent({
     );
     if (uploadSvc == null) {
       if (context.mounted) {
-        showAbSnackBar(context, 'Not connected to the agent — could not send');
+        showAbToast(context, 'Not connected to the agent — could not send');
       }
       return false;
     }
@@ -96,7 +96,7 @@ Future<bool> sendCaptureToAgent({
       // caller that owns cancelToken already knows and is closing its own UI.
       if (e is UploadException && e.code == 'CANCELLED') return false;
       if (context.mounted) {
-        showAbSnackBar(context, uploadErrorText(e, fileName));
+        showAbToast(context, uploadErrorText(e, fileName));
       }
       return false;
     }
@@ -106,7 +106,7 @@ Future<bool> sendCaptureToAgent({
   if (body.isEmpty) return false;
 
   if (!termSvc.sendToAgentTerminal(body)) {
-    if (context.mounted) showSendRefusedSnackBar(context);
+    if (context.mounted) showSendRefusedToast(context);
     return false;
   }
   container.read(switchToAgentProvider)?.call();
@@ -116,7 +116,7 @@ Future<bool> sendCaptureToAgent({
   // route above needs no equivalent: the composer focuses itself as it picks
   // the handoff up (`AgentTranscriptView._consumeHandoff`).
   container.read(focusAgentInputProvider)?.call();
-  if (context.mounted) showSentToAgentSnackBar(context);
+  if (context.mounted) showSentToAgentToast(context);
   return true;
 }
 

@@ -16,7 +16,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
@@ -116,7 +116,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ((_maxScreenshotBytes + 2) ~/ 3) * 4 + 64;
   static const _maxScreenshotChunks =
       (_maxScreenshotDataChars + _screenshotChunkChars - 1) ~/
-          _screenshotChunkChars;
+      _screenshotChunkChars;
 
   final Map<int, _TabWebViewState> _tabStates = {};
 
@@ -445,7 +445,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
       final target = parsePreviewTarget(trimmed);
       if (target == null) {
-        showAbSnackBar(
+        showAbToast(
           context,
           'Enter a port (e.g. 3000) or a link like localhost:3000/path',
         );
@@ -542,7 +542,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // page inside the demo. Decline in the same words every other demo refusal
     // uses instead.
     if (ref.read(demoModeProvider)) {
-      showAbSnackBar(context, kDemoRefusalText);
+      showAbToast(context, kDemoRefusalText);
       return;
     }
     // Pin the project this open belongs to. The provider re-reads below are
@@ -614,7 +614,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // are fire-and-forget at the callers, so surface the error ourselves
       // instead of letting it become an unobserved async error.
       if (!mounted) return;
-      showAbSnackBar(context, 'Could not open preview on port $port: $e');
+      showAbToast(context, 'Could not open preview on port $port: $e');
     }
   }
 
@@ -718,7 +718,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     drawController,
                     onError: (reason) {
                       if (mounted) {
-                        showAbSnackBar(
+                        showAbToast(
                           context,
                           'Could not capture the preview: $reason',
                         );
@@ -1447,7 +1447,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
   Future<void> _copyToClipboard(String text, [String? confirm]) async {
     await Clipboard.setData(ClipboardData(text: text));
-    if (confirm != null && mounted) showAbSnackBar(context, confirm);
+    if (confirm != null && mounted) showAbToast(context, confirm);
   }
 
   /// Opens a link/image address found by the content script — routed through

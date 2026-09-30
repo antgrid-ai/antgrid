@@ -8,7 +8,7 @@ import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
 import '../../providers/projects.dart';
@@ -200,7 +200,7 @@ class NewSessionContent extends ConsumerWidget {
       id = await openFolderPicker(container, select: false);
     } catch (e) {
       if (context.mounted) {
-        showAbSnackBar(context, 'Could not open folder: $e');
+        showAbToast(context, 'Could not open folder: $e');
       }
       return;
     }

@@ -18,7 +18,6 @@ import 'config/environment.dart';
 import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
-import 'design/ab_tokens.dart';
 import 'design/theme_presets.dart';
 import 'launcher/host_teardown.dart';
 import 'project/limits.dart';
@@ -552,17 +551,6 @@ class AbApp extends ConsumerWidget {
         // and platformBrightness are the accessibility inputs we compose with.
         final osMediaQuery = MediaQuery.of(context);
 
-        // The snackBarTheme (floating, styling) lives in buildAbTheme; only
-        // the width is dynamic — it can't live in the static theme because it
-        // needs MediaQuery. A floating SnackBar with `width` is centered at
-        // that width, so it doesn't span the full window on desktop/tablet
-        // and isn't edge-to-edge on mobile.
-        final windowWidth = osMediaQuery.size.width;
-        final snackBarWidth = (windowWidth - 2 * AbTokens.space16).clamp(
-          0.0,
-          480.0,
-        );
-
         // Resolved here (not in AbApp.build) so MediaQuery.platformBrightnessOf
         // re-runs the builder on every OS light/dark flip. MaterialApp's
         // `theme:` above is only the pre-follow chosen theme; everything
@@ -597,11 +585,7 @@ class AbApp extends ConsumerWidget {
                   osMediaQuery.disableAnimations || settings.reduceMotion,
             ),
             child: Theme(
-              data: effectiveTheme.copyWith(
-                snackBarTheme: effectiveTheme.snackBarTheme.copyWith(
-                  width: snackBarWidth,
-                ),
-              ),
+              data: effectiveTheme,
               // Mounted from the builder, not from a screen: the console has to
               // outlive every route and stay out of the shell's own layout,
               // which is also what lets it drive navigation from wherever the

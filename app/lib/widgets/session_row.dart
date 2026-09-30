@@ -14,7 +14,7 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_row_trailing.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
@@ -426,10 +426,22 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // Captured before the first await: this row is routinely disposed by the
     // switch its own tap triggers (mobile pops the drawer, a cross-project
     // activate rebuilds it), and a refusal the user asked for must not vanish
-    // with it. The navigator outlives any one route or overlay entry; falls back
-    // to the row's own context where there is no Navigator (widget tests).
-    final refusalHost =
-        Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
+    // with it. The navigator's OVERLAY outlives any one route or row — its
+    // OWN `context` sits above the Overlay it builds and can't be used to
+    // find it (see `showAbToastOn`'s doc) — falling back to the row's own
+    // context where there is no Navigator (widget tests).
+    final refusalOverlay = Navigator.maybeOf(
+      context,
+      rootNavigator: true,
+    )?.overlay;
+    void notifyNoAnswer() {
+      if (refusalOverlay != null && refusalOverlay.mounted) {
+        showAbToastForOverlay(refusalOverlay, _startNoAnswerMessage);
+      } else if (context.mounted) {
+        showAbToast(context, _startNoAnswerMessage);
+      }
+    }
+
     final liveId = ref.read(selectedRegistrationIdProvider);
     if (widget.entryId == liveId) {
       // Same project — local fast path. For a same-project remote `liveId`
@@ -471,7 +483,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // checkout is gone — the tap was otherwise a silent no-op. Returning
           // is part of the answer: focusing the workspace onto a session that
           // never spawned reads as the app having lost the output.
-          if (refusalHost.mounted) reportStartRefusal(refusalHost, error);
+          if (refusalOverlay != null && refusalOverlay.mounted) {
+            reportStartRefusalOn(refusalOverlay, error);
+          } else if (context.mounted) {
+            reportStartRefusal(context, error);
+          }
           return;
         } on TimeoutException {
           // A dropped reply must not abandon the focus + surface + nav writes
@@ -479,15 +495,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // spawned the PTY anyway (`session:updated` then reconciles the row).
           // Leaving the activeSessionId set while the surface never switches is
           // the worst of both — a tap that visibly did nothing.
-          if (refusalHost.mounted) {
-            showAbSnackBar(refusalHost, _startNoAnswerMessage);
-          }
+          notifyNoAnswer();
         } on SessionDownException {
           // Same "may still be coming up" shape as the timeout above — the
           // machine went away, not the bridge refusing.
-          if (refusalHost.mounted) {
-            showAbSnackBar(refusalHost, _startNoAnswerMessage);
-          }
+          notifyNoAnswer();
         }
         // A different project can be activated while start() is in flight. The
         // writes below (focus, surface, nav entry) all belong to THIS project,
@@ -893,13 +905,13 @@ class _SessionMenu extends ConsumerWidget {
       }
     } on TimeoutException {
       if (anchor.mounted) {
-        showAbSnackBar(
+        showAbToast(
           anchor,
           "The agent didn't answer. Check the connection and try again.",
         );
       }
     } on SessionDownException catch (e) {
-      if (anchor.mounted) showAbSnackBar(anchor, e.toString());
+      if (anchor.mounted) showAbToast(anchor, e.toString());
     }
   }
 

@@ -4,7 +4,7 @@ import '../ab_colors.dart';
 import '../ab_tokens.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
-import 'ab_snack_bar.dart';
+import 'ab_toast.dart';
 import 'ab_tooltip.dart';
 
 /// One cell of an [AbSegmented] control.
@@ -164,7 +164,7 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
       if (onDisabledTap != null) {
         onDisabledTap(s);
       } else if (s.disabledReason != null) {
-        showAbSnackBar(context, s.disabledReason!);
+        showAbToast(context, s.disabledReason!);
       }
       return;
     }

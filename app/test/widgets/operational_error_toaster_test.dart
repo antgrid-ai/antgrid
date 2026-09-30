@@ -10,6 +10,7 @@ import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/widgets/operational_error_toaster.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 
 void main() {
   Widget wrap(List<Override> overrides) => ProviderScope(
@@ -120,16 +121,14 @@ void main() {
     expect(find.text('detached HEAD'), findsOneWidget);
 
     // Clear the error (null gitCheckoutError, same project) — this resets the
-    // per-project de-dup key. Explicitly tear down the first snackbar (its 4s
+    // per-project de-dup key. Explicitly tear down the first toast (its 4s
     // auto-dismiss timer is unreliable under the test clock) so the slate is
     // clean and a re-appearance unambiguously proves the recurrence re-fired
     // rather than counting a lingering first toast.
     term.add(const TerminalState(projectId: 'p'));
     await tester.pump();
     await tester.pump();
-    ScaffoldMessenger.of(
-      tester.element(find.byType(OperationalErrorToaster)),
-    ).removeCurrentSnackBar();
+    clearAbToasts(tester.element(find.byType(OperationalErrorToaster)));
     await tester.pumpAndSettle();
     expect(find.text('detached HEAD'), findsNothing);
 
@@ -195,9 +194,7 @@ void main() {
     expect(find.text('Discarded changes'), findsOneWidget);
 
     // Clear the slate so a re-appearance unambiguously proves a re-fire.
-    ScaffoldMessenger.of(
-      tester.element(find.byType(OperationalErrorToaster)),
-    ).removeCurrentSnackBar();
+    clearAbToasts(tester.element(find.byType(OperationalErrorToaster)));
     await tester.pumpAndSettle();
     expect(find.text('Discarded changes'), findsNothing);
 

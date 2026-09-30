@@ -18,7 +18,7 @@ import '../design/ansi_palette.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
@@ -458,17 +458,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       grid.rows,
     );
     if (!sent) {
-      showAbSnackBar(
-        context,
-        'Unable to take control. Try again when connected.',
-      );
+      showAbToast(context, 'Unable to take control. Try again when connected.');
       return;
     }
     setState(() {
       _takeoverTimer = Timer(const Duration(seconds: 5), () {
         if (!mounted) return;
         setState(_cancelTakeover);
-        showAbSnackBar(context, 'Taking control timed out. Please try again.');
+        showAbToast(context, 'Taking control timed out. Please try again.');
       });
     });
   }
@@ -592,7 +589,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
       return true;
     }
-    if (mounted) showSendRefusedSnackBar(context);
+    if (mounted) showSendRefusedToast(context);
     return false;
   }
 
@@ -647,7 +644,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // reads as a finished attach.
       insert: _typeIntoTerminal,
       onError: (message) {
-        if (mounted) showAbSnackBar(context, message);
+        if (mounted) showAbToast(context, message);
       },
     );
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
@@ -1067,9 +1064,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // Auto-repeat is swallowed, not acted on. A held chord repeats ~30x/s;
       // each repeat would re-read the clipboard (on Windows, re-synthesizing a
       // multi-megabyte PNG from CF_DIB per repeat) and then lose the uploader's
-      // single-flight race, and `showAbSnackBar` queues its 4s bars serially —
-      // so one second of held key buys a minute of unclearable BUSY toasts.
-      // Still `handled`: returning `ignored` would hand Ghostty a `^V`.
+      // single-flight race, and `showAbToast` stacks every failure toast it's
+      // given — so one second of held key buys a screen-filling column of
+      // BUSY toasts. Still `handled`: returning `ignored` would hand Ghostty
+      // a `^V`.
       if (event is KeyRepeatEvent) return KeyEventResult.handled;
       // Detached, not a bare `.then`: a clipboard read can reject (no clipboard
       // owner on a headless/Wayland session), and from this callback the
@@ -1707,7 +1705,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         accepting: true,
         attach: _dropAttach,
         onError: (m) {
-          if (mounted) showAbSnackBar(context, m);
+          if (mounted) showAbToast(context, m);
         },
         child: ColoredBox(
           color: context.antgrid.bgDeepest,
@@ -1868,32 +1866,32 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                           amDriver: amDriver,
                           cell: cell,
                           child: TerminalHistoryView(
-                          key: _historyKey,
-                          initialRowId: _historyRow,
-                          screenRows: _historyScreen,
-                          historyEndRow: _historyEndRow,
-                          onInput: _typeIntoTerminal,
-                          softKeyboardController: !_hasPhysicalKeyboard
-                              ? _historySoftKeyboardController
-                              : null,
-                          onPosition: (row) {
-                            if (mounted && _historyOpen) {
-                              setState(() => _historyRow = row);
-                            }
-                          },
-                          model: tab.history,
-                          onLoadMore: () => widget.terminalService
-                              .requestTerminalHistoryPage(tab.terminalId),
-                          onClose: _closeHistory,
-                          // The live pane's own measured type, not a
-                          // re-derived copy, so zoom and the UI Size setting
-                          // land on both surfaces identically.
-                          fontSize: terminalFontSize,
-                          fontWeight: terminalFontWeight,
-                          boldFontWeight: terminalBoldFontWeight,
-                          minimumContrastRatio: _minContrastRatio,
-                          onOpenHyperlink: _openHyperlink,
-                          onHyperlinkHover: _onHyperlinkHover,
+                            key: _historyKey,
+                            initialRowId: _historyRow,
+                            screenRows: _historyScreen,
+                            historyEndRow: _historyEndRow,
+                            onInput: _typeIntoTerminal,
+                            softKeyboardController: !_hasPhysicalKeyboard
+                                ? _historySoftKeyboardController
+                                : null,
+                            onPosition: (row) {
+                              if (mounted && _historyOpen) {
+                                setState(() => _historyRow = row);
+                              }
+                            },
+                            model: tab.history,
+                            onLoadMore: () => widget.terminalService
+                                .requestTerminalHistoryPage(tab.terminalId),
+                            onClose: _closeHistory,
+                            // The live pane's own measured type, not a
+                            // re-derived copy, so zoom and the UI Size setting
+                            // land on both surfaces identically.
+                            fontSize: terminalFontSize,
+                            fontWeight: terminalFontWeight,
+                            boldFontWeight: terminalBoldFontWeight,
+                            minimumContrastRatio: _minContrastRatio,
+                            onOpenHyperlink: _openHyperlink,
+                            onHyperlinkHover: _onHyperlinkHover,
                           ),
                         ),
                       ),
@@ -1920,7 +1918,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                             ),
                             busy: attach != null,
                             onError: (m) {
-                              if (mounted) showAbSnackBar(context, m);
+                              if (mounted) showAbToast(context, m);
                             },
                           ),
                         if (attach != null) ...[
@@ -2238,7 +2236,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           _dropAttach(bytes: picked.bytes, fileName: picked.name),
       uploadBusy: uploadBusy,
       onUploadError: (m) {
-        if (mounted) showAbSnackBar(context, m);
+        if (mounted) showAbToast(context, m);
       },
       onSendInput: _typeIntoTerminal,
       onZoomOut: () => _stepZoom(-0.1),

@@ -686,10 +686,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             () => applyNotificationRoute(toastContext, container, route!),
           ),
         ),
-        // The action cannot dismiss its own toast (`showAbToastOn`'s remove is
-        // local to that call), so it stays pressable for its whole life — long
-        // enough to be worth reaching for, and the applier absorbs the second
-        // press.
+        // 8s, not the 4s default: give the user a real window to notice and
+        // tap this before it goes — the tap itself now dismisses it.
         duration: const Duration(seconds: 8),
       );
       return;
