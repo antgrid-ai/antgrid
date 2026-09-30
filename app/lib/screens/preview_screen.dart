@@ -589,9 +589,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
-    // Followed links are taken here rather than from a state listener: this
-    // screen is unmounted while another pane shows, and its next build is the
-    // only place a link followed meanwhile can still land.
+    // Followed links are taken here rather than from a state listener; see
+    // PreviewService._pendingNav for why.
     final previewService = focusedCheckoutServiceOrNull(
       ref.container,
       (s) => s.previewService,
@@ -1349,14 +1348,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // The window's scroll offset alone is not enough: pages that scroll inside
     // an overflow container (custom scroll bars, app-shell layouts) keep
     // window.scrollY at 0 forever, so every downward drag while reading such a
-    // page would look like a pull from the top and reload it.
+    // page would look like a pull from the top and reload it. The native offset
+    // goes first so a touch on a page scrolled down, the common case, never
+    // pays for the script.
     final x = event.localPosition.dx.round();
     final y = event.localPosition.dy.round();
     unawaited(
       controller
-          .runJavaScriptReturningResult('''
+          .getScrollPosition()
+          .then((pos) async {
+            if (pos.dy > 0) return false;
+            final result = await controller.runJavaScriptReturningResult('''
 (function(){
-  if ((window.scrollY || document.documentElement.scrollTop || 0) > 0) return false;
   var el = document.elementFromPoint($x, $y);
   while (el) {
     if (el.scrollTop > 0) return false;
@@ -1364,10 +1367,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
   return true;
 })()
-''')
-          .then((result) {
+''');
+            return result.toString() == 'true';
+          })
+          .then((atTop) {
             if (!mounted || _pullStartY == null) return;
-            if (result.toString() == 'true') _pullArmed = true;
+            if (atTop) _pullArmed = true;
           })
           .catchError((_) {}),
     );

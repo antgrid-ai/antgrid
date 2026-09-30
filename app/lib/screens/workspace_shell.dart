@@ -687,7 +687,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           ),
         ),
         // 8s, not the 4s default: give the user a real window to notice and
-        // tap this before it goes — the tap itself now dismisses it.
+        // tap this before it goes.
         duration: const Duration(seconds: 8),
       );
       return;

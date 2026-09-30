@@ -49,7 +49,7 @@ class AbMenuItem extends AbMenuEntry {
   final Color? badgeColor;
 
   /// False greys the row and blocks selection. The row still hit-tests so
-  /// [disabledReason] can surface (tooltip + snack bar) — a greyed option
+  /// [disabledReason] can surface (tooltip + toast) — a greyed option
   /// raises the more urgent question of WHY, same contract as `AbSegmented`.
   final bool enabled;
 
@@ -212,7 +212,7 @@ class AbLiveMenuRow extends StatelessWidget {
 
   final String? icon;
 
-  /// False dims the row and, on tap, surfaces [disabledReason] as a snack bar
+  /// False dims the row and, on tap, surfaces [disabledReason] as a toast
   /// instead of calling [onTap] — same contract as [AbSegment.disabledReason].
   final bool enabled;
   final String? disabledReason;

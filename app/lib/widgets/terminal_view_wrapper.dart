@@ -1064,10 +1064,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // Auto-repeat is swallowed, not acted on. A held chord repeats ~30x/s;
       // each repeat would re-read the clipboard (on Windows, re-synthesizing a
       // multi-megabyte PNG from CF_DIB per repeat) and then lose the uploader's
-      // single-flight race, and `showAbToast` stacks every failure toast it's
-      // given — so one second of held key buys a screen-filling column of
-      // BUSY toasts. Still `handled`: returning `ignored` would hand Ghostty
-      // a `^V`.
+      // single-flight race. Still `handled`: returning `ignored` would hand
+      // Ghostty a `^V`.
       if (event is KeyRepeatEvent) return KeyEventResult.handled;
       // Detached, not a bare `.then`: a clipboard read can reject (no clipboard
       // owner on a headless/Wayland session), and from this callback the

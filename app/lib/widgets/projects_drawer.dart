@@ -529,18 +529,21 @@ class _EntryWithSessions extends ConsumerWidget {
     // what opens the machine's control-plane socket. A local project (or a
     // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
     // collapse in [collapsedDrawerIdsProvider].
-    final machineUuid = entry.machineUuid;
-    final expanded = machineUuid != null
-        ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
-        : !ref.watch(collapsedDrawerIdsProvider).contains(entry.id);
-    final isLocal = entry.kind == EntryKind.local;
-    if (isLocal && ref.watch(localMachineCollapsedProvider)) {
-      // The band stays on the first local row; every other local row folds to
-      // nothing but keeps its keyed slot so the reorder indices stay valid.
+    // A folded "This machine" keeps only its band (on the first local row);
+    // every other local row folds to nothing but keeps its keyed slot so the
+    // reorder indices stay valid.
+    final folded =
+        entry.kind == EntryKind.local &&
+        ref.watch(localMachineCollapsedProvider);
+    if (folded) {
       return showLocalBand
           ? LocalMachineBand(showRule: showRule)
           : const SizedBox.shrink();
     }
+    final machineUuid = entry.machineUuid;
+    final expanded = machineUuid != null
+        ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
+        : !ref.watch(collapsedDrawerIdsProvider).contains(entry.id);
     final entryRow = machineUuid != null
         ? MachineDrawerHeaderRow(entry, showRule: showRule)
         : DrawerEntryRow(entry);
