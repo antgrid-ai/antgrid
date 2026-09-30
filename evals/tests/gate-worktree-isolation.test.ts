@@ -2,12 +2,8 @@
 // real relay with a real bridge process.
 //
 // What these cover that the bridge unit tests cannot: the frames actually cross
-// the E2E stream, so a checkout id that failed to survive sealing or stream
-// muxing shows up here and nowhere else.
-//
-// The app-side capability gate is NOT one of them: this harness's app client
-// always advertises `checkoutRouting`, so the refusal branch is unreachable
-// from here. `bridge/tests/worktree-remote-security.test.ts` pins that.
+// the native QUIC stream, so a checkout id that failed to survive stream
+// admission shows up here and nowhere else.
 import { expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

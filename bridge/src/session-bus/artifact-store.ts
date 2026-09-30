@@ -1,4 +1,4 @@
-// Artifacts, which is where reference-over-value (D5) becomes real: an envelope
+// Artifacts, which is where reference-over-value becomes real: an envelope
 // carries only the HANDLE (id, name, media type, size, digest, summary) and the
 // bytes are pulled with `session-bus:fetch` in ARTIFACT_CHUNK_BYTES slices. A
 // session that produced a 3 MB diff therefore costs the other machine a line of

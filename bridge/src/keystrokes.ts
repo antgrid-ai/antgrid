@@ -87,17 +87,46 @@ export function submittedLine(data: string): string | null {
   return isSubmitKeystroke(data) && hasTypedContent(data) ? data.slice(0, -1) : null;
 }
 
+// Kitty keyboard protocol (`CSI > <flags> u`, pushed by Claude measured at
+// flags=5 = disambiguate(1)+report-alternate(4)): with disambiguation on, a
+// key that would otherwise collide with a C0 control byte is sent as
+// `CSI <codepoint>[;<modifiers>]u` instead of the raw byte, specifically so
+// Escape-the-key can be told apart from Escape-starting-a-sequence, and
+// Ctrl+C from the ETX byte a Ctrl+bracket or a pasted 0x03 could also produce.
+// Without recognizing this form, every terminal that negotiates the protocol
+// (most modern ones) never arms a transcript-interrupt confirmation at all —
+// the bridge keeps waiting for a legacy byte that CLI stopped sending.
+// Modifiers are `1 + bitfield` (bit 3 = ctrl), so "no modifiers held" is
+// absent or `1`, and "ctrl alone" is exactly `5`.
+const KITTY_ESC_RE = /^\x1b\[27(?:;1)?u$/;
+const KITTY_CTRL_C_RE = /^\x1b\[99;5u$/;
+
 /**
- * Whether a `terminal:input` payload was a bare Escape keypress — the
- * interactive interrupt shortcut every agent CLI honors, and the only signal
- * a hook-based session gets that the user meant to abort a running turn.
+ * Whether a `terminal:input` payload was a bare Escape keypress.
  *
- * Exactly `\x1b` and nothing else: any longer sequence starting with ESC
- * (arrow keys, function keys, alt+key, kitty-protocol chunks, alt+enter's
- * `\x1b\r`) is content, not an interrupt, and must not be misread as one — a
- * PTY assembles a full escape sequence before writing it, so a lone ESC byte
- * in one frame unambiguously means the user pressed just that key.
+ * Either the legacy `\x1b` byte alone, or its kitty-protocol form
+ * (`CSI 27u`, no modifiers): any other sequence starting with ESC (arrow
+ * keys, function keys, alt+key, alt+enter's `\x1b\r`, or a kitty chunk for a
+ * DIFFERENT key or Escape+modifier) is content, not this key on its own, and
+ * must not be misread as one — a PTY assembles a full escape sequence before
+ * writing it, so either form arriving whole in one frame unambiguously means
+ * the user pressed just that key.
+ *
+ * A byte identity only — whether this key actually interrupted the running
+ * turn is confirmed against the agent's own transcript, not decided from the
+ * key (see `shouldArmInterruptConfirm` in agent-core.ts and
+ * `interrupt-confirm.ts`): the same key closes a picker, a dialog or a task
+ * view without aborting anything.
  */
-export function isInterruptKeystroke(data: string): boolean {
-  return data === "\x1b";
+export function isLoneEsc(data: string): boolean {
+  return data === "\x1b" || KITTY_ESC_RE.test(data);
+}
+
+/** Whether a `terminal:input` payload was a bare Ctrl+C keypress: the legacy
+ *  `\x03` byte, or its kitty-protocol form (`CSI 99;5u`). Byte/sequence
+ *  identity only, for the same reason as {@link isLoneEsc}: some CLIs
+ *  interrupt on it, idle Codex exits on it, and only the transcript says
+ *  which happened. */
+export function isCtrlC(data: string): boolean {
+  return data === "\x03" || KITTY_CTRL_C_RE.test(data);
 }

@@ -344,12 +344,11 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     // and folding it into the default would report one the user never made.
     //
     // Every chip label is ≤16 chars precisely so this row can reuse the same
-    // vocabulary the sheet chips use rather than fork a second short set (see
-    // the redesign spec §11) — no separate bar-only word for the unnamed
-    // default.
+    // vocabulary the sheet chips use rather than fork a second short set —
+    // no separate bar-only word for the unnamed default.
     //
     // `Your own` has no [roleId] of its own: a preset always clears the brief
-    // to `""` on pick (§6), so a non-null [HandlerSessionState.brief] with no
+    // to `""` on pick, so a non-null [HandlerSessionState.brief] with no
     // [roleId] can only mean the user's own text is what is running.
     final role = session.role;
     final lensLabel = state?.lenses == null

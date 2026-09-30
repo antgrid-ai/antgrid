@@ -100,9 +100,8 @@ typedef BusRouting = ({BusForward forward, String? because});
 
 /// Where one frame goes, from its own address and nothing else.
 ///
-/// The rule is symmetric and has exactly two clauses. §4.2 leaves the two ends
-/// of an exchange symmetric, so a frame is placed by where its target IS and
-/// never by which side opened it:
+/// The rule is symmetric and has exactly two clauses: a frame is placed by
+/// where its target IS and never by which side opened the exchange:
 ///
 ///  - `to.machineId` is not this machine — it leaves, on the leg keyed
 ///    `'${to.machineId}.${to.projectId}'`. Whether that leg exists yet is not

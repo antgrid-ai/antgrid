@@ -7,12 +7,10 @@
 // handler (relay-client.ts:558-572) then owns reconnection; this suite never
 // reimplements that decision, only observes it via a real close event.
 import { test, expect, afterEach } from "bun:test";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
-import { RelayClient } from "../src/relay-client";
-import { generateEphemeralKeypair } from "../src/key-exchange";
+import { CentralControlClient } from "../src/central-control-client";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
 
-let clients: RelayClient[] = [];
+let clients: CentralControlClient[] = [];
 let servers: ReturnType<typeof Bun.serve>[] = [];
 afterEach(() => {
   for (const c of clients.splice(0)) try { c.close(); } catch {}
@@ -52,7 +50,7 @@ function startStubRelay(opts: { answerPing?: boolean } = {}) {
 }
 
 function makeClient(url: string) {
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url,
     identity: {
       deviceId: vector.fields.deviceId,
@@ -61,7 +59,6 @@ function makeClient(url: string) {
       ed25519PublicKey: vector.fields.publicKey,
       ed25519PrivateKey: Buffer.from(vector.ed25519.seedHex, "hex").toString("base64"),
     },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => vector.fields.licenseToken,
   });
   clients.push(client);
@@ -121,32 +118,4 @@ test("a pong (or any inbound frame) clears the pending watchdog", async () => {
 
   advanceHeartbeat(); // watchdog cleared -> this just sends another ping, no close
   expect((client as any).ws?.readyState).toBe(WebSocket.OPEN);
-});
-
-test("a decoded binary frame clears the pending watchdog, not just JSON traffic", () => {
-  // Uses the `forTest` + `encodeRouteFrame` seam from handshake-pull.test.ts
-  // rather than a real socket: a busy binary connection (sealed terminal/file
-  // data) must count as liveness even when JSON pongs are delayed, and
-  // `handleBinaryFrame` is exercised directly there too. The frame's sealed
-  // payload is garbage and will fail to decrypt (no established/pending E2E
-  // session on a bare forTest client) — that's fine, since a structurally
-  // valid route frame is itself proof the socket delivered real bytes, before
-  // handleBinaryFrame dispatches to the handshake/sealed handler.
-  const client = RelayClient.forTest({
-    generateKeypair: generateEphemeralKeypair,
-    sendPayload: () => {},
-    peerId: "phone-1",
-    deviceId: "agent-1",
-  });
-  clients.push(client);
-  (client as any).awaitingPong = true;
-
-  const frame = encodeRouteFrame(
-    { type: "message", from: "phone-1", channel: "control" },
-    Buffer.from("not a real ciphertext"),
-    FrameKind.sealed,
-  );
-  (client as any).handleBinaryFrame(Buffer.from(frame));
-
-  expect((client as any).awaitingPong).toBe(false);
 });

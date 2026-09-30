@@ -29,18 +29,18 @@ This file provides guidance to Coding Agents (like Claude, Codex, etc) when work
 
 ## Project Overview
 
-Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is fully E2E-encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app traffic is end-to-end encrypted (X25519 ECDH + AES-256-GCM); the relay is zero-knowledge and only sees opaque blobs.
+Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is a fully encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app payload traffic runs over native Iroh connections between two endpoint IDs the authorization snapshot names; QUIC/TLS 1.3 between those authorized endpoints is the confidentiality layer, with no app-layer sealing on top of it. The central WebSocket is control-only and never accepts application payloads.
 
 The app should feel agent command centre, not a web dashboard. It prioritizes information density, fast scanning, and keyboard/gesture efficiency. The agent's terminal output is the primary view; files, git, and preview are supporting context.
 
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript/Bun | Runs on dev machine: terminals (PTY), file watching, port scanning, HTTP tunneling. Entry: `src/index.ts`. |
-| **Relay** | `relay/` | TypeScript/Bun | Zero-knowledge WebSocket router. Never reads payloads. Entry: `src/index.ts`. |
+| **Relay** | `relay/` | TypeScript/Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery. Rejects application payloads. Entry: `src/index.ts`. |
 | **App** | `app/` | Flutter/Dart + Riverpod | Mobile/desktop UI: terminal viewer, file explorer, browser preview. |
 | **Web** | `web/` | TS/Bun + Hono + Postgres | Licensing, subscriptions, OAuth device-flow, Ed25519 JWT minting, Better-Auth sign-in. Entry: `src/index.ts`. |
 
-Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (MPL-2.0 pure Dart relay/crypto client, no Flutter), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (MPL-2.0 TS route-frame codec + relay control-envelope Zod schemas, shared by bridge/relay/web/evals; source of truth for `FRAME_VERSION`, and the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
+Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (MPL-2.0 pure Dart central-control client plus the peer session protocol over an injected native `PeerLink`, no Flutter), **`antgrid_peer_transport`** (MPL-2.0 native transport and authorization leases, shared by app/CLI), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (MPL-2.0 TS session-frame type names, stream-open records, and relay control-envelope Zod schemas, shared by bridge/relay/web/evals; the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
 
 ## Gotchas (read before editing)
 
@@ -94,7 +94,12 @@ bun run --filter antgrid-evals test:evals   # E2E; explicit only, never in a swe
 cd app && flutter test                   # -j 2 when other sessions are live — see below
 cd packages/antgrid_relay_client && dart test
 npm run check:font-tokens                # Fails on raw `fontSize:` literals in app/lib (see Design Rules)
+npm run dup-check                        # jscpd over source; fails above .jscpd.json's threshold
+npm run dup-check:tests                  # same over tests and evals (.jscpd-tests.json)
 ```
+Not in CI. Scope either to a directory with `npm run dup-check -- <path>`; the
+threshold is a percentage of whatever was scanned, so a narrow scope can fail
+where the full run passes — read the clone list, not the exit code, there.
 **`flutter test` sizes its own parallelism and is not session-aware** — with no
 `-j` it runs `max(1, cores/2)` testers, each a separate Dart VM loading the whole
 suite. Pass `-j 2` when other sessions share the machine. (Ignored for
@@ -112,14 +117,13 @@ analyzer is per-session and retained, where `flutter analyze` is transient.
 
 - **Zod everywhere** — all message types and config schemas use Zod v4 for runtime validation.
 - **Adding a message type** requires ALL of: schema in `protocol.ts` → add to `AbMessageSchema` union → add to `KNOWN_TYPES` set → export the type → handle in `handleAbMessage`'s switch (`bridge/src/agent-core.ts`). Miss one and it silently fails. If the type reads or writes the working tree, it also belongs in `CHECKOUT_VARIABLE_MESSAGE_TYPES` — see below.
-- **Checkout-scoped routing** — an isolated session runs in a managed git worktree, so anything filesystem-variable (files, tree, search, Git, commands, preview, terminals, the handler's judge cwd and destructive-path floor) must resolve from the session's checkout, never from the project path. `CHECKOUT_VARIABLE_MESSAGE_TYPES` (`bridge/src/protocol.ts`) is the authoritative set and is mirrored BY HAND as `kCheckoutVariableMessageTypes` (`app/lib/project/project_message_classification.dart`); the two drifting apart is silent. An app that doesn't advertise the `checkoutRouting` capability is refused a project holding a managed session rather than shown main's workspace beside an isolated agent. `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
-- **App capabilities are hand-mirrored across the licence boundary.** The app's hello literals (`connection_handshake.dart` and `local_transport.dart` in `packages/antgrid_relay_client`) must name every key `AppReadyMessage.capabilities` (`bridge/src/protocol.ts`) declares, and vice versa: Zod strips an undeclared key, no suite spans both sides, and the fail direction is silent — for `checkoutRouting`, an app dropping it is refused a project holding a managed session with no way to see why. `pullsTree` is parsed-and-ignored pending removal (see its TODO in `protocol.ts`): the bridge no longer pushes `tree:full` at all, but a bridge that drops the key leaves an app that predates the on-demand listing protocol treeless with no error.
+- **Checkout-scoped routing** — an isolated session runs in a managed git worktree, so anything filesystem-variable (files, tree, search, Git, commands, preview, terminals, the handler's judge cwd and destructive-path floor) must resolve from the session's checkout, never from the project path. `CHECKOUT_VARIABLE_MESSAGE_TYPES` (`bridge/src/protocol.ts`) is the authoritative set and is mirrored BY HAND as `kCheckoutVariableMessageTypes` (`app/lib/project/project_message_classification.dart`); the two drifting apart is silent. `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
 - **Session-bus frames route by `sessionId` on the project stream, never by checkout.** The bridge resolves the checkout from the session, so nothing in that family joins `CHECKOUT_VARIABLE_MESSAGE_TYPES`.
 - **Command execution is gated by account membership AND one machine-level remote-access switch, not by origin.** A phone is trusted the moment the bridge resolves its identity from the signed-in user's account inventory (no pairing ceremony); trust alone is NOT enough. A remote phone may drive project X iff it is account-trusted **AND** the machine's remote-access boolean is on (`remote-access-policy.ts`, the sole authorization store — `paired-phones.ts` is identity/push/last-seen only) **AND** X is in the host's project catalog (`seenProjects` in `host-server.ts`). Default is off on a fresh install; off is machine-wide and immediate. That catalog lookup plus `isSafeProjectId` are the *only* thing bounding which projectId a phone may name — nothing backs them up, so never refactor them away as redundant. Loopback/local callers are exempt by design (`remoteFrameAllowed()` in `agent-core.ts`): the desktop drives its own machine with the switch off. The `antgrid phones remove` CLI is **not** a revocation — see `docs/commands.md`.
-- **NEVER make encryption optional.** All agent↔app messages are encrypted after handshake; the relay never holds decryption keys.
+- **NEVER add a plaintext payload path.** Off-machine payloads travel only over authenticated Iroh connections to an endpoint ID from the authorization snapshot (`acceptPeer`, `bridge/src/peer/native-host-connection.ts`) — QUIC/TLS between the two authorized endpoints is the confidentiality layer, so there is no app-layer session key left to make optional. The token-gated `127.0.0.1` listener (`bridge/src/local-listener.ts`) is the one plaintext path, and it must stay loopback-bound. Push notification encryption (`bridge/src/push/seal.ts`, `key-exchange.ts`, `push_open.dart`) and central hello signing (`relay-epoch.ts`, relay-auth) are separate and still mandatory; the relay never holds push decryption keys.
 - **The licence boundary is file-level.** First-party files are MPL-2.0 except `relay/` and `web/`, which are ELv2 (`LICENSING.md` is the map). `antgrid-wire` stays MPL when imported by those services: a Larger Work may combine them, but modifications to the wire files remain MPL. **Never move relay/web business logic into an MPL file merely to share it** because that changes that file's source-distribution obligations. Brand assets and third-party material keep their separate terms.
 - **Platform-aware code** — port scanning, shell detection, clipboard all branch per OS (Linux/macOS/Windows). Keep all three branches working.
-- **Eval harness** — E2E tests use `setupTestEnv()` (starts in-process relay with a fake license gate, spawns a real agent, connects `RelayClient` as an account-trusted app — no pairing frame, no QR); `createTestProject()` makes temp projects with antgrid.yaml + sample files. Project verbs run on the firstProject STREAM (`openProjectStream`/`sendOnStream`, helpers in `evals/support/`), not the control plane, and state comes from `pullStateSnapshot()` — v3 dedups welcome-replayed adverts, so never await a live `agent:projects` push. The v3 merge-gate suites live at `evals/tests/gate-*.test.ts`; `test:evals` runs `scenarios/` + `tests/`.
+- **Eval harness** — E2E tests use `setupTestEnv()`: it starts an in-process control relay with a fake license gate, spawns a real bridge with an explicit loopback Iroh endpoint, enrolls an account-trusted app endpoint, and establishes the native payload session with its plaintext hello (no pairing frame or WebSocket payload fallback). `createTestProject()` makes temporary projects with antgrid.yaml and sample files. Project verbs run on the host-owned project stream (`openProjectStream`/`sendOnStream`, helpers in `evals/support/`), and state comes from `pullStateSnapshot()`; never race a live `agent:projects` push. Central authentication tests may use the WebSocket alone. The merge-gate suites live at `evals/tests/gate-*.test.ts`; `test:evals` runs the self-contained `scenarios/` + `tests/` sweep, while native-DLL and Rust-relay gates stay explicit in `evals/package.json`.
 
 ## Design Rules (app UI)
 
@@ -154,7 +158,7 @@ Comments are permanent docs for the next reader, not a log of this chat — writ
 ### Per-component deep reference
 Each file below loads only when you work under its directory — read it before
 editing that component; the repo-wide rules stay in this file.
-- `bridge/CLAUDE.md` — PTY/terminals, relay-client v3 auth, stream mux, host server, OAuth bootstrap, isolated checkouts.
+- `bridge/CLAUDE.md` — PTY/terminals, relay-client v3 auth, native streams, host server, OAuth bootstrap, isolated checkouts.
 - `relay/CLAUDE.md` — hello verification order, epochs, routing, streams, license gate, error contract.
 - `app/CLAUDE.md` — providers, ConnectionSupervisor, per-project services/registry, account auth.
 - `packages/antgrid_relay_client/CLAUDE.md` — relay service + MachineSession (NOT under `app/`, so it loads separately).

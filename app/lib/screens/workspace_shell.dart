@@ -13,7 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show LocalTransportHandshakeException, RelayConnectionState, RpcException;
 
-import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
+import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart'
     show BlockReason, Blocked, SupervisorStatus;
 import '../constants/breakpoints.dart';
@@ -61,10 +61,12 @@ import '../services/sessions_service.dart'
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
+import '../widgets/ab_status_helpers.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
 import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
 import '../widgets/mobile_bottom_nav.dart';
+import '../widgets/pane_swipe_exclusion.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_search_modal.dart';
@@ -2146,6 +2148,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   static const double _tabletFlingMinDistance = 40.0;
 
   void _onTabletFlingDown(PointerDownEvent event, BuildContext context) {
+    if (PaneSwipeExclusion.claims(event.pointer)) {
+      _tabletFlingTracker = null;
+      return;
+    }
     _tabletFlingTracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
     _tabletFlingOrigin = _tabletFlingLatest = event.position;
@@ -2597,6 +2603,10 @@ class _HorizontalFlingDetectorState extends State<_HorizontalFlingDetector> {
   double get _sign => widget.towards == AxisDirection.right ? 1.0 : -1.0;
 
   void _onDown(PointerDownEvent event) {
+    if (PaneSwipeExclusion.claims(event.pointer)) {
+      _tracker = null;
+      return;
+    }
     _tracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
     _origin = _latest = event.position;
@@ -2634,7 +2644,7 @@ class _HorizontalFlingDetectorState extends State<_HorizontalFlingDetector> {
 /// Boot-log style status panel rendered while the workspace is coming up.
 /// Each phase is one line with a leading glyph (`▸` running, `✓` done, `×`
 /// failed); the running phase pulses in the accent. When `agent link` flips to
-/// failed (PAIR_TIMEOUT), an inline retry control replaces the
+/// failed, an inline retry control replaces the
 /// indeterminate spinner UX of the previous implementation.
 class _WorkspaceBootStatus extends ConsumerStatefulWidget {
   const _WorkspaceBootStatus();
@@ -2764,13 +2774,9 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
         ? -1
         : _stateOrder.indexOf(conn);
 
-    final pairFailed = reach == AgentReachability.offline;
     _PhaseStatus pairStatus;
     String pairDetail;
-    if (pairFailed) {
-      pairStatus = _PhaseStatus.failed;
-      pairDetail = 'not reachable';
-    } else if (reach == AgentReachability.online) {
+    if (reach == AgentReachability.online) {
       // Only the supervisor's Connected — not mere socket auth — proves the
       // agent actually answered (see agentReachabilityProvider).
       pairStatus = _PhaseStatus.done;
@@ -3218,24 +3224,13 @@ Object? workspaceBlockingError({
 /// Whether [reason], reached on an ALREADY-established workspace, is worth
 /// unmounting that workspace for.
 ///
-/// Only the reasons that stay blocked until the user acts. `agentOffline` and
-/// `handshakeFailing` clear themselves on `notePresence(true)`, and the routable
-/// rung reaches `agentOffline` about 6s after a peer-offline (3 ×
-/// `routableStallMs`) — so taking the screen over for them would blow the
-/// terminal, file tree and panes away on every host restart and rebuild them
-/// from scratch seconds later. Those two already have their own non-destructive
-/// surface in `agentReachabilityProvider`.
+/// Only reasons requiring user action take over an established workspace.
 ///
 /// A block reached while the providers were still resolving is unaffected: it
 /// arrives as a thrown [ConnectionBlockedException] above, where there is no
 /// established workspace to preserve and every reason must be stated.
-bool _takesOverMidSession(BlockReason reason) => switch (reason) {
-  BlockReason.sessionTakenOver ||
-  BlockReason.superseded ||
-  BlockReason.deviceRevoked ||
-  BlockReason.licenseExpired => true,
-  BlockReason.agentOffline || BlockReason.handshakeFailing => false,
-};
+bool _takesOverMidSession(BlockReason reason) =>
+    blockReasonPresentation(reason).interruptsWorkspace;
 
 /// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
 /// sources — a reader who checks only the first will conclude this screen
@@ -3265,77 +3260,21 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
 
   /// Map specific exception shapes to a user-actionable headline + tip. The
   /// fallback covers everything else without leaving the user staring at a
-  /// raw stack-trace-style message. `retryLabel` defaults to 'retry' — only
-  /// `sessionTakenOver` needs a different verb ("take back"), since retrying
-  /// there specifically reclaims a session another device is holding, rather
-  /// than merely reattempting a failed connection.
+  /// raw stack-trace-style message. A blocked connection takes its
+  /// `retryLabel` from `blockReasonPresentation`; everything else says
+  /// 'retry'.
   ({String headline, String tip, String retryLabel}) _diagnose() {
     final e = error;
     // The supervisor stopped climbing on purpose and named the reason. Each
     // one has a different user action, so none of them may collapse into the
     // generic "agent failed to start" bucket below.
     if (e is ConnectionBlockedException) {
-      return switch (e.reason) {
-        BlockReason.deviceRevoked => (
-          headline: 'the relay would not accept this device',
-          // LICENSE_INVALID covers far more than a revoked device: a token the
-          // relay cannot verify (wrong issuer — a build pointed at the wrong
-          // LICENSE_API_URL) and a malformed one land here alongside
-          // LICENSE_REVOKED. So the copy has to be true for every cause while
-          // still naming the one action that fixes the common ones.
-          tip:
-              'The relay rejected this device\'s access token — it was '
-              'revoked, it no longer matches your plan, or this build is '
-              'pointed at a different server. Check you are signed in on the '
-              'right account, then sign out and back in to re-provision this '
-              'device and Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.licenseExpired => (
-          // LICENSE_EXPIRED is the relay's verdict for "no active plan", which
-          // an account that never subscribed hits too — so no "renew your
-          // subscription" framing.
-          headline: 'this account can\'t reach machines remotely',
-          tip:
-              'The relay declined this connection\'s access token. Sign in '
-              'again on this device to mint a fresh one, or check that your '
-              'plan includes remote access, then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.agentOffline => (
-          headline: 'agent is not running',
-          tip:
-              'The relay could not route to this machine — its antgrid host '
-              'is not connected. Start it on the host, then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.superseded => (
-          headline: 'the relay is holding this connection for another session',
-          // Reached only after the ladder has already retried long enough for
-          // the relay to drop a stale entry of our own, so by this point it is
-          // genuinely someone else's — and Retry cannot evict them: this app
-          // dials with one epoch per launch, which the relay refuses against
-          // an equal-or-higher live holder.
-          tip:
-              'Another session of this app is connected as the same device. '
-              'Close it, or restart this app to connect with a fresh session, '
-              'then Retry.',
-          retryLabel: 'retry',
-        ),
-        BlockReason.sessionTakenOver => (
-          headline: 'another device took over this agent',
-          tip: 'Another of your devices took over this agent.',
-          retryLabel: 'take back',
-        ),
-        BlockReason.handshakeFailing => (
-          headline: 'the encrypted session could not be established',
-          tip:
-              'The agent answered but the E2E handshake kept failing — usually '
-              'a host that re-provisioned its identity. Retry; if it persists, '
-              'forget the machine and pair it again.',
-          retryLabel: 'retry',
-        ),
-      };
+      final presentation = blockReasonPresentation(e.reason);
+      return (
+        headline: presentation.workspaceHeadline,
+        tip: presentation.workspaceTip,
+        retryLabel: presentation.retryLabel,
+      );
     }
     // A bridge that answered and refused the verb. NOT_ALLOWED is the blanket
     // refusal while the machine's remote-access switch is off — only that

@@ -1,4 +1,6 @@
 import 'package:flutter/widgets.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show remoteCommandOutcomeUnknownMessage;
 
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_snack_bar.dart';
@@ -11,10 +13,10 @@ import 'ab_status_helpers.dart' show sessionRefusalCopy;
 typedef SessionDeleter =
     Future<SessionDeleteAck> Function({bool? force, bool? deleteBranch});
 
-/// [pending] is the bridge accepting the request without answering it yet. It
-/// is deliberately not [failed]: the removal is very likely still running, and
-/// the row's own pending state is the feedback the user gets.
-enum SessionDeleteResult { deleted, cancelled, failed, pending }
+/// [outcomeUnknown] means dispatch happened without an application result. The
+/// app neither claims failure nor repeats the mutation; it reports uncertainty
+/// and waits for a fresh user action.
+enum SessionDeleteResult { deleted, cancelled, failed, outcomeUnknown }
 
 /// The delete confirmation ladder, shared by every surface that deletes a
 /// session (the drawer kebab, the Recent list) so the same session can never be
@@ -32,10 +34,8 @@ enum SessionDeleteResult { deleted, cancelled, failed, pending }
 /// every arm on the same irreversibility sentence so no surface can forget it.
 ///
 /// [onInFlight] is called `true` immediately before each attempt and `false`
-/// when that attempt settles — EXCEPT for [SessionDeleteAck.accepted], where
-/// the mark must stay armed: an unanswered delete is still running, and the
-/// surface that armed it may be the only one that can show so (the Recent
-/// list's remote rows never receive the bridge's own flag).
+/// when that attempt settles. An outcome-unknown request must require a fresh
+/// user action rather than remaining armed as though execution were confirmed.
 ///
 /// [context] governs the DIALOGS and TOASTS only, never the outcome. Once the
 /// user has confirmed, the delete runs and its result is reported whether or not
@@ -90,8 +90,12 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   try {
     onInFlight?.call(true);
     final ack = await delete();
-    if (ack == SessionDeleteAck.deleted) onInFlight?.call(false);
-    return _resultFor(ack);
+    onInFlight?.call(false);
+    final result = _resultFor(ack);
+    if (result == SessionDeleteResult.outcomeUnknown && context.mounted) {
+      showAbSnackBar(context, remoteCommandOutcomeUnknownMessage);
+    }
+    return result;
   } on SessionOperationException catch (error) {
     onInFlight?.call(false);
     final code = error.errorCode;
@@ -140,8 +144,12 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   try {
     onInFlight?.call(true);
     final ack = await delete(force: true, deleteBranch: choice.optionSelected);
-    if (ack == SessionDeleteAck.deleted) onInFlight?.call(false);
-    return _resultFor(ack);
+    onInFlight?.call(false);
+    final result = _resultFor(ack);
+    if (result == SessionDeleteResult.outcomeUnknown && context.mounted) {
+      showAbSnackBar(context, remoteCommandOutcomeUnknownMessage);
+    }
+    return result;
   } on SessionOperationException catch (error) {
     onInFlight?.call(false);
     if (context.mounted) _report(context, error.errorCode, error.message);
@@ -153,11 +161,9 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   }
 }
 
-/// No toast for [SessionDeleteAck.accepted]: nothing failed, and the copy must
-/// never claim otherwise. The row's pending state is the whole report.
 SessionDeleteResult _resultFor(SessionDeleteAck ack) => switch (ack) {
   SessionDeleteAck.deleted => SessionDeleteResult.deleted,
-  SessionDeleteAck.accepted => SessionDeleteResult.pending,
+  SessionDeleteAck.outcomeUnknown => SessionDeleteResult.outcomeUnknown,
 };
 
 /// Guarded by a literal `context.mounted` at every call site rather than once in

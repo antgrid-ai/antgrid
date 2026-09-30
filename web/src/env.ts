@@ -4,9 +4,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseDotenv } from "dotenv";
-import { parseTrustedProxies } from "antgrid-wire";
+import { parseTrustedProxies, peerAuthorizationSnapshotSchema } from "antgrid-wire";
 import { z } from "zod";
+import { parseApplePrivateKey } from "./auth/apple-client-secret.js";
 import { billingToEnvFields, resolveBillingConfig } from "./config/billing.js";
+import { PeerPolicyTargetsSchema } from "./relay/peer-policy-outbox.js";
 
 const EnvSchema = z
   .object({
@@ -20,11 +22,37 @@ const EnvSchema = z
     GITHUB_CLIENT_SECRET: z.string().min(1),
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
+    // Sign in with Apple. Optional as a group: all four or none, checked in the
+    // transform below. APPLE_CLIENT_ID is the Services ID the web flow
+    // authenticates as; APPLE_PRIVATE_KEY is the .p8 PEM, with newlines
+    // escaped as \n when the value has to fit on one line.
+    APPLE_CLIENT_ID: z.string().min(1).optional(),
+    APPLE_TEAM_ID: z.string().min(1).optional(),
+    APPLE_KEY_ID: z.string().min(1).optional(),
+    APPLE_PRIVATE_KEY: z
+      .string()
+      .min(1)
+      .optional()
+      .transform((s) => s?.replace(/\\n/g, "\n")),
+    // Audience of the identity tokens the native iOS and macOS apps present.
+    APPLE_APP_BUNDLE_ID: z.string().min(1).default("ai.radhaai.antgrid"),
     ZEPTOMAIL_TOKEN: z.string().optional(),
     ZEPTOMAIL_WEBHOOK_SECRET: z.string().min(16).optional(),
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
     RELAY_INTERNAL_URL: z.string().url().optional(),
     RELAY_INTERNAL_SECRET: z.string().min(16).optional(),
+    // Bearer token the stock iroh-relay's `access.http` check presents back to
+    // us (relay-side env: IROH_RELAY_HTTP_BEARER_TOKEN). Aspire generates one
+    // per run; production sets it through deployment secrets.
+    PEER_RELAY_ACCESS_TOKEN: z.string().min(32).optional(),
+    // Scheme validation happens in the object transform below, which is the
+    // first place ANTGRID_DEV_INSECURE_RELAY and NODE_ENV are both in scope.
+    IROH_RELAY_URLS: z.string().optional().transform((value) =>
+      value ? value.split(",").map((url) => url.trim()).filter(Boolean) : []),
+    PEER_POLICY_TARGETS: z.string().optional().transform((value, ctx) => {
+      try { return value ? JSON.parse(value) : []; }
+      catch { ctx.addIssue({ code: "custom", message: "Expected JSON array of private policy delivery targets" }); return z.NEVER; }
+    }).pipe(PeerPolicyTargetsSchema),
     PADDLE_API_KEY: z.string().optional(),
     PADDLE_WEBHOOK_SECRET: z.string().optional(),
     RAZORPAY_KEY_ID: z.string().optional(),
@@ -41,6 +69,15 @@ const EnvSchema = z
     // non-production in app.ts; the enum rejects typos so a bad value fails
     // loud instead of silently flipping the gate.
     DEV_BILLING_ENABLED: z
+      .enum(["true", "false"])
+      .optional()
+      .transform((v) => v === "true"),
+    // Dev-only escape hatch: lets IROH_RELAY_URLS name a plaintext `http://`
+    // relay, for the local stack that has no DNS name or trusted certificate.
+    // Minted snapshots carry that origin to every peer, so the transform below
+    // refuses to boot with it set outside development/test rather than leaving
+    // the downgrade to a runtime gate someone can forget to apply.
+    ANTGRID_DEV_INSECURE_RELAY: z
       .enum(["true", "false"])
       .optional()
       .transform((v) => v === "true"),
@@ -92,9 +129,57 @@ const EnvSchema = z
       }
       authUrl = `http://localhost:${raw.PORT}`;
     }
+    const devRelay = raw.ANTGRID_DEV_INSECURE_RELAY;
+    if (devRelay && raw.NODE_ENV !== "development" && raw.NODE_ENV !== "test") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["ANTGRID_DEV_INSECURE_RELAY"],
+        message: "ANTGRID_DEV_INSECURE_RELAY is only allowed in development and test",
+      });
+      return z.NEVER;
+    }
+    const relayUrls = peerAuthorizationSnapshotSchema(devRelay).shape.relayUrls
+      .safeParse(raw.IROH_RELAY_URLS);
+    if (!relayUrls.success) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["IROH_RELAY_URLS"],
+        message: devRelay
+          ? "Expected https:// or http:// relay origins with no credentials, query or path"
+          : "Expected https:// relay origins with no credentials, query or path",
+      });
+      return z.NEVER;
+    }
+    const appleKeys = [
+      "APPLE_CLIENT_ID",
+      "APPLE_TEAM_ID",
+      "APPLE_KEY_ID",
+      "APPLE_PRIVATE_KEY",
+    ] as const;
+    const appleMissing = appleKeys.filter((key) => !raw[key]);
+    if (appleMissing.length > 0 && appleMissing.length < appleKeys.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: [appleMissing[0]],
+        message: `Sign in with Apple needs all of ${appleKeys.join(", ")}; missing ${appleMissing.join(", ")}`,
+      });
+      return z.NEVER;
+    }
+    if (raw.APPLE_PRIVATE_KEY) {
+      try {
+        parseApplePrivateKey(raw.APPLE_PRIVATE_KEY);
+      } catch (err) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["APPLE_PRIVATE_KEY"],
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return z.NEVER;
+      }
+    }
     const billing =
       raw.NODE_ENV === "test" ? {} : billingToEnvFields(resolveBillingConfig(raw.NODE_ENV));
-    return { ...raw, BETTER_AUTH_URL: authUrl, ...billing };
+    return { ...raw, BETTER_AUTH_URL: authUrl, IROH_RELAY_URLS: relayUrls.data, ...billing };
   });
 
 export type Env = z.output<typeof EnvSchema> & Partial<ReturnType<typeof billingToEnvFields>>;

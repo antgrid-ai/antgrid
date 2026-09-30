@@ -35,7 +35,6 @@ import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
   DURABLE_SETUP_STATES,
-  isIsolatedCheckoutKind,
   isManagedCheckoutKind,
   type CheckoutKind,
   type CheckoutRecord,
@@ -649,18 +648,6 @@ export class SessionManager {
     return out;
   }
 
-  /** Whether any persisted session requires checkout-scoped workspace routing.
-   *  This is the ROUTING question, not the ownership one — any checkout that is
-   *  not main's working tree needs it, whoever created it, so it must stay on
-   *  `isIsolatedCheckoutKind` even though every kind that answers true today is
-   *  also one Antgrid created. */
-  hasIsolatedSessions(): boolean {
-    for (const entry of this.entries.values()) {
-      if (isIsolatedCheckoutKind(entry.checkoutKind)) return true;
-    }
-    return false;
-  }
-
   /** Whether a delete is currently tearing this checkout down. The ONLY read
    *  path for agent-core's dispatch guard: a checkout-variable verb answered
    *  while its worktree is being removed either races the removal for the
@@ -1230,6 +1217,23 @@ export class SessionManager {
    *  it by adding it to toWire; this getter is the sanctioned read path. */
   getAgentTranscriptPath(id: string): string | undefined {
     return this.entries.get(id)?.agentTranscriptPath;
+  }
+
+  /**
+   * Backstop for {@link setAgentSession}: records [path] for [id] only if
+   * nothing is recorded yet. setAgentSession withholds the path when it
+   * refuses the accompanying agent-session id (an ephemeral helper thread —
+   * see its own doc), but a transcript-interrupt confirmation only needs a
+   * file to read, not a matched conversation identity, so a hook post that
+   * carries a path is worth keeping even then. Never overwrites: once
+   * setAgentSession has recorded a real one, that identity-checked report is
+   * authoritative.
+   */
+  noteTranscriptPath(id: string, path: string): void {
+    const entry = this.entries.get(id);
+    if (!entry || entry.agentTranscriptPath) return;
+    entry.agentTranscriptPath = path;
+    this.changed();
   }
 
   /**

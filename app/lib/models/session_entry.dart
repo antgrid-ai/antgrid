@@ -306,8 +306,8 @@ String? _bounded(String? value, int max) {
 ///
 /// Nothing in the app parses one yet — the bus inbox reads the bare key as
 /// `SessionBusAddress`, and the `session-bus:directory` read the bridge offers
-/// is unconsumed — so this is the mirror kept ready for the surface
-/// `docs/session-messaging.md` §5.3 describes, not an orphan to delete.
+/// is unconsumed — so this is the mirror kept ready for the remote session
+/// directory surface, not an orphan to delete.
 class SessionMemberRef {
   /// The account device uuid, which is how the app addresses a machine — never
   /// a relay slot id or a hostname.

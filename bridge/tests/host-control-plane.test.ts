@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: Buffer.alloc(32, 1).toString("base64") },
     onAuthRevoked: () => {},
   };
 }
@@ -45,7 +46,7 @@ afterEach(async () => {
 });
 
 test("opens one control-plane registration equal to the bare deviceUuid", async () => {
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });
@@ -63,12 +64,12 @@ test("startControlPlane echoes the app's ownerBuild into host.json", async () =>
   // it notices a Store update replaced it while the previous install's host
   // stayed alive. The host never interprets the value, so the only contract is
   // that it comes back out byte-for-byte, and is absent when nobody supplied one.
-  host = new HostServer({ ownerBuild: "1.20662.412 (0f3b1c)" });
+  host = createHostPolicyFixture({ ownerBuild: "1.20662.412 (0f3b1c)" });
   await host.startControlPlane();
   expect(readHostFile(hostFilePath())?.ownerBuild).toBe("1.20662.412 (0f3b1c)");
   await host.shutdown();
 
-  host = new HostServer({});
+  host = createHostPolicyFixture({});
   await host.startControlPlane();
   expect(readHostFile(hostFilePath())?.ownerBuild).toBeUndefined();
 });
@@ -89,7 +90,7 @@ test("control plane heartbeats the current relayUrl on authenticate (keeps inven
     return new Response(null, { status: 200 });
   }) as unknown as typeof fetch);
   try {
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });
@@ -98,7 +99,7 @@ test("control plane heartbeats the current relayUrl on authenticate (keeps inven
     // Invoke the onAuthenticated closure built in startRemoteControlPlane.
     const client = (host as any).controlPlaneRelay;
     expect(client).not.toBeNull();
-    await client.opts.onAuthenticated();
+    await client.hostOptions.central.onAuthenticated();
 
     const hb = calls.find((c) => c.url.endsWith("/account/devices/me/heartbeat"));
     expect(hb).toBeDefined();
@@ -125,7 +126,7 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
     return new Response(null, { status: 200 });
   }) as unknown as typeof fetch);
   try {
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });
@@ -147,15 +148,10 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
   }
 });
 
-test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)", async () => {
-  // Regression test: a peer that goes away and comes back keeps its session —
-  // it is marked unreachable and revived on `peer-online`, so it never resends
-  // client-hello and onHandshakeComplete doesn't re-fire. Any
-  // readvertiseToControlPlane() call that raced the unreachable window used to
-  // silently no-op, with nothing to correct it until an unrelated project:start
-  // forced a full recompute. onPeerOnline re-advertises the moment the session
-  // is reachable again, closing that window.
-  host = new HostServer({
+test("native handshake re-advertises to the established session", async () => {
+  // The native handshake is the first point at which the app can consume the
+  // advert, so it must trigger a fresh snapshot for that session.
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });
@@ -179,14 +175,14 @@ test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)
   // again (→ phonePubkey via phoneEd25519ByDeviceId) before the callback fires.
   installFakeSession(client, "phone-1");
   (client as any).phoneEd25519ByDeviceId.set("phone-1", "pub-1");
-  client.opts.onPeerOnline?.("phone-1");
+  client.hostOptions.native.onHandshakeComplete?.({ peerId: "phone-1" });
 
   const advert = delivered.find((m) => m.type === "agent:projects");
   expect(advert).toBeDefined();
 });
 
 test("no remote config → no control-plane relay opened", async () => {
-  host = new HostServer({}); // local-only
+  host = createHostPolicyFixture({}); // local-only
   await host.startControlPlane();
   expect(host.controlPlaneRegistrationId).toBeNull();
 });

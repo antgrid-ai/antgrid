@@ -1,3 +1,5 @@
+import '../helpers/test_license_token_minter.dart';
+import '../helpers/test_peer_runtime.dart';
 // Resolution coverage for `_buildRelayTransportFor`: which source supplies a
 // machine's dial coordinates, and when the provider declines the machine
 // entirely and falls through to the local path.
@@ -11,13 +13,13 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -48,8 +50,7 @@ class _FakeRelayService extends RelayService {
 
   AppState _cur = const AppState();
 
-  @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
 
   @override
   Stream<AppState> get stateStream => _states.stream;
@@ -88,29 +89,20 @@ class _FakeRelayService extends RelayService {
     unawaited(_states.close());
   }
 
-  @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    // no-op — no real relay in tests
-  }
 }
 
 /// Hands every machine a connection whose socket is the fake above, so the
 /// supervisor's dial never touches a real WebSocket.
-class _FakeConnectionManager extends RelayConnectionManager {
+class _FakeConnectionManager extends MachineConnectionManager {
   _FakeConnectionManager(this._relay) : super(crypto: CryptoService());
 
   final RelayService _relay;
-  final Map<String, RelayConnection> _conns = {};
+  final Map<String, MachineConnection> _conns = {};
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
+  MachineConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
     machineDeviceId,
-    () => RelayConnection(
+    () => MachineConnection(
       machineDeviceId: machineDeviceId,
       crypto: CryptoService(),
       relayOverride: _relay,
@@ -118,7 +110,7 @@ class _FakeConnectionManager extends RelayConnectionManager {
   );
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +182,12 @@ void main() {
     }) {
       return [
         ...stores.overrides,
+        // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         // Override accountAgentsProvider directly (not the API layer) so the
         // cache is immediately populated. _buildRelayTransportFor uses
         // `.value` to avoid adding async latency for unresolved cases.
@@ -198,7 +196,9 @@ void main() {
         connectionDeviceRecordProvider.overrideWith(
           (_) async => _connectionRecord(),
         ),
-        connectionTokenMinterProvider.overrideWith((_) async => null),
+        connectionTokenMinterProvider.overrideWith(
+          (_) async => TestLicenseTokenMinter(),
+        ),
         cryptoServiceProvider.overrideWith((_) => CryptoService()),
         // The supervisor dials the socket itself, so the connection must hand
         // it a relay that authenticates without a real WebSocket.
@@ -359,26 +359,26 @@ void main() {
       expect(coldSocket.dialedUrls, [_inventoryUrl]);
     }, timeout: const Timeout(Duration(seconds: 30)));
 
-    test('a host that moved relay is re-dialled at its NEW address, without '
-        'the machine being rebuilt', () async {
-      // The stale-coords dead end: the supervisor caches the coords step's
-      // answer and only re-runs it after repeated socket failures, so the
-      // step itself has to re-read the account inventory at call time. A
-      // closure over the values resolved at provider build hands it the same
-      // dead endpoint forever, and the ladder sits on the socket cap with no
-      // Blocked reason and an inert Retry.
+    test('a central outage does not re-resolve native coordinates', () async {
       var inventory = <InventoryAgent>[_inventoryAgent()];
       relay.failDials = true;
 
       final container = ProviderContainer(
         overrides: [
           ...stores.overrides,
+          peerRuntimeProvider.overrideWith((ref) async {
+            final runtime = TestPeerRuntime();
+            ref.onDispose(runtime.dispose);
+            return runtime;
+          }),
           accountAgentsProvider.overrideWith((_) async => inventory),
           localDeviceUuidProvider.overrideWith((_) async => _localUuid),
           connectionDeviceRecordProvider.overrideWith(
             (_) async => _connectionRecord(),
           ),
-          connectionTokenMinterProvider.overrideWith((_) async => null),
+          connectionTokenMinterProvider.overrideWith(
+            (_) async => TestLicenseTokenMinter(),
+          ),
           cryptoServiceProvider.overrideWith((_) => CryptoService()),
           relayConnectionManagerProvider.overrideWithValue(
             _FakeConnectionManager(relay),
@@ -392,23 +392,20 @@ void main() {
       await pumpUntilDial(container);
       expect(relay.dialedUrls.first, _inventoryUrl);
 
-      // The host came back behind a different relay and heartbeated it to the
-      // account service. Nothing rebuilds the transport: this machine is held
-      // warm and its connection is live. Dials keep failing throughout, so the
-      // ONLY way the new address is ever reached is a re-resolve.
       inventory = <InventoryAgent>[_inventoryAgent(relayUrl: _movedUrl)];
-
-      for (var i = 0; i < 2500 && !relay.dialedUrls.contains(_movedUrl); i++) {
+      for (var i = 0; i < 300 && relay.dialedUrls.length < 2; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
+
+      expect(relay.dialedUrls.length, greaterThanOrEqualTo(2));
       expect(
         relay.dialedUrls,
-        contains(_movedUrl),
+        everyElement(_inventoryUrl),
         reason:
-            'the coords step must re-read the inventory, not replay the '
-            'answer it computed at provider build',
+            'central failures retry their own cached endpoint and must not '
+            'tear down or re-resolve the native payload',
       );
-    }, timeout: const Timeout(Duration(seconds: 60)));
+    }, timeout: const Timeout(Duration(seconds: 10)));
 
     test('an inventory agent that is THIS device is not dialled', () async {
       final container = ProviderContainer(

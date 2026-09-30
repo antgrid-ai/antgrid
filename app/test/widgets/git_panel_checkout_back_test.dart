@@ -11,7 +11,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/git_panel.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/material.dart';

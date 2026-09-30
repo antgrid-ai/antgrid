@@ -55,7 +55,7 @@ export const SESSION_BUS_ERRORS = {
    *  condition does clear on its own the moment the app reattaches. */
   PEER_UNREACHABLE: 503,
   /** The caller's own project cannot be addressed at all: it has no git
-   *  remote, so it has no repo key and therefore no peers (§5.1 fails closed).
+   *  remote, so it has no repo key and therefore no peers.
    *  Distinct from an empty directory, which means the key resolved and nobody
    *  else is on it — and from `UNKNOWN_PEER`, which is a fact about the
    *  address rather than about the project doing the asking. Raised by the
@@ -63,7 +63,7 @@ export const SESSION_BUS_ERRORS = {
    *  keyless caller before it has looked at the address at all. */
   NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
-  /** §7.3: a `notify` addressed at a session that is not running. A stopped
+  /** A `notify` addressed at a session that is not running. A stopped
    *  session never reaches the turn boundary a notify waits for — but for a
    *  SAME-MACHINE target this host can start on its own authority, `api.ts`
    *  wakes it instead of refusing (see `SessionBusApiDeps.startSession`), and
@@ -75,7 +75,7 @@ export const SESSION_BUS_ERRORS = {
    *  the verb that still reaches: a post lands in the mailbox whether or not
    *  anything is running to read it yet. */
   NOT_RUNNING: 409,
-  /** The two per-pair ceilings of §7.4, and they stay two codes on purpose:
+  /** The two per-pair budget ceilings, and they stay two codes on purpose:
    *  `NOTIFY_RATE` is a rolling-hour rate limit the pair simply waits out and
    *  refuses one verb, naming `post` as the one that still reaches; `NO_PROGRESS`
    *  is a halt that time does not clear — only a human does

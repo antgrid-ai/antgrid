@@ -31,7 +31,7 @@ void main() {
     final w = make();
     w.record(
       dir: 'tx',
-      kind: 'sealed',
+      kind: 'frame',
       channel: 'control',
       bytes: 412,
       frameId: 'a3f9c2110bd4',
@@ -40,7 +40,7 @@ void main() {
 
     final o = readLines().single;
     expect(o['dir'], 'tx');
-    expect(o['kind'], 'sealed');
+    expect(o['kind'], 'frame');
     expect(o['channel'], 'control');
     expect(o['bytes'], 412);
     expect(o['frameId'], 'a3f9c2110bd4');
@@ -54,7 +54,7 @@ void main() {
 
   test('an annotation lands on the held frame before it is written', () async {
     final w = make();
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'abc123');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'abc123');
     w.annotate('abc123', msgType: 'terminal:input', streamId: 'proj-1');
     await w.flush();
 
@@ -69,8 +69,8 @@ void main() {
     // is the flood case — a capture must degrade to typeless frames, never
     // stall a send to keep one annotatable.
     final w = make(capacity: 1);
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'gone');
-    w.record(dir: 'tx', kind: 'sealed', frameId: 'here');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'gone');
+    w.record(dir: 'tx', kind: 'frame', frameId: 'here');
     expect(() => w.annotate('gone', msgType: 'too:late'), returnsNormally);
     await w.flush();
 
@@ -84,7 +84,7 @@ void main() {
   test('order is preserved and seq is contiguous under eviction', () async {
     final w = make(capacity: 2);
     for (var i = 0; i < 5; i++) {
-      w.record(dir: 'rx', kind: 'sealed', frameId: 'f$i');
+      w.record(dir: 'rx', kind: 'frame', frameId: 'f$i');
     }
     await w.flush();
 
@@ -101,7 +101,7 @@ void main() {
       w.tap({
         'op': 'frame',
         'dir': 'rx',
-        'kind': 'sealed',
+        'kind': 'frame',
         'channel': 'control',
         'bytes': 96,
         'frameId': 'ff00',
@@ -129,15 +129,43 @@ void main() {
         'kind': 'drop',
         'channel': 'control',
         'msgType': 'file:read',
-        'reason': 'no-e2e-session',
+        'reason': 'no-established-session',
         'detail': {'why': 'pre-establishment'},
       });
       await w.flush();
 
       final o = readLines().single;
       expect(o['kind'], 'drop');
-      expect(o['reason'], 'no-e2e-session');
+      expect(o['reason'], 'no-established-session');
       expect(o['detail'], {'why': 'pre-establishment'});
+      w.dispose();
+    });
+
+    test('streamKind round-trips through tap, beside streamId', () async {
+      final w = make();
+      w.tap({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': 'lifecycle',
+        'streamKind': 'upload',
+        'streamId': 'req-1',
+        'reason': 'stream-open',
+      });
+      w.tap({'op': 'frame', 'dir': 'rx', 'kind': 'frame', 'frameId': 'ff01'});
+      w.tap({
+        'op': 'annotate',
+        'frameId': 'ff01',
+        'streamKind': 'project',
+        'streamId': 'proj-1',
+      });
+      await w.flush();
+
+      final lines = readLines();
+      expect(lines[0]['streamKind'], 'upload');
+      expect(lines[0]['streamId'], 'req-1');
+      expect(lines[0]['reason'], 'stream-open');
+      expect(lines[1]['streamKind'], 'project');
+      expect(lines[1]['streamId'], 'proj-1');
       w.dispose();
     });
 
@@ -159,4 +187,42 @@ void main() {
   test('netwatchLogPath is a sibling of host.json, not app.log', () {
     expect(netwatchLogPath(abDir: '/tmp/ag'), '/tmp/ag/netwatch.log');
   });
+
+  // Pin, not a behavior change: MachineSession's session-record row
+  // already carries every field complete (no annotate step), so this is a
+  // lockstep check that the existing tap adapter writes it through verbatim —
+  // the same literal shape bridge-tests pins on its own half of the join.
+  test(
+    'a complete session-record row from the tap adapter round-trips to the '
+    'JSONL line bridge-tests pins on its own half',
+    () async {
+      final w = make();
+      w.tap({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': 'frame',
+        'transport': 'iroh',
+        'channel': 'control',
+        'streamKind': 'session',
+        'streamId': '0',
+        'msgType': 'session:ping',
+        'bytes': 23,
+        'frameId': '1e65322bad672889949c1355',
+      });
+      await w.flush();
+
+      final o = readLines().single;
+      expect(o['dir'], 'tx');
+      expect(o['kind'], 'frame');
+      expect(o['transport'], 'iroh');
+      expect(o['origin'], 'app');
+      expect(o['channel'], 'control');
+      expect(o['streamId'], '0');
+      expect(o['streamKind'], 'session');
+      expect(o['msgType'], 'session:ping');
+      expect(o['bytes'], 23);
+      expect(o['frameId'], '1e65322bad672889949c1355');
+      w.dispose();
+    },
+  );
 }

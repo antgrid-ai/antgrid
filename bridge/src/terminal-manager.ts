@@ -53,7 +53,7 @@ import type { ConnState } from "./conn-state";
  */
 const EXIT_DRAIN_MS = 5 * TERMINAL_FRAME_INTERVAL_MS;
 
-// --- Terminal history store (D3: the real run lifecycle) ---------------------
+// --- Terminal history store: the real run lifecycle ---------------------------
 //
 // One SQLite-backed row archive, shared by every `TerminalManager` on the
 // process (one per project core): a run's rowIds mean nothing outside this
@@ -291,8 +291,8 @@ export class TerminalManager {
    *  `Terminal` per PTY costs memory, so every site that drops a scrollback
    *  must dispose one here too. */
   private screens = new Map<string, TerminalScreen>();
-  /** Identity of the CURRENT PTY run, for Wave 4 (history's `z.uuid().parse`)
-   *  and Wave 5 (subscription identity). Lives with the SCREEN, not the
+  /** Identity of the CURRENT PTY run, used by history's `z.uuid().parse` and
+   *  by subscription identity. Lives with the SCREEN, not the
    *  session — set at every spawn (fresh on a same-id respawn too) and
    *  cleared only where `disposeScreen` clears the screen, so it survives
    *  `retainScrollbackOnExit` exactly as the screen it identifies does. */
@@ -783,11 +783,12 @@ export class TerminalManager {
 
   /**
    * Opens `runId`'s history handle with an `onFailure` that records the
-   * failure without touching the terminal itself — D3's guarantee that a
-   * disk problem degrades ONE run's history, never the terminal it belongs
-   * to (`TerminalRunHistory` already guarantees its own methods never throw
-   * once opened; this guards the OPEN itself, which can still fail — a
-   * literally-full disk on the very first write, most plausibly). Returns
+   * failure without touching the terminal itself — the history store's
+   * guarantee that a disk problem degrades ONE run's history, never the
+   * terminal it belongs to (`TerminalRunHistory` already guarantees its own
+   * methods never throw once opened; this guards the OPEN itself, which can
+   * still fail — a literally-full disk on the very first write, most
+   * plausibly). Returns
    * `undefined` in a bare test run (`historyStoreAllowed`) or when opening
    * genuinely fails; either way the terminal spawns exactly as it would with
    * no history feature at all.
@@ -1101,8 +1102,8 @@ export class TerminalManager {
     return this.runIds.get(terminalId);
   }
 
-  /** Serve one page of `runId`'s row history — Wave 5's
-   *  `terminal:history:request`. Reads from the STORE rather than from any live
+  /** Serve one page of `runId`'s row history — `terminal:history:request`.
+   *  Reads from the STORE rather than from any live
    *  source's own handle: mid-rebuild, a source's handle is a
    *  `ReplayGuardedHistory` composed over this same underlying
    *  `TerminalRunHistory`, and `openRun` returns that identical cached instance

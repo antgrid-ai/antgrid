@@ -187,7 +187,7 @@ void main() {
       expect(routeOfPush(decoded), isNull);
     });
 
-    test('a pre-W1 bridge payload names nothing', () {
+    test('a payload with neither projectId nor machineUuid names nothing', () {
       const decoded = (
         title: 't',
         body: 'b',

@@ -1,3 +1,4 @@
+import '../helpers/test_peer_runtime.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -5,12 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/connection_supervisor.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/connection_identity.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -37,31 +40,61 @@ class _MemStorage implements DeviceSecretStorage {
   }
 }
 
-/// Captures the [RelayMechanisms] the transport builder hands the connection —
+/// Captures the [PeerConnectionMechanisms] the transport builder hands the connection —
 /// and deliberately never constructs a supervisor, so nothing dials.
-class _CapturingConnection extends RelayConnection {
-  _CapturingConnection() : super(machineDeviceId: 'M', crypto: CryptoService());
+class _CapturingConnection extends MachineConnection {
+  _CapturingConnection(RelayService relay)
+    : super(
+        machineDeviceId: 'M',
+        crypto: CryptoService(),
+        relayOverride: relay,
+      );
 
-  final Completer<RelayMechanisms> _first = Completer<RelayMechanisms>();
+  final Completer<CentralControlContract> _first =
+      Completer<CentralControlContract>();
 
   /// Resolves with the first mechanisms handed over, so the test awaits the
   /// event itself rather than polling the wall clock for it.
-  Future<RelayMechanisms> get firstMechanisms => _first.future;
+  Future<CentralControlContract> get firstMechanisms => _first.future;
 
   @override
-  void ensureStarted({required RelayMechanisms mechanisms}) {
-    if (!_first.isCompleted) _first.complete(mechanisms);
+  void ensureStarted({
+    required PeerConnectionMechanisms mechanisms,
+    CentralControlContract? central,
+  }) {
+    if (!_first.isCompleted && central != null) _first.complete(central);
   }
 }
 
-class _CapturingManager extends RelayConnectionManager {
+class _TokenCapturingRelay extends RelayService {
+  _TokenCapturingRelay() : super(crypto: CryptoService());
+  final tokens = <String>[];
+  AppState _state = const AppState();
+  @override
+  AppState get currentState => _state;
+  @override
+  Future<void> connect(
+    String url,
+    DeviceIdentity identity, {
+    required String licenseToken,
+    required int epoch,
+    String? machineDeviceId,
+  }) async {
+    tokens.add(licenseToken);
+    _state = const AppState(
+      connectionState: RelayConnectionState.authenticated,
+    );
+  }
+}
+
+class _CapturingManager extends MachineConnectionManager {
   _CapturingManager(this.conn) : super(crypto: CryptoService());
   final _CapturingConnection conn;
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => conn;
+  MachineConnection connectionFor(String machineDeviceId) => conn;
   @override
-  RelayConnection? peek(String machineDeviceId) => conn;
+  MachineConnection? peek(String machineDeviceId) => conn;
 }
 
 DeviceRecord _record(String uuid) => DeviceRecord(
@@ -130,7 +163,7 @@ void main() {
   // `claims.deviceUuid` — so one minter shared across two device records
   // silently widens revoking either into revoking both.
   //
-  // Driving the real `RelayMechanisms.mintToken` closure is the only way to see
+  // Driving the real central reconnect path is the only way to see
   // which provider it reads: the two minters below return distinguishable
   // tokens. (This assertion previously rode `PairingService.tokenProvider`,
   // deleted in Task 10 — same guarantee, re-anchored on the surviving carrier:
@@ -174,7 +207,8 @@ void main() {
       ),
     );
 
-    final conn = _CapturingConnection();
+    final relay = _TokenCapturingRelay();
+    final conn = _CapturingConnection(relay);
     addTearDown(conn.dispose);
 
     final container = ProviderContainer(
@@ -187,6 +221,12 @@ void main() {
           (ref) async => connectionMinter,
         ),
         licenseTokenMinterProvider.overrideWith((ref) async => mainMinter),
+        // This fixture observes credential selection without HTTP enrollment.
+        peerRuntimeProvider.overrideWith((ref) async {
+          final runtime = TestPeerRuntime();
+          ref.onDispose(runtime.dispose);
+          return runtime;
+        }),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
         // The record the socket authenticates AS — a different deviceUuid from the
         // main record, so a mix-up is a different DEVICE IDENTITY, not just a
@@ -218,13 +258,25 @@ void main() {
       onTimeout: () => throw TestFailure('the relay path must have been built'),
     );
 
-    expect(await mech.mintToken(), 'CONN-1');
+    await mech.connect(
+      const ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'agent',
+      ),
+    );
+    expect(relay.tokens.single, 'CONN-1');
     expect(connectionMints, 1);
     expect(mainRecordMints, 0, reason: 'the MAIN record must not be used');
 
     // Fresh per attempt, never a cached token: one minted before a long backoff
     // is already expired by the time its dial runs.
-    expect(await mech.mintToken(), 'CONN-2');
+    await mech.connect(
+      const ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'agent',
+      ),
+    );
+    expect(relay.tokens.last, 'CONN-2');
     expect(connectionMints, 2);
     expect(mainRecordMints, 0);
   }, timeout: const Timeout(Duration(seconds: 30)));

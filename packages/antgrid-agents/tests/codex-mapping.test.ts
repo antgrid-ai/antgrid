@@ -1,5 +1,33 @@
 import { describe, it, expect } from "bun:test";
 import { mapThreadItem, mapCodexError, mapTurnStatusToStopReason, mapPlanStepStatus, mapTokenBreakdown } from "../src/agents/codex/mapping";
+import { isInterruptRecord } from "../src/agents/codex/transcript";
+
+describe("isInterruptRecord (transcript-confirmed manual interrupt)", () => {
+  it("matches turn_aborted with reason interrupted", () => {
+    expect(isInterruptRecord({
+      type: "event_msg",
+      payload: { type: "turn_aborted", reason: "interrupted", turn_id: "t1", duration_ms: 36 },
+    })).toBe(true);
+  });
+
+  it("rejects other event_msg types", () => {
+    expect(isInterruptRecord({ type: "event_msg", payload: { type: "agent_message" } })).toBe(false);
+  });
+
+  it("rejects turn_aborted with a different reason", () => {
+    expect(isInterruptRecord({ type: "event_msg", payload: { type: "turn_aborted", reason: "replaced" } })).toBe(false);
+  });
+
+  it("treats an absent reason as no match", () => {
+    expect(isInterruptRecord({ type: "event_msg", payload: { type: "turn_aborted" } })).toBe(false);
+  });
+
+  it("rejects a record that is not an event_msg at all, or is malformed", () => {
+    expect(isInterruptRecord({ type: "response_item", payload: { type: "turn_aborted", reason: "interrupted" } })).toBe(false);
+    expect(isInterruptRecord(null)).toBe(false);
+    expect(isInterruptRecord({ type: "event_msg" })).toBe(false);
+  });
+});
 
 describe("mapThreadItem", () => {
   it("maps agentMessage -> message item", () => {

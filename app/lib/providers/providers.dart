@@ -748,17 +748,8 @@ final connectionStateProvider = StreamProvider<AppState>((ref) {
   return seededStream(() => relay.currentState, relay.stateStream);
 });
 
-/// Whether the active agent is reachable through the relay.
-///
-/// - `connecting` — the supervisor hasn't reached [Connected] yet (climbing,
-///   released, or nothing dialed at all).
-/// - `online` — the ladder is fully climbed (`Connected`).
-/// - `offline` — the ladder stopped specifically because the agent never
-///   showed up (`Blocked(agentOffline)`). Every OTHER block reason (license,
-///   revoked, superseded…) still needs the user or an out-of-band re-mint, not
-///   a bare reconnect attempt, so it stays `connecting` here rather than
-///   collapsing into the same "not reachable" bucket.
-enum AgentReachability { connecting, online, offline }
+/// Whether the active agent has an established native session.
+enum AgentReachability { connecting, online }
 
 /// Pure mapping, pulled out of [agentReachabilityProvider] so the derivation
 /// is pinned against literal [SupervisorStatus] values without dialling a
@@ -768,7 +759,6 @@ enum AgentReachability { connecting, online, offline }
 AgentReachability reachabilityForStatus(SupervisorStatus? status) =>
     switch (status) {
       Connected() => AgentReachability.online,
-      Blocked(reason: BlockReason.agentOffline) => AgentReachability.offline,
       _ => AgentReachability.connecting,
     };
 
@@ -778,15 +768,9 @@ final agentReachabilityProvider = Provider<AgentReachability>((ref) {
   return reachabilityForStatus(ref.watch(supervisorStatusProvider(id)).value);
 });
 
-/// True when the focused machine's ladder has STOPPED on a [Blocked] reason.
-///
-/// [AgentReachability] deliberately folds every block except `agentOffline`
-/// into `connecting`, which reads correctly as "not usable yet" but is wrong
-/// for anything that treats `connecting` as "an attempt is in flight, wait for
-/// it". A blocked ladder never stops being `connecting` on its own, so such a
-/// guard would wait forever — including the drawer's duplicate-tap guard,
-/// which would then swallow every tap and leave the user unable to reach the
-/// error surface that holds Retry.
+/// True when the focused machine's native ladder has stopped on a block.
+/// Reachability remains connecting for every block, so action guards must
+/// consult this separately to keep the explicit Retry surface reachable.
 final focusedAgentBlockedProvider = Provider<bool>((ref) {
   final id = ref.watch(selectedRegistrationIdProvider);
   if (id == null) return false;
@@ -1027,7 +1011,7 @@ class MachineConnectionNotifier extends Notifier<void> {
           .where((id) => baseDeviceUuid(id) == machineUuid),
     );
     for (final id in forgottenIds) {
-      mgr.release(id);
+      await mgr.release(id);
       // `AndSettle` (awaited) before purge: eviction's `onEvict` writes the
       // status cache that `purgeEntryState` then deletes — ordering matters.
       await registry.forceEvictAndSettle(id);
@@ -1064,7 +1048,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       final machineUuid = baseDeviceUuid(activeId);
       // Same guard, and the same reason, as the control-plane reaper's: the
       // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
-      // one from here would kill the live E2E session and every other project
+      // one from here would kill the live peer session and every other project
       // stream riding it. Cancel only ever abandons an attempt in flight.
       if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
         mgr.release(machineUuid);
@@ -1075,7 +1059,7 @@ class MachineConnectionNotifier extends Notifier<void> {
 
   /// User-initiated retry from the boot panel or the connection-error screen.
   ///
-  /// Hands the machine's [ConnectionSupervisor] its `retry()` input — clearing
+  /// Hands the machine connection its `retry()` input — clearing
   /// the block and the backoff — rather than dialling here: a second component
   /// deciding when to reconnect is exactly what the supervisor replaced.
   ///
@@ -1099,11 +1083,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       'retry → supervisor',
       fields: {'target': registrationId},
     );
-    ref
-        .read(relayConnectionManagerProvider)
-        .peek(registrationId)
-        ?.supervisor
-        ?.retry();
+    ref.read(relayConnectionManagerProvider).peek(registrationId)?.retry();
     ref.invalidate(agentTransportForProvider(registrationId));
   }
 }

@@ -71,6 +71,36 @@ export async function readLastClaudeMessages(transcriptPath: string, n: number):
   return (await readTailUntil(transcriptPath, n, claudeMessagesIn)).slice(-n);
 }
 
+// Walks a Claude `message.content` value looking for a text leaf starting
+// with [prefix] — either a plain "text" part, or one nested inside a
+// "tool_result" part's own content array (a tool call the user interrupted
+// mid-run reports it there, not as a top-level text part).
+function contentStartsWith(content: unknown, prefix: string): boolean {
+  if (typeof content === "string") return content.startsWith(prefix);
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!part || typeof part !== "object") return false;
+    const p = part as { type?: unknown; text?: unknown; content?: unknown };
+    if (p.type === "text") return typeof p.text === "string" && p.text.startsWith(prefix);
+    if (p.type === "tool_result") return contentStartsWith(p.content, prefix);
+    return false;
+  });
+}
+
+/**
+ * Whether one parsed transcript record marks Claude's turn as manually
+ * interrupted — the only trace an interrupt leaves, since no installed build
+ * fires a hook on Esc/Ctrl+C. Matches a user entry whose content carries the
+ * marker text (`[Request interrupted by user]`, and the `for tool use`
+ * variant); an assistant entry or an ordinary user message is never a match.
+ */
+export function isInterruptRecord(record: unknown): boolean {
+  if (!record || typeof record !== "object") return false;
+  const r = record as { type?: unknown; message?: { role?: unknown; content?: unknown } };
+  if (r.type !== "user" || r.message?.role !== "user") return false;
+  return contentStartsWith(r.message.content, "[Request interrupted by user");
+}
+
 /** The transcript path is the caller's own input echoed back — claude's hook
  *  posts it, so there is nothing to discover and it is always followable. */
 export async function readTranscript(opts: TranscriptOpts): Promise<{ msgs: string[]; transcriptPath?: string }> {

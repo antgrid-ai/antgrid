@@ -18,6 +18,36 @@ function fakeJwt(expSec: number): string {
 }
 
 describe("OAuthClient", () => {
+  for (const stallBody of [false, true]) {
+    it(`aborts stalled ${stallBody ? "body" : "headers"} and ignores late denial`, async () => {
+      let signal: AbortSignal | undefined;
+      let resolve!: (response: Response) => void;
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      let revoked = false;
+      const client = new OAuthClient({
+        licenseApiUrl: "https://api.antgrid.test",
+        clientId: "id", clientSecret: "secret", requestTimeoutMs: 20,
+        onAuthRevoked: () => { revoked = true; },
+        fetchImpl: (async (_url, init) => {
+          signal = init?.signal as AbortSignal;
+          if (stallBody) return new Response(new ReadableStream<Uint8Array>({
+            start(controller) { stream = controller; },
+          }), { status: 400 });
+          return new Promise<Response>((done) => { resolve = done; });
+        }) as typeof fetch,
+      });
+      await expect(client.mint()).rejects.toThrow("timed out");
+      expect(signal?.aborted).toBe(true);
+      if (stallBody) {
+        stream.enqueue(new TextEncoder().encode('{"error":"invalid_client"}'));
+        stream.close();
+      } else {
+        resolve(Response.json({ error: "invalid_client" }, { status: 400 }));
+      }
+      await Bun.sleep(0);
+      expect(revoked).toBe(false);
+    });
+  }
   it("mints a token via client_credentials with resource=<licenseApiUrl>/api/auth", async () => {
     const srv = makeServer(async (req) => {
       const u = new URL(req.url);
@@ -140,6 +170,40 @@ describe("OAuthClient", () => {
 });
 
 describe("startTokenMaintenance", () => {
+  it("retries the mint after 30 seconds and ignores completion after stop", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    let pending!: () => Promise<void>;
+    let delay = 0;
+    (globalThis as any).setTimeout = (fn: () => Promise<void>, ms: number, ...rest: unknown[]) => {
+      if (ms >= 30_000) { pending = fn; delay = ms; return 0; }
+      return (realSetTimeout as any)(fn, ms, ...rest);
+    };
+    let calls = 0;
+    let resolve!: (token: MintedToken) => void;
+    const client = { mint: async () => {
+      if (++calls === 1) throw new Error("offline");
+      return new Promise<MintedToken>((done) => { resolve = done; });
+    } } as unknown as OAuthClient;
+    let minted = 0;
+    const maint = startTokenMaintenance(client,
+      { accessToken: "initial", expiresAt: Date.now() + 3_600_000 },
+      { onMinted: () => { minted++; } });
+    try {
+      await pending();
+      expect(calls).toBe(1);
+      expect(delay).toBe(30_000);
+      const retry = pending();
+      expect(calls).toBe(2);
+      maint.stop();
+      resolve({ accessToken: "late", expiresAt: Date.now() + 3_600_000 });
+      await retry;
+      expect(maint.getToken()).toBe("initial");
+      expect(minted).toBe(0);
+    } finally {
+      maint.stop();
+      globalThis.setTimeout = realSetTimeout;
+    }
+  });
   it("onMinted fires after each successful re-mint, not the initial", async () => {
     // The real refresh timer waits 0.8×60s (the ttl floor) — far too long for a
     // unit test — so capture the scheduled callback and drive re-mints by hand.

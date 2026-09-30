@@ -1,8 +1,7 @@
 /// Transport-agnostic interface for sending and receiving agent messages.
 ///
-/// Two implementations are expected: a relay-backed transport (existing
-/// `RelayService`-style WebSocket + E2E encryption) and a local-mode
-/// transport that talks directly to a co-located agent. Higher-level
+/// Two implementations are expected: a native remote transport with E2E
+/// encryption and a local-mode transport that talks directly to a co-located agent. Higher-level
 /// services (terminal, file, preview, command) consume this interface so
 /// they don't care which transport is in use.
 ///
@@ -13,8 +12,41 @@
 /// Flutter layer.
 library;
 
+import 'dart:typed_data';
+
+import 'terminal_attachment.dart';
+import 'tunnel_stream.dart';
+import 'upload_stream.dart';
+
 /// Lifecycle states an [AgentTransport] can be in.
 enum TransportState { connecting, connected, disconnected, error }
+
+/// What this process can truthfully say about one mutating remote request.
+enum RemoteCommandOutcome { notSent, confirmed, outcomeUnknown }
+
+/// A remote request result whose transport outcome is explicit.
+class RemoteRequestResult<T> {
+  final RemoteCommandOutcome outcome;
+  final T? _value;
+
+  const RemoteRequestResult._(this.outcome, this._value);
+  const RemoteRequestResult.notSent()
+    : this._(RemoteCommandOutcome.notSent, null);
+  const RemoteRequestResult.confirmed(T value)
+    : this._(RemoteCommandOutcome.confirmed, value);
+  const RemoteRequestResult.outcomeUnknown()
+    : this._(RemoteCommandOutcome.outcomeUnknown, null);
+
+  T get value {
+    if (outcome != RemoteCommandOutcome.confirmed) {
+      throw StateError('A $outcome request has no confirmed result');
+    }
+    return _value as T;
+  }
+}
+
+const remoteCommandOutcomeUnknownMessage =
+    'Connection lost; execution could not be confirmed';
 
 /// A decoded inbound message routed off a specific channel.
 class InboundMessage {
@@ -31,23 +63,11 @@ abstract class AgentTransport {
   /// Stream of state transitions. Emits each time [currentState] changes.
   Stream<TransportState> get stateChanges;
 
-  /// Emits when the relay reports that it DROPPED a frame on this transport's
-  /// socket (`MESSAGE_RATE_LIMITED`).
-  ///
-  /// The relay tells only the SENDER and identifies no frame — the route header
-  /// carries no message id — so a listener learns that something in flight died,
-  /// never which one. It is therefore a hint to re-issue work that is safe to
-  /// repeat, not a per-request failure: a service that cannot re-issue safely
-  /// must ignore it. Recovering here is what keeps a dropped frame from costing
-  /// a full request timeout. Never fires on a local transport — no relay, so
-  /// nothing to drop.
-  Stream<void> get droppedFrames;
-
   /// Latest known state (synchronous snapshot).
   TransportState get currentState;
 
   /// `true` when the agent runs on the same host as this app. Lets services
-  /// skip relay-only machinery (e.g. PreviewProxyServer) when localhost ports
+  /// skip relay-only machinery (e.g. PreviewPortForwarder) when localhost ports
   /// are directly reachable.
   bool get isLocal;
 
@@ -55,7 +75,7 @@ abstract class AgentTransport {
   Future<void> connect();
 
   /// Send a JSON-encodable message on the named channel.
-  /// Defaults to `control`; preview/HTTP-tunnel callers pass `preview`.
+  /// Defaults to `control`.
   ///
   /// Completes when the message has been handed to the socket, or dropped —
   /// never when a peer has received it. A relay transport writes it behind
@@ -67,58 +87,97 @@ abstract class AgentTransport {
   /// `result` map on success; throws [RpcException] on `ok: false` or
   /// timeout. Default timeout 10s.
   ///
-  /// Each transport implements correlation by `requestId`.
-  ///
-  /// [countsTowardHealth] gates whether a [StreamTransport] folds this call's
-  /// outcome into the session's consecutive-timeout rekey trigger (see
-  /// `MachineSession.notifyRpcResult`), success and timeout alike. A caller
-  /// that re-issues the SAME pull on every re-establishment — including the
-  /// one a rekey itself causes — must pass `false`, or a run of timeouts on a
-  /// link that cannot carry the pull forces a rekey, the rekey re-establishes,
-  /// the re-establish re-drives the same pull, and the loop never breaks. `LocalTransport` and
-  /// `FakeAgentTransport` accept and ignore it (no rekey counter to feed).
+  /// Each transport implements correlation by `requestId`. On a remote project
+  /// transport, a timeout counts toward that stream's own health accounting —
+  /// three consecutive ones reset and reopen the stream (never the link). On
+  /// the control transport and on loopback, a timeout is only a failed call.
   Future<Map<String, dynamic>> request(
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
-    bool countsTowardHealth = true,
+  });
+
+  /// Sends one RPC while preserving the distinction between a request that
+  /// never left, an application-confirmed result, and an interrupted mutation
+  /// whose execution cannot be determined. Every call is treated as a
+  /// mutation: not established short-circuits to [RemoteRequestResult.notSent],
+  /// an application-level refusal ([RpcException] carrying the bridge's typed
+  /// error) rethrows, and any other transport failure or timeout reports
+  /// [RemoteRequestResult.outcomeUnknown].
+  Future<RemoteRequestResult<Map<String, dynamic>>> requestWithOutcome(
+    String method, {
+    Map<String, dynamic>? params,
+    Duration timeout = const Duration(seconds: 10),
   });
 
   /// `true` once the transport can carry an RPC — a local session from the
-  /// start, a relay stream once its E2E session is established. Distinct from
-  /// [currentState] == connected: a relay stream stays connected across a
-  /// session-down window where a send would silently drop.
+  /// start, a native stream transport once its session is established (and,
+  /// for a project, its stream is bound). Distinct from [currentState] ==
+  /// connected: a project transport stays connected while its stream is
+  /// unbound, where a send would silently drop.
   bool get isEstablished;
 
-  /// Counts (re)establishments. A revision number a service obtained from the
-  /// agent is only comparable against the SAME establishment: a reconnect may
-  /// have reached a new agent process whose counters restarted, so a claim
-  /// carried across one could match by coincidence and have stale state
-  /// confirmed. Services that cache a server-issued seq record this beside it
+  /// Counts establishments: the session's own for the control transport, each
+  /// stream bind for a project transport. A revision number a service obtained
+  /// from the agent is only comparable against the SAME establishment: a
+  /// project stream can reopen onto a restarted project core whose counters
+  /// restarted, so a claim carried across one could match by coincidence and
+  /// have stale state confirmed. Services that cache a server-issued seq record this beside it
   /// and re-claim only while it still matches.
   int get establishmentEpoch;
 
   /// Tier-3: register [run] as the hydrator for [key], invoking it now when the
   /// transport is already established and re-invoking it on every future
-  /// (re)establishment (the reconciliation checkpoint — a reconnect re-pulls
-  /// idempotent view-state instead of leaving it stale). A re-register under
+  /// establishment (the reconciliation checkpoint — a reopened project stream
+  /// re-pulls idempotent view-state instead of leaving it stale). A re-register under
   /// [key] supersedes. [run] owns its own bounded wait + flag lifecycle.
   Future<void> hydrate(String key, Future<void> Function() run);
 
   /// Deregister the hydrator for [key]. No-op if absent.
   void unhydrate(String key);
 
-  /// Tier-2: run a one-shot user action bounded by [timeout] so the caller's
-  /// flag lifecycle always settles (no reply-clears-the-flag stranding). NOT
-  /// re-driven on reconnect. STREAMING actions pass a [run] with its own
-  /// idle-timeout and leave [timeout] as an outer net (or `null`).
-  Future<T> action<T>(
-    Future<T> Function() run, {
-    Duration? timeout = const Duration(seconds: 15),
-  });
-
   /// Tear down the connection and release resources.
   Future<void> dispose();
+
+  /// Opens one terminal viewer attachment. [subscribe] is the complete
+  /// `terminal:subscribe` message, checkoutId already stamped, with
+  /// `subscribe['requestId'] == requestId`. Returns synchronously; never
+  /// throws — every failure (refusal, a local open error, the transport
+  /// closing) is reported through the returned handle's `done`.
+  TerminalAttachment openTerminalAttachment({
+    required String requestId,
+    required String checkoutId,
+    required Map<String, dynamic> subscribe,
+  });
+
+  /// Opens one forwarded TCP connection to [port] on the agent's loopback.
+  /// Returns synchronously; never throws — every failure (refusal, a local
+  /// open error, `NOT_SUPPORTED` on a transport with no stream-backed
+  /// implementation) is reported through the returned channel's `ready`.
+  ///
+  /// [probe] asks the bridge only to check reachability and whether the port
+  /// speaks TLS: `ready` reports `tls` and the stream then ends with nothing
+  /// piped.
+  TunnelTcpChannel openTunnelTcp({
+    required String connId,
+    required int port,
+    String checkoutId = 'main',
+    bool probe = false,
+  });
+
+  /// Opens one file upload. Returns synchronously; never throws — every
+  /// failure (refusal, a local open error, `NOT_SUPPORTED` on a transport
+  /// with no stream-backed implementation) is reported through the returned
+  /// exchange's `result`.
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  });
 }
 
 class RpcException implements Exception {

@@ -4,8 +4,8 @@
 // turns an agent's message into an addressed frame, and folds an inbound frame
 // back into a store. It knows nothing about how a frame travels — a `send` that
 // returns false is all it needs to hold the frame and try again — which is what
-// lets ONE module serve both ends of a link neither can open (E4: a bridge
-// cannot dial another bridge; the initiating machine's desktop app carries).
+// lets ONE module serve both ends of a link neither can open (a bridge cannot
+// dial another bridge; the initiating machine's desktop app carries).
 //
 // TWO INVARIANTS LIVE HERE AND NOWHERE ELSE.
 // Every frame leaves through `deps.send`, never through the MessageBus: a
@@ -91,7 +91,7 @@ export type BusRole = "lead" | "peer";
 
 /** This bridge's own half of an address, plus the labels it stamps onto what it
  *  sends. Labels travel because the other machine can never look them up: it
- *  cannot reach this one (E4). */
+ *  cannot reach this one. */
 export interface SessionBusSelf {
   key: SessionMemberKey;
   ref: SessionMemberRef;
@@ -147,11 +147,11 @@ export interface CoordinatorDeps {
   abDir: string;
   /** Which project owns [sessionId]'s bus state, or null when this coordinator
    *  has no record of it at all. One coordinator now answers for every project
-   *  a machine has open (E9/§5.4's directory), not one project's own sessions —
-   *  so every store call below resolves its path PER SESSION instead of
-   *  assuming one shared projectId. A per-core fallback (no host) answers this
-   *  with a constant closure over its own project id, which is what makes it
-   *  behave exactly as a single-project coordinator did before this widened. */
+   *  a machine has open, not one project's own sessions — so every store call
+   *  below resolves its path PER SESSION instead of assuming one shared
+   *  projectId. A per-core fallback (no host) answers this with a constant
+   *  closure over its own project id, which is what makes it behave exactly
+   *  as a single-project coordinator did before this widened. */
   projectIdFor: (sessionId: string) => string | null;
   send: SessionBusSend;
   /** This bridge's address for one of its own sessions, or null when the machine
@@ -166,7 +166,7 @@ export interface CoordinatorDeps {
    *  keeps today's answer. */
   addressable?: () => boolean;
   /** Hand a frame straight to the session it names on THIS machine, bypassing
-   *  the relay, the carrier and the route table entirely (§6.1). False means it
+   *  the relay, the carrier and the route table entirely. False means it
    *  could not be delivered in process — the target's project is not loaded, or
    *  a store write failed — and the frame is HELD, never offered to the carrier
    *  instead: see {@link SessionBusCoordinator.dispatch} for what that costs.
@@ -187,7 +187,7 @@ export interface CoordinatorDeps {
    *
    *  A same-machine frame never reaches it. */
   offMachineSendAllowed?: () => boolean;
-  /** The per-pair budget (§7.4), read before a send and charged by every
+  /** The per-pair budget, read before a send and charged by every
    *  message this end sends OR receives — see `pair-budget.ts`'s header for why
    *  both halves have to land on this end's mirror.
    *  Held by whoever owns every project's rather than by this class: a halt
@@ -216,7 +216,7 @@ interface SessionState {
    *  because a `send` that returned false never reached the relay, so putting
    *  the frame out later is a delivery and not a second copy. */
   held: HeldState;
-  /** Posts parked for this session to read when it chooses (§7.1). Loaded with
+  /** Posts parked for this session to read when it chooses. Loaded with
    *  the log rather than lazily like artifacts: an inbound post writes it, and a
    *  session that has one waiting is exactly the session a restart must find. */
   mailbox: MailboxState;
@@ -238,15 +238,15 @@ interface SessionState {
 
 export interface MessageInput {
   sessionId: string;
-  /** Which verb the caller chose (§7.1). A post is parked in the target's
+  /** Which verb the caller chose. A post is parked in the target's
    *  mailbox and interrupts nothing; a notify becomes a line at the target's
    *  next turn boundary. Everything after the send decision is identical, which
    *  is why the two travel as one shape. */
   verb: "post" | "notify";
   /** The thread this turn belongs to, or null to open a new one. The coordinator
    *  MINTS an id when this is null and returns it, because an agent that was
-   *  never told the id cannot reply on the thread (§4.3). Correlation only — a
-   *  thread has no state machine (§4.2) — so a supplied id is carried and never
+   *  never told the id cannot reply on the thread. Correlation only — a
+   *  thread has no state machine — so a supplied id is carried and never
    *  validated. */
   threadId: string | null;
   to: SessionMemberRef;
@@ -260,15 +260,16 @@ export interface MessageResult {
   ok: true;
   /** That the frame LEFT, never that it arrived: everything this side of the
    *  relay can only report departure, and the other end's receipt is the one
-   *  honest witness (E6). */
+   *  honest witness. */
   sent: boolean;
   held: boolean;
   messageId: string;
   /** Always a real id — minted here when the caller supplied none — because it
    *  is what the caller replies on. */
   threadId: string;
-  /** Whether this send OPENED that thread, which is §7.4's definition of
-   *  progress and so the signal the budget resets on. */
+  /** Whether this send OPENED that thread — opening a thread (like publishing
+   *  an artifact) counts as progress, so it is the signal the pair budget
+   *  resets on. */
   opensThread: boolean;
 }
 
@@ -316,7 +317,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Seed the route table from the machine-level store (E9/§5.4).
+   * Seed the route table from the machine-level store.
    *
    * Unlike a session's message log or held store — loaded lazily, the first
    * time THAT session is addressed, because each belongs to exactly one
@@ -352,18 +353,20 @@ export class SessionBusCoordinator {
    * The project named here is the one whose stream the frame ARRIVED on, and
    * it is deliberately not compared against whichever project owns
    * [contextId]: a lead context's id IS a local session id
-   * (`roleForContext`'s own rule below), so on the same machine E9/§5.4's own
-   * case — a worktree session in project W answering its parent's context in
-   * project P — always arrives with the two disagreeing. Refusing that
-   * mismatch reinstates exactly the unreachability the move exists to remove,
-   * and buys nothing: a forged frame stamping another project's session id as
-   * its contextId presents identically here (applied frame, addressed to a
-   * session in the arriving project, contextId owned elsewhere), and the
-   * genuinely remote context the check would have to let through — its lead
-   * living on the OTHER machine, so attributable to no local project at all —
-   * is the common shape anyway. What a peer may name once admitted is bounded
-   * at the gate that admits it, not at this table; see bridge/CLAUDE.md's E9
-   * bullet for what does and does not bound it today.
+   * (`roleForContext`'s own rule below), so on the same machine the case a
+   * shared machine-wide coordinator exists to handle — a worktree session in
+   * project W answering its parent's context in project P — always arrives
+   * with the two disagreeing. Refusing that mismatch reinstates exactly the
+   * unreachability the move exists to remove, and buys nothing: a forged
+   * frame stamping another project's session id as its contextId presents
+   * identically here (applied frame, addressed to a session in the arriving
+   * project, contextId owned elsewhere), and the genuinely remote context the
+   * check would have to let through — its lead living on the OTHER machine,
+   * so attributable to no local project at all — is the common shape anyway.
+   * What a peer may name once admitted is bounded at the gate that admits it,
+   * not at this table; see bridge/CLAUDE.md's bullet on one coordinator
+   * serving every project a host has open for what does and does not bound it
+   * today.
    *
    * No peerId means the loopback owner — this machine's own desktop app,
    * already reachable without a route.
@@ -431,7 +434,7 @@ export class SessionBusCoordinator {
 
   /** Persist the map, throttled: a binding change or a drop is written at
    *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
-   *  One machine-level file (E9/§5.4/C5), so this table's own rows are only
+   *  One machine-level file, so this table's own rows are only
    *  ONE process's view of it — two hosts pointed at one ANTGRID_DIR is a
    *  documented setup (dev stack beside an installed bridge), not a
    *  once-per-abDir guarantee this coordinator can lean on. `saveBusRoutes`
@@ -620,7 +623,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Lift a no-progress halt (`docs/session-messaging.md` §7.4).
+   * Lift a no-progress halt.
    *
    * A human's own submitted reply into the halted session is what reaches here.
    * The halt says two agents exchanged messages while the work stood still, and
@@ -631,7 +634,7 @@ export class SessionBusCoordinator {
    * Delegated rather than answered here, and with no loaded-session check in
    * front of it: the budget is per PAIR and belongs to whoever holds every
    * project's, so a keystroke has to be able to lift a halt on a session this
-   * coordinator is not currently holding — which is exactly the signal §7.4 says
+   * coordinator is not currently holding — which is exactly the signal that
    * lifts it. A coordinator with no budget wired clears nothing, which is the
    * honest answer for a bare bus with no host above it.
    */
@@ -646,7 +649,7 @@ export class SessionBusCoordinator {
    *
    * Lossy on purpose: a send that does not leave is HELD, not queued for
    * unbounded retry, and a message carries no seq and expects no reliable
-   * delivery. Anything that must survive is an Artifact (§4.1).
+   * delivery. Anything that must survive is an Artifact.
    */
   message(input: MessageInput): MessageResult | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
@@ -661,8 +664,8 @@ export class SessionBusCoordinator {
       return refuse("UNKNOWN_PEER", "a session cannot address itself; name another session on this repository");
     }
     // A bridge with no relay identity names itself by the local sentinel so the
-    // sessions it spawned can reach each other (§6.1). It can reach nothing
-    // else, and a frame stamped with the sentinel and held for a carrier that
+    // sessions it spawned can reach each other. It can reach nothing else,
+    // and a frame stamped with the sentinel and held for a carrier that
     // attaches later would arrive carrying a `from` no reply can route back to.
     if (!namesMachine(to.machineId, self.key.machineId) && this.deps.addressable?.() === false) {
       return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it can only reach sessions on itself");
@@ -670,15 +673,15 @@ export class SessionBusCoordinator {
     const s = this.stateFor(input.sessionId);
 
     const now = this.now();
-    // Both ceilings of §7.4, read BEFORE anything is stamped or logged: a
+    // Both pair-budget ceilings, read BEFORE anything is stamped or logged: a
     // refusal must leave no trace of the message it refused, or a halted pair
     // accumulates thread rows for exchanges that never happened.
     const budget = this.pairBudgetFor(input.sessionId, self, to);
     const refusal = refusalForPair(budget, input.verb, now);
     if (refusal) return refusal;
     const contextId = input.contextId ?? input.sessionId;
-    // Minted here when the caller has none, and RETURNED either way: §4.3 makes
-    // the id bridge-owned except when replying, so an agent that is not told it
+    // Minted here when the caller has none, and RETURNED either way: the id
+    // is bridge-owned except when replying, so an agent that is not told it
     // has no way to answer on the thread it just opened.
     const opensThread = input.threadId === null;
     const threadId = input.threadId ?? this.newId();
@@ -732,7 +735,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Would this pair's §7.4 ceilings refuse [verb] right now? Read-only: it
+   * Would this pair's budget ceilings refuse [verb] right now? Read-only: it
    * charges nothing, writes nothing, and loads no session state.
    *
    * It exists so a caller can ORDER its own refusals, not so it can gate.
@@ -765,13 +768,13 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Charge one message to this end's mirror of the pair's budget (§7.4) —
-   * outbound where it was sent, inbound where it landed, so the two mirrors
-   * stay in lockstep.
+   * Charge one message to this end's mirror of the pair's budget — outbound
+   * where it was sent, inbound where it landed, so the two mirrors stay in
+   * lockstep.
    *
-   * Progress is §7.4's own definition and nothing wider — a NEW thread, or an
-   * artifact part — because a reply on a thread already open is exactly the
-   * exchange the no-progress counter exists to notice. Reset before the
+   * Progress means a NEW thread, or an artifact part, and nothing wider —
+   * because a reply on a thread already open is exactly the exchange the
+   * no-progress counter exists to notice. Reset before the
    * increment, so the message that made the progress starts the next count at
    * one rather than being forgiven retroactively.
    */
@@ -792,7 +795,7 @@ export class SessionBusCoordinator {
    * The one send decision, taken by everything that leaves this coordinator —
    * a message and the receipt that answers one alike.
    *
-   * A target on this machine is handed straight to it (§6.1): no relay, no
+   * A target on this machine is handed straight to it: no relay, no
    * carrier, no route table, and nothing that can fail for transport reasons.
    * Local delivery that DECLINES is the whole answer — the frame is held and
    * retried, so a target whose project is cold gets it once that project is
@@ -1137,7 +1140,7 @@ export class SessionBusCoordinator {
     const opensThread = threadId === null || threadById(s.threads, threadId) === null;
     this.commit(sessionId, {
       log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
-      // A post is parked for the target to read when it chooses (§7.1); a notify
+      // A post is parked for the target to read when it chooses; a notify
       // is rendered into its session instead, and a mailbox row for one would
       // re-offer a message the agent has already been handed.
       ...(verb === "post"
@@ -1167,13 +1170,13 @@ export class SessionBusCoordinator {
         ? {}
         : { threads: upsertThread(s.threads, { threadId, contextId, peer: from, lastAt: now, openedByPeer: true }) }),
     });
-    // The other half of §7.4's ceilings. The pair's record is mirrored at each
-    // end rather than shared (`pair-budget.ts`'s header), so a message charged
-    // only where it was sent leaves this end counting nothing but its own
-    // outbound traffic — which is the ping-pong `pairKey`'s doc says cannot
-    // happen. Charged AFTER the commit above and before anything renders, so a
-    // halt this message trips is already recorded when the line reaches the
-    // session.
+    // The other half of the pair-budget ceilings. The pair's record is
+    // mirrored at each end rather than shared (`pair-budget.ts`'s header), so
+    // a message charged only where it was sent leaves this end counting
+    // nothing but its own outbound traffic — which is the ping-pong
+    // `pairKey`'s doc says cannot happen. Charged AFTER the commit above and
+    // before anything renders, so a halt this message trips is already
+    // recorded when the line reaches the session.
     const budget = this.pairBudgetFor(sessionId, self, from);
     if (budget) this.spendBudget(sessionId, budget, verb, opensThread || carriesArtifact(envelope.parts), now);
     // The receipt takes the same send decision a message does, so it must go
@@ -1208,7 +1211,7 @@ export class SessionBusCoordinator {
     });
   }
 
-  /** Stamp the outbound entry a receipt answers (E6).
+  /** Stamp the outbound entry a receipt answers.
    *
    *  Nothing to stamp is not a failure: a message already trimmed out of the
    *  ring, or a second receipt for one already stamped, both leave the log where
@@ -1324,8 +1327,8 @@ function notMember(): SessionBusRefusal {
 }
 
 /**
- * §7.4's two ceilings as ONE decision, in the order they refuse: the halt binds
- * every verb, the hourly ceiling only `notify`.
+ * The pair budget's two ceilings as ONE decision, in the order they refuse:
+ * the halt binds every verb, the hourly ceiling only `notify`.
  *
  * Shared by {@link SessionBusCoordinator.message} and
  * {@link SessionBusCoordinator.pairRefusal} rather than written twice, so the
@@ -1344,9 +1347,10 @@ function refusalForPair(
   return verb === "notify" ? checkNotify(budget, now) : null;
 }
 
-/** Whether a message carries something durable, which is half of §7.4's
- *  definition of progress. An artifact outlives the exchange that produced it;
- *  text does not, which is why text alone never resets the counter. */
+/** Whether a message carries something durable, which is half of what counts
+ *  as progress for the pair budget. An artifact outlives the exchange that
+ *  produced it; text does not, which is why text alone never resets the
+ *  counter. */
 function carriesArtifact(parts: readonly BusPart[]): boolean {
   return parts.some((p) => p.kind === "artifact");
 }

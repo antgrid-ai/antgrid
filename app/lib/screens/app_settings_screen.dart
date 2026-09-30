@@ -23,6 +23,7 @@ import '../providers/sign_out.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
+import '../util/detached.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/settings/help_about_section.dart';
@@ -140,7 +141,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref.container);
+        if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
         showAbSnackBar(
           context,
@@ -436,7 +437,11 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                               size: 10,
                               color: antgrid.textSecondary,
                             ),
-                            onTap: () => openAccountInBrowser(ref.container),
+                            onTap: () => detached(
+                              'AppSettingsScreen',
+                              'open account page',
+                              () => openAccountInBrowser(ref.container),
+                            ),
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),

@@ -19,8 +19,7 @@ import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/control_plane_client.dart'
     show ControlPlaneClient, MachineSessionRow;
 
-/// The push IS the heartbeat (`docs/session-messaging.md` §5.3: "being
-/// pushed to is what proves a carrier exists"): the bridge's `lastPushAt` is
+/// The push IS the heartbeat: the bridge's `lastPushAt` is
 /// what proves this machine's carrier is alive, so an unchanged snapshot is
 /// re-sent at this cadence regardless.
 const Duration kRemoteDirectoryHeartbeat = Duration(seconds: 30);

@@ -34,6 +34,28 @@ HostFile _unstampedHost({int pid = 100, int port = 6000}) => HostFile(
 );
 
 void main() {
+  test('resume notifies discovered host without pinging or spawning', () async {
+    final host = _host();
+    final notified = <HostFile>[];
+    final controller = HostController(
+      readHost: () async => host,
+      ping: (_) async => throw StateError('resume must not ping'),
+      spawnHost: () async => throw StateError('resume must not spawn'),
+      notifyPeerResume: (value) async => notified.add(value),
+    );
+    await controller.notifyPeerResume();
+    expect(notified, [host]);
+  });
+
+  test('resume without a discovered host never starts one', () async {
+    final controller = HostController(
+      readHost: () async => null,
+      spawnHost: () async => throw StateError('resume must not spawn'),
+      notifyPeerResume: (_) async => throw StateError('no host to notify'),
+    );
+    await controller.notifyPeerResume();
+  });
+
   test('trusts a live host (alive PID + successful ping); no spawn', () async {
     var spawns = 0;
     final c = HostController(

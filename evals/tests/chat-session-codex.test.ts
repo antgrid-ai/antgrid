@@ -78,10 +78,12 @@ describe.skipIf(!HAVE_CODEX)("chat-session codex auto-title", () => {
           (m: any) =>
             m._streamId === streamId &&
             m.sessionId === sessionId &&
-            m.type === "agent:turn-end",
-          10_000,
-        )
-        .catch(() => null);
+            (m.type === "agent:turn-end" || m.type === "agent:error"),
+          turnDeadline - Date.now(),
+        );
+      if (msg?.type === "agent:error") {
+        throw new Error(`Codex turn failed: ${msg.error?.message ?? "unknown driver error"}`);
+      }
       if (msg) turnEnded = true;
     }
     expect(turnEnded).toBe(true);

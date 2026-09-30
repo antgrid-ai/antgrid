@@ -174,6 +174,7 @@ function field(value: unknown, max = 64): string {
 function detailText(event: NetwatchEvent): string {
   const parts: string[] = [];
   if (event.streamId) parts.push(`s:${field(event.streamId, 8)}`);
+  if (event.streamKind) parts.push(field(event.streamKind, 12));
   if (event.reason) parts.push(field(event.reason));
   for (const [k, v] of Object.entries(event.detail ?? {})) parts.push(`${field(k, 24)}=${field(v)}`);
   return parts.join(" ");
@@ -185,8 +186,8 @@ function detailText(event: NetwatchEvent): string {
  * this process without it — an older host's ring, an app's own capture shipped
  * in by `--remote` — got here over the relay by construction.
  */
-function transportOf(event: NetwatchEvent): "relay" | "local" {
-  return event.transport === "local" ? "local" : "relay";
+function transportOf(event: NetwatchEvent): "relay" | "local" | "iroh" {
+  return event.transport === "local" || event.transport === "iroh" ? event.transport : "relay";
 }
 
 /** Whether this event survives the transport narrowing. Neither flag = both. */
@@ -194,6 +195,21 @@ function selected(event: NetwatchEvent, opts: NetwatchCliOptions): boolean {
   if (opts.local) return transportOf(event) === "local";
   if (opts.relay) return transportOf(event) === "relay";
   return true;
+}
+
+/**
+ * The transport narrowing a JOIN applies. A join's own file (`--join`) is
+ * always an app-side capture, and either side's capture may carry native
+ * `iroh` rows, so a join with no flag must keep `iroh` rows
+ * alongside `relay` ones — unlike the live stream's `selected`, whose default
+ * of "no flag = both" already includes them. `--local` still exists because a
+ * DESKTOP capture can also carry loopback frames; it has no counterpart in an
+ * app-side `--join` file, but is honoured here for symmetry.
+ */
+export function joinSelected(event: NetwatchEvent, opts: NetwatchCliOptions): boolean {
+  if (opts.local) return transportOf(event) === "local";
+  if (opts.relay) return transportOf(event) === "relay";
+  return transportOf(event) !== "local";
 }
 
 /**
@@ -218,7 +234,7 @@ function frameColumns(event: NetwatchEvent, color: boolean): string[] {
     // Relay is the dimmed half: a desktop machine carries both wires at once,
     // and loopback is the one no other column would hint at — the channel,
     // kind and size of a local frame all read like a relay frame's.
-    transport === "local" ? "local" : paint("relay", "dim", color),
+    transport === "relay" ? paint("relay", "dim", color) : transport.padEnd(5),
     (event.channel === "preview" ? "prev" : event.channel === "control" ? "ctrl" : "—").padEnd(4),
     (event.kind === "drop" ? "DROP" : field(event.kind, 9)).padEnd(9),
     bytes(event.bytes).padStart(7),
@@ -232,7 +248,7 @@ function frameColumns(event: NetwatchEvent, color: boolean): string[] {
  *  would be a word per line saying what the reader already knows. */
 export function renderEvent(event: NetwatchEvent, color = false, showOrigin = false): string {
   const drop = event.kind === "drop";
-  const arrow = drop ? "x" : event.dir === "tx" ? "->" : "<-";
+  const arrow = drop ? "x" : event.dir === "event" ? "·" : event.dir === "tx" ? "->" : "<-";
   const cols = [
     paint(clock(event.at), "dim", color),
     ...(showOrigin ? [paint(event.origin === "app" ? "app" : "brg", "dim", color)] : []),
@@ -290,7 +306,7 @@ function renderJoinedRow(
 
 /** Reads an app-side capture. Tolerates a partial trailing line: the writer
  *  appends in batches and may be running while this reads. */
-function readAppCapture(path: string): NetwatchEvent[] | null {
+export function readAppCapture(path: string): NetwatchEvent[] | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -359,10 +375,11 @@ const SETTLE_MS = 1000;
 /**
  * Pairs the two captures on frame id.
  *
- * A sealed frame's id is its AES-GCM nonce, which the relay forwards
- * untouched — so the SAME id appears as `tx` on the sender and `rx` on the
- * receiver, and that is the entire join. What it buys is the question the
- * route header cannot answer: not "was something dropped" but "which one".
+ * A frame's id is a SHA-256 hash of its payload bytes, which both endpoints
+ * compute the same way — so the SAME id appears as `tx` on the sender and
+ * `rx` on the receiver, and that is the entire join. What it buys is the
+ * question the route header cannot answer: not "was something dropped" but
+ * "which one".
  *
  * A frame can only be called lost inside the window both captures actually
  * cover. That window's END is not the last event either side recorded — a quiet
@@ -398,20 +415,14 @@ export function joinCaptures(
   // receiver's unrelated frame of the same id, which cannot happen but would be
   // a silent lie if it did. An `rx` drop is the opposite case and belongs IN it:
   // the frame did cross the socket and was thrown away on arrival, carrying the
-  // sender's own frameId (`decrypt-failed` in relay-client.ts is the one that
-  // matters). Excluding it verdicted the sender's half "never arrived" — turning
-  // the rekey race this capture exists to catch into a report of network loss.
-  const index = new Map<string, NetwatchEvent[]>();
-  const add = (e: NetwatchEvent): void => {
-    if (!e.frameId || (e.kind === "drop" && e.dir !== "rx")) return;
-    const bucket = index.get(e.frameId);
-    if (bucket) bucket.push(e);
-    else index.set(e.frameId, [e]);
-  };
-  for (const e of app) add(e);
-  for (const e of bridge) add(e);
+  // sender's own frameId (a receive-side drop such as `pre-establishment` or
+  // `not-admitted` is the one that matters here). Excluding it verdicted the
+  // sender's half "never arrived" — turning a receive-side drop into a report
+  // of network loss.
+  const eligible = (e: NetwatchEvent): boolean =>
+    Boolean(e.frameId) && !(e.kind === "drop" && e.dir !== "rx");
 
-  const rows = [...app.map((e) => ({ e, origin: "app" as Origin })), ...bridge.map((e) => ({ e, origin: "brg" as Origin }))]
+  const sorted = [...app.map((e) => ({ e, origin: "app" as Origin })), ...bridge.map((e) => ({ e, origin: "brg" as Origin }))]
     // `seq` counts one process's own records, so it orders rows only WITHIN an
     // origin — netwatch.ts says as much, and an older capture file may not carry
     // it at all, which made the subtraction NaN and left same-millisecond rows
@@ -421,30 +432,69 @@ export function joinCaptures(
       x.e.at - y.e.at ||
       (x.origin === y.origin
         ? (x.e.seq ?? 0) - (y.e.seq ?? 0)
-        : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)))
-    .map(({ e, origin }) => {
-      if (!e.frameId || e.kind === "drop") return { event: e, origin, verdict: "na" as Verdict };
-      const peer = (index.get(e.frameId) ?? []).find((o) => o !== e && o.dir !== e.dir);
-      if (peer && peer.kind === "drop") {
-        // It reached the far end and died there. No latency: the peer row
-        // carries the reason, and timing a frame to its own discard would read
-        // as a successful delivery.
-        return { event: e, origin, verdict: "discarded" as Verdict };
-      }
-      if (peer) {
-        return {
-          event: e,
-          origin,
-          verdict: "matched" as Verdict,
-          // Only meaningful on the receiving half of a pair, and only because
-          // both captures come off one machine's clock in the desktop case.
-          deltaMs: e.dir === "rx" ? e.at - peer.at : undefined,
-        };
-      }
-      const inOverlap = overlap !== null && e.at >= overlap[0] && e.at <= overlap[1];
-      if (!inOverlap) return { event: e, origin, verdict: "outside" as Verdict };
-      return { event: e, origin, verdict: (e.dir === "tx" ? "lost" : "unpaired") as Verdict };
-    });
+        : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)));
+
+  // A hash id repeats for every byte-identical frame — a ping, a pong, a
+  // repeated stream-ready notice — so more than one occurrence can legitimately
+  // share a frameId. Pairing "the first
+  // opposite-direction event with this id" wired every later occurrence to that
+  // SAME first peer instead of to the one that actually crossed with it, which
+  // both double-counted one frame as matched and left its true counterpart
+  // unpaired. Bucketing per direction and zipping by position — the Nth send
+  // with the Nth receive, in the causal order established above — pairs the
+  // occurrences that actually happened together, and degrades to exactly the
+  // old one-shot lookup when an id occurs once per side. Channel joins the key
+  // so two loopback channels sharing an id are never read as the same event
+  // twice, and so does the direction of travel: both ends can send the same
+  // bytes, and a send pairs only with a receive at the far end, never with its
+  // own side's receive of the other end's copy. `streamKind` stays out of the
+  // key: the app's capture never sets it, so keying on it would leave every
+  // native frame the bridge tags unpairable.
+  const txByKey = new Map<string, NetwatchEvent[]>();
+  const rxByKey = new Map<string, NetwatchEvent[]>();
+  for (const { e, origin } of sorted) {
+    if (!eligible(e)) continue;
+    const sender: Origin = e.dir === "tx" ? origin : origin === "app" ? "brg" : "app";
+    const key = `${e.frameId}\u0000${e.channel ?? ""}\u0000${sender}`;
+    const bucket = e.dir === "tx" ? txByKey : rxByKey;
+    const list = bucket.get(key);
+    if (list) list.push(e);
+    else bucket.set(key, [e]);
+  }
+  const peerOf = new Map<NetwatchEvent, NetwatchEvent>();
+  for (const [key, txs] of txByKey) {
+    const rxs = rxByKey.get(key);
+    if (!rxs) continue;
+    const n = Math.min(txs.length, rxs.length);
+    for (let i = 0; i < n; i++) {
+      peerOf.set(txs[i], rxs[i]);
+      peerOf.set(rxs[i], txs[i]);
+    }
+  }
+
+  const rows = sorted.map(({ e, origin }) => {
+    if (!e.frameId || e.kind === "drop") return { event: e, origin, verdict: "na" as Verdict };
+    const peer = peerOf.get(e);
+    if (peer && peer.kind === "drop") {
+      // It reached the far end and died there. No latency: the peer row
+      // carries the reason, and timing a frame to its own discard would read
+      // as a successful delivery.
+      return { event: e, origin, verdict: "discarded" as Verdict };
+    }
+    if (peer) {
+      return {
+        event: e,
+        origin,
+        verdict: "matched" as Verdict,
+        // Only meaningful on the receiving half of a pair, and only because
+        // both captures come off one machine's clock in the desktop case.
+        deltaMs: e.dir === "rx" ? e.at - peer.at : undefined,
+      };
+    }
+    const inOverlap = overlap !== null && e.at >= overlap[0] && e.at <= overlap[1];
+    if (!inOverlap) return { event: e, origin, verdict: "outside" as Verdict };
+    return { event: e, origin, verdict: (e.dir === "tx" ? "lost" : "unpaired") as Verdict };
+  });
 
   return { rows, overlap };
 }
@@ -458,14 +508,8 @@ async function runNetwatchJoin(
   const bridge = await fetchBridgeSnapshot(host.controlPort, host.token, opts.limit ?? 4096);
   if (!bridge) return 1;
 
-  // A join with no transport named is RELAY, not both — the one place the
-  // filter's default differs from the live stream's. An app-side capture file
-  // is relay traffic by construction, so a loopback frame in the host's half
-  // has no counterpart to find and would be verdicted `lost` on every run of a
-  // machine that also has a desktop app attached.
-  const scoped: NetwatchCliOptions = opts.local ? opts : { ...opts, relay: true };
-  const appRows = app.filter((e) => selected(e, scoped));
-  const bridgeRows = bridge.filter((e) => selected(e, scoped));
+  const appRows = app.filter((e) => joinSelected(e, opts));
+  const bridgeRows = bridge.filter((e) => joinSelected(e, opts));
 
   const color = Boolean(process.stdout.isTTY);
   const { rows, overlap } = joinCaptures(appRows, bridgeRows);
@@ -499,11 +543,12 @@ async function runNetwatchJoin(
   }
 
   if (opts.json) return 0;
+  const scope = opts.local ? "loopback" : opts.relay ? "relay" : "relay and native (iroh)";
   console.error("");
   console.error(
     paint(
       `# ${appRows.length} app events joined against ${bridgeRows.length} host events ` +
-        `(${scoped.local ? "loopback" : "relay"} frames only)`,
+        `(${scope} frames only)`,
       "dim",
       color,
     ),

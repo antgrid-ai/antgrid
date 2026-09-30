@@ -1,4 +1,4 @@
-// Turn-boundary delivery (spec 5.2). A rendered line waits here until the
+// Turn-boundary delivery. A rendered line waits here until the
 // session it is for is clear — no open turn, no unanswered block — and is
 // submitted through the same `SessionAdapter.injectReply` a Handler auto-reply
 // uses.
@@ -62,8 +62,8 @@ export const MAX_QUEUED_LINES = 64;
 /** Which template produced the line. Recorded so a queue dumped after a restart
  *  says what is waiting without re-parsing the rendered text.
  *
- *  Only a notify produces a line at all — a post is read when the target chooses
- *  (§7.1) — and the two kinds split on whether the RECEIVER already held the
+ *  Only a notify produces a line at all — a post is read when the target
+ *  chooses — and the two kinds split on whether the RECEIVER already held the
  *  thread when the message landed, which is what decides whether the reader is
  *  being introduced to an exchange or continued in one. */
 export const DeliveryKindSchema = z.enum(["notify", "reply"]);
@@ -99,7 +99,7 @@ export function emptyDeliveries(): DeliveryQueueState {
 }
 
 /** Which lines may be dropped to make room. Both kinds are: a message is
- *  conversation and is allowed to be lost (§4.1), and the durable half of what
+ *  conversation and is allowed to be lost, and the durable half of what
  *  a session says is an artifact, which this queue never carries. A kind added
  *  to the enum without being added HERE is treated as load-bearing instead, and
  *  the eviction below then drops the oldest line outright — possibly another

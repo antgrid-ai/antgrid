@@ -1,0 +1,18 @@
+{
+  "path": ["bridge", "relay", "web", "packages", "app", "evals"],
+  "format": ["typescript", "dart"],
+  "pattern": "**/{tests,test,scenarios,helpers,support}/**",
+  "minTokens": 50,
+  "threshold": 10,
+  "reporters": ["console", "threshold"],
+  "absolute": true,
+  "gitignore": true,
+  "ignore": [
+    "**/node_modules/**",
+    "**/.dart_tool/**",
+    "**/build/**",
+    "**/fixtures/**",
+    "**/.worktrees/**",
+    "**/.claude/**"
+  ]
+}

@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMessage } from "../../bridge/src/protocol";
-import { loadDeliveries } from "../../bridge/src/session-bus/delivery-queue";
 import { setMobileAccess } from "../helpers/harness";
 import { setupTwoBridgeEnv, type BridgeMachine, type TwoBridgeEnv } from "../helpers/two-bridge";
 import {
   NOTIFY_MARKER,
   SINK_SCRIPT_NAME,
+  awaitDeliveryLines,
   busCall,
   countMarkers,
   hookDoneMarker,
@@ -242,12 +242,15 @@ async function fireHookOnMachine(
   event: string,
   sinkPath: string,
 ): Promise<void> {
+  // Counted, not merely present: the sink keeps every earlier marker, so a
+  // second firing of the same event would otherwise return before it ran.
+  const before = countMarkers(sinkText(sinkPath), hookDoneMarker(event));
   machine.env.app.sendOnStream(
     machine.streamId,
     createMessage("terminal:input", { terminalId: sessionId, data: hookTriggerData(agent, event) }),
   );
   await untilAsync(
-    async () => (sinkText(sinkPath).includes(hookDoneMarker(event)) ? true : undefined),
+    async () => (countMarkers(sinkText(sinkPath), hookDoneMarker(event)) > before ? true : undefined),
     CROSS_TIMEOUT_MS,
     `the simulated "${event}" hook to run for session ${sessionId} on machine ${machine.name}`,
   );
@@ -341,11 +344,11 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   // submitted and cleared only once it went in. Waiting on it is what makes the
   // "nothing reached the terminal" assertion below a statement about the turn
   // boundary rather than about a frame that never crossed at all.
-  const queued = await untilAsync(
-    async () => {
-      const lines = loadDeliveries(b.env.abDir, b.env.projectId).lines.filter((l) => l.sessionId === sessionB);
-      return lines.length > 0 ? lines : undefined;
-    },
+  const queued = await awaitDeliveryLines(
+    b.env.abDir,
+    b.env.projectId,
+    sessionB,
+    1,
     CROSS_TIMEOUT_MS,
     `the notify from machine a to be queued for session ${sessionB} on machine b`,
   );
@@ -366,8 +369,11 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   // write, so machine b's queue is still holding it until one is announced. The
   // rest of this test runs long enough for an unretired line to be retried.
   await fireHookOnMachine(b, sessionB, "claude", "user-prompt", sinks.b);
-  await until(
-    () => (loadDeliveries(b.env.abDir, b.env.projectId).lines.some((l) => l.sessionId === sessionB) ? undefined : true),
+  await awaitDeliveryLines(
+    b.env.abDir,
+    b.env.projectId,
+    sessionB,
+    0,
     CROSS_TIMEOUT_MS,
     `the submitted notify to be retired by the turn it opened on session ${sessionB}`,
   );
@@ -413,7 +419,7 @@ test("a message crosses to the other machine, comes back receipted, and refuses 
   expect((await inbox(b, sessionB)).posts).toHaveLength(0);
 }, ROW_TIMEOUT_MS);
 
-test("the RECEIVING end's two switches decide a cross-machine send, and the sender's own has no say (E15)", async () => {
+test("the RECEIVING end's two switches decide a cross-machine send, and the sender's own has no say", async () => {
   const sinks = newSinks();
   env = await setupTwoBridgeEnv({
     prepareProject: prepareBusProject,
@@ -458,11 +464,12 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   expect(openerMail.posts[0].summary).toBe(OPENER);
   expect((await awaitReceipt(a, sessionA, opened.body.threadId, OPENER)).deliveredAt).toBeGreaterThan(0);
 
-  // The first of the receiving end's two switches (§8.1's subordinate bit),
-  // against a mirror that is still warm. Deliberately not pumped: b refuses
-  // the session-bearing card with reach off, so a push in this window empties
-  // a's rows for b, and the send would then be refused by machine a's own row
-  // lookup without the frame ever reaching machine b's inbound gate.
+  // The first of the receiving end's two switches (the agent-reach
+  // subordinate bit), against a mirror that is still warm. Deliberately not
+  // pumped: b refuses the session-bearing card with reach off, so a push in
+  // this window empties a's rows for b, and the send would then be refused by
+  // machine a's own row lookup without the frame ever reaching machine b's
+  // inbound gate.
   //
   // Nothing travels back to say the frame was dropped, so the sender is told it
   // left — which is the whole failure this row exists to pin.
@@ -506,11 +513,12 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 
-  // Machine a shuts its OWN door, and stops talking with it. This reverses E15,
-  // which held that the switch governs only what may be done TO a: the leg did
-  // leave over a's own loopback carrier, but b's reply came back through a's
-  // relay ingress, which the same switch refuses — so what E15 actually shipped
-  // was a machine that could speak and could not be answered.
+  // Machine a shuts its OWN door, and stops talking with it. This refutes the
+  // assumption that the remote-access switch governs only what may be done TO
+  // a: the leg did leave over a's own loopback carrier, but b's reply came
+  // back through a's relay ingress, which the same switch refuses — so the
+  // switch actually gates a machine that could speak and could not be
+  // answered.
   await setMobileAccess(a.env.abDir, false);
   const DOOR_SHUT = "My own switch is off, so this does not leave.";
   const outbound = await busCall(a.env.abDir, "post", { terminalId: sessionA, body: body(DOOR_SHUT) });
@@ -532,6 +540,7 @@ test("the RECEIVING end's two switches decide a cross-machine send, and the send
   await setMobileAccess(a.env.abDir, false);
 
   await setMobileAccess(a.env.abDir, true);
+  await carrier.reestablishRemote("a");
   await pumpAndExpectRows(carrier);
   await peerRow(a, sessionA, b, sessionB);
 

@@ -1,8 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart'
+    show AppleLogoPainter;
 import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
@@ -23,6 +26,7 @@ import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
 import '../storage/last_auth_method_store.dart';
+import '../util/detached.dart';
 
 /// Declared here rather than under `providers/` so `storage/` stays free of
 /// Riverpod: this screen is the only consumer, and tests override it to
@@ -30,6 +34,14 @@ import '../storage/last_auth_method_store.dart';
 final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
+
+/// Sign in with Apple runs Apple's own sheet, so it needs no browser and exists
+/// only where that sheet does. The macOS build can present it only when signed
+/// with the Developer ID profile that grants the entitlement; an unsigned or
+/// debug build reports the failure on the form.
+bool get _offersAppleSignIn =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.macOS;
 
 /// Sign-in screen.
 ///
@@ -49,8 +61,11 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
 ///
 /// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
-/// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path.
+/// entirely over HTTPS — no browser, no deeplink. GitHub and Google remain as
+/// secondary options on the browser+deeplink path (an in-app sheet on iOS, see
+/// [AuthService.startOAuth]), and Sign in with Apple ([_offersAppleSignIn]) on
+/// Apple's native sheet. App Review requires Apple beside them on iOS
+/// (guideline 4.8).
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -115,6 +130,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   int _pollTicks = 0;
   StreamSubscription<String>? _oauthFailureSub;
 
+  /// An in-app OAuth round trip is running under the spinner, so its failures
+  /// belong to this screen even though the form is not showing.
+  bool _oauthInApp = false;
+
   /// Bumped every time the user walks away from the flow they were in
   /// ([_backToForm], [_goToStep]). A request that snapshots this and finds it
   /// changed knows its flow was abandoned mid-air. [_pollOnce]'s
@@ -173,7 +192,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   void _onOAuthFailure(String message) {
     // A late bounce must not clobber an in-progress magic-link flow — OAuth is
     // only ever started from the form, so only the form shows its failures.
-    if (!mounted || _phase != _Phase.form) return;
+    if (!mounted || (_phase != _Phase.form && !_oauthInApp)) return;
     setState(() => _error = message);
   }
 
@@ -204,20 +223,38 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // browser detour can outlive this widget — a `ref` touched then throws.
     final store = ref.read(lastAuthMethodStoreProvider);
     final auth = ref.read(authServiceProvider);
-    // Back to the form even if Continue routed us here from [_Phase.submitting]:
-    // OAuth's outcome arrives as a deep link much later, and [_onOAuthFailure]
-    // only shows itself on the form.
+    final container = ref.container;
+    // A hand-off returns to the form even if Continue routed us here from
+    // [_Phase.submitting]: its outcome arrives as a deep link much later, and
+    // [_onOAuthFailure] only shows itself on the form. An in-app round trip
+    // holds the spinner until the session is redeemed, so a second tap cannot
+    // start another sign-in underneath it.
+    final inApp = auth.oauthRunsInApp;
     setState(() {
-      _phase = _Phase.form;
+      _phase = inApp ? _Phase.submitting : _Phase.form;
       _error = null;
+      _oauthInApp = inApp;
     });
+    final OAuthStart started;
     try {
-      await auth.startOAuth(provider);
+      started = await auth.startOAuth(provider);
     } on AuthException catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.message);
+      setState(() {
+        _phase = _Phase.form;
+        _oauthInApp = false;
+        _error = e.message;
+      });
       return;
+    } finally {
+      _oauthInApp = false;
     }
+    // Signed in, the root replaces this screen; anything else is back to the
+    // form, where a failure reported during the round trip is already shown.
+    if (mounted && started != OAuthStart.signedIn) {
+      setState(() => _phase = _Phase.form);
+    }
+    if (started == OAuthStart.notSignedIn) return;
     // Only once the browser is actually up: written before the launch, the hint
     // outlives a launch that never happened and then routes every later
     // Continue back to a provider that has never worked. It still records the
@@ -230,6 +267,63 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       provider == 'github' ? AuthMethod.github : AuthMethod.google,
       store: store,
     );
+    if (started != OAuthStart.signedIn) return;
+    // The in-app round trip has no deep link behind it, so nothing else will
+    // tell the root the user signed in.
+    _warmSignedIn(container);
+  }
+
+  /// The session cookie is already stored: tell the root, and warm billing in
+  /// parallel with the user refresh so pricing is ready when the shell opens.
+  /// Takes a container so a caller past an await need not touch [ref].
+  static void _warmSignedIn(ProviderContainer container) {
+    container
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInCompleted);
+    container.invalidate(currentUserProvider);
+    container.invalidate(subscriptionProvider);
+    container.invalidate(pricingCatalogProvider);
+    prefetchSubscriptionCache(container);
+  }
+
+  Future<void> _signInWithApple() async {
+    final email = _emailController.text.trim();
+    final auth = ref.read(authServiceProvider);
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInStarted, props: {'provider': 'apple'});
+    setState(() {
+      _phase = _Phase.submitting;
+      _error = null;
+      _notice = null;
+    });
+    final bool signedIn;
+    try {
+      signedIn = await auth.signInWithApple();
+    } catch (e) {
+      // Anything, not just AuthException: a keychain that refuses the cookie
+      // write throws its own type, and leaving the phase at submitting would
+      // disable every control on the screen for good.
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = e is AuthException
+            ? e.message
+            : 'Apple sign-in failed. Try again.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    if (!signedIn) {
+      // Dismissing Apple's sheet is a choice, not a failure: back to the form
+      // with nothing to explain.
+      setState(() => _phase = _Phase.form);
+      return;
+    }
+    // Keyed on the TYPED address, like the OAuth hint: the sheet may answer
+    // with a private relay address the user never typed here.
+    _remember(email, AuthMethod.apple);
+    _warmSignedIn(ref.container);
   }
 
   /// Reclaim a sign-in started before this process existed.
@@ -305,8 +399,13 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         await _startOAuth('github');
       case AuthMethod.google:
         await _startOAuth('google');
+      case AuthMethod.apple when _offersAppleSignIn:
+        await _signInWithApple();
       // A remembered link, and an address this device has never seen, take the
-      // same path — the link is what works without knowing anything.
+      // same path — the link is what works without knowing anything. So does an
+      // Apple hint on a platform without Apple's sheet, which another surface
+      // can have recorded.
+      case AuthMethod.apple:
       case AuthMethod.link:
       case null:
         await _sendLink();
@@ -544,15 +643,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // rejected credential would offer to save a password the server just
         // refused, and this screen is about to be popped out from under it.
         TextInput.finishAutofillContext();
-        ref
-            .read(analyticsServiceProvider)
-            ?.track(AnalyticsEvents.signInCompleted);
-        // Cookie already persisted by the service. Same warm-up as the
-        // magic-link ready path so pricing is ready when the shell opens.
-        ref.invalidate(currentUserProvider);
-        ref.invalidate(subscriptionProvider);
-        ref.invalidate(pricingCatalogProvider);
-        prefetchSubscriptionCache(ref);
+        _warmSignedIn(ref.container);
       case PasswordSignIn.invalidCredentials:
         setState(() {
           _phase = _Phase.form;
@@ -660,15 +751,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       switch (poll.status) {
         case MagicLinkStatus.ready:
           _pollTimer?.cancel();
-          ref
-              .read(analyticsServiceProvider)
-              ?.track(AnalyticsEvents.signInCompleted);
-          // Cookie already persisted by pollStatus. Warm billing in parallel
-          // with the user refresh so pricing is ready as soon as the shell opens.
-          ref.invalidate(currentUserProvider);
-          ref.invalidate(subscriptionProvider);
-          ref.invalidate(pricingCatalogProvider);
-          prefetchSubscriptionCache(ref);
+          _warmSignedIn(ref.container);
         case MagicLinkStatus.expired:
         case MagicLinkStatus.consumed:
         case MagicLinkStatus.unbound:
@@ -822,7 +905,22 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
-        // One bordered group rather than three stacked buttons: these are three
+        if (_offersAppleSignIn) ...[
+          _SignInButton(
+            label: 'Continue with Apple',
+            leading: (color) => _AppleMark(color: color),
+            appleInk: true,
+            onPressed: busy
+                ? null
+                : () => detached(
+                    'SignInScreen',
+                    'Apple sign-in failed',
+                    _signInWithApple,
+                  ),
+          ),
+          const SizedBox(height: AbTokens.space8),
+        ],
+        // One bordered group rather than stacked buttons: these are all
         // answers to a single question — how to prove the address is yours —
         // and [AbSegmented]'s construction is how this app already asks a small
         // closed set where the alternatives must stay visible. Not AbSegmented
@@ -1271,10 +1369,21 @@ class _SignInButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.variant = _SignInButtonVariant.normal,
+    this.leading,
+    this.appleInk = false,
   });
   final String label;
   final VoidCallback? onPressed;
   final _SignInButtonVariant variant;
+
+  /// A mark before the label, drawn in the label's colour.
+  final Widget Function(Color color)? leading;
+
+  /// Draws the label and mark in pure black or white, whichever contrasts
+  /// with the fill behind them, as Apple requires of a Sign in with Apple
+  /// button. Decided from the fill rather than a light/dark flag because
+  /// custom themes can put any colour there.
+  final bool appleInk;
 
   @override
   State<_SignInButton> createState() => _SignInButtonState();
@@ -1289,23 +1398,40 @@ class _SignInButtonState extends State<_SignInButton> {
     final antgrid = context.antgrid;
     final enabled = widget.onPressed != null;
     final isPrimary = widget.variant == _SignInButtonVariant.primary;
+    final fill = isPrimary
+        ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
+        : (_hovered ? antgrid.bgElevated : antgrid.bgSurface);
+    final foreground = widget.appleInk
+        ? (fill.computeLuminance() > 0.5
+              ? AbTokens.appleSignInInkOnLight
+              : AbTokens.appleSignInInkOnDark)
+        : isPrimary
+        ? antgrid.accentForeground
+        : antgrid.textPrimary;
     final visual = Container(
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
-        color: isPrimary
-            ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
-            : (_hovered ? antgrid.bgElevated : antgrid.bgSurface),
+        color: fill,
         border: Border.all(
           color: isPrimary ? antgrid.accent : antgrid.borderDefault,
         ),
         borderRadius: AbTokens.borderRadius5,
       ),
-      child: Text(
-        widget.label,
-        textAlign: TextAlign.center,
-        style: AbTokens.sansStyle(
-          color: isPrimary ? antgrid.accentForeground : antgrid.textPrimary,
-        ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (widget.leading case final leading?) ...[
+            leading(foreground),
+            const SizedBox(width: AbTokens.space6),
+          ],
+          Flexible(
+            child: Text(
+              widget.label,
+              textAlign: TextAlign.center,
+              style: AbTokens.sansStyle(color: foreground),
+            ),
+          ),
+        ],
       ),
     );
     if (!enabled) return Opacity(opacity: 0.4, child: visual);
@@ -1352,6 +1478,26 @@ const String _googleMark =
     '2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0C5.867 0 .307 5.387.307 12'
     's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
     '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
+
+/// Apple's logo artwork, sized to sit beside a [_SignInButton] title.
+///
+/// Sign in with Apple is a full-width outlined [_SignInButton] rather than a
+/// cell in [_AuthMethodRow]: Apple's guidelines want its title spelled out,
+/// and it may be no less prominent than the other providers. It is not the
+/// plugin's `SignInWithAppleButton`, whose solid black or white fill competed
+/// with the primary Continue button.
+class _AppleMark extends StatelessWidget {
+  const _AppleMark({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: AbTokens.fontBody * 25 / 31,
+    height: AbTokens.fontBody,
+    child: CustomPaint(painter: AppleLogoPainter(color: color)),
+  );
+}
 
 /// One way to prove the address is yours, as rendered by [_AuthMethodRow].
 class _AuthMethodSpec {

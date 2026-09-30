@@ -5,10 +5,6 @@ import {
   ErrorCode,
   HelloMessage,
   WelcomeMessage,
-  StreamOpenMessage,
-  StreamCloseMessage,
-  StreamOpenedMessage,
-  StreamClosedMessage,
   ErrorMessage,
 } from "../src/index";
 
@@ -85,13 +81,12 @@ describe("ErrorMessage", () => {
     expect(r.success).toBe(true);
   });
 
-  it("parses with optional ref and serverTime", () => {
+  it("parses with optional serverTime", () => {
     const r = ErrorMessage.safeParse({
       type: "error",
-      code: "PEER_OFFLINE",
-      message: "peer gone",
+      code: "AUTH_FAILED",
+      message: "clock skew",
       retryable: true,
-      ref: "stream-1",
       serverTime: "2026-06-08T12:36:33.442Z",
     });
     expect(r.success).toBe(true);
@@ -119,12 +114,9 @@ describe("ServerMessage", () => {
     expect(r.success).toBe(true);
   });
 
-  it("parses stream-opened", () => {
-    expect(ServerMessage.safeParse({ type: "stream-opened", streamId: "0" }).success).toBe(true);
-  });
-
-  it("parses stream-closed", () => {
-    expect(ServerMessage.safeParse({ type: "stream-closed", streamId: "0" }).success).toBe(true);
+  it("rejects retired stream acknowledgements", () => {
+    expect(ServerMessage.safeParse({ type: "stream-opened", streamId: "0" }).success).toBe(false);
+    expect(ServerMessage.safeParse({ type: "stream-closed", streamId: "0" }).success).toBe(false);
   });
 
   it("rejects an unknown type", () => {
@@ -133,14 +125,9 @@ describe("ServerMessage", () => {
 });
 
 describe("ClientMessage", () => {
-  it("parses stream-open", () => {
-    const r = ClientMessage.safeParse({ type: "stream-open", streamId: "0" });
-    expect(r.success).toBe(true);
-  });
-
-  it("parses stream-close", () => {
-    const r = ClientMessage.safeParse({ type: "stream-close", streamId: "0" });
-    expect(r.success).toBe(true);
+  it("rejects retired stream registration verbs", () => {
+    expect(ClientMessage.safeParse({ type: "stream-open", streamId: "0" }).success).toBe(false);
+    expect(ClientMessage.safeParse({ type: "stream-close", streamId: "0" }).success).toBe(false);
   });
 
   it("no longer parses a v2 'register' message", () => {
@@ -170,14 +157,14 @@ describe("ErrorCode", () => {
 
   it("accepts new v3 codes", () => {
     expect(ErrorCode.safeParse("SUPERSEDED").success).toBe(true);
-    expect(ErrorCode.safeParse("PEER_OFFLINE").success).toBe(true);
     expect(ErrorCode.safeParse("PROTOCOL_VIOLATION").success).toBe(true);
     expect(ErrorCode.safeParse("LICENSE_UNAVAILABLE").success).toBe(true);
   });
 
-  it("keeps codes carried over from v2", () => {
-    expect(ErrorCode.safeParse("SESSION_LIMIT_EXCEEDED").success).toBe(true);
-    expect(ErrorCode.safeParse("AUTH_FAILED").success).toBe(true);
+  it("rejects retired payload and stream error identifiers", () => {
+    for (const code of ["ROUTE_FAILED", "PEER_OFFLINE", "SESSION_LIMIT_EXCEEDED", "STREAM_LIMIT_EXCEEDED"]) {
+      expect(ErrorCode.safeParse(code).success).toBe(false);
+    }
   });
 
   // Pair/grant-only codes: EXPIRED and AGENT_OFFLINE were pair-request-only;

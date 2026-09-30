@@ -6,6 +6,7 @@ import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_diff_stat.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
@@ -754,15 +755,11 @@ class _FileTreeRowState extends State<_FileTreeRow> {
         },
         leading: Padding(
           padding: EdgeInsets.only(left: widget.depth * AbTokens.space16),
+          // An icon, not a `▶` glyph: Android's font fallback draws U+25B6 as
+          // the colour emoji, so a collapsed folder's arrow turned yellow.
           child: isDirectory
-              ? Text(
-                  widget.isExpanded ? '▼ ' : '▶ ',
-                  style: TextStyle(
-                    fontSize: AbTokens.fontXxs,
-                    color: context.antgrid.textMuted,
-                  ),
-                )
-              : const Text('  ', style: TextStyle(fontSize: AbTokens.fontXxs)),
+              ? AbDisclosureChevron(expanded: widget.isExpanded)
+              : const SizedBox(width: AbTokens.drawerLeadingSlot),
         ),
         title: Text(
           widget.node.name,

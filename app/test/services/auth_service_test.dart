@@ -1,4 +1,8 @@
 import 'dart:convert';
+import 'dart:async';
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -65,6 +69,32 @@ class _ClearFailingStorage extends _InMemoryStorage {
 }
 
 void main() {
+  test('sign-out clears local credentials when the server stalls', () {
+    fakeAsync((clock) {
+      final storage = _InMemoryStorage().._cookie = 'session=value';
+      final response = Completer<http.Response>();
+      var calls = 0;
+      final auth = AuthService(
+        licenseApiUrl: 'https://api.antgrid.test',
+        storage: storage,
+        httpClient: MockClient((_) {
+          calls++;
+          return response.future;
+        }),
+      );
+      var done = false;
+      auth.signOut().then((_) => done = true);
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 15));
+      expect(done, isTrue);
+      expect(storage._cookie, isNull);
+      expect(calls, 1);
+      response.complete(http.Response('', 200));
+      clock.flushMicrotasks();
+      expect(storage._cookie, isNull);
+    });
+  });
+
   group('AuthService', () {
     test('OAuth start URI uses a relative same-origin handoff', () {
       final uri = buildOAuthStartUri(
@@ -1196,6 +1226,313 @@ void main() {
           throwsA(isA<AuthException>()),
         );
         expect(requested, isFalse);
+      });
+    });
+
+    group('OAuth on iOS', () {
+      const verifyPath = '/api/auth/one-time-token/verify';
+
+      setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
+      tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      AuthService iosService({
+        required AuthStorage storage,
+        required List<http.Request> requests,
+        required InAppWebAuth sheet,
+        int verifyStatus = 200,
+      }) => AuthService(
+        licenseApiUrl: 'https://lic.test',
+        storage: storage,
+        httpClient: MockClient((req) async {
+          requests.add(req);
+          return http.Response(
+            '{}',
+            verifyStatus,
+            headers: verifyStatus == 200
+                ? {
+                    'set-cookie':
+                        '__Secure-better-auth.session_token=signed.gh; Path=/',
+                  }
+                : {},
+          );
+        }),
+        launchUrl: (_) async => fail('iOS must not open Safari'),
+        authenticateInApp: sheet,
+      );
+
+      test('runs in the in-app sheet and redeems its callback', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        late Uri opened;
+        final service = iosService(
+          storage: storage,
+          requests: requests,
+          sheet: (url, scheme) async {
+            opened = url;
+            expect(scheme, 'antgrid');
+            return Uri.parse('antgrid://auth/callback?token=ott-1');
+          },
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.signedIn);
+        expect(opened.path, '/oauth/start');
+        expect(opened.queryParameters['provider'], 'github');
+        expect(requests.single.url.path, verifyPath);
+        expect(jsonDecode(requests.single.body), {'token': 'ott-1'});
+        expect(
+          await storage.readCookie(),
+          '__Secure-better-auth.session_token=signed.gh',
+        );
+      });
+
+      test('a closed sheet is not signed in and asks nothing', () async {
+        final requests = <http.Request>[];
+        final service = iosService(
+          storage: _InMemoryStorage(),
+          requests: requests,
+          sheet: (_, _) async => null,
+        );
+
+        expect(await service.startOAuth('google'), OAuthStart.notSignedIn);
+        expect(requests, isEmpty);
+      });
+
+      test('an error bounce is reported, not signed in', () async {
+        final failures = <String>[];
+        final service = iosService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          sheet: (_, _) async =>
+              Uri.parse('antgrid://auth/callback?error=no_session'),
+        );
+        final sub = service.oauthFailures.listen(failures.add);
+
+        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
+        await Future<void>.delayed(Duration.zero);
+        expect(failures, ["GitHub sign-in didn't complete. Try again."]);
+        await sub.cancel();
+      });
+
+      test('a refused token stores no session', () async {
+        final storage = _InMemoryStorage();
+        final service = iosService(
+          storage: storage,
+          requests: [],
+          verifyStatus: 401,
+          sheet: (_, _) async =>
+              Uri.parse('antgrid://auth/callback?token=ott-1'),
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
+        expect(await storage.readCookie(), isNull);
+      });
+
+      test('other platforms hand off to the browser', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        var sheetShown = false;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((_) async => http.Response('', 500)),
+          launchUrl: (_) async => true,
+          authenticateInApp: (_, _) async {
+            sheetShown = true;
+            return null;
+          },
+        );
+
+        expect(await service.startOAuth('github'), OAuthStart.handedOff);
+        expect(sheetShown, isFalse);
+      });
+    });
+
+    group('Sign in with Apple', () {
+      const sessionCookie =
+          '__Secure-better-auth.session_token=signed.apple; Path=/; HttpOnly';
+
+      AuthService appleService({
+        required AuthStorage storage,
+        required List<http.Request> requests,
+        AppleCredentialRequest? request,
+        int signInStatus = 200,
+        int codeStatus = 204,
+        String licenseApiUrl = 'https://lic.test',
+      }) => AuthService(
+        licenseApiUrl: licenseApiUrl,
+        storage: storage,
+        httpClient: MockClient((req) async {
+          requests.add(req);
+          if (req.url.path == '/api/auth/sign-in/social') {
+            return http.Response(
+              jsonEncode({'redirect': false, 'token': 't'}),
+              signInStatus,
+              headers: signInStatus == 200 ? {'set-cookie': sessionCookie} : {},
+            );
+          }
+          return http.Response('', codeStatus);
+        }),
+        requestAppleCredential:
+            request ??
+            (nonce) async => const AppleCredential(
+              identityToken: 'id-token',
+              authorizationCode: 'auth-code',
+            ),
+      );
+
+      test('signs in with the id token, then hands over the code', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        String? sheetNonce;
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          request: (nonce) async {
+            sheetNonce = nonce;
+            return const AppleCredential(
+              identityToken: 'id-token',
+              authorizationCode: 'auth-code',
+              givenName: 'Ada',
+              familyName: 'Lovelace',
+            );
+          },
+        );
+
+        expect(await service.signInWithApple(), isTrue);
+
+        expect(requests.map((r) => r.url.path), [
+          '/api/auth/sign-in/social',
+          '/account/apple/authorization-code',
+        ]);
+        final signIn = jsonDecode(requests[0].body) as Map<String, dynamic>;
+        expect(signIn['provider'], 'apple');
+        expect(signIn['idToken'], {
+          'token': 'id-token',
+          'nonce': sheetNonce,
+          'user': {
+            'name': {'firstName': 'Ada', 'lastName': 'Lovelace'},
+          },
+        });
+        expect(
+          sheetNonce,
+          isNotEmpty,
+          reason:
+              'the server compares the claim with this verbatim, so Apple '
+              'and the server must see the same string',
+        );
+        expect(
+          requests[0].headers['cookie'],
+          isNull,
+          reason: 'a sign-in never rides an earlier session',
+        );
+
+        final code = requests[1];
+        expect(jsonDecode(code.body), {'code': 'auth-code'});
+        expect(
+          code.headers['cookie'],
+          '__Secure-better-auth.session_token=signed.apple',
+          reason: 'the code is bound to the session the sign-in just minted',
+        );
+        expect(
+          await storage.readCookie(),
+          '__Secure-better-auth.session_token=signed.apple',
+        );
+      });
+
+      test('omits a name Apple did not supply', () async {
+        final requests = <http.Request>[];
+        await appleService(
+          storage: _InMemoryStorage(),
+          requests: requests,
+        ).signInWithApple();
+
+        final signIn = jsonDecode(requests[0].body) as Map<String, dynamic>;
+        expect(
+          (signIn['idToken'] as Map<String, dynamic>).containsKey('user'),
+          isFalse,
+          reason: 'Apple sends the name on the first sign-in only',
+        );
+      });
+
+      test('each attempt carries a fresh nonce', () async {
+        final nonces = <String>[];
+        final service = appleService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          request: (nonce) async {
+            nonces.add(nonce);
+            return null;
+          },
+        );
+
+        await service.signInWithApple();
+        await service.signInWithApple();
+
+        expect(nonces.toSet(), hasLength(2));
+      });
+
+      test('a dismissed sheet is not an error and asks nothing', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          request: (_) async => null,
+        );
+
+        expect(await service.signInWithApple(), isFalse);
+        expect(requests, isEmpty);
+        expect(await storage.readCookie(), isNull);
+      });
+
+      test('a refused id token fails without a session', () async {
+        final storage = _InMemoryStorage();
+        final requests = <http.Request>[];
+        final service = appleService(
+          storage: storage,
+          requests: requests,
+          signInStatus: 401,
+        );
+
+        await expectLater(
+          service.signInWithApple(),
+          throwsA(isA<AuthException>()),
+        );
+        expect(await storage.readCookie(), isNull);
+        expect(
+          requests.map((r) => r.url.path),
+          isNot(contains('/account/apple/authorization-code')),
+        );
+      });
+
+      test('a refused code still leaves the user signed in', () async {
+        final storage = _InMemoryStorage();
+        final service = appleService(
+          storage: storage,
+          requests: [],
+          codeStatus: 502,
+        );
+
+        expect(await service.signInWithApple(), isTrue);
+        expect(await storage.readCookie(), isNotNull);
+      });
+
+      test('refuses plaintext before presenting the sheet', () async {
+        var presented = false;
+        final service = appleService(
+          storage: _InMemoryStorage(),
+          requests: [],
+          licenseApiUrl: 'http://evil.test',
+          request: (_) async {
+            presented = true;
+            return null;
+          },
+        );
+
+        await expectLater(
+          service.signInWithApple(),
+          throwsA(isA<AuthException>()),
+        );
+        expect(presented, isFalse);
       });
     });
 

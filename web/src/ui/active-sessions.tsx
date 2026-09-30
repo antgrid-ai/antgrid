@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { runningSessionCount, type UserSession } from "../services/sessions.js";
+import type { UserSession } from "../services/sessions.js";
 import { fmtAge } from "./format.js";
 
 // No tier branch: remote control is included on Free, so every tier sees its
@@ -17,11 +17,9 @@ export function ActiveSessionsCard(props: {
     <section class="mt-8">
       <div class="flex items-baseline gap-3 mb-3">
         <h2 class="text-lg font-semibold">Active sessions</h2>
-        {/* No denominator: open streams are billed against nothing since the
-            paid axis became the worker cap. This is liveness telemetry. */}
         {sessions ? (
           <span class="font-mono text-xs text-muted2">
-            {runningSessionCount(sessions)} running
+            {sessions.length} connected
           </span>
         ) : null}
       </div>
@@ -47,19 +45,13 @@ export function ActiveSessionsCard(props: {
             <thead>
               <tr class="text-xs uppercase tracking-wide text-muted">
                 <th>Device</th>
-                <th>Sessions</th>
                 <th>Connected</th>
               </tr>
             </thead>
             <tbody>
-              {/* One row per machine, not per project: the relay multiplexes
-                  projects as sealed streams and cannot name them. */}
               {sessions.map((s) => (
                 <tr class="font-mono text-sm">
                   <td>{s.displayName}</td>
-                  <td class={s.openStreamCount === 0 ? "text-muted" : ""}>
-                    {s.openStreamCount === 0 ? "idle" : s.openStreamCount}
-                  </td>
                   <td class="text-muted">{fmtAge(s.connectedAt, now)} ago</td>
                 </tr>
               ))}

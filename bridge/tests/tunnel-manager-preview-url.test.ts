@@ -10,7 +10,6 @@ function makeManager(opts: { previewPorts?: number[]; relayHost?: string } = {})
     projectId: "proj",
     portLabels: new Map([[3000, "web"]]),
     previewPorts: new Set(opts.previewPorts ?? [3000]),
-    sendTunnel: async () => "sent",
     sendEncrypted: (msg) => sent.push(msg),
     relayHost: opts.relayHost ?? "relay.test",
     connState,

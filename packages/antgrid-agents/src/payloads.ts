@@ -224,7 +224,7 @@ export const AgentQuestionMessage = z.object({
 });
 
 // A previously sent permission-request/question is no longer answerable
-// (agent retracted it, turn ended, or the driver was disposed) — the app
+// (answered, agent retracted it, turn ended, or the driver was disposed) — the app
 // must drop it from its pending lists. Exactly one of the two ids is set.
 export const AgentRequestRetractedMessage = z.object({
   type: z.literal("agent:request-retracted"),

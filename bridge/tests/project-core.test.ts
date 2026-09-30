@@ -1,14 +1,18 @@
-import { test, expect, afterEach } from "bun:test";
+import { test, expect, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { ProjectCore } from "../src/project-core";
+import { ProjectCore, type ProjectCoreRemoteDeps } from "../src/project-core";
 import { computeProjectId } from "../src/project-id";
+import { MessageBus } from "../src/message-bus";
+import type { AttachStreamOpts, StreamHandle, TerminalStreamHooks } from "../src/project-streams";
 import { fakeRemoteDeps, MACHINE_UUID } from "./relay-stubs";
 import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { SessionDirectory } from "../src/session-bus/directory";
+import { TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
+import { initialWorkStatus, reduceWorkStatus, turnStart, type WorkStatusState } from "../src/work-status";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -66,7 +70,7 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   // v3: promote() no longer builds its own RelayClient with a machine identity
   // — it attaches the core's EXISTING bus as a stream on the host's
   // one machine socket via ProjectCoreRemoteDeps.attachStream. isRelayRegistered()
-  // and firstRegister must track that stream's onAdmitted/onRejected outcome.
+  // and firstRegister tracks host-local admission.
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -84,34 +88,44 @@ test("promoting a LOCAL core attaches its bus as a stream and reflects the admis
   const handle = core.promote(deps);
 
   expect(calls.length).toBe(1); // attached exactly once, on THIS core's bus
-  calls[0].opts.onAdmitted?.("stream-1");
+  calls[0].opts.onAdmitted?.();
 
   expect(core.isRelayRegistered()).toBe(true);
-  await expect(handle.firstRegister).resolves.toEqual({ ok: true });
+  await expect(handle.firstRegister).resolves.toBeUndefined();
 
   handle.stop();
   expect(core.isRelayRegistered()).toBe(false);
 });
 
-test("a rejected stream-open (e.g. SESSION_LIMIT_EXCEEDED) resolves firstRegister with the typed rejection", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-reject-"));
+test("the project stream a core attaches refuses a sender with no session and fails delivery closed", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-gate-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
 
+  let remoteOn = false;
   const core = new ProjectCore({
     folder,
     mode: "local",
     identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => remoteOn,
   });
   cleanup.push(() => core.shutdown());
   await core.start();
 
   const { deps, calls } = fakeRemoteDeps();
   const handle = core.promote(deps);
-  calls[0].opts.onRejected?.("SESSION_LIMIT_EXCEEDED", "cap reached");
+  cleanup.push(() => handle.stop());
+  const { opts } = calls[0];
 
-  expect(core.isRelayRegistered()).toBe(false);
-  await expect(handle.firstRegister).resolves.toEqual({ ok: false, code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" });
+  // A stream open (or inbound record) whose peer resolves to no session must
+  // be refused, never admitted with nothing to route by.
+  expect(opts.mayAcceptFrom?.(null)).toEqual({ code: "NOT_ALLOWED", message: "no session for this peer" });
+  expect(opts.mayAcceptFrom?.({ peerId: "app#machine", peerPubkey: "pk" })).toBeNull();
+
+  // Outbound is gated live on the machine switch, per send.
+  expect(opts.mayDeliver?.()).toBe(false);
+  remoteOn = true;
+  expect(opts.mayDeliver?.()).toBe(true);
 });
 
 test("promote() throws for a remote-mode core (its relay slot is already the primary session)", async () => {
@@ -204,7 +218,7 @@ test("remote-mode core also binds loopback (connect is non-null) and attaches it
   expect(core.localConnectInfo?.token).toBeTruthy();
   expect(calls.length).toBe(1); // the primary remote stream attached at start()
 
-  calls[0].opts.onAdmitted?.("stream-1");
+  calls[0].opts.onAdmitted?.();
   expect(core.isRelayRegistered()).toBe(true);
 });
 
@@ -365,4 +379,227 @@ test("a core built with sessionDirectory deps answers session-bus:directory inst
   // weaker check while still proving nothing about the forward under test.
   expect(result.code).toBeUndefined();
   expect(result.sessions).toEqual([expect.objectContaining({ sessionId: siblingId })]);
+});
+
+test("attachRelayStream wires handle.terminalHooks into the core, and every teardown clears them", async () => {
+  // Both of attachRelayStream's callers (startRemote, promote) share this one
+  // wiring — promote() is used here only because it is the one whose handle
+  // stays reachable after its own teardown, to prove the clear actually took.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-term-hooks-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const retired: Array<{ peerId: string; attachmentId: string }> = [];
+  const settled: Array<{ peerId: string; requestId: string; attachmentId: string | undefined }> = [];
+  const hooks: TerminalStreamHooks = {
+    retired: (peerId, attachmentId) => retired.push({ peerId, attachmentId }),
+    subscribeSettled: (peerId, requestId, attachmentId) => settled.push({ peerId, requestId, attachmentId }),
+  };
+  const calls: Array<{ bus: MessageBus; opts: AttachStreamOpts }> = [];
+  const deps: ProjectCoreRemoteDeps = {
+    attachStream: (bus, opts) => {
+      calls.push({ bus, opts });
+      const handle: StreamHandle = {
+        detach: () => {},
+        sendTo: async () => "sent" as const,
+        deliverableTo: () => true,
+        terminalHooks: hooks,
+      };
+      return handle;
+    },
+    establishedPeers: () => [],
+    peerSession: () => null,
+    machineDeviceId: () => "machine-uuid",
+    sendPushDeliver: () => {},
+  };
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+    remoteAccessEnabled: () => true,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const bus = (core as unknown as { bus: MessageBus }).bus;
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  // Not the default shell: an interactive POSIX shell ignores the polite stop
+  // shutdown sends first, so cleanup would sit out the whole 5s grace and time
+  // the test out on Linux. This process exits when asked.
+  bus.dispatchInbound(createMessage("terminal:start", {
+    terminalId: "adhoc", cwd: tmpdir(), command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
+  }) as any, "control", "loopback");
+  await waitFor(() => sent.some((m) => m.type === "terminal:started" && (m as any).terminalId === "adhoc"), "terminal:started");
+
+  const promoted = core.promote(deps);
+  expect(calls.length).toBe(1);
+  calls[0].opts.onAdmitted?.();
+
+  // A promoted LOCAL core's inbound handler is startLocal()'s promotion
+  // wrapper; the hooks are keyed by peerId, so the wrapper must pass it on.
+  const requestId = randomUUID();
+  bus.dispatchInbound(
+    createMessage("terminal:subscribe", { terminalId: "adhoc", version: TERMINAL_PROTOCOL_VERSION, requestId }) as any,
+    "control", "relay", "phone-1",
+  );
+  await waitFor(() => settled.some((s) => s.requestId === requestId), "subscribeSettled after promotion");
+  expect(settled).toEqual([{ peerId: "phone-1", requestId, attachmentId: expect.any(String) }]);
+  const attachmentId = settled[0].attachmentId!;
+
+  // Teardown: promote()'s stop() must clear the hooks it wired, same as
+  // ProjectCore.shutdown does for startRemote's binding.
+  promoted.stop();
+
+  bus.dispatchInbound(
+    createMessage("terminal:unsubscribe", { terminalId: "adhoc", runId: "adhoc", attachmentId }) as any,
+    "control", "relay", "phone-1",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(retired).toEqual([]);
+
+  const secondRequestId = randomUUID();
+  bus.dispatchInbound(
+    createMessage("terminal:subscribe", { terminalId: "adhoc", version: TERMINAL_PROTOCOL_VERSION, requestId: secondRequestId }) as any,
+    "control", "relay", "phone-2",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(settled.some((s) => s.requestId === secondRequestId)).toBe(false);
+});
+
+test("sendToAppSession returns false and sends nothing when deliverableTo(peer) is false", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-deliverable-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const sendCalls: Array<{ peerId: string }> = [];
+  let deliverable = false;
+  const deps: ProjectCoreRemoteDeps = {
+    attachStream: (_bus, _opts) => ({
+      detach: () => {},
+      sendTo: async (_msg, _channel, target) => {
+        sendCalls.push({ peerId: (target as { peerId: string }).peerId });
+        return "sent" as const;
+      },
+      deliverableTo: () => deliverable,
+    }),
+    establishedPeers: () => [],
+    peerSession: () => null,
+    machineDeviceId: () => "machine-uuid",
+    sendPushDeliver: () => {},
+  };
+
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "d", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "AAAA", ed25519PrivateKey: "AAAA",
+    },
+    remote: deps,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const msg = createMessage("terminal:display:status", {
+    terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
+  }) as AbMessage;
+
+  // Not deliverable: the strongest fact available synchronously says the
+  // session isn't live, so no queue is spent on a frame the writer would drop.
+  expect(core.sendToAppSession("peer-x", msg)).toBe(false);
+  expect(sendCalls).toEqual([]);
+
+  // Deliverable: the same call now reaches the stream's sendTo.
+  deliverable = true;
+  expect(core.sendToAppSession("peer-x", msg)).toBe(true);
+  expect(sendCalls).toEqual([{ peerId: "peer-x" }]);
+});
+
+test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {
+  // A device that closed its project stream stops vouching for whatever it had
+  // on screen — same effect as clientGone, just triggered by the stream rather
+  // than the whole peer session ending.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-streamclosed-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+  const { deps, calls } = fakeRemoteDeps();
+  core.promote(deps);
+  const opts = calls[0].opts;
+
+  core.noteSessionFocus("session-1", "phone-1");
+  const work = () => (core as unknown as { _work: WorkStatusState })._work;
+  expect(work().focusedSessions.get("phone-1")).toBe("session-1");
+
+  opts.onPeerStreamClosed?.("phone-1");
+  expect(work().focusedSessions.get("phone-1")).toBeUndefined();
+});
+
+test("start() wires the expireTurns sweep to the interval, and shutdown() clears it", async () => {
+  // Regression: every existing expiry test drives the pure `expireTurns`
+  // directly, so a break in the wiring itself — the sweep never scheduled, or
+  // scheduled but never cleared — passed the suite unnoticed.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-expirewire-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+
+  // Wrap the REAL timer functions rather than replace them: other subsystems
+  // start their own intervals during core.start(), and only the 5-minute sweep
+  // (EXPIRE_CHECK_INTERVAL_MS, private to project-core.ts) is this test's
+  // business.
+  const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let sweep: (() => void) | null = null;
+  let sweepHandle: unknown = null;
+  const cleared: unknown[] = [];
+  const setIntervalSpy = spyOn(globalThis, "setInterval")
+    .mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      const handle = (realSetInterval as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+      if (ms === EXPIRE_CHECK_INTERVAL_MS) { sweep = fn; sweepHandle = handle; }
+      return handle;
+    }) as unknown as typeof setInterval);
+  const clearIntervalSpy = spyOn(globalThis, "clearInterval")
+    .mockImplementation(((handle: unknown) => {
+      cleared.push(handle);
+      return (realClearInterval as (a: unknown) => void)(handle);
+    }) as unknown as typeof clearInterval);
+
+  const core = new ProjectCore({
+    folder,
+    mode: "local",
+    identity: { deviceId: randomUUID(), deviceName: "local", createdAt: new Date().toISOString() },
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+  expect(sweep).not.toBeNull();
+
+  // White-box: seed a turn stamped at the Unix epoch, so any real Date.now()
+  // reading is already DEFAULT_TURN_IDLE_MS past it.
+  const running = reduceWorkStatus(initialWorkStatus, {
+    id: "m", timestamp: 0, type: "session:updated",
+    sessions: [{ id: "r0", name: "r0", createdAt: 0, lastUsedAt: 0, archived: false, running: true }],
+  } as unknown as Parameters<typeof reduceWorkStatus>[1]);
+  const seeded = turnStart(running, "r0", undefined, 0);
+  const core_ = core as unknown as { _work: WorkStatusState };
+  core_._work = seeded;
+  expect(core_._work.sessionStatuses.get("r0")).toBe("working");
+
+  sweep!();
+  expect(core_._work).not.toBe(seeded);
+  expect(core_._work.sessionStatuses.get("r0")).toBe("done");
+
+  await core.shutdown();
+  expect(cleared).toContain(sweepHandle);
+
+  setIntervalSpy.mockRestore();
+  clearIntervalSpy.mockRestore();
 });

@@ -2,14 +2,17 @@ import { describe, it, expect, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
-import { joinCaptures, runNetwatchCli } from "../src/cli/netwatch";
+import { joinCaptures, joinSelected, readAppCapture, runNetwatchCli, type NetwatchCliOptions } from "../src/cli/netwatch";
+import { netwatch, __resetNetwatchForTest } from "../src/netwatch";
 import type { NetwatchEvent } from "../src/netwatch";
+import { TestPeerSessionOwner } from "./test-peer-session-owner";
+import peerTransportVectors from "../../evals/fixtures/peer-transport-vectors.json";
 
 let seq = 0;
 function ev(partial: Partial<NetwatchEvent> & { at: number; dir: "tx" | "rx" }): NetwatchEvent {
   return {
     seq: ++seq,
-    kind: "sealed",
+    kind: "frame",
     transport: "relay",
     channel: "control",
     ...partial,
@@ -105,6 +108,95 @@ describe("joinCaptures", () => {
     expect(rows.find((r) => r.event.frameId === "orphan")!.verdict).toBe("unpaired");
   });
 
+  it("pairs byte-identical frames (same frameId) by occurrence, not all to one peer", () => {
+    // A ping, a pong, a credit update — every occurrence of the same payload
+    // hashes to the same frameId. The buggy `.find()` wired every send to the
+    // FIRST receive sharing that id, so this must use two occurrences on each
+    // side and check each pairs with its own counterpart, not both with #1.
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 2000, dir: "tx", frameId: "dup", msgType: "ping" }),
+    ];
+    const bridge = [
+      ev({ at: 1010, dir: "rx", frameId: "dup" }),
+      ev({ at: 2050, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.every((r) => r.verdict === "matched")).toBe(true);
+    const rx1 = rows.find((r) => r.event.dir === "rx" && r.event.at === 1010)!;
+    const rx2 = rows.find((r) => r.event.dir === "rx" && r.event.at === 2050)!;
+    expect(rx1.deltaMs).toBe(10);
+    expect(rx2.deltaMs).toBe(50);
+  });
+
+  it("pairs a duplicate id's discard to its own occurrence, not to a later delivery", () => {
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 2000, dir: "tx", frameId: "dup", msgType: "ping" }),
+    ];
+    const bridge = [
+      ev({ at: 1010, dir: "rx", kind: "drop", frameId: "dup", reason: "pre-establishment" }),
+      ev({ at: 2050, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    const tx1 = rows.find((r) => r.event.dir === "tx" && r.event.at === 1000)!;
+    const tx2 = rows.find((r) => r.event.dir === "tx" && r.event.at === 2000)!;
+    expect(tx1.verdict).toBe("discarded");
+    expect(tx2.verdict).toBe("matched");
+    expect(tx2.deltaMs).toBeUndefined();
+    const rx2 = rows.find((r) => r.event.dir === "rx" && r.event.at === 2050)!;
+    expect(rx2.verdict).toBe("matched");
+    expect(rx2.deltaMs).toBe(50);
+  });
+
+  it("never pairs a duplicate id against a frame travelling the other way", () => {
+    // Both ends send the same bytes, so both sends share one hash id. A send
+    // pairs only with a receive at the FAR end: the app's own receive of the
+    // bridge's copy is a different frame, however close in time.
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 1005, dir: "rx", frameId: "dup" }),
+    ];
+    const bridge = [
+      ev({ at: 1001, dir: "tx", frameId: "dup", msgType: "ping" }),
+      ev({ at: 1030, dir: "rx", frameId: "dup" }),
+    ];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.every((r) => r.verdict === "matched")).toBe(true);
+    const appRx = rows.find((r) => r.origin === "app" && r.event.dir === "rx")!;
+    const brgRx = rows.find((r) => r.origin === "brg" && r.event.dir === "rx")!;
+    expect(appRx.deltaMs).toBe(4);
+    expect(brgRx.deltaMs).toBe(30);
+  });
+
+  it("pairs a duplicate id only within its own channel", () => {
+    const app = [
+      ev({ at: 1000, dir: "tx", frameId: "dup", channel: "preview" }),
+      ev({ at: 1001, dir: "tx", frameId: "dup", channel: "control" }),
+    ];
+    const bridge = [ev({ at: 1020, dir: "rx", frameId: "dup", channel: "control" })];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    const preview = rows.find((r) => r.event.channel === "preview")!;
+    const rx = rows.find((r) => r.event.dir === "rx")!;
+    expect(preview.verdict).not.toBe("matched");
+    expect(rx.deltaMs).toBe(19);
+  });
+
+  it("pairs a bridge record tagged with a stream kind against the app's untagged copy", () => {
+    // The app's capture carries no stream kind, so the bridge tagging its half
+    // must not split the pair.
+    const app = [ev({ at: 1000, dir: "tx", frameId: "pk", transport: "iroh" })];
+    const bridge = [ev({ at: 1020, dir: "rx", frameId: "pk", transport: "iroh", streamKind: "project" })];
+
+    const { rows } = joinCaptures(app, bridge, NOW);
+    expect(rows.map((r) => r.verdict)).toEqual(["matched", "matched"]);
+    expect(rows.find((r) => r.event.dir === "rx")!.deltaMs).toBe(20);
+  });
+
   it("counts a drop as unpairable, not as a match", () => {
     // A drop never crossed the socket, so it has no counterpart by
     // construction — calling it matched would flatter every report.
@@ -192,12 +284,12 @@ describe("antgrid watch --join", () => {
     const base = Date.now() - 30_000;
     const { dir, appLog, server } = seeded(
       [
-        { seq: 1, at: base, dir: "rx", kind: "sealed", transport: "relay", channel: "control", frameId: "aa" },
-        { seq: 2, at: base + 5, dir: "rx", kind: "sealed", transport: "relay", channel: "control", frameId: "solo" },
+        { seq: 1, at: base, dir: "rx", kind: "frame", transport: "relay", channel: "control", frameId: "aa" },
+        { seq: 2, at: base + 5, dir: "rx", kind: "frame", transport: "relay", channel: "control", frameId: "solo" },
       ] as NetwatchEvent[],
       [
-        JSON.stringify({ seq: 1, at: base - 20, dir: "tx", kind: "sealed", transport: "relay", origin: "app", channel: "control", frameId: "aa", msgType: "terminal:input" }),
-        JSON.stringify({ seq: 2, at: base + 2, dir: "tx", kind: "sealed", transport: "relay", origin: "app", channel: "control", frameId: "vanished", msgType: "file:read" }),
+        JSON.stringify({ seq: 1, at: base - 20, dir: "tx", kind: "frame", transport: "relay", origin: "app", channel: "control", frameId: "aa", msgType: "terminal:input" }),
+        JSON.stringify({ seq: 2, at: base + 2, dir: "tx", kind: "frame", transport: "relay", origin: "app", channel: "control", frameId: "vanished", msgType: "file:read" }),
         "{ this line is torn",
       ],
     );
@@ -224,5 +316,76 @@ describe("antgrid watch --join", () => {
 
     server.stop(true);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("joinSelected", () => {
+  const iroh = { at: 0, dir: "tx", transport: "iroh" } as NetwatchEvent;
+  const relay = { at: 0, dir: "tx", transport: "relay" } as NetwatchEvent;
+  const local = { at: 0, dir: "tx", transport: "local" } as NetwatchEvent;
+
+  it("with no flags keeps iroh and relay, and drops local", () => {
+    const opts = {} as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(true);
+    expect(joinSelected(relay, opts)).toBe(true);
+    expect(joinSelected(local, opts)).toBe(false);
+  });
+
+  it("--local keeps only local", () => {
+    const opts = { local: true } as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(false);
+    expect(joinSelected(relay, opts)).toBe(false);
+    expect(joinSelected(local, opts)).toBe(true);
+  });
+
+  it("--relay keeps only relay", () => {
+    const opts = { relay: true } as NetwatchCliOptions;
+    expect(joinSelected(iroh, opts)).toBe(false);
+    expect(joinSelected(relay, opts)).toBe(true);
+    expect(joinSelected(local, opts)).toBe(false);
+  });
+});
+
+describe("a native session:ping pairs across a real join", () => {
+  it("the app's tx row and the bridge's rx row both verdict matched", async () => {
+    __resetNetwatchForTest();
+    const sample = (peerTransportVectors as {
+      sessionRecords: { samples: Array<{ name: string; json: string; frameId: string }> };
+    }).sessionRecords.samples.find((s) => s.name === "ping");
+    if (!sample) throw new Error("fixture has no sessionRecords ping sample");
+
+    const dir = mkdtempSync(joinPath(tmpdir(), "netwatch-ping-pair-"));
+    const now = Date.now();
+    const appLine = JSON.stringify({
+      seq: 1, at: now, dir: "tx", kind: "frame", transport: "iroh", origin: "app",
+      channel: "control", streamId: "0", streamKind: "session", msgType: "session:ping",
+      bytes: Buffer.byteLength(sample.json, "utf8"), frameId: sample.frameId,
+    });
+    const appLog = joinPath(dir, "netwatch.log");
+    writeFileSync(appLog, appLine);
+    const app = readAppCapture(appLog);
+    expect(app).not.toBeNull();
+
+    const client = TestPeerSessionOwner.forTest({ sendPayload: () => {}, peerId: "phone-1", deviceId: "dev-1" });
+    try {
+      client.establish("phone-1");
+      __resetNetwatchForTest();
+      client.injectPeerPayload(Buffer.from(sample.json, "utf8"), "phone-1");
+      const bridge = netwatch.snapshot().filter((e) => e.dir === "rx" && e.kind === "frame");
+
+      const appRows = app!.filter((e) => joinSelected(e, {} as NetwatchCliOptions));
+      const bridgeRows = bridge.filter((e) => joinSelected(e, {} as NetwatchCliOptions));
+      // Comfortably past both events' `at` and past the 1s settle margin, so
+      // neither the app's (pre-dated) row nor the bridge's (just-recorded) one
+      // is read as still-buffered ("outside").
+      const { rows } = joinCaptures(appRows, bridgeRows, Date.now() + 5_000);
+      const appRow = rows.find((r) => r.origin === "app");
+      const bridgeRow = rows.find((r) => r.origin === "brg");
+      expect(appRow?.verdict).toBe("matched");
+      expect(bridgeRow?.verdict).toBe("matched");
+    } finally {
+      client.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

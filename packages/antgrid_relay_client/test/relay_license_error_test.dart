@@ -20,14 +20,6 @@ void main() {
         RelayLicenseErrorCode.fromWire('LICENSE_REQUIRED'),
         RelayLicenseErrorCode.licenseRequired,
       );
-      expect(
-        RelayLicenseErrorCode.fromWire('UNEXPECTED_LICENSE'),
-        RelayLicenseErrorCode.unexpectedLicense,
-      );
-      expect(
-        RelayLicenseErrorCode.fromWire('DEVICE_HARDWARE_MISMATCH'),
-        RelayLicenseErrorCode.deviceHardwareMismatch,
-      );
     });
 
     test('returns null for unknown / null input', () {
@@ -37,10 +29,7 @@ void main() {
     });
 
     test('LICENSE_UNAVAILABLE is NOT in the fatal set', () {
-      // This enum is the fatal set, and RelayService flips
-      // `_intentionalDisconnect` for anything it matches. LICENSE_UNAVAILABLE
-      // means the relay couldn't reach the license service to check — adding it
-      // here would strand every phone through a transient web outage.
+      // An infrastructure outage is retryable, not a license verdict.
       expect(RelayLicenseErrorCode.fromWire('LICENSE_UNAVAILABLE'), isNull);
     });
 

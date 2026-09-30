@@ -1,10 +1,10 @@
 import { describe, it, expect } from "bun:test";
-import { HelloMessage, RouteHeader } from "../src/index";
+import { HelloMessage } from "../src/index";
 
 // An agent's device id is its bare machine `deviceUuid`; an app's is a
 // per-machine relay slot, `<accountDeviceUuid>#<machineDeviceUuid>` (see
-// relay-slot.ts). Both shapes must parse — and so must a route header's `to`,
-// since that is how an agent addresses the slot back. The compound
+// relay-slot.ts). Both shapes must parse. Peer frames carry no route identity;
+// the authenticated native connection supplies it. The compound
 // `deviceUuid.projectId` registration is gone, but '.' remains legal.
 const fakePubKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const b64 = (n: number) => Buffer.from(new Uint8Array(n)).toString("base64");
@@ -53,23 +53,5 @@ describe("v3 device id validation", () => {
   it("HelloMessage rejects a deviceId past the 128-char cap", () => {
     const result = HelloMessage.safeParse({ ...baseHello, deviceId: "a".repeat(129) });
     expect(result.success).toBe(false);
-  });
-
-  it("RouteHeader accepts a slot as 'to' — it is how the agent replies", () => {
-    const result = RouteHeader.safeParse({
-      type: "message",
-      to: "phone-1#machine-1",
-      channel: "control",
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("RouteHeader accepts a bare 'to' device id", () => {
-    const result = RouteHeader.safeParse({
-      type: "message",
-      to: "phone-1",
-      channel: "control",
-    });
-    expect(result.success).toBe(true);
   });
 });

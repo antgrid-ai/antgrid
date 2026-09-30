@@ -309,7 +309,7 @@ export class TerminalHistoryStore {
   // The checkpoint/vacuum and the close are two SEPARATE best-effort steps, not one:
   // a failing checkpoint must not skip the close, or the connection (and its `-wal`/
   // `-shm` files) stays open for the rest of the process — on Windows that locks the
-  // path against the D3 startup sweep on every later boot.
+  // path against the startup sweep on every later boot.
   close(): void {
     for (const handle of this.handles.values()) { handle.flush(); handle.retire(); }
     this.handles.clear();

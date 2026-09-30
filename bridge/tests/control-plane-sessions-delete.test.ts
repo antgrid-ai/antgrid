@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 // bridge/tests/control-plane-sessions-delete.test.ts
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -49,7 +50,7 @@ beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-cp-del-"));
   process.env.ANTGRID_DIR = abDir;
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
 });
 afterEach(async () => {
   await host?.shutdown();

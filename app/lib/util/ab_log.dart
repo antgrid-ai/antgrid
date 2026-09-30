@@ -16,7 +16,19 @@ class AbLog {
   AbLog._();
 
   static _AbLogWriter? _writer;
-  static _AbLogWriter _w() => _writer ??= _AbLogWriter('${hostDir()}/app.log');
+
+  /// `flutter test` resolves the same `hostDir()` a debug build does, so an
+  /// unconfigured writer appends the suite's own output to the dev rig's live
+  /// `app.log` — where a fixture supervisor's zero-delay backoff and its march
+  /// through every block reason are indistinguishable from a fault on the
+  /// running app. Tests that assert on logging name their own file through
+  /// [configureForTest].
+  static final bool _underTest = Platform.environment.containsKey(
+    'FLUTTER_TEST',
+  );
+
+  static _AbLogWriter _w() =>
+      _writer ??= _AbLogWriter(_underTest ? null : '${hostDir()}/app.log');
 
   static void debug(
     String component,
@@ -60,12 +72,12 @@ class AbLog {
 }
 
 class _AbLogWriter {
-  _AbLogWriter(String path, {bool? mirror})
+  _AbLogWriter(String? path, {bool? mirror})
     : _mirror = mirror ?? kDebugMode,
-      _sink = JsonlSink(path);
+      _sink = path == null ? null : JsonlSink(path);
 
   final bool _mirror;
-  final JsonlSink _sink;
+  final JsonlSink? _sink;
 
   void log(
     int level,
@@ -73,7 +85,8 @@ class _AbLogWriter {
     String msg,
     Map<String, Object?>? fields,
   ) {
-    _sink.add(_encode(level, component, msg, fields));
+    final sink = _sink;
+    if (sink != null) sink.add(_encode(level, component, msg, fields));
     if (_mirror) debugPrint('[$component] $msg');
   }
 
@@ -127,7 +140,7 @@ class _AbLogWriter {
     }
   }
 
-  Future<void> flush() => _sink.flush();
+  Future<void> flush() => _sink?.flush() ?? Future<void>.value();
 
-  void dispose() => _sink.dispose();
+  void dispose() => _sink?.dispose();
 }

@@ -7,7 +7,7 @@
 // reloaded. Observed live on 2026-09-08 after taking the loopback owner socket
 // away from the app and giving it back.
 import 'package:antgrid/providers/relay_error_banner.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show TransportState;
 import 'package:flutter_test/flutter_test.dart';
