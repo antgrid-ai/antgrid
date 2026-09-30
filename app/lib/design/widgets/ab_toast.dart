@@ -202,11 +202,30 @@ class _ToastStack {
 class _ActiveToast {
   _ActiveToast(this.toast, this.duration);
   final AbToast toast;
-  final Duration duration;
+  Duration duration;
+
+  /// Bumped when an identical toast is shown again, so the card's own timer
+  /// (owned by [_DismissingToastState]) restarts without the card being
+  /// rebuilt from scratch.
+  int generation = 0;
+
+  /// Set once a swipe commits to dismissing the card. Its removal is already
+  /// scheduled, so a repeat merged into it would vanish with it.
+  bool exiting = false;
+
+  bool isRepeatOf(AbToast other) =>
+      !exiting &&
+      toast.actionLabel == null &&
+      other.actionLabel == null &&
+      toast.title == other.title &&
+      toast.description == other.description &&
+      toast.icon == other.icon &&
+      toast.iconColor == other.iconColor;
 }
 
 /// A burst (a held key auto-repeating) must not fill the screen; the oldest
-/// toast is dropped first since the newest is closest to the trigger.
+/// toast is dropped first since the newest is closest to the trigger. Only
+/// distinct toasts count: an identical repeat is merged into its card.
 const int _kMaxStackedToasts = 4;
 
 final Expando<_ToastStack> _toastStacks = Expando<_ToastStack>();
@@ -230,21 +249,26 @@ void showAbToast(
   );
 }
 
-/// Shows [toast] as a transient overlay pinned to the top-right, auto-dismissing
-/// after [duration]. No-ops when no [Overlay] is in scope. Safe if the Overlay
-/// is torn down before the timer fires (route swap, teardown, hot restart).
-/// [clearPrevious] dismisses every toast currently showing on this overlay
-/// before this one is added, instead of stacking beneath them.
+/// Shows [toast] as a transient overlay pinned to the bottom-right on desktop
+/// and bottom-centre on a touch platform, auto-dismissing after [duration].
+/// No-ops when no [Overlay] is in scope. Safe if the Overlay is torn down
+/// before the timer fires (route swap, teardown, hot restart). [clearPrevious]
+/// dismisses every toast currently showing on this overlay before this one is
+/// added, instead of stacking above them.
+///
+/// A toast with the same title, description and icon as one already showing,
+/// and no action on either, is not added again: the existing card restarts its
+/// timer and moves to the newest position. A toast with an action is never
+/// merged, since each carries its own callback.
 ///
 /// Falls back to the ROOT navigator's own overlay when [context] doesn't
-/// resolve one directly — several call sites deliberately hand this a
-/// `NavigatorState`'s own context (`Navigator.of(context, rootNavigator:
-/// true).context`) to outlive a row the tap itself disposes, and
-/// `Overlay.maybeOf` alone can't see through that (see [showAbToastOn]'s
-/// doc). `Navigator.of(navigatorState.context, rootNavigator: true)`
-/// resolves to that SAME state — Flutter special-cases a `NavigatorState`
-/// asking about its own context — so the fallback works for exactly that
-/// shape without needing to know it's being used.
+/// resolve one directly — callers deliberately hand this a `NavigatorState`'s
+/// own context (`Navigator.of(context, rootNavigator: true).context`) to
+/// outlive a row the tap itself disposes, and `Overlay.maybeOf` alone can't
+/// see through that. `Navigator.maybeOf(navigatorState.context, rootNavigator:
+/// true)` resolves to that SAME state — Flutter special-cases a
+/// `NavigatorState` asking about its own context — so the fallback works for
+/// exactly that shape without needing to know it's being used.
 void showAbToastOverlay(
   BuildContext context, {
   required AbToast toast,
@@ -263,35 +287,13 @@ void showAbToastOverlay(
   );
 }
 
-/// [showAbToast] for a caller holding the [OverlayState] itself — see
-/// [showAbToastOn]'s own doc for why a `BuildContext` resolved from
-/// `Navigator.of(context, rootNavigator: true).context` can't be handed to
-/// [showAbToast] instead.
-void showAbToastForOverlay(
-  OverlayState overlay,
-  String message, {
-  String icon = AbIcons.info,
-  Duration? duration,
-  bool clearPrevious = false,
-}) {
-  showAbToastOn(
-    overlay,
-    toast: AbToast(icon: icon, title: message),
-    duration: duration ?? const Duration(seconds: 4),
-    clearPrevious: clearPrevious,
-  );
-}
-
 /// [showAbToastOverlay] for a caller holding the [OverlayState] itself.
 ///
 /// `Overlay.maybeOf` resolves through an inherited marker that each overlay
 /// ENTRY plants, so it answers only from inside a mounted route — a caller
 /// working from a navigator key (no widget of its own, firing long after the
-/// screen that started it) has no such context and would silently show
-/// nothing. Note that a `NavigatorState`'s OWN `context` doesn't fix this
-/// either: the Overlay is a CHILD of the Navigator, not an ancestor, so
-/// `Overlay.maybeOf(navigatorState.context)` also finds nothing — reach for
-/// `navigatorState.overlay` (an [OverlayState]) and this function instead.
+/// screen that started it) reaches for `navigatorState.overlay` and this
+/// function instead.
 void showAbToastOn(
   OverlayState overlay, {
   required AbToast toast,
@@ -300,6 +302,17 @@ void showAbToastOn(
 }) {
   final stack = _toastStacks[overlay] ??= _ToastStack();
   if (clearPrevious) _clearStack(stack);
+
+  for (final existing in stack.active) {
+    if (!existing.isRepeatOf(toast)) continue;
+    stack.active
+      ..remove(existing)
+      ..add(existing);
+    existing.duration = duration;
+    existing.generation++;
+    stack.entry?.markNeedsBuild();
+    return;
+  }
 
   final active = _ActiveToast(toast, duration);
   stack.active.add(active);
@@ -335,10 +348,6 @@ void clearAbToasts(BuildContext context) {
       Overlay.maybeOf(context) ??
       Navigator.maybeOf(context, rootNavigator: true)?.overlay;
   if (overlay == null) return;
-  clearAbToastsOn(overlay);
-}
-
-void clearAbToastsOn(OverlayState overlay) {
   final stack = _toastStacks[overlay];
   if (stack == null) return;
   _clearStack(stack);
@@ -365,43 +374,63 @@ class _ToastStackView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Positioned(
-      top: MediaQuery.paddingOf(context).top + AbTokens.space16,
-      right: AbTokens.space16,
-      // The overlay theater hands a top/right-only Positioned unbounded
-      // width, and the toast's flex children assert without a finite max —
-      // cap it, screen-fitted on narrow phones. The clamp also floors at 0:
-      // a window dragged below the margins would otherwise produce negative
-      // (invalid) constraints.
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: (MediaQuery.sizeOf(context).width - AbTokens.space16 * 2)
-              .clamp(0.0, 360.0),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            // Newest on top, closest to where the trigger happened; older
-            // toasts get pushed down rather than replaced so a burst of
-            // failures (e.g. a held key auto-repeating) is visible as a
-            // stack instead of overlapping illegibly.
-            children: [
-              for (final a in stack.active.reversed)
-                Padding(
-                  key: ObjectKey(a),
-                  padding: const EdgeInsets.only(top: AbTokens.space8),
-                  child: _DismissingToast(
-                    active: a,
-                    onExpire: () => _dismissOne(stack, a),
-                  ),
+    final media = MediaQuery.of(context);
+    // Bottom, not top: the top-right corner holds the window's caption buttons
+    // and the context panel's tab bar on desktop. padding excludes whatever
+    // the keyboard already covers, so padding + viewInsets is the larger of
+    // the system inset and the keyboard rather than their sum.
+    final bottom =
+        media.padding.bottom + media.viewInsets.bottom + AbTokens.space16;
+    final touch = isMobilePlatform;
+    // The overlay theater hands a bottom/right-only Positioned unbounded
+    // width, and the toast's flex children assert without a finite max —
+    // cap it, screen-fitted on narrow phones. The clamp also floors at 0:
+    // a window dragged below the margins would otherwise produce negative
+    // (invalid) constraints.
+    final column = ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: (media.size.width - AbTokens.space16 * 2).clamp(0.0, 360.0),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: touch
+              ? CrossAxisAlignment.center
+              : CrossAxisAlignment.end,
+          // Oldest first so the newest sits nearest the anchor edge, closest
+          // to where the trigger happened; older toasts get pushed up rather
+          // than replaced so a burst of failures (e.g. a held key
+          // auto-repeating) is visible as a stack instead of overlapping
+          // illegibly.
+          children: [
+            for (final a in stack.active)
+              Padding(
+                key: ObjectKey(a),
+                padding: const EdgeInsets.only(top: AbTokens.space8),
+                child: _DismissingToast(
+                  active: a,
+                  generation: a.generation,
+                  onExpire: () => _dismissOne(stack, a),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
+    if (touch) {
+      return Positioned(
+        left: 0,
+        right: 0,
+        bottom: bottom,
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          heightFactor: 1,
+          child: column,
+        ),
+      );
+    }
+    return Positioned(bottom: bottom, right: AbTokens.space16, child: column);
   }
 }
 
@@ -414,9 +443,18 @@ class _ToastStackView extends StatelessWidget {
 /// happens: it expires, its close button is tapped, [clearAbToasts] wipes the
 /// stack, or the Overlay itself is torn down.
 class _DismissingToast extends StatefulWidget {
-  const _DismissingToast({required this.active, required this.onExpire});
+  const _DismissingToast({
+    required this.active,
+    required this.generation,
+    required this.onExpire,
+  });
 
   final _ActiveToast active;
+
+  /// [active]'s generation at build time. [active] is one mutable object, so
+  /// the state can only see a repeat by comparing this against the previous
+  /// widget's copy.
+  final int generation;
   final VoidCallback onExpire;
 
   @override
@@ -425,6 +463,7 @@ class _DismissingToast extends StatefulWidget {
 
 class _DismissingToastState extends State<_DismissingToast> {
   Timer? _timer;
+  bool _hovered = false;
 
   // Touch has no hover, so a touch card carries no close button (see
   // AbToast) — swipe is its dismiss gesture instead, tracked here rather
@@ -440,7 +479,17 @@ class _DismissingToastState extends State<_DismissingToast> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer(widget.active.duration, widget.onExpire);
+    _startTimer();
+  }
+
+  @override
+  void didUpdateWidget(_DismissingToast oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A hovered card stays paused: the pointer leaving restarts the full
+    // duration anyway, so a repeat has nothing to add.
+    if (oldWidget.generation != widget.generation && !_hovered) {
+      _startTimer();
+    }
   }
 
   @override
@@ -449,13 +498,31 @@ class _DismissingToastState extends State<_DismissingToast> {
     super.dispose();
   }
 
-  void _pauseTimer() => _timer?.cancel();
+  void _startTimer() {
+    _timer?.cancel();
+    final generation = widget.active.generation;
+    _timer = Timer(widget.active.duration, () {
+      // A repeat bumps the generation synchronously but restarts this timer
+      // only on the next build; firing in between must not drop the card the
+      // repeat was just merged into.
+      if (widget.active.generation != generation) {
+        _startTimer();
+      } else {
+        widget.onExpire();
+      }
+    });
+  }
+
+  void _pauseTimer() {
+    _hovered = true;
+    _timer?.cancel();
+  }
 
   // Restarts the full duration rather than the remainder: the user just
   // showed attention, so a fresh window beats a sliver.
   void _resumeTimer() {
-    _timer?.cancel();
-    _timer = Timer(widget.active.duration, widget.onExpire);
+    _hovered = false;
+    _startTimer();
   }
 
   void _dismissNow() {
@@ -484,6 +551,7 @@ class _DismissingToastState extends State<_DismissingToast> {
     // — but let the exit animation (driven by the AnimatedContainer below)
     // finish before actually removing it from the stack.
     _timer?.cancel();
+    widget.active.exiting = true;
     final direction = _dragExtent != 0
         ? _dragExtent.sign
         : (velocity < 0 ? -1.0 : 1.0);

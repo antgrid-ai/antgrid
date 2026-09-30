@@ -39,42 +39,20 @@ void reportStartRefusal(
   sessionStartRefusalCopy(error.errorCode, error.message),
 );
 
-/// [reportStartRefusal] for a caller holding the root navigator's
-/// [OverlayState] directly — see [reportSessionNoticeOn]'s doc for why.
-void reportStartRefusalOn(
-  OverlayState overlay,
-  SessionOperationException error,
-) => reportSessionNoticeOn(
-  overlay,
-  sessionStartRefusalCopy(error.errorCode, error.message),
-);
-
-/// Reports [message] about a session on the root navigator's OVERLAY rather
-/// than [context]'s own: a session tap can dispose the row that fired it
+/// Reports [message] about a session through the root navigator rather than
+/// [context]'s own overlay: a session tap can dispose the row that fired it
 /// (mobile pops the drawer, a cross-project switch rebuilds it), and an answer
 /// the user asked for must not vanish with the widget. Same reason
 /// `recent_session_row_widget.dart`'s onTap hands `openRecentSession` the
 /// navigator's context. Falls back to [context] where there is no Navigator
 /// (widget tests).
 void reportSessionNotice(BuildContext context, String message) {
-  final overlay = Navigator.maybeOf(context, rootNavigator: true)?.overlay;
-  if (overlay != null && overlay.mounted) {
-    reportSessionNoticeOn(overlay, message);
+  final host = Navigator.maybeOf(context, rootNavigator: true)?.context;
+  if (host != null && host.mounted) {
+    showAbToast(host, message, duration: const Duration(seconds: 8));
     return;
   }
   if (context.mounted) {
     showAbToast(context, message, duration: const Duration(seconds: 8));
   }
-}
-
-/// [reportSessionNotice] for a caller already holding the [OverlayState].
-///
-/// A `NavigatorState`'s own `context` sits ABOVE the Overlay it owns (the
-/// Overlay is built as the Navigator's CHILD), so `Overlay.maybeOf` on that
-/// context finds nothing — this was the actual bug behind a "reported" toast
-/// that never rendered. Go through the `OverlayState` itself instead, which
-/// has no such ambiguity and is exactly as durable.
-void reportSessionNoticeOn(OverlayState overlay, String message) {
-  if (!overlay.mounted) return;
-  showAbToastForOverlay(overlay, message, duration: const Duration(seconds: 8));
 }
