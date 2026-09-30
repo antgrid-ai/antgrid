@@ -38,6 +38,7 @@ class PreviewService {
   bool _disposed = false;
 
   final _stateController = StreamController<PreviewState>.broadcast();
+  int _navSeq = 0;
   PreviewState _state = const PreviewState();
 
   /// Every HTTP exchange currently open, so [dispose] can cancel them and a
@@ -374,15 +375,30 @@ class PreviewService {
   /// FRESHLY opened tab somewhere other than the origin (e.g. a pasted link
   /// to `localhost:3000/dashboard`); it's ignored when [port] is already
   /// open — reusing a live tab must never yank it to a different page.
+  ///
+  /// [navigateExisting] is for a link the user explicitly followed: a reused
+  /// tab is then sent to [path] instead of staying on whatever page it had
+  /// wandered to.
   Future<SelectPortResult> openTab(
     int port, {
     String scheme = 'http',
     bool focus = true,
     String path = '/',
+    bool navigateExisting = false,
   }) {
     final existing = _tabByPort(port);
     if (existing != null && existing.scheme == scheme) {
-      if (focus) setActiveTab(port);
+      if (navigateExisting) {
+        _navSeq++;
+        _setState(
+          _state.copyWith(
+            activeTabId: focus ? port : null,
+            navRequest: PreviewNavRequest(port: port, path: path, seq: _navSeq),
+          ),
+        );
+      } else if (focus) {
+        setActiveTab(port);
+      }
       return Future.value(SelectPortResult.opened);
     }
     return _open(

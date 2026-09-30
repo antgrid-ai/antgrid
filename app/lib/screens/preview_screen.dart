@@ -498,6 +498,22 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final previewStateAsync = ref.watch(previewStateProvider);
+    ref.listen(previewStateProvider, (prev, next) {
+      final req = next.value?.navRequest;
+      if (req == null || req.seq == prev?.value?.navRequest?.seq) return;
+      final tab = next.value!.tabs.where((t) => t.port == req.port).firstOrNull;
+      final controller = _tabStates[req.port]?.controller;
+      if (tab == null || controller == null) return;
+      // Tab currentUrl is only the URL the controller was built with, so the
+      // origin comes from the live page (proxy origin in relay mode).
+      final live = _tabStates[req.port]?.currentUrl ?? tab.currentUrl;
+      if (live == null) return;
+      detached(
+        'PreviewScreen',
+        'navigate to link',
+        () => controller.loadRequest(Uri.parse(live).resolve(req.path)),
+      );
+    });
     // watch, not the `ref.read` in [_backFromPreview]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
     final onScreen =
@@ -1361,12 +1377,28 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   ) {
     _pullStartY = event.position.dy;
     _pullArmed = false;
+    // The window's scroll offset alone is not enough: pages that scroll inside
+    // an overflow container (custom scroll bars, app-shell layouts) keep
+    // window.scrollY at 0 forever, so every downward drag while reading such a
+    // page would look like a pull from the top and reload it.
+    final x = event.localPosition.dx.round();
+    final y = event.localPosition.dy.round();
     unawaited(
       controller
-          .getScrollPosition()
-          .then((pos) {
+          .runJavaScriptReturningResult('''
+(function(){
+  if ((window.scrollY || document.documentElement.scrollTop || 0) > 0) return false;
+  var el = document.elementFromPoint($x, $y);
+  while (el) {
+    if (el.scrollTop > 0) return false;
+    el = el.parentElement;
+  }
+  return true;
+})()
+''')
+          .then((result) {
             if (!mounted || _pullStartY == null) return;
-            if (pos.dy <= 0) _pullArmed = true;
+            if (result.toString() == 'true') _pullArmed = true;
           })
           .catchError((_) {}),
     );

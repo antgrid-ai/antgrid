@@ -93,12 +93,18 @@ class PreviewState {
   final bool isLoading;
   final String? error;
 
+  /// The latest explicit "go to this URL" aimed at an already-open tab (a link
+  /// clicked in the terminal). The tab's webview owns its own history, so the
+  /// service can only ask; the screen performs the load.
+  final PreviewNavRequest? navRequest;
+
   const PreviewState({
     this.ports = const [],
     this.tabs = const [],
     this.activeTabId,
     this.isLoading = false,
     this.error,
+    this.navRequest,
   });
 
   PreviewTab? get activeTab {
@@ -118,6 +124,7 @@ class PreviewState {
     bool? isLoading,
     String? error,
     bool clearError = false,
+    PreviewNavRequest? navRequest,
   }) {
     return PreviewState(
       ports: ports ?? this.ports,
@@ -127,8 +134,23 @@ class PreviewState {
           : (activeTabId ?? this.activeTabId),
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
+      navRequest: navRequest ?? this.navRequest,
     );
   }
+}
+
+/// [seq] is monotonic so the same link clicked twice still reads as a new
+/// request (state equality alone would swallow the second one).
+class PreviewNavRequest {
+  final int port;
+  final String path;
+  final int seq;
+
+  const PreviewNavRequest({
+    required this.port,
+    required this.path,
+    required this.seq,
+  });
 }
 
 class TunnelHttpRequest {
