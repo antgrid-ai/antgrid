@@ -46,9 +46,10 @@ class DemoFrame extends ConsumerWidget {
     // already on into a demo with no project drawer and nothing to restore it.
     final narrow = MediaQuery.sizeOf(context).width < kMediumBreakpoint;
     final showTitleBar = !isMobilePlatform && (appOwnsWindowChrome || !narrow);
-    // Everything below is a SIBLING of the app's Navigator, which owns the only
-    // Overlay in the tree — so the caption buttons' tooltips, which are
-    // `OverlayPortal`s and throw at BUILD time rather than on hover, have none.
+    // Everything below is a SIBLING of the app's Navigator and sits beside the
+    // toast host's Overlay rather than under it, so no Overlay is an ancestor —
+    // and the caption buttons' tooltips, which are `OverlayPortal`s and throw
+    // at BUILD time rather than on hover, would have none.
     // Wrapping the whole frame instead of just the bar: an Overlay sized to the
     // bar would clip the tooltip it exists to host, since a tooltip on a title
     // bar opens downward into the routes below.

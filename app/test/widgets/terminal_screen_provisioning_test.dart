@@ -29,6 +29,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _projectId = 'P';
 const _sessionId = 's1';
@@ -128,6 +129,7 @@ Future<FakeAgentTransport> pumpPane(
         ),
       ],
       child: MaterialApp(
+        builder: abToastHostBuilder,
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
@@ -304,6 +306,7 @@ void main() {
             machineConnectionProvider.overrideWith(() => spy),
           ],
           child: MaterialApp(
+            builder: abToastHostBuilder,
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),

@@ -12,10 +12,15 @@ import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/widgets/operational_error_toaster.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 
+import '../helpers/toast_host.dart';
+
 void main() {
   Widget wrap(List<Override> overrides) => ProviderScope(
     overrides: overrides,
-    child: const MaterialApp(home: Scaffold(body: OperationalErrorToaster())),
+    child: const MaterialApp(
+      builder: abToastHostBuilder,
+      home: Scaffold(body: OperationalErrorToaster()),
+    ),
   );
 
   testWidgets('toasts when a git checkout error arrives', (tester) async {

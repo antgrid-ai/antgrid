@@ -21,6 +21,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _projectId = 'pending-proj';
 
@@ -66,7 +67,10 @@ void main() {
         (ref) => Stream.value(const TerminalState()),
       ),
     ],
-    child: MaterialApp(home: Scaffold(body: child)),
+    child: MaterialApp(
+      builder: abToastHostBuilder,
+      home: Scaffold(body: child),
+    ),
   );
 
   testWidgets('the Start button reports the start it is waiting on', (

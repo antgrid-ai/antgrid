@@ -58,6 +58,7 @@ import 'package:super_clipboard/super_clipboard.dart' show DataReader;
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 bool _hasNative() {
   try {
@@ -348,6 +349,7 @@ Widget _wrap(
     terminalStateProvider.overrideWith((ref) => terminalState),
   ],
   child: MaterialApp(
+    builder: abToastHostBuilder,
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),

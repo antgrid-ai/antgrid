@@ -16,6 +16,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/toast_host.dart';
+
 /// Both fakes append to one shared list, which is the only way to assert the
 /// thing the sequence exists for: the host is drained BEFORE the platform is
 /// handed the update.
@@ -172,6 +174,7 @@ Future<_Harness> _pump(
     UncontrolledProviderScope(
       container: container,
       child: MaterialApp(
+        builder: abToastHostBuilder,
         home: Scaffold(
           body: Builder(
             builder: (context) {

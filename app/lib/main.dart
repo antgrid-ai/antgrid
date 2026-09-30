@@ -19,6 +19,7 @@ import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
 import 'design/theme_presets.dart';
+import 'design/widgets/ab_toast.dart';
 import 'launcher/host_teardown.dart';
 import 'project/limits.dart';
 import 'project/perf_recorder.dart';
@@ -26,6 +27,7 @@ import 'project/project_session.dart';
 import 'project/project_session_registry.dart';
 import 'providers/account_heartbeat.dart';
 import 'providers/analytics.dart';
+import 'providers/app_toaster.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
@@ -592,7 +594,15 @@ class AbApp extends ConsumerWidget {
               // app currently is. It renders nothing unless the driver entry
               // point enabled it.
               child: AbTextDensity(
-                child: NavConsole(child: DemoFrame(child: child!)),
+                child: NavConsole(
+                  // Inside the console so a card never covers its command
+                  // field, around the demo frame so its title bar shares the
+                  // app's one stack.
+                  child: AbToastHost(
+                    toaster: ref.watch(appToasterProvider),
+                    child: DemoFrame(child: child!),
+                  ),
+                ),
               ),
             ),
           ),

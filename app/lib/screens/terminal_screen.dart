@@ -266,7 +266,7 @@ class _StoppedSessionEmptyStateState
       // session's isolated checkout is gone. That is a different sentence from
       // the timeout below, which invites a retry: retrying a refusal just earns
       // the same refusal.
-      if (mounted) reportStartRefusal(context, error);
+      if (mounted) reportStartRefusal(AbToaster.maybeOf(context), error);
     } on TimeoutException catch (_) {
       // The button the user just pressed is still on screen and the session is
       // still stopped, so a silent swallow reads as a dropped tap. A dropped

@@ -30,6 +30,8 @@ import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/new_session/project_menu.dart';
 
+import '../helpers/toast_host.dart';
+
 // Fabricated sources follow the pattern used in test/widgets/project_menu_test.dart
 // and test/widgets/environment_menu_test.dart: pickerSourcesProvider is a pure
 // Provider<List<PickerSource>>, so it can be overridden with a literal list.
@@ -190,6 +192,7 @@ Widget _host({
     overrides: overrides,
     child: MaterialApp(
       theme: buildAbTheme(),
+      builder: abToastHostBuilder,
       home: Scaffold(
         body: Align(
           alignment: Alignment.bottomCenter,
@@ -712,6 +715,7 @@ void main() {
           ],
           child: MaterialApp(
             theme: buildAbTheme(),
+            builder: abToastHostBuilder,
             home: Scaffold(
               body: Align(
                 alignment: Alignment.bottomCenter,
@@ -1736,6 +1740,7 @@ void main() {
           overrides: _baseOverrides(target: _project, worktreeSupported: true),
           child: MaterialApp(
             theme: buildAbTheme(),
+            builder: abToastHostBuilder,
             home: Scaffold(
               body: Align(
                 alignment: Alignment.bottomCenter,

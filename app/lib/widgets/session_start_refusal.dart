@@ -1,5 +1,3 @@
-import 'package:flutter/widgets.dart';
-
 import '../design/widgets/ab_toast.dart';
 import '../services/sessions_service.dart';
 import 'ab_status_helpers.dart';
@@ -32,24 +30,17 @@ String sessionForkRefusalCopy(String? code, String? message) =>
     sessionRefusalCopy(code, message, 'Could not fork this session.');
 
 void reportStartRefusal(
-  BuildContext context,
+  AbToaster? toaster,
   SessionOperationException error,
 ) => reportSessionNotice(
-  context,
+  toaster,
   sessionStartRefusalCopy(error.errorCode, error.message),
 );
 
-/// Reports [message] about a session through the root navigator rather than
-/// [context]'s own overlay: a session tap can dispose the row that fired it
+/// Reports [message] about a session on [toaster]. Takes the toaster rather
+/// than a context so a caller whose widget can be disposed mid-await captures
+/// it before its first await: a session tap can dispose the row that fired it
 /// (mobile pops the drawer, a cross-project switch rebuilds it), and an answer
-/// the user asked for must not vanish with the widget. Same reason
-/// `recent_session_row_widget.dart`'s onTap hands `openRecentSession` the
-/// navigator's context. Falls back to [context] where there is no Navigator
-/// (widget tests).
-void reportSessionNotice(BuildContext context, String message) {
-  final navigator = Navigator.maybeOf(context, rootNavigator: true)?.context;
-  final host = navigator != null && navigator.mounted ? navigator : context;
-  if (host.mounted) {
-    showAbToast(host, message, duration: const Duration(seconds: 8));
-  }
-}
+/// the user asked for must not vanish with the widget.
+void reportSessionNotice(AbToaster? toaster, String message) =>
+    toaster?.showMessage(message, duration: const Duration(seconds: 8));

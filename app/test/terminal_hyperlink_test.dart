@@ -7,6 +7,8 @@ import 'package:antgrid/widgets/terminal_hyperlink_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'helpers/toast_host.dart';
+
 void main() {
   group('openableTerminalHyperlink', () {
     test('accepts web links', () {
@@ -153,6 +155,7 @@ void main() {
       late BuildContext captured;
       await tester.pumpWidget(
         MaterialApp(
+          builder: abToastHostBuilder,
           home: Scaffold(
             body: Builder(
               builder: (context) {
@@ -387,6 +390,7 @@ void main() {
       late Future<bool> answer;
       await tester.pumpWidget(
         MaterialApp(
+          builder: abToastHostBuilder,
           home: Scaffold(
             body: Builder(
               builder: (context) => ElevatedButton(

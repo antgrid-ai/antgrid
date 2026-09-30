@@ -22,11 +22,13 @@ import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/prefs_test_mock.dart';
+import '../../helpers/toast_host.dart';
 
 const _tests = HandlerInstructionItem(
   id: 'i1',
@@ -198,6 +200,7 @@ Future<void> _pumpDrawer(
         ),
       ],
       child: const MaterialApp(
+        builder: abToastHostBuilder,
         home: Scaffold(body: HandlerBacklogDrawer(terminalId: 't1')),
       ),
     ),
@@ -243,8 +246,13 @@ Future<void> _drainSessionCacheFlush(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-/// Lets the toast's dismiss timer expire, so it can't outlive the test.
-Future<void> _drainToast(WidgetTester tester) async {
+/// Asserts the held edit answered with [reason] as a toast, then lets the
+/// toast's dismiss timer expire so it can't outlive the test.
+Future<void> _drainToast(WidgetTester tester, String reason) async {
+  expect(
+    find.descendant(of: find.byType(AbToast), matching: find.text(reason)),
+    findsOneWidget,
+  );
   await tester.pump(const Duration(seconds: 4));
   await tester.pumpAndSettle();
 }
@@ -1334,7 +1342,7 @@ void main() {
       await _pick(tester, 'Delete');
 
       expect(configures(session), isEmpty);
-      await _drainToast(tester);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('the same edit goes through once the snapshot lands', (
@@ -1380,7 +1388,7 @@ void main() {
       await _pick(tester, 'Stop waiting on 1');
 
       expect(configures(session), isEmpty);
-      await _drainToast(tester);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('two outstanding instructions are counted, not quoted', (

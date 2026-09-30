@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_tap_target.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 
@@ -18,7 +21,7 @@ const _desktop = TargetPlatformVariant(<TargetPlatform>{
 });
 const _touch = TargetPlatformVariant(<TargetPlatform>{TargetPlatform.iOS});
 
-/// Pumps an empty host and returns a context that has an [Overlay] in scope.
+/// Pumps an empty page and returns a route context under the [AbToastHost].
 Future<BuildContext> _pumpHost(WidgetTester tester) async {
   late BuildContext ctx;
   await pumpAntgrid(
@@ -39,6 +42,42 @@ void _sizeView(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
   addTearDown(tester.view.reset);
+}
+
+/// Pumps an app whose [AbToastHost] wraps a Column holding a widget ABOVE the
+/// Navigator and the Navigator itself, returning a context from each side.
+Future<({BuildContext above, BuildContext route})> _pumpSplitContexts(
+  WidgetTester tester,
+) async {
+  late BuildContext above;
+  late BuildContext route;
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: ThemeData.dark().copyWith(
+        extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+      ),
+      builder: (context, child) => AbToastHost(
+        child: Column(
+          children: [
+            Builder(
+              builder: (context) {
+                above = context;
+                return const SizedBox.shrink();
+              },
+            ),
+            Expanded(child: child!),
+          ],
+        ),
+      ),
+      home: Builder(
+        builder: (context) {
+          route = context;
+          return const SizedBox.shrink();
+        },
+      ),
+    ),
+  );
+  return (above: above, route: route);
 }
 
 void main() {
@@ -225,8 +264,8 @@ void main() {
         .opacity;
     expect(closeOpacity(), 0);
 
-    // Programmatic, not Tab: the root-overlay toast sits outside every
-    // route's focus scope, so route traversal never reaches it.
+    // Programmatic, not Tab: the toast host sits beside the Navigator, outside
+    // every route's focus scope, so route traversal never reaches it.
     final inner = find.descendant(
       of: find.byTooltip('Dismiss'),
       matching: find.byType(AbTapTarget),
@@ -573,7 +612,7 @@ void main() {
     expect(find.text('c'), findsOneWidget);
   });
 
-  testWidgets('overlay torn down before the timer fires: no error, no leaked '
+  testWidgets('host torn down before the timer fires: no error, no leaked '
       'timer', (tester) async {
     final ctx = await _pumpHost(tester);
 
@@ -600,5 +639,103 @@ void main() {
     await tester.pump();
 
     expect(find.text('Reported'), findsOneWidget);
+  });
+
+  group('AbToastHost', () {
+    testWidgets('toasts render above an open dialog and take taps through its '
+        'barrier', (tester) async {
+      final ctx = await _pumpHost(tester);
+      var acted = false;
+
+      showAbToast(ctx, 'Before dialog');
+      await tester.pump();
+      unawaited(
+        showDialog<void>(
+          context: ctx,
+          builder: (_) => const Center(child: Text('Dialog body')),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      showAbToastOverlay(
+        ctx,
+        toast: AbToast(
+          icon: AbIcons.info,
+          title: 'While dialog',
+          actionLabel: 'Undo',
+          onAction: () => acted = true,
+        ),
+        duration: const Duration(seconds: 8),
+      );
+      await tester.pump();
+
+      expect(find.text('Dialog body'), findsOneWidget);
+      expect(find.text('Before dialog').hitTestable(), findsOneWidget);
+      expect(find.text('While dialog').hitTestable(), findsOneWidget);
+
+      // The barrier is dismissible: had the tap reached it, the dialog would
+      // have popped.
+      await tester.tap(find.text('Undo'));
+      await tester.pumpAndSettle();
+
+      expect(acted, isTrue);
+      expect(find.text('While dialog'), findsNothing);
+      expect(find.text('Dialog body'), findsOneWidget);
+    });
+
+    testWidgets('a tap beside a toast reaches the page underneath', (
+      tester,
+    ) async {
+      _sizeView(tester, const Size(1280, 800));
+      late BuildContext ctx;
+      var taps = 0;
+      await pumpAntgrid(
+        tester,
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => taps++,
+          child: SizedBox.expand(
+            child: Builder(
+              builder: (context) {
+                ctx = context;
+                return const SizedBox.shrink();
+              },
+            ),
+          ),
+        ),
+      );
+
+      showAbToast(ctx, 'Path copied');
+      await tester.pump();
+      final toast = tester.getRect(find.byType(AbToast));
+
+      // Level with the card, and far from it.
+      await tester.tapAt(Offset(AbTokens.space16, toast.center.dy));
+      await tester.pump();
+      await tester.tapAt(const Offset(AbTokens.space16, AbTokens.space16));
+      await tester.pump();
+
+      expect(taps, 2);
+      expect(find.text('Path copied'), findsOneWidget);
+    }, variant: _desktop);
+
+    testWidgets('toasts from above and below the Navigator render in one '
+        'stack', (tester) async {
+      final contexts = await _pumpSplitContexts(tester);
+
+      showAbToast(contexts.above, 'Copied to clipboard');
+      showAbToast(contexts.route, 'Copied to clipboard');
+      await tester.pump();
+      expect(find.byType(AbToast), findsOneWidget);
+
+      showAbToast(contexts.route, 'Saved');
+      await tester.pump();
+      expect(find.byType(AbToast), findsNWidgets(2));
+      expect(
+        tester.getTopLeft(find.text('Saved')).dy,
+        greaterThan(tester.getBottomLeft(find.text('Copied to clipboard')).dy),
+        reason: 'stacked in one column, newest nearest the bottom',
+      );
+    });
   });
 }

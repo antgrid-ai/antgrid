@@ -59,7 +59,7 @@ class AbToast extends StatelessWidget {
           // The title carries an unbounded program-chosen string for a plain
           // [showAbToast] call (a URL, an exception's toString()) — capped so
           // one long message can't grow the card past the host's width cap
-          // (see showAbToastOverlay's ConstrainedBox) into an unreadable wall.
+          // (see _ToastStackView's ConstrainedBox) into an unreadable wall.
           maxLines: 3,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
@@ -118,7 +118,7 @@ class AbToast extends StatelessWidget {
           // of overflowing the Row. Expanded (tight) pins the action/close
           // to the trailing edge; loose Flexible keeps a bare toast
           // shrink-wrapped below the cap. Either way the host must bound the
-          // Row's width — see showAbToastOverlay's ConstrainedBox.
+          // Row's width — see _ToastStackView's ConstrainedBox.
           if (hasAction || hasClose)
             Expanded(child: textColumn)
           else
@@ -149,8 +149,9 @@ class AbToast extends StatelessWidget {
             SizedBox(width: hasAction ? 4 : 8),
             // Present but invisible/untappable at rest — faded and
             // IgnorePointer'd rather than left out of the tree, so hovering
-            // doesn't reflow the text column next to it. Stays tab-reachable,
-            // and focus reveals it so a keyboard user can dismiss too.
+            // doesn't reflow the text column next to it. Stays focusable, and
+            // focus reveals it. Tab never reaches it: the host sits outside
+            // the Navigator, whose focus scope route traversal stays within.
             // Focus.of tracks focus anywhere below the wrapping Focus, which
             // Focus.onFocusChange (primary focus only) does not.
             Builder(
@@ -186,14 +187,6 @@ class AbToast extends StatelessWidget {
   }
 }
 
-/// One overlay-anchored toast queue per [OverlayState]. Kept off the state
-/// object itself (via [Expando]) so a torn-down overlay's stack is dropped
-/// with it instead of leaking.
-class _ToastStack {
-  final List<_ActiveToast> active = [];
-  OverlayEntry? entry;
-}
-
 class _ActiveToast {
   _ActiveToast(this.toast, this.duration);
   final AbToast toast;
@@ -213,127 +206,178 @@ class _ActiveToast {
 /// distinct toasts count: an identical repeat replaces its card.
 const int _kMaxStackedToasts = 4;
 
-final Expando<_ToastStack> _toastStacks = Expando<_ToastStack>();
-
 const Duration _kDefaultToastDuration = Duration(seconds: 4);
 
-/// The single plain-text toast. Renders [message] as the toast's title with
-/// no description row and a neutral icon, so every one-line notice call is
-/// this with no per-call-site styling decision. [clearPrevious] dismisses
-/// every toast currently showing before this one is added, instead of
-/// stacking above them.
+/// The toasts an [AbToastHost] is showing.
+///
+/// A plain object rather than something read off a widget, so a caller whose
+/// widget may be gone by the time its answer lands (a tap that disposes its
+/// own row, a reply after a long await) captures it BEFORE the first await
+/// and needs no live context afterwards.
+class AbToaster extends ChangeNotifier {
+  final List<_ActiveToast> _active = [];
+  bool _disposed = false;
+
+  /// The toaster of the nearest [AbToastHost], or null outside one. Registers
+  /// no dependency, so it is safe to call from a callback.
+  static AbToaster? maybeOf(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<_AbToastScope>()?.toaster;
+
+  /// Shows [toast], auto-dismissing after [duration].
+  ///
+  /// A toast with the same title, description and icon as one already showing,
+  /// and no action on either, replaces that card: one card, with a full timer,
+  /// in the newest position. A toast with an action never replaces another,
+  /// since each carries its own callback.
+  void show(AbToast toast, {Duration duration = _kDefaultToastDuration}) {
+    // A captured toaster can outlive its owner — a reply landing after the
+    // app, or a test's container, has been torn down.
+    if (_disposed) return;
+    // A repeat REPLACES its card rather than updating it: the fresh entry gets
+    // a fresh widget state and so a fresh timer, while the old card's pending
+    // timer or swipe-out lands on an entry no longer in the stack and does
+    // nothing (see [_dismiss]).
+    _active.removeWhere((existing) => existing.isRepeatOf(toast));
+    _active.add(_ActiveToast(toast, duration));
+    while (_active.length > _kMaxStackedToasts) {
+      _active.removeAt(0);
+    }
+    notifyListeners();
+  }
+
+  /// The single plain-text toast: [message] as the title, no description and
+  /// a neutral icon, so a one-line notice carries no per-call styling
+  /// decision. [clearPrevious] dismisses every toast showing first instead of
+  /// stacking above them.
+  void showMessage(
+    String message, {
+    Duration? duration,
+    bool clearPrevious = false,
+  }) {
+    if (clearPrevious) clear();
+    show(
+      AbToast(icon: AbIcons.info, title: message),
+      duration: duration ?? _kDefaultToastDuration,
+    );
+  }
+
+  /// Immediately dismisses every toast showing, ahead of its own timer.
+  void clear() {
+    if (_disposed || _active.isEmpty) return;
+    _active.clear();
+    notifyListeners();
+  }
+
+  /// A no-op if [active] is already gone: the close button and the timer can
+  /// each fire first, and whichever loses does nothing.
+  void _dismiss(_ActiveToast active) {
+    if (_disposed || !_active.remove(active)) return;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+}
+
+/// Renders [toaster]'s toasts above [child]. Mounted once, around the app's
+/// Navigator, so a toast outlives its route and sits above every dialog. It
+/// brings its own [Overlay] because none of the Navigator's encloses it, and a
+/// card's tooltip needs one.
+class AbToastHost extends StatefulWidget {
+  const AbToastHost({super.key, this.toaster, required this.child});
+
+  /// Fixed for the host's lifetime; the host owns one itself when null.
+  final AbToaster? toaster;
+  final Widget child;
+
+  @override
+  State<AbToastHost> createState() => _AbToastHostState();
+}
+
+class _AbToastHostState extends State<AbToastHost> {
+  AbToaster? _owned;
+  late final OverlayEntry _entry = OverlayEntry(
+    builder: (_) => ListenableBuilder(
+      listenable: _toaster,
+      builder: (_, _) => _ToastStackView(toaster: _toaster),
+    ),
+  );
+
+  AbToaster get _toaster => widget.toaster ?? (_owned ??= AbToaster());
+
+  @override
+  void didUpdateWidget(AbToastHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    assert(widget.toaster == oldWidget.toaster, 'AbToastHost.toaster is fixed');
+  }
+
+  @override
+  void dispose() {
+    _entry
+      ..remove()
+      ..dispose();
+    _owned?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _AbToastScope(
+      toaster: _toaster,
+      // Empty space in the toast Overlay hits nothing, so a tap anywhere but
+      // on a card falls through to [child].
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          widget.child,
+          Overlay(initialEntries: [_entry]),
+        ],
+      ),
+    );
+  }
+}
+
+class _AbToastScope extends InheritedWidget {
+  const _AbToastScope({required this.toaster, required super.child});
+
+  final AbToaster toaster;
+
+  @override
+  bool updateShouldNotify(_AbToastScope oldWidget) =>
+      toaster != oldWidget.toaster;
+}
+
+/// [AbToaster.showMessage] on the toaster of [context]'s [AbToastHost]. A
+/// no-op outside one.
 void showAbToast(
   BuildContext context,
   String message, {
   Duration? duration,
   bool clearPrevious = false,
-}) {
-  if (clearPrevious) clearAbToasts(context);
-  showAbToastOverlay(
-    context,
-    toast: AbToast(icon: AbIcons.info, title: message),
-    duration: duration ?? _kDefaultToastDuration,
-  );
-}
+}) => AbToaster.maybeOf(context)?.showMessage(
+  message,
+  duration: duration,
+  clearPrevious: clearPrevious,
+);
 
-/// Shows [toast] as a transient overlay pinned to the bottom-right on desktop
-/// and bottom-centre on a touch platform, auto-dismissing after [duration].
-/// No-ops when no [Overlay] is in scope. Safe if the Overlay is torn down
-/// before the timer fires (route swap, teardown, hot restart).
-///
-/// A toast with the same title, description and icon as one already showing,
-/// and no action on either, replaces that card: one card, with a full timer,
-/// in the newest position. A toast with an action never replaces another,
-/// since each carries its own callback.
+/// [AbToaster.show] on the toaster of [context]'s [AbToastHost]. A no-op
+/// outside one.
 void showAbToastOverlay(
   BuildContext context, {
   required AbToast toast,
   Duration duration = _kDefaultToastDuration,
-}) {
-  final overlay = _overlayOf(context);
-  if (overlay == null) return;
-  showAbToastOn(overlay, toast: toast, duration: duration);
-}
+}) => AbToaster.maybeOf(context)?.show(toast, duration: duration);
 
-/// Falls back to the ROOT navigator's own overlay when [context] doesn't
-/// resolve one directly — callers deliberately hand a `NavigatorState`'s own
-/// context (`Navigator.of(context, rootNavigator: true).context`) to outlive a
-/// row the tap itself disposes, and `Overlay.maybeOf` alone can't see through
-/// that. `Navigator.maybeOf(navigatorState.context, rootNavigator: true)`
-/// resolves to that SAME state — Flutter special-cases a `NavigatorState`
-/// asking about its own context — so the fallback works for exactly that
-/// shape without needing to know it's being used.
-OverlayState? _overlayOf(BuildContext context) =>
-    Overlay.maybeOf(context) ??
-    Navigator.maybeOf(context, rootNavigator: true)?.overlay;
-
-/// [showAbToastOverlay] for a caller holding the [OverlayState] itself.
-///
-/// `Overlay.maybeOf` resolves through an inherited marker that each overlay
-/// ENTRY plants, so it answers only from inside a mounted route — a caller
-/// working from a navigator key (no widget of its own, firing long after the
-/// screen that started it) reaches for `navigatorState.overlay` and this
-/// function instead.
-void showAbToastOn(
-  OverlayState overlay, {
-  required AbToast toast,
-  Duration duration = _kDefaultToastDuration,
-}) {
-  final stack = _toastStacks[overlay] ??= _ToastStack();
-
-  // A repeat REPLACES its card rather than updating it: the fresh entry gets a
-  // fresh widget state and so a fresh timer, while the old card's pending
-  // timer or swipe-out lands on an entry no longer in the stack and does
-  // nothing (see [_dismissOne]).
-  stack.active.removeWhere((existing) => existing.isRepeatOf(toast));
-  stack.active.add(_ActiveToast(toast, duration));
-  while (stack.active.length > _kMaxStackedToasts) {
-    stack.active.removeAt(0);
-  }
-  if (stack.entry == null) {
-    stack.entry = OverlayEntry(builder: (ctx) => _ToastStackView(stack: stack));
-    overlay.insert(stack.entry!);
-  } else {
-    stack.entry!.markNeedsBuild();
-  }
-}
-
-/// Dismisses [active] — its own timer firing, or the card's close button —
-/// and drops it from [stack]. A no-op if it's already gone (the close
-/// button and the timer can each fire first; whichever loses does nothing).
-void _dismissOne(_ToastStack stack, _ActiveToast active) {
-  if (!stack.active.remove(active)) return;
-  if (stack.active.isEmpty) {
-    _removeStackEntry(stack);
-  } else {
-    stack.entry?.markNeedsBuild();
-  }
-}
-
-/// Immediately dismisses every toast currently showing on [context]'s
-/// overlay, ahead of its own timer.
-void clearAbToasts(BuildContext context) {
-  final overlay = _overlayOf(context);
-  if (overlay == null) return;
-  final stack = _toastStacks[overlay];
-  if (stack == null) return;
-  stack.active.clear();
-  _removeStackEntry(stack);
-}
-
-void _removeStackEntry(_ToastStack stack) {
-  // entry.mounted guards a bare remove() against the Overlay being detached
-  // first, which would otherwise trip a debug assertion when the timer fires
-  // after disposal.
-  final entry = stack.entry;
-  if (entry != null && entry.mounted) entry.remove();
-  stack.entry = null;
-}
+/// [AbToaster.clear] on the toaster of [context]'s [AbToastHost].
+void clearAbToasts(BuildContext context) => AbToaster.maybeOf(context)?.clear();
 
 class _ToastStackView extends StatelessWidget {
-  const _ToastStackView({required this.stack});
+  const _ToastStackView({required this.toaster});
 
-  final _ToastStack stack;
+  final AbToaster toaster;
 
   @override
   Widget build(BuildContext context) {
@@ -369,13 +413,13 @@ class _ToastStackView extends StatelessWidget {
           // auto-repeating) is visible as a stack instead of overlapping
           // illegibly.
           children: [
-            for (final a in stack.active)
+            for (final a in toaster._active)
               Padding(
                 key: ObjectKey(a),
                 padding: const EdgeInsets.only(top: AbTokens.space8),
                 child: _DismissingToast(
                   active: a,
-                  onExpire: () => _dismissOne(stack, a),
+                  onExpire: () => toaster._dismiss(a),
                 ),
               ),
           ],
@@ -404,8 +448,8 @@ class _ToastStackView extends StatelessWidget {
 /// built (a test that triggers one and ends without a further `pump`) never
 /// starts a timer to leak in the first place, and one that IS built has its
 /// timer cancelled the moment the toast leaves the tree, however that
-/// happens: it expires, its close button is tapped, [clearAbToasts] wipes the
-/// stack, or the Overlay itself is torn down.
+/// happens: it expires, its close button is tapped, [AbToaster.clear] wipes the
+/// stack, or the host itself is torn down.
 class _DismissingToast extends StatefulWidget {
   const _DismissingToast({required this.active, required this.onExpire});
 
