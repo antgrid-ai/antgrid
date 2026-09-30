@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:iroh_flutter/iroh_flutter.dart' as iroh;
 import 'package:path/path.dart' as path;
 
+import '../services/bounded_http_request.dart';
 import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 
@@ -66,6 +67,7 @@ class PeerRuntime implements PeerConnector {
     required this.record,
     required String licenseApiUrl,
     required Future<String> Function() mintToken,
+    required bool Function(String token) rejectToken,
     this.fenceOnResume = true,
     http.Client? httpClient,
   }) : _http = httpClient ?? http.Client(),
@@ -77,32 +79,43 @@ class PeerRuntime implements PeerConnector {
       enrollmentId: record.clientId,
       request: (method, path, body) {
         var expired = false;
-        return (() async {
+        void checkCurrent() {
+          if (expired || _disposed) {
+            throw TimeoutException('Authorization request retired');
+          }
+        }
+
+        Future<http.Response> send({bool mayRetry = true}) async {
+          checkCurrent();
           final String token;
           try {
             token = await mintToken();
           } on DeviceRevokedException {
             throw const PeerAuthorizationDenied();
           }
-          if (expired || _disposed) {
-            throw TimeoutException('Authorization request retired');
-          }
-          final uri = Uri.parse(
-            '${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path',
+          checkCurrent();
+          final response = await boundedHttpRequest(
+            _http,
+            method,
+            Uri.parse('${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path'),
+            headers: {
+              'authorization': 'Bearer $token',
+              'content-type': 'application/json',
+            },
+            body: method == 'GET' ? null : jsonEncode(body),
           );
-          final headers = {
-            'authorization': 'Bearer $token',
-            'content-type': 'application/json',
-          };
-          final response =
-              await (method == 'GET'
-                      ? _http.get(uri, headers: headers)
-                      : _http.post(
-                          uri,
-                          headers: headers,
-                          body: jsonEncode(body),
-                        ))
-                  .timeout(const Duration(seconds: 15));
+          // Only a 401 is about the token; a 403 judges the request. A reused
+          // token can stop verifying while the device is still good (a
+          // rotated signing key, a clock step), so its refusal earns one
+          // retry with a fresh token.
+          if (response.statusCode == 401 && rejectToken(token) && mayRetry) {
+            return send(mayRetry: false);
+          }
+          return response;
+        }
+
+        return (() async {
+          final response = await send();
           if (response.statusCode == 401 || response.statusCode == 403) {
             throw const PeerAuthorizationDenied();
           }
@@ -141,6 +154,7 @@ class PeerRuntime implements PeerConnector {
     );
   }
   final DeviceRecord record;
+
   /// Whether a resume discards the current lease before asking again. A phone
   /// resumes from real backgrounding, where policy pushes may have been
   /// missed; a desktop "resumes" on every window focus, and fencing there
@@ -179,10 +193,9 @@ class PeerRuntime implements PeerConnector {
   @override
   void invalidate() => lease.invalidate();
   @override
-  Future<bool> resume() => _resuming ??=
-      (fenceOnResume ? lease.refreshFresh() : lease.refresh()).whenComplete(
-        () => _resuming = null,
-      );
+  Future<bool> resume() =>
+      _resuming ??= (fenceOnResume ? lease.refreshFresh() : lease.refresh())
+          .whenComplete(() => _resuming = null);
 
   AuthorizationSnapshot _currentSnapshot() {
     final snapshot = lease.snapshot;

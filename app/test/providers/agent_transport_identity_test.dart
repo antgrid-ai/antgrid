@@ -28,6 +28,9 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/services/license_token_minter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
@@ -60,6 +63,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   final sent = <Uint8List>[];
   DeviceIdentity? connectedAs;
   String? connectedMachineId;
+  String? connectedToken;
   AppState _cur = const AppState();
 
   @override
@@ -83,6 +87,7 @@ class _RecordingRelay extends RelayService implements PeerLink {
   }) async {
     connectedAs = identity;
     connectedMachineId = machineDeviceId;
+    connectedToken = licenseToken;
     _cur = const AppState(connectionState: RelayConnectionState.authenticated);
     _states.add(_cur);
     // The relay announces same-account peers right after `welcome`.
@@ -198,6 +203,7 @@ void main() {
   List<Override> overrides({
     List<InventoryAgent> inventory = const [],
     _RecordingRelay? on,
+    LicenseTokenMinter? minter,
   }) => [
     ...stores.overrides,
     // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
@@ -210,7 +216,7 @@ void main() {
     localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
     connectionDeviceRecordProvider.overrideWith((_) async => record),
     connectionTokenMinterProvider.overrideWith(
-      (_) async => TestLicenseTokenMinter(),
+      (_) async => minter ?? TestLicenseTokenMinter(),
     ),
     cryptoServiceProvider.overrideWith((_) => CryptoService()),
     relayConnectionManagerProvider.overrideWithValue(
@@ -223,6 +229,33 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
   }
+
+  test(
+    'central dials reuse the saved token instead of forcing a mint',
+    () async {
+      var mints = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient(
+          (_) async => http.Response(
+            '{"access_token":"saved-${++mints}","expires_in":3600}',
+            200,
+          ),
+        ),
+      );
+      expect(await minter.token(), 'saved-1');
+      await stores.recentAgentsStore.upsert(_recent(_machine));
+      final c = ProviderContainer(overrides: overrides(minter: minter));
+      addTearDown(c.dispose);
+      await c.read(accountAgentsProvider.future);
+      c.read(agentTransportForProvider(_machine));
+      await pump(c, () => relay.connectedToken != null);
+      expect(relay.connectedToken, 'saved-1');
+      expect(mints, 1);
+    },
+  );
 
   test('the remote transport connects on the relay slot and sends a plaintext '
       'session:hello, never a signed transcript', () async {
@@ -281,11 +314,7 @@ void main() {
       await recentOnly.read(accountAgentsProvider.future);
       recentOnly.read(agentTransportForProvider(_machine));
       await pump(recentOnly, () => relay2.helloFrames().isNotEmpty);
-      expect(
-        relay2.helloFrames(),
-        isNotEmpty,
-        reason: 'recent-only dialled',
-      );
+      expect(relay2.helloFrames(), isNotEmpty, reason: 'recent-only dialled');
 
       // inventory only (a machine we hold no RecentAgent for)
       final relay3 = _RecordingRelay();
