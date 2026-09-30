@@ -35,13 +35,10 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
-/// Sign in with Apple runs Apple's own sheet, so it needs no browser and exists
-/// only where that sheet does. The macOS build can present it only when signed
-/// with the Developer ID profile that grants the entitlement; an unsigned or
-/// debug build reports the failure on the form.
-bool get _offersAppleSignIn =>
-    defaultTargetPlatform == TargetPlatform.iOS ||
-    defaultTargetPlatform == TargetPlatform.macOS;
+/// Sign in with Apple runs Apple's own sheet, so it needs no browser. iOS only:
+/// the sheet needs the applesignin entitlement, and Apple will not put it in
+/// the Developer ID profile the macOS build ships under.
+bool get _offersAppleSignIn => defaultTargetPlatform == TargetPlatform.iOS;
 
 /// Sign-in screen.
 ///

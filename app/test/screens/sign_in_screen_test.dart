@@ -487,16 +487,14 @@ void main() {
       expect(find.text('Continue'), findsOneWidget);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    testWidgets('Apple is offered on iOS and macOS only', (tester) async {
+    testWidgets('Apple is offered on iOS only', (tester) async {
       await _pumpScreen(tester);
 
-      final offered = {
-        TargetPlatform.iOS,
-        TargetPlatform.macOS,
-      }.contains(defaultTargetPlatform);
       expect(
         find.text('Continue with Apple'),
-        offered ? findsOneWidget : findsNothing,
+        defaultTargetPlatform == TargetPlatform.iOS
+            ? findsOneWidget
+            : findsNothing,
       );
     }, variant: TargetPlatformVariant.all());
 
@@ -584,7 +582,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('Apple sign-in failed. Try again.'), findsOneWidget);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('on iOS a remembered Apple hint presents the sheet', (
       tester,
@@ -605,8 +603,9 @@ void main() {
       expect(paths, isEmpty);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    testWidgets('off Apple platforms a remembered Apple hint falls through to '
-        'the link', (tester) async {
+    testWidgets('off iOS a remembered Apple hint falls through to the link', (
+      tester,
+    ) async {
       var presented = 0;
       final store = _FakeAuthMethodStore({'user@example.com': AuthMethod.apple});
       final paths = await _pumpScreen(
@@ -623,7 +622,12 @@ void main() {
       expect(presented, 0);
       expect(paths, contains(_startPath));
       expect(store.memory['user@example.com'], AuthMethod.link);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+      }),
+    );
 
     for (final hint in [AuthMethod.github, AuthMethod.google]) {
       testWidgets('on iOS a remembered ${hint.name} hint opens the in-app '

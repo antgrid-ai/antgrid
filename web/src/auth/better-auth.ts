@@ -103,7 +103,7 @@ function appleProvider(env: Env) {
       return secret();
     },
     // An identity token's audience is whoever asked Apple for it: the bundle
-    // ID from the native iOS and macOS apps, the Services ID from the web.
+    // ID from the native iOS app, the Services ID from the web.
     // When set, this list overrides appBundleIdentifier in token verification.
     audience: [env.APPLE_APP_BUNDLE_ID, env.APPLE_CLIENT_ID],
   };
