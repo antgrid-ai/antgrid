@@ -119,3 +119,41 @@ export function claudeResumeReplay(sessionId: string, history: any[]): AbMessage
   }
   return out;
 }
+
+/** Give the replay's in-flight turn the live turn's identity.
+ *
+ *  A snapshot read mid-turn ends in the turn still streaming, under a synthetic
+ *  `resumed:N` id, closed by a turn-end it has not had, and with its prompt as
+ *  `umsg:` where the live stream sent `user:<turnId>`. A client holding the live
+ *  turn would render it twice, the copy marked finished. Relabelled, the replay
+ *  turn IS the live one: same ids, still open. Adopted only when its prompt is
+ *  the live prompt — the prompt may not be on disk yet, and the last replay
+ *  turn is then a finished one that must keep its turn-end. Text alone cannot
+ *  tell a repeated prompt ("continue") from the live one, so `at`, when given,
+ *  also requires the prompt to have been written no earlier than it was sent. */
+export function adoptLiveTurn(frames: AbMessage[], live: { turnId: string; prompt: string; at?: number }): AbMessage[] {
+  let lastStart = -1;
+  for (let i = frames.length - 1; i >= 0; i--) {
+    if (frames[i]!.type === "agent:turn-start") { lastStart = i; break; }
+  }
+  if (lastStart < 0) return frames;
+  const tail = frames.slice(lastStart);
+  const prompt = tail.find((f) => {
+    const item = (f as { item?: { role?: string; text?: string } }).item;
+    return f.type === "agent:item-added" && item?.role === "user";
+  }) as { itemId: string; timestamp: number; item: { text?: string } } | undefined;
+  if (prompt?.item.text !== live.prompt) return frames;
+  if (live.at !== undefined && prompt.timestamp < live.at) return frames;
+  const userItemId = `user:${live.turnId}`;
+  const adopted: AbMessage[] = [];
+  for (const f of tail) {
+    if (f.type === "agent:turn-end") continue;
+    const m = { ...f, turnId: live.turnId } as AbMessage & { itemId?: string; item?: Record<string, unknown> };
+    if (f === (prompt as unknown as AbMessage)) {
+      m.itemId = userItemId;
+      m.item = { ...m.item, itemId: userItemId };
+    }
+    adopted.push(m);
+  }
+  return [...frames.slice(0, lastStart), ...adopted];
+}

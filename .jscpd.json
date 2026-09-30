@@ -2,7 +2,7 @@
   "path": ["bridge", "relay", "web", "packages", "app"],
   "minTokens": 50,
   "threshold": 3,
-  "reporters": ["console", "html"],
+  "reporters": ["console", "html", "threshold"],
   "output": ".jscpd",
   "absolute": true,
   "gitignore": true,

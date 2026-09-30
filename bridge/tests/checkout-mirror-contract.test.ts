@@ -177,8 +177,7 @@ describe("checkout mirror contract", () => {
     // The two predicates in checkout-types.ts are the only sanctioned place the
     // kind vocabulary is interrogated, and they ask different questions:
     // ownership decides whether a delete must reclaim the directory, isolation
-    // decides whether checkout-scoped routing is required (and whether an app
-    // without the `checkoutRouting` capability may be admitted). Adding a kind
+    // decides whether checkout-scoped routing is required. Adding a kind
     // without answering both is how one gets silently degraded to shared
     // handling, so the tuple assertion below fails this suite until the table
     // is extended.

@@ -16,7 +16,7 @@ import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/terminal_attachment_uploader.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';

@@ -4,7 +4,7 @@ import 'package:antgrid/models/search_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/search_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {

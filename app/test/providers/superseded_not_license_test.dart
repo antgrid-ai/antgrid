@@ -1,116 +1,84 @@
-// SUPERSEDED must never render as a license revocation ("re-activate")
-// condition — it just means a newer instance of ourselves took over the
-// socket (epoch arbitration). The authoritative classification
-// (RelayLicenseErrorCode.fromWire('SUPERSEDED') is null, and
-// ConnectionSupervisor.noteRelayError blocks it as `superseded`, never
-// `deviceRevoked`) is pinned at the package level in
-// relay_service_reconnect_test.dart / connection_supervisor_test.dart; this
-// test proves the app's connection-state surface — what the workspace boot
-// screen and `agentReachabilityProvider` actually read — treats a SUPERSEDED
-// disconnect exactly like any other non-license disconnect, and that it can
-// never reach the one UI flag that DOES mean "re-authenticate"
-// (`authRevokedBannerProvider`, which only local-transport `auth_revoked`
-// events flip).
+import 'package:antgrid/connection/peer_connection.dart';
+import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/providers/relay_connection.dart';
+import 'package:antgrid/providers/supervisor_status.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
-import 'package:antgrid/models/session_target.dart';
-import 'package:antgrid/providers/agent_transport.dart';
-import 'package:antgrid/providers/providers.dart';
-import 'package:antgrid/providers/relay_connection.dart';
-import 'package:antgrid/providers/value_controller.dart';
+import '../helpers/fixed_peer_connector.dart';
 
-class _FakeManager extends RelayConnectionManager {
-  _FakeManager(this._conn) : super(crypto: CryptoService());
-  final RelayConnection _conn;
+class _FakeManager extends MachineConnectionManager {
+  _FakeManager(this.connection) : super(crypto: CryptoService());
+
+  final MachineConnection connection;
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conn;
-  @override
-  RelayConnection? peek(String machineDeviceId) => _conn;
-}
-
-class _SettableRelay extends RelayService {
-  _SettableRelay() : super(crypto: CryptoService());
-  AppState _state = const AppState();
+  MachineConnection connectionFor(String machineDeviceId) => connection;
 
   @override
-  AppState get currentState => _state;
-
-  @override
-  Stream<AppState> get stateStream => Stream<AppState>.empty();
-
-  void push(AppState s) => _state = s;
+  MachineConnection? peek(String machineDeviceId) => connection;
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('a SUPERSEDED disconnect is read by agentReachabilityProvider the SAME '
-      'as any other non-license disconnect, and never flips '
-      'authRevokedBannerProvider', () async {
-    final relay = _SettableRelay();
-    final conn = RelayConnection(
-      machineDeviceId: 'M',
-      crypto: CryptoService(),
-      relayOverride: relay,
-    );
-    addTearDown(conn.dispose);
-
-    final container = ProviderContainer(
-      overrides: [
-        relayConnectionManagerProvider.overrideWithValue(_FakeManager(conn)),
-        selectedTargetProvider.overrideWith(
-          () => ValueController(const RemoteTarget.legacy('M')),
+  test(
+    'SUPERSEDED is a separate central conflict cleared only by Retry',
+    () async {
+      final connection = MachineConnection(
+        machineDeviceId: 'M',
+        crypto: CryptoService(),
+      );
+      addTearDown(connection.dispose);
+      connection.ensureStarted(
+        mechanisms: PeerConnectionMechanisms(
+          peerRuntime: FixedPeerConnector.stub(),
+          machineDeviceId: 'M',
+          resolveCoords: () async => null,
         ),
-      ],
-    );
-    addTearDown(container.dispose);
+      );
 
-    // Baseline: ordinary retryable disconnect (e.g. AGENT_OFFLINE mid-flow).
-    relay.push(
-      const AppState(
-        connectionState: RelayConnectionState.disconnected,
-        errorCode: 'AGENT_OFFLINE',
-      ),
-    );
-    final baseline = container.read(agentReachabilityProvider);
+      final container = ProviderContainer(
+        overrides: [
+          relayConnectionManagerProvider.overrideWithValue(
+            _FakeManager(connection),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    // SUPERSEDED — same connectionState (disconnected), different code.
-    relay.push(
-      const AppState(
-        connectionState: RelayConnectionState.disconnected,
-        errorCode: 'SUPERSEDED',
-      ),
-    );
-    // agentReachabilityProvider maps on `connectionState` alone; every
-    // disconnected state — regardless of code — must classify identically
-    // (never a distinct "license" bucket).
-    final supersededReach = container.read(agentReachabilityProvider);
-    expect(
-      supersededReach,
-      baseline,
-      reason:
-          'SUPERSEDED must not carve out special (license-like) '
-          'reachability handling',
-    );
-    expect(supersededReach, isNot(AgentReachability.online));
+      final conflictProvider = centralControlConflictProvider('M');
+      final conflictSub = container.listen(conflictProvider, (_, _) {});
+      addTearDown(conflictSub.close);
+      expect(await container.read(conflictProvider.future), isFalse);
 
-    expect(
-      RelayLicenseErrorCode.fromWire('SUPERSEDED'),
-      isNull,
-      reason:
-          'SUPERSEDED must never parse as a license error code — '
-          'the type the app would need to render "re-activate" UI',
-    );
+      connection.centralSupervisor!.noteRelayError('SUPERSEDED');
+      for (
+        var i = 0;
+        i < 20 && container.read(conflictProvider).value != true;
+        i++
+      ) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(container.read(conflictProvider).value, isTrue);
+      expect(connection.nativeSupervisor!.status, isNot(isA<Blocked>()));
+      expect(RelayLicenseErrorCode.fromWire('SUPERSEDED'), isNull);
 
-    expect(
-      container.read(authRevokedBannerProvider),
-      isFalse,
-      reason:
-          'only a local-transport auth_revoked event flips this — a '
-          'relay SUPERSEDED must never trip it',
-    );
-  });
+      connection.nativeSupervisor!.noteFreshToken();
+      connection.nativeSupervisor!.notePresence(true);
+      await container.pump();
+      expect(container.read(conflictProvider).value, isTrue);
+
+      connection.retry();
+      for (
+        var i = 0;
+        i < 20 && container.read(conflictProvider).value != false;
+        i++
+      ) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(container.read(conflictProvider).value, isFalse);
+    },
+  );
 }

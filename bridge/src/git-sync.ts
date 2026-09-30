@@ -259,7 +259,7 @@ function fail(
  * Push the current branch, setting an upstream on a branch that has none.
  *
  * NEVER `--force` or `--force-with-lease`, under any failure. A force push is
- * an unrecoverable action the Handler takes a §5.2 snapshot before allowing
+ * an unrecoverable action the Handler takes a snapshot before allowing
  * (`force_push` in `HandlerSnapshotWire`); it has no business behind a one-tap
  * control that a phone can reach. A rejected push returns the rejection intact
  * so the app can hand it to the agent, which reconciles it deliberately.

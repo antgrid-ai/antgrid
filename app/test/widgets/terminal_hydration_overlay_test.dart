@@ -21,7 +21,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/terminal_hydration_strip.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:flutter/material.dart';

@@ -9,6 +9,7 @@ export type HookPath =
   | "/notify"
   | "/handler-event"
   | "/turn-start"
+  | "/turn-activity"
   | "/hook-alive";
 
 export interface HookPost {
@@ -61,4 +62,16 @@ export function titlePost(
 /** Drops the nulls a `titlePost` returns when it had no terminal or session id. */
 export function compact(posts: Array<HookPost | null>): HookPost[] {
   return posts.filter((post): post is HookPost => post !== null);
+}
+
+// A submission the model can name a task from. A slash command is the user
+// invoking a command, not describing what they want done — "/clear", "/commit"
+// and their arguments name the command, so a title generated from one describes
+// the tool rather than the session, and the attempt it spends is gone.
+// Withholding `prompt` does not drop the post: it falls through to the on-disk
+// read, which is what a session without a pre-turn hook already does. Shared by
+// every agent whose turn-start hook carries the raw prompt text.
+export function namesTheSession(prompt: string | null | undefined): boolean {
+  const text = prompt?.trim();
+  return !!text && !text.startsWith("/");
 }

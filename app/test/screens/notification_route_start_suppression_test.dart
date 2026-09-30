@@ -8,7 +8,7 @@
 import 'package:antgrid/providers/relay_error_banner.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';

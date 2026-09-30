@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { startRelay, allocatePort } from "../helpers/harness";
-import { RelayClient } from "../helpers/relay-client";
+import { CentralTestClient } from "../helpers/central-test-client";
 
 /**
  * v3 makes the license token MANDATORY for apps: the tokenless
@@ -16,7 +16,7 @@ test("app hello with an empty license token is terminally rejected (PROTOCOL_VIO
     // An empty token fails the hello schema's `licenseToken: min(1)`, so the
     // relay closes the socket during auth → connectAndAuth rejects.
     await expect(
-      RelayClient.connectAndAuth(relay.url, { deviceType: "app", licenseToken: "" }),
+      CentralTestClient.connectAndAuth(relay.url, { deviceType: "app", licenseToken: "" }),
     ).rejects.toThrow(/PROTOCOL_VIOLATION|Closed during auth/);
   } finally {
     relay.stop();

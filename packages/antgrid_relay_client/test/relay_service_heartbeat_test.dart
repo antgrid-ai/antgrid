@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -65,7 +64,7 @@ void main() {
   });
 
   test(
-    'pong and a valid routed frame each clear an outstanding probe',
+    'pong and a valid policy frame each clear an outstanding probe',
     () async {
       final attempt = await dial();
       attempt.connection.sendJson(_welcome());
@@ -75,13 +74,10 @@ void main() {
       attempt.connection.sendJson({'type': 'pong'});
       expect(await attempt.connection.nextJson(), {'type': 'ping'});
 
-      attempt.connection.sendBinary(
-        encodeRouteFrame(
-          {'type': 'message', 'from': 'machine-1', 'channel': 'agent'},
-          Uint8List.fromList(utf8.encode('sealed')),
-          FrameKind.sealed,
-        ),
-      );
+      attempt.connection.sendJson({
+        'type': 'peer-policy-changed',
+        'generation': '1',
+      });
       expect(await attempt.connection.nextJson(), {'type': 'ping'});
       attempt.connection.sendJson({'type': 'pong'});
       expect(

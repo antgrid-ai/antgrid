@@ -6,7 +6,7 @@ import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/screens/project_picker_screen.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'helpers/fake_agent_transport.dart';
 
 void main() {
   void emitTwo(FakeAgentTransport t) => t.emit('agent:projects', {

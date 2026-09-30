@@ -4,7 +4,7 @@ import { atomicWriteFile } from "../../atomic-file";
 import type { HookCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { hasFiles } from "../launch-inject";
-import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
+import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 const log = logger.child({ component: "agent-launch" });
@@ -44,7 +44,16 @@ function materializeClaudePlugin(
       // A turn that died on a provider fault fires StopFailure INSTEAD of Stop,
       // so without this an armed Handler sees nothing for the whole limit window.
       StopFailure: [{ hooks: [claudeHook(command, "stop-failure")] }],
-      Notification: [{ hooks: [claudeHook(command, "notification")] }],
+      // Claude matches a Notification hook's `matcher` against `notification_type`
+      // (its own hook metadata says so), so this is what keeps the hook process
+      // from spawning for the types `toPosts` below throws away — an installed
+      // CLI old enough to send no type at all ignores the matcher and sends
+      // every Notification regardless, which is why `toPosts` still has to keep
+      // its no-type fallback rather than trusting this to gate them. The two
+      // elicitation types are included because the CLI's own dialog registry
+      // classes them a session-level block (`waitingFor: "input needed"`), same
+      // as a permission prompt, not a background event.
+      Notification: [{ matcher: "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog", hooks: [claudeHook(command, "notification")] }],
       // The trio that makes a terminal session's own question visible. The
       // `matcher` is a RegEx over the tool name, so all three run for this one
       // tool and nothing else. The post hooks are not decoration: they carry the
@@ -66,8 +75,25 @@ function materializeClaudePlugin(
       // the permission Notification Claude schedules seconds later — and that
       // ordering is the whole basis for suppressing the second one.
       PreToolUse: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question")] }],
-      PostToolUse: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] }],
-      PostToolUseFailure: [{ matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] }],
+      // A second, catch-all group on the SAME event: Claude runs every matching
+      // group for one tool call, so AskUserQuestion still fires both. This one
+      // is `async` — unlike its sibling above — because it re-asserts a status
+      // the turn already has rather than reporting a fact only a synchronous
+      // hook can order against the Notification Claude schedules afterward.
+      PostToolUse: [
+        { matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] },
+        { matcher: "", hooks: [{ ...claudeHook(command, "tool-done"), async: true }] },
+      ],
+      PostToolUseFailure: [
+        { matcher: ASK_QUESTION_TOOL, hooks: [claudeHook(command, "question-answered")] },
+        // A second, catch-all group on the SAME event, same reasoning as
+        // PostToolUse's catch-all above: a failed tool call is still activity,
+        // and this is the only re-assert a turn gets when the failing call is
+        // the last thing before an otherwise-silent stretch. Async because it
+        // reports a fact, not the ordering PreToolUse/PostToolUse/
+        // PostToolUseFailure's AskUserQuestion trio depends on.
+        { matcher: "", hooks: [{ ...claudeHook(command, "tool-failed"), async: true }] },
+      ],
       // A fresh turn: resets control-plane work status to "working" so a
       // re-prompt of an existing session (the Stop hook already fired
       // task_complete) no longer reads as done/attention. See hook-runner's
@@ -125,14 +151,16 @@ const ClaudePayloadSchema = z.object({
 });
 type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 
-// "user-prompt" (→ /turn-start + /session-title) is Claude-specific: Claude exposes a
+// "user-prompt" (→ /turn-start + /session-title): Claude exposes a
 // UserPromptSubmit hook that fires before each new turn, and it is the ONLY
 // turn-start signal a terminal-mode Claude session has (chat sessions get
-// precise `agent:turn-start` frames from their driver instead).
-// Codex/Cursor/Copilot expose no pre-turn hook, so their terminal-mode sessions
-// infer the start from a submitted keystroke — see `needsKeystrokeTurnStart` in
-// ../registry.ts, which reads the `turnBoundaryEvents` declared below. Their
-// turn-END hooks still deliver attention/error/done.
+// precise `agent:turn-start` frames from their driver instead). Codex declares
+// its own UserPromptSubmit-backed "user-prompt" independently (see
+// ../codex/hooks.ts). Cursor/Copilot expose no pre-turn hook at all, so their
+// terminal-mode sessions infer the start from a submitted keystroke — see
+// `needsKeystrokeTurnStart` in ../registry.ts, which reads the
+// `turnBoundaryEvents` declared below. Their turn-END hooks still deliver
+// attention/error/done.
 //
 // "question"/"question-answered" are the AskUserQuestion pair, the second of
 // which is raised by either completion hook — the two are alternatives and
@@ -141,7 +169,7 @@ type ClaudePayload = z.infer<typeof ClaudePayloadSchema>;
 // of one.
 export const events = [
   "session-start", "stop", "stop-failure", "notification", "user-prompt",
-  "question", "question-answered",
+  "question", "question-answered", "tool-done", "tool-failed",
 ] as const;
 
 // "stop-failure" is deliberately not an `end`: it posts a turn-end notify only
@@ -151,7 +179,7 @@ export const turnBoundaryEvents = {
   end: ["stop"],
 } as const;
 
-export const posts = ["/session-title", "/turn-start", "/notify", "/handler-event"] as const;
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // StopFailure reasons no amount of waiting fixes. They take the ordinary
@@ -168,17 +196,6 @@ const CLAUDE_FATAL_STOP_ERRORS = new Set([
 function claudeStopFailureEvent(errorClass: string): "limit_hit" | "turn_failed" | "turn_end" {
   if (errorClass === "rate_limit") return "limit_hit";
   return CLAUDE_FATAL_STOP_ERRORS.has(errorClass) ? "turn_end" : "turn_failed";
-}
-
-// A submission the model can name a task from. A slash command is the user
-// invoking a command, not describing what they want done — "/clear", "/commit"
-// and their arguments name the command, so a title generated from one describes
-// the tool rather than the session, and the attempt it spends is gone.
-// Withholding `prompt` does not drop the post: it falls through to the on-disk
-// read, which is what a session without a pre-turn hook already does.
-function namesTheSession(prompt: string | null | undefined): boolean {
-  const text = prompt?.trim();
-  return !!text && !text.startsWith("/");
 }
 
 // Bounds the loopback POST, not the display. Set to the engine's escalation row
@@ -255,6 +272,29 @@ export async function toPosts(
       }),
     );
   }
+  if (invocation.event === "tool-done") {
+    // Every tool completion, not just the one that ends the turn: a sibling
+    // call finishing while the turn is otherwise idle (a background Task,
+    // a slow Bash) is itself evidence the agent is still working, and this is
+    // the only signal that re-asserts it between UserPromptSubmit and Stop.
+    posts.push({
+      port,
+      path: "/turn-activity",
+      body: { ...(terminalId ? { terminalId } : {}) },
+    });
+  }
+  if (invocation.event === "tool-failed") {
+    // A failed tool call is still activity — no installed Claude build fires
+    // this (or any) hook on a manual Esc/Ctrl+C interrupt, so there is no
+    // signal here to split an ordinary failure from one. A real interrupt is
+    // confirmed against the transcript instead (see
+    // AgentSpec.transcriptInterrupt).
+    posts.push({
+      port,
+      path: "/turn-activity",
+      body: { ...(terminalId ? { terminalId } : {}) },
+    });
+  }
   if (invocation.event === "stop") {
     posts.push({
       port,
@@ -297,21 +337,20 @@ export async function toPosts(
     });
     // StopFailure fires INSTEAD of Stop, so nothing else ever answers the
     // "working" that UserPromptSubmit set — the session would read as actively
-    // working while the agent sits dead at its prompt. Only the fatal classes:
-    // they never park, so the engine sends no push of its own, whereas a park IS
-    // covered (once, on the first park of an episode) and must not be re-alerted
-    // here.
-    if (event === "turn_end") {
-      posts.push({
-        port,
-        path: "/notify",
-        body: {
-          type: "error",
-          ...(terminalId ? { terminalId } : {}),
-          ...(input.message ? { message: input.message } : {}),
-        },
-      });
-    }
+    // working while the agent sits dead at its prompt, whatever the error
+    // class. The hook always reports; whether a phone also hears about it is
+    // the dispatcher's call — push-dispatcher.ts suppresses this push on a
+    // slot the Handler is armed on, so a park, wrap-up or escalation the
+    // Handler already announced does not double as a second alert.
+    posts.push({
+      port,
+      path: "/notify",
+      body: {
+        type: "error",
+        ...(terminalId ? { terminalId } : {}),
+        ...(input.message ? { message: input.message } : {}),
+      },
+    });
   }
   // Both halves of the question pair need a slot: an escalation nobody can
   // route to a session is not supervision, it is a stuck row.
@@ -374,59 +413,68 @@ export async function toPosts(
     });
   }
   if (invocation.event === "notification") {
-    // Three states reach this one hook: a live permission prompt, the generic
-    // post-completion idle nudge, and a question — Claude renders
-    // AskUserQuestion through its permission dialog, so that one arrives here
-    // wearing the permission prompt's clothes. `notification_type` separates
-    // the first two exactly; nothing here can single out the third, which is
-    // why the question has a producer of its own above.
+    // A present `notification_type` is the CLI naming the event; only some of
+    // those names are THIS session's own turn stalling on the user, and words
+    // in `message` cannot recover that distinction (a background agent's own
+    // completion reads as "<label> finished", not visibly different in shape
+    // from a real block). A type outside the allow-list is silence, not a
+    // guess. AskUserQuestion wears the permission prompt's clothes here too,
+    // but it has a producer of its own above and never reaches this
+    // classification.
     //
-    // The message-text test is the fallback for an installed CLI old enough to
-    // send no `notification_type` at all, and for any value added upstream:
-    // guessing from the words is worse than today's behaviour on neither.
-    const notificationType = input.notification_type ?? "";
-    const isWaitingNudge = notificationType === "idle_prompt" ? true
-      : notificationType === "permission_prompt" ? false
-      : !!input.message && /waiting/i.test(input.message);
-    // Only a block names a tool; the idle nudge is about the session, not about
-    // any one call, so asking it for one could only produce a false match.
-    const promptTool = isWaitingNudge ? undefined : permissionPromptTool(input.message);
-    if (terminalId) {
+    // The message-text fallback survives ONLY for a payload with no
+    // `notification_type` at all — an installed CLI old enough to predate the
+    // field, for which the words are the only signal there is.
+    const notificationType = input.notification_type;
+    const isWaitingNudge = notificationType == null
+      ? !!input.message && /waiting/i.test(input.message)
+      : notificationType === "idle_prompt" ? true
+      : notificationType === "permission_prompt"
+        || notificationType === "elicitation_dialog"
+        || notificationType === "elicitation_url_dialog" ? false
+      : undefined;
+    if (isWaitingNudge !== undefined) {
+      // Only a block names a tool; the idle nudge is about the session, not
+      // about any one call, so asking it for one could only produce a false
+      // match.
+      const promptTool = isWaitingNudge ? undefined : permissionPromptTool(input.message);
+      if (terminalId) {
+        posts.push({
+          port,
+          path: "/handler-event",
+          body: {
+            terminalId,
+            // Still "awaiting_input" for a live permission prompt, not
+            // "permission_request": the payload carries no tool_use_id, so an
+            // escalation raised from it would have no deterministic retirement
+            // signal — the very trap the question hooks exist to avoid.
+            agent: "claude",
+            event: "awaiting_input",
+            transcriptPath: input.transcript_path ?? "",
+            sessionId: input.session_id ?? "",
+            // The same reading the /notify below branches on, carried so the host's
+            // stale-nudge drop cannot classify as an idle nudge the very invocation
+            // it is about to record as a live block: this POST is decided before
+            // that one has folded into the reduction it reads.
+            idleNudge: isWaitingNudge,
+            // Carried on both posts of this invocation because the two routes ask
+            // the host the same question and must not be answered differently —
+            // and this body has no `message` of its own to re-read the tool from.
+            ...(promptTool ? { promptTool } : {}),
+          },
+        });
+      }
       posts.push({
         port,
-        path: "/handler-event",
+        path: "/notify",
         body: {
-          terminalId,
-          // Still "awaiting_input" for a live permission prompt, not
-          // "permission_request": the payload carries no tool_use_id, so an
-          // escalation raised from it would have no deterministic retirement
-          // signal — the very trap the question hooks exist to avoid.
-          agent: "claude",
-          event: "awaiting_input",
-          transcriptPath: input.transcript_path ?? "",
-          sessionId: input.session_id ?? "",
-          // The same reading the /notify below branches on, carried so the host's
-          // stale-nudge drop cannot classify as an idle nudge the very invocation
-          // it is about to record as a live block: this POST is decided before
-          // that one has folded into the reduction it reads.
-          idleNudge: isWaitingNudge,
-          // Carried on both posts of this invocation because the two routes ask
-          // the host the same question and must not be answered differently —
-          // and this body has no `message` of its own to re-read the tool from.
+          type: isWaitingNudge ? "awaiting_input" : "permission_request",
+          ...(terminalId ? { terminalId } : {}),
+          ...(input.message ? { message: input.message } : {}),
           ...(promptTool ? { promptTool } : {}),
         },
       });
     }
-    posts.push({
-      port,
-      path: "/notify",
-      body: {
-        type: isWaitingNudge ? "awaiting_input" : "permission_request",
-        ...(terminalId ? { terminalId } : {}),
-        ...(input.message ? { message: input.message } : {}),
-        ...(promptTool ? { promptTool } : {}),
-      },
-    });
   }
 
   return compact(posts);

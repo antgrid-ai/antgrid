@@ -32,9 +32,9 @@ function artifactsOf(parts: readonly BusPart[]): BusArtifactHandle[] {
 /**
  * The line one inbound event owes the local agent, or null when it owes none.
  *
- * A post owes none, and permanently: it is read when the target chooses (§7.1),
- * so rendering one here would interrupt a turn on the sender's say-so with none
- * of §7.4's budget in front of it. It is parked in the mailbox instead.
+ * A post owes none, and permanently: it is read when the target chooses,
+ * so rendering one here would interrupt a turn on the sender's say-so with
+ * none of the pair budget in front of it. It is parked in the mailbox instead.
  *
  * A notify owes exactly one, keyed by the message id so a redelivered frame the
  * coordinator re-emits costs nothing at the queue. Which template it gets turns

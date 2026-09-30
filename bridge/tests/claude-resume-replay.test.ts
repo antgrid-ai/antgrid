@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { claudeResumeReplay } from "../../packages/antgrid-agents/src/agents/claude-code/resume-replay";
+import { adoptLiveTurn, claudeResumeReplay } from "../../packages/antgrid-agents/src/agents/claude-code/resume-replay";
 
 describe("claudeResumeReplay", () => {
   it("replays assistant text history as one resumed turn", () => {
@@ -195,5 +195,38 @@ describe("claudeResumeReplay usage backfill", () => {
       { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "no usage here" }] } },
     ]);
     expect(out.filter((m: any) => m.type === "agent:usage").length).toBe(0);
+  });
+});
+
+describe("adoptLiveTurn", () => {
+  const history = [
+    { type: "user", message: { role: "user", content: "first" }, uuid: "d1" },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] }, uuid: "d2" },
+    { type: "user", message: { role: "user", content: "second" }, uuid: "d3" },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "half" }] }, uuid: "d4" },
+  ];
+
+  it("relabels the last turn when its prompt is the live one, leaving earlier turns closed", () => {
+    const out = adoptLiveTurn(claudeResumeReplay("s1", history), { turnId: "turn-1", prompt: "second" }) as any[];
+    expect(out.filter((m) => m.type === "agent:turn-end").map((m) => m.turnId)).toEqual(["resumed:0"]);
+    const live = out.filter((m) => m.turnId === "turn-1");
+    expect(live[0].type).toBe("agent:turn-start");
+    expect(live.filter((m) => m.type === "agent:item-added").map((m) => [m.itemId, m.item.itemId]))
+      .toEqual([["user:turn-1", "user:turn-1"], ["msg:d4", "msg:d4"]]);
+  });
+
+  it("leaves the replay alone when the live prompt is not on disk yet", () => {
+    const frames = claudeResumeReplay("s1", history.slice(0, 2));
+    expect(adoptLiveTurn(frames, { turnId: "turn-1", prompt: "second" })).toBe(frames);
+  });
+
+  it("leaves a finished turn alone when the live prompt repeats its text but is not on disk yet", () => {
+    const repeated = [
+      { type: "user", message: { role: "user", content: "continue" }, uuid: "d1", timestamp: "2026-01-01T00:00:00.000Z" },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] }, uuid: "d2", timestamp: "2026-01-01T00:00:01.000Z" },
+    ];
+    const frames = claudeResumeReplay("s1", repeated);
+    const at = Date.parse("2026-01-01T00:00:05.000Z");
+    expect(adoptLiveTurn(frames, { turnId: "turn-1", prompt: "continue", at })).toBe(frames);
   });
 });

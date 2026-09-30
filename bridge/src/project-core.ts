@@ -2,82 +2,67 @@ import { randomBytes } from "node:crypto";
 import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./agent-core";
 import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
-import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
-import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
-import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
+import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
+import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
 import { sealPush } from "./push/seal";
 
+/** How often {@link ProjectCore} checks for turns {@link expireTurns} should
+ *  close. Five minutes is coarse enough that the check never shows up as work,
+ *  and precise enough against a 30-minute idle bound that nobody watching the
+ *  dot would notice the difference from an exact deadline. */
+const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
+
 /** Host-level dependencies injected into a remote-mode ProjectCore. In local
- *  mode these are unused. The host owns the single machine relay socket;
- *  a core attaches its bus as a multiplexed stream rather than owning a
- *  RelayClient of its own. */
+ * mode these are unused. The host owns the machine's native peer sessions; a
+ * core attaches its bus as a host-local multiplexed stream. */
 export interface ProjectCoreRemoteDeps {
-  /** Attach this core's bus as a stream on the machine socket, allocating a
-   *  streamId and driving stream-open admission. */
+  /** Attach this core's bus as a host-local stream on the machine's native
+   *  peer sessions. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
-  /** Every app device that currently holds an E2E session with this machine —
-   *  the push dispatcher's live-device list, and the fan-out this stream feeds.
-   *  A session outlives its relay presence (see {@link PeerSessionView.reachable}),
-   *  which is what keeps push aimed at the device that just walked away. */
+  /** Every app device that currently holds a session with this machine —
+   *  the push dispatcher's authorized-device list, and the fan-out this stream
+   *  feeds. Central presence does not own or mutate these native sessions. */
   establishedPeers(): PeerSessionView[];
   /** One device's session by route address, or null when it holds none. The
    *  core asks this of the device a frame ARRIVED on, so every per-device answer
-   *  (capabilities, push identity) is that device's own. */
+   *  (push identity) is that device's own. */
   peerSession(peerId: string): PeerSessionView | null;
   /** The bare machine deviceUuid this host registers under. The phone addresses
    *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
-   *  push the phone cannot open. Required, not optional: optional would let the
-   *  wizard-promotion supplier ship unroutable pushes and still compile. */
+   *  push the phone cannot open. Required, not optional: optional would let a
+   *  supplier ship unroutable pushes and still compile. */
   machineDeviceId(): string;
-  /** Blind FCM push forward over the machine socket (fallback delivery). */
+  /** Blind FCM/APNs push forward over the central control socket. */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
 }
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
   remote?: ProjectCoreRemoteDeps; // Required when mode === "remote".
-  /** This machine's relay device id, supplied by the host for cores of EVERY
+  /** This machine's account-scoped device id, supplied by the host for cores of EVERY
    *  mode. The session bus needs it on a local core too: a desktop-opened
    *  project is `mode === "local"` and still has to stamp its own half of every
    *  address it sends. Distinct from `identity.deviceId`, which for a local core
    *  is a fresh randomUUID that addresses no machine any peer knows. Null when
-   *  the host has no relay identity yet, which is a machine with no bus address
+   *  the host has no remote identity yet, which is a machine with no bus address
    *  rather than a session this bridge does not hold — see the coordinator's
    *  `addressable`. */
   machineDeviceId?: () => string | null;
-  /** Host hook that lets the local wizard promotion path bring the machine relay
-   *  socket up from the app-supplied credentials and attach this core as a
-   *  stream. Absent for a bare agent (enabling relay is then unsupported). */
-  ensureMachineRelay?: RelayPromotionDeps["ensureMachineRelay"];
 }
 
-/** Handle for a relay slot added to an already-open core via {@link ProjectCore.promote}.
- *  `stop()` is idempotent and tears down ONLY the added relay slot — the live
+/** Handle for a native project binding added to an already-open core via {@link ProjectCore.promote}.
+ *  `stop()` is idempotent and tears down ONLY the added native binding — the live
  *  loopback session is left attached (Task 3 owns the full demotion semantics). */
 export interface PromotionHandle {
   stop(): void;
-  /** Resolves with the FIRST register outcome of the added relay slot: `ok`
-   *  once the relay authenticates it, or a terminal rejection the gate closed it
-   *  with (only the retired `SESSION_LIMIT_EXCEEDED`, from a relay predating the
-   *  worker-limit change, reaches this today). Lets the host gate the
-   *  phone-facing `running:true` advert on a real slot and surface the rejection
-   *  instead of letting the phone dial an empty data-plane slot. */
-  firstRegister: Promise<RegisterOutcome>;
+  /** Resolves once the host-local project binding is ready. */
+  firstRegister: Promise<void>;
 }
-
-/** Outcome of a relay stream's FIRST admission — `ok` once the relay acks the
- *  stream-open, otherwise the typed rejection the relay answered with (current
- *  relays admit unconditionally; the retired `SESSION_LIMIT_EXCEEDED` still
- *  arrives from older ones). Stream admission is its own signal:
- *  a rejection leaves the socket and every other stream live. */
-export type RegisterOutcome =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
 
 function sameStatuses(a: ReadonlyMap<string, WorkStatus>, b: ReadonlyMap<string, WorkStatus>): boolean {
   if (a.size !== b.size) return false;
@@ -88,30 +73,25 @@ function sameStatuses(a: ReadonlyMap<string, WorkStatus>, b: ReadonlyMap<string,
 /**
  * Per-project runtime aggregate. Owns the {@link AgentCore}, its outbound
  * {@link MessageBus}, and the mode-specific transport (loopback listener for
- * local; relay for remote). This is the seam for a future singleton host that
+ * local; native peer transport for remote). This is the seam for a singleton host that
  * runs N cores in one process.
  */
 export class ProjectCore {
   private core: AgentCore | null = null;
   private bus: MessageBus | null = null;
   private listener: LocalListener | null = null;
-  private promotion: RelayPromotionController | null = null;
-  /** This core's stream on the machine socket, with the deps that own it: the
-   *  primary slot for a remote-mode core, the promoted one for a local-mode
-   *  core. {@link sendToAppSession} reads both halves and has no other way to
-   *  reach the wire, so they are one field — a handle without its deps is not a
-   *  usable slot, and `deps.remote` cannot stand in for them (it is a
-   *  construction input, and a local-mode core is built without it). Written
-   *  only by {@link attachRelayStream}. */
+  /** This core's project stream with the push subscriber that rides it: the
+   *  primary binding for a remote-mode core, the promoted one for a local-mode
+   *  core. {@link sendToAppSession} has no other way to reach the wire, so a
+   *  promoted core that left this unset could carry a session-bus exchange IN
+   *  and never answer it. Written only by {@link attachRelayStream}. */
   private slot: {
     handle: StreamHandle;
-    remote: ProjectCoreRemoteDeps;
     /** An ADDITIVE subscriber on a bus that outlives the stream, so whoever
-     *  detaches the handle must drop this too. On the slot so every teardown
-     *  can reach it — a promoted slot's used to be closure-only. */
+     *  detaches the handle must drop this too. */
     unsubscribePush: () => void;
   } | null = null;
-  private relayFirstRegister: Promise<RegisterOutcome> | null = null;
+  private relayFirstRegister: Promise<void> | null = null;
   private relayRegistered = false;
   private _localConnectInfo: { port: number; token: string } | null = null;
 
@@ -119,10 +99,15 @@ export class ProjectCore {
   // the app's Recent/sidebar reflect activity WITHOUT warming this core. The
   // reduction is a pure fold over outbound bus frames — see work-status.ts.
   private _work: WorkStatusState = initialWorkStatus;
-  /** Turn-boundary delivery for this project's session-bus lines (spec 5.2).
+  /** Turn-boundary delivery for this project's session-bus lines.
    *  Owned here because the turn-open set it waits on is THIS reduction, and
    *  nothing below the core can see one. */
   private deliveries: SessionBusDeliveryQueue | null = null;
+  /** Periodic {@link expireTurns} sweep — the backstop for a turn nothing else
+   *  closes. Unref'd so it never keeps the process alive on its own; cleared in
+   *  {@link shutdown}. */
+  private expireInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly provisionalTimers = new Set<ReturnType<typeof setTimeout>>();
   private _onWorkStatusChange: (() => void) | null = null;
   private _onSessionsChange: (() => void) | null = null;
   /** Identity signature (id/name/archived, sorted) of the last `session:updated`
@@ -169,12 +154,10 @@ export class ProjectCore {
     // strongest fact available synchronously and is exactly what the boolean
     // used to mean.
     const slot = this.slot;
-    if (!slot || !slot.remote.peerSession(peerId)) return false;
+    if (!slot?.handle.deliverableTo(peerId)) return false;
     void slot.handle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
   }
-  hasIsolatedSessions(): boolean { return this.core?.hasIsolatedSessions() ?? false; }
-
   /** Current reduced work status (working/attention/done/error) for the
    *  control-plane advert. Defaults to "done" before any signal. */
   get workStatus(): WorkStatus { return this._work.status; }
@@ -278,7 +261,7 @@ export class ProjectCore {
 
   /** Fold one outbound bus frame into the work-status reduction. Must never
    *  throw — the bus lets subscriber throws propagate, and this rides the same
-   *  publish() as the live relay subscriber (reduceWorkStatus is pure/total). */
+   *  publish() as the live native-stream subscriber (reduceWorkStatus is pure/total). */
   private observeWorkStatus(msg: AbMessage): void {
     const next = reduceWorkStatus(this._work, msg);
     // Redundant = the notification told us nothing new (exact repeat on the same
@@ -300,7 +283,15 @@ export class ProjectCore {
    *  bus frame — the app must not see it as a notification) and from the inbound
    *  permission/question resolves, via {@link AgentContext.onTurnStart}. */
   noteTurnStart(sessionId?: string): void {
-    this.commitWork(turnStart(this._work, sessionId));
+    this.commitWork(turnStart(this._work, sessionId, undefined, Date.now()));
+  }
+
+  /** A per-tool-call hook re-asserted that [sessionId] is still working. Unlike
+   *  {@link noteTurnStart}, never clears a pending request or a call-to-action
+   *  notification — see {@link turnActivity}. Routed here from the per-core
+   *  api-server via {@link AgentContext.onTurnActivity}. */
+  noteTurnActivity(sessionId?: string): void {
+    this.commitWork(turnActivity(this._work, sessionId, Date.now()));
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
@@ -310,14 +301,24 @@ export class ProjectCore {
     sessionId: string,
     opts: { submitted: boolean; typed: boolean; command?: boolean },
   ): void {
-    this.commitWork(userReply(this._work, sessionId, opts));
+    const now = Date.now();
+    const before = this._work.provisionalTurns.get(sessionId);
+    this.commitWork(userReply(this._work, sessionId, opts, now));
+    const openedAt = this._work.provisionalTurns.get(sessionId);
+    if (openedAt === undefined || openedAt === before) return;
+    const timer = setTimeout(() => {
+      this.provisionalTimers.delete(timer);
+      this.commitWork(retractProvisionalTurn(this._work, sessionId, openedAt));
+    }, PROVISIONAL_TURN_GRACE_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.provisionalTimers.add(timer);
   }
 
   /** The user answered the permission/question [requestId] on [sessionId].
    *  Clears that block and resumes the turn, but only if it was pending; see
    *  {@link answerRequest}. */
   noteAnswer(sessionId: string, requestId?: string): void {
-    this.commitWork(answerRequest(this._work, sessionId, requestId));
+    this.commitWork(answerRequest(this._work, sessionId, requestId, Date.now()));
   }
 
   /** [client] is looking at [sessionId] (`session:focus`) — clear its unread
@@ -335,8 +336,8 @@ export class ProjectCore {
     this.commitWork(clientFocusState(this._work, paused, client));
   }
 
-  /** [client]'s socket closed — it stops vouching for whatever it had on screen.
-   *  Without this a desktop that quit, or a phone that dropped off the relay,
+  /** [client]'s transport session closed — it stops vouching for whatever it had on screen.
+   *  Without this a desktop that quit, or a phone whose native session ended,
    *  would keep one session permanently exempt from unread. See
    *  {@link clientGone}. */
   noteClientGone(client: ClientKey): void {
@@ -346,11 +347,21 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
-  /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now
-   *  rather than wait on a Stop hook the CLI may never fire for a manual
-   *  interrupt. See {@link closeTurn}. */
+  /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
+   *  now rather than wait on a Stop hook the CLI may never fire for a manual
+   *  interrupt. See {@link closeInterruptedTurn}.
+   *
+   *  Gated on {@link turnOpenFor}: closeInterruptedTurn clears whatever the
+   *  session (or the project's unattributed slot) was blocked on
+   *  unconditionally, with no notion of whether a turn was actually open to
+   *  close. An idle session's Ctrl+C — reflexive after Claude/Codex added it
+   *  as an interrupt key, where Esc rarely fired outside a live turn — would
+   *  otherwise delete its own `task_complete` record and defeat
+   *  {@link isStaleIdleNudge}, or (via the unattributed fallback) another
+   *  session's live call-to-action. */
   noteInterrupt(sessionId: string): void {
-    this.commitWork(closeTurn(this._work, sessionId));
+    if (!turnOpenFor(this._work.activeTurns, sessionId)) return;
+    this.commitWork(closeInterruptedTurn(this._work, sessionId));
   }
 
   /** A hook reported [sessionId]'s turn over on a channel that files no
@@ -370,23 +381,14 @@ export class ProjectCore {
     this.commitWork(noteHookChannelRestored(this._work, sessionId));
   }
 
-  /** First register outcome of a REMOTE-mode core's primary relay slot (null in
-   *  local mode, or before start()). Lets the host gate the phone-facing
-   *  `running:true` advert on a real register and surface a terminal rejection
-   *  (today only the retired `SESSION_LIMIT_EXCEEDED`, from an older relay).
-   *  Promotion's slot exposes the same via its
-   *  {@link PromotionHandle.firstRegister}. */
-  whenRelayRegistered(): Promise<RegisterOutcome> | null { return this.relayFirstRegister; }
+  /** Resolves when a remote core's host-local project binding is ready. */
+  whenRelayRegistered(): Promise<void> | null { return this.relayFirstRegister; }
 
-  /** True once this core's relay slot has AUTHENTICATED on the relay — i.e. the
-   *  data-plane slot is admitted and a phone can dial it. Covers both a
-   *  remote-mode core's primary slot and a promoted local core's added slot;
-   *  flips false when that slot is torn down (promote stop / fatal register
-   *  rejection). This is what the phone-facing advert's `running` flag means:
-   *  "dialable", NOT merely "warm/open on the host". A desktop-open project that
-   *  was never promoted reads false here — dialing it would loop AGENT_OFFLINE —
-   *  until project:start promotes it and the slot registers. (The desktop hub's
-   *  `knownProjectsForHub` advertises plain warmth separately; do not conflate.) */
+  /** True once this core has a host-local native stream binding. Covers both
+   *  a remote-mode core's primary binding and a promoted local core's additive
+   *  binding; flips false when that binding is torn down. This is what the
+   *  phone-facing advert's `running` flag means: remotely dialable, not merely
+   *  warm/open on the host. The desktop hub advertises plain warmth separately. */
   isRelayRegistered(): boolean { return this.relayRegistered; }
 
   /** Forward a session delete to the live AgentCore. False if not started. */
@@ -429,6 +431,7 @@ export class ProjectCore {
       agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
+      onTurnActivity: (sessionId) => this.noteTurnActivity(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
@@ -447,12 +450,15 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
+      // Gates whether a lone Esc/Ctrl+C is even worth confirming against the
+      // transcript — see shouldArmInterruptConfirm in agent-core.ts.
+      isTurnOpenFor: (id) => turnOpenFor(this._work.activeTurns, id),
       sendToOwner: (msg) => this.sendToOwner(msg),
       sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
-      // This machine's half of every session-bus address. The relay slot's id
+      // This machine's half of every session-bus address. The remote device id
       // wins when there is one, but a local core falls back to the host's — the
-      // bus travels by carrier, not by relay, so needing an address and having a
-      // relay stream are independent.
+      // bus travels by its app carrier, not central control, so an address and a
+      // native project stream are independent.
       machineId: () => this.deps.remote?.machineDeviceId() ?? this.deps.machineDeviceId?.() ?? null,
       // Only a desktop owner that declared itself a carrier can move a frame to
       // the machine it is addressed to; anything else is an unreachable target,
@@ -470,7 +476,7 @@ export class ProjectCore {
       ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
       // Host-injected for the same reason and forwarded the same way: a bridge
       // with no host (evals, most of this file's own test callers) offers no
-      // wake at all, and the §7.3 refusal falls back to its unconditional shape.
+      // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
@@ -503,7 +509,6 @@ export class ProjectCore {
         // or stops — is the edge that gets it delivered. A no-op on an empty
         // queue, which is every ordinary project.
         this.deliveries?.drainAll();
-        if (core.hasIsolatedSessions()) this.listener?.requireCheckoutRouting();
       }
     } });
     if (this.deps.mode === "local") {
@@ -511,12 +516,21 @@ export class ProjectCore {
     } else {
       await this.startRemote(core, bus);
     }
+    // Bounds a turn nothing else closes (a missed interrupt key, a lost loopback
+    // POST, a bridge restart mid-turn). Committed through the same path as every
+    // other reducer transition, so a real expiry still re-advertises and drains
+    // whatever the delivery queue was holding on it.
+    this.expireInterval = setInterval(
+      () => this.commitWork(expireTurns(this._work, Date.now(), DEFAULT_TURN_IDLE_MS)),
+      EXPIRE_CHECK_INTERVAL_MS,
+    );
+    if (typeof this.expireInterval.unref === "function") this.expireInterval.unref();
   }
 
   /** Binds the loopback listener, sets `_localConnectInfo`, and eagerly primes
    *  managers via `core.onHandshakeComplete()`. Called from both startLocal and
    *  startRemote so every core exposes a usable loopback endpoint regardless of
-   *  whether it also holds a relay slot. The eager prime is safe in remote mode:
+   *  whether it also holds a native project binding. The eager prime is safe in remote mode:
    *  a later re-fire when a phone pairs calls setupServices guarded by
    *  `if (manager) resyncState()` — a benign resync, not a re-setup. */
   private async bindLoopback(core: AgentCore, bus: MessageBus): Promise<void> {
@@ -527,8 +541,8 @@ export class ProjectCore {
       projectId: core.projectId,
       // `onHandshakeComplete` is called twice intentionally and is idempotent:
       // here per owner connection, and eagerly below to prime managers at startup
-      // (the loopback socket + token is the trust boundary; there's no E2E
-      // handshake to gate on for the local data plane).
+      // (the loopback socket + token is the trust boundary; there's no
+      // session handshake to gate on for the local data plane).
       onOwnerConnected: () => {
         // A local owner now shares the bus — clear any suppression a prior
         // peer-offline latched while no owner was attached.
@@ -542,8 +556,6 @@ export class ProjectCore {
     });
     await listener.start();
     this.listener = listener;
-    core.setOwnerPullsTreeProvider(() => listener.ownerPullsTree);
-    core.setOwnerTerminalFramesV1Provider(() => listener.ownerSupportsTerminalFramesV1);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
@@ -559,30 +571,6 @@ export class ProjectCore {
     log.info(`local: folder=${folder} projectId=${projectId} pid=${process.pid}`);
 
     await this.bindLoopback(core, bus);
-
-    // Promotion: intercept agent:enableRelay / agent:disableRelay in front of the
-    // core dispatcher. attachTransport already installed the core inbound handler;
-    // wrap it so promotion control messages are consumed and everything else falls
-    // through unchanged.
-    const coreInbound = bus.inboundHandler;
-    const promotion = createRelayPromotion({
-      bus,
-      ensureMachineRelay: this.deps.ensureMachineRelay,
-      attach: (remote) => this.attachLocalStreamForWizard(core, bus, remote),
-    });
-    this.promotion = promotion;
-    bus.setInboundHandler((msg, channel, source, peerId) => {
-      if (promotion.handleInbound(msg)) return;
-      // Thread `source` AND `peerId` through so the core's gates still see what
-      // they see on a natively-remote core: `source` distinguishes the desktop's
-      // loopback frames from relay frames after promotion, and `peerId` is what
-      // every PER-DEVICE answer keys off (checkout routing, client generations,
-      // focus/read state). Without it every promoted phone collapses onto the
-      // anonymous "relay" key and `checkoutRoutingRefusal` reads "frame carried
-      // no peer id" for all of them — a permanent refusal on any project holding
-      // an isolated session, which no reconnect can clear.
-      coreInbound?.(msg, channel, source, peerId);
-    });
   }
 
   private async startRemote(core: AgentCore, bus: MessageBus): Promise<void> {
@@ -596,33 +584,32 @@ export class ProjectCore {
     this.relayFirstRegister = this.attachRelayStream(core, bus, remote).firstRegister;
   }
 
-  /** Attach an already-built core+bus as a stream on the machine socket and wire
-   *  its plaintext (tunnel) sender, remote-peer provider, and fallback push
+  /** Attach an already-built core+bus as a host-local native project stream and wire
+   *  its tunnel-stream server, remote-peer provider, and fallback push
    *  path. The stream is an ADDITIVE bus subscriber, so the live loopback
    *  session is undisturbed. Shared by {@link startRemote} (fresh remote core)
    *  and {@link promote} (already-open local core); the caller owns the returned
-   *  handle's lifetime. Encryption is NEVER optional — the machine socket owns
-   *  the one E2E session every stream is sealed under. */
+   *  handle's lifetime. Encryption is NEVER optional: every project stream rides an
+   *  authenticated Iroh connection to the one peer it was opened by. */
   private attachRelayStream(
     core: AgentCore,
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
   ): {
     handle: StreamHandle;
-    firstRegister: Promise<RegisterOutcome>;
+    firstRegister: Promise<void>;
     unsubscribePush: () => void;
-    /** Full teardown for a non-primary slot; idempotent, and safe once a
-     *  re-attach has taken the slot over. False once it has. */
+    /** Full teardown for this attach; idempotent, and safe once a re-attach
+     *  has taken the slot over. False once it has. */
     detachSlot: () => boolean;
   } {
-    // Settle on the FIRST admission outcome only (onPeerOnline re-fires on every
-    // rekey; a recoverable state must not pre-empt a later success), so the host
-    // can gate the running advert / surface a terminal rejection. Never rejects —
-    // a stream rejection resolves `ok:false`; nothing else settles it.
-    let settle!: (o: RegisterOutcome) => void;
-    const firstRegister = new Promise<RegisterOutcome>((res) => { settle = res; });
+    // A binding is ready synchronously once the host's project-stream registry
+    // admits it. Keep the promise-shaped seam so callers cannot race the ready
+    // advertisement.
+    let settle!: () => void;
+    const firstRegister = new Promise<void>((res) => { settle = res; });
     let settled = false;
-    const settleOnce = (o: RegisterOutcome) => { if (!settled) { settled = true; settle(o); } };
+    const settleOnce = () => { if (!settled) { settled = true; settle(); } };
 
     // Whether a phone is live on THIS stream. Starts false: a fresh stream has
     // no peer until one connects. `connState.peerOnline` cannot express that —
@@ -641,44 +628,19 @@ export class ProjectCore {
       // to tear down. Fail-closed, same as the inbound side.
       mayDeliver: () => this.deps.remoteAccessEnabled?.() ?? false,
       projectId: core.projectId,
-      // Per-receiver half: a stale app that cannot address a checkout would read
-      // an isolated session's output as the main worktree's, so it is muted —
-      // but only it. A modern device on the same machine keeps its stream.
-      mayDeliverTo: (peer) => !core.hasIsolatedSessions() || peer.checkoutRouting,
-      // Per-sender mirror, and the one that has to ANSWER. The advert is
-      // deliberately optimistic across a mixed fleet, and an app binds the
-      // streamId it carries without a fresh project:start — so this is the only
-      // place a stale device on a project with isolated sessions can be told
-      // why, and the refusal it would have got from that verb is the one to
-      // give it. Fail-closed on an unresolvable session, exactly as the core's
-      // own gate does.
-      mayAcceptFrom: (peer) =>
-        !core.hasIsolatedSessions() || peer?.checkoutRouting === true
-          ? null
-          : { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
-      onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
-      onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
+      // Fail-closed: a stream open with no resolvable session for the peer is
+      // refused rather than admitted with nothing to route by.
+      mayAcceptFrom: (peer) => peer === null ? { code: "NOT_ALLOWED", message: "no session for this peer" } : null,
+      onAdmitted: () => { this.relayRegistered = true; settleOnce(); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
       // snapshots on reconnect. connState gates ALL bus subscribers at the source,
       // so don't suppress while a desktop owner shares it over loopback — that
       // would freeze the live local session.
       onPeerOnline: () => {
-        // A tunneled body in flight across either edge is dead by construction —
-        // the relay client clears its queues at promotion and on peer-offline —
-        // but that clear only reaches a run parked on a send at that instant; a
-        // run between sends keeps streaming into a relay that will drop it or a
-        // session that will ignore it, competing for the preview window with the
-        // page reload the app is doing. The manager is the only thing that can
-        // stop it.
-        core.abortTunnelStreams();
         peerConnected = true;
         core.connState.peerOnline = true;
       },
       onPeerOffline: () => {
-        // Before the hasOwner early return, and for the same reason as at
-        // peer-online: the phone has left whether or not a desktop owner is
-        // still here, and every body it was receiving is now unreachable.
-        core.abortTunnelStreams();
         // Unconditional, unlike the stream gate below: the loopback carve-out
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
@@ -692,16 +654,23 @@ export class ProjectCore {
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      onPeerSessionGone: (peerId) => this.noteClientGone(peerId),
-      onTunnel: (raw, peerId) => core.handleTunnelMessage(raw, peerId),
+      onPeerSessionGone: (peerId) => {
+        this.noteClientGone(peerId);
+      },
+      // Fired when this peer's project-stream binding itself closes (unbind,
+      // reset, or the stream reader ending) rather than the whole peer session —
+      // the read-state cleanup is the same either way.
+      onPeerStreamClosed: (peerId) => this.noteClientGone(peerId),
+      tunnels: core.tunnelStreams,
+      uploads: core.uploadStreams,
     });
 
-    core.setPlainHook((d, target) => handle.sendTunnel(d, target));
     // Mark this connection as REMOTE for the core's mobile-access gate, and let
     // every per-device question (capabilities, push identity) resolve against the
     // device that asked. Local mode never wires this, so loopback control stays
     // ungated.
     core.setPeerSessionProvider((peerId) => remote.peerSession(peerId));
+    core.setTerminalStreamHooks(handle.terminalHooks ?? null);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -712,7 +681,7 @@ export class ProjectCore {
     const dispatcher = createPushDispatcher({
       projectId: core.projectId,
       machineUuid: () => remote.machineDeviceId(),
-      // Fire when NO attached client can receive in-band: no reachable session
+      // Fire when NO attached client can receive in-band: no native session
       // at all, OR every client that has declared a focus state is backgrounded
       // (`appFocusPaused` is that conjunction, so one device in the user's hand
       // keeps push quiet while its backgrounded sibling would not). NOT
@@ -726,9 +695,9 @@ export class ProjectCore {
       handlerOwnsCompletion: (terminalId) => core.handlerOwnsCompletion(terminalId),
       // Target every registered phone that CANNOT receive this in band right
       // now, which is the question push actually answers. A device is in band
-      // only while it holds a reachable session AND that session's client has
-      // not backgrounded itself; anything else — no session, an unreachable one,
-      // a reaped one, a backgrounded one — is a push target. Asking it per
+      // only while it holds an established native session AND that session's
+      // client has not backgrounded itself; anything else — no session, a
+      // retired one, a backgrounded one — is a push target. Asking it per
       // device is what keeps a sibling from suppressing the fallback: a desktop
       // app establishes a session exactly like a phone but registers no push
       // token, so "some session exists" would silence the phone in the user's
@@ -744,7 +713,7 @@ export class ProjectCore {
         if (!(this.deps.remoteAccessEnabled?.() ?? false)) return [];
         const inBand = new Set(
           remote.establishedPeers()
-            .filter((p) => p.reachable && core.clientFocusPaused(p.peerId) !== true)
+            .filter((p) => core.clientFocusPaused(p.peerId) !== true)
             .map((p) => p.peerPubkey),
         );
         const paired = core.pairedPhones.list();
@@ -792,63 +761,47 @@ export class ProjectCore {
 
     // Claimed here, not by the caller: an attach leaving the slot unset can carry
     // a session-bus exchange IN and never answer it, the reply expiring at the
-    // TTL with the send having reported itself on its way.
-    // Host promotion and the wizard controller each guard their own path and
-    // neither sees the other's, so a core enabled both ways overwrites the slot
-    // — making "last attach wins" an accidental routing decision. Warn, don't
-    // throw: the overwrite already happens, and a throw would fail a live path.
+    // TTL with the send having reported itself on its way. `promote` refuses a
+    // remote-mode core, so a takeover means a second promote without a stop —
+    // warn rather than throw, since the overwrite would fail a live path.
     if (this.slot) {
       log.warn(
-        "relay slot for project %s taken over by a second attach — the earlier stream can no longer be answered on",
+        "project stream slot for %s taken over by a second attach — the earlier stream can no longer be answered on",
         core.projectId,
       );
     }
-    this.slot = { handle, remote, unsubscribePush };
+    this.slot = { handle, unsubscribePush };
 
     // Push and stream go first, so `sendToAppSession` refuses rather than
-    // reporting a send onto a dead stream. Everything past the identity check is
-    // the CORE's single copy, which a second attach now owns: clearing it blind
-    // leaves that live stream with no plain hook and refusing every
-    // checkout-variable frame for the life of the core, unrecoverably.
+    // reporting a send onto a dead stream. The core's hooks are its single copy,
+    // which a second attach now owns, so they are cleared only by the attach
+    // that still holds the slot.
     const detachSlot = (): boolean => {
       try { unsubscribePush(); } catch { /* best-effort */ }
       try { handle.detach(); } catch { /* best-effort */ }
       if (this.slot?.handle !== handle) return false;
       this.slot = null;
-      try { core.setPlainHook(null); } catch { /* best-effort */ }
       try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
+      try { core.setTerminalStreamHooks(null); } catch { /* best-effort */ }
       return true;
     };
 
     return { handle, firstRegister, unsubscribePush, detachSlot };
   }
 
-  /** Attach the local core as a stream for the desktop wizard promotion path,
-   *  reusing {@link attachRelayStream}'s full wiring. Returns a `detach` that
-   *  tears the stream + push subscriber down and clears the hooks — the machine
-   *  socket itself is owned by the host control plane and stays up. */
-  private attachLocalStreamForWizard(
-    core: AgentCore,
-    bus: MessageBus,
-    remote: ProjectCoreRemoteDeps,
-  ): { handle: StreamHandle; detach: () => void } {
-    const { handle, detachSlot } = this.attachRelayStream(core, bus, remote);
-    return { handle, detach: detachSlot };
-  }
-
-  /** Promote an already-open (typically LOCAL) core onto the relay by adding a
-   *  relay slot to its EXISTING bus — the live loopback session keeps running
+  /** Promote an already-open (typically LOCAL) core to remote access by adding a
+   *  native project binding to its EXISTING bus — the live loopback session keeps running
    *  untouched. The phone here is machine-trusted (account inventory + the
    *  machine's mobile-access switch), NOT QR-paired per project, so this does NOT
    *  open a pairing window. `remoteDeps` MUST come from the host's ONE shared
    *  runtime (remoteDepsFor) — promote constructs no OAuthClient / token timer. */
   promote(remoteDeps: ProjectCoreRemoteDeps): PromotionHandle {
-    // A remote-mode core's relay slot IS its primary session; promoting it would
-    // wire a SECOND client whose PromotionHandle.stop() nulls setPlainHook/
+    // A remote-mode core's native binding IS its primary remote session; promoting it would
+    // wire a SECOND client whose PromotionHandle.stop() nulls
     // setPeerSessionProvider, tearing down the live primary session's hooks. Only
-    // a local-mode core (whose loopback session owns no relay hooks) is promotable.
+    // a local-mode core (whose loopback session owns no remote hooks) is promotable.
     if (this.deps.mode === "remote") {
-      throw new Error("ProjectCore.promote: cannot promote a remote-mode core (its relay slot is the primary session)");
+      throw new Error("ProjectCore.promote: cannot promote a remote-mode core (its native project binding is primary)");
     }
     const core = this.core;
     const bus = this.bus;
@@ -864,7 +817,7 @@ export class ProjectCore {
         stopped = true;
         // No stream → not dialable, so the advert reads not-running (a re-promote
         // flips it back). Unless a second attach owns the slot: ITS stream is
-        // still admitted, and `running:false` costs the phone `stream-ready`.
+        // still admitted.
         if (detachSlot()) this.relayRegistered = false;
       },
     };
@@ -872,14 +825,11 @@ export class ProjectCore {
 
   /** Tear down transport + subsystems. */
   async shutdown(reason?: string): Promise<void> {
-    try { this.promotion?.stop(); } catch {}
-    if (this.deps.mode === "remote" && this.slot) {
-      // Publish over the bus so the disconnecting notice rides this core's stream.
-      // Best-effort: a notice still queued in the relay client when the socket
-      // closes is dropped, and the phone learns of the shutdown by liveness.
-      try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
+    if (this.expireInterval) { clearInterval(this.expireInterval); this.expireInterval = null; }
+    for (const timer of this.provisionalTimers) clearTimeout(timer);
+    this.provisionalTimers.clear();
+    try { this.core?.setPeerSessionProvider(null); } catch {}
+    try { this.core?.setTerminalStreamHooks(null); } catch {}
     // Before detaching — deliver() would otherwise hand a frame to a torn-down
     // stream.
     try { this.slot?.unsubscribePush(); } catch {}
@@ -894,11 +844,5 @@ export class ProjectCore {
     // Match promote().stop(): a detached handle left in the slot would have
     // `sendToAppSession` still answering true onto a dead stream.
     this.slot = null;
-    // AFTER the detach, the order promote().stop() keeps: the core latches
-    // itself relay-attached for life, so a frame the still-attached stream
-    // admits while the lookup is already gone is refused
-    // CHECKOUT_ROUTING_UNAVAILABLE at error level — a routine close reading as a
-    // fault, once per frame the phone sends during the graceful PTY drain.
-    try { this.core?.setPeerSessionProvider(null); } catch {}
   }
 }

@@ -13,7 +13,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/handler_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_ask_footer.dart';
 import 'package:antgrid/widgets/handler/handler_blocked_action_card.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';

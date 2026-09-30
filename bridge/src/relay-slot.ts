@@ -5,4 +5,4 @@
  * (revocation is per ACCOUNT device, but an app's live sockets are keyed by
  * slot), and the separator must not exist in two TS copies.
  */
-export { baseSlotDeviceId, slotMachineDeviceId, isSlotOf } from "antgrid-wire";
+export { baseSlotDeviceId, isSlotOf } from "antgrid-wire";

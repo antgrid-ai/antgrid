@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "status": "preliminary-windows-smoke-only",
+  "dart": {
+    "package": "iroh_quic",
+    "version": "1.0.3",
+    "generatedRuntimeVersion": "2.12.0",
+    "artifacts": [
+      {
+        "target": "x86_64-pc-windows-msvc",
+        "url": "https://github.com/snowpinelabs/iroh_dart/releases/download/v1.0.3/irohdart_ffi-x86_64-pc-windows-msvc.dll",
+        "signatureUrl": "https://github.com/snowpinelabs/iroh_dart/releases/download/v1.0.3/irohdart_ffi-x86_64-pc-windows-msvc.dll.sig",
+        "sha256": "d133f9bf9801b7d62cc1c0f1527af51b873e0cbac2651b7d290b109a6e15d476",
+        "upstreamSignatureVerified": true
+      }
+    ]
+  },
+  "javascript": {
+    "package": "@number0/iroh",
+    "version": "1.1.0",
+    "artifactIntegritySource": "bun.lock"
+  }
+}

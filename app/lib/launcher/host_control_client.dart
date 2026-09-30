@@ -298,7 +298,9 @@ class RemoteDirectoryAck {
     }
     final rawKeys = json['wantedRepoKeys'];
     final wantedRepoKeys = <String>[
-      if (rawKeys is List) for (final k in rawKeys) if (k is String) k,
+      if (rawKeys is List)
+        for (final k in rawKeys)
+          if (k is String) k,
     ];
     final lastReadAt = json['lastReadAt'];
     return RemoteDirectoryAck(
@@ -338,6 +340,46 @@ class HostControlClient {
   int _seq = 0;
 
   Uri get _uri => Uri.parse('http://127.0.0.1:$port/control');
+
+  /// Asks the host to refresh its remote authorization and retry a blocked
+  /// endpoint. It fences nothing: a desktop reports window focus as a resume.
+  /// The refresh is asynchronous, so this never promises a usable session.
+  Future<void> peerResume({
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    final http.Response response;
+    try {
+      response = await _http
+          .post(
+            Uri.parse('http://127.0.0.1:$port/peer-resume'),
+            headers: {'authorization': 'Bearer $token'},
+          )
+          .timeout(timeout);
+    } catch (_) {
+      throw HostControlException('TRANSPORT', 'peer resume POST failed');
+    }
+    if (response.statusCode != 202) {
+      throw HostControlException(
+        'HTTP_${response.statusCode}',
+        'peer resume returned ${response.statusCode}',
+      );
+    }
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } catch (_) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'invalid peer resume response',
+      );
+    }
+    if (decoded is! Map || decoded['ok'] != true) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'peer resume was not acknowledged',
+      );
+    }
+  }
 
   /// [timeout] bounds the loopback round-trip; callers size it to the verb's
   /// cost. A `TimeoutException` flows through the same `catch` as any transport
@@ -642,10 +684,10 @@ class HostControlClient {
   }
 
   /// The asking half of the remote session directory (`session-bus:remote-
-  /// directory`, `docs/session-messaging.md` §5.3): hand the local bridge
-  /// what this cycle's pump learned peeking peer capability cards. `machines`
-  /// is sent verbatim — the bridge's own `RemoteDirectoryCache.replace`
-  /// validates and sanitises each row, so nothing here re-checks one.
+  /// directory`): hand the local bridge what this cycle's pump learned peeking
+  /// peer capability cards. `machines` is sent verbatim — the bridge's own
+  /// `RemoteDirectoryCache.replace` validates and sanitises each row, so
+  /// nothing here re-checks one.
   /// `BAD_REQUEST` covers ANY rejection of `ControlRequestSchema`, not only an
   /// unrecognised verb — `RemoteDirectoryPumpEngine` is what tells a bridge
   /// that predates this verb apart from a payload bug on this side, by

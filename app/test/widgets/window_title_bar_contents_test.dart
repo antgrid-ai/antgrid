@@ -12,7 +12,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';

@@ -34,8 +34,6 @@ import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
-import '../../screens/upgrade_screen.dart';
-import '../../billing/pricing_visibility.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
 import '../../util/ab_log.dart';
@@ -402,13 +400,6 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           }
           stashIfDirty = true;
         }
-      }
-    } on SessionLimitExceededException catch (e) {
-      // A legacy relay's retired cap, not a transient failure — retrying won't
-      // clear it, so say what will and show the plan the account is on.
-      if (mounted && !_endedByCancel) {
-        showAbSnackBar(context, e.userMessage);
-        if (kPricingSurfacesEnabled) await openUpgrade(context, ref.container);
       }
     } on SessionOperationException catch (e) {
       // The bridge's create/start refusal is already user-facing text and the

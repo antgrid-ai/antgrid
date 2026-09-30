@@ -29,8 +29,9 @@ export interface PairedPhonesStore {
   upsert(phone: PairedPhone): void;
   remove(phonePubkey: string): void;
   /** Record a fresh admission for `phonePubkey` WITHOUT writing to disk.
-   *  A phone rekeys on a schedule and every rekey re-runs the client-hello, so
-   *  a straight `upsert` here would rewrite (and re-flush) the file on each one
+   *  Every session establishment re-runs admission, so a phone that
+   *  reconnects often would, with a straight `upsert` here, rewrite (and
+   *  re-flush) the file on each one
    *  — tripping the watcher's re-advertise. The row is updated in memory and
    *  the write is coalesced onto a timer (see `flushLastSeen`). No-op for an
    *  unknown phone. */
@@ -57,7 +58,7 @@ export interface PairedPhonesStore {
 export interface PairedPhonesOptions {
   /** How long to coalesce `touchLastSeen` writes. Tests drive this to 0-ish;
    *  production trades up to this much staleness in `antgrid phones list` for
-   *  one write per active minute instead of one per rekey. */
+   *  one write per active minute instead of one per reconnect. */
   lastSeenFlushMs?: number;
 }
 
@@ -140,8 +141,8 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     has: (pk) => phones.some((p) => p.phonePubkey === pk),
     get: (pk) => phones.find((p) => p.phonePubkey === pk),
     upsert: (phone: PairedPhone) => {
-      // Displace by pubkey OR device id, so a rekey (same device, new pubkey)
-      // replaces the old row instead of leaving an orphan alongside it.
+      // Displace by pubkey OR device id, so a re-provisioned device (same
+      // device, new pubkey) replaces the old row instead of leaving an orphan alongside it.
       const displaced = phones.filter(
         (p) =>
           p.phonePubkey === phone.phonePubkey ||
@@ -203,7 +204,7 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
           const armed = touchWriteRaw;
           touchWriteRaw = null;
           // Our own touch flush: memory already holds it, and re-advertising on
-          // it would put every rekey back on the wire indirectly.
+          // it would put every reconnect back on the wire indirectly.
           if (armed !== null && raw === armed) return;
           // A failed read is a write in flight, not an emptied store — keep
           // memory and wait for the completing write's own event.

@@ -24,7 +24,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/session_mode.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/command_output_overlay.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:antgrid/widgets/send_capture_to_agent.dart';

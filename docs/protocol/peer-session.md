@@ -1,0 +1,425 @@
+# Peer session protocol (native Iroh payload path)
+
+There is no app-layer handshake, transcript, key schedule or rekey: **QUIC/TLS between two
+Iroh endpoints the authorization snapshot names is the confidentiality layer**, and a native connection
+carries exactly one plaintext session hello. What follows is the shape of that hello and the invariants
+around it that no single test suite owns end to end.
+
+---
+
+## 1. Identity and admission
+
+A native connection is accepted only from an endpoint ID present in the caller's authorization lease
+(`acceptPeer`, `bridge/src/peer/native-host-connection.ts`); the peer's Ed25519 pubkey used for
+identity/push targeting (`admitPeer`, `bridge/src/peer-session-owner.ts`) comes from that same lease
+entry, never from anything the peer sends over the wire — there is no signature for the bridge to
+verify because the QUIC handshake already proved which endpoint dialed in.
+
+**Same-endpoint reconnect:** the newest authenticated connection from a given endpoint ID retires the
+prior one in `acceptPeer` ("newest wins") rather than being refused. Sessions are keyed per device, so
+a *different* endpoint for the same device cannot sit alongside it: while the lease still authorizes the
+held endpoint, the newcomer is the one closed — a second endpoint never evicts a live, authorized one.
+Only when the held endpoint has lost its authorization is it retired in the newcomer's favour.
+
+## 1a. Streams
+
+ALPN `antgrid/peer/2`. Every native bidirectional stream — the session stream included — opens with one
+open-frame record, `[u32 BE len][UTF-8 JSON StreamOpen]`; the body is raw JSON, not a peer frame. Schema
+and codecs: `StreamOpen`/`StreamRefused`, `encodeStreamOpen`/`decodeStreamOpen`,
+`encodeStreamRefused`/`decodeStreamRefused` (`packages/antgrid-wire/src/stream-open.ts`).
+
+**The first stream** the bridge accepts must declare `{kind:"session"}`. A missing, unparseable or
+non-session first open closes the connection (code `2n`, protocol violation) rather than being refused
+in-band — there is no session yet worth keeping alive. Once validated, the session stream carries the
+rest of this document unchanged: session-stream records (§4) and the hello (§2), all on the same stream,
+with no open acknowledgement. One `AbMessage` (or one session frame) is one record, sliced only at the
+transport layer (`StreamRecordWriter`, `bridge/src/peer/stream-records.ts`), and
+`MAX_TRANSFER_BYTES`/`PEER_MAX_RECORD_BYTES` bound a record's size instead of a window's.
+
+**Every later stream** is admitted in its own task by `PeerStreamAcceptor`
+(`bridge/src/peer/stream-dispatch.ts`), so stream *N+1* is never blocked behind stream *N*'s open-frame
+read. Admission order per stream:
+
+1. A pending-open cap per peer (`STREAM_MAX_PENDING_OPENS_PER_PEER`) — over cap is refused
+   `CAP_EXCEEDED` without being read.
+2. The open frame is read under a 5s deadline; a missed deadline resets the stream's send half (the read
+   still holds the recv mutex, so `recv.stop` waits until that read settles, and a late frame is never
+   admitted) and a native read failure (peer FIN/reset) drops the stream silently. Neither costs the
+   connection.
+3. A peer no longer authorized gets nothing written; the connection is retired as unauthorized instead.
+4. An unparseable, zero-length or oversized open frame, or `{kind:"session"}` on a later stream (the
+   session stream is already open), is refused `INVALID`.
+5. A non-session open before the session is established is refused `NOT_READY`.
+6. A well-formed kind with no registered handler is refused `NOT_ALLOWED`.
+
+Refusals are in-band `{type:"stream:refused", code, message}` followed by FIN — the Dart binding cannot
+read a QUIC reset code, so every refusal the app must act on has to be a record it can decode. Reset and
+stop codes (`STREAM_STOP_REFUSED`, `STREAM_RESET_OPEN_TIMEOUT`, `STREAM_RESET_REFUSED`,
+`bridge/src/peer/stream-dispatch.ts`) are bridge-side diagnostics only. A refused or timed-out later
+stream never costs the connection; only an unauthorized peer or a first-stream protocol violation does.
+
+The handler table registers `{kind:"terminal"}` (§1b), `{kind:"tunnel-tcp"}`
+(§1c), `{kind:"project"}` (§1d — this is what replaces the session stream's old `{s,m}` mux entirely), and
+`{kind:"upload"}` (§1e); a well-formed kind with no registered handler is refused `NOT_ALLOWED`. The
+QUIC-level cap (`STREAM_MAX_BIDI_STREAMS_PER_CONNECTION`) is set
+once per connection via `setMaxConcurrentBiStreams`, synchronously after the ALPN check. All caps are
+defined once in `packages/antgrid-wire/src/stream-open.ts` and hand-mirrored in
+`packages/antgrid_relay_client/lib/src/models/stream_open.dart`.
+
+## 1b. Terminal attachment streams
+
+A terminal attachment (§1a's `{kind:"terminal", projectId, checkoutId?, requestId}`) gets its own stream
+once admitted by `TerminalStreamRegistry` (`bridge/src/peer/terminal-streams.ts`), plugged into
+`PeerStreamAcceptor` as `handlerFor("terminal")`. Terminal, tunnel and upload streams share one admission
+path, `ScopedStreamRegistry` (`bridge/src/peer/stream-dispatch.ts`), in this order, synchronous and before
+any read: the kind's per-peer cap (`CAP_EXCEEDED`); the kind's own open-frame check (terminal: a uuid
+`requestId`, `INVALID`); `isSafeProjectId` (`NOT_ALLOWED`); the project catalogued (`NOT_ALLOWED`); a live
+entry for the project (`ProjectStreamRegistry.projectBinding`, `NOT_READY`) — a lookup only; a stream open
+never opens or promotes a core; that peer holding the project's stream open (`NOT_ALLOWED`); the project's
+own `refusalFor`, masked to `NOT_ALLOWED`; a duplicate (peer, kind, id) (`INVALID`); and the kind's own
+server being available (tunnel, upload: `NOT_ALLOWED`). Past admission, refusal reuses §1a's in-band
+`stream:refused` codes; a `NOT_READY` here means the project has no live mux entry yet, not that the open
+frame was malformed.
+
+**Record set.** After the open frame, every record body is the raw UTF-8 JSON of one `AbMessage` — no
+`{s,m}` peer-frame envelope and no channel label. Exactly eight message types ride this stream:
+app→bridge `terminal:subscribe`, `terminal:ack`, `terminal:unsubscribe`, `terminal:history:request`;
+bridge→app `terminal:subscribed`, `terminal:frame`, `terminal:display:status`, `terminal:history:page`.
+Everything else — `terminal:input`, `terminal:resize`, `terminal:start` and the rest — stays on the
+project/session stream, unchanged by this section.
+
+**First-record rule.** The app's first record must be a `terminal:subscribe` naming the open frame's own
+`requestId` and normalized `checkoutId` (an absent `checkoutId` on either the open frame or the message
+normalizes to `"main"`). Every later app record must carry the same `terminalId`, `checkoutId`, and the
+`attachmentId`/`runId` the bridge bound from its own `terminal:subscribed` — one arriving before
+`subscribed` is a breach. The bridge's first record is either a refusal (§1a) or `terminal:subscribed`
+itself, or the requestId-addressed `terminal:display:status` that ends a failed attempt. A record that
+breaks either rule aborts only that stream, never the connection.
+
+**Routing keys.** `subscribed`, and a `display:status` naming no bound attachment yet (UPGRADE_REQUIRED,
+UNKNOWN_TERMINAL, a failed attach), route by `(peerId, requestId)`; every other outbound message routes by
+`(peerId, attachmentId)`. A message with no bound stream falls back to that peer's project stream (§1d) —
+this is how the app's own `terminal:subscribe` on the project stream (still accepted; the app itself never
+sends one there) and older builds keep working.
+
+**Ends.** When delivery retires the attachment, the bridge `finish()`es its send half; the app reads that
+FIN as a plain retirement, not an ENDED status. When the app FINs or resets its send half, the bridge
+synthesizes `terminal:unsubscribe` for whatever attachment was bound. An overflow or a lost stream resets
+only that one stream (every other attachment and the connection are untouched); only `unauthorized`, or an
+app record whose length prefix exceeds the stream's cap (a protocol violation), closes the connection.
+
+**Caps.** `STREAM_TERMINAL_APP_RECORD_MAX_BYTES`, `STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES` and
+`STREAM_MAX_TERMINAL_ATTACHMENTS_PER_PEER` are defined once in `packages/antgrid-wire/src/stream-open.ts`
+beside every other stream cap (§1a); the writer's queue ceiling
+(`TERMINAL_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_TERMINAL`) are side-local to
+`bridge/src/peer/terminal-streams.ts`, since Dart has no priority concept and nothing on the app side reads
+them.
+
+## 1c. Tunnel streams
+
+Preview traffic never rides the bus and is never parsed. The phone listens on `localhost:<port>` and every
+TCP connection it accepts becomes ONE QUIC stream, `{kind:"tunnel-tcp", projectId, connId}` (`connId` is
+app-minted and unique per peer); the bridge dials `localhost:<port>` and pipes raw bytes. HTTP, WebSocket,
+TLS, cookies and redirects are all just bytes here. `TunnelStreamRegistry`
+(`bridge/src/peer/tunnel-streams.ts`) is plugged into `PeerStreamAcceptor` as `handlers["tunnel-tcp"]`, and
+its streams pass through §1a's cap/pending-open/timeout admission and §1b's shared project-scoped admission
+exactly as a terminal stream does — a lookup only, never an open or a promotion.
+
+**Framing.** Exactly one length-prefixed record, `[u32 BE len][UTF-8 JSON]`, goes each way, each bounded by
+`STREAM_TUNNEL_TCP_RECORD_MAX_BYTES`; everything after the bridge's record is raw bytes with no framing,
+read with `StreamRawReader` and written with `StreamRecordWriter.sendRaw()`
+(`bridge/src/peer/stream-records.ts`), exactly like an upload's file bytes (§1e).
+
+**First-record rule.** The target rides the app's first record, not the open frame. It must be
+`{type:"tunnel:tcp-open", connId, port, checkoutId?, probe?}`: `connId` equals the open frame's, `port` is
+1..65535, `checkoutId` defaults to `main`. It is read under the same 5s deadline as §1a's open frame. Once it
+parses, `AgentCore.tunnelStreams.admit(peerId, checkoutId)` runs, in order: the remote-access switch
+(`NOT_ALLOWED` if off), the named checkout must be a currently running runtime (`NOT_ALLOWED` — "unknown
+checkout"), and that runtime must have a `TunnelManager` (`NOT_ALLOWED`). A malformed record, or one naming a
+`connId` other than the open frame's, is refused `INVALID`. The bridge dials only the host `localhost`; the
+port is the one thing the app chooses.
+
+**The bridge's one reply record**, then FIN or raw bytes:
+
+| Reply | Then |
+|---|---|
+| `stream:refused` (§1a) — cap, catalog, remote access, checkout, bad head | FIN |
+| `tunnel:tcp-error {connId, message}` — the upstream connect failed or timed out | FIN |
+| `tunnel:tcp-ready {connId, tls}` — only for `probe:true`, after a TLS handshake attempt against the port; nothing is piped | FIN |
+| `tunnel:tcp-ready {connId}` | raw bytes both ways until either end closes |
+
+The app must not send raw bytes before it has read the ready record; the bridge holds the upstream's
+bytes back until the ready record is queued.
+
+**Endings.** Half-close is not modelled: an end in either direction winds the whole connection down. An
+upstream close or error makes the bridge FIN after the bytes already queued and release the slot. An app FIN
+or reset makes the bridge stop relaying, keep reading and discarding upstream bytes, and half-close the upstream once it
+has ended or a short drain window has passed (`TCP_END_DRAIN_MS`), then finish its own half; a socket still open
+after `TCP_END_DESTROY_MS` is destroyed. The bridge never resets an upstream on its own initiative, but an upstream
+still streaming when the browser gives up can still see a reset, exactly as it would from a real browser. A peer that is dropped ends every one of
+its forwards the same way. Failure isolation matches §1b: an overflow or a lost stream resets only that one
+stream, and only `unauthorized`, or a protocol violation (a bad first stream, §1a, or an app record over the
+stream's cap), closes the connection.
+
+**Pacing.** The bridge pauses the upstream socket until each `sendRaw` resolves, and the app awaits each send
+before pulling more from the local socket: a Dart `sendRaw` does not block, and overflowing the per-stream
+queue resets the stream.
+
+**Caps.** `STREAM_MAX_TUNNEL_STREAMS_PER_PEER` counts open connections, not requests;
+`STREAM_TUNNEL_TCP_RECORD_MAX_BYTES` is defined once in `packages/antgrid-wire/src/stream-open.ts` beside every
+other stream cap (§1a). The raw bytes use the same `STREAM_RAW_READ_BYTES`/`STREAM_RECORD_SLICE_BYTES` as any
+other raw stream (§5).
+
+## 1d. Project streams
+
+Every project gets its own stream — `{kind:"project", projectId}`, no `checkoutId`: a
+project stream is per PROJECT, and checkout routing stays per message on it, unchanged. It replaces the
+`{s,m}` mux entirely: a bound stream carries no `s`/`m` envelope, one `AbMessage` is one record, and the
+session stream (§1a) is left carrying only the machine control plane: the hello, the app's wedge-probe
+`session:ping` and its `session:pong`, and machine-scoped verbs such as `agent:projects`, `stream-ready`
+and `control:result`. Admitted
+and routed by `ProjectStreamRegistry` (`bridge/src/project-streams.ts`), plugged into `PeerStreamAcceptor`
+as `handlers.project`, and exposed to the terminal, tunnel and upload registries as
+`projectBinding` — a lookup only; none of their opens ever opens or promotes a core.
+
+**Admission order**, synchronous and before any read: a per-peer cap (`STREAM_MAX_PROJECTS_PER_PEER`,
+`CAP_EXCEEDED`); `isSafeProjectId` (`NOT_ALLOWED`); the remote-access switch (`NOT_ALLOWED`); the project
+catalogued (`seenProjects`, `NOT_ALLOWED`); a relay-registered core for this project — else `NOT_READY`
+(the app waits for `stream-ready {projectId}` on the session stream and opens again, never parked); that
+core's outbound `mayDeliver` (`NOT_ALLOWED`); its
+`mayAcceptFrom` (`NOT_ALLOWED` — fail-closed when the peer resolves to no session); and finally a
+duplicate open for the same (peer, project) pair (`INVALID`).
+
+**The bind is the bridge's own first record.** `stream-ready {projectId}` is both the ready notice
+on the session stream AND the bridge's first write on a newly admitted project stream — the app treats its
+project stream as bound only once this record arrives; there is no separate open acknowledgement.
+
+**Outbound authorization runs on every send, not just at open.** `mayDeliver` (the remote-access switch,
+outbound half) and the optional per-receiver `mayDeliverTo` are both re-read on every bus frame a project
+stream would carry, broadcast or peer-addressed — the switch can flip after the stream is already bound.
+No current caller of `attachStream` supplies `mayDeliverTo`; it stays wired through `ProjectStreamRegistry`
+for a future per-receiver policy. `mayAcceptFrom` is the sender-side mirror, re-checked on every inbound
+record: a refused record is dropped and the peer is told why by a `control:result {ok:false}` on the
+session stream, rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
+
+**Session-bus frames** (`session-bus:*`, `bridge/src/protocol.ts`) ride this stream, peer-addressed, exactly like any
+other project-scoped bus frame — there is no separate stream for them.
+
+**Failure isolation** matches §1b/§1c: an overflow or a lost stream resets only that one project stream
+(the app reopens and resyncs through `state.snapshot`); only `unauthorized`, or a protocol violation (a bad
+first stream, §1a, or an app record over `STREAM_PROJECT_APP_RECORD_MAX_BYTES`), closes the connection.
+
+**Caps.** `STREAM_MAX_PROJECTS_PER_PEER`, `STREAM_PROJECT_APP_RECORD_MAX_BYTES` (app→bridge; the app only
+ever writes small control-plane records) and `STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES` (bridge→app, equal to
+`MAX_TRANSFER_BYTES` — a large reply such as `file:content` is still one record) are defined once in
+`packages/antgrid-wire/src/stream-open.ts` beside every other stream cap (§1a); the writer's queue ceiling
+(`PROJECT_STREAM_MAX_QUEUED_BYTES`) and stream priority (`STREAM_PRIORITY_PROJECT`, between terminal and
+tunnel priority) are side-local to `bridge/src/project-streams.ts`.
+
+## 1e. Upload streams
+
+A remote file upload gets its own stream, `{kind:"upload", projectId, checkoutId?, requestId, fileName,
+size, mimeType?}`, admitted by `UploadStreamRegistry` (`bridge/src/peer/upload-streams.ts`), plugged into
+`PeerStreamAcceptor` as `handlers.upload`, and exposed to it via `ProjectStreamRegistry.projectBinding`
+(`UploadProjectBinding`) — a lookup only; an upload stream never opens or promotes a core.
+
+**Admission order.** §1b's shared project-scoped steps run synchronously, before any read, and bind the
+stream on success so a cap or duplicate check across concurrent opens is race-free
+(`STREAM_MAX_UPLOAD_STREAMS_PER_PEER`; the last step is the project declaring an upload server at all).
+The rest continues asynchronously once bound: `UploadStreamServer.admit(peerId, checkoutId)` — unlike `tunnelStreams.admit` (§1c), this may
+PREPARE a checkout runtime that is not yet running, replicating the lazy prepare an app's socket-path
+upload verbs relied on before a stream open bypassed that bus-level dispatch — then
+`FileUploadManager.begin()`, which admits the declared `fileName`/`size` and opens the file.
+
+**Record framing.** The file's bytes need no record framing of their own: once admitted, the app writes
+exactly `size` raw bytes (read with `StreamRawReader`, at most `STREAM_RAW_READ_BYTES` per native read)
+and FINs its send half. The bridge answers with exactly one length-prefixed JSON record —
+`stream:refused` (an early refusal) or `file:upload-result` (`ok`, or an error code including
+`INCOMPLETE` for a FIN short of `size`) — then FINs in turn. There is no ack and no second record: the
+exchange is exactly one file in, one result out.
+
+**Overrun detection.** Each read requests `min(STREAM_RAW_READ_BYTES, remaining + 1)`: a well-behaved
+peer's read never returns more than `remaining` bytes, so a chunk that does is the overrun signal on the
+SAME read — there is no separate probe once the declared size is reached. An overrun resets the stream
+(`STREAM_RESET_SCOPED`) with no result reported, since the app has already broken the declared contract.
+
+**Cancel.** The app cancels by resetting (or FIN-ing) its own send half; the bridge's pending read
+observes it the same way a tunnel connection's reset does (§1c), and the in-progress
+`FileUploadManager` upload is cancelled with no result to report.
+
+**Caps.** `STREAM_MAX_UPLOAD_STREAMS_PER_PEER`, `STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES` (the one result
+record), `STREAM_UPLOAD_MAX_FILE_NAME_LENGTH` and `STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH` (open-frame
+fields) are defined once in `packages/antgrid-wire/src/stream-open.ts` beside every other stream cap
+(§1a); the writer's queue ceiling (`UPLOAD_STREAM_MAX_QUEUED_BYTES`) and stream priority
+(`STREAM_PRIORITY_UPLOAD`, the same as tunnel priority — a background transfer never needs to preempt a
+live terminal or project viewer) are side-local to `bridge/src/peer/upload-streams.ts`.
+
+**Loopback is a different message entirely.** The desktop app shares the bridge's filesystem, so its own
+local upload writes the bytes to a temp file and names that path instead of streaming them — it crosses the loopback socket as one `file:upload-local`
+(`{projectId, requestId, fileName, sourcePath, mimeType?}`, `bridge/src/protocol.ts`) and gets back one
+`file:upload-result`. A relay-origin frame naming `file:upload-local` is dropped before dispatch (it names a
+path on THIS machine, which only the desktop's own loopback caller can mean), so a remote app uploads over
+its own `upload` stream (above) instead. `FileUploadManager.copyLocal` stats `sourcePath` before copying —
+`INVALID_SOURCE` if it is not an absolute path to a readable file, `TOO_LARGE` past the same cap a streamed
+upload enforces — then copies it through the same staging directory and finalizer a streamed upload uses.
+
+## 2. The hello
+
+One plaintext hello establishes a session per connection:
+
+```
+peer → host : session:hello        { attemptId }
+host → peer : session:established  { attemptId }
+```
+
+Schema: `SessionHelloFrame` in `bridge/src/protocol.ts`. These are bare `{ type, ... }` objects with no
+`id`/`timestamp` envelope — deliberately outside `AbMessageSchema` / `KNOWN_TYPES` (see the comment above
+`PeerSessionOwner.handleHello`), because a hello precedes the session that envelope is scoped to.
+
+- A hello naming an `attemptId` that already matches the peer's established session is re-acked
+  idempotently (the driver has no retransmit loop of its own, but a duplicate must not be treated as a
+  protocol violation). A *different* `attemptId` while already established closes the connection.
+- A peer with no session must already be admitted (`peerPubkeyFor`), or the hello is dropped as
+  `not-admitted`.
+- **Pre-establishment frames are dropped per peer, fail closed** — `receiveSessionRecord`'s only way in
+  for a session-less peer is a `session:hello`; everything else is dropped before it can reach dispatch,
+  the session bus or a stream. This is enforced independently of the transport, because nothing above the
+  QUIC layer proves a connected peer has said hello.
+- A hello that still carries an unknown `capabilities` key parses — Zod strips it and it is ignored, not
+  refused. `sessionBusCarrier` is a loopback-only key (`local-listener.ts`) and must never be sent on this
+  native hello.
+
+The Dart driver (`ConnectionHandshake` / `AppSessionHandshaker`, `packages/antgrid_relay_client`) is
+called "handshake" in code, but it drives no cryptographic exchange: it sends one hello and waits for `established`, with the whole
+attempt bounded by one timeout. A connection that never establishes is closed by the caller, not retried
+on the same link.
+
+## 3. Session lifetime — no in-place rekey
+
+There is no live-session key material to rotate; a session ends only when its link closes.
+Liveness is QUIC's: both endpoints run iroh 1.0's keep-alive (5s) and connection idle timeout (30s),
+recorded as `PEER_QUIC_KEEP_ALIVE_INTERVAL_MS`/`PEER_QUIC_MAX_IDLE_TIMEOUT_MS` and
+`kPeerQuicKeepAliveInterval`/`kPeerQuicMaxIdleTimeout` rather than set, because neither binding exposes a
+transport config. A peer that stops acking closes the connection on idle; the bridge retires it from
+`connection.closed()` (`peer/native-host-connection.ts`).
+
+The app additionally sends `session:ping` after `kPingSilenceSeconds` of session-stream silence and
+closes the `PeerLink` after `kMaxMissedPongs` unanswered (`machine_session.dart`). Its only job is a
+bridge whose event loop is wedged while its QUIC stack still acks — QUIC idle already covers a dead one.
+The bridge answers `session:ping` with `session:pong` and never pings.
+
+RPC timeouts never close the link. Three consecutive timeouts on one project stream reset and reopen
+that stream alone, rerunning the bind resync (§1d); every other project, terminal, tunnel and upload
+stream is untouched. The control plane's only connection-level escape is the app's ping.
+
+Closing the link is still the whole recovery for the session, and the connection supervisor redials,
+going through admission (§1) and the hello (§2) again. One `MachineSession` per `PeerLink` establishes at
+most once — a failed hello closes the link rather than retrying on it — so sends/receives fence on a
+single `_established` flag and `_firstEstablished` completer (`machine_session.dart`).
+
+`acceptPeer`'s capacity cap (§1) is the only admission-time bound, and nothing evicts an established
+peer to admit another.
+
+## 4. Session-record layout
+
+A session-stream record is `[u32 BE len][UTF-8 JSON]` — byte for byte the same shape as a project-stream
+record (§1d), read and written by the same record reader/writer both use. There is no header, no version
+byte and no kind byte: the JSON body's own `type` tells a session frame from a control-plane
+`AbMessage` — no `AbMessage` uses a `session:`-prefixed type, and nothing else on this stream uses
+one either.
+
+The four session frames, one scheme (`session:` + verb), are the whole set
+`SESSION_FRAME_TYPES` (`packages/antgrid-wire/src/peer-protocol.ts`, hand-mirrored as
+`kSessionFrameTypes` in `packages/antgrid_relay_client/lib/src/frame.dart`):
+
+| Type | Direction | Body |
+|---|---|---|
+| `session:hello` | app → bridge | `{type, attemptId}` |
+| `session:established` | bridge → app | `{type, attemptId}` |
+| `session:ping` | either direction may receive it | `{type}` |
+| `session:pong` | reply to a ping | `{type}` |
+
+`isSessionFrameType(type)` is the dispatch: a record whose `type` is one of these four is a session frame
+(`PeerSessionOwner.onSessionFrame`/`handleSessionFrame`); everything else is the bare JSON of exactly one
+`AbMessage` of the control plane (`onControlMessage`/`dispatchControlPlane`). An old envelope-era name
+(`ping`, `pong`, `established`) is therefore control-plane traffic, not a session frame: `PingMessage`/
+`PongMessage` stay in `AbMessageSchema`/`KNOWN_TYPES` for exactly this reason (see
+`PeerSessionOwner.receiveSessionRecord`). A body that is not JSON, or whose `type` is not a string, is
+dropped (`plaintext-not-json`/`unrecognized-plaintext`) rather than treated as a protocol violation — only
+a zero-length or over-cap length prefix still closes the connection (the record reader enforces it).
+Peer identity is authenticated by the connection and deliberately absent from the record.
+
+Test vectors: `evals/fixtures/peer-transport-vectors.json`, generated by
+`packages/antgrid-wire/scripts/gen-peer-transport-vectors.ts` (`bun run --filter antgrid-wire
+gen:peer-vectors`) and consumed by both `packages/antgrid-wire/tests/peer-transport-vectors.test.ts` and
+`packages/antgrid_peer_transport/test/peer_transport_vectors_test.dart`. Regenerate and commit the fixture
+together with any change to the session-record or stream-open constants it pins.
+
+## 5. Per-record caps, not per-channel flow control
+
+Every purpose-specific stream (§1a-§1e) carries its own records directly, so a per-record size cap is
+the whole bound: there is a cap per record, asymmetric by direction and defined once per stream kind in
+`packages/antgrid-wire` (session: `PEER_MAX_RECORD_BYTES`/`PEER_MAX_BRIDGE_RECORD_BYTES` in
+`peer-authorization.ts`; project, terminal, tunnel and upload: `stream-open.ts`, §1b-§1e) — the app only
+ever writes small control-plane records, so its cap is far below the bridge's, which is sized to
+`MAX_TRANSFER_BYTES`. An upload stream's own cap, `STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES`, bounds only
+the one `file:upload-result`/`stream:refused` record it ever writes — the file's bytes carry no record
+cap at all, since a raw read/write has no length prefix to check against (§1e). An app record whose
+length prefix exceeds its stream's cap is a protocol violation and closes the connection. Backpressure is
+a bounded per-stream write queue ahead of the native binding (`StreamRecordWriter`,
+`bridge/src/peer/stream-records.ts`): a project, terminal, tunnel or upload
+stream that fills its queue is reset — that stream alone — without stalling any other stream. The session stream is the one exception: it has nothing to
+reopen, so its overflow retires the connection (`queue-full`, `native-host-connection.ts`).
+
+A raw stream (a tunnel connection's bytes or an upload's file bytes) carries no length-prefixed records at all,
+so its pacing is per-read/per-write rather than per-record: `StreamRawReader.read()` asks for at most
+`STREAM_RAW_READ_BYTES` (65 536) per native call, and `StreamRecordWriter.sendRaw()` slices anything
+larger into writes of at most `STREAM_RECORD_SLICE_BYTES` (262 144) — both side-local constants in
+`bridge/src/peer/stream-records.ts`, since neither is negotiated with the app.
+
+## 6. Netwatch frame IDs
+
+Both endpoints tag every frame with a hash of its payload bytes — `frameIdFor` (`bridge/src/netwatch.ts`),
+hand-mirrored as `frameIdOf` (`packages/antgrid_relay_client/lib/src/frame.dart`) — and the joiner
+(`joinCaptures`, `bridge/src/cli/netwatch.ts`) pairs same-hash occurrences across the two captures
+**in the order they occur**, not by assuming a hash is unique — a ping, a pong, and a repeated
+`stream-ready` with the same field values are byte-identical and legitimately recur. `NetwatchKind` names
+`frame`/`hello` alongside `control`/`json`/`drop`/`lifecycle` — see the
+type declaration for the current set, since it is a poor fit for a frozen list here.
+
+`NetwatchEvent.channel` is the loopback socket's own `control`/`preview` JSON label — the loopback wire was
+left unchanged when native traffic moved to per-kind QUIC streams, so this label stays meaningful there; on
+`transport: "iroh"` it carries no information: every native record source writes `"control"`.
+`NetwatchEvent.streamKind` (the open frame's `kind`, §1a-§1e) is what names a native record's stream
+instead, and both ends now write it — the bridge from `streamLabelOf` (`bridge/src/peer/stream-dispatch.ts`),
+the app from the same lookup in `antgrid_relay_client` — for every stream kind, terminal and tunnel
+included; it is deliberately not part of the join key, since a hash-based pair (above) needs no extra key
+to match on. `streamId` is a per-connection stream LABEL, not a QUIC stream id (`"0"` for the session
+stream, the projectId for a project stream, the open frame's own `requestId` for a terminal or upload stream, `connId` for a
+tunnel-tcp stream) — both ends write it for every stream kind, on the same terms as `streamKind`.
+
+## 7. Lifecycle and interrupted commands
+
+Native shutdown first fences generations, dispatch, timers, and queued work.
+Graceful teardown has five seconds, followed by forced carrier closure and five
+seconds for ownership confirmation. A `cleanupIncomplete` result means the
+runtime still owns work or a carrier; keep the identity locked and do not start
+a replacement. Repeated stop calls share the same completion.
+
+An interrupted mutating request has three local outcomes: `notSent`,
+`confirmed`, or `outcomeUnknown`. A completed socket write is not execution
+confirmation. After `outcomeUnknown`, refresh authoritative state with reads
+and require a fresh user action before submitting another mutation. Never
+replay terminal input, reconnect hydration mutations, or host-restart recovery
+mutations automatically.
+
+Authorization refresh starts after roughly one third of the accepted lease,
+with jitter. Each request is bounded by ten seconds or the remaining lease,
+whichever is shorter. Backend failure, central reconnect, and native success do
+not move the original deadline. Denial, revocation, rotation, remote-access-off,
+or expiry fence dispatch immediately.
+
+Backend registration and lease code is not evidence that a deployed relay
+enforces admission. That needs the relay gate run against the deployed
+configuration, including an unregistered endpoint being denied, before staging
+preference can pass.

@@ -17,7 +17,7 @@ class AppState {
   final RelayConnectionState connectionState;
 
   /// The wire `code` from the most recent relay `ErrorMessage`, if any
-  /// (e.g. `PAIR_TIMEOUT`, `LICENSE_INVALID`). Consumers should match on
+  /// (e.g. `LICENSE_INVALID`). Consumers should match on
   /// this rather than parsing [error] (which is the human "code: message"
   /// concatenation).
   final String? errorCode;

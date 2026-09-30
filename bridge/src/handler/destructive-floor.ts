@@ -75,7 +75,7 @@ const DESTRUCTIVE: RegExp[] = [
   /\b(drop|truncate)\s+(table|database)\b/i,
   /\bchmod\s+-R\b/i,
   /\bchown\s+-R\b/i,
-  // Outward moves: a merged pull request, a published version, a deleted ref. No §5.2
+  // Outward moves: a merged pull request, a published version, a deleted ref. No
   // snapshot reaches any of them — the state that moved lives on a remote or in a
   // registry — so what these buy is the audit row and a lift that has to be asked for,
   // never an undo.
@@ -84,10 +84,11 @@ const DESTRUCTIVE: RegExp[] = [
   // is routinely the backlog's whole point, and a HARD entry is liftable by nothing, so
   // promoting these would block the very operation the user authorized.
   //
-  // One operation per pattern, never an alternation over two: §5.4 keys a lift on the
-  // pattern SOURCE, so a `(?:release|repo)` arm would let an authorized release delete
-  // silently authorize deleting the whole repository — and a `(?:merge|close)` one would
-  // let "close the stale PRs" grant every merge the judge proposes.
+  // One operation per pattern, never an alternation over two: the pattern lift
+  // (`FloorWarning.pattern`, `handler/authorization.ts`) keys on the pattern
+  // SOURCE, so a `(?:release|repo)` arm would let an authorized release delete
+  // silently authorize deleting the whole repository — and a `(?:merge|close)`
+  // one would let "close the stale PRs" grant every merge the judge proposes.
   //
   // The branch pattern alone carries no `i` flag: `-d` and `-D` are different commands.
   // The lowercase one refuses to drop an unmerged branch and so destroys nothing, and

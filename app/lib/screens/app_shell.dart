@@ -33,6 +33,7 @@ import '../launcher/project_resolve.dart';
 import '../keyboard/app_shortcut_scope.dart';
 import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../widgets/window_title_bar.dart';
 import '../window/window_capabilities.dart';
@@ -74,8 +75,9 @@ class _AppShellState extends ConsumerState<AppShell> {
         await ref.read(preferencesServiceProvider).flush();
         return AppExitResponse.exit;
       },
-      onRestart: _reconnectRelay,
-      onResume: _reconnectRelay,
+      // onRestart precedes onResume during the same foreground transition;
+      // refreshing at both points can invalidate the first connection attempt.
+      onResume: _resume,
       onStateChange: (state) {
         _mobileLifecycle?.handleState(state);
       },
@@ -96,9 +98,8 @@ class _AppShellState extends ConsumerState<AppShell> {
     unawaited(pruneRemovedMachines(ref.container));
   }
 
-  /// One kick at a time: a single foregrounding fires both onRestart and
-  /// onResume (and cold launch adds the startup resume to the post-frame
-  /// kick), and a second concurrent kick would re-invalidate the providers the
+  /// One kick at a time: cold launch adds the startup resume to the post-frame
+  /// kick, and a second concurrent kick would re-invalidate the providers the
   /// first one's dials are still mid-building — restarting them for nothing.
   void _kickEagerDials() {
     _eagerKick ??= kickEagerControlPlaneDials(
@@ -139,6 +140,18 @@ class _AppShellState extends ConsumerState<AppShell> {
     }
     final active = ref.read(activeSessionIdProvider);
     if (active != null) session.sessionsService.focus(active);
+  }
+
+  void _resume() {
+    if (!isMobilePlatform) {
+      final host = ref.read(hostControllerProvider);
+      detached(
+        'AppShell',
+        'refresh local host peer authorization',
+        host.notifyPeerResume,
+      );
+    }
+    _reconnectRelay();
   }
 
   void _reconnectRelay() {
@@ -311,9 +324,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // WorkspaceShell out entirely, so a reaper lower than here is unmounted
     // exactly when de-selection happens.
     return ControlPlaneReaper(
-      child: SessionBusCarrierHost(
-        child: RemoteDirectoryPumpHost(child: body),
-      ),
+      child: SessionBusCarrierHost(child: RemoteDirectoryPumpHost(child: body)),
     );
   }
 }
@@ -872,7 +883,8 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
             final repeek = shouldRepeekLocalSessions(
               neverSynced: !store.has(entryId),
               cachedSessionIds: store.get(entryId).map((s) => s.id).toSet(),
-              liveSessionIds: sessionStatuses[entryId]?.keys.toSet() ?? const {},
+              liveSessionIds:
+                  sessionStatuses[entryId]?.keys.toSet() ?? const {},
               hadStatus: hadStatus,
               prevStatus: prevStatus,
               newStatus: newStatus,
@@ -962,7 +974,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
 /// release implementation detail to ever learn it was torn down on purpose.
 @visibleForTesting
 List<String> reconcileControlPlaneWantedness({
-  required RelayConnectionManager mgr,
+  required MachineConnectionManager mgr,
   required Set<String> alive,
   required Set<String> openProjects,
 }) {

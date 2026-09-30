@@ -1,12 +1,12 @@
-// Widget-layer coverage for Wave 7's live frame-replace terminal protocol.
+// Widget-layer coverage for the live frame-replace terminal protocol.
 // The service half (terminal_service.dart) owns the protocol state machine
 // and its own opt-in suite (test/services/terminal_frame_mode_test.dart);
 // this file owns what TerminalViewWrapper does with that state:
 //
-//   - D7: TerminalAttachStage.ended's chrome (an exhaustive switch, so this
+//   - TerminalAttachStage.ended's chrome (an exhaustive switch, so this
 //     is the only place that stage's rendering is pinned) and the frame
 //     protocol's own display:status message winning over the generic label.
-//   - D10: an applied frame clears a live selection mirror rather than
+//   - an applied frame clears a live selection mirror rather than
 //     leaving it pointed at glyphs the frame just replaced.
 //   - (g): the load a live frame stream (up to 20/s) adds to the widget
 //     tree, measured directly rather than argued.
@@ -34,7 +34,7 @@ import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
@@ -43,6 +43,8 @@ import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show UploadStreamResult;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -93,7 +95,6 @@ const _touchKeys = <String, String>{
   'Tab': '\t',
   'Esc': '\x1b',
   'Ctrl+C': '\x03',
-  'Ctrl+D': '\x04',
   '↑': '\x1b[A',
   '↓': '\x1b[B',
   '→': '\x1b[C',
@@ -396,7 +397,7 @@ void main() {
     );
   });
 
-  group('D7: TerminalAttachStage.ended chrome', () {
+  group('TerminalAttachStage.ended chrome', () {
     testWidgets(
       'renders the protocol\'s own message, undimmed, with no Retry',
       (tester) async {
@@ -467,7 +468,7 @@ void main() {
     });
   });
 
-  group('D7: the failed chrome prefers the protocol\'s own message', () {
+  group('the failed chrome prefers the protocol\'s own message', () {
     testWidgets('a display:status message replaces the generic label', (
       tester,
     ) async {
@@ -502,7 +503,7 @@ void main() {
     });
   });
 
-  group('D10: an applied frame clears a live selection mirror', () {
+  group('an applied frame clears a live selection mirror', () {
     testWidgets(
       'SendToAgentButton disappears once TerminalTab.replaceEpoch bumps',
       (tester) async {
@@ -549,7 +550,7 @@ void main() {
         );
 
         // The signal TerminalService._handleTerminalFrame sends on every
-        // applied frame (D10) — the screen under the selection's row/col
+        // applied frame — the screen under the selection's row/col
         // anchors was just replaced wholesale.
         tab.replaceEpoch.value++;
         await tester.pump();
@@ -616,8 +617,8 @@ void main() {
           findsNothing,
           reason:
               'Ctrl+C and SendToAgentButton both read the mirror, and '
-              'handing the user glyphs they never selected is the harm D10 '
-              'exists to prevent',
+              'handing the user glyphs they never selected is the harm this '
+              'mirror exists to prevent',
         );
       },
     );
@@ -843,7 +844,7 @@ void main() {
   // exercises the controller the wrapper drives rather than the wrapper's
   // own build method. What it proves is the mechanism the wrapper's
   // correctness actually rests on: a frame is one appendOutputBytes call
-  // through the SAME VT parser legacy output uses (D3), and mouse/focus
+  // through the SAME VT parser legacy output uses, and mouse/focus
   // mode state is read fresh off that parser on every call — so a frame
   // that turns a mode on or off is exactly as effective as the guest
   // sending it directly ever was.
@@ -1494,6 +1495,8 @@ void main() {
         expect(find.byType(TerminalQuickActionsBar), findsOneWidget);
         expect(find.text(_keysWithdrawn), findsNothing);
         h.transport.sent.clear();
+        await tester.ensureVisible(find.text(entry.key));
+        await tester.pump();
         await tester.tap(find.text(entry.key));
         await tester.pump();
         expect(find.byType(TerminalHistoryView), findsNothing);
@@ -1772,7 +1775,7 @@ void main() {
         );
         await tester.pump();
 
-        // The REAL UploadService, driven through the bridge's own protocol and
+        // The REAL UploadService, driven through the transport's upload API and
         // under the cap, so the path genuinely comes back — the multi-second
         // wait every attach gesture's reader check is made before.
         Future<void> upload({required bool openReaderMidUpload}) async {
@@ -1785,28 +1788,20 @@ void main() {
                 ),
           );
           await tester.pump();
-          final requestId =
-              h.transport.sent.lastWhere(
-                    (m) => m['type'] == 'file:upload-start',
-                  )['requestId']
-                  as String;
+          final exchange = h.transport.uploadCalls.last;
           if (openReaderMidUpload) {
             await tester.tap(_historyScrollbar);
             await tester.pump();
           }
-          h.transport.emit('file:upload-ready', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-          });
+          exchange.progress(3, 3);
           await tester.pump();
-          h.transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-          await tester.pump();
-          h.transport.emit('file:upload-result', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-            'ok': true,
-            'path': '/staged/shot.png',
-          });
+          exchange.complete(
+            const UploadStreamResult(
+              ok: true,
+              uploadId: 'u1',
+              path: '/staged/shot.png',
+            ),
+          );
           await tester.pump();
           await tester.pump();
         }
@@ -1896,7 +1891,7 @@ void main() {
     });
   });
 
-  group('D2: an archive epoch turnover empties the reader under the user', () {
+  group('an archive epoch turnover empties the reader under the user', () {
     testWidgets('a new epoch closes the reader rather than blanking it', (
       tester,
     ) async {
@@ -1944,7 +1939,7 @@ void main() {
     });
   });
 
-  group('D3: the affordance is the archive route an agent pane has', () {
+  group('the affordance is the archive route an agent pane has', () {
     testWidgets(
       'a mouse-reporting guest swallows the wheel, and the control still '
       'reaches the archive',

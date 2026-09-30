@@ -85,3 +85,11 @@ symbols:
   the shipped binary. Uploading the symbol files as a build artifact is the fix.
   DART frames stay readable because releases ship unobfuscated (see the top of
   this file). Re-check this if errex gains the endpoint.
+
+## macOS
+
+macOS artifacts and the updater feed are Apple Silicon only:
+`antgrid-macos-arm64.dmg` and `appcast-macos-arm64.xml`. No Intel build or
+transitional universal release is planned. Signing/notarization remains in the
+desktop build workflow. macOS, Linux and physical mobile packaging must be
+verified on their actual runners/devices; Windows smoke does not cover them.

@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { setupTestEnv, type TestEnv } from "../../helpers/harness";
 import { createMessage } from "../../../bridge/src/protocol";
 import { firstProjectStream } from "../../support/stream";
+import { frameContaining } from "./frame-output";
 
 /**
  * v3: multiple terminals multiplex over the ONE firstProject stream, each keyed
@@ -32,21 +33,16 @@ describe("multiple terminals", () => {
       }));
     }
 
-    const deadline = Date.now() + 15_000;
-    let outputA = "";
-    let outputB = "";
-    while (Date.now() < deadline) {
-      if (outputA.includes("TERMINAL_A") && outputB.includes("TERMINAL_B")) break;
-      try {
-        const msg = await env.app.waitForStreamAbType(streamId, "terminal:output", 2_000);
-        const data = (msg as any).data ?? "";
-        const termId = (msg as any).terminalId;
-        if (termId === "terminal-a") outputA += data;
-        if (termId === "terminal-b") outputB += data;
-      } catch { break; }
-    }
-
-    expect(outputA).toContain("TERMINAL_A");
-    expect(outputB).toContain("TERMINAL_B");
+    const frames = await Promise.all([["terminal-a", "TERMINAL_A"], ["terminal-b", "TERMINAL_B"]].map(async ([id, marker]) => {
+      await env.app.waitFor((message) => message.type === "terminal:started" &&
+        message._streamId === streamId && message.terminalId === id, 5_000);
+      return frameContaining(env.app, streamId, id, marker);
+    }));
+    expect(frames[0].terminalId).toBe("terminal-a");
+    expect(frames[0].ansi).toContain("TERMINAL_A");
+    expect(frames[0].ansi).not.toContain("TERMINAL_B");
+    expect(frames[1].terminalId).toBe("terminal-b");
+    expect(frames[1].ansi).toContain("TERMINAL_B");
+    expect(frames[1].ansi).not.toContain("TERMINAL_A");
   });
 });

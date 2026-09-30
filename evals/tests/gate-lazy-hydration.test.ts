@@ -1,9 +1,8 @@
 // The merge gate for on-demand file trees: opening a project (or resyncing
-// an already-open one) must never pull a whole file tree. The whole-tree push and the `pullsTree`-keyed fork in behaviour it
-// used to guard directly are gone — there is no longer a "legacy path" that
-// still gets a push, for any client. What replaces it is asserted here three
+// an already-open one) must never pull a whole file tree. There is no
+// whole-tree push for any client. What replaces it is asserted here three
 // ways: (1) a resync, run across several checkouts and observed by two
-// differently-configured clients, produces no tree data at all unless asked;
+// successive loopback owners, produces no tree data at all unless asked;
 // (2) the listing protocol itself is genuinely shallow — requesting the root
 // returns depth-1 entries only (a subdirectory comes back with no `children`),
 // and a subdirectory's contents arrive only once it is asked for by path;
@@ -101,7 +100,7 @@ function hasSyncStateForEveryCheckout(frames: AbMessage[], checkoutIds: string[]
 test("a project resync never pushes a whole tree, and the listing protocol stays shallow", async () => {
   const env = await setupTestEnv({ fixtureName: "basic", prepareProject: initRepo });
   let local: LocalTestClient | null = null;
-  let legacy: LocalTestClient | null = null;
+  let second: LocalTestClient | null = null;
   try {
     const { streamId } = await bindFirstProject(env.app, env.projectId);
     const one = await createIsolated(env.app, streamId, "one");
@@ -113,12 +112,12 @@ test("a project resync never pushes a whole tree, and the listing protocol stays
       id: "connect", type: "project:start", projectId: env.projectId,
     })).connect;
 
-    // --- A pulling owner connects, triggering resyncState. ---
+    // --- A loopback owner connects, triggering resyncState. ---
     env.app.drainQueued("tree:full");
     const seen: AbMessage[] = [];
     local = new LocalTestClient();
     local.on((m) => seen.push(m));
-    await local.connect(conn); // pullsTree defaults on, and is now ignored either way.
+    await local.connect(conn);
 
     await waitFor(
       () => hasSyncStateForEveryCheckout(seen, checkoutIds),
@@ -128,7 +127,7 @@ test("a project resync never pushes a whole tree, and the listing protocol stays
 
     // No `tree:full` — the whole-tree push this gate used to name — from the
     // resync. (`tree:update`, the live delta channel, is a different
-    // mechanism a resync never drove even before this wave, and freshly
+    // mechanism a resync never drove, and freshly
     // creating a worktree can legitimately fire one of its own as the new
     // checkout's watcher catches up — asserting its absence here would be
     // asserting something this test never guaranteed.)
@@ -136,22 +135,19 @@ test("a project resync never pushes a whole tree, and the listing protocol stays
     // The relay app's stream is the other surface a push would have reached.
     expect(env.app.queuedCount((m: any) => m.type === "tree:full" && m._streamId === streamId)).toBe(0);
 
-    // --- A second, differently-configured client connects (superseding ---
-    // --- `local`), firing a fresh resync. `pullsTree: false` used to select ---
-    // --- the OTHER behaviour (a forced tree:full per checkout); today the ---
-    // --- capability is parsed-and-ignored (spec Deferred) and both clients ---
-    // --- get the identical, tree-free resync. ---
-    const legacySeen: AbMessage[] = [];
-    legacy = new LocalTestClient();
-    legacy.on((m) => legacySeen.push(m));
-    await legacy.connect(conn, { pullsTree: false });
+    // --- A second owner connects (superseding `local`), firing a fresh ---
+    // --- resync that must be just as tree-free. ---
+    const secondSeen: AbMessage[] = [];
+    second = new LocalTestClient();
+    second.on((m) => secondSeen.push(m));
+    await second.connect(conn);
 
     await waitFor(
-      () => hasSyncStateForEveryCheckout(legacySeen, checkoutIds),
-      "git:sync-state for every checkout (legacy)",
+      () => hasSyncStateForEveryCheckout(secondSeen, checkoutIds),
+      "git:sync-state for every checkout (second owner)",
       20_000,
     );
-    expect(legacySeen.filter((m) => m.type === "tree:full")).toHaveLength(0);
+    expect(secondSeen.filter((m) => m.type === "tree:full")).toHaveLength(0);
 
     // Widen the first client's negative window cheaply now that more time has
     // passed and a second resync has run.
@@ -202,7 +198,7 @@ test("a project resync never pushes a whole tree, and the listing protocol stays
     )).toBe(0);
   } finally {
     local?.close();
-    legacy?.close();
+    second?.close();
     await env.teardown();
   }
 }, 180_000);

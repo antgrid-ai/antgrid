@@ -210,8 +210,8 @@ void main() {
   });
 
   testWidgets('a brief with no role is shown as your own', (tester) async {
-    // Every preset clears the brief on pick (redesign spec §6), so a non-empty
-    // brief with no role id can only be the user's own lens.
+    // Every preset clears the brief on pick, so a non-empty brief with no
+    // role id can only be the user's own lens.
     await _pump(
       tester,
       sessions: {'t1': _armed(brief: 'watch the migrations')},

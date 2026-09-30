@@ -33,9 +33,9 @@ export const BusRouteSchema = z.object({
   peerId: z.string().min(1).max(400),
   /** The project whose stream carried this exchange in — which socket a reply
    *  leaves on, distinct from the peer's relay slot (route-store.ts:10-15,
-   *  above). Load-bearing now that one machine-level table (E9/§5.4) can name
-   *  a route for any project this host has open: it is the only thing that
-   *  says which project's stream a peer-role dispatch may use. */
+   *  above). Load-bearing now that one machine-level table can name a route
+   *  for any project this host has open: it is the only thing that says
+   *  which project's stream a peer-role dispatch may use. */
   projectId: z.string().min(1).max(200),
   /** When this route was last proven by an applied inbound frame. */
   at: z.number().int().nonnegative(),

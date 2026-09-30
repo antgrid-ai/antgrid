@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +32,12 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
+/// App Store guideline 4.8: an iOS app that offers a third-party login such as
+/// GitHub or Google must also offer Sign in with Apple, which this app does not
+/// yet have. App Review rejected GitHub on those grounds, and guideline 4 also
+/// rejects OAuth's hand-off to the external browser, so iOS offers neither.
+bool get _offersOAuthSignIn => defaultTargetPlatform != TargetPlatform.iOS;
+
 /// Sign-in screen.
 ///
 /// Sign-in is optional on desktop — signed-out users land in [AppShell] and
@@ -49,8 +56,9 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
 ///
 /// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
-/// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path.
+/// entirely over HTTPS — no browser, no deeplink. GitHub and Google (not on
+/// iOS, see [_offersOAuthSignIn]) remain as secondary options on the existing
+/// browser+deeplink path.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -301,12 +309,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     switch (method) {
       case AuthMethod.password:
         _goToStep(_Step.password);
-      case AuthMethod.github:
+      case AuthMethod.github when _offersOAuthSignIn:
         await _startOAuth('github');
-      case AuthMethod.google:
+      case AuthMethod.google when _offersOAuthSignIn:
         await _startOAuth('google');
       // A remembered link, and an address this device has never seen, take the
-      // same path — the link is what works without knowing anything.
+      // same path — the link is what works without knowing anything. So does a
+      // provider hint on a platform that does not offer OAuth, which an earlier
+      // build can have recorded.
+      case AuthMethod.github:
+      case AuthMethod.google:
       case AuthMethod.link:
       case null:
         await _sendLink();
@@ -822,7 +834,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
-        // One bordered group rather than three stacked buttons: these are three
+        // One bordered group rather than stacked buttons: these are all
         // answers to a single question — how to prove the address is yours —
         // and [AbSegmented]'s construction is how this app already asks a small
         // closed set where the alternatives must stay visible. Not AbSegmented
@@ -835,16 +847,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // step 2 — and the link it carries — whatever the hint says.
         _AuthMethodRow(
           methods: [
-            _AuthMethodSpec(
-              icon: AbIcons.github,
-              label: 'GitHub',
-              onTap: busy ? null : () => _startOAuth('github'),
-            ),
-            _AuthMethodSpec(
-              icon: _googleMark,
-              label: 'Google',
-              onTap: busy ? null : () => _startOAuth('google'),
-            ),
+            if (_offersOAuthSignIn) ...[
+              _AuthMethodSpec(
+                icon: AbIcons.github,
+                label: 'GitHub',
+                onTap: busy ? null : () => _startOAuth('github'),
+              ),
+              _AuthMethodSpec(
+                icon: _googleMark,
+                label: 'Google',
+                onTap: busy ? null : () => _startOAuth('google'),
+              ),
+            ],
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
             // would tell anyone watching the screen which addresses this device

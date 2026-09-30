@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 // Task 13 security gates: the order in which a remote isolated-session request
 // is checked, and the fact that every filesystem coordinate is host-derived.
 //
@@ -6,7 +7,7 @@
 // `sessions.create` control-plane verb); the path/branch gates live inside
 // WorktreeManager. Both halves are asserted here.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
@@ -51,7 +52,7 @@ describe("remote isolated-session security", () => {
     writeFileSync(join(repo, "readme.txt"), "v1\n");
     await git(repo, ["add", "."]);
     await git(repo, ["commit", "-m", "initial"]);
-    host = new HostServer({
+    host = createHostPolicyFixture({
       remote: fakeRemoteConfig(),
       remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
     });
@@ -68,19 +69,6 @@ describe("remote isolated-session security", () => {
 
   function seedCatalog(projectId: string, path: string): void {
     (host as any).seenProjects.set(projectId, { path, label: projectId });
-  }
-
-  /** Write a persisted session store for a cold project. */
-  function seedManagedSession(projectId: string): void {
-    const dir = join(abDir, "agents", projectId);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "sessions.json"), JSON.stringify({
-      version: 1,
-      sessions: [{
-        id: "s1", name: "Isolated", createdAt: 1, lastUsedAt: 1, archived: false,
-        checkoutId: "checkout-1", checkoutKind: "managed-worktree",
-      }],
-    }));
   }
 
   test("gate 1: the machine remote-access switch is checked before any core exists", async () => {
@@ -104,27 +92,6 @@ describe("remote isolated-session security", () => {
     );
     expect(res).toMatchObject({ ok: false, error: { code: "UNKNOWN_PROJECT" } });
     expect(host!.list()).toHaveLength(0);
-  });
-
-  test("gate 3: a peer without checkoutRouting cannot start a project holding a managed session", async () => {
-    await host!.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
-    const projectId = computeProjectId(repo);
-    seedCatalog(projectId, repo);
-    seedManagedSession(projectId);
-
-    const res = await host!.handleControlPlaneVerb(
-      { type: "project:start", projectId } as never,
-      new MessageBus(),
-    );
-    expect(res).toMatchObject({ ok: false, error: { code: "UPDATE_REQUIRED" } });
-    expect(host!.get(projectId)).toBeNull();
-
-    // ...and the same project is advertised without a dialable streamId, so an
-    // old app has nothing to replay onto.
-    const advert = host!.buildProjectsAdvertisement().find((p) => p.projectId === projectId);
-    expect(advert).toBeDefined();
-    expect(advert?.streamId).toBeUndefined();
-    expect(advert?.running).toBe(false);
   });
 
   test("catalog ids are always path-segment safe, so seenProjects cannot smuggle traversal", () => {

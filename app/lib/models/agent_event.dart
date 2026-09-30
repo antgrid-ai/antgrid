@@ -380,8 +380,9 @@ class AgentQuestion {
   });
 }
 
-/// The bridge withdrew a pending permission/question (agent retracted it,
-/// turn ended, or the driver was disposed). Exactly one id is set.
+/// The bridge withdrew a pending permission/question (a client answered it,
+/// the agent retracted it, the turn ended, or the driver was disposed).
+/// Exactly one id is set.
 class AgentRequestRetracted {
   final String sessionId;
   final String? permissionId;

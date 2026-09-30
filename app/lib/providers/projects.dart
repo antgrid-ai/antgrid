@@ -259,7 +259,7 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   Future<void> _remove(String id) async {
     // Only stop active sessions when the project is already warm — warming a
     // cold project just to stop sessions would block on the relay connect +
-    // E2E handshake (3-5s if the agent is offline), which is exactly what
+    // session handshake (3-5s if the agent is offline), which is exactly what
     // users feel as a slow delete. Cold projects have no live transport to tear
     // down; the agent's PTYs will keep running and can be stopped on reconnect.
     final open = ref.read(projectSessionRegistryProvider);

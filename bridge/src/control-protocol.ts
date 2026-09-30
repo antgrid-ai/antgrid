@@ -185,7 +185,7 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   }),
   // The asking half of the remote session directory: the app's pump hands
   // over what it learned peeking peer capability cards this cycle. Exempt from
-  // the remote-access switch like every other verb on this plane (E15): the
+  // the remote-access switch like every other verb on this plane: the
   // switch governs what may be done TO this machine, and every row here was
   // offered by the peer that owns it, under that peer's own switch and its own
   // agent-reach bit. What a machine may be TOLD about willing peers is not

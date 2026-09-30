@@ -4,12 +4,11 @@
 
 /// What came back from one delete attempt.
 ///
-/// [deleted] is the bridge's own yes. [accepted] is "the request was sent and
-/// no answer came back" — not a failure, and not something to report as one:
-/// the removal work is unbounded, so silence is indistinguishable from a slow
-/// success. A REFUSAL is neither of these; it raises instead, because it is the
-/// confirm ladder's input.
-enum SessionDeleteAck { deleted, accepted }
+/// [deleted] is the bridge's own yes. [outcomeUnknown] means the request was
+/// dispatched but no application answer came back, so execution must not be
+/// guessed or automatically repeated. A refusal raises separately because it
+/// is the confirm ladder's input.
+enum SessionDeleteAck { deleted, outcomeUnknown }
 
 /// Transport backstop for a delete reply. **Not a deadline.**
 ///

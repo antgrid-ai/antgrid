@@ -1,7 +1,7 @@
 // One row per thread this session is part of, and the only thing that can tell a
 // reply where to go.
 //
-// A thread id is a correlation id with no state machine (§4.2) — it is carried
+// A thread id is a correlation id with no state machine — it is carried
 // and never validated — so this store exists for exactly one question: given a
 // thread id an agent wants to answer on, what `contextId` did that exchange
 // arrive under? Nothing else on the machine can answer it. A session that was
@@ -21,7 +21,7 @@
 // `upsertThread` freezes `contextId`, `peer` and `openedByPeer` so no later
 // frame can re-point an existing row at somewhere else. Keep both properties.
 //
-// Aged on the mailbox's clock, because §4.2's "a thread is garbage once both
+// Aged on the mailbox's clock, because "a thread is garbage once both
 // sides stop writing" needs a moment to point at and `lastAt` is it. The
 // coordinator applies that expiry on the warm path too, so the TTL bounds a
 // long-lived bridge and not merely a restart.
@@ -42,7 +42,7 @@ export const ThreadRowSchema = z.object({
   peer: SessionMemberKeySchema,
   lastAt: z.number().int().nonnegative(),
   /** True when the peer opened it, which is what says this session must reply on
-   *  the id it was given rather than mint one (§4.3). */
+   *  the id it was given rather than mint one. */
   openedByPeer: z.boolean(),
 });
 export type ThreadRow = z.infer<typeof ThreadRowSchema>;

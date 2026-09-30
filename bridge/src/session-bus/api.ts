@@ -10,8 +10,7 @@
 //
 // THE CALLER NAMES A TERMINAL AND NOTHING ELSE. The terminal names a session and
 // the session is the identity; there is no role, and a body field claiming one
-// would let an agent that guessed the field name act as somebody else
-// (`docs/session-messaging.md` §4.3).
+// would let an agent that guessed the field name act as somebody else.
 
 import { z } from "zod";
 import {
@@ -114,8 +113,8 @@ export const SendBodySchema = z
      *  rendering it could copy that address from is a joined string. */
     to: SendTargetSchema.optional(),
     ...messageFields,
-    /** Absent OPENS a thread, whose id comes back on the result. §4.3 makes the
-     *  id bridge-owned, so the only id an agent may put here is one it was
+    /** Absent OPENS a thread, whose id comes back on the result. The id is
+     *  bridge-owned, so the only id an agent may put here is one it was
      *  told. */
     threadId: z.string().min(1).max(200).optional(),
   })
@@ -167,15 +166,16 @@ export interface ArtifactHandleView {
 export interface SendResultView {
   ok: true;
   messageId: string;
-  /** Always returned, including for a send that supplied one. §4.3 makes the id
+  /** Always returned, including for a send that supplied one. The id is
    *  bridge-owned precisely so an agent cannot invent one, which leaves an agent
    *  never told the id unable to reply on the thread it just opened. */
   threadId: string;
   /** That the frame LEFT this machine, never that it arrived: the other end's
-   *  receipt is the only honest witness (E6). */
+   *  receipt is the only honest witness. */
   sent: boolean;
   held: boolean;
-  /** Whether this send opened the thread — §7.4's definition of progress. */
+  /** Whether this send opened the thread — the event pair-budget.ts counts as
+   *  progress, resetting the no-progress halt. */
   opensThread: boolean;
 }
 
@@ -239,7 +239,7 @@ export interface ThreadEntryView {
 }
 
 export interface SessionBusApi {
-  /** Every session addressable from this terminal's own (§5.5), sorted. Async
+  /** Every session addressable from this terminal's own, sorted. Async
    *  where the artifact verbs are not: the branch each row is ranked on is read
    *  fresh, which is a git spawn, and a request is the one place that is
    *  affordable. */
@@ -249,11 +249,12 @@ export interface SessionBusApi {
     | { sessions: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach; machineId: string | null }
     | SessionBusRefusal
   >;
-  /** §7.1's two verbs. Both synchronous, and so is everything below them: what a
-   *  send consults — one directory row, the pair's budget, this session's own
-   *  artifacts — is in memory or on local disk. {@link listSessions} is async
-   *  for the one reason a send must not inherit, a git spawn per row, which is
-   *  also why nothing here resolves a target through `directory.list()`. */
+  /** Post and notify, the bus's two send verbs. Both synchronous, and so is
+   *  everything below them: what a send consults — one directory row, the
+   *  pair's budget, this session's own artifacts — is in memory or on local
+   *  disk. {@link listSessions} is async for the one reason a send must not
+   *  inherit, a git spawn per row, which is also why nothing here resolves a
+   *  target through `directory.list()`. */
   post(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
   notify(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
   reply(terminalId: string | undefined, body: ReplyBody): SendResultView | SessionBusRefusal;
@@ -308,7 +309,7 @@ export interface SessionMembership {
 
 export interface SessionBusApiDeps {
   coordinator: SessionBusCoordinator;
-  /** The machine-level directory (§5.5). Absent for a core with no host above
+  /** The machine-level directory. Absent for a core with no host above
    *  it — a bare bus in a unit test — where `listSessions` is REFUSED rather
    *  than answered from this one project: a directory that silently narrows to
    *  the caller's own project is the exact reach failure the rescope exists to
@@ -336,7 +337,7 @@ export interface SessionBusApiDeps {
    *  has never faced a relay (local, bare, every unit test) answers to no
    *  switch. Same-machine sends never consult it. */
   remoteAccessEnabled: () => boolean;
-  /** §7.3's same-machine carve-out: starts a session THIS HOST holds, by id.
+  /** The same-machine carve-out: starts a session THIS HOST holds, by id.
    *  Absent means the wake never fires and a stopped session is always
    *  refused `NOT_RUNNING`, same as before this existed — a bare bus in a
    *  unit test, or any caller with no host above it, gets the unconditional
@@ -447,9 +448,11 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     const machineId = deps.machineId();
     if (!machineId) return null;
     // An artifact's author ref is read on the OTHER machine, which cannot look
-    // any of these up (E4) — so the machine label belongs here for the reason
-    // the project label does. Same source as the coordinator's `self()` stamp,
-    // so one machine cannot be named two ways by two surfaces.
+    // any of these up — a bridge cannot dial another bridge, so nothing on the
+    // other end can query this one for a label — so the machine label belongs
+    // here for the reason the project label does. Same source as the
+    // coordinator's `self()` stamp, so one machine cannot be named two ways by
+    // two surfaces.
     const machineLabel = selfMachineLabel();
     return {
       machineId,
@@ -594,7 +597,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     // does not exist rather than that nothing is carrying its messages.
     //
     // THIS machine's remote-access switch gates the way OUT as well as the way
-    // in, which reverses E15. That decision argued the switch governs what may
+    // in, reversing an earlier design where the switch governed only what may
     // be done TO this machine, not what it may do — but inbound is already
     // refused by `remoteFrameAllowed`, so leaving the send ungated shipped a
     // machine that could speak and could not be answered: peers hold a
@@ -615,9 +618,9 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     }
 
     if (offMachine && !peerRole) {
-      // The desktop app carries every off-machine leg this session OPENED
-      // (§6.1). Without it the send would answer sent:false with the message
-      // held, which every surface renders as a success. A peer-role frame is
+      // The desktop app carries every off-machine leg this session OPENED.
+      // Without it the send would answer sent:false with the message held,
+      // which every surface renders as a success. A peer-role frame is
       // exempt because it does not use that socket: it resolves
       // `routeFor(contextId)` and leaves on whichever project's stream brought
       // the context in, so refusing it here would refuse a reply whose
@@ -692,18 +695,20 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       }
     }
 
-    // §7.4, and ahead of liveness on purpose: a halted pair told "that session
-    // is not running" would go wait for something that cannot free it, when
-    // what it needs is a human on the other session. Read only — the
-    // coordinator re-decides on the way through and is the one place that
-    // charges it, so nothing is spent here and nothing is spent twice.
+    // This pair-budget check runs ahead of liveness on purpose: a halted pair
+    // told "that session is not running" would go wait for something that
+    // cannot free it, when what it needs is a human on the other session.
+    // Read only — the coordinator re-decides on the way through and is the
+    // one place that charges it, so nothing is spent here and nothing is
+    // spent twice.
     const pairRefusal = deps.coordinator.pairRefusal(m.sessionId, target, verb);
     if (pairRefusal) return pairRefusal;
 
-    // §7.3, and only the state it names: a STOPPED session never reaches a turn
-    // boundary. An idle one reaches it at once — the delivery queue hands a line
-    // to an idle session immediately — so refusing there would refuse a live
-    // peer at rest, which is what every session is between turns.
+    // This refusal covers only the state it names: a STOPPED session never
+    // reaches a turn boundary. An idle one reaches it at once — the delivery
+    // queue hands a line to an idle session immediately — so refusing there
+    // would refuse a live peer at rest, which is what every session is
+    // between turns.
     //
     // A SAME-MACHINE target narrows the refusal: this bridge can start a
     // session it already holds, so it does, and lets the send through — the
@@ -759,9 +764,9 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     },
 
     // A reply answers on a thread the peer is waiting on, so it takes the
-    // interrupting verb. §7.1 puts that choice in the VERB rather than in a
-    // flag, which leaves `post` carrying a threadId as the way to answer a
-    // thread without interrupting.
+    // interrupting verb. That choice lives in the VERB rather than in a flag,
+    // which leaves `post` carrying a threadId as the way to answer a thread
+    // without interrupting.
     reply(terminalId, body) {
       return sendMessage(terminalId, "notify", body);
     },
@@ -778,7 +783,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (unread.length > 0) {
         deps.coordinator.markMailboxRead(m.sessionId, unread.map((p) => p.messageId));
       }
-      // `dropped` rides every answer, zero included (§7.4): a reader that cannot
+      // `dropped` rides every answer, zero included: a reader that cannot
       // tell an empty inbox from an emptied one has been told the wrong thing,
       // not merely told less.
       return { posts, dropped: mailbox.dropped };

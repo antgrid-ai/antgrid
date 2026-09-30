@@ -1,4 +1,4 @@
-import { needsKeystrokeTurnStart } from "./agent-runtime";
+import { needsKeystrokeTurnStart, opensProvisionalTurn } from "./agent-runtime";
 import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 
@@ -37,11 +37,56 @@ export interface WorkStatusState {
    *  submitted keystroke is the only thing that can open their turn — see
    *  {@link needsKeystrokeTurnStart} and {@link userReply}. */
   readonly keystrokeTurnSessions: ReadonlySet<string>;
+  /** Running sessions whose agent DOES report its turn starts, but too late to
+   *  show work the moment the user submits (codex runs its start hook through a
+   *  fresh shell, a second or more after Enter). A submitted prompt opens their
+   *  turn at once as a {@link provisionalTurns} entry for the hook to confirm.
+   *  See {@link opensProvisionalTurn}. */
+  readonly provisionalStartSessions: ReadonlySet<string>;
+  /** Turns {@link userReply} opened on a keystroke for a
+   *  {@link provisionalStartSessions} session that nothing has confirmed yet,
+   *  keyed to the clock reading that opened them. A turn-start, a tool
+   *  completion or any turn end settles one; the bridge retracts one still here
+   *  after a grace period ({@link retractProvisionalTurn}), which is what keeps
+   *  an Enter the agent swallowed (an overlay, a dialog) from reading "working"
+   *  until the idle decay. */
+  readonly provisionalTurns: ReadonlyMap<string, number>;
   /** Running sessions whose hook channel has been declared dead. Subtracted from
    *  {@link keystrokeTurnSessions} on every fold, which recomputes from the agent's
    *  STATIC spec — so without this the bridge goes on inferring starts that
    *  nothing can close. See {@link noteHookChannelLost}. */
   readonly deadHookSessions: ReadonlySet<string>;
+  /** Sessions {@link closeInterruptedTurn} just closed on a confirmed manual
+   *  interrupt. {@link turnActivity} refuses to reopen a session in this set —
+   *  a catch-all PostToolUse/PostToolUseFailure hook already in flight when the
+   *  confirmation lands (`interrupt-confirm.ts` polls on a timer; the hook spawn
+   *  itself costs several hundred ms) can still resolve afterward, and with
+   *  nothing recorded to check against it reopened a turn the interrupt had just
+   *  closed for good. Cleared by whatever opens the NEXT turn ({@link turnStart},
+   *  a submitted {@link userReply}), the same window {@link isStaleIdleNudge}
+   *  documents. */
+  readonly interruptedTurns: ReadonlySet<string>;
+  /** Timestamp (ms) of the last recorded activity for each OPEN turn — refreshed
+   *  by {@link turnStart}, {@link turnActivity} and the opening path of
+   *  {@link userReply}, whichever last touched it. This is the only clock
+   *  anywhere in this reducer, and it is always an ARGUMENT, never read off the
+   *  wall: {@link expireTurns} is the one function that compares it against a
+   *  caller-supplied `now`, so every other function here stays a pure fold of
+   *  its inputs regardless of when it happens to run. Keyed like
+   *  {@link activeTurns}. A turn opened by a call that carried no clock reading
+   *  (most of this file's own tests) has no entry, which makes it ineligible for
+   *  expiry rather than eligible by a false zero. */
+  readonly lastActivityAt: ReadonlyMap<string, number>;
+  /** Clock reading for a HELD start/activity signal — one that named a session
+   *  the last `session:updated` had not listed yet — keyed like
+   *  {@link pendingTurns}, which it always has the same or fewer entries than.
+   *  {@link foldSessions} carries an entry over into {@link lastActivityAt} the
+   *  moment it promotes the matching `pendingTurns` id, so the exact race
+   *  {@link pendingTurns} holds for is not also a turn {@link expireTurns} can
+   *  never see: a promoted turn with nothing here would sit with no clock
+   *  reading at all, which reads as "nothing to measure against" rather than
+   *  "measured as ancient" — ineligible for expiry for its entire length. */
+  readonly pendingActivityAt: ReadonlyMap<string, number>;
   /** What is sitting in each session's composer since its last inferred turn,
    *  classified by the first thing typed on it. The evidence half of the keystroke
    *  inference: a bare enter and a `/` command both start no turn, so neither has
@@ -82,6 +127,11 @@ export interface WorkStatusState {
    *  agentSpec.name` — without it every default-spec session looked toolless and
    *  silently opted out of the keystroke inference. */
   readonly defaultTool: string | undefined;
+  /** Sessions an armed Handler is driving, from the latest `handler:status`
+   *  (a full snapshot listing ARMED sessions only). Read by
+   *  {@link parkedByHandler}; the push dispatcher asks AgentCore's own mirror of
+   *  the same frame, so the two cannot disagree for long. */
+  readonly handlerArmedSessions: ReadonlySet<string>;
   /** Rollup of {@link sessionStatuses} — what the project row shows. */
   readonly status: WorkStatus;
   readonly sessionStatuses: ReadonlyMap<string, WorkStatus>;
@@ -174,6 +224,7 @@ const EMPTY_NOTIFICATIONS: ReadonlyMap<string, NotificationType> = new Map();
 const EMPTY_REQUESTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
 const EMPTY_TYPED: ReadonlyMap<string, TypedLine> = new Map();
 const EMPTY_FOCUS: ReadonlyMap<ClientKey, string> = new Map();
+const EMPTY_ACTIVITY: ReadonlyMap<string, number> = new Map();
 
 /** The mutable inputs {@link build} folds into a state; everything else on
  *  WorkStatusState is derived from these. */
@@ -184,12 +235,18 @@ interface WorkInputs {
   activeTurns: ReadonlySet<string>;
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
+  provisionalStartSessions: ReadonlySet<string>;
+  provisionalTurns: ReadonlyMap<string, number>;
   deadHookSessions: ReadonlySet<string>;
+  interruptedTurns: ReadonlySet<string>;
+  lastActivityAt: ReadonlyMap<string, number>;
+  pendingActivityAt: ReadonlyMap<string, number>;
   typedSessions: ReadonlyMap<string, TypedLine>;
   focusedSessions: ReadonlyMap<ClientKey, string>;
   readTracking: boolean;
   unreadSessions: ReadonlySet<string>;
   defaultTool: string | undefined;
+  handlerArmedSessions: ReadonlySet<string>;
 }
 
 /** Notification types that mean "the turn is over" (as opposed to the
@@ -251,12 +308,25 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
     case "permission_request":
     case "awaiting_input":
     case "question": return "attention";
-    case "error": return "error";
+    case "error": return parkedByHandler(sessionId, i) ? "done" : "error";
     case "task_complete":
     case "idle": return "done";
     default:
       return turnOpenFor(i.activeTurns, sessionId) ? "working" : "done";
   }
+}
+
+/** Did [sessionId]'s turn end in its OWN error while an armed Handler drives it?
+ *
+ *  Such a session reads done, not error: the Handler announces that stop itself
+ *  (a park notice, a wrap-up or an escalation) and resumes the agent when a
+ *  limit lifts, so a red dot held for the length of a park would contradict it.
+ *  The error stays on record, so disarming turns the dot red again at once —
+ *  a stopped agent nothing will resume is exactly what error is for. The
+ *  unattributed fallback never qualifies: arming names one session, and that
+ *  error could belong to any of them. */
+function parkedByHandler(sessionId: string, i: WorkInputs): boolean {
+  return i.handlerArmedSessions.has(sessionId) && i.notifications.get(sessionId) === "error";
 }
 
 /** Sessions holding an answer nobody has looked at, for the state {@link build}
@@ -276,12 +346,19 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
  *  from going blue under you, and it covers the interrupt case for free (an Esc
  *  reaches this the same way a real turn-end does, and the user is by definition
  *  looking at the session they just interrupted). */
-function deriveUnread(i: WorkInputs, raw: ReadonlyMap<string, WorkStatus>, prev?: WorkStatusState): Set<string> {
+function deriveUnread(
+  i: WorkInputs,
+  raw: ReadonlyMap<string, WorkStatus>,
+  prev?: WorkStatusState,
+  decayed?: ReadonlySet<string>,
+): Set<string> {
   const unread = new Set<string>();
   for (const id of i.unreadSessions) if (raw.get(id) === "done") unread.add(id);
   if (i.readTracking && prev) {
     for (const [id, s] of raw) {
-      if (s !== "done") continue;
+      // A decay is silence, never an answer nobody looked at — see expireTurns.
+      // Nor is a Handler park: the Handler's own notice is that announcement.
+      if (s !== "done" || decayed?.has(id) || parkedByHandler(id, i)) continue;
       const before = prev.sessionStatuses.get(id);
       if (before !== undefined && before !== "done" && before !== "unread") unread.add(id);
     }
@@ -330,11 +407,12 @@ export function attentionEdges(
  *
  *  [prev] is the state being replaced, and is what {@link deriveUnread} diffs
  *  against — every caller passes it; only {@link initialWorkStatus}, which has
- *  no predecessor, omits it. */
-function build(i: WorkInputs, prev?: WorkStatusState): WorkStatusState {
+ *  no predecessor, omits it. [decayed] forwards to {@link deriveUnread}; only
+ *  {@link expireTurns} passes it. */
+function build(i: WorkInputs, prev?: WorkStatusState, decayed?: ReadonlySet<string>): WorkStatusState {
   const raw = new Map<string, WorkStatus>();
   for (const id of i.runningSessions) raw.set(id, statusFor(id, i));
-  const unreadSessions = deriveUnread(i, raw, prev);
+  const unreadSessions = deriveUnread(i, raw, prev, decayed);
   const sessionStatuses = new Map<string, WorkStatus>();
   let status: WorkStatus = "done";
   for (const [id, s] of raw) {
@@ -355,9 +433,15 @@ function build(i: WorkInputs, prev?: WorkStatusState): WorkStatusState {
     activeTurns: i.activeTurns,
     pendingTurns: i.pendingTurns,
     keystrokeTurnSessions: i.keystrokeTurnSessions,
+    provisionalStartSessions: i.provisionalStartSessions,
+    provisionalTurns: i.provisionalTurns,
     deadHookSessions: i.deadHookSessions,
+    interruptedTurns: i.interruptedTurns,
+    lastActivityAt: i.lastActivityAt,
+    pendingActivityAt: i.pendingActivityAt,
     typedSessions: i.typedSessions,
     defaultTool: i.defaultTool,
+    handlerArmedSessions: i.handlerArmedSessions,
     status,
     sessionStatuses,
   };
@@ -371,12 +455,18 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     activeTurns: s.activeTurns,
     pendingTurns: s.pendingTurns,
     keystrokeTurnSessions: s.keystrokeTurnSessions,
+    provisionalStartSessions: s.provisionalStartSessions,
+    provisionalTurns: s.provisionalTurns,
     deadHookSessions: s.deadHookSessions,
+    interruptedTurns: s.interruptedTurns,
+    lastActivityAt: s.lastActivityAt,
+    pendingActivityAt: s.pendingActivityAt,
     typedSessions: s.typedSessions,
     focusedSessions: s.focusedSessions,
     readTracking: s.readTracking,
     unreadSessions: s.unreadSessions,
     defaultTool: s.defaultTool,
+    handlerArmedSessions: s.handlerArmedSessions,
   };
 }
 
@@ -387,12 +477,18 @@ export const initialWorkStatus: WorkStatusState = build({
   activeTurns: EMPTY_IDS,
   pendingTurns: EMPTY_IDS,
   keystrokeTurnSessions: EMPTY_IDS,
+  provisionalStartSessions: EMPTY_IDS,
+  provisionalTurns: EMPTY_ACTIVITY,
   deadHookSessions: EMPTY_IDS,
+  interruptedTurns: EMPTY_IDS,
+  lastActivityAt: EMPTY_ACTIVITY,
+  pendingActivityAt: EMPTY_ACTIVITY,
   typedSessions: EMPTY_TYPED,
   focusedSessions: EMPTY_FOCUS,
   readTracking: false,
   unreadSessions: EMPTY_IDS,
   defaultTool: undefined,
+  handlerArmedSessions: EMPTY_IDS,
 });
 
 /** Drop [id]'s notification AND the unattributed one. The latter has no id to
@@ -444,6 +540,18 @@ function withoutTurn(turns: ReadonlySet<string>, id: string): ReadonlySet<string
   return next;
 }
 
+/** Drop [id]'s recorded activity clock. Same shape as {@link withoutTurn}, over
+ *  the map a turn's close must also retire — a stale reading left behind would
+ *  cost nothing today (only an id in {@link WorkStatusState.activeTurns} is ever
+ *  read against it), but there is no reason to let it outlive the turn it was
+ *  measuring. */
+function withoutActivity(map: ReadonlyMap<string, number>, id: string): ReadonlyMap<string, number> {
+  if (!map.has(id)) return map;
+  const next = new Map(map);
+  next.delete(id);
+  return next;
+}
+
 function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
   for (const id of a) if (!b.has(id)) return false;
@@ -469,6 +577,12 @@ function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  *  knows which one the user replied to ({@link answerRequest}). Absent — the
  *  hook path, which carries no request id — clears the session's whole set.
  *
+ *  [now], when given, refreshes {@link WorkStatusState.lastActivityAt} for the
+ *  opened turn — the evidence {@link expireTurns} bounds a stuck "working" by.
+ *  Omitted, the clock is left untouched rather than read off the wall, so every
+ *  caller that has no timestamp handy (most of this file's own tests) keeps
+ *  today's behavior exactly.
+ *
  *  Pure; returns the SAME object when nothing changes — including for an
  *  UNATTRIBUTED start with nothing running, which has no session to be held
  *  against and would otherwise light up an unrelated session that starts later. */
@@ -476,6 +590,7 @@ export function turnStart(
   prev: WorkStatusState,
   sessionId?: string,
   answered?: string,
+  now?: number,
 ): WorkStatusState {
   if (sessionId !== undefined && !prev.runningSessions.has(sessionId)) {
     // The held start still clears this session's block: `openRequest` does not
@@ -488,10 +603,15 @@ export function turnStart(
     // notifications here could only wipe an unattributed one on the word of a
     // session that may never exist.
     const pendingRequests = clearRequests(prev.pendingRequests, sessionId, answered);
-    if (prev.pendingTurns.has(sessionId) && pendingRequests === prev.pendingRequests) return prev;
+    const pendingActivityAt = now !== undefined && prev.pendingActivityAt.get(sessionId) !== now
+      ? new Map(prev.pendingActivityAt).set(sessionId, now)
+      : prev.pendingActivityAt;
+    if (prev.pendingTurns.has(sessionId) && pendingRequests === prev.pendingRequests
+      && pendingActivityAt === prev.pendingActivityAt) return prev;
     return build({
       ...inputsOf(prev),
       pendingRequests,
+      pendingActivityAt,
       pendingTurns: new Set(prev.pendingTurns).add(sessionId),
     }, prev);
   }
@@ -500,15 +620,105 @@ export function turnStart(
   const notifications = clearNotifications(prev.notifications, id);
   const pendingRequests = clearRequests(prev.pendingRequests, id, answered);
   const open = prev.activeTurns.has(id);
-  if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open) {
+  // A fresh turn retires the confirmed-interrupt mark {@link closeInterruptedTurn}
+  // left on [id] — see {@link WorkStatusState.interruptedTurns}.
+  const interruptedTurns = withoutTurn(prev.interruptedTurns, id);
+  const lastActivityAt = now !== undefined && prev.lastActivityAt.get(id) !== now
+    ? new Map(prev.lastActivityAt).set(id, now)
+    : prev.lastActivityAt;
+  // The agent's own word that the turn is real — see WorkStatusState.provisionalTurns.
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, id);
+  if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open
+    && interruptedTurns === prev.interruptedTurns && lastActivityAt === prev.lastActivityAt
+    && provisionalTurns === prev.provisionalTurns) {
     return prev;
   }
   return build({
     ...inputsOf(prev),
     notifications,
     pendingRequests,
+    interruptedTurns,
+    lastActivityAt,
+    provisionalTurns,
     activeTurns: open ? prev.activeTurns : new Set(prev.activeTurns).add(id),
   }, prev);
+}
+
+/** A tool call completed on [sessionId] — a catch-all "the agent is still
+ *  here" signal fired after every tool use, not just at turn boundaries.
+ *  Re-opens the turn if a Stop hook closed it early (an agent whose own tools
+ *  keep firing cannot really be idle), and never clears a live block.
+ *
+ *  Deliberately not {@link turnStart}: that clears pendingRequests and every
+ *  call-to-action notification, which is right for an actual new turn but
+ *  wrong here — a sibling tool call finishing while the SAME turn is waiting
+ *  on a question or a permission prompt must not make that block disappear
+ *  out from under the user.
+ *
+ *  A session's own turn-end notification ({@link endsTurn}) — or the
+ *  unattributed fallback it may be reading — is left standing rather than
+ *  reopened under it. This signal is `async` and races the hook that actually
+ *  ends a turn, so it can arrive after the REAL last Stop of a turn, with no
+ *  further tool call coming to close what it would reopen: the agent has
+ *  stopped, and the only thing that reopens its turn from here is the user
+ *  prompting again. Reopening anyway would flip `busDeliverable` false on a
+ *  session no answer is coming to unblock (`error`), or defeat
+ *  {@link isStaleIdleNudge} by deleting the very `task_complete` record that
+ *  suppresses the next post-completion nudge. Recording is left untouched so
+ *  that suppression keeps working. A confirmed manual interrupt is the OTHER
+ *  early close this races: {@link closeInterruptedTurn} clears notifications
+ *  on its way out (same as an ordinary {@link closeTurn}), which would leave
+ *  nothing here to check against — so it also marks the session in
+ *  {@link WorkStatusState.interruptedTurns}, and this reads that mark
+ *  alongside the notification check below.
+ *
+ *  The not-yet-listed hold mirrors {@link turnStart}'s, for the same race — a
+ *  tool-completion hook can beat the session's first `session:updated` just
+ *  as a turn-start can, and {@link foldSessions} promotes both holds off the
+ *  same set. Unlike turnStart's hold, there is no block to clear on the way
+ *  in (this signal never carries an answer), so the hold does nothing but
+ *  wait.
+ *
+ *  [now], when given, refreshes {@link WorkStatusState.lastActivityAt} the same
+ *  way {@link turnStart} does — a tool completing is exactly the kind of
+ *  evidence {@link expireTurns} looks for. Omitted, the clock is left alone.
+ *
+ *  Pure; SAME object when nothing changes. */
+export function turnActivity(
+  prev: WorkStatusState,
+  sessionId?: string,
+  now?: number,
+): WorkStatusState {
+  if (sessionId !== undefined && !prev.runningSessions.has(sessionId)) {
+    const pendingActivityAt = now !== undefined && prev.pendingActivityAt.get(sessionId) !== now
+      ? new Map(prev.pendingActivityAt).set(sessionId, now)
+      : prev.pendingActivityAt;
+    if (prev.pendingTurns.has(sessionId) && pendingActivityAt === prev.pendingActivityAt) return prev;
+    return build({
+      ...inputsOf(prev),
+      pendingActivityAt,
+      pendingTurns: new Set(prev.pendingTurns).add(sessionId),
+    }, prev);
+  }
+  if (prev.runningSessions.size === 0) return prev;
+  const id = sessionId ?? UNATTRIBUTED_TURN;
+  const alreadyEnded = (n: NotificationType | undefined): boolean => n !== undefined && endsTurn(n);
+  if ((sessionId !== undefined && alreadyEnded(prev.notifications.get(sessionId)))
+    || alreadyEnded(prev.notifications.get(UNATTRIBUTED_TURN))
+    || (sessionId !== undefined && prev.interruptedTurns.has(sessionId))) {
+    return prev;
+  }
+  const activeTurns = prev.activeTurns.has(id)
+    ? prev.activeTurns
+    : new Set(prev.activeTurns).add(id);
+  const lastActivityAt = now !== undefined && prev.lastActivityAt.get(id) !== now
+    ? new Map(prev.lastActivityAt).set(id, now)
+    : prev.lastActivityAt;
+  // A tool completing is the agent at work, so it confirms a provisional turn.
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, id);
+  if (activeTurns === prev.activeTurns && lastActivityAt === prev.lastActivityAt
+    && provisionalTurns === prev.provisionalTurns) return prev;
+  return build({ ...inputsOf(prev), activeTurns, lastActivityAt, provisionalTurns }, prev);
 }
 
 /** The user answered the permission/question [requestId] that [sessionId] was
@@ -533,13 +743,14 @@ export function answerRequest(
   prev: WorkStatusState,
   sessionId: string,
   requestId?: string,
+  now?: number,
 ): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
   const open = prev.pendingRequests.get(sessionId);
   const answered = requestId === undefined ? open !== undefined : open?.has(requestId) === true;
   if (!blocked && !answered) return prev;
-  return turnStart(prev, sessionId, requestId);
+  return turnStart(prev, sessionId, requestId, now);
 }
 
 /** The user typed into [sessionId]'s PTY. Terminal-mode sessions have no
@@ -558,11 +769,17 @@ export function answerRequest(
  *  Otherwise deliberately narrower than {@link turnStart}: a bare keystroke is
  *  weaker evidence than a submitted prompt, so it never clears the UNATTRIBUTED
  *  notification (it may belong to a different session) nor a turn-end state
- *  (nothing to resolve). Pure; SAME object when there was nothing to do. */
+ *  (nothing to resolve). Pure; SAME object when there was nothing to do.
+ *
+ *  [now], when given, refreshes {@link WorkStatusState.lastActivityAt} — but
+ *  only on the [opens] path: a bare keystroke into an already-open turn is not
+ *  new evidence the turn is still running, {@link turnActivity} already covers
+ *  that case via the tool-completion hook. */
 export function userReply(
   prev: WorkStatusState,
   sessionId: string,
   opts: { submitted?: boolean; typed?: boolean; command?: boolean } = {},
+  now?: number,
 ): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
@@ -576,9 +793,10 @@ export function userReply(
   // and every frame after the first carries the middle of a line.
   const held = prev.typedSessions.get(sessionId);
   const line = held ?? opening;
+  const provisional = prev.provisionalStartSessions.has(sessionId);
   const opens = opts.submitted === true
     && line === "prompt"
-    && prev.keystrokeTurnSessions.has(sessionId)
+    && (prev.keystrokeTurnSessions.has(sessionId) || provisional)
     && !prev.activeTurns.has(sessionId);
   // A frame that both types and submits (a paste) leaves nothing behind: the
   // line it opens is the line the same frame consumes.
@@ -609,38 +827,55 @@ export function userReply(
     notifications,
     pendingRequests: clearRequests(prev.pendingRequests, sessionId),
     activeTurns: opens ? new Set(prev.activeTurns).add(sessionId) : prev.activeTurns,
+    // A submitted prompt that actually opens a turn retires a confirmed-interrupt
+    // mark the same way turnStart does — see WorkStatusState.interruptedTurns.
+    interruptedTurns: opens ? withoutTurn(prev.interruptedTurns, sessionId) : prev.interruptedTurns,
+    lastActivityAt: opens && now !== undefined
+      ? new Map(prev.lastActivityAt).set(sessionId, now)
+      : prev.lastActivityAt,
+    provisionalTurns: opens && provisional
+      ? new Map(prev.provisionalTurns).set(sessionId, now ?? 0)
+      : prev.provisionalTurns,
     typedSessions,
   }, prev);
 }
 
-/** The three maps a turn's end empties, whichever channel reported it. Shared by
+/** The maps a turn's end empties, whichever channel reported it. Shared by
  *  {@link closeTurn}, {@link hookTurnEnd} and {@link foldNotification} so a
- *  fourth one added here reaches all of them; [changed] is the SAME-object test. */
+ *  further one added here reaches all of them; [changed] is the SAME-object test. */
 function withTurnEnded(prev: WorkStatusState, sessionId: string): {
   activeTurns: ReadonlySet<string>;
   pendingTurns: ReadonlySet<string>;
   pendingRequests: ReadonlyMap<string, ReadonlySet<string>>;
+  lastActivityAt: ReadonlyMap<string, number>;
+  provisionalTurns: ReadonlyMap<string, number>;
   changed: boolean;
 } {
   const activeTurns = withoutTurn(prev.activeTurns, sessionId);
   const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
   const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
+  const lastActivityAt = withoutActivity(prev.lastActivityAt, sessionId);
+  const provisionalTurns = withoutActivity(prev.provisionalTurns, sessionId);
   return {
     activeTurns,
     pendingTurns,
     pendingRequests,
+    lastActivityAt,
+    provisionalTurns,
     changed: activeTurns !== prev.activeTurns
       || pendingTurns !== prev.pendingTurns
-      || pendingRequests !== prev.pendingRequests,
+      || pendingRequests !== prev.pendingRequests
+      || lastActivityAt !== prev.lastActivityAt
+      || provisionalTurns !== prev.provisionalTurns,
   };
 }
 
-/** The turn on [sessionId] is over — its turn-end frame, a chat cancel, or a
- *  hook-based session's Esc interrupt (see {@link isInterruptKeystroke} in
- *  keystrokes.ts, dispatched from agent-core.ts, the only other
- *  caller). Anything it was blocked on died with it. Pure; SAME object
- *  when there was nothing open to close, so a
- *  second Esc — or one after the real turn-end already landed — is a no-op. */
+/** The turn on [sessionId] is over — its turn-end frame or a chat cancel.
+ *  Anything it was blocked on died with it. Pure; SAME object when there was
+ *  nothing open to close.
+ *
+ *  NOT the confirmed-interrupt path — see {@link closeInterruptedTurn} — which
+ *  needs everything here plus a mark the chat case has no use for. */
 export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
   const { changed, ...ended } = withTurnEnded(prev, sessionId);
   // A chat session's block lives in pendingRequests; a terminal-mode session's
@@ -654,6 +889,24 @@ export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusS
   const notifications = clearNotifications(prev.notifications, sessionId);
   if (!changed && notifications === prev.notifications) return prev;
   return build({ ...inputsOf(prev), ...ended, notifications }, prev);
+}
+
+/** A hook-based session's manual interrupt, confirmed against its own
+ *  transcript (`interrupt-confirm.ts` and `shouldArmInterruptConfirm` in
+ *  agent-core.ts, the only caller) — {@link closeTurn}, plus a mark in
+ *  {@link WorkStatusState.interruptedTurns} so {@link turnActivity} cannot
+ *  reopen what this just closed. See that field's own doc for why the mark
+ *  exists and {@link turnStart}/{@link userReply} for where it is lifted.
+ *  Pure; SAME object when {@link closeTurn} was already a no-op and the
+ *  session was already marked (a second Esc, or one after the mark's own
+ *  turn-start already cleared it). */
+export function closeInterruptedTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
+  const closed = closeTurn(prev, sessionId);
+  if (closed.interruptedTurns.has(sessionId)) return closed;
+  return build({
+    ...inputsOf(closed),
+    interruptedTurns: new Set(closed.interruptedTurns).add(sessionId),
+  }, closed);
 }
 
 /** A hook reported [sessionId]'s turn over on a channel carrying no notification
@@ -679,6 +932,8 @@ export function noteHookChannelLost(prev: WorkStatusState, sessionId: string): W
     ...inputsOf(prev),
     deadHookSessions: new Set(prev.deadHookSessions).add(sessionId),
     keystrokeTurnSessions,
+    // Nothing is left to confirm one; foldSessions drops it again on every list.
+    provisionalStartSessions: withoutTurn(prev.provisionalStartSessions, sessionId),
     activeTurns: inferred ? withoutTurn(prev.activeTurns, sessionId) : prev.activeTurns,
     pendingTurns: inferred ? withoutTurn(prev.pendingTurns, sessionId) : prev.pendingTurns,
   }, prev);
@@ -832,10 +1087,12 @@ function foldNotification(
   let activeTurns = prev.activeTurns;
   let pendingTurns = prev.pendingTurns;
   let pendingRequests = prev.pendingRequests;
+  let lastActivityAt = prev.lastActivityAt;
+  let provisionalTurns = prev.provisionalTurns;
   // A turn-end notification closes the turn even when the reduction ignores the
   // notification itself (below) — the primary closer; hookTurnEnd only backs it up.
   if (endsTurn(msg.notificationType)) {
-    ({ activeTurns, pendingTurns, pendingRequests } = withTurnEnded(prev, raw));
+    ({ activeTurns, pendingTurns, pendingRequests, lastActivityAt, provisionalTurns } = withTurnEnded(prev, raw));
   }
   const own = prev.notifications.get(key);
   // "awaiting_input" fires from the same idle-timeout signal whether the agent
@@ -854,10 +1111,12 @@ function foldNotification(
   if (msg.notificationType === own || stale) {
     if (activeTurns === prev.activeTurns
       && pendingTurns === prev.pendingTurns
-      && pendingRequests === prev.pendingRequests) {
+      && pendingRequests === prev.pendingRequests
+      && lastActivityAt === prev.lastActivityAt
+      && provisionalTurns === prev.provisionalTurns) {
       return prev;
     }
-    return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests }, prev);
+    return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests, lastActivityAt, provisionalTurns }, prev);
   }
   return build({
     ...inputsOf(prev),
@@ -865,6 +1124,8 @@ function foldNotification(
     pendingRequests,
     activeTurns,
     pendingTurns,
+    lastActivityAt,
+    provisionalTurns,
   }, prev);
 }
 
@@ -897,6 +1158,14 @@ function foldSessions(
         && needsKeystrokeTurnStart(s.tool ?? prev.defaultTool))
       .map((s) => s.id),
   );
+  // Same exclusions: a dead channel has no start hook left to confirm with.
+  const provisionalStartSessions = new Set(
+    running
+      .filter((s) => s.mode !== "chat"
+        && !deadHookSessions.has(s.id)
+        && opensProvisionalTurn(s.tool ?? prev.defaultTool))
+      .map((s) => s.id),
+  );
 
   // Nothing keyed by a session may outlive it: a killed/crashed agent never
   // sends its turn-end or retracts its question, so prune rather than leave the
@@ -923,6 +1192,24 @@ function foldSessions(
   }
   const typedSessions = new Map<string, TypedLine>();
   for (const [id, line] of prev.typedSessions) if (live.has(id)) typedSessions.set(id, line);
+  const interruptedTurns = new Set<string>();
+  for (const id of prev.interruptedTurns) if (live.has(id)) interruptedTurns.add(id);
+  const lastActivityAt = new Map<string, number>();
+  for (const [id, t] of prev.lastActivityAt) {
+    if (id === UNATTRIBUTED_TURN ? live.size > 0 : live.has(id)) lastActivityAt.set(id, t);
+  }
+  const provisionalTurns = new Map<string, number>();
+  for (const [id, t] of prev.provisionalTurns) if (live.has(id)) provisionalTurns.set(id, t);
+  // A promoted pendingTurns id carries its HELD clock reading forward the same
+  // way its turn itself is promoted above — see WorkStatusState.pendingActivityAt
+  // — so the exact race pendingTurns holds for does not also produce a turn
+  // {@link expireTurns} can never see (no entry here reads as ineligible for
+  // expiry, not as freshly active).
+  for (const id of prev.pendingTurns) {
+    if (!live.has(id)) continue;
+    const held = prev.pendingActivityAt.get(id);
+    if (held !== undefined) lastActivityAt.set(id, held);
+  }
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
   // a fallback that predates it. The call-to-action signals ({@link
@@ -938,11 +1225,15 @@ function foldSessions(
   if (sameIds(live, prev.runningSessions)
     && sameIds(activeTurns, prev.activeTurns)
     && sameIds(keystrokeTurnSessions, prev.keystrokeTurnSessions)
+    && sameIds(provisionalStartSessions, prev.provisionalStartSessions)
+    && provisionalTurns.size === prev.provisionalTurns.size
     && prev.pendingTurns.size === 0
     && pendingRequests.size === prev.pendingRequests.size
     && notifications.size === prev.notifications.size
     && deadHookSessions.size === prev.deadHookSessions.size
-    && typedSessions.size === prev.typedSessions.size) {
+    && typedSessions.size === prev.typedSessions.size
+    && interruptedTurns.size === prev.interruptedTurns.size
+    && lastActivityAt.size === prev.lastActivityAt.size) {
     return prev;
   }
   return build({
@@ -950,9 +1241,14 @@ function foldSessions(
     runningSessions: live,
     activeTurns,
     pendingTurns: EMPTY_IDS,
+    pendingActivityAt: EMPTY_ACTIVITY,
     keystrokeTurnSessions,
+    provisionalStartSessions,
+    provisionalTurns,
     deadHookSessions,
     typedSessions,
+    interruptedTurns,
+    lastActivityAt,
     pendingRequests,
     notifications,
   }, prev);
@@ -963,7 +1259,11 @@ function foldSessions(
  *  detect a real transition by `next !== prev` (and re-advertise only then). */
 export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkStatusState {
   switch (msg.type) {
-    case "agent:turn-start": return turnStart(prev, msg.sessionId);
+    // The message's own `timestamp` is the clock reading, never `Date.now()` —
+    // this function stays a pure fold of its arguments so it can double as an
+    // `Array.reduce` callback (a third parameter here would silently bind to
+    // the array INDEX instead of a caller's clock).
+    case "agent:turn-start": return turnStart(prev, msg.sessionId, undefined, msg.timestamp);
     // Covers cancels too: structured-manager answers an `agent:cancel` with a
     // turn-end either from the driver or synthesized in its `finally`, so there
     // is no cancel path that leaves a turn open here.
@@ -984,6 +1284,116 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
       return msg.tool === prev.defaultTool
         ? prev
         : build({ ...inputsOf(prev), defaultTool: msg.tool }, prev);
+    case "handler:status": {
+      const armed = new Set(msg.sessions.map((s) => s.terminalId));
+      // Every emit repeats the whole map, most of them for a backlog or goal
+      // change that arms nothing; an unchanged set must return [prev] itself.
+      return sameIds(armed, prev.handlerArmedSessions)
+        ? prev
+        : build({ ...inputsOf(prev), handlerArmedSessions: armed }, prev);
+    }
     default: return prev;
   }
+}
+
+/** How long a turn may go with no recorded activity before {@link expireTurns}
+ *  treats it as abandoned rather than working. */
+export const DEFAULT_TURN_IDLE_MS = 30 * 60_000;
+
+/** How long a provisional turn waits for its agent's start hook before
+ *  {@link retractProvisionalTurn} takes it back. Several times the slowest start
+ *  measured (codex's first prompt, about 4 s), because a retraction that comes
+ *  too early flips a working session to done until its next tool completes. */
+export const PROVISIONAL_TURN_GRACE_MS = 30_000;
+
+/** Close every OPEN turn idle longer than [maxIdleMs], measured against [now]
+ *  and each turn's {@link WorkStatusState.lastActivityAt} — the backstop for
+ *  whatever leaves a turn with no closer of its own: a missed interrupt key, a
+ *  loopback POST that never arrived, a bridge restart mid-turn. Per-agent key
+ *  detection and the catch-all tool-completion hook ({@link turnActivity}) are
+ *  what should ordinarily close a turn; this is what bounds the ones they miss.
+ *
+ *  Three classes of turn are excluded from consideration entirely, rather than
+ *  closed and papered over:
+ *  - {@link WorkStatusState.keystrokeTurnSessions} — an agent with no per-tool
+ *    hook to re-assert liveness (cursor/copilot) has no way to repair a false
+ *    close before its real one, unlike Claude/Codex's {@link turnActivity}.
+ *  - A pending request, or a call-to-action notification (own or the
+ *    UNATTRIBUTED fallback): the session's idle time belongs to the human, not
+ *    the agent. {@link statusFor}'s precedence already shows the block ahead of
+ *    an open turn, so decaying the turn underneath it is invisible right up
+ *    until the block clears via a path that does not reopen one (a retraction,
+ *    a terminal keystroke answer) — at which point the session would read
+ *    "done" and go bus-deliverable while the agent is actually resuming.
+ *
+ *  Deliberately NOT {@link closeTurn}: a decay is a guess, not the agent's own
+ *  word that it is done, so it records no notification.
+ *
+ *  A turn nothing has ever stamped a clock reading onto (every caller in this
+ *  file's own tests that omits [now]) is left alone: absence from
+ *  {@link WorkStatusState.lastActivityAt} is "nothing to measure against", not
+ *  "measured as ancient".
+ *
+ *  Pure; SAME object when nothing expires. */
+export function expireTurns(prev: WorkStatusState, now: number, maxIdleMs: number): WorkStatusState {
+  const expired = new Set<string>();
+  for (const id of prev.activeTurns) {
+    // A session with no repair path for a false decay (see {@link
+    // WorkStatusState.keystrokeTurnSessions}) never gets a re-assert from
+    // {@link turnActivity} — cursor/copilot have no per-tool hook at all — so a
+    // false close here is not temporary the way it is for an agent with one:
+    // nothing ever reopens it before the turn really ends. Leaving the clock
+    // unenforced for them is the smaller cost.
+    if (prev.keystrokeTurnSessions.has(id)) continue;
+    // A session genuinely waiting on the human (a pending request, or a
+    // call-to-action notification) never decays: its idle time belongs to
+    // the human, not the agent, and {@link statusFor}'s own precedence
+    // already reads that block ahead of an open turn — so closing the turn
+    // underneath it would be invisible right up until the block clears via a
+    // path (a retraction, a terminal keystroke answer) that does not reopen
+    // one, at which point the session would read "done" and become
+    // deliverable while the agent is actually resuming.
+    if ((prev.pendingRequests.get(id)?.size ?? 0) > 0) continue;
+    const ownOrFallback = prev.notifications.get(id) ?? prev.notifications.get(UNATTRIBUTED_TURN);
+    if (ownOrFallback !== undefined && isCallToAction(ownOrFallback)) continue;
+    const last = prev.lastActivityAt.get(id);
+    if (last !== undefined && now - last > maxIdleMs) expired.add(id);
+  }
+  if (expired.size === 0) return prev;
+  const activeTurns = new Set(prev.activeTurns);
+  const lastActivityAt = new Map(prev.lastActivityAt);
+  const provisionalTurns = new Map(prev.provisionalTurns);
+  for (const id of expired) {
+    activeTurns.delete(id);
+    lastActivityAt.delete(id);
+    provisionalTurns.delete(id);
+  }
+  // A decayed UNATTRIBUTED_TURN was the ONLY reason every other running session
+  // read "working" (see turnOpenFor's fallback) — deriveUnread's exclusion has
+  // to reach those sessions by their own id, since nothing in `raw` is ever
+  // keyed by the anonymous one.
+  const decayed = expired.has(UNATTRIBUTED_TURN)
+    ? new Set([...expired, ...prev.runningSessions])
+    : expired;
+  // decayed excludes these closes from deriveUnread's transition scan — see its
+  // own doc for why a decay must not raise the "come and look" mark.
+  return build({ ...inputsOf(prev), activeTurns, lastActivityAt, provisionalTurns }, prev, decayed);
+}
+
+/** Take back the turn {@link userReply} opened provisionally at [openedAt] on
+ *  [sessionId], because nothing confirmed it inside the bridge's grace period —
+ *  the Enter never reached the agent as a prompt. Keyed to [openedAt] so a timer
+ *  from an earlier Enter cannot retract the turn a later one opened.
+ *
+ *  Closed the way {@link expireTurns} closes a turn, and for the same reason: a
+ *  guess, not the agent's word, so it records no notification and raises no
+ *  unread mark. Pure; SAME object when that turn is no longer provisional. */
+export function retractProvisionalTurn(prev: WorkStatusState, sessionId: string, openedAt: number): WorkStatusState {
+  if (prev.provisionalTurns.get(sessionId) !== openedAt) return prev;
+  return build({
+    ...inputsOf(prev),
+    activeTurns: withoutTurn(prev.activeTurns, sessionId),
+    lastActivityAt: withoutActivity(prev.lastActivityAt, sessionId),
+    provisionalTurns: withoutActivity(prev.provisionalTurns, sessionId),
+  }, prev, new Set([sessionId]));
 }

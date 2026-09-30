@@ -130,7 +130,7 @@ fi
 cat <<'INSTALL'
 ## Install
 
-- **macOS** (antgrid-macos.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
+- **macOS (Apple Silicon)** (antgrid-macos-arm64.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
 - **Windows**: install from the [Microsoft Store](https://apps.microsoft.com/detail/9N0P7ZRL4D9W).
 - **Linux** (antgrid-linux.AppImage): `chmod +x antgrid-linux.AppImage` then run it. Needs GTK 3 and WebKit2GTK on the host (`libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsecret-1-0`).
 INSTALL

@@ -9,6 +9,7 @@ import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 import 'auth.dart';
 import 'device_provisioning.dart';
+import 'provisioning_coordinator.dart';
 import 'provider_retry.dart';
 
 /// Test seam for the desktop/mobile split. Read through a provider rather than
@@ -19,19 +20,20 @@ final isMobilePlatformProvider = Provider<bool>(
   (_) => Platform.isIOS || Platform.isAndroid,
 );
 
-/// The identity a REMOTE-CONTROL connection presents to the relay and signs the
-/// E2E transcript with. Mobile: the main account [DeviceRecord] (`kind:"app"`,
+/// The identity a REMOTE-CONTROL connection presents to the relay and dials
+/// its peer as. Mobile: the main account [DeviceRecord] (`kind:"app"`,
 /// already in the peers inventory). Desktop: a dedicated controller record —
 /// the main desktop record is the LOCAL bridge's relay identity
 /// (`kind:"agent"`); reusing it would epoch-collide with our own bridge.
 ///
 /// Lazily provisions the controller record on first read, so a desktop that has
 /// never remote-controlled anything registers no extra device.
-final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
-  ref,
-) async {
+final FutureProvider<DeviceRecord>
+connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((ref) async {
   if (ref.watch(isMobilePlatformProvider)) {
-    return ensureCurrentUserDeviceRecord(ref);
+    return ref
+        .read(provisioningCoordinatorProvider)
+        .ensureCurrentUserDeviceRecord();
   }
 
   // The user comes FIRST, then the cached record — the read must be
@@ -48,7 +50,7 @@ final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
   }
 
   final cached = await store.readControllerIfMatchesUser(user.userId);
-  if (cached != null) return cached;
+  if (cached != null && cached.endpointSecret != null) return cached;
 
   return ref
       .read(deviceProvisioningProvider)
@@ -67,9 +69,8 @@ final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
 /// `deviceUuid` claim, so sharing one device's token across two devices would
 /// make revoking either one kill both.
 ///
-/// Null when no record can be resolved (signed out, or provisioning refused):
-/// the dial then presents an empty token and the relay's license verdict is what
-/// tells the user to sign in.
+/// Null when no record can be resolved (signed out, or provisioning refused).
+/// Remote setup treats missing credentials as a terminal provisioning error.
 final connectionTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
   ref,
 ) async {
@@ -92,9 +93,9 @@ final connectionTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
 ///
 /// [machineDeviceId] scopes the relay slot this identity dials with, so the app
 /// can hold one socket per machine open at once — see [relaySlotId]. It changes
-/// the transport address ONLY: the E2E transcript is signed with the bare
-/// `deviceUuid` (`phoneDeviceId` in `RelayMechanisms`), which is what the agent
-/// resolves us by in the account peers inventory.
+/// the transport address ONLY: peer admission resolves us by the bare
+/// `deviceUuid` (`phoneDeviceId` in `PeerConnectionMechanisms`), which is what the agent
+/// looks up in the account peers inventory.
 DeviceIdentity connectionIdentityFor(
   DeviceRecord r, {
   required String machineDeviceId,

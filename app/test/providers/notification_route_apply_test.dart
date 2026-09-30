@@ -625,8 +625,8 @@ void main() {
     expect(container.read(activeSessionIdProvider), _sessionId);
   });
 
-  // Unroutable is a real answer: a pre-W1 bridge sealed no machineUuid, and a
-  // projectId alone names no machine (`computeProjectId` hashes the path).
+  // Unroutable is a real answer: an older bridge may seal no machineUuid, and
+  // a projectId alone names no machine (`computeProjectId` hashes the path).
   test('a route that resolves to nothing changes no state', () async {
     final container = _container(
       sessions: [_entry(_sessionId)],
