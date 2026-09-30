@@ -5,6 +5,7 @@ import '../services/devices_api.dart';
 import 'auth.dart';
 import 'control_plane.dart';
 import 'device_provisioning.dart';
+import 'host_status.dart' show hostUpGenerationProvider;
 
 /// A loopback [HostControlClient] bound to the live machine host (port+token
 /// from `ensureHost`). Overridden in tests with a fake-backed client. Disposed
@@ -12,6 +13,7 @@ import 'device_provisioning.dart';
 final hostControlClientProvider = FutureProvider<HostControlClient>((
   ref,
 ) async {
+  ref.watch(hostUpGenerationProvider);
   final host = await ref.read(hostControllerProvider).ensureHost();
   final client = HostControlClient(port: host.controlPort, token: host.token);
   ref.onDispose(client.close);
@@ -26,6 +28,10 @@ final hostControlClientProvider = FutureProvider<HostControlClient>((
 /// us, or an `up` whose generation never moved. Without it the panel's Retry
 /// rebuilds the failing provider around the SAME dead client, so a stale port
 /// is unrecoverable short of an app restart.
+///
+/// The client is READ, never watched: this invalidates it on failure, and a
+/// build watching it would rebuild straight into the same refusal, forever.
+/// A build re-runs on a host coming up through [_buildViaHost] instead.
 Future<T> _viaHost<T>(
   Ref ref,
   Future<T> Function(HostControlClient c) op,
@@ -49,6 +55,16 @@ Future<T> _viaHost<T>(
   }
 }
 
+/// [_viaHost] for a notifier's `build()`: also rebuilds whenever a host process
+/// comes up, so a read that failed before any host existed heals itself.
+Future<T> _buildViaHost<T>(
+  Ref ref,
+  Future<T> Function(HostControlClient c) op,
+) {
+  ref.watch(hostUpGenerationProvider);
+  return _viaHost(ref, op);
+}
+
 /// Loads the roster of devices that have connected to this machine and mutates
 /// it over the loopback control plane (the bridge is the single writer). Every
 /// mutation refreshes from the bridge so the UI reflects the authoritative
@@ -60,7 +76,7 @@ final remoteDevicesProvider =
 
 class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
   @override
-  Future<PhonesList> build() async => _viaHost(ref, (c) => c.phonesList());
+  Future<PhonesList> build() async => _buildViaHost(ref, (c) => c.phonesList());
 
   Future<void> _mutate(Future<void> Function(HostControlClient c) op) async {
     // Retain the current data under the loading flag so a toggle/refresh does
@@ -121,7 +137,7 @@ final remoteAccessPolicyProvider =
 class RemoteAccessPolicyNotifier extends AsyncNotifier<RemoteAccessPolicy> {
   @override
   Future<RemoteAccessPolicy> build() async =>
-      _viaHost(ref, (c) => c.remoteAccessGet());
+      _buildViaHost(ref, (c) => c.remoteAccessGet());
 
   Future<void> _mutate(
     Future<RemoteAccessPolicy> Function(HostControlClient c) op,
@@ -158,7 +174,7 @@ final agentReachPolicyProvider =
 class AgentReachPolicyNotifier extends AsyncNotifier<AgentReachPolicy> {
   @override
   Future<AgentReachPolicy> build() async =>
-      _viaHost(ref, (c) => c.agentReachGet());
+      _buildViaHost(ref, (c) => c.agentReachGet());
 
   Future<void> setEnabled(bool enabled) async {
     // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).

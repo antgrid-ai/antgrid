@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/launcher/host_controller.dart';
+import 'package:antgrid/providers/host_status.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -208,6 +211,70 @@ void main() {
       expect(builds, 1);
     },
   );
+
+  test(
+    'a read made before the host existed heals when the host comes up',
+    () async {
+      // Launch race: the title-bar chip builds on the first frame, before the
+      // warm-up has supplied a spawn bootstrap, so `ensureHost` throws. Nothing
+      // else ever rebuilds these providers, so without this the switch stayed
+      // inert for the whole launch beside a perfectly healthy host.
+      var hostReady = false;
+      final calls = <String, int>{};
+      final status = StreamController<HostStatus>.broadcast();
+      addTearDown(status.close);
+      final container = ProviderContainer(
+        overrides: [
+          hostStatusProvider.overrideWith((ref) => status.stream),
+          hostControlClientProvider.overrideWith((ref) async {
+            if (!hostReady) {
+              throw StateError('bootstrapBuilder is required to spawn');
+            }
+            return _fakeClient(calls);
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+      for (final p in [remoteAccessPolicyProvider, agentReachPolicyProvider]) {
+        container.listen(p, (_, _) {}, onError: (_, _) {});
+      }
+      container.listen(remoteDevicesProvider, (_, _) {}, onError: (_, _) {});
+
+      await _until(() => container.read(remoteAccessPolicyProvider).hasError);
+      expect(container.read(remoteAccessPolicyProvider).hasValue, isFalse);
+
+      hostReady = true;
+      status.add(const HostStatus(HostPhase.up, generation: 1));
+
+      await _until(() => container.read(remoteAccessPolicyProvider).hasValue);
+      await _until(() => container.read(agentReachPolicyProvider).hasValue);
+      await _until(() => container.read(remoteDevicesProvider).hasValue);
+      expect(container.read(remoteAccessPolicyProvider).hasError, isFalse);
+    },
+  );
+
+  test('a failed read does not retry itself in a loop', () async {
+    // The failure path invalidates the client; a build that WATCHED the client
+    // would rebuild into the same refusal forever.
+    var builds = 0;
+    final status = StreamController<HostStatus>.broadcast();
+    addTearDown(status.close);
+    final container = ProviderContainer(
+      overrides: [
+        hostStatusProvider.overrideWith((ref) => status.stream),
+        hostControlClientProvider.overrideWith((ref) async {
+          builds++;
+          throw StateError('no host');
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(remoteAccessPolicyProvider, (_, _) {}, onError: (_, _) {});
+
+    await _until(() => container.read(remoteAccessPolicyProvider).hasError);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(builds, 1);
+  });
 
   test('agent reach reads and writes its own verbs, never the switch ones', () async {
     final calls = <String, int>{};

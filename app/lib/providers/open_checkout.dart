@@ -169,9 +169,15 @@ Future<String?> _resolveCheckoutPath(
       checkoutId: checkoutId,
     );
   } on HostControlException catch (error) {
+    if (error.code == 'TRANSPORT') {
+      container.invalidate(hostControlClientProvider);
+    }
     if (context.mounted) showAbToast(context, _messageFor(error));
     return null;
   } catch (_) {
+    // The client provider caches a failed `ensureHost`; without dropping it
+    // every later open or copy re-reads that failure beside a healthy host.
+    container.invalidate(hostControlClientProvider);
     if (context.mounted) {
       showAbToast(context, 'Could not reach the local host.');
     }
