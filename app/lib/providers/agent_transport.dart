@@ -319,6 +319,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
     );
   }
 
+  LicenseTokenMinter? dialMinter;
   Future<String> mintConnectionToken() async {
     final live = await minterResolver.resolve(tokenMinter);
     if (live == null) {
@@ -327,7 +328,8 @@ Future<AgentTransport?> _buildRelayTransportFor(
         'Device credentials are required for remote connections',
       );
     }
-    return live.mint();
+    dialMinter = live;
+    return live.token();
   }
 
   conn.ensureStarted(
@@ -343,6 +345,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
       identity: identity,
       epoch: epoch,
       mintToken: mintConnectionToken,
+      rejectToken: (token) => dialMinter?.discard(token),
     ),
   );
   // A redial onto a new payload link swaps the whole MachineSession, which

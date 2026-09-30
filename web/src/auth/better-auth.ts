@@ -330,6 +330,10 @@ export function createAuth(deps: CreateAuthDeps) {
     // (routes/ui.tsx); nothing here is a backstop for one that doesn't.
     rateLimit: {
       customRules: {
+        // app.ts applies a refilling token bucket to this endpoint. The
+        // built-in counter resets only after an idle window, so even steady
+        // lease refresh traffic eventually exhausts it at any finite max.
+        "/oauth2/token": false,
         "/sign-in/cross-device/start": { window: 60, max: 5 },
         "/sign-in/cross-device/approve": { window: 60, max: 10 },
         "/sign-in/cross-device/status": { window: 60, max: 60 },

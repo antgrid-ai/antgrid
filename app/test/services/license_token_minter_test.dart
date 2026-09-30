@@ -121,6 +121,96 @@ void main() {
     expect(minter.mint(), throwsA(isA<DeviceRevokedException>()));
   });
 
+  test(
+    '400 invalid_client is terminal and clears a previously cached token',
+    () async {
+      var calls = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient(
+          (_) async => ++calls == 1
+              ? http.Response('{"access_token":"old","expires_in":3600}', 200)
+              : http.Response('{"error":"invalid_client"}', 400),
+        ),
+      );
+      expect(await minter.token(), 'old');
+      await expectLater(minter.mint(), throwsA(isA<DeviceRevokedException>()));
+      expect(minter.getToken(), isNull);
+      await expectLater(minter.token(), throwsA(isA<DeviceRevokedException>()));
+      await expectLater(minter.mint(), throwsA(isA<DeviceRevokedException>()));
+      expect(calls, 2, reason: 'known revoked credentials must not be retried');
+    },
+  );
+
+  for (final response in [
+    (400, '{"error":"invalid_scope"}'),
+    (400, 'invalid_client'),
+    (400, '["invalid_client"]'),
+    (503, '{"error":"invalid_client"}'),
+  ]) {
+    test('non-credential error $response is not a revocation', () async {
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient(
+          (_) async => http.Response(response.$2, response.$1),
+        ),
+      );
+      await expectLater(
+        minter.mint(),
+        throwsA(isNot(isA<DeviceRevokedException>())),
+      );
+    });
+  }
+
+  test('revocation outranks a pending renewal cooldown', () async {
+    var calls = 0;
+    final minter = LicenseTokenMinter(
+      licenseApiUrl: 'https://api.antgrid.test',
+      clientId: 'cid',
+      clientSecret: 'secret',
+      httpClient: MockClient(
+        (_) async => http.Response(
+          ++calls == 1 ? 'offline' : '{"error":"invalid_client"}',
+          calls == 1 ? 503 : 400,
+        ),
+      ),
+    );
+    await expectLater(minter.token(), throwsException);
+    await expectLater(minter.mint(), throwsA(isA<DeviceRevokedException>()));
+    await expectLater(minter.token(), throwsA(isA<DeviceRevokedException>()));
+    expect(calls, 2);
+  });
+
+  test('a concurrent mint cannot restore a token after revocation', () async {
+    final lateResponse = Completer<http.Response>();
+    var calls = 0;
+    final minter = LicenseTokenMinter(
+      licenseApiUrl: 'https://api.antgrid.test',
+      clientId: 'cid',
+      clientSecret: 'secret',
+      httpClient: MockClient(
+        (_) async => ++calls == 1
+            ? lateResponse.future
+            : http.Response('{"error":"invalid_client"}', 400),
+      ),
+    );
+    final pending = minter.token();
+    final rejected = expectLater(
+      pending,
+      throwsA(isA<DeviceRevokedException>()),
+    );
+    await expectLater(minter.mint(), throwsA(isA<DeviceRevokedException>()));
+    lateResponse.complete(
+      http.Response('{"access_token":"stale","expires_in":3600}', 200),
+    );
+    await rejected;
+    expect(minter.getToken(), isNull);
+  });
+
   test('mint() throws on malformed body (no access_token)', () async {
     final client = MockClient((req) async {
       return http.Response(

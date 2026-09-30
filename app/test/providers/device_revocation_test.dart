@@ -1,6 +1,6 @@
 import '../helpers/fixed_peer_connector.dart';
 // Revoking a device from the web must sign THIS app out — the relay kicks the
-// socket while it is live, and the token mint answers 401 once it isn't. These
+// socket while it is live, and the token mint refuses its credentials once it isn't. These
 // pin the three properties the feature rests on: the teardown runs exactly once
 // however many machines report it, an inconclusive (offline) probe never signs
 // anyone out, and LICENSE_INVALID stays a connection fault rather than an
@@ -159,6 +159,28 @@ void main() {
 
     expect(signOut.calls, 1);
     expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  test('400 invalid_client from a deleted device signs it out', () async {
+    final container = await containerWith(
+      minter: _minter(
+        () async => http.Response('{"error":"invalid_client"}', 400),
+      ),
+    );
+    await checkDeviceRevoked(container);
+    expect(signOut.calls, 1);
+    expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  test('other 400 errors leave the session alone', () async {
+    final container = await containerWith(
+      minter: _minter(
+        () async => http.Response('{"error":"invalid_scope"}', 400),
+      ),
+    );
+    await checkDeviceRevoked(container);
+    expect(signOut.calls, 0);
+    expect(container.read(revokedNoticeProvider), isFalse);
   });
 
   test('an unreachable license service is NOT a revocation', () async {

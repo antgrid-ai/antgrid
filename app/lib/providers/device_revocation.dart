@@ -69,7 +69,8 @@ void clearRevokedNotice(ProviderContainer ref) {
 /// so `/account/me` keeps returning a user and nothing else would notice until
 /// a relay dial happens (which on desktop may be never). Minting is the
 /// authoritative oracle instead: revocation deletes the device's OAuth client,
-/// so `/api/auth/oauth2/token` answers 401 → [DeviceRevokedException].
+/// so `/api/auth/oauth2/token` rejects it with `invalid_client`, which becomes
+/// [DeviceRevokedException].
 ///
 /// **Only that exception signs anyone out.** A transport failure means offline,
 /// not revoked, and must leave the session alone.

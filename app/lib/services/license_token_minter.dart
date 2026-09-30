@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'bounded_http_request.dart';
 
-/// Thrown when the web rejects our client credentials with 401
-/// `invalid_client`. Caller (the provisioning hook) should clear the
+/// Thrown when the web rejects our client credentials with 401 or
+/// 400 `invalid_client`. Caller (the provisioning hook) should clear the
 /// keychain so the next sign-in re-provisions.
 class DeviceRevokedException implements Exception {
   const DeviceRevokedException();
@@ -40,6 +40,7 @@ class LicenseTokenMinter {
   Future<String>? _minting;
   ({Object error, StackTrace stack, DateTime retryAt})? _renewalFailure;
   int _renewalAttempts = 0;
+  bool _revoked = false;
 
   String _basicAuth() {
     return 'Basic ${base64Encode(utf8.encode('$clientId:$clientSecret'))}';
@@ -49,9 +50,10 @@ class LicenseTokenMinter {
 
   /// Mint a fresh token and cache it. Returns the new `access_token`.
   ///
-  /// Throws [DeviceRevokedException] on 401 (device revoked), or a plain
+  /// Throws [DeviceRevokedException] on rejected client credentials, or a plain
   /// `Exception` on other transport/server failures.
   Future<String> mint() async {
+    if (_revoked) throw const DeviceRevokedException();
     final base = _base();
     final res = await boundedHttpRequest(
       _http,
@@ -68,7 +70,11 @@ class LicenseTokenMinter {
       },
       timeout: requestTimeout,
     );
-    if (res.statusCode == 401) {
+    if (_revoked) throw const DeviceRevokedException();
+    if (res.statusCode == 401 ||
+        (res.statusCode == 400 && _isInvalidClient(res.body))) {
+      _revoked = true;
+      _cached = null;
       throw const DeviceRevokedException();
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -109,12 +115,9 @@ class LicenseTokenMinter {
   /// cached token while it is unexpired. Failed renewals back off independently
   /// of lease polling, honoring longer server retry delays.
   ///
-  /// For callers on a timer. In production the token endpoint is rate limited
-  /// per IP by the `@better-auth/oauth-provider` default, which
-  /// `web/src/auth/oauth-provider.ts` does not override (20 per 60 s, reset
-  /// only after 60 s with no admitted request), so a caller minting every
-  /// 20 s exhausts it in about seven minutes.
+  /// For callers on a timer: lease polling must not mint at its own frequency.
   Future<String> token() async {
+    if (_revoked) throw const DeviceRevokedException();
     final cached = _cached;
     if (cached != null && _now().isBefore(cached.refreshAt)) {
       cached.reused = true;
@@ -145,8 +148,8 @@ class LicenseTokenMinter {
       rethrow;
     } catch (error, stack) {
       _renewalAttempts = (_renewalAttempts + 1).clamp(1, 4);
-      // The OAuth bucket resets after 60 seconds of silence. Leave a margin
-      // so lease polling cannot keep it occupied after a renewal failure.
+      // Older servers reset their OAuth bucket after 60 seconds of silence.
+      // Leave a margin so lease polling cannot keep it occupied after failure.
       var delay = Duration(
         seconds: (65 * (1 << (_renewalAttempts - 1))).clamp(65, 300),
       );
@@ -227,6 +230,15 @@ class LicenseTokenMinter {
       return;
     }
     _scheduleRefresh();
+  }
+}
+
+bool _isInvalidClient(String response) {
+  try {
+    final body = jsonDecode(response);
+    return body is Map<String, dynamic> && body['error'] == 'invalid_client';
+  } on FormatException {
+    return false;
   }
 }
 

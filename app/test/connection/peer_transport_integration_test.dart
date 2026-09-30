@@ -8,6 +8,9 @@ import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/services/license_token_minter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:antgrid_peer_transport/antgrid_peer_transport.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -94,6 +97,8 @@ class _Relay extends RelayService {
   final presence = StreamController<bool>.broadcast();
   AppState state = const AppState();
   int dials = 0;
+  final tokens = <String>[];
+  String? rejection;
   Completer<void>? gate;
   @override
   AppState get currentState => state;
@@ -110,6 +115,12 @@ class _Relay extends RelayService {
     String? machineDeviceId,
   }) async {
     dials++;
+    tokens.add(licenseToken);
+    final code = rejection;
+    if (code != null) {
+      rejection = null;
+      throw RelayConnectException(code: code, retryable: false, message: code);
+    }
     await gate?.future;
     state = const AppState(connectionState: RelayConnectionState.authenticated);
     if (!states.isClosed) states.add(state);
@@ -168,7 +179,11 @@ PeerConnectionMechanisms _mechanisms(
   buildHandshaker: () => handshake,
 );
 
-RelayCentralControlDialer _central(_Relay relay) => RelayCentralControlDialer(
+RelayCentralControlDialer _central(
+  _Relay relay, {
+  Future<String> Function()? mintToken,
+  void Function(String)? rejectToken,
+}) => RelayCentralControlDialer(
   relay: relay,
   machineDeviceId: 'machine',
   identity: DeviceIdentity(
@@ -180,10 +195,48 @@ RelayCentralControlDialer _central(_Relay relay) => RelayCentralControlDialer(
     x25519PublicKey: Uint8List(32),
   ),
   epoch: 1,
-  mintToken: () async => 'token',
+  mintToken: mintToken ?? () async => 'token',
+  rejectToken: rejectToken,
 );
 
 void main() {
+  test(
+    'a relay expiry verdict discards the cached token before the next dial',
+    () async {
+      var mints = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient(
+          (_) async => http.Response(
+            '{"access_token":"tok-${++mints}","expires_in":3600}',
+            200,
+          ),
+        ),
+      );
+      await minter.token();
+      final relay = _Relay()..rejection = 'LICENSE_EXPIRED';
+      addTearDown(relay.dispose);
+      final central = _central(
+        relay,
+        mintToken: minter.token,
+        rejectToken: minter.discard,
+      );
+      const coords = ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'pin',
+      );
+      await expectLater(
+        central.connect(coords),
+        throwsA(isA<RelayConnectException>()),
+      );
+      expect(minter.getToken(), isNull);
+      await central.connect(coords);
+      expect(relay.tokens, ['tok-1', 'tok-2']);
+    },
+  );
+
   test(
     'changed central URL is reconciled without using payload failure',
     () async {
