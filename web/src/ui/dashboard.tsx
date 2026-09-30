@@ -11,6 +11,7 @@ import type { SubscriptionRow } from "../models/subscription.js";
 import type { PlanRow } from "../models/plan.js";
 import { FREE_TIER } from "../billing/plans.js";
 import { isPendingCancellation } from "../models/subscription.js";
+import { pricingHidden } from "./pricing-visibility.js";
 
 export type DashboardPageProps = {
   user: LayoutUser;
@@ -238,13 +239,16 @@ function SubscriptionCard({
               </div>
               <p class="text-sm text-muted mt-1 max-w-md">
                 Remote control is included, capped at {workerLimit} worker
-                {workerLimit === 1 ? " machine" : " machines"}. Pro raises the
-                cap and is billed per seat, so you can bring your team along.
+                {workerLimit === 1 ? " machine" : " machines"}.
+                {!pricingHidden() &&
+                  " Pro raises the cap and is billed per seat, so you can bring your team along."}
               </p>
             </div>
-            <a class="btn btn-primary" href="/pricing">
-              View pricing
-            </a>
+            {!pricingHidden() && (
+              <a class="btn btn-primary" href="/pricing">
+                View pricing
+              </a>
+            )}
           </div>
           <CapacityRow
             activeWorkers={activeWorkers}

@@ -3,7 +3,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { appleEnvOverrides, buildTestApp } from "../helpers/app.js";
 import { safeCallbackURL } from "../../src/routes/oauth-start.js";
 
 let pg: PgHandle;
@@ -41,6 +41,27 @@ describe("/oauth/start", () => {
     const loc = res.headers.get("location") ?? "";
     expect(loc.includes("accounts.google.com")).toBe(true);
     expect(loc.includes("client_id=gl")).toBe(true);
+  });
+
+  test("apple: 302s to Apple's authorize URL with the Services ID, posting back", async () => {
+    const { app } = buildTestApp(pg.db, pg.url, { envOverrides: appleEnvOverrides() });
+    const res = await app.request("/oauth/start?provider=apple&callbackURL=/dashboard");
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get("location") ?? "");
+    expect(loc.origin).toBe("https://appleid.apple.com");
+    expect(loc.searchParams.get("client_id")).toBe("ai.radhaai.antgrid.web");
+    // Apple returns name and email only to a form_post callback.
+    expect(loc.searchParams.get("response_mode")).toBe("form_post");
+    expect(loc.searchParams.get("redirect_uri")).toBe(
+      "http://localhost:8787/api/auth/callback/apple",
+    );
+    expect(res.headers.get("set-cookie")).toBeTruthy();
+  });
+
+  test("apple → 400 on a deployment without the Apple keys", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const res = await app.request("/oauth/start?provider=apple");
+    expect(res.status).toBe(400);
   });
 
   test("defaults callbackURL to /dashboard when omitted", async () => {

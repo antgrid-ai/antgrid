@@ -9,6 +9,7 @@ import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
 import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportLauncher } from "./salesiq.js";
 import { Analytics } from "./analytics.js";
+import { pricingHidden } from "./pricing-visibility.js";
 import {
   THEME_CHOICES,
   THEME_TOGGLE_SCRIPT,
@@ -127,7 +128,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               // labels. That is measured: the wordmark as an <img> left Devices
               // visible at 414px until the file landed, then scrolled it out.
               <nav class="flex min-w-0 items-center gap-1 overflow-x-auto text-sm [scrollbar-width:none]">
-                {NAV.map((item) => {
+                {NAV.filter((item) => item.section !== "pricing" || !pricingHidden()).map((item) => {
                   const here = item.section === section;
                   return (
                     <a

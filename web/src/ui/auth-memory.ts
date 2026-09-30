@@ -19,7 +19,7 @@
 
 /** Methods step 1 may route to. Mirrored by the switch in `/ui/login/continue`;
  *  anything else there falls through to the magic link. */
-export const AUTH_METHODS = ["password", "link", "github", "google"] as const;
+export const AUTH_METHODS = ["password", "link", "github", "google", "apple"] as const;
 export type AuthMethod = (typeof AUTH_METHODS)[number];
 
 /** Seconds the resend buttons stay disabled. Comfortably above the server's

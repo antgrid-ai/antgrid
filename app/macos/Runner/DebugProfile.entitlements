@@ -9,5 +9,9 @@
 	     notarized direct download, not the Mac App Store. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 </dict>
 </plist>

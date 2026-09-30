@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'dart:math';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kDebugMode;
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'bounded_http_request.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
@@ -137,6 +141,53 @@ String? passwordLengthError(String password) {
 /// avoiding.
 enum PasswordSignIn { ok, invalidCredentials, emailNotVerified }
 
+/// What the Apple sign-in sheet hands back, reduced to the fields the server
+/// takes. A seam for tests: the real sheet is a system UI no widget test can
+/// drive.
+class AppleCredential {
+  const AppleCredential({
+    required this.identityToken,
+    required this.authorizationCode,
+    this.givenName,
+    this.familyName,
+  });
+
+  final String identityToken;
+
+  /// Single-use and valid for five minutes; traded server-side for the refresh
+  /// token that account deletion revokes.
+  final String authorizationCode;
+
+  /// Apple supplies the name on the FIRST authorization only, so this is the
+  /// one chance to send it.
+  final String? givenName;
+  final String? familyName;
+}
+
+/// Presents Apple's sheet for [nonce]. Resolves to null when the user
+/// dismissed it, and throws [AuthException] when it could not complete.
+typedef AppleCredentialRequest =
+    Future<AppleCredential?> Function(String nonce);
+
+/// Runs an OAuth round trip inside the app, resolving to the callback URL the
+/// flow ended on, or to null when the user closed the sheet. Throws
+/// [AuthException] when the sheet could not be shown.
+typedef InAppWebAuth = Future<Uri?> Function(Uri url, String callbackScheme);
+
+/// How far [AuthService.startOAuth] got before returning.
+enum OAuthStart {
+  /// The system browser is up; the outcome arrives later as a deep link.
+  handedOff,
+
+  /// The round trip ran in the app and the session cookie is stored.
+  signedIn,
+
+  /// The round trip ran in the app and ended without a session: the user
+  /// closed the sheet, or redemption failed and was reported on
+  /// [AuthService.oauthFailures].
+  notSignedIn,
+}
+
 /// Thrown by magic-link flows on a non-recoverable failure (bad response,
 /// insecure transport). Pending/transient poll failures are NOT exceptions —
 /// see [MagicLinkStatus.error].
@@ -194,9 +245,13 @@ class AuthService {
     http.Client? httpClient,
     DateTime Function()? now,
     Future<bool> Function(Uri url)? launchUrl,
+    AppleCredentialRequest? requestAppleCredential,
+    InAppWebAuth? authenticateInApp,
   }) : _http = httpClient ?? http.Client(),
        _now = now ?? DateTime.now,
-       _launchUrl = launchUrl ?? _launchExternal;
+       _launchUrl = launchUrl ?? _launchExternal,
+       _requestAppleCredential = requestAppleCredential ?? _presentAppleSignIn,
+       _authenticateInApp = authenticateInApp ?? _presentWebAuthSession;
 
   final String licenseApiUrl;
   final AuthStorage storage;
@@ -212,6 +267,71 @@ class AuthService {
     url,
     mode: url_launcher.LaunchMode.externalApplication,
   );
+
+  final InAppWebAuth _authenticateInApp;
+
+  static const _webAuthChannel = MethodChannel('ai.radhaai.antgrid/web_auth');
+
+  static Future<Uri?> _presentWebAuthSession(
+    Uri url,
+    String callbackScheme,
+  ) async {
+    final String? callback;
+    try {
+      callback = await _webAuthChannel.invokeMethod<String>('authenticate', {
+        'url': url.toString(),
+        'callbackScheme': callbackScheme,
+      });
+    } on PlatformException catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'In-app sign-in sheet failed',
+        fields: {'code': e.code, 'message': e.message},
+      );
+      throw AuthException('Could not open the sign-in page');
+    }
+    return callback == null ? null : Uri.parse(callback);
+  }
+
+  final AppleCredentialRequest _requestAppleCredential;
+
+  static Future<AppleCredential?> _presentAppleSignIn(String nonce) async {
+    final AuthorizationCredentialAppleID credential;
+    try {
+      credential = await SignInWithApple.getAppleIDCredential(
+        scopes: [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: nonce,
+      );
+    } on SignInWithAppleAuthorizationException catch (e) {
+      if (e.code == AuthorizationErrorCode.canceled) return null;
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in sheet failed',
+        fields: {'code': e.code.name, 'message': e.message},
+      );
+      throw AuthException('Apple sign-in failed. Try again.');
+    } on SignInWithAppleException catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in unavailable',
+        fields: {'error': '$e'},
+      );
+      throw AuthException('Apple sign-in is not available on this device.');
+    }
+    final identityToken = credential.identityToken;
+    if (identityToken == null) {
+      throw AuthException('Apple sign-in failed. Try again.');
+    }
+    return AppleCredential(
+      identityToken: identityToken,
+      authorizationCode: credential.authorizationCode,
+      givenName: credential.givenName,
+      familyName: credential.familyName,
+    );
+  }
 
   /// User-facing OAuth failures that surface OUTSIDE any call stack: the
   /// browser detour means the outcome arrives later as a deep link, long after
@@ -241,16 +361,25 @@ class AuthService {
   /// killed during the browser detour) — copy falls back to the generic form.
   String? _lastOAuthProvider;
 
-  /// Open the system browser to begin OAuth. Provider is "github" or "google".
+  /// Begin OAuth. Provider is "github" or "google".
   /// We pass `callbackURL=/oauth/handoff` so the server can mint
   /// a single-use one-time token bound to the new session and return it in the
   /// `antgrid://` deep link; [handleDeepLink] redeems it for the session cookie.
   /// Deep links can't receive cookies directly, and forwarding the raw session
   /// would expose it to custom-scheme hijacking and logging.
   ///
-  /// Throws [AuthException] when the browser cannot be opened; failures of the
-  /// round-trip itself are reported on [oauthFailures].
-  Future<void> startOAuth(String provider) async {
+  /// iOS runs the round trip in the app's own sign-in sheet and returns once it
+  /// is over, because App Review rejects a hand-off to Safari (guideline 4).
+  /// Everywhere else this opens the system browser and returns
+  /// [OAuthStart.handedOff].
+  ///
+  /// Throws [AuthException] when the browser or sheet cannot be opened;
+  /// failures of the round-trip itself are reported on [oauthFailures].
+  /// Whether [startOAuth] runs the whole round trip before returning, rather
+  /// than handing off to the system browser.
+  bool get oauthRunsInApp => defaultTargetPlatform == TargetPlatform.iOS;
+
+  Future<OAuthStart> startOAuth(String provider) async {
     _lastOAuthProvider = provider;
     // Better-Auth's social sign-in is POST-only; `/oauth/start` is the
     // browser-navigable GET wrapper that 302s to the provider authorize URL.
@@ -258,6 +387,13 @@ class AuthService {
       licenseApiUrl: licenseApiUrl,
       provider: provider,
     );
+    if (oauthRunsInApp) {
+      final callback = await _authenticateInApp(url, 'antgrid');
+      if (callback == null) return OAuthStart.notSignedIn;
+      return await handleDeepLink(callback)
+          ? OAuthStart.signedIn
+          : OAuthStart.notSignedIn;
+    }
     final bool opened;
     try {
       opened = await _launchUrl(url);
@@ -267,6 +403,7 @@ class AuthService {
       throw AuthException('Could not open the browser');
     }
     if (!opened) throw AuthException('Could not open the browser');
+    return OAuthStart.handedOff;
   }
 
   void _emitOAuthFailure() {
@@ -292,8 +429,10 @@ class AuthService {
   /// token at the OTT verify endpoint, and persist the session cookie returned
   /// via `Set-Cookie`. The OTT (not the raw session) is what travels through
   /// the deep link, so a hijacked or logged link yields nothing replayable.
-  Future<void> handleDeepLink(Uri uri) async {
-    if (uri.scheme != 'antgrid' || uri.host != 'auth') return;
+  ///
+  /// Resolves to true once a session cookie is stored.
+  Future<bool> handleDeepLink(Uri uri) async {
+    if (uri.scheme != 'antgrid' || uri.host != 'auth') return false;
     final Map<String, String> query;
     try {
       query = uri.queryParameters;
@@ -302,7 +441,7 @@ class AuthService {
       // (`antgrid://auth/x?token=%80`) throws out of it. Any web page can fire
       // that URL, and main()'s handleLink is unawaited, so the throw would land
       // as an unhandled async error rather than an ignored link.
-      return;
+      return false;
     }
     // The handoff bounces its own failures back as `?error=` (no_session |
     // server_error — web/src/routes/oauth-handoff.ts) so the app regains the
@@ -310,13 +449,13 @@ class AuthService {
     // screen with no explanation.
     if (query['error'] != null) {
       _emitOAuthFailure();
-      return;
+      return false;
     }
     final token = query['token'];
-    if (token == null || token.isEmpty) return;
+    if (token == null || token.isEmpty) return false;
     // The verify response carries the session cookie; never redeem (and receive
     // it) over plaintext. Consistent with the magic-link methods' guard.
-    if (!_transportIsSecure) return;
+    if (!_transportIsSecure) return false;
     // This may run on the cold-start deep link, unawaited from main() (see
     // main.dart's getInitialLink consumption), so a thrown network error here
     // would surface as an unhandled zone error. Redemption never throws: on
@@ -332,7 +471,7 @@ class AuthService {
       );
       if (res.statusCode != 200) {
         _emitOAuthFailure();
-        return;
+        return false;
       }
       // The signed session cookie only exists in Set-Cookie — the JSON body's
       // `token` is the unsigned DB token, not the signed cookie the server
@@ -341,9 +480,10 @@ class AuthService {
       final cookie = _extractSessionCookie(res.headers['set-cookie']);
       if (cookie == null) {
         _emitOAuthFailure();
-        return;
+        return false;
       }
       await storage.writeCookie(cookie);
+      return true;
     } catch (e) {
       // Offline, server unreachable, malformed response, or a keychain that
       // refuses the write — never rethrow. Logged because the user-facing
@@ -355,6 +495,7 @@ class AuthService {
         fields: {'error': '$e'},
       );
       _emitOAuthFailure();
+      return false;
     }
   }
 
@@ -460,6 +601,89 @@ class AuthService {
       default:
         throw AuthException('Could not sign in. Try again.');
     }
+  }
+
+  /// Sign in with Apple's native sheet, persisting the session cookie on
+  /// success. Returns false when the user dismissed the sheet.
+  ///
+  /// The server verifies Apple's identity token and signs in, or creates, the
+  /// account it names. The nonce binds that token to this attempt, and it goes
+  /// to Apple and to the server as the SAME string: Better-Auth compares the
+  /// token's `nonce` claim with the one it is sent verbatim, where Firebase's
+  /// convention hashes one side.
+  Future<bool> signInWithApple() async {
+    _assertSecureTransport();
+    final nonce = _newNonce();
+    final credential = await _requestAppleCredential(nonce);
+    if (credential == null) return false;
+    final name = {
+      if (credential.givenName case final given? when given.isNotEmpty)
+        'firstName': given,
+      if (credential.familyName case final family? when family.isNotEmpty)
+        'lastName': family,
+    };
+    final res = await _postAuthJson('/api/auth/sign-in/social', {
+      'provider': 'apple',
+      'idToken': {
+        'token': credential.identityToken,
+        'nonce': nonce,
+        if (name.isNotEmpty) 'user': {'name': name},
+      },
+    });
+    if (res.statusCode == 429) {
+      throw AuthException('Too many attempts. Try again in a minute.');
+    }
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      // Apple's sheet has already succeeded by now, so the one copy the user
+      // sees stands for every server-side cause — a deployment without Apple
+      // configured (PROVIDER_NOT_FOUND) reads the same as a rejected token.
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in rejected by server',
+        fields: {'status': res.statusCode, 'code': _errorCode(res)},
+      );
+      throw AuthException('Could not sign in with Apple. Try again.');
+    }
+    final cookie = _extractSessionCookie(res.headers['set-cookie']);
+    if (cookie == null) throw AuthException('Unexpected server response');
+    await storage.writeCookie(cookie);
+    await _sendAppleAuthorizationCode(cookie, credential.authorizationCode);
+    return true;
+  }
+
+  /// Hands the server the sign-in's authorization code, which it trades for
+  /// the refresh token it must revoke if this account is ever deleted.
+  ///
+  /// Never throws: the user is signed in by now, and losing this call costs
+  /// only that revocation, never the sign-in.
+  Future<void> _sendAppleAuthorizationCode(String cookie, String code) async {
+    try {
+      final res = await boundedHttpRequest(
+        _http,
+        'POST',
+        Uri.parse('$licenseApiUrl/account/apple/authorization-code'),
+        headers: {'cookie': cookie, 'content-type': 'application/json'},
+        body: jsonEncode({'code': code}),
+      );
+      if (res.statusCode >= 200 && res.statusCode < 300) return;
+      AbLog.warn(
+        'AuthService',
+        'Apple authorization code was not accepted',
+        fields: {'status': res.statusCode},
+      );
+    } catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'Apple authorization code could not be sent',
+        fields: {'error': '$e'},
+      );
+    }
+  }
+
+  static String _newNonce() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
   }
 
   /// Create an account. Mints NO session — the server runs `autoSignIn: false`
