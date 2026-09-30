@@ -91,8 +91,10 @@ class PreviewState {
   final String? error;
 
   /// The latest explicit "go to this URL" aimed at an already-open tab (a link
-  /// clicked in the terminal). The tab's webview owns its own history, so the
-  /// service can only ask; the screen performs the load.
+  /// clicked in the terminal). It is only the change signal that makes a
+  /// mounted screen rebuild: the load itself is handed over once through
+  /// [PreviewService.takeNavRequest], which works whether or not a screen was
+  /// mounted when the link was clicked.
   final PreviewNavRequest? navRequest;
 
   const PreviewState({
@@ -122,6 +124,7 @@ class PreviewState {
     String? error,
     bool clearError = false,
     PreviewNavRequest? navRequest,
+    bool clearNavRequest = false,
   }) {
     return PreviewState(
       ports: ports ?? this.ports,
@@ -131,21 +134,23 @@ class PreviewState {
           : (activeTabId ?? this.activeTabId),
       isLoading: isLoading ?? this.isLoading,
       error: clearError ? null : (error ?? this.error),
-      navRequest: navRequest ?? this.navRequest,
+      navRequest: clearNavRequest ? null : (navRequest ?? this.navRequest),
     );
   }
 }
 
+/// [url] is absolute and already anchored on the tab's own origin, so the
+/// page the webview happens to be showing never influences where it lands.
 /// [seq] is monotonic so the same link clicked twice still reads as a new
 /// request (state equality alone would swallow the second one).
 class PreviewNavRequest {
   final int port;
-  final String path;
+  final Uri url;
   final int seq;
 
   const PreviewNavRequest({
     required this.port,
-    required this.path,
+    required this.url,
     required this.seq,
   });
 }

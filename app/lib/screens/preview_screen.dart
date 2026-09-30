@@ -508,22 +508,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final previewStateAsync = ref.watch(previewStateProvider);
-    ref.listen(previewStateProvider, (prev, next) {
-      final req = next.value?.navRequest;
-      if (req == null || req.seq == prev?.value?.navRequest?.seq) return;
-      final tab = next.value!.tabs.where((t) => t.port == req.port).firstOrNull;
-      final controller = _tabStates[req.port]?.controller;
-      if (tab == null || controller == null) return;
-      // Tab currentUrl is only the URL the controller was built with, so the
-      // origin comes from the live page (proxy origin in relay mode).
-      final live = _tabStates[req.port]?.currentUrl ?? tab.currentUrl;
-      if (live == null) return;
-      detached(
-        'PreviewScreen',
-        'navigate to link',
-        () => controller.loadRequest(Uri.parse(live).resolve(req.path)),
-      );
-    });
     // watch, not the `ref.read` in [_backFromPreview]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
     final onScreen =
@@ -605,10 +589,20 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
+    // Consumed here, not from a state listener: this screen is unmounted while
+    // another pane shows, so a link followed then has no listener to reach and
+    // the next mount builds its controllers from here.
+    final previewService = state.tabs.isEmpty
+        ? null
+        : focusedCheckoutServiceOrNull(
+            ref.container,
+            (s) => s.previewService,
+          );
     for (final tab in state.tabs) {
       final initialUrl =
           tab.currentUrl ?? 'http://localhost:${tab.localPort}';
       final tabState = _tabStates.putIfAbsent(tab.port, _TabWebViewState.new);
+      final linkTarget = previewService?.takeNavRequest(tab.port);
       // Rebuild only on an actual target change: webview_flutter builds the
       // controller eagerly (unlike inappwebview's onWebViewCreated), so a
       // fresh target means a fresh controller and the ValueKey below swaps
@@ -617,20 +611,33 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller, or every tab would reload on every state update. Keyed
       // on the full URL (path included), not [_TabWebViewState.origin] —
       // that's deliberately path-free (see its doc) so it can't serve this.
-      if (tabState.lastAppliedUrl == initialUrl) continue;
+      if (tabState.lastAppliedUrl == initialUrl) {
+        final controller = tabState.controller;
+        if (linkTarget != null && controller != null) {
+          detached(
+            'PreviewScreen',
+            'navigate to link',
+            () => controller.loadRequest(linkTarget),
+          );
+        }
+        continue;
+      }
       tabState.lastAppliedUrl = initialUrl;
       tabState.origin = _originOf(initialUrl);
       // Present the logical target, not the forwarder: in relay mode the webview
       // may load a different localhost port when the dev server's was taken
       // here, but the tab targets scheme://localhost:<port>.
       tabState.displayOrigin = '${tab.scheme}://localhost:${tab.port}';
-      tabState.currentUrl = initialUrl;
+      // A link waiting on a freshly built controller becomes its first load, so
+      // the tab never loads the page it was opened on just to leave it.
+      final loadUrl = linkTarget?.toString() ?? initialUrl;
+      tabState.currentUrl = loadUrl;
       if (tab.port == state.activeTabId) {
         _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
       }
       tabState.controller = _buildController(
         tab.port,
-        initialUrl,
+        loadUrl,
         context.antgrid.bgDeepest,
       );
     }

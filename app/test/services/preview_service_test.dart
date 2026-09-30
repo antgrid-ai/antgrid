@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_handoff.dart';
 import 'package:antgrid/services/preview_service.dart';
@@ -806,6 +807,143 @@ void main() {
       await svc.closeTab(portB);
       expect(svc.currentState.activeTabId, isNull);
       await session.close();
+    });
+  });
+
+  group('PreviewService followed-link navigation', () {
+    test(
+      'relay mode queues a load on the forwarder origin, ahead of any page the '
+      'webview wandered to',
+      () async {
+        final occupied = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        addTearDown(occupied.close);
+        final session = await _newSession(FakeAgentTransport());
+        addTearDown(session.close);
+        final svc = session.previewService;
+        await svc.openTab(occupied.port);
+        final localPort = svc.currentState.activeTab!.localPort;
+        expect(localPort, isNot(occupied.port));
+
+        await svc.openTab(
+          occupied.port,
+          path: '/dashboard?q=1#top',
+          navigateExisting: true,
+        );
+        final first = svc.currentState.navRequest!;
+        expect(first.port, occupied.port);
+        expect(first.url, Uri.parse('http://localhost:$localPort/dashboard?q=1#top'));
+
+        await svc.openTab(
+          occupied.port,
+          path: '/dashboard?q=1#top',
+          navigateExisting: true,
+        );
+        expect(svc.currentState.navRequest!.seq, greaterThan(first.seq));
+        expect(svc.takeNavRequest(occupied.port), first.url);
+
+        await svc.closeTab(occupied.port);
+      },
+    );
+
+    test('local mode queues a load on the localhost origin', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000, path: '/start');
+
+      await svc.openTab(3000, path: '/a/b?x=1#f', navigateExisting: true);
+      await svc.openTab(3000, path: '/a/b?x=1#f', navigateExisting: true);
+
+      expect(svc.currentState.navRequest!.seq, 2);
+      expect(svc.takeNavRequest(3000), Uri.parse('http://localhost:3000/a/b?x=1#f'));
+    });
+
+    test('a queued load is taken once, replaced by a newer one, and dropped on '
+        'close', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000);
+      await svc.openTab(4000);
+
+      expect(svc.takeNavRequest(3000), isNull);
+
+      await svc.openTab(3000, path: '/one', navigateExisting: true);
+      await svc.openTab(3000, path: '/two', navigateExisting: true);
+      final emissions = <PreviewState>[];
+      final sub = svc.stateStream.listen(emissions.add);
+      addTearDown(sub.cancel);
+      expect(svc.takeNavRequest(3000), Uri.parse('http://localhost:3000/two'));
+      expect(svc.takeNavRequest(3000), isNull);
+      await Future<void>.delayed(Duration.zero);
+      expect(emissions, isEmpty);
+
+      await svc.openTab(4000, path: '/gone', navigateExisting: true);
+      await svc.closeTab(4000);
+      expect(svc.takeNavRequest(4000), isNull);
+      expect(svc.currentState.navRequest, isNull);
+    });
+
+    test('focus decides whether the tab is activated', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000);
+      await svc.openTab(4000, focus: false);
+      expect(svc.currentState.activeTabId, 3000);
+
+      await svc.openTab(
+        4000,
+        path: '/x',
+        focus: false,
+        navigateExisting: true,
+      );
+      expect(svc.currentState.activeTabId, 3000);
+      expect(svc.takeNavRequest(4000), isNotNull);
+
+      await svc.openTab(4000, path: '/y', navigateExisting: true);
+      expect(svc.currentState.activeTabId, 4000);
+    });
+
+    test('a local scheme mismatch reopens the tab instead of queuing a load',
+        () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000);
+
+      await svc.openTab(
+        3000,
+        scheme: 'https',
+        path: '/secure',
+        navigateExisting: true,
+      );
+
+      expect(svc.currentState.navRequest, isNull);
+      expect(svc.takeNavRequest(3000), isNull);
+      expect(svc.currentState.tabs.single.scheme, 'https');
+      expect(
+        svc.currentState.tabs.single.currentUrl,
+        'https://localhost:3000/secure',
+      );
+    });
+
+    test('without navigateExisting an open tab is left where it is', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000);
+      await svc.openTab(4000, focus: false);
+
+      await svc.openTab(4000, path: '/ignored');
+
+      expect(svc.currentState.navRequest, isNull);
+      expect(svc.takeNavRequest(4000), isNull);
+      expect(svc.currentState.activeTabId, 4000);
+      expect(svc.currentState.tabs.last.currentUrl, 'http://localhost:4000');
     });
   });
 }
