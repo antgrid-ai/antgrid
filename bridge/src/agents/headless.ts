@@ -14,6 +14,7 @@ import {
 // an entry point is not a single place; the chokepoint is.
 import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
+import { stripParentClaudeSession } from "antgrid-agents/terminal-platform";
 import { detectInstalledTools } from "../tool-detector";
 import { AGENTS, agentSpec } from "../agent-runtime";
 import {
@@ -456,7 +457,7 @@ function makeScratchHome(vars?: string[]):
  */
 function headlessEnv(overrides?: Record<string, string>): Record<string, string> {
   const { ANTGRID_TERMINAL_ID: _drop, ...inherited } = process.env;
-  const env = stripInheritedCertOverrides({ ...inherited } as Record<string, string>);
+  const env = stripInheritedCertOverrides(stripParentClaudeSession(inherited) as Record<string, string>);
   return overrides ? { ...env, ...overrides } : env;
 }
 

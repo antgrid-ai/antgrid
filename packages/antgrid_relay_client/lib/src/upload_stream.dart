@@ -97,7 +97,7 @@ abstract interface class UploadExchange {
 final class FailedUploadExchange implements UploadExchange {
   FailedUploadExchange(UploadFailure failure, [this.requestId = ''])
     : _resultCompleter = Completer<UploadStreamResult>() {
-    // Mirrors FailedTunnelHttpExchange: a caller that never awaits `result`
+    // Mirrors FailedTunnelTcpChannel: a caller that never awaits `result`
     // must not turn this into an unhandled error.
     _resultCompleter.future.ignore();
     _resultCompleter.completeError(failure);

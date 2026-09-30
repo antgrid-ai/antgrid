@@ -62,24 +62,13 @@ void main() {
       checkoutId: 'main',
       subscribe: {'type': 'terminal:subscribe', 'requestId': 'term-1'},
     );
-    final tunnel = transportX.openTunnelHttp(
-      requestId: 'tun-1',
-      checkoutId: 'main',
-      head: {
-        'type': 'tunnel:http-request',
-        'requestId': 'tun-1',
-        'method': 'GET',
-        'path': '/',
-        'headers': <String, String>{},
-      },
-      bodyLength: 0,
-    );
+    final tunnel = transportX.openTunnelTcp(connId: 'tun-1', port: 3000);
     await Future<void>.delayed(const Duration(milliseconds: 20));
     final terminalStream = relay.openedStreams.firstWhere(
       (s) => s.open is TerminalStreamOpen,
     );
     final tunnelStream = relay.openedStreams.firstWhere(
-      (s) => s.open is TunnelHttpStreamOpen,
+      (s) => s.open is TunnelTcpStreamOpen,
     );
 
     final events = <ProjectStreamEvent>[];
@@ -147,7 +136,7 @@ void main() {
 
     await eventsSub.cancel();
     await terminal.close();
-    tunnel.cancel();
+    tunnel.abort();
     terminalStream.end();
     tunnelStream.end();
     await session.dispose();

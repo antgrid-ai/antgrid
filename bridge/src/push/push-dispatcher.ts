@@ -78,6 +78,20 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         log.debug("push: turn-end notification not sent — the Handler owns this session's completion");
         return;
       }
+      // An armed Handler already announces this slot's stop on its own terms —
+      // a park notice, a wrap-up or an escalation — so the agent's own error
+      // push would be a second alert for one event. Keyed on `isHandlerArmed`
+      // rather than `handlerOwnsCompletion`: the Handler's park notice fires
+      // for any armed slot regardless of backlog, including the empty-backlog
+      // one-tap arm before a goal is stated.
+      if (msg.type === "notification:push"
+        && msg.notificationType === "error"
+        && msg.origin === "agent"
+        && msg.sessionId
+        && deps.isHandlerArmed?.(msg.sessionId)) {
+        log.debug("push: error notification not sent — the Handler owns this session's completion");
+        return;
+      }
       const composed = composePush(msg);
       if (!composed) return;
       // Past this point every return path drops a user-facing notification, and

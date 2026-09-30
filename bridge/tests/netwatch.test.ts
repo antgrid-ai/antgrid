@@ -67,10 +67,10 @@ describe("Netwatch stream kind", () => {
   it("renders a record's native stream kind alongside its stream id", () => {
     const event: NetwatchEvent = {
       seq: 1, at: 0, dir: "tx", kind: "frame", transport: "iroh",
-      channel: "control", streamKind: "tunnel-ws", streamId: "abc123",
+      channel: "control", streamKind: "tunnel-tcp", streamId: "abc123",
       msgType: "preview:url",
     };
-    expect(renderEvent(event)).toContain("s:abc123 tunnel-ws");
+    expect(renderEvent(event)).toContain("s:abc123 tunnel-tcp");
   });
 });
 

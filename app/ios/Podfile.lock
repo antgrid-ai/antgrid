@@ -1,5 +1,7 @@
 PODS:
   - Flutter (1.0.0)
+  - iroh_flutter (1.0.0):
+    - Flutter
   - irondash_engine_context (0.0.1):
     - Flutter
   - push (0.0.1):
@@ -10,6 +12,7 @@ PODS:
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
+  - iroh_flutter (from `.symlinks/plugins/iroh_flutter/ios`)
   - irondash_engine_context (from `.symlinks/plugins/irondash_engine_context/ios`)
   - push (from `.symlinks/plugins/push/darwin`)
   - super_native_extensions (from `.symlinks/plugins/super_native_extensions/ios`)
@@ -17,6 +20,8 @@ DEPENDENCIES:
 EXTERNAL SOURCES:
   Flutter:
     :path: Flutter
+  iroh_flutter:
+    :path: ".symlinks/plugins/iroh_flutter/ios"
   irondash_engine_context:
     :path: ".symlinks/plugins/irondash_engine_context/ios"
   push:
@@ -26,10 +31,11 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
-  irondash_engine_context: 8e58ca8e0212ee9d1c7dc6a42121849986c88486
-  push: 91373ae39c5341c6de6adefa3fda7f7287d646bf
-  super_native_extensions: b763c02dc3a8fd078389f410bf15149179020cb4
+  iroh_flutter: 6e967d7fc90750c43e2e34df28439f7f27f09e5f
+  irondash_engine_context: 3458bf979b90d616ffb8ae03a150bafe2e860cc9
+  push: dab402f84bedfc62b8e5f6d81db808a7502025f7
+  super_native_extensions: 4916b3c627a9c7fffdc48a23a9eca0b1ac228fa7
 
 PODFILE CHECKSUM: 05feb34a54d1cb7daf735c3bbc191fc80d57e480
 
-COCOAPODS: 1.16.2
+COCOAPODS: 1.17.0

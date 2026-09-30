@@ -56,15 +56,24 @@ describe("augmentAgentLaunch", () => {
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
     const hooks = JSON.parse(readFileSync(join(a.args[1], "hooks", "hooks.json"), "utf8"));
+    // PostToolUse and PostToolUseFailure each carry a second, catch-all group
+    // (the tool-done/tool-failed re-assert) — every OTHER event here is still
+    // exactly one group of one command hook.
     for (const event of [
       "SessionStart", "Stop", "StopFailure", "Notification",
-      "PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit",
+      "PreToolUse", "UserPromptSubmit",
     ]) {
       expect(hooks.hooks[event]).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks[0].command).toBe(HOOK_COMMAND.binary);
       expect(hooks.hooks[event][0].hooks[0].args).toContain("hook");
       expect(hooks.hooks[event][0].hooks[0].args.join(" ")).not.toMatch(/\bnode(?:\.exe)?\b/i);
+    }
+    for (const group of [...hooks.hooks.PostToolUse, ...hooks.hooks.PostToolUseFailure]) {
+      expect(group.hooks).toHaveLength(1);
+      expect(group.hooks[0].command).toBe(HOOK_COMMAND.binary);
+      expect(group.hooks[0].args).toContain("hook");
+      expect(group.hooks[0].args.join(" ")).not.toMatch(/\bnode(?:\.exe)?\b/i);
     }
     // The tool hooks are scoped to the one tool that asks the user. `matcher` is
     // a RegEx over the tool name and an EMPTY one matches everything, so a
@@ -80,6 +89,15 @@ describe("augmentAgentLaunch", () => {
     // notification it exists to pre-empt, and the double push comes back
     // non-deterministically.
     expect(hooks.hooks.PreToolUse[0].hooks[0].async).toBeUndefined();
+    expect(hooks.hooks.PostToolUse[0].hooks[0].async).toBeUndefined();
+    expect(hooks.hooks.PostToolUseFailure[0].hooks[0].async).toBeUndefined();
+    // Each event's catch-all is the one group allowed to run off the critical
+    // path — it re-asserts a status the turn already has, never a fact a
+    // sibling hook depends on the ordering of.
+    expect(hooks.hooks.PostToolUse[1].matcher).toBe("");
+    expect(hooks.hooks.PostToolUse[1].hooks[0].async).toBe(true);
+    expect(hooks.hooks.PostToolUseFailure[1].matcher).toBe("");
+    expect(hooks.hooks.PostToolUseFailure[1].hooks[0].async).toBe(true);
   });
 
   test("codex uses the bridge for notify and command hooks", () => {

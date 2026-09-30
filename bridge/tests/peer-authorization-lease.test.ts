@@ -126,8 +126,10 @@ test("an error that lands after a pushed policy change is re-asked, not thrown",
 test("accepted leases schedule jittered one-third refresh and their original expiry", async () => {
   let now = 0;
   const clock = manualScheduler();
+  // Both clocks pinned: remainingMs reads the earlier of the two deadlines, so a
+  // real wall clock ticking once between refresh and read makes it 59_999.
   const lease = new AuthorizationLease(identity, async () => snapshot(), () => {}, undefined,
-    () => now, () => 0.5, clock.schedule);
+    () => now, () => 0.5, clock.schedule, () => now);
 
   expect(await lease.refresh()).toBe(true);
   expect(lease.remainingMs).toBe(60_000);

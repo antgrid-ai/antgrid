@@ -98,7 +98,7 @@ export interface ProjectBinding {
    *  reason a sender is refused is not the app's business past that. */
   refusalFor(peerId: string): StreamRefusal | undefined;
   /** Per-RECEIVER gate for a stream already admitted: the mirror of
-   *  `refusalFor` for outbound records (a tunnel head/body/end, a WS frame,
+   *  `refusalFor` for outbound records (a tunnel reply record or raw byte,
    *  or an upload result). */
   mayDeliverTo(peerId: string): boolean;
   /** Re-runs `refusalFor`, then `entry.bus.dispatchInbound(msg, "control",

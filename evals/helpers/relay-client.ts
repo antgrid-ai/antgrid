@@ -14,12 +14,8 @@ import {
   STREAM_PROJECT_APP_RECORD_MAX_BYTES,
   STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
   STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
   STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
-  TUNNEL_RECORD_TAG_WS_TEXT,
-  TUNNEL_RECORD_TAG_WS_BINARY,
-  encodeTunnelDataRecord,
-  decodeTunnelRecord,
 } from "antgrid-wire";
 import { StreamRecordReader, StreamRecordWriter, STREAM_RECORD_SLICE_BYTES } from "../../bridge/src/peer/stream-records";
 
@@ -35,10 +31,8 @@ const TEST_LICENSE_TOKEN = "eval-license-token";
 
 /** Mirrors the bridge's own `STREAM_RAW_READ_BYTES` (`bridge/src/peer/stream-records.ts`)
  *  — kept in lockstep by hand, since this client reads the raw upload and
- *  tunnel-http bodies directly off the wire rather than through that module.
- *  Exported so a test can assert a lower bound on how many raw reads a body
- *  of a given size must have taken. */
-export const RAW_READ_BYTES = 65_536;
+ *  tunnel-tcp bytes directly off the wire rather than through that module. */
+const RAW_READ_BYTES = 65_536;
 
 /** Monotonic per-launch epoch source. A client (re)started within
  *  one test presents a strictly higher epoch than its predecessor, so the newer
@@ -76,40 +70,36 @@ export interface HelloForgeOpts {
   licenseToken?: string;
 }
 
-/** One tunneled HTTP response, reassembled from a dedicated `tunnel-http`
- *  QUIC stream. The body rides the stream as raw bytes with
- *  no per-record framing, so `chunks` counts only how many separate reads it
- *  took to drain — a diagnostic on read granularity, not a wire record count. */
-export interface TunnelHttpResult {
-  status: number;
-  headers: Record<string, string>;
-  setCookies: string[];
-  body: Buffer;
-  chunks: number;
-}
+/** How a `tunnel-tcp` stream's bridge half ended. `upstream-error` is the
+ *  bridge's own `tunnel:tcp-error` (connect failed); `refused` is the in-band
+ *  `stream:refused`. A raw read can tell a clean `fin` from a `reset`. */
+export type TunnelTcpEnded = "fin" | "reset" | "refused" | "upstream-error" | "reset-before-ready";
 
-/** A `tunnel-http` stream driven directly, mirroring the app's own
- *  `StreamTransport.openTunnelHttp` without its retry or queueing policy —
- *  see `openTerminalStream`'s header comment for why this exists beside the
- *  Dart client at all. */
-export interface TunnelHttpStreamClient {
-  readonly requestId: string;
-  /** The `tunnel:http-head` record, or rejects with an Error carrying
-   *  `.refusal` (the `stream:refused` record) when the open was refused. */
-  head(timeoutMs?: number): Promise<Record<string, any>>;
-  /** Head + the raw response body, read to a clean FIN; rejects on refusal
-   *  or a status other than `"end"`. */
-  response(timeoutMs?: number): Promise<TunnelHttpResult>;
-  bodyBytesSoFar(): number;
+/** A `tunnel-tcp` stream driven directly, mirroring the app's forwarder:
+ *  one reply record, then raw bytes both ways. */
+export interface TunnelTcpStreamClient {
+  readonly connId: string;
+  /** The bridge's `tunnel:tcp-ready` (`tls` present only for a probe), or
+   *  rejects with an Error carrying `.refusal` (a `stream:refused`) or
+   *  `.tcpError` (a `tunnel:tcp-error`). */
+  ready(timeoutMs?: number): Promise<{ tls?: boolean }>;
+  /** Raw bytes toward the upstream. Only valid after `ready`. */
+  send(bytes: Uint8Array): Promise<void>;
+  /** Every raw byte received after the ready record, so far. */
+  received(): Buffer;
+  bytesSoFar(): number;
+  /** Resolves once `predicate` holds over the bytes received so far; rejects if
+   *  the stream ends first or on timeout. */
+  waitFor(predicate: (bytes: Buffer) => boolean, timeoutMs?: number): Promise<Buffer>;
   /** Stops/restarts issuing reads, so QUIC flow control pushes back on the
    *  bridge's writer instead of this client draining as fast as it can. */
   pauseReading(): void;
   resumeReading(): void;
-  /** Resets the send half only; the receive half keeps draining (the app
-   *  cancels the same way, and the bridge learns of it through its own
-   *  pending read). */
-  cancel(): void;
-  readonly ended: Promise<"end" | "truncated" | "refused" | "reset-before-head">;
+  /** FIN on the send half. */
+  finish(): Promise<void>;
+  /** Resets the send half only, the way the app cancels. */
+  reset(): void;
+  readonly ended: Promise<TunnelTcpEnded>;
 }
 
 /** An `upload` stream driven directly: the open frame, then the file's raw
@@ -136,27 +126,6 @@ export interface UploadStreamClient {
   writeMore(bytes: Uint8Array): Promise<void>;
   /** Resets the send half only, mirroring the app's own cancel. */
   cancel(): void;
-}
-
-export type TunnelWsRecord =
-  | { kind: "text"; text: string }
-  | { kind: "binary"; bytes: Buffer }
-  | { kind: "close"; code?: number; reason?: string }
-  | { kind: "refused"; refusal: Record<string, any> };
-
-/** A `tunnel-ws` stream driven directly. `records`/`next` see every record in
- *  arrival order; the caller narrows by `kind`. */
-export interface TunnelWsStreamClient {
-  readonly tunnelId: string;
-  readonly records: TunnelWsRecord[];
-  next(predicate: (r: TunnelWsRecord) => boolean, timeoutMs?: number): Promise<TunnelWsRecord>;
-  sendText(text: string): Promise<void>;
-  sendBinary(bytes: Uint8Array): Promise<void>;
-  /** Writes `tunnel:ws-close` after every queued frame, then `finish()`. */
-  close(code?: number, reason?: string): Promise<void>;
-  /** `reset()` with no close record. */
-  reset(): void;
-  readonly ended: Promise<void>;
 }
 
 /** A terminal-kind native stream driven directly, without the app's own
@@ -265,7 +234,7 @@ type RawRecordOutcome =
 
 /** Reads exactly one length-prefixed JSON record off a RAW receive half
  *  (`recv.read`, not `StreamRecordReader`'s `readExact`): the upload and
- *  tunnel-http admission replies are each a single such record, and only a
+ *  tunnel-tcp admission replies are each a single such record, and only a
  *  raw read can tell a clean FIN apart from a reset (`readExact` rejects on
  *  both, so it collapses the two the caller here wants distinguished). */
 async function readOneRawRecord(
@@ -814,83 +783,78 @@ export class RelayClient {
     };
   }
 
-  /** Opens a `kind:"tunnel-http"` stream: the open frame, the
-   *  `tunnel:http-request` head (with `bodyLength` stamped from `body`), then
-   *  `body` itself as raw bytes in `≤STREAM_RECORD_SLICE_BYTES` slices.
-   *  The send half stays open after that — a clean response FIN is what
-   *  triggers this side's own `finish()`, since a QUIC reset issued after
-   *  `finish()` is unreliable and that is otherwise the only way left to
-   *  cancel. `opts.head` may set its own `requestId` to build a deliberate
-   *  open/head mismatch for a refusal-path row; otherwise it takes the open
-   *  frame's id. */
-  async openTunnelHttpStream(opts: {
+  /** Opens a `kind:"tunnel-tcp"` stream: the open frame, then the one
+   *  `tunnel:tcp-open` head record. The bridge answers with exactly one record
+   *  (`tunnel:tcp-ready`, `tunnel:tcp-error` or `stream:refused`); after a
+   *  ready every byte in either direction is raw upstream TCP payload.
+   *  `opts.open` may override head fields (`connId`, `checkoutId`) to build a
+   *  deliberate mismatch for a refusal-path row. */
+  async openTunnelTcpStream(opts: {
     projectId: string;
-    requestId?: string;
-    head: Record<string, unknown>;
-    body?: Uint8Array;
-  }): Promise<TunnelHttpStreamClient> {
+    port: number;
+    connId?: string;
+    probe?: boolean;
+    open?: Record<string, unknown>;
+  }): Promise<TunnelTcpStreamClient> {
     const connection = this.nativeConnection;
     if (!connection) throw new Error("Native connection is not established");
-    const openRequestId = opts.requestId ?? crypto.randomUUID();
-    const body = opts.body ?? new Uint8Array(0);
-    const stream = await openStreamWithFrame(connection, { kind: "tunnel-http", projectId: opts.projectId, requestId: openRequestId });
-
-    const head: Record<string, unknown> = {
-      ...opts.head,
-      requestId: (opts.head as { requestId?: unknown }).requestId ?? openRequestId,
-      bodyLength: body.length,
-      checkoutId: (opts.head as { checkoutId?: unknown }).checkoutId ?? "main",
+    const connId = opts.connId ?? crypto.randomUUID();
+    const stream = await openStreamWithFrame(connection, { kind: "tunnel-tcp", projectId: opts.projectId, connId });
+    const head = {
+      type: "tunnel:tcp-open",
+      connId,
+      port: opts.port,
+      checkoutId: "main",
+      ...(opts.probe ? { probe: true } : {}),
+      ...opts.open,
     };
-    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8"))));
+    // A refusal lands before the bridge reads this head, so its STOP_SENDING
+    // can beat this write; the in-band record on the receive half is what
+    // decides the outcome, never the write.
+    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8")))).catch(() => {});
 
-    for (let offset = 0; offset < body.length; offset += STREAM_RECORD_SLICE_BYTES) {
-      const slice = body.subarray(offset, Math.min(offset + STREAM_RECORD_SLICE_BYTES, body.length));
-      await stream.send.writeAll(Array.from(slice));
-    }
+    let outcome: TunnelTcpEnded | null = null;
+    let received: Buffer = Buffer.alloc(0);
+    let paused = false;
+    const resumeWaiters: Array<() => void> = [];
+    const dataWaiters: Array<() => void> = [];
+    const notifyData = () => {
+      for (const w of dataWaiters.splice(0)) w();
+    };
 
-    let gotHead = false;
-    let refusal: Record<string, any> | null = null;
-    let bodyBytes = 0;
-    let chunkCount = 0;
-    const bodyChunks: Buffer[] = [];
-
-    let headResolve!: (h: Record<string, any>) => void;
-    let headReject!: (e: Error) => void;
-    const headPromise = new Promise<Record<string, any>>((resolve, reject) => {
-      headResolve = resolve;
-      headReject = reject;
+    let readyResolve!: (r: { tls?: boolean }) => void;
+    let readyReject!: (e: Error) => void;
+    const readyPromise = new Promise<{ tls?: boolean }>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
     });
-    // Nobody may ever call `head()`/`response()` (a cap-refused row, say) —
-    // without this, that rejection surfaces as an unhandled rejection instead
-    // of the `ended` status the row actually asserts on.
-    headPromise.catch(() => {});
+    // A refused or reset row may never call `ready()`; without this that
+    // rejection surfaces as an unhandled rejection instead of the `ended`
+    // status the row asserts on.
+    readyPromise.catch(() => {});
 
-    let endedResolve!: (v: "end" | "truncated" | "refused" | "reset-before-head") => void;
-    const ended = new Promise<"end" | "truncated" | "refused" | "reset-before-head">((resolve) => {
+    let endedResolve!: (v: TunnelTcpEnded) => void;
+    const ended = new Promise<TunnelTcpEnded>((resolve) => {
       endedResolve = resolve;
     });
-
-    let paused = false;
-    let resumeWaiters: Array<() => void> = [];
-    const waitIfPaused = async (): Promise<void> => {
-      if (!paused) return;
-      await new Promise<void>((resolve) => resumeWaiters.push(resolve));
+    const finishWith = (v: TunnelTcpEnded) => {
+      if (outcome) return;
+      outcome = v;
+      endedResolve(v);
+      notifyData();
     };
 
     void (async () => {
-      // "finish" once a clean response FIN is seen, "reset" for anything
-      // else (a reset mid-body, or the stream ending before a head ever
-      // arrived) — that decision is also what closes this side's own send
-      // half (it stays open until the response has ended, so a reset stays a cancel).
-      let sendOutcome: "finish" | "reset" = "reset";
+      let gotReady = false;
       try {
-        // The head/refusal record is still length-prefixed JSON, so a normal
-        // record read is enough here — the app can't do anything differently
-        // for a clean FIN before it than for a reset before it, and this
-        // stream never carries more than the one record before the head.
-        const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
-        const bytes = await reader.read();
-        const text = Buffer.from(bytes).toString("utf8");
+        // Raw reads let a clean FIN before the reply be told apart from a reset.
+        const first = await readOneRawRecord(stream.recv, STREAM_TUNNEL_TCP_RECORD_MAX_BYTES);
+        if (first.kind !== "record") {
+          readyReject(new Error(`tunnel-tcp stream ${connId} ended before any reply (${first.kind})`));
+          finishWith("reset-before-ready");
+          return;
+        }
+        const text = Buffer.from(first.bytes).toString("utf8");
         let obj: any;
         try {
           obj = JSON.parse(text);
@@ -898,76 +862,78 @@ export class RelayClient {
           obj = null;
         }
         if (obj?.type === "stream:refused") {
-          refusal = obj;
-          headReject(
-            Object.assign(new Error(`tunnel-http stream refused: ${obj.code} ${obj.message}`), { refusal: obj }),
-          );
+          readyReject(Object.assign(new Error(`tunnel-tcp stream refused: ${obj.code} ${obj.message}`), { refusal: obj }));
+          finishWith("refused");
           return;
         }
-        if (obj?.type !== "tunnel:http-head") {
-          headReject(new Error(`unexpected tunnel-http head record: ${text.slice(0, 200)}`));
+        if (obj?.type === "tunnel:tcp-error") {
+          readyReject(Object.assign(new Error(`tunnel-tcp upstream error: ${obj.message}`), { tcpError: obj }));
+          finishWith("upstream-error");
           return;
         }
-        gotHead = true;
-        headResolve(obj);
-
-        // Everything after the head is the raw body, with no framing — a
-        // clean FIN (an empty read) is the response's orderly end; a reset
-        // rejects.
+        if (obj?.type !== "tunnel:tcp-ready") {
+          readyReject(new Error(`unexpected tunnel-tcp reply: ${text.slice(0, 200)}`));
+          finishWith("reset-before-ready");
+          return;
+        }
+        gotReady = true;
+        readyResolve(obj.tls === undefined ? {} : { tls: obj.tls });
         while (true) {
-          await waitIfPaused();
+          if (paused) await new Promise<void>((resolve) => resumeWaiters.push(resolve));
           const raw = await stream.recv.read(RAW_READ_BYTES);
           if (raw.length === 0) {
-            sendOutcome = "finish";
+            finishWith("fin");
             return;
           }
-          chunkCount++;
-          const chunk = Buffer.from(raw);
-          bodyChunks.push(chunk);
-          bodyBytes += chunk.length;
+          received = Buffer.concat([received, Buffer.from(raw)]);
+          notifyData();
         }
       } catch {
-        // A reset after the head is an aborted response; before it, the
-        // stream ended without ever producing one (both fold into
-        // `sendOutcome`'s default above).
-      } finally {
-        if (sendOutcome === "finish") void stream.send.finish().catch(() => {});
-        else void stream.send.reset(0n).catch(() => {});
-        endedResolve(refusal ? "refused" : !gotHead ? "reset-before-head" : sendOutcome === "finish" ? "end" : "truncated");
+        if (!gotReady) readyReject(new Error(`tunnel-tcp stream ${connId} reset before ready`));
+        finishWith(gotReady ? "reset" : "reset-before-ready");
       }
     })();
 
     return {
-      requestId: openRequestId,
-      head(timeoutMs = 10_000): Promise<Record<string, any>> {
-        return withTimeout(headPromise, timeoutMs, `tunnel-http head for ${openRequestId}`);
+      connId,
+      ready(timeoutMs = 10_000) {
+        return withTimeout(readyPromise, timeoutMs, `tunnel-tcp ready for ${connId}`);
       },
-      async response(timeoutMs = 10_000): Promise<TunnelHttpResult> {
-        const h = await withTimeout(headPromise, timeoutMs, `tunnel-http head for ${openRequestId}`);
-        const status = await withTimeout(ended, timeoutMs, `tunnel-http end for ${openRequestId}`);
-        if (status !== "end") {
-          throw new Error(`tunnel-http stream ${openRequestId} ended "${status}" instead of "end"`);
+      async send(bytes: Uint8Array): Promise<void> {
+        for (let offset = 0; offset < bytes.length; offset += STREAM_RECORD_SLICE_BYTES) {
+          const slice = bytes.subarray(offset, Math.min(offset + STREAM_RECORD_SLICE_BYTES, bytes.length));
+          await stream.send.writeAll(Array.from(slice));
         }
-        return {
-          status: h.status,
-          headers: (h.headers ?? {}) as Record<string, string>,
-          setCookies: (h.setCookies ?? []) as string[],
-          body: Buffer.concat(bodyChunks),
-          chunks: chunkCount,
-        };
       },
-      bodyBytesSoFar(): number {
-        return bodyBytes;
+      received: () => received,
+      bytesSoFar: () => received.length,
+      async waitFor(predicate: (bytes: Buffer) => boolean, timeoutMs = 10_000): Promise<Buffer> {
+        const deadline = Date.now() + timeoutMs;
+        while (!predicate(received)) {
+          if (outcome) throw new Error(`tunnel-tcp stream ${connId} ended "${outcome}" before the awaited bytes arrived`);
+          const left = deadline - Date.now();
+          if (left <= 0) throw new Error(`Timed out waiting for tunnel-tcp bytes on ${connId} (${timeoutMs}ms)`);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, left);
+            dataWaiters.push(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+        }
+        return received;
       },
       pauseReading(): void {
         paused = true;
       },
       resumeReading(): void {
         paused = false;
-        const waiters = resumeWaiters.splice(0);
-        for (const w of waiters) w();
+        for (const w of resumeWaiters.splice(0)) w();
       },
-      cancel(): void {
+      async finish(): Promise<void> {
+        await stream.send.finish();
+      },
+      reset(): void {
         void stream.send.reset(0n).catch(() => {});
       },
       ended,
@@ -1080,123 +1046,6 @@ export class RelayClient {
       cancel(): void {
         void stream.send.reset(0n).catch(() => {});
       },
-    };
-  }
-
-  /** Opens a `kind:"tunnel-ws"` stream: the open frame, then the
-   *  `tunnel:ws-open` head. `opts.tunnelId` (falling back to the open frame's
-   *  own id) is what `close`/records key on; `opts.open` supplies the rest of
-   *  the head (`port`, `path`, …). */
-  async openTunnelWsStream(opts: {
-    projectId: string;
-    tunnelId?: string;
-    open: Record<string, unknown>;
-  }): Promise<TunnelWsStreamClient> {
-    const connection = this.nativeConnection;
-    if (!connection) throw new Error("Native connection is not established");
-    const tunnelId = opts.tunnelId ?? crypto.randomUUID();
-    const checkoutId = (opts.open as { checkoutId?: unknown }).checkoutId ?? "main";
-    const stream = await openStreamWithFrame(connection, { kind: "tunnel-ws", projectId: opts.projectId, wsId: tunnelId });
-
-    const head = { ...opts.open, type: "tunnel:ws-open", tunnelId, checkoutId };
-    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8"))));
-
-    const records: TunnelWsRecord[] = [];
-    const waiters: Array<{
-      match: (r: TunnelWsRecord) => boolean;
-      resolve: (r: TunnelWsRecord) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }> = [];
-    let settleEnded = () => {};
-    const ended = new Promise<void>((resolve) => {
-      settleEnded = resolve;
-    });
-
-    const deliver = (record: TunnelWsRecord): void => {
-      for (let i = 0; i < waiters.length; i++) {
-        if (waiters[i]!.match(record)) {
-          const waiter = waiters.splice(i, 1)[0]!;
-          clearTimeout(waiter.timer);
-          waiter.resolve(record);
-          return;
-        }
-      }
-      records.push(record);
-    };
-
-    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TUNNEL_RECORD_MAX_BYTES, () => {});
-    void (async () => {
-      try {
-        while (true) {
-          const bytes = await reader.read();
-          const decoded = decodeTunnelRecord(bytes);
-          if (!decoded) continue;
-          if (decoded.kind === "json") {
-            let obj: any;
-            try {
-              obj = JSON.parse(decoded.text);
-            } catch {
-              continue;
-            }
-            if (obj?.type === "stream:refused") {
-              deliver({ kind: "refused", refusal: obj });
-              continue;
-            }
-            if (obj?.type === "tunnel:ws-close") {
-              deliver({ kind: "close", code: obj.code, reason: obj.reason });
-              continue;
-            }
-            continue;
-          }
-          if (decoded.tag === TUNNEL_RECORD_TAG_WS_TEXT) {
-            deliver({ kind: "text", text: Buffer.from(decoded.payload).toString("utf8") });
-          } else if (decoded.tag === TUNNEL_RECORD_TAG_WS_BINARY) {
-            deliver({ kind: "binary", bytes: Buffer.from(decoded.payload) });
-          }
-        }
-      } catch {
-        // bridge half ended — FIN or reset look the same from here.
-      } finally {
-        settleEnded();
-      }
-    })();
-
-    return {
-      tunnelId,
-      records,
-      next(predicate, timeoutMs = 10_000): Promise<TunnelWsRecord> {
-        for (let i = 0; i < records.length; i++) {
-          if (predicate(records[i]!)) return Promise.resolve(records.splice(i, 1)[0]!);
-        }
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => {
-            const idx = waiters.findIndex((w) => w.timer === timer);
-            if (idx !== -1) waiters.splice(idx, 1);
-            reject(new Error(`Timed out waiting for tunnel-ws record (${timeoutMs}ms)`));
-          }, timeoutMs);
-          waiters.push({ match: predicate, resolve, timer });
-        });
-      },
-      async sendText(text: string): Promise<void> {
-        const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_TEXT, Buffer.from(text, "utf8"));
-        await stream.send.writeAll(Array.from(prefixWithLength(record)));
-      },
-      async sendBinary(bytes: Uint8Array): Promise<void> {
-        const record = encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, bytes);
-        await stream.send.writeAll(Array.from(prefixWithLength(record)));
-      },
-      async close(code?: number, reason?: string): Promise<void> {
-        const record = Buffer.from(
-          JSON.stringify({ type: "tunnel:ws-close", tunnelId, code, reason, checkoutId }),
-          "utf8",
-        );
-        await stream.send.writeAll(Array.from(prefixWithLength(record)));
-        await stream.send.finish();
-      },
-      reset(): void {
-        void stream.send.reset(0n).catch(() => {});
-      },
-      ended,
     };
   }
 

@@ -3,7 +3,6 @@ import 'dart:io' show InternetAddress;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/workspace_view.dart';
 import '../services/file_service.dart';
@@ -287,9 +286,7 @@ String _fileNameOf(String path) {
   return segments.isEmpty ? path : segments.last;
 }
 
-/// Opens a `localhost`/IP-literal `http(s)` link in the Preview tab, with the
-/// same port-conflict confirm-and-fallback dialog the manual "open port" flow
-/// uses (`PreviewScreen._openPort`).
+/// Opens a `localhost`/IP-literal `http(s)` link in the Preview tab.
 Future<void> _openPreviewLink(
   BuildContext context,
   Uri target,
@@ -310,33 +307,7 @@ Future<void> _openPreviewLink(
   try {
     final service = previewService();
     if (service == null) return;
-    final result = await service.openTab(
-      port,
-      scheme: scheme,
-      path: path,
-      navigateExisting: true,
-    );
-    if (!context.mounted) return;
-    if (result != SelectPortResult.portInUse) {
-      revealView(WorkspaceView.preview);
-      return;
-    }
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
-      title: 'Port $port unavailable',
-      body:
-          'Port $port could not be opened on this device (it may be in use '
-          'or reserved). Open the preview on a different local port '
-          'instead? Sites that pin assets to port $port may not fully '
-          'load.',
-      confirmLabel: 'Open anyway',
-    );
-    if (!confirmed || !context.mounted) return;
-    // Re-resolved rather than reusing `service`: this awaited a user dialog,
-    // and the session behind it could have torn down in that window.
-    final fallback = previewService();
-    if (fallback == null) return;
-    await fallback.selectPortWithFallback(port, scheme: scheme, path: path);
+    await service.openTab(port, scheme: scheme, path: path, navigateExisting: true);
     if (!context.mounted) return;
     revealView(WorkspaceView.preview);
   } catch (error, stack) {

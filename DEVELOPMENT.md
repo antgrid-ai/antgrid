@@ -518,6 +518,9 @@ No third-party account is needed for local development.
   fills them with literal stubs (`stub-github-client-id`, etc.). They must be
   *present*, not real. The consequence is that the GitHub and Google sign-in
   buttons render and then fail. Exercising those paths needs your own OAuth apps.
+- Sign in with Apple is off unless all of `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`,
+  `APPLE_KEY_ID` and `APPLE_PRIVATE_KEY` are set; setup leaves them empty. A
+  partial set fails the boot. Real values come from an Apple developer account.
 - **Sign-in still works, credential-free, via the magic link.** `ZEPTOMAIL_TOKEN`
   is optional and setup never fills it. With it unset, the email sender degrades
   to a console logger that prints the whole message:

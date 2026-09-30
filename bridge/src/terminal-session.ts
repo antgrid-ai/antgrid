@@ -1,5 +1,5 @@
 import { resolveTerminalInvocation } from "./terminal-invocation";
-import { needsShellForAgentBinary, prepareAgentBinary } from "antgrid-agents/terminal-platform";
+import { needsShellForAgentBinary, prepareAgentBinary, stripParentClaudeSession } from "antgrid-agents/terminal-platform";
 import { agentRuntime } from "./agent-host";
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
@@ -636,7 +636,7 @@ export class TerminalSession {
     // bridge launched without a TERM of its own — the packaged app, started by
     // the OS rather than a shell — would hand every PTY a colorless env.
     const env = stripInheritedCertOverrides({
-      ...process.env,
+      ...stripParentClaudeSession(process.env),
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       TERM_PROGRAM: "ghostty",

@@ -1220,6 +1220,23 @@ export class SessionManager {
   }
 
   /**
+   * Backstop for {@link setAgentSession}: records [path] for [id] only if
+   * nothing is recorded yet. setAgentSession withholds the path when it
+   * refuses the accompanying agent-session id (an ephemeral helper thread —
+   * see its own doc), but a transcript-interrupt confirmation only needs a
+   * file to read, not a matched conversation identity, so a hook post that
+   * carries a path is worth keeping even then. Never overwrites: once
+   * setAgentSession has recorded a real one, that identity-checked report is
+   * authoritative.
+   */
+  noteTranscriptPath(id: string, path: string): void {
+    const entry = this.entries.get(id);
+    if (!entry || entry.agentTranscriptPath) return;
+    entry.agentTranscriptPath = path;
+    this.changed();
+  }
+
+  /**
    * The slot id whose last-active agent conversation is `conversationId`, or
    * undefined. Used by the antigravity rename watcher to route a live `/rename`
    * (keyed by agy's conversationId) back to the owning session for auto-naming.
