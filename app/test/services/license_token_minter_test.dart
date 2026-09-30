@@ -208,6 +208,182 @@ void main() {
     minter.stop();
   });
 
+  group('token()', () {
+    late int calls;
+    late DateTime now;
+    late Map<int, int> statusByCall;
+    late Map<int, Map<String, String>> headersByCall;
+    late int lifetimeSeconds;
+    LicenseTokenMinter minter() => LicenseTokenMinter(
+      licenseApiUrl: 'https://api.antgrid.test',
+      clientId: 'cid',
+      clientSecret: 'csec',
+      now: () => now,
+      httpClient: MockClient((_) async {
+        calls++;
+        final status = statusByCall[calls];
+        if (status != null) {
+          return http.Response('', status, headers: headersByCall[calls] ?? {});
+        }
+        return http.Response(
+          jsonEncode({
+            'access_token': 'tok-$calls',
+            'expires_in': lifetimeSeconds,
+          }),
+          200,
+        );
+      }),
+    );
+
+    setUp(() {
+      calls = 0;
+      now = DateTime.utc(2026);
+      statusByCall = {};
+      headersByCall = {};
+      lifetimeSeconds = 100;
+    });
+
+    test('reuses the cached token until 80% of its lifetime', () async {
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 79));
+      expect(await m.token(), 'tok-1');
+      expect(calls, 1);
+      now = now.add(const Duration(seconds: 1));
+      expect(await m.token(), 'tok-2');
+      expect(calls, 2);
+    });
+
+    test('concurrent callers share one mint', () async {
+      final m = minter();
+      final a = m.token(), b = m.token();
+      expect(await a, 'tok-1');
+      expect(await b, 'tok-1');
+      expect(calls, 1);
+    });
+
+    test('a failed mint waits for cooldown before retrying', () async {
+      statusByCall = {1: 500};
+      final m = minter();
+      await expectLater(m.token(), throwsException);
+      await expectLater(m.token(), throwsException);
+      expect(calls, 1);
+      now = now.add(const Duration(seconds: 65));
+      expect(await m.token(), 'tok-2');
+    });
+
+    test('a failed renewal falls back to the unexpired token', () async {
+      statusByCall = {2: 429, 3: 429};
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 80));
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 20));
+      await expectLater(m.token(), throwsException);
+      expect(calls, 2, reason: 'expiry must not bypass the mint cooldown');
+      now = now.add(const Duration(seconds: 45));
+      await expectLater(m.token(), throwsException);
+      expect(calls, 3);
+    });
+
+    test('lease polling reuses the token during renewal cooldown', () async {
+      lifetimeSeconds = 3600;
+      statusByCall = {2: 500};
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 2880));
+      expect(await m.token(), 'tok-1');
+      for (var i = 0; i < 3; i++) {
+        now = now.add(const Duration(seconds: 20));
+        expect(await m.token(), 'tok-1');
+        expect(calls, 2);
+      }
+      now = now.add(const Duration(seconds: 5));
+      expect(await m.token(), 'tok-3');
+      expect(calls, 3);
+    });
+
+    test('renewal backoff grows and resets after success', () async {
+      lifetimeSeconds = 3600;
+      statusByCall = {2: 500, 3: 500, 5: 500};
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 2880));
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 65));
+      expect(await m.token(), 'tok-1');
+      expect(calls, 3);
+      now = now.add(const Duration(seconds: 129));
+      expect(await m.token(), 'tok-1');
+      expect(calls, 3);
+      now = now.add(const Duration(seconds: 1));
+      expect(await m.token(), 'tok-4');
+      now = now.add(const Duration(seconds: 2880));
+      expect(await m.token(), 'tok-4');
+      now = now.add(const Duration(seconds: 65));
+      expect(await m.token(), 'tok-6');
+    });
+
+    for (final header in ['x-retry-after', 'retry-after']) {
+      test('renewal honors $header on a rate limit', () async {
+        lifetimeSeconds = 3600;
+        statusByCall = {2: 429};
+        headersByCall = {
+          2: {header: '150'},
+        };
+        final m = minter();
+        expect(await m.token(), 'tok-1');
+        now = now.add(const Duration(seconds: 2880));
+        expect(await m.token(), 'tok-1');
+        now = now.add(const Duration(seconds: 149));
+        expect(await m.token(), 'tok-1');
+        expect(calls, 2);
+        now = now.add(const Duration(seconds: 1));
+        expect(await m.token(), 'tok-3');
+      });
+    }
+
+    test('rejecting a fallback cannot bypass renewal cooldown', () async {
+      statusByCall = {2: 429};
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 80));
+      expect(await m.token(), 'tok-1');
+      expect(m.discard('tok-1'), isTrue);
+      await expectLater(m.token(), throwsException);
+      expect(calls, 2);
+      now = now.add(const Duration(seconds: 65));
+      expect(await m.token(), 'tok-3');
+    });
+
+    test('a revoked device is not masked by the cached token', () async {
+      statusByCall = {2: 401};
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      now = now.add(const Duration(seconds: 80));
+      await expectLater(m.token(), throwsA(isA<DeviceRevokedException>()));
+    });
+
+    test('discard forgets only the token it names', () async {
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      m.discard('tok-0');
+      expect(await m.token(), 'tok-1');
+      m.discard('tok-1');
+      expect(await m.token(), 'tok-2');
+      expect(calls, 2);
+    });
+
+    test('discard reports whether a retry could help', () async {
+      final m = minter();
+      expect(await m.token(), 'tok-1');
+      expect(m.discard('tok-1'), isFalse, reason: 'fresh from a mint');
+      expect(await m.token(), 'tok-2');
+      expect(await m.token(), 'tok-2');
+      expect(m.discard('tok-2'), isTrue, reason: 'reused from the cache');
+    });
+  });
+
   test('stop() cancels pending refresh', () async {
     var callCount = 0;
     final client = MockClient((req) async {

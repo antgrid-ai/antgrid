@@ -66,6 +66,7 @@ class _Runtime extends PeerRuntime {
         ),
         licenseApiUrl: 'https://api.test',
         mintToken: () async => 'token',
+        rejectToken: (_) => false,
       );
   final _Payload payload;
   Completer<void>? gate;

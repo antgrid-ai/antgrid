@@ -14,11 +14,15 @@ final class PeerRuntimeRequest {
     required this.record,
     required this.licenseApiUrl,
     required this.mintToken,
+    required this.rejectToken,
   });
 
   final DeviceRecord record;
   final String licenseApiUrl;
   final Future<String> Function() mintToken;
+
+  /// Returns whether presenting another token could fare differently.
+  final bool Function(String token) rejectToken;
 }
 
 typedef AppPeerRuntimeOwner = PeerRuntimeOwner<PeerRuntime, PeerRuntimeRequest>;
@@ -29,6 +33,7 @@ final peerRuntimeOwnerProvider = Provider<AppPeerRuntimeOwner>((ref) {
       record: request.record,
       licenseApiUrl: request.licenseApiUrl,
       mintToken: request.mintToken,
+      rejectToken: request.rejectToken,
       fenceOnResume: isMobilePlatform,
     ),
     dispose: (runtime) async {
@@ -83,7 +88,8 @@ final peerRuntimeProvider = FutureProvider<PeerRuntime>((ref) async {
         PeerRuntimeRequest(
           record: record,
           licenseApiUrl: ref.watch(licenseApiUrlProvider),
-          mintToken: minter.mint,
+          mintToken: minter.token,
+          rejectToken: minter.discard,
         ),
       );
 }, retry: noProviderRetry);

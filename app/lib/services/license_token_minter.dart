@@ -25,16 +25,21 @@ class LicenseTokenMinter {
     required this.clientSecret,
     http.Client? httpClient,
     this.requestTimeout = const Duration(seconds: 15),
-  }) : _http = httpClient ?? http.Client();
+    DateTime Function()? now,
+  }) : _http = httpClient ?? http.Client(),
+       _now = now ?? DateTime.now;
 
   final String licenseApiUrl;
   final String clientId;
   final String clientSecret;
   final http.Client _http;
   final Duration requestTimeout;
+  final DateTime Function() _now;
 
-  String? _current;
-  DateTime? _expiresAt;
+  _CachedToken? _cached;
+  Future<String>? _minting;
+  ({Object error, StackTrace stack, DateTime retryAt})? _renewalFailure;
+  int _renewalAttempts = 0;
 
   String _basicAuth() {
     return 'Basic ${base64Encode(utf8.encode('$clientId:$clientSecret'))}';
@@ -67,9 +72,18 @@ class LicenseTokenMinter {
       throw const DeviceRevokedException();
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw Exception(
+      final retrySeconds = int.tryParse(
+        res.headers['x-retry-after'] ?? res.headers['retry-after'] ?? '',
+      );
+      throw _TokenRequestException(
         'oauth: token endpoint returned ${res.statusCode}: '
         '${res.body.substring(0, res.body.length.clamp(0, 200))}',
+        retryAfter:
+            (res.statusCode == 429 || res.statusCode == 503) &&
+                retrySeconds != null &&
+                retrySeconds > 0
+            ? Duration(seconds: retrySeconds)
+            : null,
       );
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -78,14 +92,93 @@ class LicenseTokenMinter {
     if (token == null || expiresIn is! int) {
       throw Exception('oauth: malformed token response (no access_token)');
     }
-    _current = token;
-    _expiresAt = DateTime.now().add(Duration(seconds: expiresIn));
+    final issuedAt = _now();
+    final lifetime = Duration(seconds: expiresIn);
+    _cached = _CachedToken(
+      token,
+      refreshAt: issuedAt.add(lifetime * 0.8),
+      expiresAt: issuedAt.add(lifetime),
+    );
+    _renewalFailure = null;
+    _renewalAttempts = 0;
     return token;
   }
 
-  /// Sync accessor — returns the most recently minted token, or `null` if
-  /// `mint()` has not yet succeeded.
-  String? getToken() => _current;
+  /// The cached token until 80% of its lifetime, then a fresh one; concurrent
+  /// callers share a single mint, and a failed renewal falls back to the
+  /// cached token while it is unexpired. Failed renewals back off independently
+  /// of lease polling, honoring longer server retry delays.
+  ///
+  /// For callers on a timer. In production the token endpoint is rate limited
+  /// per IP by the `@better-auth/oauth-provider` default, which
+  /// `web/src/auth/oauth-provider.ts` does not override (20 per 60 s, reset
+  /// only after 60 s with no admitted request), so a caller minting every
+  /// 20 s exhausts it in about seven minutes.
+  Future<String> token() async {
+    final cached = _cached;
+    if (cached != null && _now().isBefore(cached.refreshAt)) {
+      cached.reused = true;
+      return cached.value;
+    }
+    try {
+      final failure = _renewalFailure;
+      if (failure != null && _now().isBefore(failure.retryAt)) {
+        Error.throwWithStackTrace(failure.error, failure.stack);
+      }
+      return await (_minting ??= _renewToken().whenComplete(
+        () => _minting = null,
+      ));
+    } on DeviceRevokedException {
+      rethrow;
+    } catch (_) {
+      final fallback = _cached;
+      if (fallback == null || !_now().isBefore(fallback.expiresAt)) rethrow;
+      fallback.reused = true;
+      return fallback.value;
+    }
+  }
+
+  Future<String> _renewToken() async {
+    try {
+      return await mint();
+    } on DeviceRevokedException {
+      rethrow;
+    } catch (error, stack) {
+      _renewalAttempts = (_renewalAttempts + 1).clamp(1, 4);
+      // The OAuth bucket resets after 60 seconds of silence. Leave a margin
+      // so lease polling cannot keep it occupied after a renewal failure.
+      var delay = Duration(
+        seconds: (65 * (1 << (_renewalAttempts - 1))).clamp(65, 300),
+      );
+      if (error is _TokenRequestException) {
+        final retryAfter = error.retryAfter;
+        if (retryAfter != null && retryAfter > delay) delay = retryAfter;
+      }
+      _renewalFailure = (
+        error: error,
+        stack: stack,
+        retryAt: _now().add(delay),
+      );
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
+
+  /// Forgets [rejected] if it is still the cached token, so the next [token]
+  /// mints; a different cached token is kept.
+  ///
+  /// Returns false when [rejected] was never reused from the cache: the
+  /// server refusing a token it has just issued is a verdict on the device,
+  /// which another fresh token would only repeat.
+  bool discard(String rejected) {
+    final cached = _cached;
+    if (cached == null || cached.value != rejected) return true;
+    _cached = null;
+    return cached.reused;
+  }
+
+  /// The cached token, or `null` before a successful [mint] or after a
+  /// [discard].
+  String? getToken() => _cached?.value;
 
   Timer? _refreshTimer;
   bool _stopped = false;
@@ -99,8 +192,8 @@ class LicenseTokenMinter {
     _scheduleRefresh();
   }
 
-  /// Cancel any pending refresh. The most recent token remains cached
-  /// (accessible via [getToken]) until it expires server-side.
+  /// Cancel any pending refresh; the cached token stays readable through
+  /// [getToken].
   void stop() {
     _stopped = true;
     _refreshTimer?.cancel();
@@ -109,9 +202,9 @@ class LicenseTokenMinter {
 
   void _scheduleRefresh() {
     if (_stopped) return;
-    final expiresAt = _expiresAt;
+    final expiresAt = _cached?.expiresAt;
     if (expiresAt == null) return;
-    final ttl = expiresAt.difference(DateTime.now());
+    final ttl = expiresAt.difference(_now());
     // For short-TTL test scenarios use raw 80%; for production-scale TTLs
     // (>=60s) honor a 60s floor.
     // The wall clock can advance past expiry before scheduling resumes.
@@ -135,4 +228,23 @@ class LicenseTokenMinter {
     }
     _scheduleRefresh();
   }
+}
+
+final class _TokenRequestException implements Exception {
+  const _TokenRequestException(this.message, {this.retryAfter});
+
+  final String message;
+  final Duration? retryAfter;
+
+  @override
+  String toString() => 'Exception: $message';
+}
+
+final class _CachedToken {
+  _CachedToken(this.value, {required this.refreshAt, required this.expiresAt});
+
+  final String value;
+  final DateTime refreshAt;
+  final DateTime expiresAt;
+  bool reused = false;
 }
