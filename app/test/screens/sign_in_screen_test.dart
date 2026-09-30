@@ -7,8 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart' show AppleLogoPainter;
 
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_password_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -126,7 +128,11 @@ AuthService _authFor(
 
 Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
 
-Widget _wrapService(AuthService auth, {LastAuthMethodStore? store}) {
+Widget _wrapService(
+  AuthService auth, {
+  LastAuthMethodStore? store,
+  AbColors palette = kDefaultPalette,
+}) {
   return ProviderScope(
     overrides: [
       authServiceProvider.overrideWithValue(auth),
@@ -136,7 +142,7 @@ Widget _wrapService(AuthService auth, {LastAuthMethodStore? store}) {
     ],
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
-        extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+        extensions: <ThemeExtension<dynamic>>[palette],
       ),
       home: const SignInScreen(),
     ),
@@ -155,6 +161,7 @@ Future<List<String>> _pumpScreen(
   Future<bool> Function(Uri url)? launchUrl,
   AppleCredentialRequest? requestAppleCredential,
   InAppWebAuth? authenticateInApp,
+  AbColors palette = kDefaultPalette,
 }) async {
   final paths = <String>[];
   final tickets = storage ?? (_GatedStorage(null)..gate.complete());
@@ -169,6 +176,7 @@ Future<List<String>> _pumpScreen(
         authenticateInApp: authenticateInApp,
       ),
       store: store,
+      palette: palette,
     ),
   );
   // Let the (empty) restore resolve so it cannot land mid-test.
@@ -491,6 +499,26 @@ void main() {
         offered ? findsOneWidget : findsNothing,
       );
     }, variant: TargetPlatformVariant.all());
+
+    for (final MapEntry(key: preset, value: palette) in kPresets.entries) {
+      testWidgets('the Apple button is pure black or white on ${preset.name}', (
+        tester,
+      ) async {
+        await _pumpScreen(tester, palette: palette);
+
+        final ink = palette.bgSurface.computeLuminance() > 0.5
+            ? const Color(0xFF000000)
+            : const Color(0xFFFFFFFF);
+        final title = tester.widget<Text>(find.text('Continue with Apple'));
+        expect(title.style?.color, ink);
+        final logo = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .map((p) => p.painter)
+            .whereType<AppleLogoPainter>()
+            .single;
+        expect(logo.color, ink);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
 
     testWidgets('the Apple button signs in and records the hint', (
       tester,

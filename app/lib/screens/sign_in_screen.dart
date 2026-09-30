@@ -909,6 +909,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           _SignInButton(
             label: 'Continue with Apple',
             leading: (color) => _AppleMark(color: color),
+            appleInk: true,
             onPressed: busy
                 ? null
                 : () => detached(
@@ -1369,6 +1370,7 @@ class _SignInButton extends StatefulWidget {
     required this.onPressed,
     this.variant = _SignInButtonVariant.normal,
     this.leading,
+    this.appleInk = false,
   });
   final String label;
   final VoidCallback? onPressed;
@@ -1376,6 +1378,12 @@ class _SignInButton extends StatefulWidget {
 
   /// A mark before the label, drawn in the label's colour.
   final Widget Function(Color color)? leading;
+
+  /// Draws the label and mark in pure black or white, whichever contrasts
+  /// with the fill behind them, as Apple requires of a Sign in with Apple
+  /// button. Decided from the fill rather than a light/dark flag because
+  /// custom themes can put any colour there.
+  final bool appleInk;
 
   @override
   State<_SignInButton> createState() => _SignInButtonState();
@@ -1390,15 +1398,20 @@ class _SignInButtonState extends State<_SignInButton> {
     final antgrid = context.antgrid;
     final enabled = widget.onPressed != null;
     final isPrimary = widget.variant == _SignInButtonVariant.primary;
-    final foreground = isPrimary
+    final fill = isPrimary
+        ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
+        : (_hovered ? antgrid.bgElevated : antgrid.bgSurface);
+    final foreground = widget.appleInk
+        ? (fill.computeLuminance() > 0.5
+              ? AbTokens.appleSignInInkOnLight
+              : AbTokens.appleSignInInkOnDark)
+        : isPrimary
         ? antgrid.accentForeground
         : antgrid.textPrimary;
     final visual = Container(
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
-        color: isPrimary
-            ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
-            : (_hovered ? antgrid.bgElevated : antgrid.bgSurface),
+        color: fill,
         border: Border.all(
           color: isPrimary ? antgrid.accent : antgrid.borderDefault,
         ),
