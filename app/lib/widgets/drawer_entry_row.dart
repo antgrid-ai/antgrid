@@ -19,7 +19,7 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_chip.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../launcher/host_controller.dart' show HostPhase;
@@ -169,10 +169,10 @@ class _MachineDrawerHeaderRowState
 /// diverge in leading glyph, trailing kit and depth all at once. It also gives
 /// the local bridge host the only status surface it has in the drawer.
 ///
-/// Deliberately NOT tappable, and so it carries no chevron: a machine band
-/// discloses a control-plane fetch, while every local project is already
-/// listed below this one. A chevron here would promise a load that does not
-/// exist.
+/// Tappable to fold every local project away ([localMachineCollapsedProvider]).
+/// Unlike a remote band the chevron discloses no fetch — the projects are
+/// already known — so the fold is purely for scanning density and is not
+/// persisted.
 class LocalMachineBand extends ConsumerWidget {
   const LocalMachineBand({super.key, this.showRule = true});
 
@@ -192,6 +192,9 @@ class LocalMachineBand extends ConsumerWidget {
           if (showRule) const DrawerBandRule(),
           DrawerBand(
             label: 'This machine',
+            expanded: !ref.watch(localMachineCollapsedProvider),
+            onTap: () =>
+                ref.read(localMachineCollapsedProvider.notifier).toggle(),
             // No host dot under the demo: there is no bridge behind the sample
             // project, and [hostStatusProvider] answers for the REAL machine — on
             // a desktop that opened a project earlier in the session that is a
@@ -887,7 +890,7 @@ Future<bool> selectRemoteAgent(
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, connectFailureMessage(e));
+      showAbToast(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -926,14 +929,14 @@ Future<bool> ensureRemoteOnline(
     if (await ref.read(agentTransportForProvider(registrationId).future) ==
         null) {
       if (context.mounted) {
-        showAbSnackBar(context, 'That machine is no longer reachable.');
+        showAbToast(context, 'That machine is no longer reachable.');
       }
       return false;
     }
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, connectFailureMessage(e));
+      showAbToast(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -997,7 +1000,7 @@ Future<bool> activateDrawerEntryById(
         !ref.read(focusedAgentBlockedProvider) &&
         ref.read(agentReachabilityProvider) == AgentReachability.connecting) {
       if (context.mounted) {
-        showAbSnackBar(context, _stillWaitingMessage(ref));
+        showAbToast(context, _stillWaitingMessage(ref));
       }
       return false;
     }
@@ -1056,7 +1059,7 @@ Future<bool> activateDrawerEntryById(
       } catch (ex) {
         ref.read(selectedTargetProvider.notifier).set(priorTarget);
         if (context.mounted) {
-          showAbSnackBar(context, 'Connect failed: $ex');
+          showAbToast(context, 'Connect failed: $ex');
         }
         ok = false;
       }
@@ -1125,7 +1128,7 @@ Future<bool> _openColdRemoteProject(
   } catch (e) {
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
-      showAbSnackBar(context, 'Connect failed: $e');
+      showAbToast(context, 'Connect failed: $e');
     }
     return false;
   }
@@ -1233,7 +1236,7 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       enterNewSession(container, retarget: true);
     } catch (e) {
       if (mounted) {
-        showAbSnackBar(context, 'New session failed: $e');
+        showAbToast(context, 'New session failed: $e');
       }
     }
   }
@@ -1334,7 +1337,7 @@ class _ErrorDot extends StatelessWidget {
     if (msg == null || msg.isEmpty) return dot;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => showAbSnackBar(context, msg),
+      onTap: () => showAbToast(context, msg),
       child: Padding(
         padding: const EdgeInsets.all(AbTokens.space6),
         child: dot,

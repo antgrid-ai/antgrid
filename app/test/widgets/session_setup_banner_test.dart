@@ -27,6 +27,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _projectId = 'P';
 const _sessionId = 's1';
@@ -91,6 +92,7 @@ Future<void> pumpBanner(
         ...extraOverrides,
       ],
       child: MaterialApp(
+        builder: abToastHostBuilder,
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),

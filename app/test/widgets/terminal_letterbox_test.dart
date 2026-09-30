@@ -27,6 +27,7 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 /// Opened per-test in `setUp`; the wrapper watches terminalZoom, so `_wrap`
 /// must override the (default-throwing) settings provider.
@@ -114,6 +115,7 @@ Widget _wrap(Widget child, {Future<String>? clientId}) => ProviderScope(
     ),
   ],
   child: MaterialApp(
+    builder: abToastHostBuilder,
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),

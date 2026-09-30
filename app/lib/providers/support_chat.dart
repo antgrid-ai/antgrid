@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/environment.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../services/auth_service.dart';
 import '../util/external_url.dart';
 import 'auth.dart';
@@ -26,7 +26,7 @@ Uri supportChatUri(String baseUrl, CurrentUser? user) {
 
 Future<void> openSupportChat(BuildContext context, WidgetRef ref) async {
   if (ref.read(demoModeProvider)) {
-    showAbSnackBar(context, 'Support chat is unavailable in demo mode.');
+    showAbToast(context, 'Support chat is unavailable in demo mode.');
     return;
   }
 

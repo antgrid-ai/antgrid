@@ -667,10 +667,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         return;
       }
       // Both captured before the tap: applying the route switches projects,
-      // which unmounts this shell out from under the overlay entry still
-      // holding the callback. `context` read through the State getter at tap
-      // time would throw on the defunct element; the captured element answers
-      // `mounted` false instead, which is what the applier tests.
+      // which unmounts this shell out from under the toast still holding the
+      // callback. `context` read through the State getter at tap time would
+      // throw on the defunct element; the captured element answers `mounted`
+      // false instead, which is what the applier tests.
       final container = ref.container;
       final toastContext = context;
       showAbToastOverlay(
@@ -686,10 +686,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             () => applyNotificationRoute(toastContext, container, route!),
           ),
         ),
-        // The action cannot dismiss its own toast (`showAbToastOn`'s remove is
-        // local to that call), so it stays pressable for its whole life — long
-        // enough to be worth reaching for, and the applier absorbs the second
-        // press.
+        // 8s, not the 4s default: give the user a real window to notice and
+        // tap this before it goes.
         duration: const Duration(seconds: 8),
       );
       return;
@@ -954,7 +952,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           try {
             await _startBestEffort(svc, desired.id, raiseRefusal: true);
           } on SessionOperationException catch (error) {
-            if (mounted && isCurrent()) reportStartRefusal(context, error);
+            if (mounted && isCurrent()) {
+              reportStartRefusal(AbToaster.maybeOf(context), error);
+            }
             return;
           }
           if (!isCurrent()) return;

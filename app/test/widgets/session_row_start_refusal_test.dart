@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 import '../helpers/test_store_overrides.dart';
 
 const _projectId = 'p';
@@ -99,6 +100,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: const MaterialApp(
+          builder: abToastHostBuilder,
           home: Scaffold(
             body: SessionRow(entryId: _projectId, session: _entry),
           ),
@@ -144,8 +146,19 @@ void main() {
       reason: 'the refusal short-circuits before focus',
     );
 
-    // Drain the 8s snack bar so its dismiss timer can't outlive the test.
-    await tester.pump(const Duration(seconds: 8));
+    // Still up past a plain toast's 4s: a session notice holds for 8s.
+    await tester.pump(const Duration(seconds: 5));
+    expect(
+      find.text(
+        sessionStartRefusalCopy(
+          'WORKTREE_MISSING',
+          'The isolated worktree is no longer available.',
+        ),
+      ),
+      findsOneWidget,
+    );
+    // Drain the rest of the toast so its dismiss timer can't outlive the test.
+    await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox());
   });

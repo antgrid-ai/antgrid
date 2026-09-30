@@ -53,6 +53,13 @@ class PreviewService {
   /// release whatever it built instead of publishing it.
   final Map<int, int> _generation = {};
 
+  /// A followed link's load, per tab, until the screen takes it. It is held
+  /// here rather than delivered by a state listener because the preview screen
+  /// is unmounted whenever another pane is showing, and a listener-only
+  /// delivery would be lost with nothing mounted to hear it. The load must be
+  /// applied by whichever screen builds the tab's webview next.
+  final Map<int, Uri> _pendingNav = {};
+
   /// Ports already weighed for auto-open — via a live [PortDetectedMessage]
   /// or a `ports:update` snapshot — so each port is only ever auto-opened
   /// ONCE per service lifetime. Without this, a port the user deliberately
@@ -303,17 +310,34 @@ class PreviewService {
   /// [reportErrors] false is for background auto-opens: a failure is logged,
   /// leaves [PreviewState.error] alone and lets the port be auto-opened again
   /// later.
+  ///
+  /// [navigateExisting] is for a link the user explicitly followed: a reused
+  /// tab is then sent to [path] on its own origin instead of staying on
+  /// whatever page it had wandered to. The load is queued for
+  /// [takeNavRequest]; a tab whose scheme cannot be reused is reopened instead.
   Future<void> openTab(
     int port, {
     String scheme = 'http',
     bool focus = true,
     String path = '/',
+    bool navigateExisting = false,
     bool reportErrors = true,
   }) {
     final existing = _tabByPort(port);
     if (existing != null &&
         (!session.transport.isLocal || existing.scheme == scheme)) {
-      if (focus) setActiveTab(port);
+      final target = navigateExisting
+          ? existingTabNavigationUrl(port, scheme: scheme, path: path)
+          : null;
+      if (target != null) {
+        _pendingNav[port] = target;
+        // Emitted even when nothing visible changed: every emission is a new
+        // state, and that is what makes a mounted screen rebuild and take the
+        // load.
+        _setState(_state.copyWith(activeTabId: focus ? port : null));
+      } else if (focus) {
+        setActiveTab(port);
+      }
       return Future.value();
     }
     final pending = _opening[port];
@@ -335,6 +359,11 @@ class PreviewService {
     _opening[port] = tracked;
     return tracked;
   }
+
+  /// Hands over, once, the load a followed link asked of [port]'s tab, or null
+  /// when none is waiting. Deliberately emits no state: the caller is the
+  /// screen's build, where publishing would modify a provider mid-build.
+  Uri? takeNavRequest(int port) => _pendingNav.remove(port);
 
   /// Resolves an address-bar navigation through the tab's actual origin,
   /// including an ephemeral forwarder port when the local one was taken.
@@ -456,6 +485,9 @@ class PreviewService {
   }
 
   void _upsertTab(PreviewTab tab, {required bool focus}) {
+    // A replaced tab carries its own target; a load queued for the old one
+    // would override it.
+    _pendingNav.remove(tab.port);
     final tabs = [
       for (final t in _state.tabs)
         if (t.port != tab.port) t,
@@ -489,6 +521,9 @@ class PreviewService {
     final forwarder = _forwarders.remove(port);
     await forwarder?.close();
 
+    // After the await: a link followed while the forwarder was closing must
+    // not survive the tab it was aimed at.
+    _pendingNav.remove(port);
     final tabs = [
       for (final t in _state.tabs)
         if (t.port != port) t,

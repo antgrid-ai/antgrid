@@ -13,7 +13,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
@@ -143,7 +143,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         if (!mounted) return;
         if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
-        showAbSnackBar(
+        showAbToast(
           context,
           'Could not delete account. Check your connection and try again.',
           clearPrevious: true,

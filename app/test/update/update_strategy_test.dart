@@ -123,7 +123,7 @@ void main() {
   // The browser/App Store hand-offs go through url_launcher, whose default
   // platform implementation is the method channel — unregistered under
   // `flutter test`, so without this their install() dead-ends in the
-  // could-not-open SnackBar instead of the path being asserted.
+  // could-not-open toast instead of the path being asserted.
   List<String> mockUrlLauncher() {
     const channel = MethodChannel('plugins.flutter.io/url_launcher');
     final messenger =

@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../demo/demo_identity.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../launcher/host_control_client.dart';
 import '../util/ab_log.dart';
 import '../util/external_open_target.dart';
@@ -94,7 +94,7 @@ Future<void> openCheckoutIn(
     opened = false;
   }
   if (!opened && context.mounted) {
-    showAbSnackBar(context, 'Could not open ${target.appName}.');
+    showAbToast(context, 'Could not open ${target.appName}.');
   }
 }
 
@@ -120,10 +120,10 @@ Future<void> copyCheckoutPath(
   try {
     await Clipboard.setData(ClipboardData(text: path));
   } catch (_) {
-    if (context.mounted) showAbSnackBar(context, 'Could not copy the path.');
+    if (context.mounted) showAbToast(context, 'Could not copy the path.');
     return;
   }
-  if (context.mounted) showAbSnackBar(context, 'Path copied');
+  if (context.mounted) showAbToast(context, 'Path copied');
 }
 
 /// Ask the host where this checkout lives. Returns null after reporting the
@@ -158,7 +158,7 @@ Future<String?> _resolveCheckoutPath(
     // re-mint in that window flips the answer. Silence here is what leaves a
     // stale clipboard the user believes they just replaced.
     if (context.mounted) {
-      showAbSnackBar(context, 'That session is not on this machine.');
+      showAbToast(context, 'That session is not on this machine.');
     }
     return null;
   }
@@ -169,11 +169,11 @@ Future<String?> _resolveCheckoutPath(
       checkoutId: checkoutId,
     );
   } on HostControlException catch (error) {
-    if (context.mounted) showAbSnackBar(context, _messageFor(error));
+    if (context.mounted) showAbToast(context, _messageFor(error));
     return null;
   } catch (_) {
     if (context.mounted) {
-      showAbSnackBar(context, 'Could not reach the local host.');
+      showAbToast(context, 'Could not reach the local host.');
     }
     return null;
   }

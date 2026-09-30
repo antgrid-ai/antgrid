@@ -12,6 +12,7 @@ import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 /// `openCheckoutIn` / `copyCheckoutPath` resolve their path over the LOOPBACK
 /// control plane, and reaching it SPAWNS the local bridge host. Their doc says
@@ -75,6 +76,7 @@ void main() {
           }),
         ],
         child: MaterialApp(
+          builder: abToastHostBuilder,
           home: Scaffold(body: Builder(builder: (_) => const SizedBox())),
         ),
       ),
@@ -139,7 +141,7 @@ void main() {
     await tester.pump();
 
     // The guard is a gate, not a wall: the local path is unchanged, and the
-    // unreachable host in this harness surfaces as the usual snackbar.
+    // unreachable host in this harness surfaces as the usual toast.
     expect(hostReads, 1);
     expect(find.text('Could not reach the local host.'), findsOneWidget);
   });

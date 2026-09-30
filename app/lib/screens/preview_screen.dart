@@ -15,7 +15,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
@@ -115,7 +115,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ((_maxScreenshotBytes + 2) ~/ 3) * 4 + 64;
   static const _maxScreenshotChunks =
       (_maxScreenshotDataChars + _screenshotChunkChars - 1) ~/
-          _screenshotChunkChars;
+      _screenshotChunkChars;
 
   final Map<int, _TabWebViewState> _tabStates = {};
 
@@ -455,7 +455,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
       final target = parsePreviewTarget(trimmed);
       if (target == null) {
-        showAbSnackBar(
+        showAbToast(
           context,
           'Enter a port (e.g. 3000) or a link like localhost:3000/path',
         );
@@ -551,7 +551,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // page inside the demo. Decline in the same words every other demo refusal
     // uses instead.
     if (ref.read(demoModeProvider)) {
-      showAbSnackBar(context, kDemoRefusalText);
+      showAbToast(context, kDemoRefusalText);
       return;
     }
     try {
@@ -581,7 +581,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // callers, so surface the error ourselves instead of letting it become
       // an unobserved async error.
       if (!mounted) return;
-      showAbSnackBar(context, 'Could not open preview on port $port: $e');
+      showAbToast(context, 'Could not open preview on port $port: $e');
     }
   }
 
@@ -589,10 +589,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
+    // Followed links are taken here rather than from a state listener; see
+    // PreviewService._pendingNav for why.
+    final previewService = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.previewService,
+    );
     for (final tab in state.tabs) {
       final initialUrl =
           tab.currentUrl ?? 'http://localhost:${tab.localPort}';
       final tabState = _tabStates.putIfAbsent(tab.port, _TabWebViewState.new);
+      final linkTarget = previewService?.takeNavRequest(tab.port);
       // Rebuild only on an actual target change: webview_flutter builds the
       // controller eagerly (unlike inappwebview's onWebViewCreated), so a
       // fresh target means a fresh controller and the ValueKey below swaps
@@ -601,20 +608,33 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller, or every tab would reload on every state update. Keyed
       // on the full URL (path included), not [_TabWebViewState.origin] —
       // that's deliberately path-free (see its doc) so it can't serve this.
-      if (tabState.lastAppliedUrl == initialUrl) continue;
+      if (tabState.lastAppliedUrl == initialUrl) {
+        final controller = tabState.controller;
+        if (linkTarget != null && controller != null) {
+          detached(
+            'PreviewScreen',
+            'navigate to link',
+            () => controller.loadRequest(linkTarget),
+          );
+        }
+        continue;
+      }
       tabState.lastAppliedUrl = initialUrl;
       tabState.origin = _originOf(initialUrl);
       // Present the logical target, not the forwarder: in relay mode the webview
       // may load a different localhost port when the dev server's was taken
       // here, but the tab targets scheme://localhost:<port>.
       tabState.displayOrigin = '${tab.scheme}://localhost:${tab.port}';
-      tabState.currentUrl = initialUrl;
+      // A link waiting on a freshly built controller becomes its first load, so
+      // the tab never loads the page it was opened on just to leave it.
+      final loadUrl = linkTarget?.toString() ?? initialUrl;
+      tabState.currentUrl = loadUrl;
       if (tab.port == state.activeTabId) {
         _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
       }
       tabState.controller = _buildController(
         tab.port,
-        initialUrl,
+        loadUrl,
         context.antgrid.bgDeepest,
       );
     }
@@ -682,7 +702,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     drawController,
                     onError: (reason) {
                       if (mounted) {
-                        showAbSnackBar(
+                        showAbToast(
                           context,
                           'Could not capture the preview: $reason',
                         );
@@ -1325,12 +1345,34 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   ) {
     _pullStartY = event.position.dy;
     _pullArmed = false;
+    // The window's scroll offset alone is not enough: pages that scroll inside
+    // an overflow container (custom scroll bars, app-shell layouts) keep
+    // window.scrollY at 0 forever, so every downward drag while reading such a
+    // page would look like a pull from the top and reload it. The native offset
+    // goes first so a touch on a page scrolled down, the common case, never
+    // pays for the script.
+    final x = event.localPosition.dx.round();
+    final y = event.localPosition.dy.round();
     unawaited(
       controller
           .getScrollPosition()
-          .then((pos) {
+          .then((pos) async {
+            if (pos.dy > 0) return false;
+            final result = await controller.runJavaScriptReturningResult('''
+(function(){
+  var el = document.elementFromPoint($x, $y);
+  while (el) {
+    if (el.scrollTop > 0) return false;
+    el = el.parentElement;
+  }
+  return true;
+})()
+''');
+            return result.toString() == 'true';
+          })
+          .then((atTop) {
             if (!mounted || _pullStartY == null) return;
-            if (pos.dy <= 0) _pullArmed = true;
+            if (atTop) _pullArmed = true;
           })
           .catchError((_) {}),
     );
@@ -1411,7 +1453,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
   Future<void> _copyToClipboard(String text, [String? confirm]) async {
     await Clipboard.setData(ClipboardData(text: text));
-    if (confirm != null && mounted) showAbSnackBar(context, confirm);
+    if (confirm != null && mounted) showAbToast(context, confirm);
   }
 
   /// Opens a link/image address found by the content script — routed through

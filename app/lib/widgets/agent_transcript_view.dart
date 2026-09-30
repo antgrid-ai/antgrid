@@ -23,7 +23,7 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_kbd.dart';
 import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/agent_event.dart';
 import '../models/capability_catalog.dart';
 import '../models/file_tree_models.dart';
@@ -355,7 +355,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     try {
       file = await openFile();
     } catch (_) {
-      if (mounted) showAbSnackBar(context, 'Could not open the file picker');
+      if (mounted) showAbToast(context, 'Could not open the file picker');
       return;
     }
     if (file == null) return;
@@ -364,7 +364,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // just to fail the cap.
     if (await _isOverCap(file)) {
       if (mounted) {
-        showAbSnackBar(
+        showAbToast(
           context,
           uploadErrorText(const UploadException('TOO_LARGE', ''), file.name),
         );
@@ -375,7 +375,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     try {
       bytes = await file.readAsBytes();
     } catch (e) {
-      if (mounted) showAbSnackBar(context, uploadErrorText(e, file.name));
+      if (mounted) showAbToast(context, uploadErrorText(e, file.name));
       return;
     }
     await _attachBytes(fileName: file.name, bytes: bytes);
@@ -390,7 +390,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   }) async {
     if (!mounted) return;
     if (bytes.length > UploadService.kMaxUploadBytes) {
-      showAbSnackBar(
+      showAbToast(
         context,
         uploadErrorText(const UploadException('TOO_LARGE', ''), fileName),
       );
@@ -470,7 +470,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     if (service == null) {
       setState(() => _attachments.remove(attachment));
       if (mounted) {
-        showAbSnackBar(
+        showAbToast(
           context,
           uploadErrorText(
             const UploadException('OFFLINE', ''),
@@ -505,7 +505,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     } catch (e) {
       if (!mounted) return;
       setState(() => attachment.status = AttachmentStatus.error);
-      showAbSnackBar(context, uploadErrorText(e, attachment.fileName));
+      showAbToast(context, uploadErrorText(e, attachment.fileName));
     }
   }
 
@@ -1007,7 +1007,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // synchronous derivation, so a result that lands while still valid is
     // never clobbered by a build it didn't cause.
     final mentionVisible =
-        _suggestions.isEmpty && !_mentionDismissed && _input.mentionToken != null;
+        _suggestions.isEmpty &&
+        !_mentionDismissed &&
+        _input.mentionToken != null;
     if (!mentionVisible) _mentionSuggestions = const [];
     if (_mentionIndex >= _mentionSuggestions.length) _mentionIndex = 0;
     final displayCaps = _capabilities;
