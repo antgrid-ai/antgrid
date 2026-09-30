@@ -361,7 +361,7 @@ class AuthService {
   /// killed during the browser detour) — copy falls back to the generic form.
   String? _lastOAuthProvider;
 
-  /// Begin OAuth. Provider is "github" or "google".
+  /// Begin OAuth. Provider is "github", "google" or "apple".
   /// We pass `callbackURL=/oauth/handoff` so the server can mint
   /// a single-use one-time token bound to the new session and return it in the
   /// `antgrid://` deep link; [handleDeepLink] redeems it for the session cookie.
@@ -410,6 +410,7 @@ class AuthService {
     final provider = switch (_lastOAuthProvider) {
       'github' => 'GitHub',
       'google' => 'Google',
+      'apple' => 'Apple',
       _ => null,
     };
     final message = provider == null
