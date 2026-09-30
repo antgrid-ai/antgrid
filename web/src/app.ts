@@ -32,6 +32,7 @@ import type { Env } from "./env.js";
 import type { RelayPushConfig } from "./relay/push.js";
 import type { SendEmail } from "./auth/email.js";
 import { makeClientIpResolver } from "./util/client-ip.js";
+import { hidePricingMiddleware } from "./ui/pricing-visibility.js";
 
 export type AppDeps = {
   db: DB;
@@ -64,6 +65,7 @@ export function buildApp(deps: AppDeps) {
   // mounted above this line renders with no context and silently falls back
   // to the OS scheme. tests/routes/account-page.test.ts pins the order.
   app.use("*", contextStorage());
+  app.use("*", hidePricingMiddleware());
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact

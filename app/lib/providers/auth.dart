@@ -97,11 +97,12 @@ bool requiresProForRemote(String? tier) =>
 /// Apple configured, and guideline 4.8 needs it to.
 Future<void> openAccountInBrowser(ProviderContainer ref) async {
   final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
+  final onIos = defaultTargetPlatform == TargetPlatform.iOS;
+  // hidePricing strips every path to a web purchase from the sheet, which App
+  // Store guideline 3.1.1 would otherwise reject (web/src/ui/pricing-visibility.ts).
   await launchUrl(
-    Uri.parse('$base/account'),
-    mode: defaultTargetPlatform == TargetPlatform.iOS
-        ? LaunchMode.inAppBrowserView
-        : LaunchMode.externalApplication,
+    Uri.parse(onIos ? '$base/account?hidePricing=1' : '$base/account'),
+    mode: onIos ? LaunchMode.inAppBrowserView : LaunchMode.externalApplication,
   );
 }
 
