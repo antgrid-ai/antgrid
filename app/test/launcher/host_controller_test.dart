@@ -4,6 +4,8 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/launcher/host_discovery.dart';
+import 'package:antgrid/launcher/local_agent_launcher.dart'
+    show BootstrapPayload;
 import 'package:antgrid/config/build_info.dart';
 
 // ownerBuild is stamped with OUR build so the attach gate is satisfied; the
@@ -761,5 +763,54 @@ void main() {
       expect(results, hasLength(2));
       expect(spawns, 1, reason: 'concurrent callers still share one spawn');
     });
+  });
+
+  group('a spawn asked for before the bootstrap exists', () {
+    test(
+      'waits for it and joins the one spawn, never reporting failed',
+      () async {
+        var spawns = 0;
+        final c = HostController(
+          readHost: () async => null,
+          pidAlive: (pid) async => true,
+          ping: (h) async => true,
+          awaitBootstrap: true,
+          spawnHost: () async {
+            spawns++;
+            return _host(pid: 999, port: 7000);
+          },
+        );
+        final seen = <HostPhase>[];
+        final sub = c.statusStream.listen((s) => seen.add(s.phase));
+        addTearDown(sub.cancel);
+
+        final early = c.ensureHost();
+        await Future<void>.delayed(Duration.zero);
+        expect(spawns, 0);
+
+        c.bootstrapBuilder = () => BootstrapPayload.machineOnly();
+        final warm = c.ensureHost();
+
+        expect((await early).pid, 999);
+        expect((await warm).pid, 999);
+        expect(spawns, 1);
+        expect(seen, isNot(contains(HostPhase.failed)));
+        expect(c.status.phase, HostPhase.up);
+      },
+    );
+
+    test(
+      'fails once the wait runs out — nothing is ever going to supply one',
+      () async {
+        final c = HostController(
+          readHost: () async => null,
+          awaitBootstrap: true,
+          bootstrapWait: const Duration(milliseconds: 10),
+          spawnHost: () async => fail('must not spawn without a bootstrap'),
+        );
+        await expectLater(c.ensureHost(), throwsStateError);
+        expect(c.status.phase, HostPhase.failed);
+      },
+    );
   });
 }

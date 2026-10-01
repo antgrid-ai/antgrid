@@ -260,6 +260,10 @@ Future<void> main() async {
   // Must stay listened for the whole app lifetime, like the warm-up above.
   container.listen(hostRestartRebindProvider, (_, _) {});
 
+  // That host is often the first to see this machine's device revoked; see the
+  // provider for why it probes rather than acting on the event itself.
+  container.listen(hostRevocationWatchProvider, (_, _) {});
+
   // Register the push token on every warm RELAY session (Android + iOS).
   // requestPermission/token can throw on a device without Google Play Services;
   // never let that take down startup. Fire-and-forget: registration completing

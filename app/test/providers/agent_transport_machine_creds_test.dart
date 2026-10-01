@@ -8,8 +8,6 @@
 // overrides, poll a call counter (the fake's openProject resolves instantly
 // but the provider body has multiple awaits; we don't await the full future).
 
-import 'dart:async';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -92,7 +90,6 @@ class _CapturingLauncher extends LocalAgentLauncher {
       agentPid: 0,
       owned: false,
       projectId: 'fake-project',
-      events: const Stream.empty(),
     );
   }
 }
