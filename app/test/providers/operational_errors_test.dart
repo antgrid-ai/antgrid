@@ -81,4 +81,100 @@ void main() {
       ('A', 'pre-commit hook failed'),
     ]);
   });
+
+  // Another project opening, or a session re-resolving, used to rebuild the
+  // whole fan-in and cancel every subscription — dropping an event that was
+  // already queued on one, since these streams deliver a microtask after add.
+  test('an event in flight survives another project opening', () async {
+    final transportA = FakeAgentTransport();
+    final sessions = <String, ProjectSession>{
+      'A': await newFakeProjectSession(transportA, projectId: 'A'),
+      'C': await newFakeProjectSession(FakeAgentTransport(), projectId: 'C'),
+    };
+    for (final s in sessions.values) {
+      addTearDown(s.close);
+    }
+
+    final container = ProviderContainer(
+      overrides: [
+        projectSessionProvider.overrideWith((ref, id) async => sessions[id]!),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(projectSessionProvider('A').future);
+    await container.read(projectSessionProvider('C').future);
+    final registry = container.read(projectSessionRegistryProvider.notifier);
+    registry.touch('A', isLocal: true);
+
+    final seen = <String>[];
+    StreamSubscription<ProjectScoped<String>>? errors;
+    final sub = container.listen(operationalErrorsProvider, (_, next) {
+      errors?.cancel();
+      errors = next.listen((e) => seen.add(e.message));
+    }, fireImmediately: true);
+    addTearDown(() {
+      sub.close();
+      errors?.cancel();
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    transportA.emit('git:commit-result', {
+      'projectId': 'A',
+      'success': false,
+      'error': 'pre-commit hook failed',
+    });
+    registry.touch('C', isLocal: true);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(seen, ['pre-commit hook failed']);
+  });
+
+  test('a project whose session is replaced is heard on the new one', () async {
+    final first = FakeAgentTransport();
+    final second = FakeAgentTransport();
+    final replacements = [
+      await newFakeProjectSession(first, projectId: 'A'),
+      await newFakeProjectSession(second, projectId: 'A'),
+    ];
+    for (final s in replacements) {
+      addTearDown(s.close);
+    }
+    var built = 0;
+    final container = ProviderContainer(
+      overrides: [
+        projectSessionProvider.overrideWith(
+          (ref, id) async => replacements[built++],
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(projectSessionProvider('A').future);
+    container
+        .read(projectSessionRegistryProvider.notifier)
+        .touch('A', isLocal: true);
+
+    final seen = <String>[];
+    StreamSubscription<ProjectScoped<String>>? errors;
+    final sub = container.listen(operationalErrorsProvider, (_, next) {
+      errors?.cancel();
+      errors = next.listen((e) => seen.add(e.message));
+    }, fireImmediately: true);
+    addTearDown(() {
+      sub.close();
+      errors?.cancel();
+    });
+
+    container.invalidate(projectSessionProvider('A'));
+    await container.read(projectSessionProvider('A').future);
+    await Future<void>.delayed(Duration.zero);
+    second.emit('git:commit-result', {
+      'projectId': 'A',
+      'success': false,
+      'error': 'from the new session',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(seen, ['from the new session']);
+  });
 }

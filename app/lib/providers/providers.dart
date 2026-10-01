@@ -159,49 +159,98 @@ typedef ProjectScoped<T extends Object> = ({String entryId, T message});
 /// A plain broadcast stream for a `Provider<Stream>`, never a StreamProvider,
 /// whose retained `AsyncData` would hand the last event back to every new
 /// listener as though it had just happened. An event that lands while nothing
-/// listens is gone instead. Rebuilt, as a new stream, when the warm set changes
-/// or a session resolves — [listenToEvents] follows it across.
+/// listens is gone instead.
+///
+/// One stream for the provider's life, which `ref.listen` rather than
+/// `ref.watch` is what keeps: a project joining or leaving the warm set, or its
+/// session re-resolving, rewires only that project. Rebuilding the whole stream
+/// instead would cancel every subscription, and these controllers deliver a
+/// microtask after `add` — so an event already queued in another project, or
+/// on its way to a consumer, was dropped with the subscription it was queued on.
 Stream<ProjectScoped<T>> _warmProjectEvents<T extends Object>(
   Ref ref, {
   Iterable<Stream<T>> Function(ProjectSession)? perProject,
   required Iterable<Stream<T>> Function(CheckoutServices) perCheckout,
 }) {
   final controller = StreamController<ProjectScoped<T>>.broadcast();
-  final subs = <StreamSubscription<Object?>>{};
-  ref.onDispose(() {
-    for (final s in subs) {
-      s.cancel();
-    }
-    controller.close();
-  });
-  for (final id in ref.watch(projectSessionRegistryProvider)) {
-    final session = ref.watch(projectSessionProvider(id)).value;
-    if (session == null) continue;
+  final projects = <String, _WarmProjectFeed>{};
+
+  void wire(String id, _WarmProjectFeed feed, ProjectSession? session) {
+    if (identical(session, feed.session)) return;
+    feed.cancelSources();
+    feed.session = session;
+    if (session == null) return;
     void forward(Stream<T> source) {
       late final StreamSubscription<T> sub;
       // A released checkout disposes its services, closing these — so a warm
       // set that outlives many checkouts does not hold on to every one.
       sub = source.listen(
         (m) => controller.add((entryId: id, message: m)),
-        onDone: () => subs.remove(sub),
+        onDone: () => feed.sources.remove(sub),
       );
-      subs.add(sub);
+      feed.sources.add(sub);
     }
 
     void forwardCheckout(CheckoutServices bundle) =>
         perCheckout(bundle).forEach(forward);
     perProject?.call(session).forEach(forward);
     session.checkoutServiceBundles.forEach(forwardCheckout);
-    subs.add(session.checkoutServiceBundleStream.listen(forwardCheckout));
+    feed.sources.add(
+      session.checkoutServiceBundleStream.listen(forwardCheckout),
+    );
   }
+
+  ref.listen<List<String>>(projectSessionRegistryProvider, (_, warm) {
+    for (final id in [...projects.keys]) {
+      if (!warm.contains(id)) projects.remove(id)!.close();
+    }
+    for (final id in warm) {
+      if (projects.containsKey(id)) continue;
+      final feed = projects[id] = _WarmProjectFeed();
+      feed.watch = ref.listen(
+        projectSessionProvider(id),
+        (_, next) => wire(id, feed, next.value),
+        fireImmediately: true,
+      );
+    }
+  }, fireImmediately: true);
+  ref.onDispose(() {
+    for (final feed in projects.values) {
+      feed.cancelSources();
+    }
+    controller.close();
+  });
   return controller.stream;
 }
 
+/// One warm project's subscriptions in [_warmProjectEvents], and the session
+/// they were taken from, so a session that re-resolves to the same instance
+/// keeps them.
+class _WarmProjectFeed {
+  ProviderSubscription<AsyncValue<ProjectSession>>? watch;
+  ProjectSession? session;
+  final sources = <StreamSubscription<Object?>>{};
+
+  void cancelSources() {
+    for (final s in sources) {
+      s.cancel();
+    }
+    sources.clear();
+  }
+
+  void close() {
+    watch?.close();
+    cancelSources();
+  }
+}
+
 /// Hands [onEvent] each event of the stream [provider] holds, following it to
-/// every stream it is rebuilt into, until the returned callback is called.
+/// any stream it is rebuilt into, until the returned callback is called.
 ///
 /// For the `Provider<Stream>` event sources (see [_warmProjectEvents]), where a
-/// bare `ref.listen` reports only that the stream was replaced.
+/// bare `ref.listen` reports only that the stream was replaced. Those keep one
+/// stream for their life, but an invalidation or an override can still swap
+/// it.
 void Function() listenToEvents<T>(
   WidgetRef ref,
   ProviderListenable<Stream<T>> provider,
