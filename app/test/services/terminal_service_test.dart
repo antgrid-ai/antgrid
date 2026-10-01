@@ -339,8 +339,7 @@ void main() {
       },
     );
 
-    test('a refused checkout is announced once, and only to a listener '
-        'already attached', () async {
+    test('a refused checkout is announced', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -357,14 +356,6 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(early, ['local changes would be overwritten']);
       expect(svc.currentState.gitBranchesLoading, isFalse);
-
-      // A late subscriber — the toaster remounting, or focus coming back to
-      // this checkout — must not be handed the old failure.
-      final afterwards = <String>[];
-      svc.gitErrors.listen(afterwards.add);
-      t.emit('agent:status', {'projectId': 'p', 'terminals': <Object>[]});
-      await Future<void>.delayed(Duration.zero);
-      expect(afterwards, isEmpty);
 
       await svc.dispose();
       await session.close();

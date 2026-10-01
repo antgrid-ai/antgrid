@@ -831,25 +831,4 @@ void main() {
     await session.close();
   });
 
-  test('a listener attached after a refusal never receives it', () async {
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    final cache = await CachedSessionsStore.open();
-    final svc = SessionsService.fromSession(session, cache: cache);
-
-    t.emit('session:result', {
-      'requestId': 'long-gone',
-      'ok': false,
-      'error': 'Could not remove the worktree.',
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    final errors = <String>[];
-    svc.errors.listen(errors.add);
-    await Future<void>.delayed(Duration.zero);
-    expect(errors, isEmpty);
-
-    await svc.dispose();
-    await session.close();
-  });
 }

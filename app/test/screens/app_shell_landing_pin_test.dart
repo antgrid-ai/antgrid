@@ -21,7 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart'
-    show TerminalNotificationMessage;
+    show NotificationPushMessage, TerminalNotificationMessage;
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -146,53 +146,35 @@ void main() {
     },
   );
 
-  // The toaster's sources are event streams with no replay, so a refusal is
+  // Errors and agent notifications are event streams with no replay, so one is
   // shown only if something is listening when it lands. The sidebar can stop a
-  // session while the New Session canvas is up, and the workspace is unmounted
-  // then — the toaster has to outlive that swap.
-  testWidgets('an operational error toasts while the New Session screen is up', (
-    tester,
-  ) async {
-    final errors = StreamController<ProjectScoped<String>>.broadcast();
-    addTearDown(errors.close);
-    await tester.pumpWidget(
-      host([
-        ...baseOverrides(),
-        operationalErrorsProvider.overrideWithValue(errors.stream),
-      ]),
-    );
-    await pumpLanding(tester);
-    expect(find.byType(NewSessionScreen), findsOneWidget);
-
-    errors.add((entryId: 'p', message: 'stop refused'));
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.text('stop refused'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 10));
-    clearAbToasts(tester.element(find.byType(AppShell)));
-  });
-
-  // Same for agent notifications, whose sources do not replay either: an agent
-  // finishing while the user starts another session is when they most need
-  // telling.
+  // session, and an agent can finish, while the New Session canvas is up and
+  // the workspace is unmounted — both surfacers have to outlive that swap.
   testWidgets(
-    'an agent notification toasts while the New Session screen is up',
+    'errors and agent notifications toast while the New Session screen is up',
     (tester) async {
+      final errors = StreamController<ProjectScoped<String>>.broadcast();
       final notifications =
           StreamController<
             ProjectScoped<TerminalNotificationMessage>
           >.broadcast();
+      final pushes =
+          StreamController<ProjectScoped<NotificationPushMessage>>.broadcast();
+      addTearDown(errors.close);
       addTearDown(notifications.close);
+      addTearDown(pushes.close);
       await tester.pumpWidget(
         host([
           ...baseOverrides(),
+          operationalErrorsProvider.overrideWithValue(errors.stream),
           terminalNotificationsProvider.overrideWithValue(notifications.stream),
+          agentPushNotificationsProvider.overrideWithValue(pushes.stream),
         ]),
       );
       await pumpLanding(tester);
       expect(find.byType(NewSessionScreen), findsOneWidget);
 
+      errors.add((entryId: 'p', message: 'stop refused'));
       notifications.add((
         entryId: 'p',
         message: const TerminalNotificationMessage(
@@ -203,10 +185,21 @@ void main() {
           title: 'Build finished',
         ),
       ));
+      pushes.add((
+        entryId: 'p',
+        message: const NotificationPushMessage(
+          id: 'p-1',
+          timestamp: 1,
+          notificationType: 'task_complete',
+          message: 'Tests pass',
+        ),
+      ));
       await tester.pump();
       await tester.pump();
 
+      expect(find.text('stop refused'), findsOneWidget);
       expect(find.text('Build finished'), findsOneWidget);
+      expect(find.text('Tests pass'), findsOneWidget);
       await tester.pump(const Duration(seconds: 10));
       clearAbToasts(tester.element(find.byType(AppShell)));
     },
