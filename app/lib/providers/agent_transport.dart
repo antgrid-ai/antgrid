@@ -92,13 +92,6 @@ void selectProjectInContainer(ProviderContainer c, String projectId) {
   c.read(selectedTargetProvider.notifier).set(LocalProject(projectId));
 }
 
-/// Set to `true` by the local-transport builder when the agent emits an
-/// `auth_revoked` stderr event. The UI listens with `ref.listen` and shows a
-/// snackbar, then resets this flag to `false` so repeat events re-notify.
-final authRevokedBannerProvider = NotifierProvider<ValueController<bool>, bool>(
-  () => ValueController(false),
-);
-
 /// Riverpod seam for [LocalAgentLauncher]. Override in tests to inject a fake
 /// launcher without touching the file system or spawning a real host process.
 final localAgentLauncherProvider = Provider<LocalAgentLauncher>(
@@ -602,20 +595,6 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // registry eviction) — without it a since-recovered project stays pinned on
   // the blocking error screen over the very reconnect it was waiting for.
   ref.read(localTransportFaultProvider(projectId).notifier).clear();
-
-  // Listen for structured stderr events from the spawned agent process.
-  // For orphan-attached agents result.events is an empty stream (no-op).
-  final eventSub = result.events.listen((event) async {
-    if (event.kind == 'auth_revoked') {
-      AbLog.info(
-        'AgentTransport',
-        'auth_revoked event received — clearing keychain device record',
-      );
-      await ref.read(keychainDeviceStoreProvider).clear();
-      ref.read(authRevokedBannerProvider.notifier).set(true);
-    }
-  });
-  ref.onDispose(eventSub.cancel);
 
   // The one consumer of a LocalTransport's post-ready teardown: a 4409
   // (another app superseded ownership) or any other close leaves the

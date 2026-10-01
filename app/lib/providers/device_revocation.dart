@@ -2,6 +2,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/license_token_minter.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
+import '../utils/platform_utils.dart';
+import 'control_plane.dart' show hostControllerProvider;
 import 'providers.dart';
 import 'sign_out.dart';
 import 'value_controller.dart';
@@ -27,7 +30,6 @@ const _kProbeCooldown = Duration(minutes: 5);
 /// survives the provider invalidation `performHardSignOut` performs — the guard
 /// is worthless if the teardown it guards resets it.
 class _RevocationCoordinator {
-  bool signingOut = false;
   DateTime? lastProbe;
 }
 
@@ -41,15 +43,12 @@ final _coordinatorProvider = Provider<_RevocationCoordinator>(
 /// independently (one relay socket per machine), and the mint path can raise it
 /// again on top — the teardown must run exactly once.
 Future<void> handleDeviceRevoked(ProviderContainer ref) async {
-  final coordinator = ref.read(_coordinatorProvider);
-  if (coordinator.signingOut || ref.read(revokedNoticeProvider)) return;
-  coordinator.signingOut = true;
+  if (hardSignOutInFlight(ref) || ref.read(revokedNoticeProvider)) return;
 
   AbLog.warn('Revocation', 'device revoked by the account — signing out');
   try {
     await performHardSignOut(ref);
   } finally {
-    coordinator.signingOut = false;
     // Set last: the notice is what flips the root to the sign-in screen, and
     // the screen must not appear while credentials are still being wiped.
     ref.read(revokedNoticeProvider.notifier).set(true);
@@ -74,24 +73,69 @@ void clearRevokedNotice(ProviderContainer ref) {
 ///
 /// **Only that exception signs anyone out.** A transport failure means offline,
 /// not revoked, and must leave the session alone.
-Future<void> checkDeviceRevoked(ProviderContainer ref) async {
+///
+/// [force] skips the cooldown, for a caller that already holds evidence the
+/// credentials died rather than a mere lifecycle tick.
+Future<void> checkDeviceRevoked(
+  ProviderContainer ref, {
+  bool force = false,
+}) async {
   final coordinator = ref.read(_coordinatorProvider);
   final now = DateTime.now();
   final last = coordinator.lastProbe;
-  if (last != null && now.difference(last) < _kProbeCooldown) return;
+  if (!force && last != null && now.difference(last) < _kProbeCooldown) return;
   if (ref.read(revokedNoticeProvider)) return;
 
   coordinator.lastProbe = now;
+  LicenseTokenMinter? minter;
   try {
     // The MAIN account record, not the desktop controller record: this is the
     // installation's identity on the account, and it is the one a cold start
     // has without dialling anything.
-    final minter = await ref.read(licenseTokenMinterProvider.future);
+    minter = await ref.read(licenseTokenMinterProvider.future);
     if (minter == null) return; // signed out, or never provisioned
     await minter.mint();
   } on DeviceRevokedException {
+    // A sign-out that finished while the mint was out has already retired
+    // these credentials, and its own revoke is what the mint just heard.
+    if (!identical(await ref.read(licenseTokenMinterProvider.future), minter)) {
+      return;
+    }
     await handleDeviceRevoked(ref);
   } catch (error) {
     AbLog.debug('Revocation', 'probe inconclusive: $error');
   }
 }
+
+/// Routes the local host's `auth_revoked` into [checkDeviceRevoked].
+///
+/// The host runs on the MAIN account record, so its relay or its token mint is
+/// usually the first to learn that record was revoked; without this a desktop
+/// that dials no machine finds out only at the next cooldown-gated resume
+/// probe. The event is evidence, not the verdict: the bridge raises it for
+/// LICENSE_INVALID too, a binding fault that is no reason to sign anyone out,
+/// so the mint decides. Ignored during a sign-out, whose own server-side
+/// revoke the host hears as one.
+///
+/// Never clears the keychain on its own. An empty keychain reads as "never
+/// provisioned" to the probe, and the next resolve re-creates the same device
+/// uuid, which the web answers by REACTIVATING the revoked row — undoing the
+/// revocation with no one signing in.
+///
+/// Desktop-only; must stay listened for the app's whole life.
+final hostRevocationWatchProvider = Provider<void>((ref) {
+  if (isMobilePlatform) return;
+  final container = ref.container;
+  final sub = ref.read(hostControllerProvider).hostEvents.listen((event) {
+    // The in-flight check only spares a mint: [handleDeviceRevoked] is what
+    // keeps a sign-out's own revoke from starting a second one.
+    if (event.kind != 'auth_revoked' || hardSignOutInFlight(container)) return;
+    AbLog.info('Revocation', 'local host reported auth_revoked — probing');
+    detached(
+      'Revocation',
+      'probe after host auth_revoked',
+      () => checkDeviceRevoked(container, force: true),
+    );
+  });
+  ref.onDispose(sub.cancel);
+});
