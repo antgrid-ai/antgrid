@@ -1549,8 +1549,8 @@ class FileService {
         'projectId': projectId,
         'requestId': requestId,
         'path': rawPath,
-        if (terminalId != null) 'terminalId': terminalId,
-        if (base != null) 'base': base,
+        'terminalId': ?terminalId,
+        'base': ?base,
       }),
     );
     return pending.future;

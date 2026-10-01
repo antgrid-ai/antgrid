@@ -293,7 +293,7 @@ void main() {
 
       final text = _text(tester);
       expect(text, contains('%E2%80%AE'));
-      expect(text, isNot(contains('‮')));
+      expect(text, isNot(contains('\u202E')));
     });
 
     testWidgets('a path of an unknown kind reads as a plain file', (
