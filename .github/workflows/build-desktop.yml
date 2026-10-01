@@ -774,10 +774,13 @@ jobs:
 
       - name: Build bridge (Windows x64 binary)
         shell: pwsh
+        # Without the --windows-* flags the exe carries bun.exe's own version
+        # resource, so the firewall dialog, Task Manager and every rule list name
+        # it "Bun" from "Oven". The values mirror app/windows/runner/Runner.rc.
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force bridge/dist | Out-Null
-          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --windows-title 'antgrid' --windows-description 'antgrid bridge' --windows-publisher 'Radha AI Products' --windows-copyright 'Copyright (C) 2026 Radha AI Products. All rights reserved.' --windows-version '${{ needs.version.outputs.msix }}' --windows-icon app/windows/runner/resources/app_icon.ico --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
 
       - name: Smoke test compiled bridge hook
         shell: pwsh
@@ -841,7 +844,7 @@ jobs:
         working-directory: app
         run: dart run msix:build --store --build-windows false --version ${{ needs.version.outputs.msix }} --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
 
-      - name: Declare bridge as a launchable Application
+      - name: Declare bridge Application and firewall rules
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/patch-msix-manifest.ps1 -ManifestPath "app/build/windows/x64/runner/$env:DEST/AppxManifest.xml"
@@ -857,10 +860,10 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-msix-protocol.ps1 -Path antgrid-store.msix -Protocol antgrid
 
-      - name: Verify bridge is launchable from the package
+      - name: Verify bridge is launchable and binaries are firewalled
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
-        run: ./scripts/verify-msix-executables.ps1 -Path antgrid-store.msix -Executable antgrid-bridge.exe
+        run: ./scripts/verify-msix-executables.ps1 -Path antgrid-store.msix -Executable antgrid-bridge.exe -FirewallExecutable antgrid.exe, antgrid-bridge.exe
 
       - uses: actions/upload-artifact@v7
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}

@@ -133,6 +133,43 @@ testOnWindows("adds a console-subsystem execution alias in the uap5 namespace", 
   expect(manifest).toMatch(/IgnorableNamespaces="[^"]*\bdesktop4\b/);
 });
 
+/** Executables named by a package-level inbound UDP firewall rule. */
+function firewallExecutables(manifest: string): string[] {
+  const packageExtensions = manifest.match(/<\/Applications>\s*<Extensions>([\s\S]*?)<\/Extensions>/);
+  if (!packageExtensions) return [];
+  return [...packageExtensions[1].matchAll(
+    /<desktop2:Extension Category="windows\.firewallRules">\s*<desktop2:FirewallRules Executable="([^"]+)">\s*<desktop2:Rule Direction="in" IPProtocol="UDP" Profile="all"\s*\/>/g,
+  )].map((match) => match[1]);
+}
+
+testOnWindows("declares a package-level inbound UDP firewall rule for every executable", () => {
+  const folder = createPackage();
+  runScript(folder);
+
+  const manifest = readManifest(folder);
+  // Both binaries open an Iroh endpoint; one without a rule prompts again on
+  // every update, because the install folder carries the package version.
+  expect(firewallExecutables(manifest).sort()).toEqual(["antgrid-bridge.exe", "antgrid.exe"]);
+  expect(manifest).toContain(
+    'xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"',
+  );
+  expect(manifest).toMatch(/IgnorableNamespaces="[^"]*\bdesktop2\b/);
+});
+
+testOnWindows("adds missing firewall rules to an already-declared bridge", () => {
+  const folder = createPackage();
+  runScript(folder);
+  const patched = readManifest(folder);
+  writeFileSync(
+    join(folder, "AppxManifest.xml"),
+    patched.replace(/<\/Applications>\s*<Extensions>[\s\S]*?<\/Extensions>/, "</Applications>"),
+  );
+
+  const result = runScript(folder);
+  expect(result.status).toBe(0);
+  expect(firewallExecutables(readManifest(folder)).sort()).toEqual(["antgrid-bridge.exe", "antgrid.exe"]);
+});
+
 testOnWindows("is idempotent", () => {
   const folder = createPackage();
   runScript(folder);

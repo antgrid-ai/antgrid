@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Declare the bridge binary as a second <Application> in the generated AppxManifest.
+  Declare the bridge binary as a second <Application> in the generated AppxManifest,
+  and give every packaged executable an inbound UDP firewall rule.
 
 .DESCRIPTION
   Windows refuses an external CreateProcess on a packaged binary that the manifest
@@ -15,6 +16,13 @@
   The `msix` package hardcodes exactly one <Application> and its `execution_alias`
   option only ever aliases the main executable, so this runs between `msix:build`
   and `msix:pack` — after the manifest is generated, before it is packed.
+
+  Both the app and the bridge open an Iroh endpoint, which binds UDP on every
+  interface. With no rule for the binary, Windows Defender Firewall prompts on
+  that first bind and records the answer against the exe's full path — and a
+  package's install folder carries its version, so every update would prompt
+  again for each binary. A package-declared rule is installed with the package
+  and survives updates, so the prompt never appears.
 
   Run against the manifest in the build folder, not inside a packed .msix.
 #>
@@ -53,6 +61,7 @@ if (-not (Test-Path -LiteralPath $executablePath)) {
 $foundationNs = 'http://schemas.microsoft.com/appx/manifest/foundation/windows10'
 $uapNs = 'http://schemas.microsoft.com/appx/manifest/uap/windows10'
 $uap5Ns = 'http://schemas.microsoft.com/appx/manifest/uap/windows10/5'
+$desktop2Ns = 'http://schemas.microsoft.com/appx/manifest/desktop/windows10/2'
 $desktop4Ns = 'http://schemas.microsoft.com/appx/manifest/desktop/windows10/4'
 $xmlnsNs = 'http://www.w3.org/2000/xmlns/'
 
@@ -63,10 +72,74 @@ if ($null -eq $applications) {
   throw "AppxManifest.xml has no <Applications> element: $resolvedPath"
 }
 
+$root = $manifest.DocumentElement
+
+function Use-ManifestNamespace([string]$Prefix, [string]$Uri) {
+  if ([string]::IsNullOrEmpty($root.GetAttribute("xmlns:$Prefix"))) {
+    # SetAttribute refuses the xmlns namespace URI, so build the declaration node.
+    $declaration = $manifest.CreateAttribute('xmlns', $Prefix, $xmlnsNs)
+    $declaration.Value = $Uri
+    $root.Attributes.Append($declaration) | Out-Null
+  }
+  $ignorable = @($root.GetAttribute('IgnorableNamespaces') -split '\s+' | Where-Object { $_ })
+  if ($ignorable -notcontains $Prefix) {
+    $root.SetAttribute('IgnorableNamespaces', (($ignorable + $Prefix) -join ' '))
+  }
+}
+
+# Every declared executable gets a rule rather than a named list, so a binary
+# added to the package later cannot reintroduce the prompt; a rule for an exe
+# that never listens is inert. Returns whether the manifest changed.
+function Add-FirewallRules {
+  $executables = @(
+    $applications.SelectNodes("*[local-name()='Application']") |
+      ForEach-Object { $_.GetAttribute('Executable') }
+  )
+  $covered = @(
+    $manifest.SelectNodes("//*[local-name()='FirewallRules']") |
+      ForEach-Object { $_.GetAttribute('Executable') }
+  )
+  $missing = @($executables | Where-Object { $covered -notcontains $_ })
+  if ($missing.Count -eq 0) { return $false }
+
+  Use-ManifestNamespace 'desktop2' $desktop2Ns
+
+  # Package-level, not inside an <Application>: windows.firewallRules is only
+  # valid as a package extension.
+  $packageExtensions = $root.SelectSingleNode("*[local-name()='Extensions']")
+  if ($null -eq $packageExtensions) {
+    $packageExtensions = $manifest.CreateElement('Extensions', $foundationNs)
+    $root.InsertAfter($packageExtensions, $applications) | Out-Null
+  }
+
+  foreach ($name in $missing) {
+    $extension = $manifest.CreateElement('desktop2', 'Extension', $desktop2Ns)
+    $extension.SetAttribute('Category', 'windows.firewallRules')
+    $rules = $manifest.CreateElement('desktop2', 'FirewallRules', $desktop2Ns)
+    $rules.SetAttribute('Executable', $name)
+    $rule = $manifest.CreateElement('desktop2', 'Rule', $desktop2Ns)
+    $rule.SetAttribute('Direction', 'in')
+    # Iroh's QUIC transport is UDP only, on an OS-assigned port, so the rule
+    # names a protocol and no port range.
+    $rule.SetAttribute('IPProtocol', 'UDP')
+    # Not just private: the phone is used away from home networks, and the
+    # endpoint completes a session only with endpoint IDs its authorization
+    # snapshot names.
+    $rule.SetAttribute('Profile', 'all')
+    $rules.AppendChild($rule) | Out-Null
+    $extension.AppendChild($rules) | Out-Null
+    $packageExtensions.AppendChild($extension) | Out-Null
+    Write-Host "Declared inbound UDP firewall rule for '$name'"
+  }
+  return $true
+}
+
 $declared = @($applications.SelectNodes("*[local-name()='Application']"))
 
 if (@($declared | Where-Object { $_.GetAttribute('Executable') -eq $Executable }).Count -gt 0) {
-  Write-Host "Already declared, nothing to do: $Executable"
+  # A manifest patched before the firewall rules existed still needs them.
+  if (Add-FirewallRules) { $manifest.Save($resolvedPath) }
+  Write-Host "Already declared: $Executable"
   return
 }
 
@@ -127,18 +200,8 @@ $application.AppendChild($visual) | Out-Null
 # defined on uap5:AppExecutionAlias, and makeappx rejects it on the uap3 one.
 # Executable/EntryPoint are omitted deliberately — uap5 inherits both from the
 # enclosing <Application>.
-$root = $manifest.DocumentElement
-if ([string]::IsNullOrEmpty($root.GetAttribute('xmlns:uap5'))) {
-  # SetAttribute refuses the xmlns namespace URI, so build the declaration node.
-  $uap5Decl = $manifest.CreateAttribute('xmlns', 'uap5', $xmlnsNs)
-  $uap5Decl.Value = $uap5Ns
-  $root.Attributes.Append($uap5Decl) | Out-Null
-}
-$ignorable = @($root.GetAttribute('IgnorableNamespaces') -split '\s+' | Where-Object { $_ })
-foreach ($prefix in @('uap5', 'desktop4')) {
-  if ($ignorable -notcontains $prefix) { $ignorable += $prefix }
-}
-$root.SetAttribute('IgnorableNamespaces', ($ignorable -join ' '))
+Use-ManifestNamespace 'uap5' $uap5Ns
+Use-ManifestNamespace 'desktop4' $desktop4Ns
 
 $extensions = $manifest.CreateElement('Extensions', $foundationNs)
 $extension = $manifest.CreateElement('uap5', 'Extension', $uap5Ns)
@@ -156,6 +219,7 @@ $extensions.AppendChild($extension) | Out-Null
 $application.AppendChild($extensions) | Out-Null
 
 $applications.AppendChild($application) | Out-Null
+Add-FirewallRules | Out-Null
 $manifest.Save($resolvedPath)
 
 Write-Host "Declared '$Executable' as <Application Id=`"$Id`"> with execution alias '$Executable'"
