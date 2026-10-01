@@ -35,6 +35,36 @@ export interface DetectRow {
   explicit: readonly (string | undefined)[];
 }
 
+/** Shared by every row that carries no program link. */
+export const NO_EXPLICIT_LINKS: readonly (string | undefined)[] = Object.freeze([]) as readonly (string | undefined)[];
+
+/** A row's text is cut at its last visible character unless the next row
+ *  continues it by soft wrap, so that "does this row run to the edge" is a
+ *  question about content. */
+export function cutDetectRow(f: {
+  text: string;
+  colAt: Int32Array;
+  /** Length of `text` through its last non-blank character. */
+  keep: number;
+  continued: boolean;
+  widthAt: Uint8Array;
+  cols: number;
+  wrapped: boolean;
+  endCol: number;
+  explicit: readonly (string | undefined)[];
+}): DetectRow {
+  const cut = f.continued ? f.text.length : f.keep;
+  return {
+    text: f.text.slice(0, cut),
+    colAt: f.colAt.slice(0, cut),
+    widthAt: f.widthAt,
+    cols: f.cols,
+    wrapped: f.wrapped,
+    endCol: f.endCol,
+    explicit: f.explicit,
+  };
+}
+
 export interface DetectedSpan {
   row: number;
   startCol: number;
@@ -75,7 +105,7 @@ export interface DetectEdges {
   /** Exclusive: rows from here on were supplied only so a mention that begins
    *  above them is whole. A line that begins at or past it is never evaluated,
    *  because nothing it holds is painted and its lookups would come out of the
-   *  budget the painted rows need. */
+   *  budget the painted rows need, and no span on such a row is returned. */
   paintedEnd?: number;
 }
 
@@ -179,22 +209,19 @@ export function detectLinks(
   platform: NodeJS.Platform = process.platform,
   edges: DetectEdges = {},
 ): DetectResult {
-  const result: DetectResult = {
-    spans: [],
-    pending: new Set(),
-    negatives: new Set(),
-    linked: new Set(),
-    refining: new Set(),
-    starved: false,
-  };
+  const result = emptyResult();
   try {
     run(rows, firstPainted, bases, cache, { ...budget }, scan ?? ((t) => scanLine(t, platform)), platform, edges, result);
     return result;
   } catch {
     // Detection is decoration: a throw here must never reach the frame
     // pipeline, which would latch the whole terminal as failed.
-    return { spans: [], pending: new Set(), negatives: new Set(), linked: new Set(), refining: new Set(), starved: false };
+    return emptyResult();
   }
+}
+
+function emptyResult(): DetectResult {
+  return { spans: [], pending: new Set(), negatives: new Set(), linked: new Set(), refining: new Set(), starved: false };
 }
 
 function run(
@@ -326,7 +353,8 @@ function run(
     const next = lines[li + 1];
     let joined = url;
     const segs: Segment[] = [head];
-    let tooLong = encodeUrlLink(url) === undefined;
+    const headUri = encodeUrlLink(url);
+    let tooLong = headUri === undefined;
 
     if (!tooLong && next && endsLine(li, end) && reachesEdge(line)) {
       let cur = li;
@@ -365,7 +393,7 @@ function run(
 
     const trimmed = segs.length > 1 ? trimUrl(joined) : url;
     if (segs.length > 1) truncateSegments(segs, trimmed.length);
-    const uri = encodeUrlLink(trimmed);
+    const uri = trimmed === url ? headUri : encodeUrlLink(trimmed);
     if (!uri) return undefined;
     const claim: Claim = { kind: "url", segs, uri, printed: trimmed, quoted: false, dead: false };
     return track(claim).dead ? undefined : claim;
@@ -530,7 +558,7 @@ function run(
         // is worth re-framing for when the root's answer arrives.
         if (realRoot === undefined && real !== cand.abs && cache.peek(root) === undefined) result.refining.add(root);
       }
-      const kind = classifyPath(cand.abs, status, root, platform, { inside: cand.inside, real, realRoot });
+      const kind = classifyPath(cand.abs, status, platform, { inside: cand.inside, real, realRoot });
       if (!kind) return { state: "none" };
       const uri = encodePathLink({
         path: cand.text,
@@ -636,7 +664,7 @@ function run(
     for (const seg of claim.segs) seg.line.occupied.fill(1, seg.start, seg.end);
     let painted = false;
     for (const s of spans) {
-      if (s.row < firstPainted) continue;
+      if (s.row < firstPainted || s.row >= paintedEnd) continue;
       result.spans.push(s);
       painted = true;
     }
@@ -676,6 +704,13 @@ function firstStartingAt(entries: ReadonlyArray<{ scanned: { start: number } }>,
   return lo;
 }
 
+/** Length of `text` without trailing whitespace, as `trimEnd` counts it. */
+function trimmedLengthOf(text: string): number {
+  let n = text.length;
+  while (n > 0 && isWhitespace(text.charCodeAt(n - 1))) n--;
+  return n;
+}
+
 /** Rows joined by terminal soft wrap form one logical line; a hard wrap (the
  *  program writing its own newline) starts the next. */
 function buildLines(rows: readonly DetectRow[]): Line[] {
@@ -684,6 +719,20 @@ function buildLines(rows: readonly DetectRow[]): Line[] {
   while (i < rows.length) {
     let j = i;
     while (j + 1 < rows.length && rows[j + 1]!.wrapped) j++;
+    const only = rows[i]!;
+    if (j === i && only.colAt.length === only.text.length) {
+      out.push({
+        first: i,
+        last: i,
+        text: only.text,
+        trimmedLength: trimmedLengthOf(only.text),
+        rowAt: new Int32Array(only.text.length).fill(i),
+        colAt: only.colAt,
+        occupied: new Uint8Array(only.text.length),
+      });
+      i++;
+      continue;
+    }
     let total = 0;
     for (let r = i; r <= j; r++) total += rows[r]!.text.length;
     const rowAt = new Int32Array(total);
@@ -705,7 +754,7 @@ function buildLines(rows: readonly DetectRow[]): Line[] {
       first: i,
       last: j,
       text,
-      trimmedLength: text.trimEnd().length,
+      trimmedLength: trimmedLengthOf(text),
       rowAt,
       colAt,
       occupied: new Uint8Array(total),

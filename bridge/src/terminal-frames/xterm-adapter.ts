@@ -1,6 +1,6 @@
 import type { IBufferCell, IBufferLine, Terminal } from "@xterm/headless";
 import { isAntgridLinkUri } from "../terminal-links/grammar";
-import type { DetectRow } from "../terminal-links/detector";
+import { NO_EXPLICIT_LINKS, cutDetectRow, type DetectRow } from "../terminal-links/detector";
 import type { TerminalHistoryRow, TerminalHistorySpan } from "./protocol";
 
 interface ExtendedCell extends IBufferCell {
@@ -11,9 +11,6 @@ interface ExtendedCell extends IBufferCell {
   isUnderlineColorRGB(): boolean;
   isUnderlineColorPalette(): boolean;
 }
-/** What a row with no program-authored link carries, so the common row
- *  allocates nothing for them. */
-const NO_LINKS: readonly (string | undefined)[] = Object.freeze([]) as readonly (string | undefined)[];
 
 interface BufferLineInternals {
   resize(cols: number, fillCellData: unknown): void;
@@ -129,8 +126,11 @@ export class XtermFrameAdapter {
    * artefact of the wrap, not a blank the program printed, so it is left out of
    * the text: read as a space it would split a token the program wrote whole.
    * `endCol` still counts it, because the row did run to the edge.
+   *
+   * `readLinks` is false while no OSC 8 has been parsed: no cell can carry a
+   * program's link, so reading each one would find nothing.
    */
-  detectRow(line: IBufferLine, cols: number, next?: IBufferLine): DetectRow {
+  detectRow(line: IBufferLine, cols: number, next?: IBufferLine, readLinks = true): DetectRow {
     const widthAt = new Uint8Array(cols);
     let explicit: (string | undefined)[] | undefined;
     if (this.colScratch.length < cols * 2) this.colScratch = new Int32Array(cols * 2);
@@ -172,15 +172,13 @@ export class XtermFrameAdapter {
           keep = text.length;
         }
       }
-      const uri = this.link(cell);
+      const uri = readLinks ? this.link(cell) : undefined;
       if (uri !== undefined) (explicit ??= new Array<string | undefined>(cols).fill(undefined))[col] = uri;
     }
-    const cut = full ? text.length : keep;
-    return {
-      text: text.slice(0, cut),
-      colAt: colAt.slice(0, cut),
-      widthAt, cols, wrapped: line.isWrapped, endCol, explicit: explicit ?? NO_LINKS,
-    };
+    return cutDetectRow({
+      text, colAt, keep, continued: full, widthAt, cols, wrapped: line.isWrapped, endCol,
+      explicit: explicit ?? NO_EXPLICIT_LINKS,
+    });
   }
 
   /**

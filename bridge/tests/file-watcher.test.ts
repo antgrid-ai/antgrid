@@ -223,11 +223,6 @@ describe("FileWatcher", () => {
   function askedCache(): { cache: PathStatCache; asked: string[]; calls: string[] } {
     const { cache, calls } = recordingCache();
     const asked: string[] = [];
-    const resolveFresh = cache.resolveFresh.bind(cache);
-    cache.resolveFresh = (abs, ms) => {
-      asked.push(abs);
-      return resolveFresh(abs, ms);
-    };
     const resolveReal = cache.resolveReal.bind(cache);
     cache.resolveReal = (abs, ms) => {
       asked.push(abs);
@@ -495,6 +490,29 @@ describe("FileWatcher", () => {
     watcher.stop();
   });
 
+  // Text rooted on the current drive, or relative to one, resolves against
+  // the bridge's own drive and directory, which says nothing about a terminal.
+  it.skipIf(process.platform !== "win32")("does not resolve current-drive or drive-relative text under a relative base", async () => {
+    const watcher = newWatcher();
+    const { cache, asked, calls } = askedCache();
+
+    for (const base of ["l", "s", "r"] as const) {
+      for (const text of ["\\src\\app.ts", "/src/app.ts", "C:app.ts", "c:src\\app.ts"]) {
+        const reply = await watcher.resolvePath(
+          text,
+          { base, liveCwd: join(tempDir, "src"), spawnCwd: join(tempDir, "src") },
+          cache,
+        );
+        expect(reply.relPath).toBeNull();
+        expect(reply.exists).toBe(false);
+      }
+    }
+    expect(asked).toEqual([]);
+    expect(calls).toEqual([]);
+
+    watcher.stop();
+  });
+
   it("refuses a base that is unavailable or whose cwd is outside the checkout", async () => {
     const watcher = newWatcher();
     const { cache, calls } = recordingCache();
@@ -727,6 +745,19 @@ describe("FileWatcher", () => {
       }
       expect(rootItself.relPath).toBe("");
       expect(rootItself.isDirectory).toBe(true);
+      expect(calls.length).toBeGreaterThan(0);
+
+      watcher.stop();
+    });
+
+    it.skipIf(!reachable)("resolves a printed relative path against the root when the root is a UNC share", async () => {
+      const watcher = uncWatcher();
+      const { cache, calls } = recordingCache();
+
+      const reply = await watcher.resolvePath("src/app.ts", { base: "r" }, cache);
+
+      expect(reply.relPath).toBe("src/app.ts");
+      expect(reply.exists).toBe(true);
       expect(calls.length).toBeGreaterThan(0);
 
       watcher.stop();

@@ -7,15 +7,15 @@ import { createMessage, type AbMessage } from "./protocol";
 import {
   loadIgnoreRules,
   readFile,
-  externalSafeImageMime,
   listDirectory,
   listDirectoryBatch,
   type FileTreeNode,
   type DirectoryListing,
 } from "./file-tree";
-import { isSeparator } from "./terminal-links/chars";
+import { startsWithDoubleSeparator } from "./terminal-links/chars";
+import { isInsideResolved, refusedUnderRoot } from "./terminal-links/containment";
 import { isRefusedPathShape, type PrintedPathBase } from "./terminal-links/grammar";
-import { isAbsoluteFor, isInsideResolved, normalizeBases } from "./terminal-links/resolver";
+import { classifyPath, normalizeBases, resolveAgainstBase } from "./terminal-links/resolver";
 import { sharedPathStatCache, type PathStatCache } from "./terminal-links/stat-cache";
 import type { ConnState } from "./conn-state";
 import type { ClientKey } from "./message-bus";
@@ -27,6 +27,25 @@ type FileResolvePathReply = Omit<
   Extract<AbMessage, { type: "file:resolve-path-result" }>,
   "id" | "timestamp" | "type" | "checkoutId"
 >;
+
+/** The answer for a request that resolved to nothing. `timedOut` marks one that
+ *  was not examined, or whose stat is still running, which is not evidence that
+ *  the path is absent. */
+export function unresolvedResolvePathReply(
+  projectId: string,
+  requestId: string,
+  timedOut = false,
+): FileResolvePathReply {
+  return {
+    projectId,
+    requestId,
+    relPath: null,
+    isDirectory: false,
+    externalImagePath: null,
+    exists: false,
+    ...(timedOut ? { timedOut: true } : {}),
+  };
+}
 
 export interface ProjectInfo {
   path: string;
@@ -660,12 +679,7 @@ export class FileWatcher {
     cache: PathStatCache = sharedPathStatCache(),
   ): Promise<FileResolvePathReply> {
     const reply = (fields: Partial<FileResolvePathReply> = {}): FileResolvePathReply => ({
-      projectId: this.projectId,
-      requestId: opts.requestId ?? "",
-      relPath: null,
-      isDirectory: false,
-      externalImagePath: null,
-      exists: false,
+      ...unresolvedResolvePathReply(this.projectId, opts.requestId ?? ""),
       ...fields,
     });
     try {
@@ -674,33 +688,39 @@ export class FileWatcher {
       // The bridge already works on this volume, so a checkout on a mapped
       // drive must not have every path in it refused as network I/O.
       cache.trustVolume(this.projectRoot);
-      const { status, real } = await cache.resolveReal(absPath, RESOLVE_FRESH_MS);
+      const root = resolve(this.projectRoot);
+      const inside = isInsideResolved(absPath, root);
+      // The root is only wanted for a path that is inside it, which is known
+      // lexically, so both stats can start together.
+      const [target, rootAnswer] = await Promise.all([
+        cache.resolveReal(absPath, RESOLVE_FRESH_MS),
+        inside ? cache.resolveReal(root, RESOLVE_FRESH_MS) : undefined,
+      ]);
+      const { status, real } = target;
       // The stat is still running, so the file may exist: the app must be able
       // to say it does not know instead of that the file is gone.
       if (status === "timeout") return reply({ timedOut: true });
       if (status === "refused") return reply();
-      const exists = status === "file" || status === "dir";
-      const normalizedRoot = resolve(this.projectRoot);
-      const lexicallyInside = isInsideResolved(absPath, normalizedRoot);
-      const realRoot =
-        lexicallyInside && real !== undefined ? (await cache.resolveReal(normalizedRoot, RESOLVE_FRESH_MS)).real : undefined;
+      if (status === "missing") return inside ? reply({ relPath: this.relPathUnder(root, absPath) }) : reply();
       // A link inside the checkout can lead out of it; where the walk really
       // ended is what decides, and an unknown root falls back to the lexical
       // answer rather than refusing a checkout that is itself reached by a link.
-      const escaped = real !== undefined && realRoot !== undefined && !isInsideResolved(real, realRoot);
-      if (lexicallyInside && !escaped) {
-        return reply({
-          relPath: absPath === normalizedRoot ? "" : this.toRelPath(absPath),
-          isDirectory: status === "dir",
-          exists,
-        });
-      }
-      const image = status === "file" && externalSafeImageMime(absPath) && (!escaped || externalSafeImageMime(real!));
-      return reply({ externalImagePath: image ? absPath : null, exists });
+      const kind = classifyPath(absPath, status, process.platform, {
+        inside,
+        real,
+        realRoot: rootAnswer?.real,
+      });
+      if (kind === "i") return reply({ externalImagePath: absPath, exists: true });
+      if (kind === undefined) return reply({ exists: true });
+      return reply({ relPath: this.relPathUnder(root, absPath), isDirectory: kind === "d", exists: true });
     } catch (error) {
       log.warn("file:resolve-path failed: %s", error);
       return reply();
     }
+  }
+
+  private relPathUnder(root: string, absPath: string): string {
+    return absPath === root ? "" : this.toRelPath(absPath);
   }
 
   /** The one absolute path a printed path names under the requested base, or
@@ -714,29 +734,18 @@ export class FileWatcher {
     // A UNC spelling of the checkout's own share is the one refused shape that
     // can still name something the bridge already works in; it is judged below
     // by where it lands. Every other refused spelling stops here.
-    if (rawRefused && !(isSeparator(rawPath[0]) && isSeparator(rawPath[1]))) return undefined;
-    let absPath: string;
+    if (rawRefused && !startsWithDoubleSeparator(rawPath)) return undefined;
+    let absPath: string | undefined;
     if (opts.base === undefined) {
       absPath = resolve(this.projectRoot, rawPath);
     } else {
       const bases = normalizeBases({ liveCwd: opts.liveCwd, spawnCwd: opts.spawnCwd, checkoutRoot: this.projectRoot });
-      if (opts.base === "a") {
-        if (!isAbsoluteFor(rawPath, process.platform)) return undefined;
-        absPath = resolve(rawPath);
-      } else {
-        const dir = { l: bases.liveCwd, s: bases.spawnCwd, r: bases.checkoutRoot }[opts.base];
-        if (dir === undefined) return undefined;
-        absPath = resolve(dir, rawPath);
-      }
+      absPath = resolveAgainstBase(rawPath, opts.base, bases);
+      if (absPath === undefined) return undefined;
     }
-    // The root is the checkout the bridge already works in, possibly a UNC
-    // share, so inside it only what follows the root is judged; a path that
-    // left it is judged whole.
     const root = resolve(this.projectRoot);
-    if (isInsideResolved(absPath, root)) {
-      return rawRefused && isRefusedPathShape(absPath.slice(root.length)) ? undefined : absPath;
-    }
-    return rawRefused || isRefusedPathShape(absPath) ? undefined : absPath;
+    if (rawRefused && !isInsideResolved(absPath, root)) return undefined;
+    return refusedUnderRoot(absPath, root) ? undefined : absPath;
   }
 
   /** Returns chokidar's close promise so a caller about to delete the watched

@@ -1,5 +1,6 @@
 import { hostname as osHostname } from "node:os";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import type { IBufferLine } from "@xterm/headless";
 import { TerminalScreen } from "../terminal-screen";
 import { logger } from "../logger";
 import { TerminalModeTracker } from "../terminal-modes";
@@ -10,10 +11,10 @@ import {
 } from "./protocol";
 import type { TerminalRunHistory } from "./history";
 import { installTerminalQueries, OscQueryTerminators, type TerminalQueryColors } from "./queries";
-import { detectLinks, type DetectRow } from "../terminal-links/detector";
+import { NO_EXPLICIT_LINKS, detectLinks, type DetectedSpan, type DetectResult, type DetectRow } from "../terminal-links/detector";
 import { parseOsc7, scanLine } from "../terminal-links/grammar";
 import { normalizeBases, type LinkBases } from "../terminal-links/resolver";
-import { sharedPathStatCache, type PathStatCache, type PathStatus } from "../terminal-links/stat-cache";
+import { defaultTimer, sharedPathStatCache, type PathStatCache, type PathStatus } from "../terminal-links/stat-cache";
 export { TERMINAL_FRAME_INTERVAL_MS as FRAME_INTERVAL_MS } from "./protocol";
 export const TerminalFrameSchema = TerminalScreenFrameSchema;
 export type { TerminalScreenFrame };
@@ -73,7 +74,6 @@ const SCAN_MEMO_MAX_CHARS = 262_144;
 /** Past this a line is scanned again each time rather than remembered: it is
  *  too large to be worth a slot, and too rare to be missed. */
 const SCAN_MEMO_MAX_KEY = 16_384;
-const NO_EXPLICIT_LINKS: readonly (string | undefined)[] = [];
 
 export interface TerminalLinkOptions {
   /** The directory the terminal was started in. Never `process.cwd()`. */
@@ -91,13 +91,7 @@ export interface TerminalLinkOptions {
 }
 
 /** What the last capture's detection was waiting on or standing on. */
-interface LinkDeps {
-  pending: Set<string>;
-  negatives: Set<string>;
-  linked: Set<string>;
-  refining: Set<string>;
-  starved: boolean;
-}
+type LinkDeps = Omit<DetectResult, "spans">;
 
 interface LinkState {
   readonly opts: TerminalLinkOptions;
@@ -124,11 +118,14 @@ function blankDetectRow(cols: number): DetectRow {
   };
 }
 
-const defaultLinkTimer =(fn: () => void, ms: number): { cancel(): void } => {
-  const handle = setTimeout(fn, ms);
-  handle.unref?.();
-  return { cancel: () => clearTimeout(handle) };
-};
+/** The spans of one row in column order, clipped to `cols`, or undefined when
+ *  two of them overlap: the later one then wins per cell, which only a cell-by-
+ *  cell walk reproduces. */
+function disjointRuns(spans: readonly DetectedSpan[], cols: number): DetectedSpan[] | undefined {
+  const runs = spans.filter((s) => s.startCol < cols && s.startCol < s.endCol).sort((a, c) => a.startCol - c.startCol);
+  for (let i = 1; i < runs.length; i++) if (runs[i]!.startCol < runs[i - 1]!.endCol) return undefined;
+  return runs;
+}
 
 /** What the row archive could not record faithfully, for the epoch the source
  *  is currently recording into. */
@@ -257,7 +254,7 @@ export class TerminalFrameSource extends TerminalScreen {
       const platform = links.platform ?? process.platform;
       const hostname = links.hostname ?? osHostname();
       const state: LinkState = {
-        opts: links, cache, platform, timer: links.timer ?? defaultLinkTimer,
+        opts: links, cache, platform, timer: links.timer ?? defaultTimer,
         scanMemo: new Map(), scanMemoChars: 0, detach: [], depsRevision: -1, recheckedRevision: -1, invalidateQueued: false,
       };
       this.link = state;
@@ -758,14 +755,14 @@ export class TerminalFrameSource extends TerminalScreen {
   }
 
   /**
-   * The links found in plain text, as one uri per viewport cell. Runs inside
+   * The links found in plain text, as the spans each viewport row holds. Runs inside
    * `capture()`, so it only ever peeks the stat cache: a stat that is not
    * answered yet is requested and the screen is re-framed when it lands.
    *
    * Never throws. A throw out of `capture()` latches the whole run as
    * `DISPLAY_FAILED`, which is far worse than a screen without its decoration.
    */
-  private detectLinkUris(): Array<Array<string | undefined> | undefined> | undefined {
+  private detectLinkSpans(): Array<DetectedSpan[] | undefined> | undefined {
     const link = this.link;
     if (!link) return undefined;
     const buffer = this.term.buffer.active;
@@ -786,7 +783,7 @@ export class TerminalFrameSource extends TerminalScreen {
       const detectRows: DetectRow[] = [];
       for (let index = first; index < buffer.baseY + rows; index++) {
         const line = buffer.getLine(index);
-        detectRows.push(line ? this.adapter.detectRow(line, cols, buffer.getLine(index + 1)) : blankDetectRow(cols));
+        detectRows.push(line ? this.adapter.detectRow(line, cols, buffer.getLine(index + 1), this.sawHyperlink) : blankDetectRow(cols));
       }
       const memoScan = (text: string): ReturnType<typeof scanLine> => {
         if (text.length > SCAN_MEMO_MAX_KEY) return scanLine(text, link.platform);
@@ -808,20 +805,13 @@ export class TerminalFrameSource extends TerminalScreen {
       };
       const result = detectLinks(detectRows, context, normalizeBases(this.linkBases(), link.platform), link.cache,
         LIVE_LINK_BUDGET, memoScan, link.platform);
-      link.deps = {
-        pending: result.pending, negatives: result.negatives, linked: result.linked, refining: result.refining,
-        starved: result.starved,
-      };
+      const { spans, ...deps } = result;
+      link.deps = deps;
       link.depsRevision = this._revision;
-      const uriAt: Array<Array<string | undefined> | undefined> = [];
-      for (const span of result.spans) {
-        const row = span.row - context;
-        if (row < 0 || row >= rows) continue;
-        const cells = (uriAt[row] ??= []);
-        for (let col = span.startCol; col < span.endCol && col < cols; col++) cells[col] = span.uri;
-      }
-      if (result.negatives.size > 0) this.armRecheck(link);
-      return uriAt;
+      const spansAt: Array<DetectedSpan[] | undefined> = [];
+      for (const span of spans) (spansAt[span.row - context] ??= []).push(span);
+      if (deps.negatives.size > 0) this.armRecheck(link);
+      return spansAt;
     } catch {
       link.deps = undefined;
       return undefined;
@@ -831,7 +821,7 @@ export class TerminalFrameSource extends TerminalScreen {
   private linkOverlay(detected: boolean): string {
     const buffer = this.term.buffer.active;
     const parts: string[] = [];
-    const detectedAt = detected ? this.detectLinkUris() : undefined;
+    const detectedAt = detected ? this.detectLinkSpans() : undefined;
     for (let row = 0; row < this.term.rows; row++) {
       const found = detectedAt?.[row];
       // With no OSC 8 ever parsed, a row holding no detected link has nothing
@@ -839,25 +829,9 @@ export class TerminalFrameSource extends TerminalScreen {
       if (!found && !this.sawHyperlink) continue;
       const line = buffer.getLine(buffer.baseY + row);
       if (!line) continue;
-      let lastId = "";
-      let lastStyle = "";
-      for (let col = 0; col < this.term.cols; col++) {
-        const cell = this.adapter.cellAt(line, col);
-        // A detected link never covers a cell that already has the program's
-        // own link: the detector drops such a mention.
-        const id = found?.[col] ?? (cell && this.sawHyperlink ? this.adapter.link(cell) ?? "" : "");
-        if (!cell || cell.getWidth() === 0) continue;
-        if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
-        // `adapter.link()` has already rejected control characters and anything
-        // past 8192 bytes, so an id that arrives here is safe to emit verbatim.
-        if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
-        const style = this.adapter.style(cell);
-        if (style !== lastStyle) parts.push(style);
-        parts.push(cell.getChars() || " ");
-        lastId = id;
-        lastStyle = style;
-      }
-      if (lastId) parts.push(OSC_CLOSE);
+      const runs = this.sawHyperlink ? undefined : disjointRuns(found!, this.term.cols);
+      if (runs) this.paintRuns(parts, row, line, runs);
+      else this.paintRow(parts, row, line, found);
     }
     if (!parts.length) return "";
     // Overpainting carries native OSC 8 metadata into Ghostty. Save/restore
@@ -866,6 +840,70 @@ export class TerminalFrameSource extends TerminalScreen {
     return "\x1b7\x1b[4l\x1b[?6l\x1b[?7l" + parts.join("") + OSC_CLOSE + "\x1b8"
       + `\x1b[4${this.term.modes.insertMode ? "h" : "l"}`
       + `\x1b[?7${this.term.modes.wraparoundMode ? "h" : "l"}`;
+  }
+
+  /** The whole row, cell by cell: a program link can sit under any of them. */
+  private paintRow(parts: string[], row: number, line: IBufferLine, found: DetectedSpan[] | undefined): void {
+    let uris: Array<string | undefined> | undefined;
+    if (found) {
+      uris = [];
+      for (const span of found) for (let col = span.startCol; col < span.endCol && col < this.term.cols; col++) uris[col] = span.uri;
+    }
+    let lastId = "";
+    let lastStyle = "";
+    for (let col = 0; col < this.term.cols; col++) {
+      const cell = this.adapter.cellAt(line, col);
+      // A detected link never covers a cell that already has the program's
+      // own link: the detector drops such a mention.
+      const id = uris?.[col] ?? (cell && this.sawHyperlink ? this.adapter.link(cell) ?? "" : "");
+      if (!cell || cell.getWidth() === 0) continue;
+      if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
+      // `adapter.link()` has already rejected control characters and anything
+      // past 8192 bytes, so an id that arrives here is safe to emit verbatim.
+      if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
+      const style = this.adapter.style(cell);
+      if (style !== lastStyle) parts.push(style);
+      parts.push(cell.getChars() || " ");
+      lastId = id;
+      lastStyle = style;
+    }
+    if (lastId) parts.push(OSC_CLOSE);
+  }
+
+  /** Only the columns a detected link covers, for a screen no program link can
+   *  be on. Emits exactly what `paintRow` would: a gap between two runs closes
+   *  the open link at its first cell that has a width. */
+  private paintRuns(parts: string[], row: number, line: IBufferLine, runs: DetectedSpan[]): void {
+    let lastId = "";
+    let lastStyle = "";
+    let reached = 0;
+    for (const run of runs) {
+      if (lastId) {
+        for (let col = reached; col < run.startCol; col++) {
+          const cell = this.adapter.cellAt(line, col);
+          if (!cell || cell.getWidth() === 0) continue;
+          parts.push(OSC_CLOSE);
+          lastId = "";
+          lastStyle = "";
+          break;
+        }
+      }
+      const to = Math.min(run.endCol, this.term.cols);
+      for (let col = run.startCol; col < to; col++) {
+        const cell = this.adapter.cellAt(line, col);
+        if (!cell || cell.getWidth() === 0) continue;
+        const id = run.uri;
+        if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
+        if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
+        const style = this.adapter.style(cell);
+        if (style !== lastStyle) parts.push(style);
+        parts.push(cell.getChars() || " ");
+        lastId = id;
+        lastStyle = style;
+      }
+      reached = to;
+    }
+    if (lastId) parts.push(OSC_CLOSE);
   }
 
   override dispose(): void {

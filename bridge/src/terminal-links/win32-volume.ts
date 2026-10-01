@@ -1,6 +1,6 @@
-import { dlopen, FFIType, ptr } from "bun:ffi";
 import { logger } from "../logger";
-import { foldAsciiCase, hasDriveLetterAt, isSeparator } from "./chars";
+import { driveType } from "../win32-process";
+import { foldAsciiCase, hasDriveLetterAt, isSeparator, startsWithDoubleSeparator } from "./chars";
 
 const log = logger.child({ component: "win32-volume" });
 
@@ -12,39 +12,17 @@ const DRIVE_RAMDISK = 6;
  *  worth a syscall per candidate path. */
 const DRIVE_TYPE_TTL_MS = 60_000;
 
-const kernel32Symbols = {
-  GetDriveTypeW: { args: [FFIType.ptr], returns: FFIType.u32 },
-} as const;
-
-type Kernel32 = ReturnType<typeof dlopen<typeof kernel32Symbols>>["symbols"];
-
-/** `undefined` = not attempted, `null` = unavailable and already reported. */
-let kernel32: Kernel32 | null | undefined;
-
-function loadKernel32(): Kernel32 | null {
-  if (kernel32 !== undefined) return kernel32;
-  if (process.platform !== "win32") return (kernel32 = null);
-  try {
-    kernel32 = dlopen("kernel32.dll", kernel32Symbols).symbols;
-  } catch (err) {
-    log.warn("drive type lookup unavailable: %s", err);
-    kernel32 = null;
-  }
-  return kernel32;
-}
-
 const driveTypeCache = new Map<string, { local: boolean; at: number }>();
 
 function driveIsLocal(letter: string): boolean {
   const now = Date.now();
   const hit = driveTypeCache.get(letter);
   if (hit && now - hit.at < DRIVE_TYPE_TTL_MS) return hit.local;
-  const api = loadKernel32();
-  if (api === null) return false;
   let local = false;
   try {
-    const root = new Uint16Array([letter.charCodeAt(0), 0x3a, 0x5c, 0]);
-    const type = api.GetDriveTypeW(ptr(root));
+    const type = driveType(letter);
+    // The Win32 layer is unavailable, and the load already said so once.
+    if (type === null) return false;
     local = type === DRIVE_REMOVABLE || type === DRIVE_FIXED || type === DRIVE_RAMDISK;
   } catch (err) {
     log.debug({ err: String(err) }, "drive type lookup failed");
@@ -73,7 +51,7 @@ function isPlainName(name: string): boolean {
  * character, and a path with no share, none of which is ever a volume to trust.
  */
 export function uncShareOf(path: string): { key: string; end: number } | undefined {
-  if (!isSeparator(path[0]) || !isSeparator(path[1])) return undefined;
+  if (!startsWithDoubleSeparator(path)) return undefined;
   const serverEnd = separatorAt(path, 2);
   const server = path.slice(2, serverEnd);
   if (server === "" || server === "." || server === "?" || serverEnd >= path.length) return undefined;

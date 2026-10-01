@@ -829,7 +829,6 @@ describe("a line made of quoted names", () => {
         get end() { reads++; return at + 3; },
         quoted,
         text: { variants: ["a/b"] },
-        followedByParen: false,
       });
       return [make(true), make(false)];
     }).flat();
@@ -876,6 +875,15 @@ describe("the edges of the rows given", () => {
     const result = detectLinks(rows, 0, ROOT_BASES, e.cache, liveBudget(), undefined, e.platform, { tailOpen: true });
 
     expect(result.spans.map((s) => s.uri)).toEqual([`antgrid-url:${url}`]);
+  });
+
+  it("returns no span on a row at or past paintedEnd, though the mention begins above it", () => {
+    const e = env();
+    const rows = mkRows(["visit https://exampl", "e.com/x"], 20, { wrapped: [1] });
+
+    const result = detectLinks(rows, 0, ROOT_BASES, e.cache, liveBudget(), undefined, e.platform, { paintedEnd: 1 });
+
+    expect(result.spans.map((s) => s.row)).toEqual([0]);
   });
 
   it("links the painted half of a URL whose first half is context", () => {

@@ -59,6 +59,12 @@ export function isSeparator(ch: string | undefined): boolean {
   return ch === "/" || ch === "\\";
 }
 
+/** `//` or `\\`, in any mix: a UNC or network root where a separator may open a
+ *  path. */
+export function startsWithDoubleSeparator(path: string): boolean {
+  return isSeparator(path[0]) && isSeparator(path[1]);
+}
+
 /** `X:` at `at`. */
 export function hasDriveLetterAt(text: string, at = 0): boolean {
   return isAsciiLetter(text.charCodeAt(at)) && text.charCodeAt(at + 1) === 0x3a;
@@ -67,6 +73,12 @@ export function hasDriveLetterAt(text: string, at = 0): boolean {
 /** `X:\` or `X:/`. */
 export function isDriveAbsolute(path: string): boolean {
   return hasDriveLetterAt(path) && isSeparator(path[2]);
+}
+
+/** Drive-qualified on Windows: a bare `\x` or `/x` is rooted on the current
+ *  drive, which is not a place a printed path can name. */
+export function isAbsoluteFor(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" ? isDriveAbsolute(path) : path.startsWith("/");
 }
 
 /**

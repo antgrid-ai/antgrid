@@ -23,6 +23,7 @@ import {
   isSeparator,
   isWhitespace,
   isWordChar,
+  startsWithDoubleSeparator,
   startsWithIgnoreCase,
 } from "./chars";
 
@@ -65,7 +66,6 @@ export interface ScannedPath {
   end: number;
   quoted: boolean;
   text: PathClaimText;
-  followedByParen: boolean;
 }
 
 export interface ScannedUrl {
@@ -128,13 +128,15 @@ export function scanLine(
 
   // A path may not overlap a URL, so URL cells are counted once and every
   // overlap question below is two array reads.
-  const urlCover = new Int32Array(text.length + 1);
+  let urlCover: Int32Array | undefined;
   if (urls.length > 0) {
+    urlCover = new Int32Array(text.length + 1);
     const mark = new Uint8Array(text.length);
     for (const u of urls) mark.fill(1, u.start, u.end);
     for (let i = 0; i < text.length; i++) urlCover[i + 1] = urlCover[i]! + mark[i]!;
   }
-  const overlapsUrl = (start: number, end: number): boolean => urlCover[end]! - urlCover[start]! > 0;
+  const overlapsUrl = (start: number, end: number): boolean =>
+    urlCover !== undefined && urlCover[end]! - urlCover[start]! > 0;
 
   for (const kind of QUOTE_KINDS) {
     scanQuoted(text, kind, (start, end) => {
@@ -145,7 +147,7 @@ export function scanLine(
         const line = pythonLineAfter(text, end + 1);
         if (line !== undefined) claim.line = line;
       }
-      paths.push({ start, end, quoted: true, text: claim, followedByParen: false });
+      paths.push({ start, end, quoted: true, text: claim });
     });
   }
 
@@ -174,7 +176,7 @@ export function scanLine(
     if (token.includes("://")) return;
 
     const claim = splitPathToken(token, { platform, followedByParen });
-    if (claim) paths.push({ start, end, quoted: false, text: claim, followedByParen });
+    if (claim) paths.push({ start, end, quoted: false, text: claim });
   });
 
   paths.sort((a, b) => a.start - b.start || b.end - a.end || Number(b.quoted) - Number(a.quoted));
@@ -600,7 +602,7 @@ function plausiblePath(path: string, platform: NodeJS.Platform, followedByParen:
   for (let at = path.indexOf("@"); at !== -1; at = path.indexOf("@", at + 1)) {
     if (at > 0 && path[at - 1] !== "/" && path[at - 1] !== "\\") return false;
   }
-  if (isSeparator(path[0]) && isSeparator(path[1])) return false;
+  if (startsWithDoubleSeparator(path)) return false;
   // `package:foo`, `dart:io`, `git@host:org/repo`, `C:a.png` and `x::$DATA`
   // all carry a colon past the one a drive prefix may own.
   if (path.indexOf(":", isDriveAbsolute(path) ? 3 : 0) !== -1) return false;
@@ -649,7 +651,7 @@ export function isRefusedPathShape(path: string, platform: NodeJS.Platform = pro
     if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) return true;
   }
   if (platform !== "win32") return false;
-  if (isSeparator(path[0]) && isSeparator(path[1])) return true;
+  if (startsWithDoubleSeparator(path)) return true;
   return path.indexOf(":", isDriveAbsolute(path) ? 3 : 0) !== -1;
 }
 
@@ -685,7 +687,7 @@ export function parseOsc7(
   if (!absolute) return undefined;
   // A leading double separator is a UNC root on Windows and a network root on
   // some POSIX layers; no shell reports its cwd that way.
-  if (isSeparator(path[0]) && isSeparator(path[1])) return undefined;
+  if (startsWithDoubleSeparator(path)) return undefined;
   if (isRefusedPathShape(path, platform)) return undefined;
   return path;
 }
@@ -717,11 +719,26 @@ export function encodePathLink(l: {
   return uri.length <= MAX_LINK_URI_BYTES ? uri : undefined;
 }
 
+const URL_ENCODER = new TextEncoder();
+
+/** True when every unit is one `encodeUrlLink` copies through unescaped, which
+ *  lets the common URL skip its per-character walk. */
+function isPrintableAscii(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x21 || code > 0x7e) return false;
+  }
+  return true;
+}
+
 /** Percent-encodes every character outside the printable ASCII range as UTF-8
  *  and keeps existing `%XX` escapes as written. */
 export function encodeUrlLink(url: string): string | undefined {
   if (url.length === 0) return undefined;
-  const encoder = new TextEncoder();
+  if (isPrintableAscii(url)) {
+    const uri = URL_LINK_SCHEME + url;
+    return uri.length <= MAX_LINK_URI_BYTES ? uri : undefined;
+  }
   let out = URL_LINK_SCHEME;
   for (const ch of url) {
     const code = ch.codePointAt(0)!;
@@ -729,7 +746,7 @@ export function encodeUrlLink(url: string): string | undefined {
       out += ch;
       continue;
     }
-    for (const b of encoder.encode(ch)) out += `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+    for (const b of URL_ENCODER.encode(ch)) out += `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
     if (out.length > MAX_LINK_URI_BYTES) return undefined;
   }
   return out.length <= MAX_LINK_URI_BYTES ? out : undefined;

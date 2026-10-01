@@ -1,19 +1,18 @@
 import {
+  MAX_SPANS_PER_ROW,
   TERMINAL_HISTORY_PAGE_BYTES,
   encodedJsonBytes,
   type TerminalHistoryRow,
   type TerminalHistorySpan,
 } from "../terminal-frames/protocol";
-import { detectLinks, type DetectedSpan, type DetectRow } from "./detector";
-import { isAntgridLinkUri } from "./grammar";
+import { NO_EXPLICIT_LINKS, cutDetectRow, detectLinks, type DetectedSpan, type DetectRow } from "./detector";
+import { isAntgridLinkUri, scanLine } from "./grammar";
 import { normalizeBases, type LinkBases } from "./resolver";
 import { sharedPathStatCache, type PathStatCache } from "./stat-cache";
 
 const HISTORY_BUDGET = { lookups: 4096, newStats: 512 };
 const MAX_PASSES = 4;
 const DEFAULT_BUDGET_MS = 150;
-/** Mirrors `TerminalHistoryRowSchema`'s span bound. */
-const MAX_SPANS_PER_ROW = 1000;
 /** Room kept under the page cap for the page envelope the rows travel in. */
 const PAGE_HEADROOM_BYTES = 1024;
 
@@ -107,10 +106,18 @@ async function link(
   const painted = before.length;
   const pageEnd = painted + rows.length;
   const edges = { tailOpen: context?.afterComplete !== true, paintedEnd: pageEnd };
+  // The same rows are read on every pass, and a pass differs only in what the
+  // stat cache has answered since.
+  const scanned = new Map<string, ReturnType<typeof scanLine>>();
+  const scan = (text: string): ReturnType<typeof scanLine> => {
+    let hit = scanned.get(text);
+    if (!hit) scanned.set(text, (hit = scanLine(text, platform)));
+    return hit;
+  };
   let spans: DetectedSpan[] = [];
   for (let pass = 0; pass < MAX_PASSES; pass++) {
-    const result = detectLinks(detectRows, painted, normalized, cache, { ...HISTORY_BUDGET }, undefined, platform, edges);
-    spans = result.spans.filter((s) => s.row < pageEnd).map((s) => ({ ...s, row: s.row - painted }));
+    const result = detectLinks(detectRows, painted, normalized, cache, HISTORY_BUDGET, scan, platform, edges);
+    spans = result.spans.map((s) => ({ ...s, row: s.row - painted }));
     // The root's own answer can still change a link found, as a stat a claim
     // waits on can.
     const awaited = [...result.pending, ...result.refining];
@@ -136,8 +143,11 @@ function piece(span: TerminalHistorySpan, text: string, cells: number, uri?: str
 function toDetectRow(row: ContextRow, lastOfLine: boolean): DetectRow {
   const cols = row.cols;
   const widthAt = new Uint8Array(cols).fill(1);
-  const explicit: (string | undefined)[] = new Array<string | undefined>(cols).fill(undefined);
-  const colAt: number[] = [];
+  let explicit: (string | undefined)[] | undefined;
+  let total = 0;
+  for (const span of row.spans) total += span.text.length;
+  const colAt = new Int32Array(total);
+  let used = 0;
   let text = "";
   let col = 0;
   let endCol = 0;
@@ -148,7 +158,7 @@ function toDetectRow(row: ContextRow, lastOfLine: boolean): DetectRow {
     const cps = Array.from(span.text);
     if (cps.length === span.cells) {
       for (const cp of cps) {
-        for (let u = 0; u < cp.length; u++) colAt.push(col);
+        for (let u = 0; u < cp.length; u++) colAt[used++] = col;
         text += cp;
         if (cp !== " ") {
           endCol = col + 1;
@@ -157,7 +167,7 @@ function toDetectRow(row: ContextRow, lastOfLine: boolean): DetectRow {
         col++;
       }
     } else {
-      for (let u = 0; u < span.text.length; u++) colAt.push(-1);
+      for (let u = 0; u < span.text.length; u++) colAt[used++] = -1;
       text += span.text;
       let trailing = 0;
       while (trailing < span.text.length && span.text[span.text.length - 1 - trailing] === " ") trailing++;
@@ -168,22 +178,15 @@ function toDetectRow(row: ContextRow, lastOfLine: boolean): DetectRow {
       col += span.cells;
     }
     if (span.uri !== undefined) {
+      explicit ??= new Array<string | undefined>(cols).fill(undefined);
       for (let c = startCol; c < col && c < cols; c++) explicit[c] = span.uri;
     }
   }
 
-  // The last row of a logical line is cut at its last visible character, so
-  // that "does this row run to the edge" is a question about content.
-  const cut = lastOfLine ? keep : text.length;
-  return {
-    text: text.slice(0, cut),
-    colAt: Int32Array.from(colAt.slice(0, cut)),
-    widthAt,
-    cols,
-    wrapped: row.wrapped,
-    endCol,
-    explicit,
-  };
+  return cutDetectRow({
+    text, colAt, keep, continued: !lastOfLine, widthAt, cols, wrapped: row.wrapped, endCol,
+    explicit: explicit ?? NO_EXPLICIT_LINKS,
+  });
 }
 
 function applySpans(rows: TerminalHistoryRow[], spans: DetectedSpan[]): TerminalHistoryRow[] {

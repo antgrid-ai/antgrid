@@ -1,10 +1,47 @@
 import { describe, it, expect, spyOn } from "bun:test";
 import { posix, win32 } from "node:path";
-import { candidatesFor, classifyPath, isInsideResolved, isInsideRoot, normalizeBases } from "../src/terminal-links/resolver";
+import {
+  candidatesFor,
+  classifyPath,
+  isInsideResolved,
+  isInsideRoot,
+  normalizeBases,
+  resolveAgainstBase,
+  type ClassifyHints,
+} from "../src/terminal-links/resolver";
 import { foldPathCase } from "../src/terminal-links/chars";
 import { detectLinks } from "../src/terminal-links/detector";
 import { PathStatCache } from "../src/terminal-links/stat-cache";
 import { AsyncFs, Clock, mkRows, settle } from "./support/terminal-links-fixtures";
+
+/** `classifyPath` with the lexical containment a caller holding no candidate
+ *  would have to compute itself. */
+function classify(
+  abs: string,
+  status: "file" | "dir",
+  root: string | undefined,
+  platform: NodeJS.Platform,
+  hints: Partial<ClassifyHints> = {},
+) {
+  const inside = root !== undefined && isInsideRoot(abs, root, platform);
+  return classifyPath(abs, status, platform, { inside, ...hints });
+}
+
+describe("resolveAgainstBase", () => {
+  it("joins relative text onto the base with the platform's own rules", () => {
+    expect(resolveAgainstBase("src\\a.ts", "r", { checkoutRoot: "C:\\r" }, "win32")).toBe("C:\\r\\src\\a.ts");
+    expect(resolveAgainstBase("src/a.ts", "r", { checkoutRoot: "/r" }, "linux")).toBe("/r/src/a.ts");
+  });
+
+  it("does not resolve current-drive or drive-relative text against the process drive", () => {
+    const bases = { checkoutRoot: "C:\\r", liveCwd: "C:\\r\\sub", spawnCwd: "C:\\r" };
+    for (const base of ["l", "s", "r"] as const) {
+      for (const text of ["\\a.ts", "/a.ts", "C:a.ts", "d:sub\\a.ts"]) {
+        expect(resolveAgainstBase(text, base, bases, "win32")).toBeUndefined();
+      }
+    }
+  });
+});
 
 describe("normalizeBases", () => {
   it("keeps a root and cwds contained in it", () => {
@@ -38,6 +75,17 @@ describe("normalizeBases", () => {
     });
   });
 
+  it("keeps a drive cwd that repeats a separator just after the root", () => {
+    expect(normalizeBases({ checkoutRoot: "C:\\r", liveCwd: "C:\\r\\\\x", spawnCwd: "C:\\r\\/y" }, "win32")).toEqual({
+      checkoutRoot: "C:\\r",
+      liveCwd: "C:\\r\\x",
+      spawnCwd: "C:\\r\\y",
+    });
+    expect(normalizeBases({ checkoutRoot: "C:\\r", liveCwd: "C:\\r\\a:b\\.." }, "win32")).toEqual({
+      checkoutRoot: "C:\\r",
+    });
+  });
+
   it("is not fooled by a shared prefix or a dot-dot", () => {
     expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: "/repo" }, "linux")).toEqual({ checkoutRoot: "/r" });
     expect(normalizeBases({ checkoutRoot: "/r/a", spawnCwd: "/r/a/../b" }, "linux")).toEqual({
@@ -45,8 +93,21 @@ describe("normalizeBases", () => {
     });
   });
 
-  it("drops refused bases: UNC roots and cwds, drive-relative and device forms", () => {
-    expect(normalizeBases({ checkoutRoot: "\\\\host\\share\\r" }, "win32")).toEqual({});
+  it("keeps a UNC checkout root and refuses a cwd on any other share", () => {
+    expect(normalizeBases({ checkoutRoot: "\\\\host\\share\\r" }, "win32")).toEqual({
+      checkoutRoot: "\\\\host\\share\\r",
+    });
+    expect(
+      normalizeBases(
+        { checkoutRoot: "\\\\host\\share\\r", liveCwd: "\\\\HOST\\Share\\r\\x", spawnCwd: "\\\\other\\share\\x" },
+        "win32",
+      ),
+    ).toEqual({ checkoutRoot: "\\\\host\\share\\r", liveCwd: "\\\\HOST\\Share\\r\\x" });
+    expect(normalizeBases({ checkoutRoot: "\\\\host\\share\\r\\a:b" }, "win32")).toEqual({});
+    expect(normalizeBases({ checkoutRoot: "\\\\?\\C:\\r" }, "win32")).toEqual({});
+  });
+
+  it("drops refused bases: foreign-share cwds, drive-relative and device forms", () => {
     expect(normalizeBases({ checkoutRoot: "C:\\r", liveCwd: "\\\\host\\share\\x" }, "win32")).toEqual({
       checkoutRoot: "C:\\r",
     });
@@ -167,29 +228,29 @@ describe("candidatesFor", () => {
 
 describe("classifyPath", () => {
   it("calls an inside file f and an inside directory d", () => {
-    expect(classifyPath("/r/a.ts", "file", "/r", "linux")).toBe("f");
-    expect(classifyPath("/r/src", "dir", "/r", "linux")).toBe("d");
-    expect(classifyPath("/r", "dir", "/r", "linux")).toBe("d");
+    expect(classify("/r/a.ts", "file", "/r", "linux")).toBe("f");
+    expect(classify("/r/src", "dir", "/r", "linux")).toBe("d");
+    expect(classify("/r", "dir", "/r", "linux")).toBe("d");
   });
 
   it("calls an outside image file i and everything else outside nothing", () => {
-    expect(classifyPath("/o/a.png", "file", "/r", "linux")).toBe("i");
-    expect(classifyPath("/o/a.PNG", "file", "/r", "linux")).toBe("i");
-    expect(classifyPath("/o/a.ts", "file", "/r", "linux")).toBeUndefined();
-    expect(classifyPath("/o/a.png", "dir", "/r", "linux")).toBeUndefined();
-    expect(classifyPath("/o/a.pdf", "file", "/r", "linux")).toBeUndefined();
-    expect(classifyPath("/rx/a.png", "file", "/r", "linux")).toBe("i");
-    expect(classifyPath("/rx/a.ts", "file", "/r", "linux")).toBeUndefined();
+    expect(classify("/o/a.png", "file", "/r", "linux")).toBe("i");
+    expect(classify("/o/a.PNG", "file", "/r", "linux")).toBe("i");
+    expect(classify("/o/a.ts", "file", "/r", "linux")).toBeUndefined();
+    expect(classify("/o/a.png", "dir", "/r", "linux")).toBeUndefined();
+    expect(classify("/o/a.pdf", "file", "/r", "linux")).toBeUndefined();
+    expect(classify("/rx/a.png", "file", "/r", "linux")).toBe("i");
+    expect(classify("/rx/a.ts", "file", "/r", "linux")).toBeUndefined();
   });
 
   it("treats everything as outside when there is no root", () => {
-    expect(classifyPath("/r/a.ts", "file", undefined, "linux")).toBeUndefined();
-    expect(classifyPath("/r/a.png", "file", undefined, "linux")).toBe("i");
+    expect(classify("/r/a.ts", "file", undefined, "linux")).toBeUndefined();
+    expect(classify("/r/a.png", "file", undefined, "linux")).toBe("i");
   });
 
   it("folds case on win32 only", () => {
-    expect(classifyPath("c:\\repo\\a.ts", "file", "C:\\Repo", "win32")).toBe("f");
-    expect(classifyPath("/repo/a.ts", "file", "/Repo", "linux")).toBeUndefined();
+    expect(classify("c:\\repo\\a.ts", "file", "C:\\Repo", "win32")).toBe("f");
+    expect(classify("/repo/a.ts", "file", "/Repo", "linux")).toBeUndefined();
     expect(isInsideRoot("C:\\REPO\\x", "c:\\repo", "win32")).toBe(true);
     expect(isInsideRoot("C:\\repository", "C:\\repo", "win32")).toBe(false);
   });
@@ -213,7 +274,7 @@ describe("Windows case folding", () => {
     expect(isInsideRoot(`C:\\${KELVIN}\\a.ts`, "C:\\k", "win32")).toBe(false);
     expect(isInsideRoot("C:\\K\\a.ts", "C:\\k", "win32")).toBe(true);
     expect(isInsideResolved(`C:\\${KELVIN}\\a.ts`, "C:\\k", "win32")).toBe(false);
-    expect(classifyPath(`C:\\${KELVIN}\\a.ts`, "file", "C:\\k", "win32")).toBeUndefined();
+    expect(classify(`C:\\${KELVIN}\\a.ts`, "file", "C:\\k", "win32")).toBeUndefined();
   });
 
   it("keeps names apart that upper-case onto ASCII letters but are distinct on NTFS", () => {
@@ -230,7 +291,7 @@ describe("Windows case folding", () => {
     expect(isInsideRoot("C:\\r\\\u017f\\a.ts", "C:\\r\\s", "win32")).toBe(false);
     expect(isInsideResolved("C:\\lf\\f\u0131le\\private\\secret.env", "C:\\lf\\file", "win32")).toBe(false);
     expect(
-      classifyPath("C:\\lf\\file\\lnk\\private\\secret.env", "file", "C:\\lf\\file", "win32", {
+      classify("C:\\lf\\file\\lnk\\private\\secret.env", "file", "C:\\lf\\file", "win32", {
         inside: true,
         real: "C:\\lf\\f\u0131le\\private\\secret.env",
         realRoot: "C:\\lf\\file",
@@ -270,8 +331,8 @@ describe("candidate containment", () => {
   });
 
   it("lets a hint stand in for the containment test", () => {
-    expect(classifyPath("/elsewhere/a.ts", "file", "/r", "linux", { inside: true })).toBe("f");
-    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { inside: false })).toBeUndefined();
+    expect(classify("/elsewhere/a.ts", "file", "/r", "linux", { inside: true })).toBe("f");
+    expect(classify("/r/a.ts", "file", "/r", "linux", { inside: false })).toBeUndefined();
   });
 
   it("judges the printed text by shape and only a path that left the root again", () => {
@@ -285,32 +346,32 @@ describe("candidate containment", () => {
 describe("classifyPath through links", () => {
   it("calls a path inside the root that really lives outside it nothing, unless it is an image", () => {
     const real = { realRoot: "/r" };
-    expect(classifyPath("/r/ln/a.ts", "file", "/r", "linux", { ...real, real: "/o/a.ts" })).toBeUndefined();
-    expect(classifyPath("/r/ln", "dir", "/r", "linux", { ...real, real: "/o" })).toBeUndefined();
-    expect(classifyPath("/r/ln/a.png", "file", "/r", "linux", { ...real, real: "/o/a.png" })).toBe("i");
+    expect(classify("/r/ln/a.ts", "file", "/r", "linux", { ...real, real: "/o/a.ts" })).toBeUndefined();
+    expect(classify("/r/ln", "dir", "/r", "linux", { ...real, real: "/o" })).toBeUndefined();
+    expect(classify("/r/ln/a.png", "file", "/r", "linux", { ...real, real: "/o/a.png" })).toBe("i");
   });
 
   it("does not let an image name hide a file that is not one", () => {
-    expect(classifyPath("/r/ln.png", "file", "/r", "linux", { realRoot: "/r", real: "/o/secret.txt" })).toBeUndefined();
+    expect(classify("/r/ln.png", "file", "/r", "linux", { realRoot: "/r", real: "/o/secret.txt" })).toBeUndefined();
   });
 
   it("keeps a path whose real location is inside the real root", () => {
-    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { realRoot: "/real/r", real: "/real/r/a.ts" })).toBe("f");
-    expect(classifyPath("/r/ln", "dir", "/r", "linux", { realRoot: "/real/r", real: "/real/r/src" })).toBe("d");
+    expect(classify("/r/a.ts", "file", "/r", "linux", { realRoot: "/real/r", real: "/real/r/a.ts" })).toBe("f");
+    expect(classify("/r/ln", "dir", "/r", "linux", { realRoot: "/real/r", real: "/real/r/src" })).toBe("d");
   });
 
   it("falls back to the lexical answer when either real path is unknown", () => {
-    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { real: "/o/a.ts" })).toBe("f");
-    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { realRoot: "/r" })).toBe("f");
+    expect(classify("/r/a.ts", "file", "/r", "linux", { real: "/o/a.ts" })).toBe("f");
+    expect(classify("/r/a.ts", "file", "/r", "linux", { realRoot: "/r" })).toBe("f");
   });
 
   it("leaves a path outside the root to the image rule whatever its real location", () => {
-    expect(classifyPath("/o/a.png", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.png" })).toBe("i");
-    expect(classifyPath("/o/a.ts", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.ts" })).toBeUndefined();
+    expect(classify("/o/a.png", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.png" })).toBe("i");
+    expect(classify("/o/a.ts", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.ts" })).toBeUndefined();
   });
 
   it("compares real paths with the platform's case rule", () => {
-    expect(classifyPath("C:\\r\\a.ts", "file", "C:\\r", "win32", { realRoot: "C:\\Real", real: "c:\\real\\a.ts" })).toBe(
+    expect(classify("C:\\r\\a.ts", "file", "C:\\r", "win32", { realRoot: "C:\\Real", real: "c:\\real\\a.ts" })).toBe(
       "f",
     );
   });

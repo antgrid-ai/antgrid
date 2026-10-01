@@ -30,7 +30,7 @@ import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
-import { FileWatcher } from "./file-watcher";
+import { FileWatcher, unresolvedResolvePathReply } from "./file-watcher";
 import { linkHistoryRows } from "./terminal-links/history-links";
 import type { LinkBases } from "./terminal-links/resolver";
 import { FileUploadManager, type UploadResultFields, type UploadStreamServer } from "./file-upload";
@@ -2087,8 +2087,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // unexamined, which is not evidence that the path is absent.
         const answerUnresolved = (busy: boolean): void => {
           sendAbToItsChannel(createMessage("file:resolve-path-result", {
-            projectId: msg.projectId, requestId: msg.requestId, relPath: null, isDirectory: false,
-            externalImagePath: null, exists: false, ...(busy ? { timedOut: true } : {}),
+            ...unresolvedResolvePathReply(msg.projectId, msg.requestId, busy),
             checkoutId: runtime.checkout.id,
           }), client);
         };

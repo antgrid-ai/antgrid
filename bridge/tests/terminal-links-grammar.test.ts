@@ -394,6 +394,27 @@ describe("encoders", () => {
     expect(encodeUrlLink("https://e.com/a\u007fb")).toBe("antgrid-url:https://e.com/a%7Fb");
   });
 
+  it("answers a printable-ascii url exactly as the escaping walk does", () => {
+    // A trailing non-ascii character sends the same url down the escaping walk,
+    // which copies every printable ascii character through unchanged.
+    const samples = [
+      "https://example.com",
+      "https://e.com/a?b=1&c=%20d#frag",
+      "http://localhost:3000/~user/a_b-c.d(e)",
+      `https://e.com/${"a".repeat(1900)}`,
+      `https://e.com/${"a".repeat(1974)}`,
+    ];
+    for (const url of samples) {
+      const fast = encodeUrlLink(url);
+      const slow = encodeUrlLink(`${url}é`);
+      expect(fast).toBeDefined();
+      expect(slow).toBe(`${fast}%C3%A9`.length <= MAX_LINK_URI_BYTES ? `${fast}%C3%A9` : undefined);
+    }
+    expect(encodeUrlLink("https://example.com")).toBe("antgrid-url:https://example.com");
+    expect(encodeUrlLink(`https://e.com/${"a".repeat(1974)}`)).toBeDefined();
+    expect(encodeUrlLink(`https://e.com/${"a".repeat(1975)}`)).toBeUndefined();
+  });
+
   it("returns undefined for a url above the byte cap", () => {
     expect(encodeUrlLink(`https://e.com/${"a".repeat(1990)}`)).toBeUndefined();
     expect(encodeUrlLink(`https://e.com/${"é".repeat(1000)}`)).toBeUndefined();

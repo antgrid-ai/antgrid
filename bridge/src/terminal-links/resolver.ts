@@ -1,7 +1,19 @@
-import { posix, win32 } from "node:path";
 import { externalSafeImageMime } from "../file-tree";
-import { foldPathCase, hasDriveLetterAt, isDriveAbsolute, isSeparator } from "./chars";
+import { hasDriveLetterAt, isAbsoluteFor, isSeparator, startsWithDoubleSeparator } from "./chars";
+import {
+  fold,
+  isInsideResolved,
+  isInsideRoot,
+  pathApi,
+  refusedUnderRoot,
+  remember,
+  rootInfoOf,
+  withinRoot,
+} from "./containment";
 import { isRefusedPathShape, type PrintedPathBase, type PrintedPathKind } from "./grammar";
+import { uncShareOf } from "./win32-volume";
+
+export { isInsideResolved, isInsideRoot };
 
 /** Where a printed relative path may be anchored. Every field is optional:
  *  nothing here falls back to `process.cwd()`, because the bridge's own working
@@ -23,68 +35,6 @@ export interface Candidate {
 }
 
 const MAX_BASE_CHARS = 4096;
-/** Distinct roots, base sets and token sets a process holds on to; a terminal
- *  session has a handful of each, so this only bounds a pathological churn. */
-const MAX_MEMO_ENTRIES = 4096;
-
-function pathApi(platform: NodeJS.Platform): typeof posix {
-  return platform === "win32" ? win32 : posix;
-}
-
-/** Drive-qualified on Windows: a bare `\x` or `/x` is rooted on the current
- *  drive, which is not a place a printed path can name. */
-export function isAbsoluteFor(path: string, platform: NodeJS.Platform): boolean {
-  return platform === "win32" ? isDriveAbsolute(path) : path.startsWith("/");
-}
-
-function fold(path: string, platform: NodeJS.Platform): string {
-  return platform === "win32" ? foldPathCase(path) : path;
-}
-
-function remember<K, V>(memo: Map<K, V>, key: K, value: V): V {
-  if (memo.size >= MAX_MEMO_ENTRIES) {
-    const oldest = memo.keys().next();
-    if (!oldest.done) memo.delete(oldest.value);
-  }
-  memo.set(key, value);
-  return value;
-}
-
-/** A root normalized once: resolved, case-folded and given the trailing
- *  separator a prefix test needs, so testing a path against it is one string
- *  comparison instead of two `path.resolve` calls. */
-interface RootInfo {
-  folded: string;
-  prefix: string;
-}
-
-const rootInfos = new Map<string, RootInfo>();
-
-function rootInfoOf(root: string, platform: NodeJS.Platform): RootInfo {
-  const key = `${platform}:${root}`;
-  const hit = rootInfos.get(key);
-  if (hit) return hit;
-  const api = pathApi(platform);
-  const folded = fold(api.resolve(root), platform);
-  return remember(rootInfos, key, { folded, prefix: folded.endsWith(api.sep) ? folded : folded + api.sep });
-}
-
-function withinRoot(foldedAbs: string, info: RootInfo): boolean {
-  return foldedAbs === info.folded || foldedAbs.startsWith(info.prefix);
-}
-
-/** Lexical containment, case-folded on Windows the way NTFS compares names: a
- *  printed path and the root it is tested against can disagree on the case of
- *  the same drive letter. Links are not followed. */
-export function isInsideRoot(abs: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
-  return withinRoot(fold(pathApi(platform).resolve(abs), platform), rootInfoOf(root, platform));
-}
-
-/** `isInsideRoot` for a path that is already resolved, such as a candidate or a
- *  real path a stat walk reached: skips the `path.resolve` of `abs`. */
-export function isInsideResolved(abs: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
-  return withinRoot(fold(abs, platform), rootInfoOf(root, platform));
-}
 
 /** Length-prefixed, so no choice of path text can make two different base sets
  *  share a key. */
@@ -119,21 +69,43 @@ export function normalizeBases(b: LinkBases, platform: NodeJS.Platform = process
 
 function computeBases(b: LinkBases, platform: NodeJS.Platform): LinkBases {
   const api = pathApi(platform);
-  const usable = (p: string | undefined): string | undefined => {
-    if (typeof p !== "string" || p.length === 0 || p.length > MAX_BASE_CHARS) return undefined;
-    if (!isAbsoluteFor(p, platform) || isRefusedPathShape(p, platform)) return undefined;
-    return api.resolve(p);
-  };
-  const root = usable(b.checkoutRoot);
+  const sane = (p: string | undefined): p is string =>
+    typeof p === "string" && p.length > 0 && p.length <= MAX_BASE_CHARS;
   const out: LinkBases = {};
-  if (root === undefined) return out;
+  const rootText = b.checkoutRoot;
+  if (!sane(rootText) || !usableRoot(rootText, platform)) return out;
+  const root = api.resolve(rootText);
   const info = rootInfoOf(root, platform);
-  const live = usable(b.liveCwd);
-  const spawn = usable(b.spawnCwd);
-  if (live !== undefined && withinRoot(fold(live, platform), info)) out.liveCwd = live;
-  if (spawn !== undefined && withinRoot(fold(spawn, platform), info)) out.spawnCwd = spawn;
+  // A UNC cwd is judged past the root only, so one on the root's own share is
+  // kept and one on any other share is not. A drive cwd is judged whole: its
+  // unresolved text can repeat a separator just after the root, which the
+  // part past the root would read as a UNC prefix.
+  const usableCwd = (p: string | undefined): string | undefined => {
+    if (!sane(p)) return undefined;
+    if (isAbsoluteFor(p, platform)) {
+      if (isRefusedPathShape(p, platform)) return undefined;
+    } else if (!(platform === "win32" && startsWithDoubleSeparator(p)) || refusedUnderRoot(p, root, platform)) {
+      return undefined;
+    }
+    const abs = api.resolve(p);
+    return withinRoot(fold(abs, platform), info) ? abs : undefined;
+  };
+  const live = usableCwd(b.liveCwd);
+  const spawn = usableCwd(b.spawnCwd);
+  if (live !== undefined) out.liveCwd = live;
+  if (spawn !== undefined) out.spawnCwd = spawn;
   out.checkoutRoot = root;
   return out;
+}
+
+/** The checkout root is where the bridge already works, so a UNC share (a WSL
+ *  distribution, a file server) is as valid a root as a drive; what follows the
+ *  share is still judged. */
+function usableRoot(root: string, platform: NodeJS.Platform): boolean {
+  if (isAbsoluteFor(root, platform)) return !isRefusedPathShape(root, platform);
+  if (platform !== "win32") return false;
+  const share = uncShareOf(root);
+  return share !== undefined && !isRefusedPathShape(root.slice(share.end), platform);
 }
 
 const candidateMemo = new WeakMap<LinkBases, Map<string, readonly Candidate[]>>();
@@ -150,9 +122,11 @@ export function candidatesFor(
   bases: LinkBases,
   platform: NodeJS.Platform = process.platform,
 ): readonly Candidate[] {
-  if (!Object.isFrozen(bases)) return computeCandidates(variants, bases, platform);
   let memo = candidateMemo.get(bases);
-  if (!memo) candidateMemo.set(bases, (memo = new Map()));
+  if (!memo) {
+    if (!Object.isFrozen(bases)) return computeCandidates(variants, bases, platform);
+    candidateMemo.set(bases, (memo = new Map()));
+  }
   let key: string = platform;
   for (const v of variants) key += `|${v.length}:${v}`;
   const hit = memo.get(key);
@@ -160,8 +134,29 @@ export function candidatesFor(
   return remember(memo, key, Object.freeze(computeCandidates(variants, bases, platform)));
 }
 
-function computeCandidates(variants: readonly string[], bases: LinkBases, platform: NodeJS.Platform): Candidate[] {
+/** Where `text` lands under `base`, or undefined when that base means nothing
+ *  for it: the base is unavailable, or on Windows the text is rooted on the
+ *  current drive or relative to one, which resolve against the bridge's own
+ *  drive and directory. The shape refusal is the caller's, because only the
+ *  caller knows whether a UNC spelling may still be judged by where it lands. */
+export function resolveAgainstBase(
+  text: string,
+  base: PrintedPathBase,
+  bases: LinkBases,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
   const api = pathApi(platform);
+  if (base === "a") return isAbsoluteFor(text, platform) ? api.resolve(text) : undefined;
+  if (platform === "win32" && !isAbsoluteFor(text, platform) && (isSeparator(text[0]) || hasDriveLetterAt(text))) {
+    return undefined;
+  }
+  const dir = base === "l" ? bases.liveCwd : base === "s" ? bases.spawnCwd : bases.checkoutRoot;
+  return dir === undefined ? undefined : api.resolve(dir, text);
+}
+
+const RELATIVE_BASES: readonly PrintedPathBase[] = ["l", "s", "r"];
+
+function computeCandidates(variants: readonly string[], bases: LinkBases, platform: NodeJS.Platform): Candidate[] {
   const root = bases.checkoutRoot;
   const info = root === undefined ? undefined : rootInfoOf(root, platform);
   const out: Candidate[] = [];
@@ -184,30 +179,21 @@ function computeCandidates(variants: readonly string[], bases: LinkBases, platfo
   for (const text of variants) {
     if (isRefusedPathShape(text, platform)) continue;
     if (isAbsoluteFor(text, platform)) {
-      add(text, "a", api.resolve(text));
+      add(text, "a", pathApi(platform).resolve(text));
       continue;
     }
-    // Rooted-without-drive and drive-relative forms resolve against the
-    // bridge's own current drive or directory, which means nothing here.
-    if (platform === "win32" && (isSeparator(text[0]) || hasDriveLetterAt(text))) continue;
-    if (platform !== "win32" && text.startsWith("/")) continue;
-    const anchors: Array<[PrintedPathBase, string | undefined]> = [
-      ["l", bases.liveCwd],
-      ["s", bases.spawnCwd],
-      ["r", root],
-    ];
-    for (const [base, dir] of anchors) {
-      if (dir !== undefined) add(text, base, api.resolve(dir, text));
+    for (const base of RELATIVE_BASES) {
+      const abs = resolveAgainstBase(text, base, bases, platform);
+      if (abs !== undefined) add(text, base, abs);
     }
   }
   return out;
 }
 
-/** What a stat walk learned beyond the printed path. Without it containment is
- *  lexical. */
+/** What a stat walk learned beyond the printed path. */
 export interface ClassifyHints {
-  /** `Candidate.inside`, when the caller has it. */
-  inside?: boolean;
+  /** `Candidate.inside`: lexical containment in the checkout root. */
+  inside: boolean;
   /** The directory entry the printed path actually reached, links expanded,
    *  and the checkout root's own. Both are needed to judge a link. */
   real?: string;
@@ -221,12 +207,10 @@ export interface ClassifyHints {
 export function classifyPath(
   abs: string,
   status: "file" | "dir",
-  checkoutRoot: string | undefined,
-  platform: NodeJS.Platform = process.platform,
-  hints: ClassifyHints = {},
+  platform: NodeJS.Platform,
+  hints: ClassifyHints,
 ): PrintedPathKind | undefined {
-  const inside = hints.inside ?? (checkoutRoot !== undefined && isInsideRoot(abs, checkoutRoot, platform));
-  const { real, realRoot } = hints;
+  const { inside, real, realRoot } = hints;
   const escaped = inside && real !== undefined && realRoot !== undefined && !isInsideResolved(real, realRoot, platform);
   if (inside && !escaped) return status === "dir" ? "d" : "f";
   if (status !== "file" || !externalSafeImageMime(abs)) return undefined;

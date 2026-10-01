@@ -619,6 +619,60 @@ describe("file-tree", () => {
       expect(r.error).toBe("Path traversal denied");
     });
 
+    // A directory link inside the checkout leaves lstat of the file itself
+    // unremarkable, so only the real path shows the read leaves the checkout.
+    const dirLink = (target: string, at: string): void =>
+      symlinkSync(target, at, process.platform === "win32" ? "junction" : "dir");
+    const PNG = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+
+    it("denies a text file reached through a link that leaves the checkout", () => {
+      writeFileSync(join(externalDir, "secret.txt"), "shh");
+      dirLink(externalDir, join(tempDir, "out"));
+
+      const r = readFile(tempDir, "out/secret.txt");
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+
+    it("serves an image reached through a link out when both the printed and real path are images", () => {
+      writeFileSync(join(externalDir, "pic.png"), PNG);
+      dirLink(externalDir, join(tempDir, "out"));
+
+      const r = readFile(tempDir, "out/pic.png");
+      expect(r.error).toBeUndefined();
+      expect(r.mimeType).toBe("image/png");
+    });
+
+    it("denies a png-named link whose real path is not an image", () => {
+      writeFileSync(join(externalDir, "secret.txt"), "shh");
+      dirLink(externalDir, join(tempDir, "out.png"));
+
+      const r = readFile(tempDir, "out.png/secret.txt");
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+
+    it("still reads a file through a link that stays inside the checkout", () => {
+      mkdirSync(join(tempDir, "real"));
+      writeFileSync(join(tempDir, "real", "a.txt"), "ok");
+      dirLink(join(tempDir, "real"), join(tempDir, "alias"));
+
+      const r = readFile(tempDir, "alias/a.txt");
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("ok");
+    });
+
+    it.skipIf(process.platform !== "win32")("reads an absolute path that differs from the root only in case", () => {
+      writeFileSync(join(tempDir, "a.txt"), "ok");
+
+      const r = readFile(tempDir, join(tempDir.toUpperCase(), "a.txt"));
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("ok");
+    });
+
     it("still denies a PDF outside the checkout root (excluded on purpose)", () => {
       const outsidePath = join(externalDir, "generated.pdf");
       writeFileSync(outsidePath, "not a real pdf — the extension is what's under test");

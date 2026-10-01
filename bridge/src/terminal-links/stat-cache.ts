@@ -1,6 +1,6 @@
 import { lstat, readlink, stat } from "node:fs/promises";
 import { posix, win32 } from "node:path";
-import { hasDriveLetterAt, isSeparator, startsWithIgnoreCase } from "./chars";
+import { hasDriveLetterAt, startsWithDoubleSeparator, startsWithIgnoreCase } from "./chars";
 import { isRefusedPathShape } from "./grammar";
 import { isLocalVolume as defaultIsLocalVolume, uncShareOf } from "./win32-volume";
 
@@ -82,7 +82,7 @@ function splitComponents(text: string, win: boolean): string[] {
 
 const defaultFs: LinkFs = { lstat, stat, readlink };
 
-const defaultTimer = (fn: () => void, ms: number): { cancel(): void } => {
+export const defaultTimer = (fn: () => void, ms: number): { cancel(): void } => {
   const handle = setTimeout(fn, ms);
   handle.unref?.();
   return { cancel: () => clearTimeout(handle) };
@@ -478,7 +478,7 @@ export class PathStatCache {
   /** Where a link's rooted target starts. A target with a drive or a share
    *  names its own volume; one without keeps the volume it was found on. */
   private windowsTargetRoot(real: string, targetRoot: string): string {
-    if (hasDriveLetterAt(targetRoot) || (isSeparator(targetRoot[0]) && isSeparator(targetRoot[1]))) return targetRoot;
+    if (hasDriveLetterAt(targetRoot) || startsWithDoubleSeparator(targetRoot)) return targetRoot;
     const volume = win32.parse(real).root;
     return volume.slice(0, volume.length - 1) + targetRoot;
   }
