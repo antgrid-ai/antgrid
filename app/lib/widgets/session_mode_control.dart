@@ -4,13 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_toast.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
+import '../providers/app_toaster.dart';
 import '../providers/focused_tools.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/session_mode.dart';
@@ -253,14 +253,15 @@ Future<void> _switchMode(
             .read(projectSessionProvider(projectId))
             .value
             ?.sessionsService;
+  // The app's toaster, not the header's: past the confirmation (and, below, a
+  // teardown that can take seconds) the header that asked may be gone, and
+  // nothing else reports these.
+  final toaster = container.read(appToasterProvider);
   if (service == null) {
-    if (context.mounted) {
-      showAbToast(
-        context,
-        "Couldn't switch to $target — this project isn't connected yet. Try "
-        'again in a moment.',
-      );
-    }
+    toaster.showMessage(
+      "Couldn't switch to $target — this project isn't connected yet. Try "
+      'again in a moment.',
+    );
     return;
   }
 
@@ -278,7 +279,7 @@ Future<void> _switchMode(
     // drop its panel back to the old view and re-enable its toggle mid-flight.
     if (container.read(pendingSessionModeProvider) == ours) pending.set(null);
   }
-  if (result.ok || !context.mounted) return;
+  if (result.ok) return;
   final error = result.error ?? '';
   final String body;
   if (error.contains(kTeardownTimeoutError)) {
@@ -299,5 +300,5 @@ Future<void> _switchMode(
   }
   // A toast, not a second modal: the user already confirmed once, and the
   // session is no worse off than before the tap.
-  showAbToast(context, body, duration: const Duration(seconds: 8));
+  toaster.showMessage(body, duration: const Duration(seconds: 8));
 }

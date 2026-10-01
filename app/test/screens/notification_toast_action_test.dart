@@ -6,6 +6,8 @@
 import 'dart:async';
 
 import 'package:antgrid/design/widgets/ab_toast.dart';
+import 'package:antgrid/models/ab_message.dart'
+    show NotificationPushMessage, TerminalNotificationMessage;
 import 'package:antgrid/models/handler_state.dart' show HandlerEscalation;
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/session_target.dart';
@@ -13,10 +15,12 @@ import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/surfaced_notifications.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Size;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
@@ -50,8 +54,9 @@ Future<void> _settle(WidgetTester tester) async {
 Future<void> _withShell(
   WidgetTester tester,
   Stream<({String entryId, HandlerEscalation message})> escalations,
-  Future<void> Function(ProviderContainer container) body,
-) async {
+  Future<void> Function(ProviderContainer container) body, {
+  List<Override> overrides = const [],
+}) async {
   debugDefaultTargetPlatformOverride = TargetPlatform.windows;
   tester.view.physicalSize = const Size(1400, 900);
   tester.view.devicePixelRatio = 1.0;
@@ -61,6 +66,7 @@ Future<void> _withShell(
       tester,
       extraOverrides: [
         handlerEscalationsProvider.overrideWith((ref) => escalations),
+        ...overrides,
       ],
     );
     // The applier compares the resolved target against this; the harness
@@ -177,5 +183,85 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       expect(find.byType(AbToast), findsNothing);
     });
+  });
+
+  // The shell is torn down whenever the New Session canvas is up, and
+  // handlerEscalationsProvider re-seeds every pending escalation into the
+  // shell that replaces it. Only a record that outlives the shell keeps that
+  // re-seed from announcing them all again — which is what this pins: the
+  // shell must consult the container's record, not one of its own.
+  testWidgets('an escalation the app already surfaced is not toasted again', (
+    tester,
+  ) async {
+    final controller =
+        StreamController<
+          ({String entryId, HandlerEscalation message})
+        >.broadcast();
+    addTearDown(controller.close);
+
+    await _withShell(tester, controller.stream, (container) async {
+      container.read(surfacedNotificationIdsProvider).mark('esc-1');
+
+      controller.add((entryId: _entryId, message: _escalation));
+      await _settle(tester);
+
+      expect(find.byType(AbToast), findsNothing);
+    });
+  });
+
+  // Both agent-notification fan-ins are plain event streams the shell
+  // subscribes to itself, so a listener left unwired drops every agent
+  // notification with nothing else failing.
+  testWidgets('agent notifications from both fan-ins are toasted', (
+    tester,
+  ) async {
+    final terminal =
+        StreamController<
+          ({String entryId, TerminalNotificationMessage message})
+        >.broadcast();
+    final pushes =
+        StreamController<
+          ({String entryId, NotificationPushMessage message})
+        >.broadcast();
+    addTearDown(terminal.close);
+    addTearDown(pushes.close);
+
+    await _withShell(
+      tester,
+      const Stream.empty(),
+      overrides: [
+        terminalNotificationsProvider.overrideWithValue(terminal.stream),
+        agentPushNotificationsProvider.overrideWithValue(pushes.stream),
+      ],
+      (container) async {
+        terminal.add((
+          entryId: _entryId,
+          message: const TerminalNotificationMessage(
+            id: 'n-1',
+            timestamp: 1,
+            terminalId: 'session-9',
+            kind: 'osc9',
+            title: 'Build finished',
+          ),
+        ));
+        await _settle(tester);
+        expect(find.text('Build finished'), findsOneWidget);
+
+        pushes.add((
+          entryId: _entryId,
+          message: const NotificationPushMessage(
+            id: 'p-1',
+            timestamp: 1,
+            notificationType: 'task_complete',
+            message: 'Tests pass',
+            sessionId: 'session-9',
+          ),
+        ));
+        await _settle(tester);
+        expect(find.text('Tests pass'), findsOneWidget);
+
+        await tester.pump(const Duration(seconds: 30));
+      },
+    );
   });
 }

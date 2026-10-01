@@ -21,6 +21,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
@@ -77,6 +78,10 @@ Widget _appToastHost(BuildContext context, Widget? child) => AbToastHost(
     listen: false,
   ).read(appToasterProvider),
   child: child!,
+);
+
+final _armFocus = NotifierProvider<ValueController<String?>, String?>(
+  () => ValueController<String?>('p'),
 );
 
 void main() {
@@ -496,12 +501,19 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
-          selectedRegistrationIdProvider.overrideWithValue('p'),
+          selectedRegistrationIdProvider.overrideWith(
+            (ref) => ref.watch(_armFocus),
+          ),
           projectSessionProvider('p').overrideWith((ref) => projectSession),
           ...extraOverrides,
         ],
       );
       addTearDown(container.dispose);
+      // The real session factory registers the project as warm; the override
+      // above bypasses it, and the arm latch only follows warm projects.
+      container
+          .read(projectSessionRegistryProvider.notifier)
+          .touch('p', isLocal: true);
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
@@ -1190,6 +1202,85 @@ void main() {
         expect(instructs(transport), isEmpty);
       });
 
+      // The latch outlives the sheet by up to the confirmation window, and the
+      // user is free to look at another project in it. That project's Handler
+      // state is not this arm's answer: its held refusal must not end the arm,
+      // and its silence must not hide this project's confirmation.
+      testWidgets('the latch follows the armed project, not the focused one', (
+        tester,
+      ) async {
+        final otherTransport = FakeAgentTransport();
+        final other = await newFakeProjectSession(
+          otherTransport,
+          projectId: 'q',
+        );
+        addTearDown(other.close);
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider('q').overrideWith((ref) => other),
+          ],
+        );
+        await openSheet(tester, container, context);
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        container
+            .read(projectSessionRegistryProvider.notifier)
+            .touch('q', isLocal: true);
+        container.read(_armFocus.notifier).set('q');
+        await tester.pumpAndSettle();
+        otherTransport.emit('handler:status', {
+          'projectId': 'q',
+          'sessions': <dynamic>[],
+          'entitlement': {'reason': 'not_entitled', 'tier': 'free'},
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('Handler not armed'), findsNothing);
+
+        await confirmArmed(tester, transport);
+        expect(instructs(transport), hasLength(1));
+        expect(instructs(otherTransport), isEmpty);
+        expect(find.text('Nothing was queued'), findsNothing);
+      });
+
+      // Only a status frame is an answer. Anything else the service emits —
+      // an escalation, an optimistic update — carries the refusal the user
+      // walked through to get to the sheet, which says nothing about this arm.
+      testWidgets('a held refusal re-emitted by a non-status update does not '
+          'end the arm', (tester) async {
+        final (transport, container, context) = await pumpArm(tester);
+        await refuse(tester, transport, {
+          'reason': 'not_entitled',
+          'tier': 'free',
+        });
+        // The refusal the user walked past: the sheet is opened over it
+        // through the flow's own paywall dialog in the app, which is not what
+        // this test is about — so the arm is latched directly.
+        latchHandlerArmedOnConfirmation(
+          container,
+          'p',
+          't1',
+          instruction: 'also update the changelog',
+        );
+        transport.emit('handler:escalation', {
+          'projectId': 'p',
+          'escalationId': 'esc-1',
+          'terminalId': 't0',
+          'question': 'q',
+          'reasoning': 'r',
+          'draftReply': 'd',
+          'urgency': 'low',
+          'at': 1,
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('Handler not armed'), findsNothing);
+
+        await confirmArmed(tester, transport);
+        expect(instructs(transport), hasLength(1));
+      });
+
       testWidgets('an arm the bridge never confirms sends nothing', (
         tester,
       ) async {
@@ -1207,6 +1298,29 @@ void main() {
 
         expect(instructs(transport), isEmpty);
         expect(find.text('Nothing was queued'), findsOneWidget);
+        await settleToast(tester);
+      });
+
+      // Nothing took the arm, so there is no answer to wait out — and a toast
+      // the whole confirmation window later reaches a user who has walked away.
+      testWidgets('an arm with no connected project is reported at once', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider(
+              'q',
+            ).overrideWith((ref) => Completer<ProjectSession>().future),
+          ],
+        );
+        await openSheet(tester, container, context);
+        container.read(_armFocus.notifier).set('q');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Handler not armed'), findsOneWidget);
+        expect(transport.sent.where((m) => m['type'] == 'handler:arm'), isEmpty);
         await settleToast(tester);
       });
 

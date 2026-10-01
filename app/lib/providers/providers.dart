@@ -152,83 +152,95 @@ final terminalStateProvider = StreamProvider<TerminalState>((ref) {
 /// is the registry key, i.e. already in its correct local-or-remote shape.
 typedef ProjectScoped<T extends Object> = ({String entryId, T message});
 
+/// Events from every warm project: [perProject]'s streams on its session, and
+/// [perCheckout]'s on each of its checkouts, those built later included, each
+/// tagged with the project's entryId.
+///
+/// A plain broadcast stream for a `Provider<Stream>`, never a StreamProvider,
+/// whose retained `AsyncData` would hand the last event back to every new
+/// listener as though it had just happened. An event that lands while nothing
+/// listens is gone instead. Rebuilt, as a new stream, when the warm set changes
+/// or a session resolves — [listenToEvents] follows it across.
+Stream<ProjectScoped<T>> _warmProjectEvents<T extends Object>(
+  Ref ref, {
+  Iterable<Stream<T>> Function(ProjectSession)? perProject,
+  required Iterable<Stream<T>> Function(CheckoutServices) perCheckout,
+}) {
+  final controller = StreamController<ProjectScoped<T>>.broadcast();
+  final subs = <StreamSubscription<Object?>>{};
+  ref.onDispose(() {
+    for (final s in subs) {
+      s.cancel();
+    }
+    controller.close();
+  });
+  for (final id in ref.watch(projectSessionRegistryProvider)) {
+    final session = ref.watch(projectSessionProvider(id)).value;
+    if (session == null) continue;
+    void forward(Stream<T> source) {
+      late final StreamSubscription<T> sub;
+      // A released checkout disposes its services, closing these — so a warm
+      // set that outlives many checkouts does not hold on to every one.
+      sub = source.listen(
+        (m) => controller.add((entryId: id, message: m)),
+        onDone: () => subs.remove(sub),
+      );
+      subs.add(sub);
+    }
+
+    void forwardCheckout(CheckoutServices bundle) =>
+        perCheckout(bundle).forEach(forward);
+    perProject?.call(session).forEach(forward);
+    session.checkoutServiceBundles.forEach(forwardCheckout);
+    subs.add(session.checkoutServiceBundleStream.listen(forwardCheckout));
+  }
+  return controller.stream;
+}
+
+/// Hands [onEvent] each event of the stream [provider] holds, following it to
+/// every stream it is rebuilt into, until the returned callback is called.
+///
+/// For the `Provider<Stream>` event sources (see [_warmProjectEvents]), where a
+/// bare `ref.listen` reports only that the stream was replaced.
+void Function() listenToEvents<T>(
+  WidgetRef ref,
+  ProviderListenable<Stream<T>> provider,
+  void Function(T event) onEvent,
+) {
+  StreamSubscription<T>? events;
+  final source = ref.listenManual(provider, (_, stream) {
+    unawaited(events?.cancel());
+    events = stream.listen(onEvent);
+  }, fireImmediately: true);
+  return () {
+    source.close();
+    unawaited(events?.cancel());
+  };
+}
+
 /// Agent desktop-notification signals (OSC 9 / OSC 777) merged across
 /// ALL warm projects — not just the focused one — so a background project's
-/// agent can still raise a toast / OS notification. Rebuilds (and re-subscribes)
-/// when the warm set changes or a session resolves; the warm-set is small
-/// (kWarmCap), so the per-rebuild resubscribe is cheap.
+/// agent can still raise a toast / OS notification.
 final terminalNotificationsProvider =
-    StreamProvider<ProjectScoped<TerminalNotificationMessage>>((ref) {
-      final openProjects = ref.watch(projectSessionRegistryProvider);
-      final controller =
-          StreamController<ProjectScoped<TerminalNotificationMessage>>();
-      final subs = <StreamSubscription<dynamic>>[];
-      for (final id in openProjects) {
-        final session = ref.watch(projectSessionProvider(id)).value;
-        if (session == null) continue;
-        for (final bundle in session.checkoutServiceBundles) {
-          subs.add(
-            bundle.terminalService.notificationStream.listen(
-              (m) => controller.add((entryId: id, message: m)),
-            ),
-          );
-        }
-        subs.add(
-          session.checkoutServiceBundleStream.listen((bundle) {
-            subs.add(
-              bundle.terminalService.notificationStream.listen(
-                (m) => controller.add((entryId: id, message: m)),
-              ),
-            );
-          }),
-        );
-      }
-      ref.onDispose(() {
-        for (final s in subs) {
-          s.cancel();
-        }
-        controller.close();
-      });
-      return controller.stream;
-    });
+    Provider<Stream<ProjectScoped<TerminalNotificationMessage>>>(
+      (ref) => _warmProjectEvents(
+        ref,
+        perCheckout: (bundle) => [bundle.terminalService.notificationStream],
+      ),
+    );
 
 /// Plugin/hook-sourced agent notifications (notification:push) merged across all
 /// warm projects — same fan-out as terminalNotificationsProvider but for the
-/// intent-aware plugin path. Rebuilds when the warm set changes.
+/// intent-aware plugin path.
 final agentPushNotificationsProvider =
-    StreamProvider<ProjectScoped<NotificationPushMessage>>((ref) {
-      final openProjects = ref.watch(projectSessionRegistryProvider);
-      final controller =
-          StreamController<ProjectScoped<NotificationPushMessage>>();
-      final subs = <StreamSubscription<dynamic>>[];
-      for (final id in openProjects) {
-        final session = ref.watch(projectSessionProvider(id)).value;
-        if (session == null) continue;
-        for (final bundle in session.checkoutServiceBundles) {
-          subs.add(
-            bundle.terminalService.pushNotificationStream.listen(
-              (m) => controller.add((entryId: id, message: m)),
-            ),
-          );
-        }
-        subs.add(
-          session.checkoutServiceBundleStream.listen((bundle) {
-            subs.add(
-              bundle.terminalService.pushNotificationStream.listen(
-                (m) => controller.add((entryId: id, message: m)),
-              ),
-            );
-          }),
-        );
-      }
-      ref.onDispose(() {
-        for (final s in subs) {
-          s.cancel();
-        }
-        controller.close();
-      });
-      return controller.stream;
-    });
+    Provider<Stream<ProjectScoped<NotificationPushMessage>>>(
+      (ref) => _warmProjectEvents(
+        ref,
+        perCheckout: (bundle) => [
+          bundle.terminalService.pushNotificationStream,
+        ],
+      ),
+    );
 
 /// Handler "needs you" escalations (handler:escalation) merged across all warm
 /// projects — same fan-out as [agentPushNotificationsProvider]. Drives the
@@ -682,6 +694,31 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // in Riverpod 3's default retry loop (which would leave the UI on "loading").
   // See provider_retry.dart.
 }, retry: noProviderRetry);
+
+/// Git op results ([FileService.gitOpFeedback]), checkout and branch-list
+/// failures ([TerminalService.gitErrors]) and session refusals
+/// ([SessionsService.errors]) from every warm project and each of its
+/// checkouts, worded for a toast and scoped to the project they came from.
+///
+/// Every warm service, not the focused one: a commit's hook can outlast a
+/// switch to another checkout, and the sidebar can stop a session in a project
+/// that is not focused — each result would otherwise land with nothing
+/// listening.
+final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(
+  (ref) => _warmProjectEvents(
+    ref,
+    perProject: (session) => [
+      session.sessionsService.errors.map((m) => 'Session error: $m'),
+    ],
+    // Checkout failures are already whole sentences ('Checkout failed' is the
+    // service's own fallback), so they surface verbatim.
+    perCheckout: (bundle) => [
+      bundle.fileService.gitOpFeedback,
+      bundle.terminalService.gitErrors,
+    ],
+  ),
+  name: 'operationalErrors',
+);
 
 /// Per-project SearchService façade.
 final searchServiceProvider = _focusedCheckoutService<SearchService>(

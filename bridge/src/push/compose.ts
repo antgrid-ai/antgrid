@@ -1,6 +1,7 @@
 import type { AbMessage } from "../protocol";
 
-// HAND-MIRRORED in the `labels` map of app/lib/screens/workspace_shell.dart,
+// HAND-MIRRORED in the `labels` map of
+// app/lib/widgets/agent_notification_surfacer.dart,
 // which titles the same notification when the app is attached. A string added
 // on one side alone describes one event two different ways depending only on
 // whether the device was awake.
@@ -37,7 +38,7 @@ export function composePush(msg: AbMessage): ComposedPush | null {
   }
   if (msg.type === "handler:escalation") {
     // HAND-MIRRORED in `handlerEscalationTitle`
-    // (app/lib/screens/workspace_shell.dart), which titles the SAME escalation
+    // (app/lib/widgets/agent_notification_surfacer.dart), which titles the SAME escalation
     // when the app is attached while this titles the pushed copy. Nothing in CI
     // couples them, so a string changed on one side alone describes one event
     // two different ways depending only on whether the device was awake.

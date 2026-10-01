@@ -745,29 +745,111 @@ void main() {
   });
 
   // The backstop de-registers the pending entry, which is why a late refusal
-  // has no future left to fail. It still has to reach the user: _handleResult
-  // writes the reason onto the state before it looks the entry up, and
-  // OperationalErrorToaster listens there.
-  test(
-    'a refusal with no pending entry left still lands on the state',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await makeSession(t);
-      final cache = await CachedSessionsStore.open();
-      final svc = SessionsService.fromSession(session, cache: cache);
+  // has no future left to fail. It still has to reach the user: with no
+  // caller left to hand the reason to, _handleResult announces it on
+  // `errors`, which OperationalErrorToaster listens to.
+  test('a refusal with no pending entry left is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
 
-      t.emit('session:result', {
-        'requestId': 'long-gone',
-        'ok': false,
-        'errorCode': 'WORKTREE_DELETE_FAILED',
-        'error': 'Could not remove the worktree.',
-      });
-      await Future<void>.delayed(Duration.zero);
+    t.emit('session:result', {
+      'requestId': 'long-gone',
+      'ok': false,
+      'errorCode': 'WORKTREE_DELETE_FAILED',
+      'error': 'Could not remove the worktree.',
+    });
+    await Future<void>.delayed(Duration.zero);
 
-      expect(svc.currentState.error, 'Could not remove the worktree.');
+    expect(errors, ['Could not remove the worktree.']);
 
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an untyped mutation refusal is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
+
+    final future = svc.stopSession('sess-1');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.lastWhere((m) => m['type'] == 'session:stop');
+    t.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': false,
+      'error': 'no such session',
+    });
+
+    // The caller gets null and no reason, so the announcement is all the user
+    // hears about it.
+    expect(await future, isNull);
+    expect(errors, ['no such session']);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a refusal handed to a typed caller is not announced too', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
+
+    final mode = svc.setMode('sess-1', 'chat');
+    final start = svc.start('sess-1', raiseRefusal: true);
+    await Future<void>.delayed(Duration.zero);
+    t.emit('session:result', {
+      'requestId': t.sent.lastWhere(
+        (m) => m['type'] == 'session:set-mode',
+      )['requestId'],
+      'ok': false,
+      'error': 'mode refused',
+    });
+    t.emit('session:result', {
+      'requestId': t.sent.lastWhere(
+        (m) => m['type'] == 'session:start',
+      )['requestId'],
+      'ok': false,
+      'errorCode': 'WORKTREE_MISSING',
+      'error': 'start refused',
+    });
+
+    expect((await mode).error, 'mode refused');
+    await expectLater(start, throwsA(isA<SessionOperationException>()));
+    expect(errors, isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a listener attached after a refusal never receives it', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    t.emit('session:result', {
+      'requestId': 'long-gone',
+      'ok': false,
+      'error': 'Could not remove the worktree.',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
+    await Future<void>.delayed(Duration.zero);
+    expect(errors, isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
 }

@@ -91,7 +91,13 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     }
 
     final runKey = '$sessionId|${setup.startedAt}';
-    if (ui.hiddenRunKeys.contains(runKey)) {
+    final uiController = ref.read(sessionSetupBannerUiProvider.notifier);
+    if (phase == SessionSetupPhase.running) uiController.noteRunning(runKey);
+    // A success this app never saw coming is history, not news. The cost is a
+    // run that finished while the agent panel was unmounted also goes
+    // unannounced — by then the agent is already up and says so itself.
+    if (ui.hiddenRunKeys.contains(runKey) ||
+        (phase == SessionSetupPhase.done && !uiController.sawRunning(runKey))) {
       _syncTail(null, null);
       return const SizedBox.shrink();
     }

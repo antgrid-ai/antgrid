@@ -8,18 +8,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
 import '../launcher/host_control_client.dart';
+import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
 import '../services/pending_reply.dart' show SessionDownException;
+import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/new_session/picker_sources.dart';
+import '../widgets/session_start_refusal.dart';
 import 'account_agents.dart';
 import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'analytics.dart';
+import 'app_toaster.dart';
 import 'cached_sessions.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
@@ -395,7 +399,17 @@ Future<void> startNewSession(
       // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
       // session, an older agent's unknown tool) leaves the draft intact for a
       // return to this canvas; a CODED refusal still raises past here.
-      final started = await starting;
+      final SessionEntry? started;
+      try {
+        started = await starting;
+      } on SessionOperationException catch (error) {
+        // Voiced here because no one else is left to: the composer that would
+        // catch it is unmounted by the hand-off above (or by the user leaving
+        // the canvas first), and the service announces no refusal whose
+        // caller holds the reason.
+        reportStartRefusal(ref.read(appToasterProvider), error);
+        rethrow;
+      }
       if (started == null) {
         abort(NewSessionStartAbortReason.startRefused);
         return;
@@ -418,10 +432,7 @@ Future<void> startNewSession(
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally
       // reach the composer so it can show their safe display message — though
-      // a START refusal now arrives after the hand-off, by which point the
-      // composer is unmounted and it is the workspace's OperationalErrorToaster
-      // that voices it (the service stamps the reason onto SessionsState.error
-      // before failing the pending request).
+      // a START refusal arrives after the hand-off and is voiced above.
       //
       // The abort is what a CREATE timeout is owed: that one is still on the
       // canvas, it is the longest wait this flow has, and ending it without a

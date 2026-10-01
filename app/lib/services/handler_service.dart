@@ -28,6 +28,12 @@ class HandlerService {
   // which would re-fire a notification; this emits each escalation exactly once
   // as it arrives, so the OS-notification fan-out can't double-notify.
   final _escalationController = StreamController<HandlerEscalation>.broadcast();
+  // The state as of each `handler:status` frame, and only those. Every other
+  // emission on [stateStream] (an escalation, a snapshot, an optimistic
+  // update) carries the entitlement the last frame set, so a reader asking
+  // "what did the bridge just answer" cannot tell a fresh refusal from a held
+  // one there.
+  final _statusFrameController = StreamController<HandlerState>.broadcast();
   HandlerState _state = const HandlerState.initial();
   bool _disposed = false;
   // agent:prompt correlation ids — the driver only needs per-send uniqueness.
@@ -144,6 +150,7 @@ class HandlerService {
   Stream<HandlerState> get stateStream => _stateController.stream;
   Stream<HandlerEscalation> get escalationStream =>
       _escalationController.stream;
+  Stream<HandlerState> get statusFrames => _statusFrameController.stream;
   HandlerState get currentState => _state;
   String get projectId => session.projectId;
 
@@ -436,6 +443,7 @@ class HandlerService {
           ? gated.copyWith(clearLenses: true)
           : gated.copyWith(lenses: msg.lenses),
     );
+    if (!_disposed) _statusFrameController.add(_state);
   }
 
   void _onHeavyJson(Map<String, dynamic> json) {
@@ -1361,5 +1369,6 @@ class HandlerService {
     _heavySub = null;
     await _stateController.close();
     await _escalationController.close();
+    await _statusFrameController.close();
   }
 }

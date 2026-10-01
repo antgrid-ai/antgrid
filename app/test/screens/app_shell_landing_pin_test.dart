@@ -11,18 +11,24 @@
 // session instead. AppShell must therefore reconcile the landing's surface to
 // `newSession` so the route can only leave the New Session screen through an
 // explicit surface write (leaveNewSession / a session-row tap).
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
+import 'package:antgrid/models/ab_message.dart'
+    show TerminalNotificationMessage;
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
@@ -32,6 +38,7 @@ import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 import '../helpers/test_store_overrides.dart';
 
 void main() {
@@ -71,6 +78,7 @@ void main() {
     overrides: overrides,
     child: MaterialApp(
       theme: buildAbTheme(),
+      builder: abToastHostBuilder,
       home: const MediaQuery(
         data: MediaQueryData(size: Size(1200, 800)),
         child: AppShell(),
@@ -135,6 +143,72 @@ void main() {
 
       expect(find.byType(NewSessionScreen), findsOneWidget);
       expect(find.byType(WorkspaceShell), findsNothing);
+    },
+  );
+
+  // The toaster's sources are event streams with no replay, so a refusal is
+  // shown only if something is listening when it lands. The sidebar can stop a
+  // session while the New Session canvas is up, and the workspace is unmounted
+  // then — the toaster has to outlive that swap.
+  testWidgets('an operational error toasts while the New Session screen is up', (
+    tester,
+  ) async {
+    final errors = StreamController<ProjectScoped<String>>.broadcast();
+    addTearDown(errors.close);
+    await tester.pumpWidget(
+      host([
+        ...baseOverrides(),
+        operationalErrorsProvider.overrideWithValue(errors.stream),
+      ]),
+    );
+    await pumpLanding(tester);
+    expect(find.byType(NewSessionScreen), findsOneWidget);
+
+    errors.add((entryId: 'p', message: 'stop refused'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('stop refused'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 10));
+    clearAbToasts(tester.element(find.byType(AppShell)));
+  });
+
+  // Same for agent notifications, whose sources do not replay either: an agent
+  // finishing while the user starts another session is when they most need
+  // telling.
+  testWidgets(
+    'an agent notification toasts while the New Session screen is up',
+    (tester) async {
+      final notifications =
+          StreamController<
+            ProjectScoped<TerminalNotificationMessage>
+          >.broadcast();
+      addTearDown(notifications.close);
+      await tester.pumpWidget(
+        host([
+          ...baseOverrides(),
+          terminalNotificationsProvider.overrideWithValue(notifications.stream),
+        ]),
+      );
+      await pumpLanding(tester);
+      expect(find.byType(NewSessionScreen), findsOneWidget);
+
+      notifications.add((
+        entryId: 'p',
+        message: const TerminalNotificationMessage(
+          id: 'n-1',
+          timestamp: 1,
+          terminalId: 's1',
+          kind: 'osc9',
+          title: 'Build finished',
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Build finished'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 10));
+      clearAbToasts(tester.element(find.byType(AppShell)));
     },
   );
 }

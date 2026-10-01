@@ -13,10 +13,12 @@ import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
+import '../../providers/agent_transport.dart';
 import '../../providers/app_toaster.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
+import '../../project/project_session_registry.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../billing/pricing_visibility.dart';
 import '../../services/handler_service.dart';
@@ -485,7 +487,25 @@ Future<void> armWithSheet({
     explain: !container.read(firstRunProvider).handlerArmedOnce,
   );
   if (decision == null) return;
-  focusedServiceOrNull(container, (s) => s.handlerService)?.arm(
+  // Resolved once, for the arm and the latch both: the latch must follow the
+  // project this arm went to, not whichever one is focused when the bridge
+  // answers.
+  final entryId = container.read(selectedRegistrationIdProvider);
+  final service = entryId == null
+      ? null
+      : container.read(projectSessionProvider(entryId)).value?.handlerService;
+  if (entryId == null || service == null) {
+    // Nothing took the arm, so no answer is coming to wait for.
+    _reportArmFailure(
+      container,
+      title: 'Handler not armed',
+      description:
+          "This project isn't connected yet, so nothing was sent. Try again "
+          'in a moment.',
+    );
+    return;
+  }
+  service.arm(
     terminalId: terminalId,
     goal: goal,
     judgeTool: decision.settings.judgeTool,
@@ -495,6 +515,7 @@ Future<void> armWithSheet({
   );
   latchHandlerArmedOnConfirmation(
     container,
+    entryId,
     terminalId,
     instruction: decision.instruction,
   );
@@ -634,6 +655,7 @@ final _armLatches = <String, VoidCallback>{};
 /// without the permission they imply.
 void latchHandlerArmedOnConfirmation(
   ProviderContainer container,
+  String entryId,
   String terminalId, {
   String? instruction,
 }) {
@@ -648,17 +670,19 @@ void latchHandlerArmedOnConfirmation(
   // dropping them silently — the replacement usually carries none, and this is
   // the only surface that ever held them.
   _armLatches.remove(terminalId)?.call();
-  ProviderSubscription<AsyncValue<HandlerState>>? sub;
+  ProviderSubscription<HandlerService?>? serviceSub;
+  StreamSubscription<HandlerState>? frameSub;
   Timer? timeout;
   void stop() {
     timeout?.cancel();
     timeout = null;
-    sub?.close();
-    sub = null;
+    serviceSub?.close();
+    serviceSub = null;
+    unawaited(frameSub?.cancel());
+    frameSub = null;
   }
 
-  bool confirmed(HandlerState? state) =>
-      state?.sessions.containsKey(terminalId) ?? false;
+  bool confirmed(HandlerState state) => state.sessions.containsKey(terminalId);
   /// The other way an arm ends: the bridge answered, and its answer was no.
   /// Ends the latch the same way a confirmation does — nothing is retired, and
   /// the send is reported rather than left to time out in silence.
@@ -668,12 +692,36 @@ void latchHandlerArmedOnConfirmation(
     _reportArmRefused(container, entitlement, instruction);
   }
 
-  void latch() {
+  void latch(HandlerService service) {
     _armLatches.remove(terminalId);
     stop();
     container.read(sessionOpeningPromptsProvider.notifier).forget(terminalId);
     container.read(firstRunProvider.notifier).markHandlerArmed();
-    _sendArmInstruction(container, terminalId, instruction);
+    _sendArmInstruction(container, service, terminalId, instruction);
+  }
+
+  void watch(HandlerService? service) {
+    if (service == null) return;
+    unawaited(frameSub?.cancel());
+    // Status FRAMES, never the state stream: a frame carrying a refusal is the
+    // bridge saying so as of that frame, and the refused arm raises one itself
+    // — so this answers within a round trip instead of after the confirmation
+    // window. Every other emission carries the entitlement already held, and
+    // the refusal the user walked through to get here is still sitting there;
+    // reading it would report an arm that is still in flight as dead.
+    frameSub = service.statusFrames.listen((frame) {
+      if (confirmed(frame)) {
+        latch(service);
+        return;
+      }
+      final entitlement = frame.entitlement;
+      if (entitlement != null) refuse(entitlement);
+    });
+    // The status may already list the session (re-arm race after a disarm the
+    // bridge never processed, or a redialled service whose replay landed
+    // before this subscribed) — check once so the latch doesn't wait on a
+    // change that never comes.
+    if (confirmed(service.currentState)) latch(service);
   }
 
   _armLatches[terminalId] = () {
@@ -686,54 +734,59 @@ void latchHandlerArmedOnConfirmation(
           'instruction you typed with it was not sent.',
     );
   };
-  sub = container.listen(handlerStateProvider, (_, next) {
-    if (confirmed(next.value)) {
-      latch();
-      return;
-    }
-    // A frame carrying a refusal is the bridge saying so as of that frame, and
-    // the refused arm raises one itself — so this answers within a round trip
-    // instead of after the confirmation window. Only frames that ARRIVE count,
-    // never the state already held: the refusal the user walked through to get
-    // here is still sitting there, and reading it would report an arm that is
-    // still in flight as dead.
-    final entitlement = next.value?.entitlement;
-    if (entitlement != null) refuse(entitlement);
-  });
+  // Bound to the ARMED project rather than the focused one: another project's
+  // held refusal must not end this arm as refused, and this project's
+  // confirmation must land while the user looks elsewhere — unseen, it times
+  // out and drops an instruction the bridge was ready to take.
+  serviceSub = container.listen(
+    _armedProjectHandlerProvider(entryId),
+    (_, next) => watch(next),
+  );
   timeout = Timer(kHandlerArmConfirmWindow, () {
     _armLatches.remove(terminalId);
     stop();
     _reportArmInstructionLost(container, instruction);
   });
-  // The status may already list the session (re-arm race after a disarm the
-  // bridge never processed) — check once so the latch doesn't wait on a
-  // change that never comes.
-  if (confirmed(container.read(handlerStateProvider).value)) latch();
+  watch(serviceSub!.read());
 }
+
+/// The handler service of a project an arm latch is waiting on, followed
+/// across a redial (which replaces the whole session, service included).
+///
+/// Gated on the warm set the way `handlerEscalationsProvider` is: a project
+/// evicted mid-window has its session invalidated, and a listener held
+/// straight on `projectSessionProvider` would rebuild it — re-warming the
+/// project the registry just let go, and evicting another to make room.
+final _armedProjectHandlerProvider = Provider.autoDispose
+    .family<HandlerService?, String>((ref, entryId) {
+      if (!ref.watch(projectSessionRegistryProvider).contains(entryId)) {
+        return null;
+      }
+      return ref.watch(projectSessionProvider(entryId)).value?.handlerService;
+    });
 
 /// Sends the arm sheet's sentence, once the bridge has confirmed the arm.
 ///
-/// The service is RE-RESOLVED here and never captured across the sheet or the
-/// latch window: this runs up to [kHandlerArmConfirmWindow] after the sheet
-/// closed, and a transport reconnect in that window disposes the build-time
-/// instance, whose `instruct` then sends nothing at all.
+/// [service] is the one whose status frame just confirmed the arm, never one
+/// captured across the sheet or the latch window: this runs up to
+/// [kHandlerArmConfirmWindow] after the sheet closed, and a transport reconnect
+/// in that window disposes the build-time instance, whose `instruct` then sends
+/// nothing at all. Nor the focused one — by now the user may be looking at
+/// another project, whose Handler has never heard of this terminal.
 ///
 /// The three-valued result is honoured rather than discarded. `duplicate` is
 /// reachable (a re-arm carrying the same sentence as one still outstanding) and
-/// `empty` means no service resolved — on a screen the user is about to walk
-/// away from, an unsent instruction must not look like a sent one.
+/// `empty` means the service was disposed under the send — on a screen the
+/// user is about to walk away from, an unsent instruction must not look like a
+/// sent one.
 void _sendArmInstruction(
   ProviderContainer container,
+  HandlerService service,
   String terminalId,
   String? text,
 ) {
   if (text == null || text.trim().isEmpty) return;
-  final result =
-      focusedServiceOrNull(
-        container,
-        (s) => s.handlerService,
-      )?.instruct(terminalId, text) ??
-      HandlerInstructResult.empty;
+  final result = service.instruct(terminalId, text);
   switch (result) {
     case HandlerInstructResult.sent:
       return;

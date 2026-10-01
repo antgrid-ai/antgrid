@@ -21,7 +21,7 @@ const handlerWhyLabel = 'Why';
 /// empty (`firstFilled(decision.notify?.body) ?? "Agent needs you"` in
 /// `engine.ts`, and the same literal again in `push/compose.ts`). Read here to
 /// decide whether the "Why" disclosure should open by default, and by
-/// `workspace_shell.dart` for the notification body.
+/// `agent_notification_surfacer.dart` for the notification body.
 const handlerFallbackQuestion = 'Agent needs you';
 
 /// Whether the reasoning should be showing the moment the surface is built.

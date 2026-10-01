@@ -9,8 +9,8 @@ import '../util/ab_log.dart';
 /// invoke based on AppLifecycleState. Degrades silently if unavailable.
 ///
 /// One instance per isolate, because [_ready] and [onTap] have to outlive the
-/// widget that installed them. `WorkspaceShell` constructs this in `initState`,
-/// and the demo's mount deliberately SKIPS [init] (its
+/// widget that installed them. `AgentNotificationSurfacer` constructs this in
+/// `initState`, and the demo's mount deliberately SKIPS [init] (its
 /// `DarwinInitializationSettings` would raise the iOS alert-permission prompt
 /// on behalf of a sample project). Per-instance readiness would therefore make
 /// [show] a no-op for the demo's whole lifetime, silently dropping the handler

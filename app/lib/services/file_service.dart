@@ -48,7 +48,6 @@ class FileService {
 
   /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
   int _snapshotEpoch = -1;
-  int _gitOpSeq = 0;
   bool _disposed = false;
   bool _treeRecoveryPending = false;
   final Set<Object> _treeOwners = {};
@@ -126,6 +125,12 @@ class FileService {
 
   Stream<FileTreeState> get stateStream => _stateController.stream;
   FileTreeState get currentState => _state;
+
+  /// One message per finished git op (commit, discard, sync, and the failures
+  /// of stage/unstage/stash), with no replay — `OperationalErrorToaster` says
+  /// why it is not a field on [FileTreeState].
+  final _gitOpFeedbackController = StreamController<String>.broadcast();
+  Stream<String> get gitOpFeedback => _gitOpFeedbackController.stream;
 
   String get projectId => session.projectId;
 
@@ -602,13 +607,9 @@ class FileService {
     );
   }
 
-  /// Surface a one-shot git op result. Bumping the seq makes each result a
-  /// distinct event so the toaster re-fires even on an identical message — no
-  /// clear-first dance, no coupling to the toaster's de-dup internals.
   void _emitOpFeedback(String message) {
-    _setState(
-      _state.copyWith(gitOpFeedback: message, gitOpFeedbackSeq: ++_gitOpSeq),
-    );
+    if (_disposed) return;
+    _gitOpFeedbackController.add(message);
   }
 
   /// Applies an incremental `tree:update` delta using the same
@@ -1791,7 +1792,7 @@ class FileService {
   }
 
   /// Commit whatever is currently staged, with [message]. Result (success or
-  /// error) arrives as git:commit-result and is surfaced via [gitOpFeedback];
+  /// error) arrives as git:commit-result and is announced on [gitOpFeedback];
   /// the changed-file list refreshes automatically from the bridge's
   /// git:status. Which files land in the commit is decided by prior
   /// [stageFiles]/[unstageFiles] calls, not by this one.
@@ -2357,6 +2358,7 @@ class FileService {
     _statusSub = null;
     await _resumeSub?.cancel();
     _resumeSub = null;
+    await _gitOpFeedbackController.close();
     await _stateController.close();
   }
 }

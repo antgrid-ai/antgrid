@@ -21,7 +21,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:antgrid/models/handler_state.dart' show HandlerEscalation;
-import 'package:antgrid/screens/workspace_shell.dart'
+import 'package:antgrid/widgets/agent_notification_surfacer.dart'
     show handlerEscalationTitle;
 import 'package:flutter_test/flutter_test.dart';
 

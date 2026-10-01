@@ -8,7 +8,9 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../models/command_models.dart';
+import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
+import '../providers/sessions.dart';
 import '../services/command_service.dart';
 import '../util/detached.dart';
 import 'send_capture_to_agent.dart';
@@ -41,6 +43,16 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
   final LayerLink _sendToAgentLink = LayerLink();
 
+  /// The project and checkout [_lastState] came from, and that state.
+  ///
+  /// [commandStateProvider] follows focus, so two consecutive states can
+  /// belong to different checkouts — and "running" on one followed by
+  /// "success" on the other is not a command finishing. Comparing only within
+  /// one source keeps a switch from collapsing the result it lands on and
+  /// dismissing it three seconds later.
+  (String?, String)? _stateSource;
+  CommandState? _lastState;
+
   /// The focused project's [CommandService], or null while its session is
   /// (re-)resolving. Every use below fires from a timer or a tap, where the
   /// throwing façade would land outside any `build()` as an unhandled error.
@@ -54,7 +66,19 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     super.dispose();
   }
 
-  void _onCommandStateChanged(CommandState? prev, CommandState next) {
+  void _onCommandStateChanged(AsyncValue<CommandState> value) {
+    // The re-subscribe after a focus switch passes through loading with the
+    // previous checkout's state still attached; it says nothing new.
+    if (value.isLoading) return;
+    final next = value.value ?? const CommandState();
+    final source = (
+      ref.read(selectedRegistrationIdProvider),
+      ref.read(focusedCheckoutIdProvider),
+    );
+    final prev = source == _stateSource ? _lastState : null;
+    _stateSource = source;
+    _lastState = next;
+
     final prevExec = prev?.current;
     final current = next.current;
 
@@ -72,8 +96,10 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
         prevExec?.status == CommandStatus.running) {
       _autoHideTimer?.cancel();
       setState(() => _expanded = false);
+      // The checkout that finished, not whichever is focused in three seconds.
+      final owner = _commandService;
       _autoHideTimer = Timer(const Duration(seconds: 3), () {
-        if (mounted) _commandService?.dismiss();
+        if (mounted) owner?.dismiss();
       });
     }
 
@@ -149,9 +175,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(commandStateProvider, (prev, next) {
-      _onCommandStateChanged(prev?.value, next.value ?? const CommandState());
-    });
+    ref.listen(commandStateProvider, (_, next) => _onCommandStateChanged(next));
 
     final current = ref.watch(commandStateProvider).value?.current;
     if (current == null) return const SizedBox.shrink();

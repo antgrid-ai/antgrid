@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -154,12 +156,17 @@ void main() {
     registry.touch('B', isLocal: true);
 
     final seen = <(String, String?)>[];
-    final sub = container.listen(terminalNotificationsProvider, (_, next) {
-      final scoped = next.value;
-      if (scoped == null) return;
-      seen.add((scoped.entryId, scoped.message.title));
+    StreamSubscription<Object?>? events;
+    final sub = container.listen(terminalNotificationsProvider, (_, stream) {
+      unawaited(events?.cancel());
+      events = stream.listen(
+        (scoped) => seen.add((scoped.entryId, scoped.message.title)),
+      );
+    }, fireImmediately: true);
+    addTearDown(() {
+      sub.close();
+      unawaited(events?.cancel());
     });
-    addTearDown(sub.close);
     await Future<void>.delayed(Duration.zero);
 
     // Created only now, so the bundle reaches the provider over
