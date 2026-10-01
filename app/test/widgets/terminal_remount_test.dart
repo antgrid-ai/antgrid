@@ -215,7 +215,7 @@ void main() {
       tester.getSize(find.byType(GhosttyTerminalView)).width,
       greaterThan(300),
     );
-    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_letterboxFit, findsOneWidget);
     expect(_wrappingScrollView, findsNothing);
 
     await tester.pumpAndSettle();
@@ -324,3 +324,8 @@ void main() {
     await tester.pumpAndSettle();
   }, variant: _macOnly);
 }
+
+// The reader letterbox specifically; SVG icons (e.g. the take-control strip) also build a FittedBox.
+Finder get _letterboxFit => find.byWidgetPredicate(
+  (w) => w is FittedBox && w.fit == BoxFit.scaleDown,
+);
