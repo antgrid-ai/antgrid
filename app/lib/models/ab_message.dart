@@ -1692,6 +1692,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         relPath: json['relPath'] as String?,
         isDirectory: json['isDirectory'] as bool? ?? false,
         externalImagePath: json['externalImagePath'] as String?,
+        // An `is` check rather than a cast: the heavy-message path parses with
+        // no try, and an older bridge omits the field.
+        exists: json['exists'] is bool ? json['exists'] as bool : null,
       );
 
     case 'file:find-result':

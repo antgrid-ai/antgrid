@@ -21,7 +21,9 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../models/workspace_view.dart';
 import '../project/project_session.dart';
+import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
@@ -30,6 +32,7 @@ import '../services/terminal_service.dart';
 import '../util/detached.dart';
 import '../util/wrapped_url.dart';
 import '../util/external_url.dart';
+import '../util/terminal_links.dart';
 import 'clipboard_image.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
@@ -1606,6 +1609,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       hyperlinkColor: context.antgrid.accent,
       onOpenHyperlink: _openHyperlink,
       onHyperlinkHover: _onHyperlinkHover,
+      isQuietHyperlink: isDetectedTerminalLink,
       showHeader: false,
       showFocusRing: false,
       // In frame mode the agent's VT is authoritative and the engine holds
@@ -1890,6 +1894,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                             minimumContrastRatio: _minContrastRatio,
                             onOpenHyperlink: _openHyperlink,
                             onHyperlinkHover: _onHyperlinkHover,
+                            isQuietHyperlink: isDetectedTerminalLink,
                           ),
                         ),
                       ),
@@ -2027,26 +2032,46 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// with nothing shown, and all of them get the sheet — which a
   /// `defaultTargetPlatform` test silently exempted the first of.
   Future<void> _openHyperlink(String detected) {
-    final uri = extendWrappedUrl(
-      detected,
-      widget.tab.ghostty.lines,
-      widget.tab.ghostty.cols,
-    );
+    // The bridge already joined a detected link's wrapped text, and its
+    // wrapper URI never matches a screen row, so extending it could only
+    // corrupt it.
+    final uri = isDetectedTerminalLink(detected)
+        ? detected
+        : extendWrappedUrl(
+            detected,
+            widget.tab.ghostty.lines,
+            widget.tab.ghostty.cols,
+          );
     return _openContentLink(uri);
   }
 
   Future<void> _openContentLink(String uri) => openContentLink(
     context,
     uri,
+    terminalId: widget.tab.terminalId,
     fileService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.fileService,
     previewService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.previewService,
-    revealView: (view) => ref.read(workspaceMenuControlProvider)?.reveal(view),
+    revealView: _revealWorkspaceView,
     disclosed: _hoveredLink.value?.uri == uri,
   );
+
+  void _revealWorkspaceView(WorkspaceView view) {
+    final menu = ref.read(workspaceMenuControlProvider);
+    if (menu != null) {
+      menu.reveal(view);
+      return;
+    }
+    // Phone width publishes no menu control, and a tapped link is the only
+    // affordance touch has, so the shell's own handover is what brings the tab
+    // and its page forward.
+    ref
+        .read(pendingWorkspaceViewProvider.notifier)
+        .set((target: ref.read(selectedTargetProvider), value: view));
+  }
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.

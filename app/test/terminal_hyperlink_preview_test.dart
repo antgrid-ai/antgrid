@@ -1,4 +1,6 @@
+import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/widgets/terminal_hyperlink_preview.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -230,6 +232,138 @@ void main() {
       final card = _card(tester);
       expect(card.width, lessThan(_panel.width * 0.75));
       expect(card.right, lessThanOrEqualTo(_panel.width));
+    });
+  });
+
+  group('TerminalHyperlinkPreview detected links', () {
+    Finder icon(String glyph) => find.byWidgetPredicate(
+      (w) => w is AbIcon && w.icon == glyph,
+      description: 'AbIcon',
+    );
+
+    testWidgets('shows a path with its line and none of the scheme', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=src%2Fa.ts&b=r&k=f&n=12',
+        const Offset(100, 100),
+      );
+
+      expect(_text(tester), 'src/a.ts:12');
+      expect(find.textContaining('antgrid'), findsNothing);
+      expect(icon(AbIcons.file), findsOneWidget);
+    });
+
+    testWidgets('shows the column when the link carries one', (tester) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=src%2Fa.ts&b=s&k=f&n=12&c=5',
+        const Offset(100, 100),
+      );
+
+      expect(_text(tester), 'src/a.ts:12:5');
+    });
+
+    testWidgets('picks the icon from the kind of what it names', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=app%2Flib&b=r&k=d',
+        const Offset(100, 100),
+      );
+      expect(icon(AbIcons.folder), findsOneWidget);
+
+      await _pump(
+        tester,
+        'antgrid-path:?p=C%3A%2Fx%2Fa.png&b=a&k=i',
+        const Offset(100, 100),
+      );
+      expect(icon(AbIcons.fileMedia), findsOneWidget);
+      expect(icon(AbIcons.folder), findsNothing);
+    });
+
+    testWidgets('spells out a bidi control in a printed path', (tester) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=src%2F%E2%80%AEgnp.ts&b=r&k=f',
+        const Offset(10, 10),
+      );
+
+      final text = _text(tester);
+      expect(text, contains('%E2%80%AE'));
+      expect(text, isNot(contains('‮')));
+    });
+
+    testWidgets('a path of an unknown kind reads as a plain file', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=a%2Fb&b=r&k=z',
+        const Offset(100, 100),
+      );
+
+      expect(_text(tester), 'a/b');
+      expect(icon(AbIcons.file), findsOneWidget);
+      expect(icon(AbIcons.link), findsNothing);
+    });
+
+    testWidgets('a malformed path link shows a neutral label, not its scheme', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        'antgrid-path:?p=%FF&b=r&k=f',
+        const Offset(100, 100),
+      );
+
+      expect(_text(tester), 'Unreadable path link');
+      expect(find.textContaining('antgrid'), findsNothing);
+      expect(find.textContaining('%FF'), findsNothing);
+      expect(icon(AbIcons.file), findsOneWidget);
+      expect(icon(AbIcons.link), findsNothing);
+    });
+
+    testWidgets('a long path keeps its file name and line, not its head', (
+      tester,
+    ) async {
+      final path = 'src/${'deep/' * 60}file.ts';
+      await _pump(
+        tester,
+        'antgrid-path:?p=${Uri.encodeComponent(path)}&b=r&k=f&n=12',
+        const Offset(100, 100),
+      );
+
+      final text = _text(tester);
+      expect(text, startsWith('…'));
+      expect(text, endsWith('/file.ts:12'));
+      expect(text, isNot(contains('src/')));
+      final paragraph = tester.renderObject<RenderParagraph>(
+        find.descendant(
+          of: find.byType(TerminalHyperlinkPreview),
+          matching: find.byType(RichText),
+        ),
+      );
+      expect(paragraph.didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('shows a detected URL as the inner URL with host emphasis', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        'antgrid-url:https://github.com@evil.example/a?b=1#c',
+        const Offset(100, 100),
+      );
+
+      final spans = _spans(tester);
+      expect(spans.first, ('https://github.com@', kDefaultPalette.textMuted));
+      expect(spans[1], ('evil.example', kDefaultPalette.textPrimary));
+      expect(spans.last.$1, '/a?b=1#c');
+      expect(find.textContaining('antgrid-url'), findsNothing);
+      expect(icon(AbIcons.link), findsOneWidget);
     });
   });
 }

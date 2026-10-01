@@ -1526,7 +1526,17 @@ class FileService {
   /// when it doesn't resolve inside this checkout. Only the bridge can answer
   /// this: the app never learns the checkout's absolute root (see
   /// `docs/architecture.md`), so it cannot relativize the path itself.
-  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+  ///
+  /// [terminalId] and [base] come from a bridge-detected path link: the first
+  /// names the terminal whose working directories the path may be relative to,
+  /// the second the one base the detector matched, and the bridge resolves
+  /// against that base alone. Both are omitted for a `file://` link, which the
+  /// bridge resolves against the checkout root only.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(
+    String rawPath, {
+    String? terminalId,
+    String? base,
+  }) {
     final requestId = const Uuid().v4();
     final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
@@ -1539,6 +1549,8 @@ class FileService {
         'projectId': projectId,
         'requestId': requestId,
         'path': rawPath,
+        if (terminalId != null) 'terminalId': terminalId,
+        if (base != null) 'base': base,
       }),
     );
     return pending.future;

@@ -595,6 +595,10 @@ class FileResolvePathResultMessage {
   final bool isDirectory;
   final String? externalImagePath;
 
+  /// Whether the resolved path exists as a file or directory right now. null:
+  /// an older bridge that does not report existence; treat as present.
+  final bool? exists;
+
   const FileResolvePathResultMessage({
     required this.id,
     required this.timestamp,
@@ -603,6 +607,7 @@ class FileResolvePathResultMessage {
     this.relPath,
     this.isDirectory = false,
     this.externalImagePath,
+    this.exists,
   });
 }
 
