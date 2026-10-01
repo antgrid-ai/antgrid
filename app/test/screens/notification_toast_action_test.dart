@@ -201,5 +201,4 @@ void main() {
       expect(find.byType(AbToast), findsNothing);
     });
   });
-
 }

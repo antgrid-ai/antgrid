@@ -72,8 +72,7 @@ final _sessionList = NotifierProvider<ValueController<SessionsState?>, SessionsS
   () => ValueController<SessionsState?>(null),
 );
 
-/// Mounts the banner alone over a hand-seeded session list. The banner is a
-/// pure projection of that list, so nothing here needs a live stream.
+/// Mounts the banner alone over a hand-seeded session list.
 ///
 /// [before] is shown first and then replaced by [setup] — how a test has the
 /// banner watch a run in progress before it settles. A `done` with no
@@ -297,6 +296,8 @@ void main() {
   });
 
   group('terminal states', () {
+    // Met cold, with no run watched: only a success is history, and a failure
+    // is still the account of a broken tree whenever the user started looking.
     testWidgets('a failure persists, warns, and offers a rerun', (
       tester,
     ) async {
@@ -368,14 +369,6 @@ void main() {
       await pumpBanner(tester, _setup('done', stepIndex: 3));
 
       expect(find.byType(AbInlineBanner), findsNothing);
-    });
-
-    // Only a success is history: a failure is still the account of a broken
-    // tree, whoever is looking and whenever they started.
-    testWidgets('a failure met cold still shows', (tester) async {
-      await pumpBanner(tester, _setup('failed', message: 'boom'));
-
-      expect(find.text('Setup failed — boom'), findsOneWidget);
     });
 
     testWidgets('a successful run clears after a short confirmation', (

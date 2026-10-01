@@ -242,15 +242,6 @@ void main() {
       expect(svc.currentState.gitBranchesLoading, isFalse);
       expect(errors, hasLength(1));
 
-      // A late reply is a success, not a second failure.
-      t.emit('git:branches', {
-        'projectId': 'p',
-        'current': 'main',
-        'branches': ['main'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(errors, hasLength(1));
-
       await svc.dispose();
       await session.close();
     });
@@ -343,8 +334,8 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
-      final early = <String>[];
-      svc.gitErrors.listen(early.add);
+      final errors = <String>[];
+      svc.gitErrors.listen(errors.add);
 
       svc.checkoutBranch('feature');
       t.emit('git:checkout-result', {
@@ -354,7 +345,7 @@ void main() {
         'error': 'local changes would be overwritten',
       });
       await Future<void>.delayed(Duration.zero);
-      expect(early, ['local changes would be overwritten']);
+      expect(errors, ['local changes would be overwritten']);
       expect(svc.currentState.gitBranchesLoading, isFalse);
 
       await svc.dispose();

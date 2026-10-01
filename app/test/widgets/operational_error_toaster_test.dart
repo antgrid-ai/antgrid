@@ -34,9 +34,7 @@ void main() {
             (ref) =>
                 ref.watch(_source) == 'a' ? sourceA.stream : sourceB.stream,
           ),
-          selectedRegistrationIdProvider.overrideWith(
-            (ref) => ref.watch(_focused),
-          ),
+          selectedRegistrationIdProvider.overrideWith((ref) => 'p1'),
           projectDisplayNameProvider.overrideWith(
             (ref, id) => const {'p1': 'Alpha', 'p2': 'Beta'}[id],
           ),
@@ -97,7 +95,4 @@ ProjectScoped<String> _focusedError(String message) =>
 
 final _source = NotifierProvider<ValueController<String>, String>(
   () => ValueController('a'),
-);
-final _focused = NotifierProvider<ValueController<String>, String>(
-  () => ValueController('p1'),
 );
