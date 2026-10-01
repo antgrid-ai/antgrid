@@ -2081,9 +2081,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:resolve-path": {
+        // A request this case will not resolve still gets an answer: the app
+        // waits on the requestId, and silence reads there as an unreachable
+        // machine after its timeout.
+        const answerUnresolved = (): void => {
+          sendAbToItsChannel(createMessage("file:resolve-path-result", {
+            projectId: msg.projectId, requestId: msg.requestId, relPath: null, isDirectory: false,
+            externalImagePath: null, exists: false, checkoutId: runtime.checkout.id,
+          }), client);
+        };
         const fw = runtime.fileWatcher;
         if (!fw) {
           log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+          answerUnresolved();
           break;
         }
         const pending = resolveInFlight.get(client) ?? 0;
@@ -2093,6 +2103,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             resolveDroppedWarnAt = now;
             log.warn("file:resolve-path dropped: client already has %d in flight", pending);
           }
+          answerUnresolved();
           break;
         }
         // `parseMessageFast` checked the type and nothing else.

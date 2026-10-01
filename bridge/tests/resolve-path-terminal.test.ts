@@ -168,14 +168,16 @@ describe("file:resolve-path against a terminal", () => {
     expect(relay.some((d) => d.message.type === "file:resolve-path-result" && d.message.requestId === "from-loopback")).toBe(false);
   });
 
-  test("a ninth concurrent request from one client is dropped", async () => {
+  test("a ninth concurrent request from one client is answered unresolved without a stat", async () => {
     const { bus, loopback } = await boot();
 
     for (let i = 0; i < 9; i++) bus.dispatchInbound(resolveRequest(`burst-${i}`, "top.ts"), "control", "loopback");
-    for (let i = 0; i < 8; i++) await reply(loopback, `burst-${i}`);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    for (let i = 0; i < 8; i++) expect((await reply(loopback, `burst-${i}`)).exists).toBe(true);
 
-    expect(loopback.some((d) => d.message.type === "file:resolve-path-result" && d.message.requestId === "burst-8")).toBe(false);
+    const refused = await reply(loopback, "burst-8");
+    expect(refused.relPath).toBeNull();
+    expect(refused.exists).toBe(false);
+    expect(refused.checkoutId).toBe("main");
 
     // The slot frees once the replies are out, so the client is not locked out.
     bus.dispatchInbound(resolveRequest("after", "top.ts"), "control", "loopback");
