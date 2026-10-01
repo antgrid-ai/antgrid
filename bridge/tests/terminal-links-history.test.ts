@@ -6,7 +6,7 @@ import {
   type TerminalHistoryRow,
   type TerminalHistorySpan,
 } from "../src/terminal-frames/protocol";
-import { linkHistoryRows } from "../src/terminal-links/history-links";
+import { linkHistoryRows, type HistoryContext } from "../src/terminal-links/history-links";
 import { PathStatCache } from "../src/terminal-links/stat-cache";
 import type { LinkBases } from "../src/terminal-links/resolver";
 import { AsyncFs, Clock, pathParams, settle } from "./support/terminal-links-fixtures";
@@ -14,6 +14,8 @@ import { AsyncFs, Clock, pathParams, settle } from "./support/terminal-links-fix
 const PLAIN = "\x1b[0m";
 const RED = "\x1b[0;31m";
 const BASES: LinkBases = { checkoutRoot: "/r", spawnCwd: "/r" };
+/** The page is the whole output: nothing precedes it and nothing continues it. */
+const END_OF_OUTPUT: HistoryContext = { before: [], after: [], afterComplete: true };
 
 function makeCache(fs: AsyncFs, clock: Clock): PathStatCache {
   return new PathStatCache({ fs, now: clock.now, timer: clock.timer, platform: "linux" });
@@ -49,7 +51,7 @@ async function link(
   setup(fs);
   const clock = new Clock();
   const cache = makeCache(fs, clock);
-  const out = await linkHistoryRows(rows, bases, { cache, now: clock.now, platform: "linux" });
+  const out = await linkHistoryRows(rows, bases, { cache, now: clock.now, platform: "linux", context: END_OF_OUTPUT });
   return { out, fs, clock, cache };
 }
 
@@ -123,7 +125,7 @@ describe("linkHistoryRows", () => {
 
   it("strips program-authored links even when there is nothing to detect", async () => {
     const rows = [rowOfSpans(1, [{ text: "x", cells: 1, sgr: PLAIN, uri: "antgrid-url:https://e.com" }])];
-    const out = await linkHistoryRows(rows, {}, { platform: "linux" });
+    const out = await linkHistoryRows(rows, {}, { platform: "linux", context: END_OF_OUTPUT });
     expect(out[0]!.spans[0]!.uri).toBeUndefined();
   });
 
@@ -199,7 +201,7 @@ describe("linkHistoryRows", () => {
     const cache = makeCache(fs, clock);
     const rows = [row(1, "see src/a.ts now", 20)];
 
-    const pending = linkHistoryRows(rows, BASES, { cache, now: clock.now, budgetMs: 150, platform: "linux" });
+    const pending = linkHistoryRows(rows, BASES, { cache, now: clock.now, budgetMs: 150, platform: "linux", context: END_OF_OUTPUT });
     await settle();
     clock.advance(150);
     const out = await pending;
@@ -217,7 +219,7 @@ describe("linkHistoryRows", () => {
     const clock = new Clock();
     const cache = makeCache(fs, clock);
     const rows = [row(1, "see src/a.ts now", 20)];
-    const out = await linkHistoryRows(rows, BASES, { cache, now: clock.now, platform: "linux" });
+    const out = await linkHistoryRows(rows, BASES, { cache, now: clock.now, platform: "linux", context: END_OF_OUTPUT });
     expect(linkSpans(out[0]!)).toHaveLength(1);
   });
 
@@ -305,7 +307,7 @@ describe("linkHistoryRows", () => {
         { text: "x", cells: 1, sgr: PLAIN, uri: "antgrid-path:?p=x&b=r&k=f" },
       ]),
     ];
-    const out = await linkHistoryRows(rows, BASES, { cache: hostile, platform: "linux" });
+    const out = await linkHistoryRows(rows, BASES, { cache: hostile, platform: "linux", context: END_OF_OUTPUT });
     expect(out).toHaveLength(1);
     expect(linkSpans(out[0]!)).toEqual([]);
   });
@@ -340,7 +342,7 @@ describe("linkHistoryRows passes", () => {
     };
 
     const out = await linkHistoryRows([row(1, "see src/a.ts", 20)], BASES, {
-      cache, now: clock.now, platform: "linux",
+      cache, now: clock.now, platform: "linux", context: END_OF_OUTPUT,
     });
 
     expect(linkSpans(out[0]!)).toEqual([]);
@@ -358,7 +360,7 @@ describe("linkHistoryRows passes", () => {
       trust(root);
     };
 
-    await linkHistoryRows([row(1, "see src/a.ts", 20)], BASES, { cache, now: clock.now, platform: "linux" });
+    await linkHistoryRows([row(1, "see src/a.ts", 20)], BASES, { cache, now: clock.now, platform: "linux", context: END_OF_OUTPUT });
 
     expect(trusted).toEqual(["/r"]);
     expect(fs.calls.length).toBeGreaterThan(0);

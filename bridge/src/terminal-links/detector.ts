@@ -30,8 +30,9 @@ export interface DetectRow {
   wrapped: boolean;
   /** Exclusive: 1 + the last non-blank column, 0 for a blank row. */
   endCol: number;
-  /** Per column: the program's own OSC 8 uri. */
-  explicit: (string | undefined)[];
+  /** Per column: the program's own OSC 8 uri. A column past the end has none,
+   *  so a row with no program link may carry an empty list. */
+  explicit: readonly (string | undefined)[];
 }
 
 export interface DetectedSpan {
@@ -55,11 +56,28 @@ export interface DetectResult {
   negatives: Set<string>;
   /** Keys behind every emitted path link. */
   linked: Set<string>;
+  /** Keys whose answer can still change a link already emitted, though no
+   *  claim waits on them: the checkout root, until its real path is known. */
+  refining: Set<string>;
   /** A request was dropped or the new-stat budget ran out. */
   starved: boolean;
 }
 
 type ScanFn = (text: string) => ReturnType<typeof scanLine>;
+
+export interface DetectEdges {
+  /** Rows past the last one exist but were not supplied, so a mention that
+   *  runs to the right edge of the last row may continue on one nobody read.
+   *  Without this the last row of the set is the end of the output. A first
+   *  row that continues the previous one needs no flag: its head is always
+   *  unknown, because nothing before the set is. */
+  tailOpen?: boolean;
+  /** Exclusive: rows from here on were supplied only so a mention that begins
+   *  above them is whole. A line that begins at or past it is never evaluated,
+   *  because nothing it holds is painted and its lookups would come out of the
+   *  budget the painted rows need. */
+  paintedEnd?: number;
+}
 
 /** The end of the run starting at `from` whose characters `stop` lets through. */
 function runEnd(text: string, from: number, stop: (code: number) => boolean): number {
@@ -127,6 +145,9 @@ interface Group {
   options: Option[];
   guard?: Guard;
   evaluated: boolean;
+  /** Left unevaluated because nothing it holds is painted; `emittable` still
+   *  evaluates it if a claim on a painted row is guarded through it. */
+  deferred?: true;
   resolved?: Resolution;
 }
 
@@ -156,21 +177,23 @@ export function detectLinks(
   budget: DetectBudget,
   scan?: ScanFn,
   platform: NodeJS.Platform = process.platform,
+  edges: DetectEdges = {},
 ): DetectResult {
   const result: DetectResult = {
     spans: [],
     pending: new Set(),
     negatives: new Set(),
     linked: new Set(),
+    refining: new Set(),
     starved: false,
   };
   try {
-    run(rows, firstPainted, bases, cache, { ...budget }, scan ?? ((t) => scanLine(t, platform)), platform, result);
+    run(rows, firstPainted, bases, cache, { ...budget }, scan ?? ((t) => scanLine(t, platform)), platform, edges, result);
     return result;
   } catch {
     // Detection is decoration: a throw here must never reach the frame
     // pipeline, which would latch the whole terminal as failed.
-    return { spans: [], pending: new Set(), negatives: new Set(), linked: new Set(), starved: false };
+    return { spans: [], pending: new Set(), negatives: new Set(), linked: new Set(), refining: new Set(), starved: false };
   }
 }
 
@@ -182,6 +205,7 @@ function run(
   budget: DetectBudget,
   scan: ScanFn,
   platform: NodeJS.Platform,
+  edges: DetectEdges,
   result: DetectResult,
 ): void {
   const lines = buildLines(rows);
@@ -195,7 +219,11 @@ function run(
     return row.endCol > 0 && row.endCol >= row.cols - WRAP_EDGE_SLACK;
   };
 
+  // Most screens carry no program link at all, and then no claim needs its
+  // cells read to find out.
+  const anyExplicit = rows.some((row) => row.explicit.length > 0);
   const coversExplicit = (c: Claim): boolean => {
+    if (!anyExplicit) return false;
     for (const seg of c.segs) {
       for (let i = seg.start; i < seg.end; i++) {
         const col = seg.line.colAt[i]!;
@@ -207,8 +235,20 @@ function run(
     }
     return false;
   };
+  /** A mention whose text the rows given cannot vouch for: its head may sit
+   *  on a row before the first (a continuation row has no head here), or its
+   *  tail on one after the last. Linking it would aim at a truncated target. */
+  const cutByEdge = (c: Claim): boolean => {
+    const first = c.segs[0]!;
+    // Only a mention that begins at the very first character can have begun
+    // on the row before: any other one is set off by a character this row holds.
+    if (rows[0]?.wrapped === true && first.line.first === 0 && first.start === 0) return true;
+    if (edges.tailOpen !== true) return false;
+    const last = c.segs[c.segs.length - 1]!;
+    return last.line === lines[lines.length - 1] && last.end >= last.line.trimmedLength && reachesEdge(last.line);
+  };
   const track = (c: Claim): Claim => {
-    if (coversExplicit(c)) c.dead = true;
+    if (coversExplicit(c) || cutByEdge(c)) c.dead = true;
     return c;
   };
   for (const entries of pathClaims) for (const e of entries) track(e.claim);
@@ -432,18 +472,35 @@ function run(
     return r;
   }
 
+  let rootAsked = false;
+  /** The checkout root's own real path decides whether a link found inside it
+   *  escapes, so it is asked for next to the first candidate rather than after
+   *  that one lands. Only a root nothing has answered is asked: its answer is
+   *  a hint that outlives the TTL, and re-stating it would add a stat to every
+   *  expiry for a path that almost never moves. */
+  function askRoot(): void {
+    const root = bases.checkoutRoot;
+    if (rootAsked || root === undefined) return;
+    rootAsked = true;
+    if (cache.peek(root) !== undefined) return;
+    if (cache.request(root) === "dropped") result.starved = true;
+  }
+
   function evalPath(c: Claim): ClaimEval {
     const cands = candidatesFor(c.text!.variants, bases, platform);
     budget.lookups -= cands.length;
+    if (cands.length > 0) askRoot();
     // Every candidate is requested before any is read: a screen that never
     // changes again must not stall behind the first unanswered one, and the
     // requests are also what keep an answer's TTL from lapsing under a link.
-    for (const cand of cands) {
+    const answers = cands.map((cand) => cache.peek(cand.abs));
+    for (let i = 0; i < cands.length; i++) {
+      const cand = cands[i]!;
       // Only a key nothing has answered yet spends the budget. Re-stating a
       // stale one is upkeep that usually changes nothing, and charging for it
       // would let a screenful of old negatives starve the unknown candidates
       // behind them with nothing left to wake the screen.
-      const known = cache.peek(cand.abs) !== undefined;
+      const known = answers[i] !== undefined;
       if (!known && budget.newStats <= 0) {
         result.starved = true;
         continue;
@@ -452,8 +509,9 @@ function run(
       if (outcome === "queued" && !known) budget.newStats--;
       else if (outcome === "dropped") result.starved = true;
     }
-    for (const cand of cands) {
-      const status = cache.peek(cand.abs);
+    for (let i = 0; i < cands.length; i++) {
+      const cand = cands[i]!;
+      const status = answers[i];
       if (status === undefined) {
         result.pending.add(cand.abs);
         return { state: "pending" };
@@ -462,7 +520,17 @@ function run(
         result.negatives.add(cand.abs);
         continue;
       }
-      const kind = classifyPath(cand.abs, status, bases.checkoutRoot, platform);
+      const real = cache.peekReal(cand.abs);
+      const root = bases.checkoutRoot;
+      let realRoot: string | undefined;
+      if (cand.inside && real !== undefined && root !== undefined) {
+        realRoot = cache.peekReal(root);
+        // Until the root answers, containment stays lexical. A path the walk
+        // reached unchanged cannot have crossed a link, so only one that moved
+        // is worth re-framing for when the root's answer arrives.
+        if (realRoot === undefined && real !== cand.abs && cache.peek(root) === undefined) result.refining.add(root);
+      }
+      const kind = classifyPath(cand.abs, status, root, platform, { inside: cand.inside, real, realRoot });
       if (!kind) return { state: "none" };
       const uri = encodePathLink({
         path: cand.text,
@@ -508,15 +576,35 @@ function run(
     if (!g.evaluated) return false;
     const guard = g.guard;
     if (!guard) return true;
-    const res = guard.group.evaluated ? resolve(guard.group) : undefined;
+    const owner = guard.group;
+    // A guard that was skipped as unpainted still decides whether the claim
+    // beneath it may link, so it is read now rather than assumed either way.
+    if (!owner.evaluated && owner.deferred && budget.lookups > 0) evaluateGroup(owner);
+    const res = owner.evaluated ? resolve(owner) : undefined;
     if (!res || res.blocked || res.ownedPieces > guard.piece) return false;
     return emittable(guard.group);
   }
 
+  // Rows before `firstPainted` are read so a mention that reaches into the
+  // painted ones is whole. A path there that no painted row can be joined to
+  // would only spend stats on text nobody sees.
+  let firstPaintedLine = 0;
+  while (firstPaintedLine < lines.length && lines[firstPaintedLine]!.last < firstPainted) firstPaintedLine++;
+  const unpainted = (li: number, g: Group): boolean =>
+    li + MAX_JOINED_PATH_LINES - 1 < firstPaintedLine && g.options.every((o) => o.claims.every((c) => c.kind === "path"));
+  // A claim is only ever guarded by a group on an earlier line, so a line that
+  // begins past the painted rows holds nothing a painted claim depends on.
+  const paintedEnd = edges.paintedEnd ?? Infinity;
+
   // Newest output first, so a screen with more candidates than budget spends
   // it on what the reader is looking at.
   for (let li = lines.length - 1; li >= 0; li--) {
+    if (lines[li]!.first >= paintedEnd) continue;
     for (const g of groupsByLine[li]!) {
+      if (unpainted(li, g)) {
+        g.deferred = true;
+        continue;
+      }
       if (budget.lookups <= 0) {
         result.starved = true;
         break;

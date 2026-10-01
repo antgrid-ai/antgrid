@@ -11,6 +11,10 @@ interface ExtendedCell extends IBufferCell {
   isUnderlineColorRGB(): boolean;
   isUnderlineColorPalette(): boolean;
 }
+/** What a row with no program-authored link carries, so the common row
+ *  allocates nothing for them. */
+const NO_LINKS: readonly (string | undefined)[] = Object.freeze([]) as readonly (string | undefined)[];
+
 interface BufferLineInternals {
   resize(cols: number, fillCellData: unknown): void;
 }
@@ -69,7 +73,15 @@ const patched = new WeakSet<BufferService>();
  * pass the scroll-boundary and native rendering fixtures before qualification. */
 export class XtermFrameAdapter {
   private readonly core: XtermInternals["_core"];
+  private readonly scratchCell: IBufferCell;
+  private readonly padCell: IBufferCell;
+  private colScratch = new Int32Array(0);
+  private styledFg = NaN;
+  private styledBg = NaN;
+  private styled = "";
   constructor(private readonly term: Terminal) {
+    this.scratchCell = term.buffer.active.getNullCell();
+    this.padCell = term.buffer.active.getNullCell();
     this.core = (term as unknown as XtermInternals)._core;
     const buffer = this.core?._bufferService?.buffer;
     const alt = this.core?._bufferService?.buffers?.alt;
@@ -87,8 +99,18 @@ export class XtermFrameAdapter {
     }
   }
 
+  /** One reusable cell for a caller's own walk. It is overwritten by the next
+   *  call, here or in `detectRow`, so nothing may hold on to it. */
+  cellAt(line: IBufferLine, col: number): IBufferCell | undefined {
+    return line.getCell(col, this.scratchCell);
+  }
+
+  /** Read only from a cell that says it has extended attributes: `loadCell`
+   *  leaves a reused cell's previous `extended` in place when the new cell has
+   *  none, which would carry one hyperlink's id onto every cell after it. */
   link(cell: IBufferCell): string | undefined {
-    const id = (cell as ExtendedCell).extended?.urlId;
+    const ext = cell as ExtendedCell;
+    const id = ext.hasExtendedAttrs() ? ext.extended?.urlId : 0;
     const uri = id ? this.core._oscLinkService.getLinkData(id)?.uri : undefined;
     if (!uri || uri.length > 8192 || /[\x00-\x1f\x7f-\x9f]/.test(uri)) return undefined;
     // Only the bridge's detector may mint these: a program writing one would
@@ -98,40 +120,66 @@ export class XtermFrameAdapter {
 
   /**
    * One row in the shape the link detector reads, built in a single cell walk.
-   * `full` keeps the row's trailing blanks, which a row that is followed by a
-   * soft-wrapped continuation needs so the join sees the true edge; the last
-   * row of a logical line is cut at its last visible character instead.
+   * A row that `next` continues by soft wrap keeps its trailing blanks, so the
+   * join sees the true edge; the last row of a logical line is cut at its last
+   * visible character instead.
+   *
+   * When a wide character does not fit at the right edge xterm leaves that last
+   * cell empty and wraps the character to the next row. The empty cell is an
+   * artefact of the wrap, not a blank the program printed, so it is left out of
+   * the text: read as a space it would split a token the program wrote whole.
+   * `endCol` still counts it, because the row did run to the edge.
    */
-  detectRow(line: IBufferLine, cols: number, full: boolean): DetectRow {
+  detectRow(line: IBufferLine, cols: number, next?: IBufferLine): DetectRow {
     const widthAt = new Uint8Array(cols);
-    const explicit: (string | undefined)[] = new Array<string | undefined>(cols).fill(undefined);
-    const colAt: number[] = [];
+    let explicit: (string | undefined)[] | undefined;
+    if (this.colScratch.length < cols * 2) this.colScratch = new Int32Array(cols * 2);
+    let colAt = this.colScratch;
+    let used = 0;
     let text = "";
     let endCol = 0;
     let keep = 0;
-    // A fresh cell per column: xterm's loadCell keeps a reused cell's previous
-    // `extended` attributes when the new cell has none, so a scratch cell would
-    // carry one hyperlink's urlId onto every cell after it.
+    const full = next?.isWrapped === true;
+    const cell = this.scratchCell;
     for (let col = 0; col < cols; col++) {
-      const cell = line.getCell(col);
-      if (!cell) continue;
+      if (!line.getCell(col, cell)) continue;
       const width = cell.getWidth();
       widthAt[col] = width;
       if (!width) continue;
-      const chars = cell.getChars() || " ";
-      for (let u = 0; u < chars.length; u++) colAt.push(col);
-      text += chars;
-      explicit[col] = this.link(cell);
-      if (chars !== " ") {
-        endCol = col + width;
-        keep = text.length;
+      const chars = cell.getChars();
+      if (chars === "" && col === cols - 1 && full && width === 1 && next!.getCell(0, this.padCell)?.getWidth() === 2) {
+        endCol = cols;
+        continue;
       }
+      const length = chars === "" ? 1 : chars.length;
+      if (used + length > colAt.length) {
+        const grown = new Int32Array(colAt.length * 2 + length);
+        grown.set(colAt.subarray(0, used));
+        colAt = grown;
+        this.colScratch = grown;
+      }
+      for (let u = 0; u < length; u++) colAt[used + u] = col;
+      used += length;
+      if (chars === "") {
+        text += " ";
+      } else {
+        text += chars;
+        // A printed space is blank like an erased cell: progress lines and
+        // `%-Ns` tables pad to the edge with them, and counting the pad as
+        // text would make the row look soft-wrapped to the join.
+        if (chars !== " ") {
+          endCol = col + width;
+          keep = text.length;
+        }
+      }
+      const uri = this.link(cell);
+      if (uri !== undefined) (explicit ??= new Array<string | undefined>(cols).fill(undefined))[col] = uri;
     }
     const cut = full ? text.length : keep;
     return {
       text: text.slice(0, cut),
-      colAt: Int32Array.from(colAt.slice(0, cut)),
-      widthAt, cols, wrapped: line.isWrapped, endCol, explicit,
+      colAt: colAt.slice(0, cut),
+      widthAt, cols, wrapped: line.isWrapped, endCol, explicit: explicit ?? NO_LINKS,
     };
   }
 
@@ -167,6 +215,22 @@ export class XtermFrameAdapter {
   }
 
   style(cell: IBufferCell): string {
+    const extended = cell as ExtendedCell;
+    // Neighbouring cells overwhelmingly share one style, and every attribute a
+    // cell without extended attributes has lives in these two words.
+    const { fg, bg } = cell as unknown as { fg?: number; bg?: number };
+    const plain = typeof fg === "number" && typeof bg === "number" && extended.hasExtendedAttrs() === 0;
+    if (plain && fg === this.styledFg && bg === this.styledBg) return this.styled;
+    const text = this.computeStyle(cell);
+    if (plain) {
+      this.styledFg = fg;
+      this.styledBg = bg;
+      this.styled = text;
+    }
+    return text;
+  }
+
+  private computeStyle(cell: IBufferCell): string {
     const extended = cell as ExtendedCell;
     const sgr = ["0"];
     for (const [enabled, code] of [

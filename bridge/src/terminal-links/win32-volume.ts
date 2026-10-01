@@ -1,6 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { logger } from "../logger";
-import { hasDriveLetterAt } from "./chars";
+import { foldAsciiCase, hasDriveLetterAt, isSeparator } from "./chars";
 
 const log = logger.child({ component: "win32-volume" });
 
@@ -53,10 +53,43 @@ function driveIsLocal(letter: string): boolean {
   return local;
 }
 
+function separatorAt(path: string, from: number): number {
+  for (let i = from; i < path.length; i++) if (isSeparator(path[i])) return i;
+  return path.length;
+}
+
+function isPlainName(name: string): boolean {
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x3a) return false;
+  }
+  return true;
+}
+
+/**
+ * The `\\server\share` a UNC path names, as the folded key a trust set holds
+ * and as the length of that prefix in `path`. Undefined for everything else:
+ * the `\\?\` and `\\.\` device namespaces, a name with a colon or a control
+ * character, and a path with no share, none of which is ever a volume to trust.
+ */
+export function uncShareOf(path: string): { key: string; end: number } | undefined {
+  if (!isSeparator(path[0]) || !isSeparator(path[1])) return undefined;
+  const serverEnd = separatorAt(path, 2);
+  const server = path.slice(2, serverEnd);
+  if (server === "" || server === "." || server === "?" || serverEnd >= path.length) return undefined;
+  const shareEnd = separatorAt(path, serverEnd + 1);
+  const share = path.slice(serverEnd + 1, shareEnd);
+  if (share === "" || !isPlainName(server) || !isPlainName(share)) return undefined;
+  // ASCII-only fold: a host name is resolved by DNS/NetBIOS, which keep U+0131
+  // and U+017F apart from `i` and `s`, so a Unicode fold would let a different
+  // server inherit the trusted share's key and be stat'ed.
+  return { key: foldAsciiCase(`\\\\${server}\\${share}`), end: shareEnd };
+}
+
 /**
  * True when `abs`'s volume is a local disk, or is one of `trusted` (drive
- * letters, either case; the checkout root's own volume, where the bridge
- * already works). Always true off Windows.
+ * letters, either case, or a UNC share key from `uncShareOf`; the checkout
+ * root's own volume, where the bridge already works). Always true off Windows.
  *
  * A stat on a mapped network drive, or a `subst` of one, does network I/O with
  * zero clicks, and a dead share pins a filesystem worker until the OS gives up.
@@ -68,7 +101,10 @@ export function isLocalVolume(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (platform !== "win32") return true;
-  if (!hasDriveLetterAt(abs)) return false;
+  if (!hasDriveLetterAt(abs)) {
+    const share = uncShareOf(abs);
+    return share !== undefined && trusted.has(share.key);
+  }
   const letter = abs[0]!.toUpperCase();
   if (trusted.has(letter) || trusted.has(letter.toLowerCase())) return true;
   return driveIsLocal(letter);

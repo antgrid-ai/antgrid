@@ -7,7 +7,7 @@ import {
   type PathStatCacheOptions,
   type PathStatus,
 } from "../src/terminal-links/stat-cache";
-import { isLocalVolume } from "../src/terminal-links/win32-volume";
+import { isLocalVolume, uncShareOf } from "../src/terminal-links/win32-volume";
 import { posix, win32 } from "node:path";
 
 type NodeKind = "file" | "dir" | "link" | "other";
@@ -766,7 +766,7 @@ describe("PathStatCache soft timeout", () => {
     await settle();
     expect(cache.peek("/r/a")).toBeUndefined();
     clock.advance(1);
-    expect(await waiter).toBe("missing");
+    expect(await waiter).toBe("timeout");
     expect(cache.peek("/r/a")).toBe("missing");
     expect(seen).toContainEqual(["/r/a", "missing"]);
 
@@ -793,11 +793,11 @@ describe("PathStatCache soft timeout", () => {
     clock.advance(3_000);
     clock.advance(5_000);
     expect(cache.request("/r/a")).toBe("inflight");
-    expect(await cache.resolveFresh("/r/a", 1000)).toBe("missing");
+    expect(await cache.resolveFresh("/r/a", 1000)).toBe("timeout");
     expect(fs.calls.filter((c) => c.endsWith(":/r/a"))).toEqual(["lstat:/r/a"]);
   });
 
-  it("answers a queued click with missing after the soft timeout instead of hanging", async () => {
+  it("answers a queued click with timeout after the soft timeout instead of hanging", async () => {
     const fs = new FakeFs();
     dirs(fs, "/r");
     for (const n of ["a", "b", "c", "d", "click"]) fs.set(`/r/${n}`, "file");
@@ -809,7 +809,7 @@ describe("PathStatCache soft timeout", () => {
     const click = cache.resolveFresh("/r/click", 1000);
     await settle();
     clock.advance(3_000);
-    expect(await click).toBe("missing");
+    expect(await click).toBe("timeout");
   });
 
   it("honours a custom soft timeout", async () => {
@@ -822,7 +822,7 @@ describe("PathStatCache soft timeout", () => {
     const waiter = cache.resolveFresh("/r/a", 1000);
     await settle();
     clock.advance(100);
-    expect(await waiter).toBe("missing");
+    expect(await waiter).toBe("timeout");
   });
 });
 
@@ -1001,5 +1001,284 @@ describe("isLocalVolume", () => {
 describe("sharedPathStatCache", () => {
   it("returns one instance", () => {
     expect(sharedPathStatCache()).toBe(sharedPathStatCache());
+  });
+});
+
+describe("PathStatCache timed-out lookups", () => {
+  it("does not let a timeout stand in for a negative answer to a later click", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "/r");
+    fs.set("/r/a", "file");
+    fs.hold("/r/a");
+    const clock = new Clock();
+    const cache = makeCache(fs, clock);
+
+    const first = cache.resolveFresh("/r/a", 1000);
+    await settle();
+    clock.advance(3_000);
+    expect(await first).toBe("timeout");
+    // Detection still gets its negative so a screen stops waiting on the share.
+    expect(cache.peek("/r/a")).toBe("missing");
+
+    // That placeholder says nothing about the path, so a second click inside its
+    // lifetime must not be answered from it.
+    const second = cache.resolveFresh("/r/a", 60_000);
+    await settle();
+    clock.advance(3_000);
+    expect(await second).toBe("timeout");
+
+    fs.release("/r/a");
+    await settle();
+    expect(await cache.resolveFresh("/r/a", 1000)).toBe("file");
+  });
+
+  it("does not report a timeout for a path that really is missing", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "/r");
+    const cache = makeCache(fs, new Clock());
+    expect(await cache.resolveFresh("/r/none", 1000)).toBe("missing");
+    expect(await cache.resolveFresh("/r/none", 1000)).toBe("missing");
+  });
+
+  it("records nothing for a click that timed out before its stat started", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "/r");
+    for (const n of ["a", "b", "c", "d", "click"]) fs.set(`/r/${n}`, "file");
+    for (const n of ["a", "b", "c", "d"]) fs.hold(`/r/${n}`);
+    const clock = new Clock();
+    const cache = makeCache(fs, clock);
+    for (const n of ["a", "b", "c", "d"]) cache.request(`/r/${n}`);
+    await settle();
+    const click = cache.resolveFresh("/r/click", 1000);
+    await settle();
+    clock.advance(3_000);
+    expect(await click).toBe("timeout");
+    expect(cache.peek("/r/click")).toBeUndefined();
+
+    for (const n of ["a", "b", "c", "d"]) fs.release(`/r/${n}`);
+    await settle();
+    expect(await cache.resolveFresh("/r/click", 1000)).toBe("file");
+  });
+});
+
+describe("PathStatCache real paths", () => {
+  function osCache(fs: OsFs): PathStatCache {
+    return new PathStatCache({ fs, platform: "darwin" });
+  }
+
+  it("reports the directory entry a walk through links reached", async () => {
+    const fs = new OsFs().file("/outside/a.png").link("/repo/ln", "/outside").file("/repo/b.ts");
+    const cache = osCache(fs);
+
+    expect(await cache.resolveReal("/repo/ln/a.png", 1000)).toEqual({ status: "file", real: "/outside/a.png" });
+    expect(await cache.resolveReal("/repo/ln", 1000)).toEqual({ status: "dir", real: "/outside" });
+    expect(await cache.resolveReal("/repo/b.ts", 1000)).toEqual({ status: "file", real: "/repo/b.ts" });
+    expect(cache.peekReal("/repo/ln/a.png")).toBe("/outside/a.png");
+  });
+
+  it("follows a root that is itself reached through a link", async () => {
+    const fs = new OsFs().file("/private/tmp/proj/a.ts").link("/tmp", "/private/tmp");
+    const cache = osCache(fs);
+
+    expect((await cache.resolveReal("/tmp/proj/a.ts", 1000)).real).toBe("/private/tmp/proj/a.ts");
+    expect((await cache.resolveReal("/tmp/proj", 1000)).real).toBe("/private/tmp/proj");
+  });
+
+  it("has no real path for a missing or refused path", async () => {
+    const fs = new OsFs().dir("/repo").link("/repo/n", "/net");
+    const cache = osCache(fs);
+
+    expect(await cache.resolveReal("/repo/none", 1000)).toEqual({ status: "missing" });
+    expect(await cache.resolveReal("/repo/n/x", 1000)).toEqual({ status: "refused" });
+    expect(cache.peekReal("/repo/none")).toBeUndefined();
+  });
+});
+
+describe("PathStatCache link targets that are bare roots", () => {
+  it("refuses a printed link whose own target is an autofs root, without touching the mount", async () => {
+    for (const target of ["/net", "/Network", "/NET"]) {
+      const fs = new OsFs().link("/repo/n", target).file(`${target}/evil/x.png`);
+      const cache = new PathStatCache({ fs, platform: "darwin" });
+
+      expect(await cache.resolveFresh("/repo/n", 1000)).toBe("refused");
+      expect(fs.touched.filter((p) => /^\/(net|network)(\/|$)/i.test(p))).toEqual([]);
+    }
+  });
+
+  it("refuses a printed link whose target is the bare root of a non-local drive", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "C:\\proj", "Z:\\");
+    fs.set("C:\\proj\\share", "link", "Z:\\");
+    const cache = makeCache(fs, new Clock(), {
+      platform: "win32",
+      isLocalVolume: (abs) => !abs.toUpperCase().startsWith("Z:"),
+    });
+
+    expect(await cache.resolveFresh("C:\\proj\\share", 1000)).toBe("refused");
+    expect(await cache.resolveFresh("C:\\proj\\share\\a.png", 1000)).toBe("refused");
+    expect(fs.paths.some((p) => p.toUpperCase().startsWith("Z:"))).toBe(false);
+  });
+
+  it("still follows a link to the bare root of a local drive", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "C:\\proj", "D:\\");
+    fs.set("C:\\proj\\data", "link", "D:\\");
+    const cache = makeCache(fs, new Clock(), { platform: "win32", isLocalVolume: () => true });
+
+    expect(await cache.resolveFresh("C:\\proj\\data", 1000)).toBe("dir");
+  });
+});
+
+describe("PathStatCache with a UNC checkout root", () => {
+  const ROOT = "\\\\srv\\share\\proj";
+  const A_TS = "\\\\srv\\share\\proj\\src\\a.ts";
+
+  function uncFs(): FakeFs {
+    const fs = new FakeFs();
+    dirs(fs, "\\\\srv\\share\\proj", "\\\\srv\\share\\proj\\src", "\\\\srv\\share\\other");
+    fs.set(A_TS, "file");
+    fs.set("\\\\srv\\share\\other\\b.ts", "file");
+    return fs;
+  }
+
+  // No injected volume check: the real rule must accept the trusted share.
+  function uncCache(fs: FakeFs, trust: string | null = ROOT): PathStatCache {
+    const cache = makeCache(fs, new Clock(), { platform: "win32" });
+    if (trust !== null) cache.trustVolume(trust);
+    return cache;
+  }
+
+  it("answers files and directories under the root's own share", async () => {
+    const cache = uncCache(uncFs());
+
+    expect(await cache.resolveReal(A_TS, 1000)).toEqual({ status: "file", real: A_TS });
+    expect(await cache.resolveFresh("\\\\srv\\share\\proj\\src", 1000)).toBe("dir");
+    expect(await cache.resolveFresh("\\\\srv\\share\\other\\b.ts", 1000)).toBe("file");
+    expect(await cache.resolveFresh("\\\\srv\\share\\proj\\none.ts", 1000)).toBe("missing");
+  });
+
+  it("matches the share without regard to case or slash direction", async () => {
+    const fs = uncFs();
+    const cache = uncCache(fs, "//SRV/Share/proj");
+
+    expect(await cache.resolveFresh(A_TS, 1000)).toBe("file");
+    expect(await cache.resolveFresh(A_TS.replace("\\\\srv\\", "\\\\SRV\\"), 1000)).not.toBe("refused");
+  });
+
+  it("refuses every other share and server, and an untrusted root, with no filesystem call", async () => {
+    const fs = uncFs();
+    fs.set("\\\\evil\\share\\a.png", "file");
+    const cache = uncCache(fs);
+
+    for (const path of [
+      "\\\\evil\\share\\a.png",
+      "\\\\srv2\\share\\proj\\src\\a.ts",
+      "\\\\?\\UNC\\srv\\share\\proj\\src\\a.ts",
+      "\\\\.\\pipe\\x",
+    ]) {
+      expect(await cache.resolveFresh(path, 1000)).toBe("refused");
+    }
+    expect(await uncCache(fs, null).resolveFresh(A_TS, 1000)).toBe("refused");
+    expect(fs.count()).toBe(0);
+  });
+
+  it("refuses a server or share that only a Unicode case fold would equate", async () => {
+    const fs = new FakeFs();
+    for (const raw of [
+      "\\\\fıleserver\\share\\proj\\x.ts",
+      "\\\\fileſerver\\ſhare\\proj\\x.ts",
+      "\\\\FILESERVER\\µ\\proj\\x.ts",
+    ]) {
+      fs.set(raw, "file");
+    }
+    const cache = uncCache(fs, "\\\\fileserver\\share\\proj");
+    const micro = uncCache(fs, "\\\\fileserver\\Μ\\proj");
+
+    expect(await cache.resolveFresh("\\\\fıleserver\\share\\proj\\x.ts", 1000)).toBe("refused");
+    expect(await cache.resolveFresh("\\\\fileſerver\\ſhare\\proj\\x.ts", 1000)).toBe("refused");
+    expect(await micro.resolveFresh("\\\\FILESERVER\\µ\\proj\\x.ts", 1000)).toBe("refused");
+    expect(fs.count()).toBe(0);
+  });
+
+  it("compares a non-ASCII server name exactly, so only ASCII letters fold", () => {
+    const key = uncShareOf("\\\\srvé\\share")!.key;
+    expect(isLocalVolume("\\\\srvé\\SHARE\\x", new Set([key]), "win32")).toBe(true);
+    expect(isLocalVolume("\\\\SRVé\\share\\x", new Set([key]), "win32")).toBe(true);
+    expect(isLocalVolume("\\\\srvÉ\\share\\x", new Set([key]), "win32")).toBe(false);
+  });
+
+  it("refuses another share on the same server", async () => {
+    const fs = uncFs();
+    fs.set("\\\\srv\\admin\\b.ts", "file");
+    expect(await uncCache(fs).resolveFresh("\\\\srv\\admin\\b.ts", 1000)).toBe("refused");
+    expect(fs.count()).toBe(0);
+  });
+
+  it("does not trust a device-namespace root", async () => {
+    const fs = new FakeFs();
+    fs.set("\\\\?\\C:\\proj\\a.ts", "file");
+    const cache = uncCache(fs, "\\\\?\\C:\\proj");
+
+    expect(await cache.resolveFresh("\\\\?\\C:\\proj\\a.ts", 1000)).toBe("refused");
+    expect(fs.count()).toBe(0);
+  });
+
+  it("still refuses a colon or a control character past the share", async () => {
+    const fs = uncFs();
+    const cache = uncCache(fs);
+
+    for (const path of [`${A_TS}:stream`, "\\\\srv\\share\\proj\\a\u0001b"]) {
+      expect(await cache.resolveFresh(path, 1000)).toBe("refused");
+    }
+    expect(fs.count()).toBe(0);
+  });
+
+  it("follows links that stay on the share and refuses ones that leave it", async () => {
+    const fs = uncFs();
+    fs.set("\\\\srv\\share\\proj\\abs", "link", "\\\\srv\\share\\proj\\src");
+    fs.set("\\\\srv\\share\\proj\\rooted", "link", "\\proj\\src");
+    fs.set("\\\\srv\\share\\proj\\relative", "link", "src");
+    fs.set("\\\\srv\\share\\proj\\away", "link", "\\\\evil\\share\\x");
+    fs.set("\\\\evil\\share\\x", "dir");
+    const cache = uncCache(fs);
+
+    for (const via of ["abs", "rooted", "relative"]) {
+      expect(await cache.resolveReal(`\\\\srv\\share\\proj\\${via}\\a.ts`, 1000)).toEqual({ status: "file", real: A_TS });
+    }
+    expect(await cache.resolveFresh("\\\\srv\\share\\proj\\away", 1000)).toBe("refused");
+    expect(await cache.resolveFresh("\\\\srv\\share\\proj\\away\\y", 1000)).toBe("refused");
+    expect(fs.paths.some((p) => p.startsWith("\\\\evil"))).toBe(false);
+  });
+
+  it("still trusts a drive root as a whole", async () => {
+    const fs = new FakeFs();
+    dirs(fs, "Y:\\proj");
+    fs.set("Y:\\proj\\a.ts", "file");
+    const cache = makeCache(fs, new Clock(), { platform: "win32" });
+    cache.trustVolume("y:\\proj");
+    expect(await cache.resolveFresh("Y:\\proj\\a.ts", 1000)).toBe("file");
+  });
+});
+
+describe("isLocalVolume with a trusted share", () => {
+  const key = uncShareOf("\\\\srv\\share\\proj")!.key;
+
+  it("accepts a path under the trusted share and no other", () => {
+    expect(isLocalVolume("\\\\srv\\share\\proj\\a", new Set([key]), "win32")).toBe(true);
+    expect(isLocalVolume("//SRV/SHARE/x", new Set([key]), "win32")).toBe(true);
+    expect(isLocalVolume("\\\\srv\\other\\a", new Set([key]), "win32")).toBe(false);
+    expect(isLocalVolume("\\\\srv2\\share\\a", new Set([key]), "win32")).toBe(false);
+    expect(isLocalVolume("\\\\srv\\share\\a", new Set(["C"]), "win32")).toBe(false);
+  });
+
+  it("never names a device namespace or a name with a colon as a volume", () => {
+    expect(uncShareOf("\\\\?\\C:\\x")).toBeUndefined();
+    expect(uncShareOf("\\\\.\\pipe\\x")).toBeUndefined();
+    expect(uncShareOf("\\\\srv\\sh:are\\x")).toBeUndefined();
+    expect(uncShareOf("\\\\srv")).toBeUndefined();
+    expect(uncShareOf("\\\\srv\\")).toBeUndefined();
+    expect(uncShareOf("C:\\x")).toBeUndefined();
+    expect(uncShareOf("\\\\srv\\share")?.end).toBe("\\\\srv\\share".length);
+    expect(uncShareOf("\\\\srv\\share\\x")?.end).toBe("\\\\srv\\share".length);
   });
 });

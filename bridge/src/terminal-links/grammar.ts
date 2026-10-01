@@ -152,6 +152,7 @@ export function scanLine(
   const masked = urls.length > 0 ? maskRanges(text, urls) : text;
   scanTokens(masked, (tokenStart, tokenEnd) => {
     if (tokenEnd - tokenStart > MAX_TOKEN_CHARS) return;
+    if (!hasPathMark(masked, tokenStart, tokenEnd)) return;
     const followedByParen = masked.charCodeAt(tokenEnd) === 0x28;
 
     let token = trimTrailingPunct(masked.slice(tokenStart, tokenEnd));
@@ -217,6 +218,20 @@ function scanQuoted(text: string, kind: QuoteKind, found: (start: number, end: n
       i = k;
     }
   }
+}
+
+/** Whether `text[start, end)` holds a separator or a dot. `plausiblePath`
+ *  accepts a name only with one of them (a separator, or the dot of an
+ *  extension), and a position suffix or an assignment prefix only shortens the
+ *  token, so a token with none can never be a path. Almost every word of
+ *  ordinary output is such a token, and one pass here spares it the several the
+ *  full check makes. */
+function hasPathMark(text: string, start: number, end: number): boolean {
+  for (let i = start; i < end; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x2e || code === 0x2f || code === 0x5c) return true;
+  }
+  return false;
 }
 
 /** Calls `found` with each unquoted token: a run of non-stop characters, plus

@@ -17,7 +17,23 @@ const MAX_SPANS_PER_ROW = 1000;
 /** Room kept under the page cap for the page envelope the rows travel in. */
 const PAGE_HEADROOM_BYTES = 1024;
 
+type ContextRow = Omit<TerminalHistoryRow, "rowId">;
+
+/** The output on either side of a page. Detection reads it so a mention that
+ *  crosses the page's edge is judged whole, but never paints it. */
+export interface HistoryContext {
+  /** Oldest first, ending where the page begins. */
+  before: readonly ContextRow[];
+  /** Oldest first, starting where the page ends. */
+  after: readonly ContextRow[];
+  /** `after` runs to the end of the output, so nothing continues past its last
+   *  row. Without it a mention that reaches the right edge of that row is
+   *  unlinked: its continuation is unknown. */
+  afterComplete: boolean;
+}
+
 export interface HistoryLinkOptions {
+  context?: HistoryContext;
   cache?: PathStatCache;
   budgetMs?: number;
   now?: () => number;
@@ -32,6 +48,12 @@ export interface HistoryLinkOptions {
  * neighbours (a path joined across a hard wrap needs both rows) and there is
  * time to wait on a stat. Archived rows never carry detected links themselves:
  * they would go stale, and a restored copy would replay them as program-authored.
+ *
+ * A page is cut at an arbitrary row, so a line that wraps across the cut would
+ * otherwise be linked as two unrelated fragments, each aimed at the wrong
+ * target. `opts.context` supplies the rows around it. A row the page begins
+ * with that continues the one before it, and a mention running to the right
+ * edge of the last row, are left unlinked when the context does not settle them.
  *
  * Never rejects. Whatever fails, the caller still gets the page, with at
  * least the program-authored `antgrid-*` links removed.
@@ -52,7 +74,7 @@ export async function linkHistoryRows(
 
 /** Only the bridge's own detector may mint these; a stored one was written by
  *  a program (or by an older bridge) and must not borrow the detected route. */
-function stripProgramLinks(rows: TerminalHistoryRow[]): TerminalHistoryRow[] {
+function stripProgramLinks<R extends ContextRow>(rows: R[]): R[] {
   return rows.map((row) => {
     if (!row.spans.some((s) => s.uri !== undefined && isAntgridLinkUri(s.uri))) return row;
     return {
@@ -77,17 +99,27 @@ async function link(
   // A page can be served before any live terminal has registered this volume.
   cache.trustVolume(normalized.checkoutRoot);
 
-  const detectRows = rows.map((row, i) => toDetectRow(row, rows[i + 1]?.wrapped !== true));
+  const context = opts.context;
+  const before = context ? stripProgramLinks(context.before as TerminalHistoryRow[]) : [];
+  const after = context ? stripProgramLinks(context.after as TerminalHistoryRow[]) : [];
+  const all = [...before, ...rows, ...after];
+  const detectRows = all.map((row, i) => toDetectRow(row, all[i + 1]?.wrapped !== true));
+  const painted = before.length;
+  const pageEnd = painted + rows.length;
+  const edges = { tailOpen: context?.afterComplete !== true, paintedEnd: pageEnd };
   let spans: DetectedSpan[] = [];
   for (let pass = 0; pass < MAX_PASSES; pass++) {
-    const result = detectLinks(detectRows, 0, normalized, cache, { ...HISTORY_BUDGET }, undefined, platform);
-    spans = result.spans;
-    if (result.pending.size === 0) break;
+    const result = detectLinks(detectRows, painted, normalized, cache, { ...HISTORY_BUDGET }, undefined, platform, edges);
+    spans = result.spans.filter((s) => s.row < pageEnd).map((s) => ({ ...s, row: s.row - painted }));
+    // The root's own answer can still change a link found, as a stat a claim
+    // waits on can.
+    const awaited = [...result.pending, ...result.refining];
+    if (awaited.length === 0) break;
     const remaining = budgetMs - (now() - started);
     // A prefetch after the last pass would delay the reply for answers nothing
     // reads.
     if (remaining <= 0 || pass === MAX_PASSES - 1) break;
-    await cache.prefetch([...result.pending], remaining);
+    await cache.prefetch(awaited, remaining);
   }
   return spans.length === 0 ? rows : applySpans(rows, spans);
 }
@@ -101,7 +133,7 @@ function piece(span: TerminalHistorySpan, text: string, cells: number, uri?: str
  * Any other span holds a wide or combining character, whose column cannot be
  * recovered from the text alone, so nothing inside it may be linked.
  */
-function toDetectRow(row: TerminalHistoryRow, lastOfLine: boolean): DetectRow {
+function toDetectRow(row: ContextRow, lastOfLine: boolean): DetectRow {
   const cols = row.cols;
   const widthAt = new Uint8Array(cols).fill(1);
   const explicit: (string | undefined)[] = new Array<string | undefined>(cols).fill(undefined);

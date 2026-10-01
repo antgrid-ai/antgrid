@@ -2083,17 +2083,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "file:resolve-path": {
         // A request this case will not resolve still gets an answer: the app
         // waits on the requestId, and silence reads there as an unreachable
-        // machine after its timeout.
-        const answerUnresolved = (): void => {
+        // machine after its timeout. `busy` marks a request turned away
+        // unexamined, which is not evidence that the path is absent.
+        const answerUnresolved = (busy: boolean): void => {
           sendAbToItsChannel(createMessage("file:resolve-path-result", {
             projectId: msg.projectId, requestId: msg.requestId, relPath: null, isDirectory: false,
-            externalImagePath: null, exists: false, checkoutId: runtime.checkout.id,
+            externalImagePath: null, exists: false, ...(busy ? { timedOut: true } : {}),
+            checkoutId: runtime.checkout.id,
           }), client);
         };
         const fw = runtime.fileWatcher;
         if (!fw) {
           log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
-          answerUnresolved();
+          answerUnresolved(false);
           break;
         }
         const pending = resolveInFlight.get(client) ?? 0;
@@ -2103,7 +2105,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             resolveDroppedWarnAt = now;
             log.warn("file:resolve-path dropped: client already has %d in flight", pending);
           }
-          answerUnresolved();
+          answerUnresolved(true);
           break;
         }
         // `parseMessageFast` checked the type and nothing else.
@@ -2762,7 +2764,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!page) break;
         // A dead run's rows resolve against the checkout alone: its own cwds
         // went with it, and the live terminal's belong to a different run.
-        const bases: LinkBases = manager.runId(internalId) === msg.runId
+        const liveRun = manager.runId(internalId) === msg.runId;
+        const bases: LinkBases = liveRun
           ? { ...manager.linkBases(internalId), checkoutRoot: owner.checkout.path }
           : { checkoutRoot: owner.checkout.path };
         // The page is the only point where every archived row is reachable with
@@ -2773,7 +2776,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // one request's own `beforeRowId` cursor into scrollback the requester
         // may already partly hold, so the wire it did not arrive on has no use
         // for it and must not be charged for it, including sibling relay apps.
-        void linkHistoryRows(page.rows, bases)
+        void linkHistoryRows(page.rows, bases, {
+          context: manager.historyContext(msg.runId, page, liveRun ? internalId : undefined),
+        })
           .catch(() => page.rows)
           .then((rows) => sendAbToItsChannel(createMessage("terminal:history:page", {
             checkoutId,

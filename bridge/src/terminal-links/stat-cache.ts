@@ -1,10 +1,22 @@
 import { lstat, readlink, stat } from "node:fs/promises";
 import { posix, win32 } from "node:path";
-import { hasDriveLetterAt, startsWithIgnoreCase } from "./chars";
+import { hasDriveLetterAt, isSeparator, startsWithIgnoreCase } from "./chars";
 import { isRefusedPathShape } from "./grammar";
-import { isLocalVolume as defaultIsLocalVolume } from "./win32-volume";
+import { isLocalVolume as defaultIsLocalVolume, uncShareOf } from "./win32-volume";
 
 export type PathStatus = "file" | "dir" | "missing" | "refused";
+
+/** What a click is told. `timeout` is not an answer about the path: the stat is
+ *  still running, so the file may well exist. */
+export type ResolveAnswer = PathStatus | "timeout";
+
+export interface ResolvedPath {
+  status: ResolveAnswer;
+  /** The directory entry the walk actually reached, links expanded; set only
+   *  for a `file` or `dir`. Containment is judged on this, not on the printed
+   *  path, because a link inside a checkout can lead anywhere. */
+  real?: string;
+}
 
 export interface LinkFsStats {
   isFile(): boolean;
@@ -55,6 +67,19 @@ function isAutofsRoot(path: string): boolean {
   return false;
 }
 
+/** Non-empty components of `text`; `\` separates only on Windows, where a
+ *  POSIX name may legitimately contain it. */
+function splitComponents(text: string, win: boolean): string[] {
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && !(text[i] === "/" || (win && text[i] === "\\"))) continue;
+    if (i > start) out.push(text.slice(start, i));
+    start = i + 1;
+  }
+  return out;
+}
+
 const defaultFs: LinkFs = { lstat, stat, readlink };
 
 const defaultTimer = (fn: () => void, ms: number): { cancel(): void } => {
@@ -66,6 +91,11 @@ const defaultTimer = (fn: () => void, ms: number): { cancel(): void } => {
 interface Entry {
   status: PathStatus;
   at: number;
+  real?: string;
+  /** Written when the soft deadline passed, not when the stat answered. It frees
+   *  detection's waiters but says nothing about the path, so a click must not
+   *  take it as an answer. */
+  timedOut?: boolean;
 }
 
 type Component = { kind: "missing" } | { kind: "plain" } | { kind: "link"; target: string };
@@ -81,8 +111,8 @@ interface Job {
   priority: boolean;
   timer?: { cancel(): void };
   timedOut: boolean;
-  settle: (status: PathStatus) => void;
-  promise: Promise<PathStatus>;
+  settle: (result: ResolvedPath) => void;
+  promise: Promise<ResolvedPath>;
 }
 
 /**
@@ -139,10 +169,17 @@ export class PathStatCache {
     this.softTimeoutMs = opts.softTimeoutMs ?? 3_000;
   }
 
-  /** Marks the checkout root's drive as allowed even when it is remote: the
-   *  bridge already works there, so refusing it would unlink the whole tree. */
+  /** Marks the checkout root's volume as allowed even when it is remote: the
+   *  bridge already works there, so refusing it would unlink the whole tree.
+   *  A drive is trusted whole; a UNC root trusts its own share and no other. */
   trustVolume(root: string): void {
-    if (hasDriveLetterAt(root)) this.trusted.add(root[0]!.toUpperCase());
+    if (hasDriveLetterAt(root)) {
+      this.trusted.add(root[0]!.toUpperCase());
+      return;
+    }
+    if (this.platform !== "win32") return;
+    const share = uncShareOf(root);
+    if (share !== undefined) this.trusted.add(share.key);
   }
 
   /** Stale included: a lookup that is merely old still answers, and `request`
@@ -154,6 +191,15 @@ export class PathStatCache {
       this.entries.delete(abs);
       this.entries.set(abs, entry);
       return entry.status;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The real path of the last answer for `abs`, whatever its age. */
+  peekReal(abs: string): string | undefined {
+    try {
+      return this.entries.get(abs)?.real;
     } catch {
       return undefined;
     }
@@ -178,10 +224,17 @@ export class PathStatCache {
 
   /** Jumps the queue but still respects `maxInFlight`, and ignores `maxQueued`:
    *  a click is bounded by its caller's own in-flight cap instead. */
-  async resolveFresh(abs: string, maxAgeMs: number): Promise<PathStatus> {
+  async resolveFresh(abs: string, maxAgeMs: number): Promise<ResolveAnswer> {
+    return (await this.resolveReal(abs, maxAgeMs)).status;
+  }
+
+  /** `resolveFresh` plus the real path the answer was found at. A stat that
+   *  outlives the soft deadline answers `timeout`, never `missing`: the file
+   *  may exist and the caller must be able to say it does not know. */
+  async resolveReal(abs: string, maxAgeMs: number): Promise<ResolvedPath> {
     try {
       const entry = this.entries.get(abs);
-      if (entry && this.isFresh(entry, maxAgeMs)) return entry.status;
+      if (entry && !entry.timedOut && this.isFresh(entry, maxAgeMs)) return { status: entry.status, real: entry.real };
       let job = this.jobs.get(abs);
       if (!job) {
         job = this.enqueue(abs, true);
@@ -192,9 +245,9 @@ export class PathStatCache {
         this.priorityQueue.push(job);
       }
       this.pump();
-      return await this.race(job.promise, this.softTimeoutMs);
+      return await this.race(job.promise, this.softTimeoutMs, { status: "timeout" });
     } catch {
-      return "missing";
+      return { status: "missing" };
     }
   }
 
@@ -209,7 +262,7 @@ export class PathStatCache {
         if (job) waits.push(job.promise);
       }
       if (waits.length === 0) return;
-      await this.race(Promise.all(waits), budgetMs);
+      await this.race(Promise.all(waits), budgetMs, undefined);
     } catch {
       // Prefetch only warms the cache; the caller proceeds with what it has.
     }
@@ -229,9 +282,9 @@ export class PathStatCache {
     };
   }
 
-  private race<T>(promise: Promise<T>, ms: number): Promise<T | "missing"> {
+  private race<T, L>(promise: Promise<T>, ms: number, onLate: L): Promise<T | L> {
     return new Promise((resolve) => {
-      const handle = this.timer(() => resolve("missing"), ms);
+      const handle = this.timer(() => resolve(onLate), ms);
       promise.then(
         (value) => {
           handle.cancel();
@@ -239,7 +292,7 @@ export class PathStatCache {
         },
         () => {
           handle.cancel();
-          resolve("missing");
+          resolve(onLate);
         },
       );
     });
@@ -254,8 +307,8 @@ export class PathStatCache {
   }
 
   private enqueue(key: string, priority: boolean): Job {
-    let settle!: (status: PathStatus) => void;
-    const promise = new Promise<PathStatus>((resolve) => {
+    let settle!: (result: ResolvedPath) => void;
+    const promise = new Promise<ResolvedPath>((resolve) => {
       settle = resolve;
     });
     const job: Job = { key, state: "queued", priority, timedOut: false, settle, promise };
@@ -287,30 +340,37 @@ export class PathStatCache {
     this.running++;
     job.timer = this.timer(() => this.timeOut(job), this.softTimeoutMs);
     this.vetAndStat(job.key).then(
-      (status) => this.finish(job, status),
-      () => this.finish(job, "missing"),
+      (result) => this.finish(job, result),
+      () => this.finish(job, { status: "missing" }),
     );
   }
 
+  /** Detection's waiters get a negative so a screen stops waiting on a hung
+   *  share; a click is told `timeout` instead, which is the honest answer. */
   private timeOut(job: Job): void {
     job.timedOut = true;
-    this.commit(job.key, "missing");
-    job.settle("missing");
+    this.commit(job.key, "missing", undefined, true);
+    job.settle({ status: "timeout" });
   }
 
-  private finish(job: Job, status: PathStatus): void {
+  private finish(job: Job, result: { status: PathStatus; real?: string }): void {
     job.timer?.cancel();
     this.running--;
     if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
-    this.commit(job.key, status);
-    job.settle(status);
+    this.commit(job.key, result.status, result.real);
+    job.settle(result);
     this.pump();
   }
 
-  private commit(key: string, status: PathStatus): void {
+  private commit(key: string, status: PathStatus, real?: string, timedOut?: boolean): void {
     const previous = this.entries.get(key)?.status;
     this.entries.delete(key);
-    this.entries.set(key, { status, at: this.now() });
+    this.entries.set(key, {
+      status,
+      at: this.now(),
+      ...(real !== undefined ? { real } : {}),
+      ...(timedOut ? { timedOut } : {}),
+    });
     this.evict(this.entries, this.maxEntries);
     if (previous === status) return;
     for (const listener of [...this.changeListeners]) {
@@ -330,12 +390,25 @@ export class PathStatCache {
     }
   }
 
+  /** `isRefusedPathShape`, except that the share a UNC checkout root lives on
+   *  is the root's own volume: the bridge already works there, so only what
+   *  follows the share is judged. Any other UNC path keeps the refusal. */
+  private shapeRefused(path: string): boolean {
+    if (this.platform === "win32") {
+      const share = uncShareOf(path);
+      if (share !== undefined && this.trusted.has(share.key)) {
+        return isRefusedPathShape(path.slice(share.end), this.platform);
+      }
+    }
+    return isRefusedPathShape(path, this.platform);
+  }
+
   /** True for a path the OS must never be asked about: a shape that opens a
    *  network session, a non-local volume, or an autofs root. Applied to every
    *  directory the walk below actually stands in, not only the printed path,
    *  because a link can lead anywhere. */
   private refusesReal(path: string): boolean {
-    if (isRefusedPathShape(path, this.platform)) return true;
+    if (this.shapeRefused(path)) return true;
     // An autofs mount contacts the host named in the path, with no click. The
     // default macOS volume ignores case, so `/NET` reaches the same mount.
     if (this.platform === "win32") return !this.localVolume(path);
@@ -346,61 +419,68 @@ export class PathStatCache {
    *  `real` as the directory actually reached. Resolving a link's `..` or a
    *  later component against the printed path instead would vet one tree while
    *  the final stat lands in another. */
-  private async vetAndStat(abs: string): Promise<PathStatus> {
-    if (this.refusesReal(abs)) return "refused";
+  private async vetAndStat(abs: string): Promise<{ status: PathStatus; real?: string }> {
+    if (this.refusesReal(abs)) return { status: "refused" };
 
     const win = this.platform === "win32";
     const pathApi = win ? win32 : posix;
-    const split = (text: string): string[] => text.split(win ? /[\\/]+/ : /\/+/).filter(Boolean);
+    const split = (text: string): string[] => splitComponents(text, win);
     const root = pathApi.parse(abs).root;
-    if (root === "") return "refused";
+    if (root === "") return { status: "refused" };
     const parts = split(abs.slice(root.length));
     // Candidates arrive resolved; a dot segment here would let a link be
     // walked around instead of through.
-    if (parts.some((p) => p === "." || p === "..")) return "refused";
+    if (parts.some((p) => p === "." || p === "..")) return { status: "refused" };
 
     let real = root;
     let followed = 0;
     for (let steps = 0; parts.length > 0; steps++) {
       // Every link adds components, so the walk is bounded by its total length
       // as well as by the number of links.
-      if (steps >= MAX_WALK_STEPS) return "refused";
+      if (steps >= MAX_WALK_STEPS) return { status: "refused" };
       const part = parts.shift()!;
       if (part === ".") continue;
       if (part === "..") {
         real = pathApi.dirname(real);
-        if (this.refusesReal(real)) return "refused";
+        if (this.refusesReal(real)) return { status: "refused" };
         continue;
       }
       const candidate = real.endsWith(pathApi.sep) ? real + part : real + pathApi.sep + part;
-      if (this.refusesReal(candidate)) return "refused";
+      if (this.refusesReal(candidate)) return { status: "refused" };
       const component = await this.component(candidate);
-      if (component.kind === "missing") return "missing";
+      if (component.kind === "missing") return { status: "missing" };
       if (component.kind === "plain") {
         real = candidate;
         continue;
       }
 
-      if (++followed > MAX_LINKS_PER_CHECK) return "refused";
+      if (++followed > MAX_LINKS_PER_CHECK) return { status: "refused" };
       const target = component.target;
-      if (isRefusedPathShape(target, this.platform)) return "refused";
+      if (this.shapeRefused(target)) return { status: "refused" };
       const targetRoot = pathApi.parse(target).root;
       if (targetRoot !== "") {
-        // A rooted target without a drive keeps the drive it was found on.
-        real = win && !hasDriveLetterAt(targetRoot) ? pathApi.parse(real).root.slice(0, 2) + targetRoot : targetRoot;
-        if (this.refusesReal(real)) return "refused";
+        real = win ? this.windowsTargetRoot(real, targetRoot) : targetRoot;
+        if (this.refusesReal(real)) return { status: "refused" };
       }
       parts.unshift(...split(target.slice(targetRoot.length)));
     }
 
     try {
       const final = await this.fs.stat(real);
-      if (final.isFile()) return "file";
-      if (final.isDirectory()) return "dir";
+      if (final.isFile()) return { status: "file", real };
+      if (final.isDirectory()) return { status: "dir", real };
     } catch {
       // Falls through to missing.
     }
-    return "missing";
+    return { status: "missing" };
+  }
+
+  /** Where a link's rooted target starts. A target with a drive or a share
+   *  names its own volume; one without keeps the volume it was found on. */
+  private windowsTargetRoot(real: string, targetRoot: string): string {
+    if (hasDriveLetterAt(targetRoot) || (isSeparator(targetRoot[0]) && isSeparator(targetRoot[1]))) return targetRoot;
+    const volume = win32.parse(real).root;
+    return volume.slice(0, volume.length - 1) + targetRoot;
   }
 
   private component(path: string): Promise<Component> {

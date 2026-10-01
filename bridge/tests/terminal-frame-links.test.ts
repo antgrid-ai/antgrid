@@ -613,3 +613,157 @@ test("an unusable link root is ignored", async () => {
   r.source.setLinkRoot("/ok\x00bad");
   expect(r.source.linkBases().checkoutRoot).toBe("/r");
 });
+
+describe("a wide character that does not fit at the right edge", () => {
+  test("keeps the path whole across the padding cell xterm leaves there", async () => {
+    const r = rig({ cols: 10, rows: 4 });
+    r.fs.add("/r/ab/cdefgh日.ts");
+    await feed(r.source, "ab/cdefgh日.ts\r\n");
+
+    const ansi = await frameAfterStats(r);
+
+    expect(linksIn(ansi).map((l) => pathParams(decodeURIComponent(l.uri.replace("antgrid-path:", "x://h/"))).p)).toEqual(["ab/cdefgh日.ts", "ab/cdefgh日.ts"]);
+  });
+
+  test("still ends a token at a real space before a wide character", async () => {
+    const r = rig({ cols: 20, rows: 4 });
+    r.fs.add("/r/src/a.ts");
+    await feed(r.source, "src/a.ts 日本\r\n");
+
+    const links = linksIn(await frameAfterStats(r));
+
+    expect(links.map((l) => [l.row, l.col])).toEqual([[0, 0]]);
+    expect(links[0]!.uri).toContain("p=src%2Fa.ts&");
+  });
+});
+
+describe("a row padded to the edge with printed spaces", () => {
+  const padTo = (text: string, cols: number): string => text + " ".repeat(cols - text.length);
+
+  test("is not read as wrapping into the next line, so a URL at its end stays whole", async () => {
+    const r = rig({ cols: 40, rows: 6 });
+    await feed(r.source, `${padTo("see https://example.com/docs", 40)}\r\nfor more info\r\n`);
+
+    const links = linksIn(r.source.capture(0)!.ansi);
+
+    expect(links.map((l) => l.uri)).toEqual(["antgrid-url:https://example.com/docs"]);
+  });
+
+  test("does not join a path ending the padded row with the word that starts the next", async () => {
+    const r = rig({ cols: 40, rows: 6 });
+    r.fs.add("/r/src/a");
+    r.fs.add("/r/src/a.ts");
+    await feed(r.source, `${padTo("edit src/a", 40)}\r\n.ts done\r\n`);
+
+    const links = linksIn(await frameAfterStats(r));
+
+    expect(links.map((l) => decodeURIComponent(l.uri))).toEqual(["antgrid-path:?p=src/a&b=r&k=f"]);
+  });
+});
+
+describe("full-width hard-wrapped path rows above the viewport", () => {
+  test("still let the path on the viewport's top row link", async () => {
+    const r = rig({ cols: 12, rows: 4 });
+    r.fs.add("/r/src/bbbbbbbb");
+    r.fs.add("/r/src/d.ts");
+    await feed(r.source, "src/aaaaaaaa\r\nsrc/bbbbbbbb\r\nsrc/cccccccc\r\nsrc/d.ts\r\nx\r\ny\r\nz");
+
+    const links = linksIn(await frameAfterStats(r));
+
+    expect(term(r.source).buffer.active.baseY).toBe(3);
+    expect(links.map((l) => [l.row, l.col, decodeURIComponent(l.uri)])).toEqual([[0, 0, "antgrid-path:?p=src/d.ts&b=r&k=f"]]);
+  });
+});
+
+describe("the edges of the live window", () => {
+  test("does not link a continuation row at the top of a screen that has no scrollback", async () => {
+    const r = rig({ cols: 18, rows: 4 });
+    r.fs.add("/r/src/index.ts");
+    r.fs.add("/r/packages/app/src/index.ts");
+    await feed(r.source, "\x1b[?1049h\x1b[Hedit packages/app/src/index.ts\r\n\r\n\r\n");
+    const buffer = term(r.source).buffer.active;
+    expect(buffer.type).toBe("alternate");
+    expect(buffer.getLine(0)!.translateToString(true)).toBe("src/index.ts");
+    expect(buffer.getLine(0)!.isWrapped).toBe(true);
+
+    expect(linksIn(await frameAfterStats(r))).toEqual([]);
+  });
+
+  test("links the same continuation once the row it continues is on screen", async () => {
+    const r = rig({ cols: 18, rows: 4 });
+    r.fs.add("/r/src/index.ts");
+    r.fs.add("/r/packages/app/src/index.ts");
+    await feed(r.source, "\x1b[?1049h\x1b[Hedit packages/app/src/index.ts\r\n");
+
+    const links = linksIn(await frameAfterStats(r));
+
+    expect(links.map((l) => decodeURIComponent(l.uri))).toEqual([
+      expect.stringContaining("p=packages/app/src/index.ts"),
+      expect.stringContaining("p=packages/app/src/index.ts"),
+    ]);
+  });
+
+  test("judges a continuation row at the top of the viewport by the scrollback row it continues", async () => {
+    const r = rig({ cols: 18, rows: 4 });
+    r.fs.add("/r/src/index.ts");
+    r.fs.add("/r/packages/app/src/index.ts");
+    await feed(r.source, "edit packages/app/src/index.ts" + "\r\n".repeat(3));
+    const buffer = term(r.source).buffer.active;
+    expect(buffer.baseY).toBe(1);
+    expect(buffer.getLine(buffer.baseY)!.isWrapped).toBe(true);
+
+    const links = linksIn(await frameAfterStats(r));
+
+    expect(links.map((l) => [l.row, l.col])).toEqual([[0, 0]]);
+    expect(decodeURIComponent(links[0]!.uri)).toContain("p=packages/app/src/index.ts");
+  });
+});
+
+describe("a mention wrapped over more rows than the context holds", () => {
+  test("is read back to its first row, so the rows still on screen are linked to the whole of it", async () => {
+    const r = rig({ cols: 18, rows: 4 });
+    const url = "https://example.com/" + "x".repeat(18 * 14);
+    await feed(r.source, url + "\r\n\r\n");
+    const buffer = term(r.source).buffer.active;
+    expect(buffer.baseY).toBeGreaterThan(8);
+    expect(buffer.getLine(buffer.baseY)!.isWrapped).toBe(true);
+
+    const links = linksIn(r.source.capture(0)!.ansi);
+
+    expect(links.map((l) => l.row)).toEqual([0, 1]);
+    expect(new Set(links.map((l) => l.uri))).toEqual(new Set(["antgrid-url:" + url]));
+  });
+});
+
+describe("the scan memo's memory", () => {
+  test("holds a bounded number of characters when one wrapped line never ends", async () => {
+    const r = rig({ cols: 100, rows: 20 });
+    let n = 0;
+    for (let i = 0; i < 120; i++) {
+      let chunk = "";
+      for (let j = 0; j < 8; j++) chunk += `var a${n++}=require("./m${n}.js");`;
+      await feed(r.source, chunk);
+      r.source.capture(0);
+    }
+
+    const memo = (r.source as unknown as { link: { scanMemo: Map<string, unknown> } }).link.scanMemo;
+    let chars = 0;
+    for (const key of memo.keys()) chars += key.length;
+
+    expect(memo.size).toBeGreaterThan(0);
+    expect(chars).toBeLessThanOrEqual(262_144);
+    expect(memo.size).toBeLessThanOrEqual(512);
+  });
+
+  test("does not keep a line longer than the cap on one key", async () => {
+    const r = rig({ cols: 200, rows: 20 });
+    for (let i = 0; i < 60; i++) {
+      await feed(r.source, "x".repeat(2000));
+      r.source.capture(0);
+    }
+
+    const memo = (r.source as unknown as { link: { scanMemo: Map<string, unknown> } }).link.scanMemo;
+
+    expect(Math.max(0, ...[...memo.keys()].map((k) => k.length))).toBeLessThanOrEqual(16_384);
+  });
+});

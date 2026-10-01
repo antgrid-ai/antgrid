@@ -69,6 +69,46 @@ export function isDriveAbsolute(path: string): boolean {
   return hasDriveLetterAt(path) && isSeparator(path[2]);
 }
 
+/**
+ * The comparison form of a Windows path. It must never merge two names NTFS
+ * keeps apart, because a merged pair lets a sibling folder stand in for the
+ * checkout's own, so it only ever errs towards "different". A unit folds to its
+ * upper case only when that is a single unit that lower-cases back to the same
+ * thing the unit itself does, which is a plain case pair. Everything
+ * `toUpperCase` does beyond that is refused: U+0131 and U+017F upper-case to
+ * ASCII `I` and `S`, and U+00B5 to a Greek capital, none of which NTFS treats as
+ * the same name; U+212A KELVIN SIGN is already upper case, so it stays apart
+ * from `k`; and `ß` would change the length of the name (`SS`).
+ */
+export function foldPathCase(path: string): string {
+  let ascii = true;
+  for (let i = 0; i < path.length; i++) {
+    if (path.charCodeAt(i) > 0x7f) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) return path.toUpperCase();
+  let out = "";
+  for (let i = 0; i < path.length; i++) {
+    const unit = path[i]!;
+    const upper = unit.toUpperCase();
+    out += upper.length === 1 && upper.toLowerCase() === unit.toLowerCase() ? upper : unit;
+  }
+  return out;
+}
+
+/** Upper-cases ASCII letters and leaves every other code unit exactly as it is,
+ *  for names whose non-ASCII characters must compare by identity. */
+export function foldAsciiCase(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    out += isAsciiLower(code) ? String.fromCharCode(code - 0x20) : text[i];
+  }
+  return out;
+}
+
 /** `prefix` must be lowercase ASCII; only ASCII letters fold, so no non-ASCII
  *  character can stand in for one of its letters. */
 export function startsWithIgnoreCase(text: string, prefix: string, at = 0): boolean {

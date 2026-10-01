@@ -54,14 +54,26 @@ const MAX_PENDING_CHARS = 16_000_000;
  */
 const MAX_WRITE_CHARS = 65_536;
 const OSC_CLOSE = "\x1b]8;;\x1b\\";
-/** Rows above the viewport read for detection, so a path that wrapped into the
- *  top row still joins with its head. */
+/** Rows above the viewport read for detection, so a path that hard-wrapped
+ *  into the top row still joins with its head. */
 const LINK_CONTEXT_ROWS = 8;
+/** How far back a soft-wrapped top row is followed to the start of its line,
+ *  so a mention that crosses the top edge is read whole. A run longer than
+ *  this leaves its first row a continuation, which the detector will not link. */
+const LINK_RUN_ROWS = 64;
 const LIVE_LINK_BUDGET = { lookups: 2048, newStats: 64 };
 /** A static screen has nothing else to wake it, so a lookup answered "missing"
  *  is retried this long after the last frame. */
 const NEGATIVE_RECHECK_MS = 5000;
 const SCAN_MEMO_MAX = 512;
+/** A key is a whole logical line, and one endless soft-wrapped line makes every
+ *  capture's key a little longer than the last, so the count alone would let a
+ *  terminal hold hundreds of near-identical megabyte strings. */
+const SCAN_MEMO_MAX_CHARS = 262_144;
+/** Past this a line is scanned again each time rather than remembered: it is
+ *  too large to be worth a slot, and too rare to be missed. */
+const SCAN_MEMO_MAX_KEY = 16_384;
+const NO_EXPLICIT_LINKS: readonly (string | undefined)[] = [];
 
 export interface TerminalLinkOptions {
   /** The directory the terminal was started in. Never `process.cwd()`. */
@@ -83,6 +95,7 @@ interface LinkDeps {
   pending: Set<string>;
   negatives: Set<string>;
   linked: Set<string>;
+  refining: Set<string>;
   starved: boolean;
 }
 
@@ -92,6 +105,8 @@ interface LinkState {
   readonly platform: NodeJS.Platform;
   readonly timer: (fn: () => void, ms: number) => { cancel(): void };
   readonly scanMemo: Map<string, ReturnType<typeof scanLine>>;
+  /** Total length of the keys in `scanMemo`. */
+  scanMemoChars: number;
   readonly detach: Array<() => void>;
   liveCwd?: string;
   checkoutRoot?: string;
@@ -105,7 +120,7 @@ interface LinkState {
 function blankDetectRow(cols: number): DetectRow {
   return {
     text: "", colAt: new Int32Array(0), widthAt: new Uint8Array(cols), cols, wrapped: false, endCol: 0,
-    explicit: new Array<string | undefined>(cols).fill(undefined),
+    explicit: NO_EXPLICIT_LINKS,
   };
 }
 
@@ -160,6 +175,9 @@ export class TerminalFrameSource extends TerminalScreen {
   private rewraps = 0;
   private discarded = 0;
   private readonly link?: LinkState;
+  /** An OSC 8 reached the parser. Until one does no cell can carry a program's
+   *  own link, and the overlay need not look at rows with nothing detected. */
+  private sawHyperlink = false;
 
   constructor(cols: number, rows: number, private readonly history?: TerminalRunHistory, links?: TerminalLinkOptions) {
     super(cols, rows);
@@ -229,13 +247,18 @@ export class TerminalFrameSource extends TerminalScreen {
         return true;
       });
     }
+    this.term.parser.registerOscHandler(8, () => {
+      this.sawHyperlink = true;
+      // Handled by xterm's own link service, which is what stores the uri.
+      return false;
+    });
     if (links) {
       const cache = links.cache ?? sharedPathStatCache();
       const platform = links.platform ?? process.platform;
       const hostname = links.hostname ?? osHostname();
       const state: LinkState = {
         opts: links, cache, platform, timer: links.timer ?? defaultLinkTimer,
-        scanMemo: new Map(), detach: [], depsRevision: -1, recheckedRevision: -1, invalidateQueued: false,
+        scanMemo: new Map(), scanMemoChars: 0, detach: [], depsRevision: -1, recheckedRevision: -1, invalidateQueued: false,
       };
       this.link = state;
       this.term.parser.registerOscHandler(7, (data) => {
@@ -253,7 +276,8 @@ export class TerminalFrameSource extends TerminalScreen {
    *  unusable root only means relative paths stay unlinked. */
   setLinkRoot(root: string): void {
     const link = this.link;
-    if (!link || normalizeBases({ checkoutRoot: root }, link.platform).checkoutRoot === undefined) return;
+    const usable = link ? normalizeBases({ checkoutRoot: root }, link.platform).checkoutRoot : undefined;
+    if (!link || usable === undefined) return;
     const changed = link.checkoutRoot !== root;
     link.checkoutRoot = root;
     link.cache.trustVolume(root);
@@ -277,6 +301,20 @@ export class TerminalFrameSource extends TerminalScreen {
     return this._revision !== before;
   }
 
+  /** The first rows of the normal screen, which is where the archive's output
+   *  continues: the row after the newest archived one is the screen's top.
+   *  `complete` is true when these are every row there is. */
+  screenTop(count: number): { rows: Array<Omit<TerminalHistoryRow, "rowId">>; complete: boolean } {
+    const normal = this.term.buffer.normal;
+    const rows: Array<Omit<TerminalHistoryRow, "rowId">> = [];
+    for (let i = 0; i < Math.min(count, this.term.rows); i++) {
+      const row = this.adapter.normalRow(normal.baseY + i);
+      if (!row) break;
+      rows.push(row);
+    }
+    return { rows, complete: rows.length === this.term.rows };
+  }
+
   /** The raw bases, unfiltered: each caller runs them through `normalizeBases`
    *  against the root it trusts. */
   linkBases(): LinkBases {
@@ -290,7 +328,8 @@ export class TerminalFrameSource extends TerminalScreen {
     const deps = this.link?.deps;
     if (!deps) return;
     const found = status === "file" || status === "dir";
-    if (deps.pending.has(abs) || (found && deps.negatives.has(abs)) || (!found && deps.linked.has(abs))) {
+    if (deps.pending.has(abs) || deps.refining.has(abs) || (found && deps.negatives.has(abs)) ||
+        (!found && deps.linked.has(abs))) {
       this.queueInvalidate();
     }
   }
@@ -737,33 +776,41 @@ export class TerminalFrameSource extends TerminalScreen {
     try {
       const { cols, rows } = this.term;
       // The alternate screen has no scrollback to read above its viewport.
-      const first = buffer.type === "normal" ? Math.max(0, buffer.baseY - LINK_CONTEXT_ROWS) : buffer.baseY;
+      let first = buffer.type === "normal" ? Math.max(0, buffer.baseY - LINK_CONTEXT_ROWS) : buffer.baseY;
+      if (buffer.type === "normal") {
+        while (first > 0 && buffer.baseY - first < LINK_CONTEXT_ROWS + LINK_RUN_ROWS && buffer.getLine(first)?.isWrapped === true) {
+          first--;
+        }
+      }
       const context = buffer.baseY - first;
       const detectRows: DetectRow[] = [];
       for (let index = first; index < buffer.baseY + rows; index++) {
         const line = buffer.getLine(index);
-        // A row followed by a soft-wrapped continuation keeps its trailing
-        // blanks, so the join can tell the text really ran to the edge.
-        detectRows.push(line
-          ? this.adapter.detectRow(line, cols, buffer.getLine(index + 1)?.isWrapped === true)
-          : blankDetectRow(cols));
+        detectRows.push(line ? this.adapter.detectRow(line, cols, buffer.getLine(index + 1)) : blankDetectRow(cols));
       }
       const memoScan = (text: string): ReturnType<typeof scanLine> => {
+        if (text.length > SCAN_MEMO_MAX_KEY) return scanLine(text, link.platform);
         let scanned = link.scanMemo.get(text);
         if (scanned) {
           // Re-inserted so the oldest entry is the least recently used one.
           link.scanMemo.delete(text);
         } else {
           scanned = scanLine(text, link.platform);
-          if (link.scanMemo.size >= SCAN_MEMO_MAX) link.scanMemo.delete(link.scanMemo.keys().next().value!);
+          link.scanMemoChars += text.length;
         }
         link.scanMemo.set(text, scanned);
+        while (link.scanMemo.size > SCAN_MEMO_MAX || link.scanMemoChars > SCAN_MEMO_MAX_CHARS) {
+          const oldest = link.scanMemo.keys().next().value!;
+          link.scanMemo.delete(oldest);
+          link.scanMemoChars -= oldest.length;
+        }
         return scanned;
       };
       const result = detectLinks(detectRows, context, normalizeBases(this.linkBases(), link.platform), link.cache,
         LIVE_LINK_BUDGET, memoScan, link.platform);
       link.deps = {
-        pending: result.pending, negatives: result.negatives, linked: result.linked, starved: result.starved,
+        pending: result.pending, negatives: result.negatives, linked: result.linked, refining: result.refining,
+        starved: result.starved,
       };
       link.depsRevision = this._revision;
       const uriAt: Array<Array<string | undefined> | undefined> = [];
@@ -786,15 +833,19 @@ export class TerminalFrameSource extends TerminalScreen {
     const parts: string[] = [];
     const detectedAt = detected ? this.detectLinkUris() : undefined;
     for (let row = 0; row < this.term.rows; row++) {
+      const found = detectedAt?.[row];
+      // With no OSC 8 ever parsed, a row holding no detected link has nothing
+      // to repaint.
+      if (!found && !this.sawHyperlink) continue;
       const line = buffer.getLine(buffer.baseY + row);
       if (!line) continue;
       let lastId = "";
       let lastStyle = "";
       for (let col = 0; col < this.term.cols; col++) {
-        const cell = line.getCell(col);
+        const cell = this.adapter.cellAt(line, col);
         // A detected link never covers a cell that already has the program's
         // own link: the detector drops such a mention.
-        const id = detectedAt?.[row]?.[col] ?? (cell ? this.adapter.link(cell) ?? "" : "");
+        const id = found?.[col] ?? (cell && this.sawHyperlink ? this.adapter.link(cell) ?? "" : "");
         if (!cell || cell.getWidth() === 0) continue;
         if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
         // `adapter.link()` has already rejected control characters and anything

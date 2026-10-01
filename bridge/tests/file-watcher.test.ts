@@ -4,7 +4,7 @@ import { createConnState } from "../src/conn-state";
 import { PathStatCache } from "../src/terminal-links/stat-cache";
 import type { AbMessage } from "../src/protocol";
 import * as fsp from "node:fs/promises";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setLogLevel } from "../src/logger";
@@ -227,6 +227,11 @@ describe("FileWatcher", () => {
     cache.resolveFresh = (abs, ms) => {
       asked.push(abs);
       return resolveFresh(abs, ms);
+    };
+    const resolveReal = cache.resolveReal.bind(cache);
+    cache.resolveReal = (abs, ms) => {
+      asked.push(abs);
+      return resolveReal(abs, ms);
     };
     return { cache, asked, calls };
   }
@@ -528,6 +533,238 @@ describe("FileWatcher", () => {
     expect(reply.exists).toBe(true);
 
     watcher.stop();
+  });
+
+  it("answers a stat that outlives its deadline as timed out, not as missing", async () => {
+    const watcher = newWatcher();
+    const hung = new PathStatCache({
+      fs: {
+        lstat: () => new Promise(() => {}),
+        stat: () => new Promise(() => {}),
+        readlink: () => new Promise(() => {}),
+      },
+      softTimeoutMs: 20,
+      // The default timer is unref'd, which lets a test with nothing else pending go quiet.
+      timer: (fn, ms) => {
+        const handle = setTimeout(fn, ms);
+        return { cancel: () => clearTimeout(handle) };
+      },
+    });
+
+    const reply = await watcher.resolvePath(join(tempDir, "src", "app.ts"), { requestId: "slow" }, hung);
+
+    expect(reply.requestId).toBe("slow");
+    expect(reply.timedOut).toBe(true);
+    expect(reply.relPath).toBeNull();
+    expect(reply.exists).toBe(false);
+
+    watcher.stop();
+  });
+
+  it("leaves timedOut off every answer that was actually reached", async () => {
+    const watcher = newWatcher();
+    const cache = new PathStatCache();
+
+    for (const path of ["src/app.ts", "src/gone.ts", `${tempDir}-sibling/x.txt`, 42 as unknown as string]) {
+      expect((await watcher.resolvePath(path, {}, cache)).timedOut).toBeUndefined();
+    }
+
+    watcher.stop();
+  });
+
+  describe("through links", () => {
+    let outsideDir: string;
+    // Links are taken down before any recursive delete: a delete that follows
+    // one would wander into the directory it points at.
+    const links: string[] = [];
+
+    function link(target: string, at: string): boolean {
+      try {
+        symlinkSync(target, at, process.platform === "win32" ? "junction" : "dir");
+        links.push(at);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    beforeEach(() => {
+      outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-linked-"));
+      writeFileSync(join(outsideDir, "notes.txt"), "text");
+      writeFileSync(join(outsideDir, "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      expect(link(outsideDir, join(tempDir, "out"))).toBe(true);
+    });
+
+    afterEach(() => {
+      for (const at of links.splice(0)) {
+        try {
+          rmdirSync(at);
+        } catch {
+          try {
+            unlinkSync(at);
+          } catch {
+            // Already gone.
+          }
+        }
+      }
+      rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    it("gives a non-image behind a link out of the checkout no checkout-relative path", async () => {
+      const watcher = newWatcher();
+
+      const reply = await watcher.resolvePath(join(tempDir, "out", "notes.txt"), {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.externalImagePath).toBeNull();
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+
+    it("gives a directory behind such a link no checkout-relative path either", async () => {
+      const watcher = newWatcher();
+
+      const reply = await watcher.resolvePath(join(tempDir, "out"), {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.isDirectory).toBe(false);
+      expect(reply.externalImagePath).toBeNull();
+
+      watcher.stop();
+    });
+
+    it("keeps an image behind such a link an external image", async () => {
+      const watcher = newWatcher();
+      const printed = join(tempDir, "out", "pic.png");
+
+      const reply = await watcher.resolvePath(printed, {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.externalImagePath).toBe(printed);
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+
+    it("does not let an image name stand for a file that is not one", async () => {
+      const watcher = newWatcher();
+      try {
+        symlinkSync(join(outsideDir, "notes.txt"), join(tempDir, "disguised.png"), "file");
+      } catch {
+        // Creating a file link needs a privilege some Windows accounts lack.
+        watcher.stop();
+        return;
+      }
+
+      const reply = await watcher.resolvePath(join(tempDir, "disguised.png"), {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.externalImagePath).toBeNull();
+
+      watcher.stop();
+    });
+
+    it("keeps a link that stays inside the checkout inside it", async () => {
+      const watcher = newWatcher();
+      expect(link(join(tempDir, "src"), join(tempDir, "inner"))).toBe(true);
+
+      const reply = await watcher.resolvePath(join(tempDir, "inner", "app.ts"), {}, new PathStatCache());
+
+      expect(reply.relPath).toBe("inner/app.ts");
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+
+    it("resolves paths of a checkout that is itself reached through a link", async () => {
+      const viaLink = join(outsideDir, "checkout");
+      expect(link(tempDir, viaLink)).toBe(true);
+      expect(realpathSync(viaLink)).toBe(realpathSync(tempDir));
+      const watcher = new FileWatcher({ id: "test", name: "Test", path: viaLink }, () => {}, createConnState());
+
+      const reply = await watcher.resolvePath(join(viaLink, "src", "app.ts"), {}, new PathStatCache());
+
+      expect(reply.relPath).toBe("src/app.ts");
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+  });
+
+  // A checkout opened over a share (a WSL distribution, a file server) has a
+  // UNC root. The administrative share of this machine is the one UNC path a
+  // test can reach without setup, so these run only where it exists.
+  describe("with a UNC checkout root", () => {
+    const toUnc = (dir: string): string | undefined => {
+      const match = /^([A-Za-z]):[\\/](.*)$/.exec(dir);
+      if (process.platform !== "win32" || match === null) return undefined;
+      const unc = `\\\\localhost\\${match[1]}$\\${match[2]}`;
+      try {
+        return existsSync(unc) ? unc : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const reachable = toUnc(tmpdir()) !== undefined;
+
+    function uncWatcher(): FileWatcher {
+      return new FileWatcher({ id: "test", name: "Test", path: toUnc(tempDir)! }, () => {}, createConnState());
+    }
+
+    it.skipIf(!reachable)("resolves a printed absolute path and a relative one inside the root", async () => {
+      const watcher = uncWatcher();
+      const root = toUnc(tempDir)!;
+      const { cache, calls } = recordingCache();
+
+      const absolute = await watcher.resolvePath(join(root, "src", "app.ts"), {}, cache);
+      const relative = await watcher.resolvePath("src/app.ts", {}, cache);
+      const rootItself = await watcher.resolvePath(root, {}, cache);
+
+      for (const reply of [absolute, relative]) {
+        expect(reply.relPath).toBe("src/app.ts");
+        expect(reply.exists).toBe(true);
+      }
+      expect(rootItself.relPath).toBe("");
+      expect(rootItself.isDirectory).toBe(true);
+      expect(calls.length).toBeGreaterThan(0);
+
+      watcher.stop();
+    });
+
+    it.skipIf(!reachable)("still refuses a stream name or control character past the root's own share", async () => {
+      const watcher = uncWatcher();
+      const { cache, asked } = askedCache();
+      const root = toUnc(tempDir)!;
+
+      for (const shape of [join(root, "src", "app.ts") + ":stream", join(root, "src", "app\u0001.ts")]) {
+        const reply = await watcher.resolvePath(shape, {}, cache);
+        expect(reply.relPath).toBeNull();
+        expect(reply.exists).toBe(false);
+      }
+      expect(asked).toEqual([]);
+
+      watcher.stop();
+    });
+
+    it.skipIf(!reachable)("still refuses a UNC path on any other server before the cache is asked", async () => {
+      const watcher = uncWatcher();
+      const { cache, asked, calls } = askedCache();
+      const root = toUnc(tempDir)!;
+      const otherServer = root.replace("\\\\localhost\\", "\\\\127.0.0.1\\");
+      expect(otherServer).not.toBe(root);
+
+      for (const shape of ["\\\\host\\share\\a.png", "//host/share/a.png", "\\\\?\\C:\\x.png", join(otherServer, "src", "app.ts")]) {
+        const reply = await watcher.resolvePath(shape, {}, cache);
+        expect(reply.relPath).toBeNull();
+        expect(reply.externalImagePath).toBeNull();
+        expect(reply.exists).toBe(false);
+      }
+      expect(asked).toEqual([]);
+      expect(calls).toEqual([]);
+
+      watcher.stop();
+    });
   });
 });
 

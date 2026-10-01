@@ -8,7 +8,7 @@ import {
   allocateBudgets,
   MAX_BATCH_NODES,
 } from "../src/file-tree";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -644,5 +644,131 @@ describe("file-tree", () => {
       expect(externalSafeImageMime("a.pdf")).toBeUndefined();
       expect(externalSafeImageMime("a.ico")).toBeUndefined();
     });
+  });
+});
+
+// A checkout opened over a network share (a WSL distribution, a file server)
+// has a UNC root; the admin share of this machine is the one UNC path a test
+// can reach without any setup.
+function uncFormOf(dir: string): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(dir);
+  if (match === null) return undefined;
+  const unc = `\\\\localhost\\${match[1]}$\\${match[2]}`;
+  try {
+    return existsSync(unc) ? unc : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+describe("file-tree under a UNC checkout root", () => {
+  let tempDir: string;
+  let uncRoot: string | undefined;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "antgrid-tree-unc-"));
+    uncRoot = uncFormOf(tempDir);
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("reads a file under the root and an inside image", () => {
+    const root = uncRoot!;
+    writeFileSync(join(tempDir, "hello.txt"), "hi");
+    mkdirSync(join(tempDir, "sub"));
+    writeFileSync(join(tempDir, "sub", "a.png"), Buffer.from(PNG_1X1, "base64"));
+
+    expect(readFile(root, "hello.txt").content).toBe("hi");
+    expect(readFile(root, "sub/a.png").mimeType).toBe("image/png");
+    expect(readFile(root, "sub\\a.png").error).toBeUndefined();
+    // A caller-supplied UNC spelling is refused even when it names the root's own share; only the checkout-relative form is accepted.
+    expect(readFile(root, join(root, "hello.txt")).error).toBe("Path traversal denied");
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("still refuses a path that leaves the root", () => {
+    const root = uncRoot!;
+    writeFileSync(join(tempDir, "hello.txt"), "hi");
+
+    expect(readFile(root, "../hello.txt").error).toBe("Path traversal denied");
+    expect(readFile(root, "..\\..\\hello.txt").error).toBe("Path traversal denied");
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("still refuses another share, even an image", () => {
+    const root = uncRoot!;
+    for (const path of ["\\\\other-host\\share\\a.png", "//other-host/share/a.png", "\\\\?\\C:\\x.png"]) {
+      const result = readFile(root, path);
+      expect(result.content).toBeNull();
+      expect(result.error).toBe("Path traversal denied");
+    }
+  });
+
+  it("refuses a relative path shaped like a UNC share against a UNC root under win32 rules", () => {
+    const result = readFile("\\\\srv\\share\\proj", "//host/share/a.png", "win32");
+    expect(result.content).toBeNull();
+    expect(result.error).toBe("Path traversal denied");
+  });
+});
+
+describe("file-tree case folding of the containment check", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "antgrid-tree-fold-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // NTFS compares names unit by unit through its own upper-case table, which
+  // leaves the Kelvin sign (U+212A) distinct from k. A plain toLowerCase() maps
+  // it onto k, so a link to the sibling directory of that name read as the root.
+  it.skipIf(process.platform !== "win32")("does not read a Kelvin-sign sibling as the root it differs from", () => {
+    const root = join(tempDir, "k");
+    const sibling = join(tempDir, "\u212a");
+    mkdirSync(root);
+    mkdirSync(join(sibling, "sub"), { recursive: true });
+    writeFileSync(join(sibling, "sub", "secret.txt"), "shh");
+    symlinkSync(sibling, join(root, "x"), "junction");
+
+    // The listed directory is a real one; only its ancestor is a link out.
+    const listing = listDirectory("x/sub", root, loadIgnoreRules(root, []));
+    expect(listing.missing).toBe(true);
+    expect(listing.children).toEqual([]);
+  });
+
+  // U+0131 and U+017F upper-case to ASCII I and S, but NTFS keeps them as names
+  // of their own, so a sibling spelled with one is not the checkout.
+  it.skipIf(process.platform !== "win32")("does not read a dotless-i or long-s sibling as the root", () => {
+    for (const [rootName, siblingName] of [
+      ["file", "fıle"],
+      ["ss", "ſſ"],
+    ] as const) {
+      const root = join(tempDir, rootName);
+      const sibling = join(tempDir, siblingName);
+      mkdirSync(root);
+      mkdirSync(join(sibling, "private"), { recursive: true });
+      writeFileSync(join(sibling, "private", "secret.env"), "TOKEN=1");
+      symlinkSync(sibling, join(root, "lnk"), "junction");
+
+      const listing = listDirectory("lnk/private", root, loadIgnoreRules(root, []));
+      expect(listing.missing).toBe(true);
+      expect(listing.children).toEqual([]);
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("still reads a directory whose root differs only in ASCII case", () => {
+    const root = join(tempDir, "Proj");
+    mkdirSync(join(root, "d"), { recursive: true });
+    writeFileSync(join(root, "d", "a.txt"), "");
+
+    const listing = listDirectory("d", root.toUpperCase(), loadIgnoreRules(root, []));
+    expect(listing.missing).toBeUndefined();
+    expect(listing.children.map((c) => c.name)).toEqual(["a.txt"]);
   });
 });

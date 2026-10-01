@@ -863,6 +863,11 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   externalImagePath: z.string().nullable(),
   /** Whether the resolved path exists as a file or directory right now. */
   exists: z.boolean(),
+  /** True when the answer is unknown rather than negative: the bridge's stat
+   *  outlived its deadline, or it was too busy to start one. `exists:false`
+   *  then means "not found out", and a retry may succeed. Absent from older
+   *  bridges, which answered `exists:false` in both cases. */
+  timedOut: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

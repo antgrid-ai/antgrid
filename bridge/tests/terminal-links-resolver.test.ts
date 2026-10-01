@@ -1,6 +1,7 @@
-import { describe, it, expect } from "bun:test";
-import { win32 } from "node:path";
-import { candidatesFor, classifyPath, isInsideRoot, normalizeBases } from "../src/terminal-links/resolver";
+import { describe, it, expect, spyOn } from "bun:test";
+import { posix, win32 } from "node:path";
+import { candidatesFor, classifyPath, isInsideResolved, isInsideRoot, normalizeBases } from "../src/terminal-links/resolver";
+import { foldPathCase } from "../src/terminal-links/chars";
 import { detectLinks } from "../src/terminal-links/detector";
 import { PathStatCache } from "../src/terminal-links/stat-cache";
 import { AsyncFs, Clock, mkRows, settle } from "./support/terminal-links-fixtures";
@@ -111,7 +112,7 @@ describe("candidatesFor", () => {
 
   it("gives an absolute path one candidate with base a", () => {
     const got = candidatesFor(["/r/src/a.ts"], bases, "linux");
-    expect(got).toEqual([{ text: "/r/src/a.ts", base: "a", abs: "/r/src/a.ts" }]);
+    expect(got).toEqual([{ text: "/r/src/a.ts", base: "a", abs: "/r/src/a.ts", inside: true }]);
   });
 
   it("resolves a Windows absolute path and folds its separators", () => {
@@ -191,5 +192,181 @@ describe("classifyPath", () => {
     expect(classifyPath("/repo/a.ts", "file", "/Repo", "linux")).toBeUndefined();
     expect(isInsideRoot("C:\\REPO\\x", "c:\\repo", "win32")).toBe(true);
     expect(isInsideRoot("C:\\repository", "C:\\repo", "win32")).toBe(false);
+  });
+});
+
+describe("Windows case folding", () => {
+  const KELVIN = "\u212a";
+
+  it("folds per UTF-16 unit the way NTFS orders names", () => {
+    expect(foldPathCase("C:\\Repo\\src")).toBe("C:\\REPO\\SRC");
+    expect(foldPathCase("C:\\repo\\\u00e9")).toBe("C:\\REPO\\\u00c9");
+    // U+212A is already upper case, so it stays apart from k and K.
+    expect(foldPathCase(KELVIN)).toBe(KELVIN);
+    expect(foldPathCase("k")).toBe("K");
+    // Upper-casing the sharp s would change the length of the name, so it is kept.
+    expect(foldPathCase("stra\u00dfe")).toBe("STRA\u00dfE");
+    expect(foldPathCase("\ud801\udc28")).toBe("\ud801\udc28");
+  });
+
+  it("does not let the Kelvin sign stand in for k when testing containment", () => {
+    expect(isInsideRoot(`C:\\${KELVIN}\\a.ts`, "C:\\k", "win32")).toBe(false);
+    expect(isInsideRoot("C:\\K\\a.ts", "C:\\k", "win32")).toBe(true);
+    expect(isInsideResolved(`C:\\${KELVIN}\\a.ts`, "C:\\k", "win32")).toBe(false);
+    expect(classifyPath(`C:\\${KELVIN}\\a.ts`, "file", "C:\\k", "win32")).toBeUndefined();
+  });
+
+  it("keeps names apart that upper-case onto ASCII letters but are distinct on NTFS", () => {
+    // Dotless i, long s, micro sign: toUpperCase maps each onto another letter.
+    for (const unit of ["\u0131", "\u017f", "\u00b5", "\u0345"]) {
+      expect(foldPathCase(unit)).toBe(unit);
+    }
+    expect(foldPathCase("\u00ff")).toBe("\u0178");
+    expect(foldPathCase("\u0131")).not.toBe(foldPathCase("i"));
+  });
+
+  it("does not treat a confusably named sibling as inside the root", () => {
+    expect(isInsideRoot("C:\\r\\f\u0131le\\a.ts", "C:\\r\\file", "win32")).toBe(false);
+    expect(isInsideRoot("C:\\r\\\u017f\\a.ts", "C:\\r\\s", "win32")).toBe(false);
+    expect(isInsideResolved("C:\\lf\\f\u0131le\\private\\secret.env", "C:\\lf\\file", "win32")).toBe(false);
+    expect(
+      classifyPath("C:\\lf\\file\\lnk\\private\\secret.env", "file", "C:\\lf\\file", "win32", {
+        inside: true,
+        real: "C:\\lf\\f\u0131le\\private\\secret.env",
+        realRoot: "C:\\lf\\file",
+      }),
+    ).toBeUndefined();
+    const got = candidatesFor(["C:\\lf\\f\u0131le\\a.ts"], { checkoutRoot: "C:\\lf\\file" }, "win32");
+    // Outside the checkout only an image is a candidate at all.
+    expect(got).toEqual([]);
+  });
+
+  it("keeps a cwd that only the Kelvin sign puts under the root out of the bases", () => {
+    expect(normalizeBases({ checkoutRoot: "C:\\k", spawnCwd: `C:\\${KELVIN}\\app` }, "win32")).toEqual({
+      checkoutRoot: "C:\\k",
+    });
+  });
+
+  it("does not merge candidates that differ only by the Kelvin sign", () => {
+    const got = candidatesFor(["k/a.ts", `${KELVIN}/a.ts`], { checkoutRoot: "C:\\r" }, "win32");
+    expect(got.map((c) => c.abs)).toEqual(["C:\\r\\k\\a.ts", `C:\\r\\${KELVIN}\\a.ts`]);
+  });
+
+  it("still merges candidates that differ only by ASCII case", () => {
+    const got = candidatesFor(["k/a.ts", "K/A.TS"], { checkoutRoot: "C:\\r" }, "win32");
+    expect(got.map((c) => c.abs)).toEqual(["C:\\r\\k\\a.ts"]);
+  });
+});
+
+describe("candidate containment", () => {
+  it("carries whether each candidate is inside the root", () => {
+    const got = candidatesFor(["/o/a.png", "/r/b.ts", "../c.png"], { checkoutRoot: "/r/x" }, "linux");
+    expect(got.map((c) => [c.abs, c.inside])).toEqual([
+      ["/o/a.png", false],
+      ["/r/c.png", false],
+    ]);
+    expect(candidatesFor(["/r/x/b.ts"], { checkoutRoot: "/r/x" }, "linux").map((c) => c.inside)).toEqual([true]);
+    expect(candidatesFor(["b.ts"], { checkoutRoot: "/r/x" }, "linux").map((c) => c.inside)).toEqual([true]);
+  });
+
+  it("lets a hint stand in for the containment test", () => {
+    expect(classifyPath("/elsewhere/a.ts", "file", "/r", "linux", { inside: true })).toBe("f");
+    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { inside: false })).toBeUndefined();
+  });
+
+  it("judges the printed text by shape and only a path that left the root again", () => {
+    expect(candidatesFor(["a:b.ts", "dir/x:y.ts"], { checkoutRoot: "C:\\r" }, "win32")).toEqual([]);
+    expect(candidatesFor(["..\\..\\x.png"], { checkoutRoot: "C:\\r" }, "win32").map((c) => c.abs)).toEqual([
+      "C:\\x.png",
+    ]);
+  });
+});
+
+describe("classifyPath through links", () => {
+  it("calls a path inside the root that really lives outside it nothing, unless it is an image", () => {
+    const real = { realRoot: "/r" };
+    expect(classifyPath("/r/ln/a.ts", "file", "/r", "linux", { ...real, real: "/o/a.ts" })).toBeUndefined();
+    expect(classifyPath("/r/ln", "dir", "/r", "linux", { ...real, real: "/o" })).toBeUndefined();
+    expect(classifyPath("/r/ln/a.png", "file", "/r", "linux", { ...real, real: "/o/a.png" })).toBe("i");
+  });
+
+  it("does not let an image name hide a file that is not one", () => {
+    expect(classifyPath("/r/ln.png", "file", "/r", "linux", { realRoot: "/r", real: "/o/secret.txt" })).toBeUndefined();
+  });
+
+  it("keeps a path whose real location is inside the real root", () => {
+    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { realRoot: "/real/r", real: "/real/r/a.ts" })).toBe("f");
+    expect(classifyPath("/r/ln", "dir", "/r", "linux", { realRoot: "/real/r", real: "/real/r/src" })).toBe("d");
+  });
+
+  it("falls back to the lexical answer when either real path is unknown", () => {
+    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { real: "/o/a.ts" })).toBe("f");
+    expect(classifyPath("/r/a.ts", "file", "/r", "linux", { realRoot: "/r" })).toBe("f");
+  });
+
+  it("leaves a path outside the root to the image rule whatever its real location", () => {
+    expect(classifyPath("/o/a.png", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.png" })).toBe("i");
+    expect(classifyPath("/o/a.ts", "file", "/r", "linux", { realRoot: "/r", real: "/r/a.ts" })).toBeUndefined();
+  });
+
+  it("compares real paths with the platform's case rule", () => {
+    expect(classifyPath("C:\\r\\a.ts", "file", "C:\\r", "win32", { realRoot: "C:\\Real", real: "c:\\real\\a.ts" })).toBe(
+      "f",
+    );
+  });
+});
+
+describe("memoized normalization", () => {
+  it("returns one frozen object for the same inputs", () => {
+    const a = normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/a" }, "linux");
+    const b = normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/a" }, "linux");
+    expect(b).toBe(a);
+    expect(Object.isFrozen(a)).toBe(true);
+  });
+
+  it("keys on every input, so different inputs never share an answer", () => {
+    const a = normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/a" }, "linux");
+    expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/a|-" }, "linux").spawnCwd).toBe("/r/a|-");
+    expect(normalizeBases({ checkoutRoot: "/r", liveCwd: "/r/a" }, "linux")).toEqual({
+      checkoutRoot: "/r",
+      liveCwd: "/r/a",
+    });
+    expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/a" }, "win32")).toEqual({});
+    expect(a).toEqual({ checkoutRoot: "/r", spawnCwd: "/r/a" });
+  });
+
+  it("copes with an over-long or non-string base", () => {
+    const long = "/r/" + "a".repeat(5000);
+    expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: long }, "linux")).toEqual({ checkoutRoot: "/r" });
+    expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: 5 as unknown as string }, "linux")).toEqual({
+      checkoutRoot: "/r",
+    });
+  });
+
+  it("answers candidates for a frozen base set without resolving a path again", () => {
+    const bases = normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/s" }, "linux");
+    const first = candidatesFor(["a.ts"], bases, "linux");
+    const resolve = spyOn(posix, "resolve");
+    try {
+      expect(candidatesFor(["a.ts"], bases, "linux")).toBe(first);
+      expect(normalizeBases({ checkoutRoot: "/r", spawnCwd: "/r/s" }, "linux")).toBe(bases);
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  it("keeps platforms and variant lists apart in that memory", () => {
+    const bases = normalizeBases({ checkoutRoot: "/r" }, "linux");
+    expect(candidatesFor(["a.ts"], bases, "linux").map((c) => c.abs)).toEqual(["/r/a.ts"]);
+    expect(candidatesFor(["a.ts", "b.ts"], bases, "linux").map((c) => c.abs)).toEqual(["/r/a.ts", "/r/b.ts"]);
+    expect(candidatesFor(["a.tsb.ts"], bases, "linux").map((c) => c.abs)).toEqual(["/r/a.tsb.ts"]);
+  });
+
+  it("does not memoize for a base set that can still change", () => {
+    const bases: { checkoutRoot: string } = { checkoutRoot: "/r" };
+    expect(candidatesFor(["a.ts"], bases, "linux").map((c) => c.abs)).toEqual(["/r/a.ts"]);
+    bases.checkoutRoot = "/q";
+    expect(candidatesFor(["a.ts"], bases, "linux").map((c) => c.abs)).toEqual(["/q/a.ts"]);
   });
 });

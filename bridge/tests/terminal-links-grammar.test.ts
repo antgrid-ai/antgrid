@@ -554,3 +554,29 @@ describe("terminal-links source", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("scanLine words with no separator or dot", () => {
+  it("finds nothing in ordinary output made only of such words", () => {
+    for (const line of ["error warning compiling done", "key=value other(12) third(1,2)", "a:1 b:2 c(3)", "Compiling 12 files"]) {
+      expect(pathsOf(line)).toEqual([]);
+    }
+  });
+
+  it("still finds a path that shares a line with them", () => {
+    const got = pathsOf("error in src/a.ts:12 while compiling");
+    expect(got.map((p) => [p.text.variants[0], p.text.line])).toEqual([["src/a.ts", 12]]);
+  });
+
+  it("still finds a bare file name by its dot and a path by its separator alone", () => {
+    expect(findPath("see main.dart now", "main.dart")).toBeDefined();
+    expect(findPath("see lib/main now", "lib/main")).toBeDefined();
+    expect(findPath("see lib\\main now", "lib\\main", "win32")).toBeDefined();
+  });
+
+  it("scans a screen of such words without per-word cost", () => {
+    const line = "word ".repeat(400);
+    const start = performance.now();
+    for (let i = 0; i < 200; i++) scanLine(line, "linux");
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+});

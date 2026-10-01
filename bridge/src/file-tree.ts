@@ -1,6 +1,7 @@
 import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
 import { join, resolve, relative, extname, basename, sep } from "node:path";
 import ignore, { type Ignore } from "ignore";
+import { foldPathCase } from "./terminal-links/chars";
 import { isRefusedPathShape } from "./terminal-links/grammar";
 
 export type FileTreeNode = {
@@ -236,8 +237,8 @@ function containedBy(absPath: string, root: string): boolean {
   // the only other containment check in the bridge that folds — because a
   // checkout-relative path and the root it is checked against can arrive with
   // different casing for the same drive letter.
-  const cmpPath = process.platform === "win32" ? absPath.toLowerCase() : absPath;
-  const cmpRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const cmpPath = process.platform === "win32" ? foldPathCase(absPath) : absPath;
+  const cmpRoot = process.platform === "win32" ? foldPathCase(root) : root;
   return cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
 }
 
@@ -510,15 +511,19 @@ export function readFile(
   // script (.svg) or a heavier parser (.pdf).
   //
   // Refused before any fs call: a Windows stat of a UNC path opens an SMB
-  // session that hands the user's NTLM hash to whoever named the host.
-  if (isRefusedPathShape(relPath, platform) || isRefusedPathShape(resolve(projectRoot, relPath), platform)) {
+  // session that hands the user's NTLM hash to whoever named the host. Only
+  // what the caller supplied is judged that way: the root is the checkout the
+  // bridge already works in and may itself be a UNC share (a WSL distro, a file
+  // server), so a result that stays inside it is the root plus the checked
+  // `relPath`.
+  if (isRefusedPathShape(relPath, platform)) {
     return { content: null, size: 0, error: "Path traversal denied" };
   }
   const absPath = resolve(projectRoot, relPath);
   const normalizedRoot = resolve(projectRoot);
   const insideRoot =
     absPath === normalizedRoot || absPath.startsWith(normalizedRoot + sep);
-  if (!insideRoot && !externalSafeImageMime(absPath)) {
+  if (!insideRoot && (isRefusedPathShape(absPath, platform) || !externalSafeImageMime(absPath))) {
     return { content: null, size: 0, error: "Path traversal denied" };
   }
 

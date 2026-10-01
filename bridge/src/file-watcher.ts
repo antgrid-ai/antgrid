@@ -13,12 +13,13 @@ import {
   type FileTreeNode,
   type DirectoryListing,
 } from "./file-tree";
+import { isSeparator } from "./terminal-links/chars";
 import { isRefusedPathShape, type PrintedPathBase } from "./terminal-links/grammar";
-import { isAbsoluteFor, isInsideRoot, normalizeBases } from "./terminal-links/resolver";
+import { isAbsoluteFor, isInsideResolved, normalizeBases } from "./terminal-links/resolver";
 import { sharedPathStatCache, type PathStatCache } from "./terminal-links/stat-cache";
 import type { ConnState } from "./conn-state";
 import type { ClientKey } from "./message-bus";
-/** What a click may wait on a stat for before it answers "missing". */
+/** How old a cached stat may be and still answer a click. */
 const RESOLVE_FRESH_MS = 1000;
 const MAX_RESOLVE_PATH_CHARS = 4096;
 
@@ -673,21 +674,29 @@ export class FileWatcher {
       // The bridge already works on this volume, so a checkout on a mapped
       // drive must not have every path in it refused as network I/O.
       cache.trustVolume(this.projectRoot);
-      const status = await cache.resolveFresh(absPath, RESOLVE_FRESH_MS);
+      const { status, real } = await cache.resolveReal(absPath, RESOLVE_FRESH_MS);
+      // The stat is still running, so the file may exist: the app must be able
+      // to say it does not know instead of that the file is gone.
+      if (status === "timeout") return reply({ timedOut: true });
       if (status === "refused") return reply();
       const exists = status === "file" || status === "dir";
       const normalizedRoot = resolve(this.projectRoot);
-      if (isInsideRoot(absPath, normalizedRoot)) {
+      const lexicallyInside = isInsideResolved(absPath, normalizedRoot);
+      const realRoot =
+        lexicallyInside && real !== undefined ? (await cache.resolveReal(normalizedRoot, RESOLVE_FRESH_MS)).real : undefined;
+      // A link inside the checkout can lead out of it; where the walk really
+      // ended is what decides, and an unknown root falls back to the lexical
+      // answer rather than refusing a checkout that is itself reached by a link.
+      const escaped = real !== undefined && realRoot !== undefined && !isInsideResolved(real, realRoot);
+      if (lexicallyInside && !escaped) {
         return reply({
           relPath: absPath === normalizedRoot ? "" : this.toRelPath(absPath),
           isDirectory: status === "dir",
           exists,
         });
       }
-      return reply({
-        externalImagePath: status === "file" && externalSafeImageMime(absPath) ? absPath : null,
-        exists,
-      });
+      const image = status === "file" && externalSafeImageMime(absPath) && (!escaped || externalSafeImageMime(real!));
+      return reply({ externalImagePath: image ? absPath : null, exists });
     } catch (error) {
       log.warn("file:resolve-path failed: %s", error);
       return reply();
@@ -700,9 +709,12 @@ export class FileWatcher {
     rawPath: unknown,
     opts: { base?: PrintedPathBase; liveCwd?: string; spawnCwd?: string },
   ): string | undefined {
-    if (typeof rawPath !== "string" || rawPath.length > MAX_RESOLVE_PATH_CHARS || isRefusedPathShape(rawPath)) {
-      return undefined;
-    }
+    if (typeof rawPath !== "string" || rawPath.length > MAX_RESOLVE_PATH_CHARS) return undefined;
+    const rawRefused = isRefusedPathShape(rawPath);
+    // A UNC spelling of the checkout's own share is the one refused shape that
+    // can still name something the bridge already works in; it is judged below
+    // by where it lands. Every other refused spelling stops here.
+    if (rawRefused && !(isSeparator(rawPath[0]) && isSeparator(rawPath[1]))) return undefined;
     let absPath: string;
     if (opts.base === undefined) {
       absPath = resolve(this.projectRoot, rawPath);
@@ -717,7 +729,14 @@ export class FileWatcher {
         absPath = resolve(dir, rawPath);
       }
     }
-    return isRefusedPathShape(absPath) ? undefined : absPath;
+    // The root is the checkout the bridge already works in, possibly a UNC
+    // share, so inside it only what follows the root is judged; a path that
+    // left it is judged whole.
+    const root = resolve(this.projectRoot);
+    if (isInsideResolved(absPath, root)) {
+      return rawRefused && isRefusedPathShape(absPath.slice(root.length)) ? undefined : absPath;
+    }
+    return rawRefused || isRefusedPathShape(absPath) ? undefined : absPath;
   }
 
   /** Returns chokidar's close promise so a caller about to delete the watched

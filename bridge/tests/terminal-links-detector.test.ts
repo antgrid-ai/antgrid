@@ -661,7 +661,14 @@ describe("failure containment", () => {
       },
       "linux",
     );
-    expect(r).toEqual({ spans: [], pending: new Set(), negatives: new Set(), linked: new Set(), starved: false });
+    expect(r).toEqual({
+      spans: [],
+      pending: new Set(),
+      negatives: new Set(),
+      linked: new Set(),
+      refining: new Set(),
+      starved: false,
+    });
   });
 
   it("returns empty results when the cache throws", () => {
@@ -831,5 +838,141 @@ describe("a line made of quoted names", () => {
       () => ({ paths: entries, urls: [] }), e.platform);
 
     expect(reads).toBeLessThan(count * 40);
+  });
+});
+
+describe("the edges of the rows given", () => {
+  const url = "https://example.com/x";
+
+  it("links a path on a row that continues the one above it only when that row is in view", async () => {
+    const e = env();
+    e.fs.add("/r/src/index.ts");
+    e.fs.add("/r/packages/app/src/index.ts");
+
+    const alone = await detectSettled(e, mkRows(["src/index.ts"], 18, { wrapped: [0] }));
+    const whole = await detectSettled(e, mkRows(["edit packages/app/", "src/index.ts"], 18, { wrapped: [1] }), ROOT_BASES, 1);
+
+    expect(alone.result.spans).toEqual([]);
+    expect(whole.result.spans.map((s) => pathParams(s.uri).p)).toEqual(["packages/app/src/index.ts"]);
+    expect(whole.result.spans.map((s) => s.row)).toEqual([1]);
+  });
+
+  it("does not link a URL that runs to the right edge of a last row the caller marks open", () => {
+    const e = env();
+    const text = `visit ${url.slice(0, 14)}`;
+    expect(text.length).toBe(20);
+
+    const closed = detect(e, mkRows([text], 20));
+    const open = detectLinks(mkRows([text], 20), 0, ROOT_BASES, e.cache, liveBudget(), undefined, e.platform, { tailOpen: true });
+
+    expect(closed.spans.map((s) => s.uri)).toEqual(["antgrid-url:https://exampl"]);
+    expect(open.spans).toEqual([]);
+  });
+
+  it("still links an open last row whose mention stops short of the edge", () => {
+    const e = env();
+    const rows = mkRows([`go ${url}`], 40);
+
+    const result = detectLinks(rows, 0, ROOT_BASES, e.cache, liveBudget(), undefined, e.platform, { tailOpen: true });
+
+    expect(result.spans.map((s) => s.uri)).toEqual([`antgrid-url:${url}`]);
+  });
+
+  it("links the painted half of a URL whose first half is context", () => {
+    const e = env();
+    const rows = mkRows(["visit https://exampl", "e.com/x"], 20, { wrapped: [1] });
+
+    const result = detect(e, rows, ROOT_BASES, 1);
+
+    expect(result.spans.map((s) => [s.row, s.uri])).toEqual([[1, `antgrid-url:${url}`]]);
+  });
+});
+
+describe("a link out of the checkout through the checkout", () => {
+  /** `/r/out` is a symlink to `/outside`, which holds `secret.ts`. */
+  class LinkedFs extends AsyncFs {
+    private readonly gates = new Map<string, () => void>();
+    private readonly shut = new Set<string>();
+
+    constructor() {
+      super();
+      this.add("/r/keep.ts");
+      this.add("/outside/secret.ts");
+    }
+
+    shutGate(p: string): void {
+      this.shut.add(p);
+    }
+
+    openGate(p: string): void {
+      this.shut.delete(p);
+      this.gates.get(p)?.();
+    }
+
+    private async gate(p: string): Promise<void> {
+      if (this.shut.has(p)) await new Promise<void>((resolve) => this.gates.set(p, resolve));
+    }
+
+    override async stat(p: string) {
+      await this.gate(p);
+      return super.stat(p);
+    }
+
+    override async lstat(p: string) {
+      if (p === "/r/out") return { isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true };
+      return super.lstat(p);
+    }
+
+    override async readlink(p?: string): Promise<string> {
+      if (p === "/r/out") return "/outside";
+      return super.readlink();
+    }
+  }
+
+  function linkedEnv(): { fs: LinkedFs; cache: PathStatCache; e: Env } {
+    const fs = new LinkedFs();
+    const clock = new Clock();
+    const cache = new PathStatCache({ fs, now: clock.now, timer: clock.timer, platform: "linux" });
+    return { fs, cache, e: { fs, clock, cache, platform: "linux" } };
+  }
+
+  it("is not linked once the checkout's own real path is known", async () => {
+    const { e } = linkedEnv();
+    const rows = mkRows(["see out/secret.ts and keep.ts"], 40);
+
+    const { result } = await detectSettled(e, rows);
+
+    expect(result.spans.map((s) => pathParams(s.uri).p)).toEqual(["keep.ts"]);
+  });
+
+  it("is linked lexically until the checkout answers, and names the root as the answer to wait for", async () => {
+    const { fs, e } = linkedEnv();
+    const rows = mkRows(["see out/secret.ts"], 40);
+    fs.shutGate("/r");
+    let result = detect(e, rows);
+    for (let i = 0; i < 6 && result.pending.size > 0; i++) {
+      await settle(10);
+      result = detect(e, rows);
+    }
+
+    expect(result.spans.map((s) => pathParams(s.uri).p)).toEqual(["out/secret.ts"]);
+    expect([...result.refining]).toEqual(["/r"]);
+
+    fs.openGate("/r");
+    await settle();
+    const after = detect(e, rows);
+
+    expect(after.spans).toEqual([]);
+    expect(after.refining.size).toBe(0);
+  });
+
+  it("does not name the root for a path the walk reached unchanged", async () => {
+    const { e } = linkedEnv();
+    const rows = mkRows(["see keep.ts"], 40);
+
+    const { result } = await detectSettled(e, rows);
+
+    expect(result.spans).toHaveLength(1);
+    expect(result.refining.size).toBe(0);
   });
 });

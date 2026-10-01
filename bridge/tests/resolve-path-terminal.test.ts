@@ -154,6 +154,17 @@ describe("file:resolve-path against a terminal", () => {
     expect(answer.relPath).toBe("top.ts");
   });
 
+  test("a path that is simply missing is answered without timedOut", async () => {
+    const { bus, loopback } = await boot();
+
+    bus.dispatchInbound(resolveRequest("gone", "nowhere.ts"), "control", "loopback");
+
+    const answer = await reply(loopback, "gone");
+    expect(answer.relPath).toBe("nowhere.ts");
+    expect(answer.exists).toBe(false);
+    expect(answer.timedOut).toBeUndefined();
+  });
+
   test("the reply reaches only the client that asked", async () => {
     const { bus, loopback, relay } = await boot();
 
@@ -178,6 +189,9 @@ describe("file:resolve-path against a terminal", () => {
     expect(refused.relPath).toBeNull();
     expect(refused.exists).toBe(false);
     expect(refused.checkoutId).toBe("main");
+    // Turned away unexamined, so the answer is "not found out" and never "gone".
+    expect(refused.timedOut).toBe(true);
+    for (let i = 0; i < 8; i++) expect((await reply(loopback, `burst-${i}`)).timedOut).toBeUndefined();
 
     // The slot frees once the replies are out, so the client is not locked out.
     bus.dispatchInbound(resolveRequest("after", "top.ts"), "control", "loopback");
