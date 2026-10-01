@@ -95,8 +95,14 @@ function Add-FirewallRules {
     $applications.SelectNodes("*[local-name()='Application']") |
       ForEach-Object { $_.GetAttribute('Executable') }
   )
+  # Only an inbound UDP rule counts as coverage, matching what
+  # verify-msix-executables.ps1 asserts; any other rule for the exe leaves the
+  # Iroh bind prompting.
   $covered = @(
     $manifest.SelectNodes("//*[local-name()='FirewallRules']") |
+      Where-Object {
+        $_.SelectNodes("*[local-name()='Rule' and @Direction='in' and @IPProtocol='UDP']").Count -gt 0
+      } |
       ForEach-Object { $_.GetAttribute('Executable') }
   )
   $missing = @($executables | Where-Object { $covered -notcontains $_ })
@@ -122,9 +128,9 @@ function Add-FirewallRules {
     # Iroh's QUIC transport is UDP only, on an OS-assigned port, so the rule
     # names a protocol and no port range.
     $rule.SetAttribute('IPProtocol', 'UDP')
-    # Not just private: the phone is used away from home networks, and the
-    # endpoint completes a session only with endpoint IDs its authorization
-    # snapshot names.
+    # Not just private: a laptop running the app or bridge joins public
+    # networks too, and the endpoint completes a session only with endpoint IDs
+    # its authorization snapshot names.
     $rule.SetAttribute('Profile', 'all')
     $rules.AppendChild($rule) | Out-Null
     $extension.AppendChild($rules) | Out-Null

@@ -87,6 +87,9 @@ try {
       $found = if ($firewalled.Count -eq 0) { '(none)' } else { $firewalled -join ', ' }
       throw "MSIX declares no inbound UDP firewall rule for '$name'; covered executables: $found"
     }
+    if ($null -eq $archive.GetEntry($name)) {
+      throw "MSIX declares a firewall rule for '$name' but the file is not in the package: $resolvedPath"
+    }
   }
 
   if ($FirewallExecutable.Count -gt 0) {
