@@ -13,6 +13,11 @@
   Nothing earlier in the pipeline covers this: the hook smoke test runs against
   the loose bridge binary before packaging, which is exactly the case that
   already works.
+
+  -FirewallExecutable asserts the package-level inbound UDP firewall rules. A
+  binary that loses its rule still builds and installs, then raises a Windows
+  Defender Firewall prompt on every update, because the rule Windows records
+  from the prompt is keyed to the versioned install folder.
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +26,10 @@ param(
 
   [Parameter(Mandatory = $true)]
   [ValidatePattern('^[A-Za-z0-9._-]+\.exe$')]
-  [string[]]$Executable
+  [string[]]$Executable,
+
+  [ValidatePattern('^[A-Za-z0-9._-]+\.exe$')]
+  [string[]]$FirewallExecutable = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +73,28 @@ try {
   }
 
   Write-Host "Verified MSIX declares launchable executables: $($Executable -join ', ')"
+
+  $firewalled = @(
+    $manifest.SelectNodes("/*/*[local-name()='Extensions']//*[local-name()='FirewallRules']") |
+      Where-Object {
+        $_.SelectNodes("*[local-name()='Rule' and @Direction='in' and @IPProtocol='UDP']").Count -gt 0
+      } |
+      ForEach-Object { $_.GetAttribute('Executable') }
+  )
+
+  foreach ($name in $FirewallExecutable) {
+    if ($firewalled -notcontains $name) {
+      $found = if ($firewalled.Count -eq 0) { '(none)' } else { $firewalled -join ', ' }
+      throw "MSIX declares no inbound UDP firewall rule for '$name'; covered executables: $found"
+    }
+    if ($null -eq $archive.GetEntry($name)) {
+      throw "MSIX declares a firewall rule for '$name' but the file is not in the package: $resolvedPath"
+    }
+  }
+
+  if ($FirewallExecutable.Count -gt 0) {
+    Write-Host "Verified MSIX firewall rules: $($FirewallExecutable -join ', ')"
+  }
 }
 finally {
   $archive.Dispose()
