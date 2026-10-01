@@ -70,18 +70,6 @@ class AgentPanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.listen<bool>(authRevokedBannerProvider, (_, revoked) {
-      if (!revoked) return;
-      // Reset so a subsequent auth_revoked event re-notifies.
-      ref.read(authRevokedBannerProvider.notifier).set(false);
-      showAbToast(
-        context,
-        "This device's access was revoked. Reopen the project to "
-        'provision a new device; sign in again if prompted.',
-        duration: const Duration(seconds: 6),
-      );
-    });
-
     // The transcript is addressed by id alone, and the LIVE row
     // (activeSessionProvider) is null for the whole window in which the session
     // list re-resolves — reading the id from there is what made a chat session
