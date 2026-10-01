@@ -394,21 +394,14 @@ Future<void> startNewSession(
         leaveNewSession(ref);
       }
 
-      // 5. Reconcile the reply now that the user is already in the session. A
-      // queued start is a SUCCESS — the entry comes back carrying
-      // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
-      // session, an older agent's unknown tool) leaves the draft intact for a
-      // return to this canvas; a CODED refusal is reported below, draft kept.
+      // 5. A queued start is a SUCCESS; only a bare rejection leaves the draft
+      // intact, while a CODED refusal is reported below.
       final SessionEntry? started;
       try {
         started = await starting;
       } on SessionOperationException catch (error) {
-        // Voiced here, and only here: the composer that would catch it is
-        // normally unmounted by the hand-off above (or by the user leaving the
-        // canvas first), and the service announces no refusal whose caller
-        // holds the reason. Not rethrown — a local bridge can refuse before
-        // the hand-off's rebuild unmounts the composer, which would then toast
-        // the same refusal a second time in its own words.
+        // Voiced only here, not rethrown: the composer may still be mounted and
+        // would toast the same refusal twice.
         reportStartRefusal(ref.read(appToasterProvider), error);
         return;
       }
@@ -432,15 +425,8 @@ Future<void> startNewSession(
       // gets its own reason instead of collapsing into replyTimedOut below.
       abort(NewSessionStartAbortReason.sessionDown);
     } on TimeoutException {
-      // A dropped/late reply is retryable. Typed bridge failures intentionally
-      // reach the composer so it can show their safe display message — though
-      // a START refusal arrives after the hand-off and is voiced above.
-      //
-      // The abort is what a CREATE timeout is owed: that one is still on the
-      // canvas, it is the longest wait this flow has, and ending it without a
-      // word is the silent vanish the whole progress model exists to remove. A
-      // start timeout records one too and nobody is left to read it, which is
-      // cheaper than deciding the reason from which await threw.
+      // A dropped/late reply is retryable; typed bridge failures reach the
+      // composer. Abort so a CREATE timeout doesn't vanish silently.
       abort(NewSessionStartAbortReason.replyTimedOut);
     }
   } finally {

@@ -152,21 +152,8 @@ final terminalStateProvider = StreamProvider<TerminalState>((ref) {
 /// is the registry key, i.e. already in its correct local-or-remote shape.
 typedef ProjectScoped<T extends Object> = ({String entryId, T message});
 
-/// Events from every warm project: [perProject]'s streams on its session, and
-/// [perCheckout]'s on each of its checkouts, those built later included, each
-/// tagged with the project's entryId.
-///
-/// A plain broadcast stream for a `Provider<Stream>`, never a StreamProvider,
-/// whose retained `AsyncData` would hand the last event back to every new
-/// listener as though it had just happened. An event that lands while nothing
-/// listens is gone instead.
-///
-/// One stream for the provider's life, which `ref.listen` rather than
-/// `ref.watch` is what keeps: a project joining or leaving the warm set, or its
-/// session re-resolving, rewires only that project. Rebuilding the whole stream
-/// instead would cancel every subscription, and these controllers deliver a
-/// microtask after `add` — so an event already queued in another project, or
-/// on its way to a consumer, was dropped with the subscription it was queued on.
+/// Every warm project's events by entryId: no StreamProvider (it replays the
+/// last event), no `ref.watch` (a rebuild drops events queued on old subs).
 Stream<ProjectScoped<T>> _warmProjectEvents<T extends Object>(
   Ref ref, {
   Iterable<Stream<T>> Function(ProjectSession)? perProject,
@@ -223,9 +210,7 @@ Stream<ProjectScoped<T>> _warmProjectEvents<T extends Object>(
   return controller.stream;
 }
 
-/// One warm project's subscriptions in [_warmProjectEvents], and the session
-/// they were taken from, so a session that re-resolves to the same instance
-/// keeps them.
+/// One warm project's subscriptions and the session they were taken from.
 class _WarmProjectFeed {
   ProviderSubscription<AsyncValue<ProjectSession>>? watch;
   ProjectSession? session;
@@ -244,13 +229,8 @@ class _WarmProjectFeed {
   }
 }
 
-/// Hands [onEvent] each event of the stream [provider] holds, following it to
-/// any stream it is rebuilt into, until the returned callback is called.
-///
-/// For the `Provider<Stream>` event sources (see [_warmProjectEvents]), where a
-/// bare `ref.listen` reports only that the stream was replaced. Those keep one
-/// stream for their life, but an invalidation or an override can still swap
-/// it.
+/// Hands [onEvent] each event of [provider]'s stream, following it across
+/// rebuilds; a bare `ref.listen` only reports that the stream was replaced.
 void Function() listenToEvents<T>(
   WidgetRef ref,
   ProviderListenable<Stream<T>> provider,
@@ -267,9 +247,8 @@ void Function() listenToEvents<T>(
   };
 }
 
-/// Agent desktop-notification signals (OSC 9 / OSC 777) merged across
-/// ALL warm projects — not just the focused one — so a background project's
-/// agent can still raise a toast / OS notification.
+/// Agent desktop-notification signals merged across ALL warm projects, so a
+/// background project's agent can still notify.
 final terminalNotificationsProvider =
     Provider<Stream<ProjectScoped<TerminalNotificationMessage>>>(
       (ref) => _warmProjectEvents(
@@ -278,9 +257,8 @@ final terminalNotificationsProvider =
       ),
     );
 
-/// Plugin/hook-sourced agent notifications (notification:push) merged across all
-/// warm projects — same fan-out as terminalNotificationsProvider but for the
-/// intent-aware plugin path.
+/// Plugin/hook-sourced agent notifications (notification:push), merged across
+/// all warm projects like terminalNotificationsProvider.
 final agentPushNotificationsProvider =
     Provider<Stream<ProjectScoped<NotificationPushMessage>>>(
       (ref) => _warmProjectEvents(
@@ -744,15 +722,8 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // See provider_retry.dart.
 }, retry: noProviderRetry);
 
-/// Git op results ([FileService.gitOpFeedback]), checkout and branch-list
-/// failures ([TerminalService.gitErrors]) and session refusals
-/// ([SessionsService.errors]) from every warm project and each of its
-/// checkouts, worded for a toast and scoped to the project they came from.
-///
-/// Every warm service, not the focused one: a commit's hook can outlast a
-/// switch to another checkout, and the sidebar can stop a session in a project
-/// that is not focused — each result would otherwise land with nothing
-/// listening.
+/// Git op, checkout and session-refusal feedback from every warm project, not
+/// just the focused one, or results landing after a focus switch are lost.
 final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(
   (ref) => _warmProjectEvents(
     ref,

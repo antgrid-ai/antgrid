@@ -419,34 +419,8 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
   }
 }
 
-/// The single arm flow, shared by the header shield and the away-moment hint so
-/// the two can never drift: sheet → arm on confirm → latch
-/// [FirstRunState.handlerArmedOnce] on every successful arm.
-///
-/// Cancelling arms nothing. Takes a [ProviderContainer], not a WidgetRef: the
-/// caller's widget may be gone by the time the sheet resolves. [context] is
-/// re-checked with `context.mounted` past every await, because the refusal path
-/// below shows a second surface after one.
-///
-/// The goal comes from [sessionOpeningPromptsProvider] rather than from the
-/// caller: both arm surfaces sit over a session the user did not have to
-/// describe, and the sentence they started it with is the only statement of
-/// intent that exists. Null when nothing was remembered — a session adopted at
-/// launch, one started from an empty composer, or one already armed once — and
-/// an omitted goal leaves the bridge's stored one untouched, so a re-arm is
-/// still exactly the payload-free arm those sessions want.
-///
-/// The project is pinned when the arm starts, since [terminalId] belongs to the
-/// one focused then and focus can move while the sheet or the upgrade screen is
-/// up. Its service is resolved AFTER the sheet, never captured before it: the
-/// sheet stays open for as long as the user reads it, and a transport reconnect
-/// in that window disposes the build-time instance, whose `arm` then returns
-/// having sent nothing. The user tapped "Arm Handler", the sheet closed, and
-/// they walk away believing the session is watched.
-///
-/// What the sheet sends is a DELTA: a control the user never touched sends
-/// nothing, so an arm cannot clear a judge, a lens or a brief the bridge holds
-/// and this app has not yet been told about.
+/// Shared arm flow. Pins the project at the start (focus can move during the
+/// sheet) but resolves its service after it, since a reconnect disposes it.
 Future<void> armWithSheet({
   required BuildContext context,
   required ProviderContainer container,
@@ -702,12 +676,8 @@ void latchHandlerArmedOnConfirmation(
   void watch(HandlerService? service) {
     if (service == null) return;
     unawaited(frameSub?.cancel());
-    // Status FRAMES, never the state stream: a frame carrying a refusal is the
-    // bridge saying so as of that frame, and the refused arm raises one itself
-    // — so this answers within a round trip instead of after the confirmation
-    // window. Every other emission carries the entitlement already held, and
-    // the refusal the user walked through to get here is still sitting there;
-    // reading it would report an arm that is still in flight as dead.
+    // Status FRAMES, not the state stream: held state carries the refusal of an
+    // earlier arm and would report one still in flight as dead.
     frameSub = service.statusFrames.listen((frame) {
       if (confirmed(frame)) {
         latch(service);
@@ -716,10 +686,8 @@ void latchHandlerArmedOnConfirmation(
       final entitlement = frame.entitlement;
       if (entitlement != null) refuse(entitlement);
     });
-    // The status may already list the session (re-arm race after a disarm the
-    // bridge never processed, or a redialled service whose replay landed
-    // before this subscribed) — check once so the latch doesn't wait on a
-    // change that never comes.
+    // The status may already list the session; check once so the latch
+    // doesn't wait on a change that never comes.
     if (confirmed(service.currentState)) latch(service);
   }
 
@@ -733,10 +701,8 @@ void latchHandlerArmedOnConfirmation(
           'instruction you typed with it was not sent.',
     );
   };
-  // Bound to the ARMED project rather than the focused one: another project's
-  // held refusal must not end this arm as refused, and this project's
-  // confirmation must land while the user looks elsewhere — unseen, it times
-  // out and drops an instruction the bridge was ready to take.
+  // Bound to the ARMED project, not the focused one, so a confirmation landing
+  // while the user looks elsewhere isn't timed out.
   serviceSub = container.listen(
     _armedProjectHandlerProvider(entryId),
     (_, next) => watch(next),
@@ -749,13 +715,8 @@ void latchHandlerArmedOnConfirmation(
   watch(serviceSub!.read());
 }
 
-/// The handler service of a project an arm latch is waiting on, followed
-/// across a redial (which replaces the whole session, service included).
-///
-/// Gated on the warm set the way `handlerEscalationsProvider` is: a project
-/// evicted mid-window has its session invalidated, and a listener held
-/// straight on `projectSessionProvider` would rebuild it — re-warming the
-/// project the registry just let go, and evicting another to make room.
+/// The handler service of the project an arm latch waits on, followed across
+/// a redial. Warm-set gated so listening never re-warms an evicted project.
 final _armedProjectHandlerProvider = Provider.autoDispose
     .family<HandlerService?, String>((ref, entryId) {
       if (!ref.watch(projectSessionRegistryProvider).contains(entryId)) {
@@ -764,20 +725,8 @@ final _armedProjectHandlerProvider = Provider.autoDispose
       return ref.watch(projectSessionProvider(entryId)).value?.handlerService;
     });
 
-/// Sends the arm sheet's sentence, once the bridge has confirmed the arm.
-///
-/// [service] is the one whose status frame just confirmed the arm, never one
-/// captured across the sheet or the latch window: this runs up to
-/// [kHandlerArmConfirmWindow] after the sheet closed, and a transport reconnect
-/// in that window disposes the build-time instance, whose `instruct` then sends
-/// nothing at all. Nor the focused one — by now the user may be looking at
-/// another project, whose Handler has never heard of this terminal.
-///
-/// The three-valued result is honoured rather than discarded. `duplicate` is
-/// reachable (a re-arm carrying the same sentence as one still outstanding) and
-/// `empty` means the service was disposed under the send — on a screen the
-/// user is about to walk away from, an unsent instruction must not look like a
-/// sent one.
+/// Sends the arm sheet's sentence once the bridge has confirmed the arm.
+/// [service] is the confirming one; earlier captures may be disposed.
 void _sendArmInstruction(
   ProviderContainer container,
   HandlerService service,

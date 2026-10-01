@@ -26,10 +26,8 @@ CommandState _state(CommandStatus status, String output) => CommandState(
 );
 
 void main() {
-  // The provider follows focus, so the state before a checkout switch and the
-  // one after belong to two different commands. Read as one command going
-  // running → success, the switch would collapse the result it lands on and
-  // queue it for dismissal.
+  // The provider follows focus, so states before and after a checkout switch
+  // are two commands; reading them as one would dismiss the landed result.
   testWidgets('a checkout switch is not read as a command finishing', (
     tester,
   ) async {

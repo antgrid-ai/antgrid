@@ -744,10 +744,8 @@ void main() {
     await session.close();
   });
 
-  // The backstop de-registers the pending entry, which is why a late refusal
-  // has no future left to fail. It still has to reach the user: with no
-  // caller left to hand the reason to, _handleResult announces it on
-  // `errors`, which OperationalErrorToaster listens to.
+  // The backstop drops the pending entry, so a late refusal has no future to
+  // fail; _handleResult must still announce it on `errors`.
   test('a refusal with no pending entry left is announced', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

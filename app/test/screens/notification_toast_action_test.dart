@@ -180,9 +180,8 @@ void main() {
     });
   });
 
-  // handlerEscalationsProvider re-seeds every pending escalation on each
-  // rebuild, and a foreground push can carry one the live stream already
-  // delivered; the shared record is what keeps either from toasting twice.
+  // Escalations are re-seeded on rebuild and can also arrive by push; the
+  // shared record keeps either from toasting twice.
   testWidgets('an escalation the app already surfaced is not toasted again', (
     tester,
   ) async {

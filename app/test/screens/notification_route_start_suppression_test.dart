@@ -201,10 +201,8 @@ void main() {
     await tester.pump(const Duration(seconds: 20));
   });
 
-  // The default pick re-runs on every remount of the shell — leaving the New
-  // Session canvas is one — but only the project's first landing is an open.
-  // A session found stopped on a later one was stopped since, and starting it
-  // would undo that.
+  // Only a project's first landing is an open; a session found stopped on a
+  // later remount was stopped since, and starting it would undo that.
   group('the default pick', () {
     Future<void> landOn(
       WidgetTester tester, {
@@ -247,9 +245,8 @@ void main() {
       await landOn(tester, landedBefore: true);
     });
 
-    // The New Session hand-off lands through the pending id, never this pick;
-    // if that left the open unspent, the next remount — backing out of the
-    // canvas — would restart a session the user has stopped since.
+    // The New Session hand-off must spend the open, or a later remount would
+    // restart a session the user has since stopped.
     testWidgets('a landing on a named session spends the open too', (
       tester,
     ) async {

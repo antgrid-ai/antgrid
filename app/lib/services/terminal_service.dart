@@ -1822,9 +1822,8 @@ class TerminalService {
         // keeping the previous counts beside a cleared branch is worse than 0.
         gitAhead: msg.git?.ahead ?? 0,
         gitBehind: msg.git?.behind ?? 0,
-        // Carried, not defaulted: a status frame says nothing about an
-        // in-flight branch list, and rebuilding without it empties an open
-        // branch picker.
+        // Carried, not defaulted: a status frame says nothing about a pending
+        // branch list; dropping it empties an open picker.
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
         needsFirstRun: msg.needsFirstRun,

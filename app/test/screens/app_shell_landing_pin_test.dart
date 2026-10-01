@@ -146,10 +146,8 @@ void main() {
     },
   );
 
-  // Errors and agent notifications are event streams with no replay, so one is
-  // shown only if something is listening when it lands. The sidebar can stop a
-  // session, and an agent can finish, while the New Session canvas is up and
-  // the workspace is unmounted — both surfacers have to outlive that swap.
+  // Event streams have no replay, so both surfacers must stay mounted while
+  // the New Session canvas unmounts the workspace.
   testWidgets(
     'errors and agent notifications toast while the New Session screen is up',
     (tester) async {

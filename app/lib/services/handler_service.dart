@@ -28,11 +28,8 @@ class HandlerService {
   // which would re-fire a notification; this emits each escalation exactly once
   // as it arrives, so the OS-notification fan-out can't double-notify.
   final _escalationController = StreamController<HandlerEscalation>.broadcast();
-  // The state as of each `handler:status` frame, and only those. Every other
-  // emission on [stateStream] (an escalation, a snapshot, an optimistic
-  // update) carries the entitlement the last frame set, so a reader asking
-  // "what did the bridge just answer" cannot tell a fresh refusal from a held
-  // one there.
+  // State as of each `handler:status` frame only; other emissions carry the
+  // last entitlement, so a fresh refusal is indistinguishable from a held one.
   final _statusFrameController = StreamController<HandlerState>.broadcast();
   HandlerState _state = const HandlerState.initial();
   bool _disposed = false;

@@ -43,12 +43,8 @@ class SessionSetupBannerUiController
     extends Notifier<SessionSetupBannerUiState> {
   final Map<String, Timer> _successTimers = <String, Timer>{};
 
-  /// Runs this app has watched in progress. "Workspace ready" announces a
-  /// transition, but the bridge keeps a finished run's `done` for its whole
-  /// lifetime and reports it to every client that attaches — so without this,
-  /// each app restart, phone connect and reconnect would re-announce a setup
-  /// that finished long ago. A plain field rather than [state]: the banner
-  /// records into it from `build`, and nothing has to rebuild when it changes.
+  /// Runs watched in progress; the bridge replays a finished run's `done` to
+  /// every attach, so without this each reconnect re-announces old setups.
   final Set<String> _observedRunning = <String>{};
 
   void noteRunning(String runKey) => _observedRunning.add(runKey);

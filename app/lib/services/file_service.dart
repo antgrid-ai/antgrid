@@ -126,9 +126,8 @@ class FileService {
   Stream<FileTreeState> get stateStream => _stateController.stream;
   FileTreeState get currentState => _state;
 
-  /// One message per finished git op (commit, discard, sync, and the failures
-  /// of stage/unstage/stash), with no replay — `OperationalErrorToaster` says
-  /// why it is not a field on [FileTreeState].
+  /// One message per finished git op, with no replay; see
+  /// `OperationalErrorToaster` for why it is not a field on [FileTreeState].
   final _gitOpFeedbackController = StreamController<String>.broadcast();
   Stream<String> get gitOpFeedback => _gitOpFeedbackController.stream;
 
@@ -1791,11 +1790,8 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
   }
 
-  /// Commit whatever is currently staged, with [message]. Result (success or
-  /// error) arrives as git:commit-result and is announced on [gitOpFeedback];
-  /// the changed-file list refreshes automatically from the bridge's
-  /// git:status. Which files land in the commit is decided by prior
-  /// [stageFiles]/[unstageFiles] calls, not by this one.
+  /// Commit whatever is currently staged, with [message]. Which files land
+  /// is decided by prior [stageFiles]/[unstageFiles] calls.
   void commit(String message) {
     session.sendForCheckout(
       checkoutId,

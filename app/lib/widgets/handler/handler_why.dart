@@ -18,10 +18,7 @@ import '../../models/handler_state.dart';
 const handlerWhyLabel = 'Why';
 
 /// What `escalate()` mints for `question` when the judge's `notify.body` was
-/// empty (`firstFilled(decision.notify?.body) ?? "Agent needs you"` in
-/// `engine.ts`, and the same literal again in `push/compose.ts`). Read here to
-/// decide whether the "Why" disclosure should open by default, and by
-/// `agent_notification_surfacer.dart` for the notification body.
+/// empty; mirrored in `engine.ts` and `push/compose.ts`.
 const handlerFallbackQuestion = 'Agent needs you';
 
 /// Whether the reasoning should be showing the moment the surface is built.

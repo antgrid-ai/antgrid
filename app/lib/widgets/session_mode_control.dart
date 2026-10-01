@@ -253,9 +253,8 @@ Future<void> _switchMode(
             .read(projectSessionProvider(projectId))
             .value
             ?.sessionsService;
-  // The app's toaster, not the header's: past the confirmation (and, below, a
-  // teardown that can take seconds) the header that asked may be gone, and
-  // nothing else reports these.
+  // The app's toaster, not the header's: the header that asked may be gone
+  // by the time these arrive.
   final toaster = container.read(appToasterProvider);
   if (service == null) {
     toaster.showMessage(

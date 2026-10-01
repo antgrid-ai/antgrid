@@ -14,10 +14,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(useInMemoryPrefs);
 
-  // A commit's hook can outlast a switch to another checkout, and the sidebar
-  // can stop a session in a project that is not focused, so the result has to
-  // be heard from wherever it lands — not only from what is focused when it
-  // does.
+  // A result can land after focus moved (late commit hook, sidebar stop), so
+  // it must be heard from any project, not only the focused one.
   test('carries results from every warm project and checkout', () async {
     final transportA = FakeAgentTransport();
     final transportB = FakeAgentTransport();
@@ -82,9 +80,8 @@ void main() {
     ]);
   });
 
-  // Another project opening, or a session re-resolving, used to rebuild the
-  // whole fan-in and cancel every subscription — dropping an event that was
-  // already queued on one, since these streams deliver a microtask after add.
+  // Rebuilding the fan-in must not cancel subscriptions: events are delivered
+  // a microtask after add, so a queued one would be dropped.
   test('an event in flight survives another project opening', () async {
     final transportA = FakeAgentTransport();
     final sessions = <String, ProjectSession>{

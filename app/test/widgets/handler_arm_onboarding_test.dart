@@ -1144,10 +1144,8 @@ void main() {
         expect(instructs(transport), isEmpty);
       });
 
-      // The latch outlives the sheet by up to the confirmation window, and the
-      // user is free to look at another project in it. That project's Handler
-      // state is not this arm's answer: its held refusal must not end the arm,
-      // and its silence must not hide this project's confirmation.
+      // Another project's Handler state is not this arm's answer: its refusal
+      // must not end the arm, nor its silence hide this confirmation.
       testWidgets('the latch follows the armed project, not the focused one', (
         tester,
       ) async {
@@ -1217,9 +1215,8 @@ void main() {
         expect(find.text('Nothing was queued'), findsNothing);
       });
 
-      // Only a status frame is an answer. Anything else the service emits —
-      // an escalation, an optimistic update — carries the refusal the user
-      // walked through to get to the sheet, which says nothing about this arm.
+      // Only a status frame answers the arm; other frames carry the earlier
+      // refusal, which says nothing about this arm.
       testWidgets('a held refusal re-emitted by a non-status update does not '
           'end the arm', (tester) async {
         final (transport, container, context) = await pumpArm(tester);
@@ -1227,9 +1224,8 @@ void main() {
           'reason': 'not_entitled',
           'tier': 'free',
         });
-        // The refusal the user walked past: the sheet is opened over it
-        // through the flow's own paywall dialog in the app, which is not what
-        // this test is about — so the arm is latched directly.
+        // The sheet normally opens over this refusal via the paywall dialog;
+        // latch the arm directly to skip that flow.
         latchHandlerArmedOnConfirmation(
           container,
           'p',

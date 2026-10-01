@@ -43,13 +43,8 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
   final LayerLink _sendToAgentLink = LayerLink();
 
-  /// The project and checkout [_lastState] came from, and that state.
-  ///
-  /// [commandStateProvider] follows focus, so two consecutive states can
-  /// belong to different checkouts — and "running" on one followed by
-  /// "success" on the other is not a command finishing. Comparing only within
-  /// one source keeps a switch from collapsing the result it lands on and
-  /// dismissing it three seconds later.
+  /// The project and checkout [_lastState] came from. [commandStateProvider]
+  /// follows focus, so states from different checkouts must not be compared.
   (String?, String)? _stateSource;
   CommandState? _lastState;
 

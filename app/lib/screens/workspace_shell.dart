@@ -569,9 +569,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
       ref.read(relayErrorBannerProvider.notifier).set(null);
     }
 
-    // Spent by whichever landing this turns out to be, named, default or empty,
-    // so a later remount is never read as the open — see
-    // [SessionsService.takeLandingAutoStart].
+    // Spent by whichever landing this is, so a later remount is never read as
+    // the open; see [SessionsService.takeLandingAutoStart].
     final opening = svc.takeLandingAutoStart();
 
     // 1. Pending session-id (from a cross-project session-row click).

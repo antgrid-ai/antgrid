@@ -72,11 +72,8 @@ final _sessionList = NotifierProvider<ValueController<SessionsState?>, SessionsS
   () => ValueController<SessionsState?>(null),
 );
 
-/// Mounts the banner alone over a hand-seeded session list.
-///
-/// [before] is shown first and then replaced by [setup] — how a test has the
-/// banner watch a run in progress before it settles. A `done` with no
-/// [before] is a run that finished before this app was looking.
+/// Mounts the banner alone over a seeded session list; [before] is shown first
+/// to watch a run settle, and `done` without it finished before the app looked.
 Future<void> pumpBanner(
   WidgetTester tester,
   SessionSetup? setup, {
@@ -109,9 +106,8 @@ Future<void> pumpBanner(
       ),
     ),
   );
-  // Set rather than seeded through an override: a re-pump of the same scope
-  // keeps the notifier it already built, so a second call would otherwise
-  // keep showing the first call's list.
+  // Set, not overridden: re-pumping the same scope keeps the built notifier,
+  // so a second call would show the first call's list.
   final list = ProviderScope.containerOf(
     tester.element(find.byType(SessionSetupBanner)),
   ).read(_sessionList.notifier);
@@ -360,9 +356,8 @@ void main() {
       expect(find.byType(AbProgressRule), findsNothing);
     });
 
-    // The bridge reports a finished run's `done` to every client that attaches
-    // for as long as it runs, so a fresh app, a phone connecting remotely and
-    // a reconnect all meet `done` cold. That is history, not a confirmation.
+    // The bridge replays a finished run's `done` to every attaching client;
+    // that is history, not a confirmation.
     testWidgets('a run that finished before this app was looking stays quiet', (
       tester,
     ) async {

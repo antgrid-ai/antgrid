@@ -274,11 +274,8 @@ class SessionsService {
       return;
     }
 
-    // Only replies no typed caller holds reach here — an untyped mutation,
-    // which collapses a refusal to null, or one whose caller gave up waiting.
-    // A typed caller words its refusal for its own surface, or declines to.
-    // Announced before the completion so a caller resuming on the null finds
-    // the reason already delivered.
+    // Only replies no typed caller holds reach here. Announced before the
+    // completion so a caller resuming on the null finds the reason delivered.
     if (!ok && error != null && !_disposed) _errorController.add(error);
     _pendingMutations.remove(requestId)?.complete(ok ? entry : null);
   }
@@ -445,14 +442,8 @@ class SessionsService {
 
   bool _landingAutoStartTaken = false;
 
-  /// True once per service — that is, once per open of this project.
-  ///
-  /// The workspace auto-starts the session it lands on, and it lands on every
-  /// remount: leaving the New Session canvas is one, and so is a switch back
-  /// from another project. Only the first landing is the project opening; a
-  /// session found stopped on any later one was stopped since — by the user,
-  /// another device, or the agent exiting — and restarting it would undo that.
-  /// A redial or an eviction builds a new service, and with it a fresh open.
+  /// True once per service (once per open of this project). Only the first
+  /// landing is the open; restarting one found stopped later undoes a stop.
   bool takeLandingAutoStart() {
     if (_landingAutoStartTaken) return false;
     return _landingAutoStartTaken = true;
@@ -511,21 +502,8 @@ class SessionsService {
     return pending.future;
   }
 
-  /// Delete [id]. Three-way, and none of the three is "failed":
-  /// a bridge refusal raises [SessionOperationException] (the confirm ladder's
-  /// input), an `ok` reply completes [SessionDeleteAck.deleted], and no reply
-  /// at all completes [SessionDeleteAck.outcomeUnknown] — see
-  /// [kSessionDeleteAckTimeout] for why silence cannot mean failure here.
-  ///
-  /// The lapse is converted at this call site rather than by teaching
-  /// [PendingReply] a second completion mode, so a disposal `StateError` from
-  /// [_failPending] still propagates: that transport is genuinely gone.
-  ///
-  /// [PendingReply.onAbandon] still de-registers the entry, and deliberately so
-  /// — a late `ok:false` is not lost by it. With no entry left to hand the
-  /// reason to, [_handleResult] announces it on [errors], and
-  /// `OperationalErrorToaster` toasts that. What
-  /// de-registering drops is only the dead future.
+  /// Delete [id]. A bridge refusal raises [SessionOperationException]; no reply
+  /// completes [SessionDeleteAck.outcomeUnknown]; silence cannot mean failure.
   Future<SessionDeleteAck> delete(
     String id, {
     bool? force,
