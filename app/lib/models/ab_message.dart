@@ -1695,6 +1695,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         // An `is` check rather than a cast: the heavy-message path parses with
         // no try, and an older bridge omits the field.
         exists: json['exists'] is bool ? json['exists'] as bool : null,
+        timedOut: json['timedOut'] is bool ? json['timedOut'] as bool : false,
       );
 
     case 'file:find-result':

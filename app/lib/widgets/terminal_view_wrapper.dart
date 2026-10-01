@@ -2057,6 +2057,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         ?.previewService,
     revealView: _revealWorkspaceView,
     disclosed: _hoveredLink.value?.uri == uri,
+    focusedTarget: () => ref.read(selectedTargetProvider),
   );
 
   void _revealWorkspaceView(WorkspaceView view) {

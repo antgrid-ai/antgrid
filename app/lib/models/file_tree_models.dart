@@ -599,6 +599,11 @@ class FileResolvePathResultMessage {
   /// an older bridge that does not report existence; treat as present.
   final bool? exists;
 
+  /// The bridge could not find out within its deadline, or was too busy to
+  /// try, so [exists] being false here is not a verdict and a retry may
+  /// succeed. False from an older bridge, which reported both cases as absent.
+  final bool timedOut;
+
   const FileResolvePathResultMessage({
     required this.id,
     required this.timestamp,
@@ -608,6 +613,7 @@ class FileResolvePathResultMessage {
     this.isDirectory = false,
     this.externalImagePath,
     this.exists,
+    this.timedOut = false,
   });
 }
 

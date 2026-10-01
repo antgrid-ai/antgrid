@@ -2928,5 +2928,20 @@ void main() {
       expect((await resolveWith({'exists': 1})).exists, isNull);
       expect((await resolveWith({'exists': null})).exists, isNull);
     });
+
+    test('parses timedOut, defaulting to false when absent or malformed', () async {
+      expect((await resolveWith({'timedOut': true})).timedOut, isTrue);
+      expect((await resolveWith({'timedOut': false})).timedOut, isFalse);
+      expect((await resolveWith({})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': 'yes'})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': 1})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': null})).timedOut, isFalse);
+    });
+
+    test('a timed-out answer keeps its exists value unchanged', () async {
+      final result = await resolveWith({'exists': false, 'timedOut': true});
+      expect(result.exists, isFalse);
+      expect(result.timedOut, isTrue);
+    });
   });
 }

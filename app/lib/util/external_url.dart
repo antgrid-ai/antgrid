@@ -202,6 +202,13 @@ bool isLocalDevHost(String host) {
 /// it null, so those schemes fall through to [openTerminalHyperlink]'s refusal
 /// — markdown and web content must not reach routes meant for the terminal.
 ///
+/// [focusedTarget] reports which session the user is looking at, for surfaces
+/// whose [fileService] is bound to something other than focus (a terminal's
+/// own checkout). A path lookup that completes after the user moved on is
+/// dropped when either this or [fileService] has changed since the tap:
+/// selecting the file in the old checkout while revealing the new session's
+/// Files tab would show the wrong session an unrelated selection.
+///
 /// [fileService] and [previewService] are resolved LAZILY, and re-invoked on
 /// every retry rather than captured once: this awaits user dialogs, and the
 /// checkout or session behind either service can be gone by the time a
@@ -217,6 +224,7 @@ Future<void> openContentLink(
   required void Function(WorkspaceView) revealView,
   bool disclosed = false,
   String? terminalId,
+  Object? Function()? focusedTarget,
 }) async {
   if (terminalId != null && uri.startsWith(kPrintedPathLinkScheme)) {
     final link = parsePrintedPathLink(uri);
@@ -230,6 +238,7 @@ Future<void> openContentLink(
       terminalId,
       fileService,
       revealView,
+      focusedTarget,
     );
     return;
   }
@@ -240,7 +249,7 @@ Future<void> openContentLink(
   // URL is http(s) by construction, so anything else inside the wrapper goes
   // to the scheme refusal below instead.
   if (inner == null && parsed?.scheme == 'file') {
-    await _openFileLink(context, uri, fileService, revealView);
+    await _openFileLink(context, uri, fileService, revealView, focusedTarget);
     return;
   }
   if (parsed != null &&
@@ -261,6 +270,7 @@ Future<void> _openPrintedPathLink(
   String terminalId,
   FileService? Function() fileService,
   void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
 ) async {
   try {
     final service = fileService();
@@ -270,12 +280,16 @@ Future<void> _openPrintedPathLink(
       }
       return;
     }
+    final target = focusedTarget?.call();
     final result = await service.resolveTerminalPath(
       link.path,
       terminalId: terminalId,
       base: link.base,
     );
-    if (!context.mounted) return;
+    if (!context.mounted ||
+        !_stillWanted(service, fileService, target, focusedTarget)) {
+      return;
+    }
     await _showResolvedPath(context, service, result, link.line, revealView);
   } on TimeoutException {
     if (context.mounted) showAbToast(context, _unreachableMessage);
@@ -310,6 +324,7 @@ Future<void> _openFileLink(
   String rawUri,
   FileService? Function() fileService,
   void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
 ) async {
   try {
     final path = terminalFilePath(rawUri);
@@ -324,8 +339,12 @@ Future<void> _openFileLink(
       }
       return;
     }
+    final target = focusedTarget?.call();
     final result = await service.resolveTerminalPath(path);
-    if (!context.mounted) return;
+    if (!context.mounted ||
+        !_stillWanted(service, fileService, target, focusedTarget)) {
+      return;
+    }
     await _showResolvedPath(context, service, result, null, revealView);
   } on TimeoutException {
     if (context.mounted) showAbToast(context, _unreachableMessage);
@@ -340,13 +359,28 @@ Future<void> _openFileLink(
   }
 }
 
-/// Acts on the bridge's answer to a path lookup. The order tells apart three
+/// Whether a path lookup that just completed still belongs to what is on
+/// screen. [service] and [target] are what the tap started from. Callers
+/// check `context.mounted` first, so [focusedTarget] never reads a dead ref.
+bool _stillWanted(
+  FileService service,
+  FileService? Function() fileService,
+  Object? target,
+  Object? Function()? focusedTarget,
+) {
+  if (!identical(fileService(), service)) return false;
+  return focusedTarget == null || focusedTarget() == target;
+}
+
+/// Acts on the bridge's answer to a path lookup. The order tells apart four
 /// failures a user needs told apart: a path inside the workspace that has
-/// since gone, one the bridge could not find or refused, and one that exists
-/// but lies outside the workspace.
+/// since gone, one the bridge could not find or refused, one that exists but
+/// lies outside the workspace, and one the bridge ran out of time checking.
 ///
 /// [FileResolvePathResultMessage.exists] is null from an older bridge, which
-/// reads as present so such a bridge behaves as it always did.
+/// reads as present so such a bridge behaves as it always did. A timed-out
+/// answer's `exists:false` is not a verdict, so an inside path still opens and
+/// the file view reports a real absence.
 Future<void> _showResolvedPath(
   BuildContext context,
   FileService service,
@@ -356,7 +390,7 @@ Future<void> _showResolvedPath(
 ) async {
   final relPath = result.relPath;
   if (relPath != null) {
-    if (result.exists == false) {
+    if (result.exists == false && !result.timedOut) {
       showAbToast(context, 'That path no longer exists.');
       return;
     }
@@ -376,6 +410,10 @@ Future<void> _showResolvedPath(
       path: externalImagePath,
       displayName: _fileNameOf(externalImagePath),
     );
+    return;
+  }
+  if (result.timedOut) {
+    showAbToast(context, "Couldn't check that path in time. Try again.");
     return;
   }
   if (result.exists == false) {

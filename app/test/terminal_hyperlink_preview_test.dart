@@ -8,7 +8,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 const Size _panel = Size(600, 400);
 
-Future<void> _pump(WidgetTester tester, String uri, Offset anchor) {
+Future<void> _pump(
+  WidgetTester tester,
+  String uri,
+  Offset anchor, {
+  double width = 600,
+}) {
   return tester.pumpWidget(
     MaterialApp(
       // The shipped palette, not `context.antgrid`'s tests-only fallback:
@@ -21,7 +26,7 @@ Future<void> _pump(WidgetTester tester, String uri, Offset anchor) {
       home: Scaffold(
         body: Center(
           child: SizedBox(
-            width: _panel.width,
+            width: width,
             height: _panel.height,
             child: Stack(
               children: [
@@ -347,6 +352,48 @@ void main() {
         ),
       );
       expect(paragraph.didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('a long astral path never starts its tail on half a pair', (
+      tester,
+    ) async {
+      // Under the readout's own length cap, so only the fit search cuts it.
+      final path = '\u{1F600}' * 55;
+      for (final width in <double>[110, 143, 177, 211, 245, 289, 333, 377]) {
+        await _pump(
+          tester,
+          'antgrid-path:?p=${Uri.encodeComponent(path)}&b=r&k=f&n=12',
+          const Offset(20, 20),
+          width: width,
+        );
+
+        final text = _text(tester);
+        expect(text, startsWith('…'), reason: 'width $width');
+        expect(text.length, greaterThan(1), reason: 'width $width');
+        final units = text.codeUnits;
+        for (var i = 1; i < units.length; i++) {
+          final unit = units[i];
+          final isLow = unit >= 0xDC00 && unit <= 0xDFFF;
+          final isHigh = unit >= 0xD800 && unit <= 0xDBFF;
+          if (isLow) {
+            final prev = units[i - 1];
+            expect(
+              prev >= 0xD800 && prev <= 0xDBFF,
+              isTrue,
+              reason: 'lone low surrogate at $i, width $width',
+            );
+          }
+          if (isHigh) {
+            expect(
+              i + 1 < units.length &&
+                  units[i + 1] >= 0xDC00 &&
+                  units[i + 1] <= 0xDFFF,
+              isTrue,
+              reason: 'lone high surrogate at $i, width $width',
+            );
+          }
+        }
+      }
     });
 
     testWidgets('shows a detected URL as the inner URL with host emphasis', (

@@ -28,8 +28,11 @@ import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/providers/agent_transport.dart'
+    show selectedTargetProvider;
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
@@ -2340,6 +2343,8 @@ void main() {
         tester.element(find.byType(TerminalViewWrapper)),
       );
       expect(container.read(workspaceMenuControlProvider), isNull);
+      const focused = LocalProject('p');
+      container.read(selectedTargetProvider.notifier).set(focused);
 
       unawaited(
         _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
@@ -2347,9 +2352,45 @@ void main() {
       await tester.pump();
       await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
 
+      final pending = container.read(pendingWorkspaceViewProvider);
+      expect(pending?.value, WorkspaceView.files);
       expect(
-        container.read(pendingWorkspaceViewProvider)?.value,
-        WorkspaceView.files,
+        pending?.target,
+        focused,
+        reason: 'the shell drops a handover stamped for a different session',
+      );
+    });
+
+    testWidgets('a path link answered after the focus moved is dropped', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('p'));
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('other'));
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      expect(container.read(pendingWorkspaceViewProvider), isNull);
+      expect(
+        h.service.session.fileService.currentState.files.selectedFilePath,
+        isNull,
       );
     });
 

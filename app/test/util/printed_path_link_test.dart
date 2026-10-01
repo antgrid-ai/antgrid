@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/file_service.dart' show FileService;
 import 'package:antgrid/services/preview_handoff.dart';
 import 'package:antgrid/util/external_url.dart';
 import 'package:antgrid/widgets/attachment_preview_dialog.dart';
@@ -27,10 +28,12 @@ void main() {
   late ProjectSession session;
   late BuildContext context;
   late List<WorkspaceView> revealed;
+  FileService? current;
 
   Future<void> pumpHost(WidgetTester tester) async {
     transport = LocalFakeAgentTransport();
     session = (await tester.runAsync(() => newFakeProjectSession(transport)))!;
+    current = session.fileService;
     revealed = <WorkspaceView>[];
     await tester.pumpWidget(
       MaterialApp(
@@ -186,6 +189,166 @@ void main() {
     expect(revealed, isEmpty);
     expect(session.fileService.currentState.files.selectedFilePath, isNull);
     await closeHost(tester);
+  });
+
+  testWidgets('a timed-out check of an inside path opens it as if present', (
+    tester,
+  ) async {
+    await pumpHost(tester);
+    await open(
+      tester,
+      _pathUri,
+      reply: {'relPath': 'src/a.ts', 'exists': false, 'timedOut': true},
+    );
+
+    expect(session.fileService.currentState.files.selectedFilePath, 'src/a.ts');
+    expect(revealed, [WorkspaceView.files]);
+    expect(find.text('That path no longer exists.'), findsNothing);
+    await closeHost(tester);
+  });
+
+  testWidgets('a timed-out check with no path asks to try again', (
+    tester,
+  ) async {
+    await pumpHost(tester);
+    await open(
+      tester,
+      _pathUri,
+      reply: {'relPath': null, 'exists': false, 'timedOut': true},
+    );
+
+    expect(
+      find.text("Couldn't check that path in time. Try again."),
+      findsOneWidget,
+    );
+    expect(find.text("Couldn't find that path."), findsNothing);
+    expect(revealed, isEmpty);
+    await closeHost(tester);
+  });
+
+  testWidgets('a timed-out file link with no path asks to try again', (
+    tester,
+  ) async {
+    await pumpHost(tester);
+    await open(
+      tester,
+      'file:///C:/x/a.png',
+      terminalId: null,
+      reply: {'relPath': null, 'exists': false, 'timedOut': true},
+    );
+
+    expect(
+      find.text("Couldn't check that path in time. Try again."),
+      findsOneWidget,
+    );
+    await closeHost(tester);
+  });
+
+  group('a lookup that outlives the session it started in', () {
+    const staleToasts = [
+      'That path no longer exists.',
+      "Couldn't find that path.",
+      'That path is outside this workspace.',
+    ];
+
+    Future<void> expectDropped(
+      WidgetTester tester,
+      String uri, {
+      String? terminalId,
+      required void Function() moveOn,
+      Object? Function()? focusedTarget,
+      Future<void> Function()? before,
+      Future<void> Function()? after,
+    }) async {
+      await pumpHost(tester);
+      await before?.call();
+      final done = openContentLink(
+        context,
+        uri,
+        fileService: () => current,
+        previewService: () => session.previewService,
+        revealView: revealed.add,
+        terminalId: terminalId,
+        focusedTarget: focusedTarget,
+      );
+      await tester.pump();
+      moveOn();
+      await deliver(tester, {'relPath': 'src/a.ts', 'exists': true});
+      await settle(tester, done);
+
+      expect(revealed, isEmpty);
+      expect(
+        session.fileService.currentState.files.selectedFilePath,
+        isNull,
+      );
+      for (final text in staleToasts) {
+        expect(find.text(text), findsNothing);
+      }
+      await after?.call();
+      await closeHost(tester);
+    }
+
+    testWidgets('is dropped when the file service was replaced', (
+      tester,
+    ) async {
+      await expectDropped(
+        tester,
+        _pathUri,
+        terminalId: 't1',
+        moveOn: () => current = null,
+      );
+    });
+
+    testWidgets('is dropped for a file link when the service was replaced', (
+      tester,
+    ) async {
+      late ProjectSession other;
+      await expectDropped(
+        tester,
+        'file:///C:/x/a.ts',
+        moveOn: () {
+          current = other.fileService;
+        },
+        before: () async {
+          other = (await tester.runAsync(
+            () => newFakeProjectSession(LocalFakeAgentTransport()),
+          ))!;
+        },
+        after: () => tester.runAsync(other.close),
+      );
+    });
+
+    testWidgets('is dropped when the focused target changed', (tester) async {
+      Object? focus = 'one';
+      await expectDropped(
+        tester,
+        _pathUri,
+        terminalId: 't1',
+        focusedTarget: () => focus,
+        moveOn: () => focus = 'two',
+      );
+    });
+
+    testWidgets('still lands when the focused target is unchanged', (
+      tester,
+    ) async {
+      await pumpHost(tester);
+      final done = openContentLink(
+        context,
+        _pathUri,
+        fileService: () => current,
+        previewService: () => session.previewService,
+        revealView: revealed.add,
+        terminalId: 't1',
+        focusedTarget: () => 'one',
+      );
+      await tester.pump();
+      await deliver(tester, {'relPath': 'src/a.ts', 'exists': true});
+      await settle(tester, done);
+
+      expect(revealed, [WorkspaceView.files]);
+      await closeHost(tester);
+    });
   });
 
   testWidgets('a path the bridge could not find says so', (tester) async {
