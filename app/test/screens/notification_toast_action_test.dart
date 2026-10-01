@@ -13,6 +13,7 @@ import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/surfaced_notifications.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Size;
@@ -175,6 +176,27 @@ void main() {
       // The plain toast keeps `showAbToastOverlay`'s 4s default; only the
       // actionable one is held open long enough to be reached for.
       await tester.pump(const Duration(seconds: 5));
+      expect(find.byType(AbToast), findsNothing);
+    });
+  });
+
+  // Escalations are re-seeded on rebuild and can also arrive by push; the
+  // shared record keeps either from toasting twice.
+  testWidgets('an escalation the app already surfaced is not toasted again', (
+    tester,
+  ) async {
+    final controller =
+        StreamController<
+          ({String entryId, HandlerEscalation message})
+        >.broadcast();
+    addTearDown(controller.close);
+
+    await _withShell(tester, controller.stream, (container) async {
+      container.read(surfacedNotificationIdsProvider).mark('esc-1');
+
+      controller.add((entryId: _entryId, message: _escalation));
+      await _settle(tester);
+
       expect(find.byType(AbToast), findsNothing);
     });
   });

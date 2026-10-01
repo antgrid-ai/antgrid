@@ -43,6 +43,14 @@ class SessionSetupBannerUiController
     extends Notifier<SessionSetupBannerUiState> {
   final Map<String, Timer> _successTimers = <String, Timer>{};
 
+  /// Runs watched in progress; the bridge replays a finished run's `done` to
+  /// every attach, so without this each reconnect re-announces old setups.
+  final Set<String> _observedRunning = <String>{};
+
+  void noteRunning(String runKey) => _observedRunning.add(runKey);
+
+  bool sawRunning(String runKey) => _observedRunning.contains(runKey);
+
   @override
   SessionSetupBannerUiState build() {
     ref.onDispose(() {

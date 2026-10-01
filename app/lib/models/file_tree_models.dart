@@ -447,14 +447,6 @@ class FileTreeState {
   final GitPaneState git;
   final PreviewPaneState preview;
 
-  /// Last git commit/discard result message. Paired with [gitOpFeedbackSeq]:
-  /// it's a one-shot *event*, not durable state. The message string may repeat
-  /// verbatim (two "Discarded changes"), so consumers (the toaster) de-dup on
-  /// the monotonically-increasing seq, which makes every op a distinct event
-  /// without anyone having to clear the message first.
-  final String? gitOpFeedback;
-  final int gitOpFeedbackSeq;
-
   const FileTreeState({
     this.root,
     this.expandedPaths = const {},
@@ -465,8 +457,6 @@ class FileTreeState {
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
     this.preview = PreviewPaneState.empty,
-    this.gitOpFeedback,
-    this.gitOpFeedbackSeq = 0,
   });
 
   FileTreeState copyWith({
@@ -479,8 +469,6 @@ class FileTreeState {
     FilesPaneState? files,
     GitPaneState? git,
     PreviewPaneState? preview,
-    String? gitOpFeedback,
-    int? gitOpFeedbackSeq,
   }) {
     return FileTreeState(
       root: root ?? this.root,
@@ -492,8 +480,6 @@ class FileTreeState {
       files: files ?? this.files,
       git: git ?? this.git,
       preview: preview ?? this.preview,
-      gitOpFeedback: gitOpFeedback ?? this.gitOpFeedback,
-      gitOpFeedbackSeq: gitOpFeedbackSeq ?? this.gitOpFeedbackSeq,
     );
   }
 }

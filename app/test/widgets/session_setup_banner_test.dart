@@ -68,26 +68,32 @@ SessionEntry _entry(
   setup: setup,
 );
 
-/// Mounts the banner alone over a hand-seeded session list. The banner is a
-/// pure projection of that list, so nothing here needs a live stream.
+final _sessionList = NotifierProvider<ValueController<SessionsState?>, SessionsState?>(
+  () => ValueController<SessionsState?>(null),
+);
+
+/// Mounts the banner alone over a seeded session list; [before] is shown first
+/// to watch a run settle, and `done` without it finished before the app looked.
 Future<void> pumpBanner(
   WidgetTester tester,
   SessionSetup? setup, {
+  SessionSetup? before,
   List<Override> extraOverrides = const [],
   bool sessionRunning = false,
   String mode = 'terminal',
 }) async {
+  SessionsState listWith(SessionSetup? s) => SessionsState(
+    projectId: _projectId,
+    sessions: [_entry(s, running: sessionRunning, mode: mode)],
+  );
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         activeSessionIdProvider.overrideWith(
           () => ValueController<String?>(_sessionId),
         ),
-        freshSessionsStateProvider.overrideWithValue(
-          SessionsState(
-            projectId: _projectId,
-            sessions: [_entry(setup, running: sessionRunning, mode: mode)],
-          ),
+        freshSessionsStateProvider.overrideWith(
+          (ref) => ref.watch(_sessionList),
         ),
         ...extraOverrides,
       ],
@@ -100,6 +106,15 @@ Future<void> pumpBanner(
       ),
     ),
   );
+  // Set, not overridden: re-pumping the same scope keeps the built notifier,
+  // so a second call would show the first call's list.
+  final list = ProviderScope.containerOf(
+    tester.element(find.byType(SessionSetupBanner)),
+  ).read(_sessionList.notifier);
+  list.set(listWith(before ?? setup));
+  await tester.pump();
+  if (before == null) return;
+  list.set(listWith(setup));
   await tester.pump();
 }
 
@@ -266,6 +281,7 @@ void main() {
         await pumpBanner(
           tester,
           _setup('done', stepIndex: 3),
+          before: _setup('running'),
           sessionRunning: true,
         );
 
@@ -276,6 +292,8 @@ void main() {
   });
 
   group('terminal states', () {
+    // Met cold, with no run watched: only a success is history, and a failure
+    // is still the account of a broken tree whenever the user started looking.
     testWidgets('a failure persists, warns, and offers a rerun', (
       tester,
     ) async {
@@ -327,17 +345,35 @@ void main() {
     // The successful run's log stays reachable — it is the record of what the
     // workspace was built from, and the setup PTY is in no terminal list.
     testWidgets('a finished run says so and keeps its log', (tester) async {
-      await pumpBanner(tester, _setup('done', stepIndex: 3));
+      await pumpBanner(
+        tester,
+        _setup('done', stepIndex: 3),
+        before: _setup('running'),
+      );
 
       expect(find.text('Workspace ready'), findsOneWidget);
       expect(find.byTooltip('View setup log'), findsOneWidget);
       expect(find.byType(AbProgressRule), findsNothing);
     });
 
-    testWidgets('a successful run clears after a short confirmation', (
+    // The bridge replays a finished run's `done` to every attaching client;
+    // that is history, not a confirmation.
+    testWidgets('a run that finished before this app was looking stays quiet', (
       tester,
     ) async {
       await pumpBanner(tester, _setup('done', stepIndex: 3));
+
+      expect(find.byType(AbInlineBanner), findsNothing);
+    });
+
+    testWidgets('a successful run clears after a short confirmation', (
+      tester,
+    ) async {
+      await pumpBanner(
+        tester,
+        _setup('done', stepIndex: 3),
+        before: _setup('running'),
+      );
 
       expect(find.text('Workspace ready'), findsOneWidget);
       await tester.pump(kSessionSetupSuccessHold);
@@ -349,7 +385,11 @@ void main() {
     testWidgets('an open successful setup log stays until it is collapsed', (
       tester,
     ) async {
-      await pumpBanner(tester, _setup('done', stepIndex: 3));
+      await pumpBanner(
+        tester,
+        _setup('done', stepIndex: 3),
+        before: _setup('running'),
+      );
       await tester.tap(find.byTooltip('View setup log'));
       await tester.pump();
       await tester.pump(kSessionSetupSuccessHold);

@@ -245,9 +245,8 @@ class NotificationPushMessage {
   final String? message;
   final String? sessionTitle;
 
-  /// Which session fired this, when the hook carried a terminal id. Absent for
-  /// an unattributed hook. Lets the surfacer stay quiet about the chat the user
-  /// is already reading — see workspace_shell's _onAgentNotificationPush.
+  /// Which session fired this; absent for an unattributed hook. Lets the
+  /// surfacer stay quiet about the chat the user is already reading.
   final String? sessionId;
   final String? projectId;
 

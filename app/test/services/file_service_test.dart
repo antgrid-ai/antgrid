@@ -1320,38 +1320,25 @@ void main() {
     await session.close();
   });
 
-  test(
-    'repeat identical discard result advances the op seq (re-toast)',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+  test('a discard or commit result is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
-      t.emit('git:discard-result', {
-        'projectId': 'p',
-        'success': true,
-        'files': ['a.dart'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Discarded changes');
-      final firstSeq = svc.currentState.gitOpFeedbackSeq;
-      expect(firstSeq, greaterThan(0));
+    t.emit('git:discard-result', {
+      'projectId': 'p',
+      'success': true,
+      'files': ['a.dart'],
+    });
+    t.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await Future<void>.delayed(Duration.zero);
+    expect(feedback, ['Discarded changes', 'Committed']);
 
-      // An identical result message must still register as a distinct event so
-      // the toaster re-fires — the seq advances even though the text repeats.
-      t.emit('git:discard-result', {
-        'projectId': 'p',
-        'success': true,
-        'files': ['a.dart'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Discarded changes');
-      expect(svc.currentState.gitOpFeedbackSeq, greaterThan(firstSeq));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
 
   test('discard sends git:discard with files', () async {
     final t = FakeAgentTransport();
@@ -1387,29 +1374,6 @@ void main() {
     await svc.dispose();
     await session.close();
   });
-
-  test(
-    'repeat identical commit result advances the op seq (re-toast)',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      t.emit('git:commit-result', {'projectId': 'p', 'success': true});
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Committed');
-      final firstSeq = svc.currentState.gitOpFeedbackSeq;
-      expect(firstSeq, greaterThan(0));
-
-      t.emit('git:commit-result', {'projectId': 'p', 'success': true});
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Committed');
-      expect(svc.currentState.gitOpFeedbackSeq, greaterThan(firstSeq));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
 
   test('commit sends git:commit with message, no file list', () async {
     final t = FakeAgentTransport();
@@ -1464,6 +1428,8 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
       'projectId': 'p',
@@ -1472,7 +1438,7 @@ void main() {
       'error': 'boom',
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.gitOpFeedback, 'boom');
+    expect(feedback, ['boom']);
 
     await svc.dispose();
     await session.close();
@@ -1482,6 +1448,8 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
       'projectId': 'p',
@@ -1489,7 +1457,7 @@ void main() {
       'files': ['a.dart'],
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.gitOpFeedback, isNull);
+    expect(feedback, isEmpty);
 
     await svc.dispose();
     await session.close();
