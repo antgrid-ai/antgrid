@@ -37,6 +37,8 @@ export interface TerminalViewerTransport {
    *  attachment (see `pause`), which resumes on its own. */
   retired?(address: TerminalAddress, attachmentId: string): void;
 }
+/** How long a finished run waits for link stats before its screen is frozen. */
+const FINAL_LINK_WAIT_MS = 150;
 interface Run {
   address: TerminalAddress;
   runId: string;
@@ -133,12 +135,21 @@ export class TerminalFrameHub {
     await run.source.settle();
     if (this.runs.get(key(address)) !== run) return;
     // The final revision shares the live capture budget, then remains cached
-    // until viewers acknowledge it or their attachments expire.
-    if (run.capturedRevision !== run.source.revision) {
-      const delay = TERMINAL_FRAME_INTERVAL_MS - (this.now() - run.lastCapture);
-      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    // until viewers acknowledge it or their attachments expire. Paths printed
+    // just before the exit have stats still in flight; the revision is frozen
+    // only after they get a bounded chance to land, because nothing re-frames
+    // a final screen once a viewer has acknowledged it.
+    const linkDeadline = this.now() + FINAL_LINK_WAIT_MS;
+    for (;;) {
+      if (run.capturedRevision !== run.source.revision) {
+        const delay = TERMINAL_FRAME_INTERVAL_MS - (this.now() - run.lastCapture);
+        if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        if (this.runs.get(key(address)) !== run) return;
+        if (run.capturedRevision !== run.source.revision) this.captureInto(run, this.now(), true);
+      }
+      const remaining = linkDeadline - this.now();
+      if (remaining <= 0 || !(await run.source.settleLinks(remaining))) break;
       if (this.runs.get(key(address)) !== run) return;
-      if (run.capturedRevision !== run.source.revision) this.captureInto(run, this.now(), true);
     }
     run.finalRevision = run.source.revision;
     run.exitCode = exitCode;

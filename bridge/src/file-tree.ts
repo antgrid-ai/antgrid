@@ -1,6 +1,7 @@
 import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
 import { join, resolve, relative, extname, basename, sep } from "node:path";
 import ignore, { type Ignore } from "ignore";
+import { isRefusedPathShape } from "./terminal-links/grammar";
 
 export type FileTreeNode = {
   name: string;
@@ -231,7 +232,7 @@ export type DirectoryListing = {
 const MAX_LISTING_SCAN = 20_000;
 
 function containedBy(absPath: string, root: string): boolean {
-  // Case-folded on Windows, mirroring `FileWatcher.handleResolvePathRequest` —
+  // Case-folded on Windows, mirroring `FileWatcher.resolvePath` —
   // the only other containment check in the bridge that folds — because a
   // checkout-relative path and the root it is checked against can arrive with
   // different casing for the same drive letter.
@@ -497,15 +498,22 @@ function tooLarge(size: number, cap: number): ReadFileResult {
 export function readFile(
   projectRoot: string,
   relPath: string,
+  platform: NodeJS.Platform = process.platform,
 ): ReadFileResult {
   // Path traversal protection — except for a recognized image extension,
   // which may be served from outside the checkout root entirely. See
   // EXTERNAL_SAFE_IMAGE_MIME for why this narrow carve-out is safe where a
   // general one would not be: `file:read`'s caller for this case is always
   // FileService.openPreview off a resolved `externalImagePath` (see
-  // `file-watcher.ts`'s handleResolvePathRequest), never a bare user-typed
+  // `file-watcher.ts`'s resolvePath), never a bare user-typed
   // path, and the extension gate rules out anything that could carry a
   // script (.svg) or a heavier parser (.pdf).
+  //
+  // Refused before any fs call: a Windows stat of a UNC path opens an SMB
+  // session that hands the user's NTLM hash to whoever named the host.
+  if (isRefusedPathShape(relPath, platform) || isRefusedPathShape(resolve(projectRoot, relPath), platform)) {
+    return { content: null, size: 0, error: "Path traversal denied" };
+  }
   const absPath = resolve(projectRoot, relPath);
   const normalizedRoot = resolve(projectRoot);
   const insideRoot =

@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { relative, resolve, sep, extname, basename, join, isAbsolute, dirname } from "node:path";
+import { relative, resolve, extname, basename, join, isAbsolute, dirname } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-watcher" });
@@ -13,8 +13,20 @@ import {
   type FileTreeNode,
   type DirectoryListing,
 } from "./file-tree";
+import { isRefusedPathShape, type PrintedPathBase } from "./terminal-links/grammar";
+import { isAbsoluteFor, isInsideRoot, normalizeBases } from "./terminal-links/resolver";
+import { sharedPathStatCache, type PathStatCache } from "./terminal-links/stat-cache";
 import type { ConnState } from "./conn-state";
 import type { ClientKey } from "./message-bus";
+/** What a click may wait on a stat for before it answers "missing". */
+const RESOLVE_FRESH_MS = 1000;
+const MAX_RESOLVE_PATH_CHARS = 4096;
+
+type FileResolvePathReply = Omit<
+  Extract<AbMessage, { type: "file:resolve-path-result" }>,
+  "id" | "timestamp" | "type" | "checkoutId"
+>;
+
 export interface ProjectInfo {
   path: string;
   id: string;
@@ -619,66 +631,93 @@ export class FileWatcher {
     );
   }
 
-  /** Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
-   *  target, absolute or already checkout-relative) against this checkout's
-   *  root, and replies with the checkout-relative form the app's file tree
-   *  understands. The app never learns the checkout's absolute root (see
+  /** Resolves a path a terminal program printed against this checkout and
+   *  returns the reply for the requester — it is never broadcast, because
+   *  `externalImagePath` is an absolute path only the asker should see. Never
+   *  rejects: every failure is the "refused" reply.
+   *
+   *  The app never learns the checkout's absolute root (see
    *  `docs/architecture.md` — the checkout path never crosses the session
-   *  wire), so it cannot make this relative on its own; a null `relPath`
+   *  wire), so it cannot make a path relative on its own; a null `relPath`
    *  covers both a path from outside this checkout and one that fails to
-   *  resolve at all. Mirrors [readFile]'s own traversal guard.
+   *  resolve at all.
+   *
+   *  Without `opts.base` the path resolves against the checkout root alone,
+   *  exactly as a `file://` hyperlink always has. With one, it resolves against
+   *  THAT base only and never falls through to another: the detector chose the
+   *  base the file was found under, and a click that quietly picked a different
+   *  same-named file would open something the user was not shown.
    *
    *  A path OUTSIDE the checkout gets one further check: [externalSafeImageMime]
    *  — an image-generation tool's own output directory is typically outside
-   *  any checkout, and before this the app could only refuse such a link
-   *  outright. `externalImagePath` carries the absolute path for exactly that
-   *  narrow case, gated the same way [readFile] gates the read it enables:
+   *  any checkout. `externalImagePath` carries the absolute path for exactly
+   *  that narrow case, gated the same way [readFile] gates the read it enables:
    *  by extension alone, never by content. */
-  handleResolvePathRequest(requestId: string, rawPath: string): void {
-    const absPath = resolve(this.projectRoot, rawPath);
-    const normalizedRoot = resolve(this.projectRoot);
-    // Case-folded on Windows, where the comparison is between two strings that
-    // came from different places: the root as the host spelled it, and a drive
-    // letter as a terminal program printed it. `path.resolve` preserves the
-    // case of both, so a `file:///c:/...` hyperlink against a `C:\...` root
-    // reads as outside the checkout and the Files tab silently ignores it.
-    // `relative()` one method away already folds, so only this test dissents.
-    const cmpPath = process.platform === "win32" ? absPath.toLowerCase() : absPath;
-    const cmpRoot =
-      process.platform === "win32" ? normalizedRoot.toLowerCase() : normalizedRoot;
-    const insideRoot = cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
-    let relPath: string | null = null;
-    let isDirectory = false;
-    let externalImagePath: string | null = null;
-    if (insideRoot) {
-      relPath =
-        absPath === normalizedRoot ? "" : this.toRelPath(absPath);
-      try {
-        isDirectory = statSync(absPath).isDirectory();
-      } catch {
-        // Doesn't exist (yet) — still a valid path to point the Files tab at.
+  async resolvePath(
+    rawPath: unknown,
+    opts: { base?: PrintedPathBase; liveCwd?: string; spawnCwd?: string; requestId?: string } = {},
+    cache: PathStatCache = sharedPathStatCache(),
+  ): Promise<FileResolvePathReply> {
+    const reply = (fields: Partial<FileResolvePathReply> = {}): FileResolvePathReply => ({
+      projectId: this.projectId,
+      requestId: opts.requestId ?? "",
+      relPath: null,
+      isDirectory: false,
+      externalImagePath: null,
+      exists: false,
+      ...fields,
+    });
+    try {
+      const absPath = this.printedPathTarget(rawPath, opts);
+      if (absPath === undefined) return reply();
+      // The bridge already works on this volume, so a checkout on a mapped
+      // drive must not have every path in it refused as network I/O.
+      cache.trustVolume(this.projectRoot);
+      const status = await cache.resolveFresh(absPath, RESOLVE_FRESH_MS);
+      if (status === "refused") return reply();
+      const exists = status === "file" || status === "dir";
+      const normalizedRoot = resolve(this.projectRoot);
+      if (isInsideRoot(absPath, normalizedRoot)) {
+        return reply({
+          relPath: absPath === normalizedRoot ? "" : this.toRelPath(absPath),
+          isDirectory: status === "dir",
+          exists,
+        });
       }
-    } else if (externalSafeImageMime(absPath)) {
-      // Unlike the inside-root case above, there is no "not yet created"
-      // expectation for a path this checkout's watcher knows nothing about —
-      // confirm it exists as a real file before pointing the app at it.
-      try {
-        if (statSync(absPath).isFile()) {
-          externalImagePath = absPath;
-        }
-      } catch {
-        // Doesn't exist — leave both relPath and externalImagePath null.
+      return reply({
+        externalImagePath: status === "file" && externalSafeImageMime(absPath) ? absPath : null,
+        exists,
+      });
+    } catch (error) {
+      log.warn("file:resolve-path failed: %s", error);
+      return reply();
+    }
+  }
+
+  /** The one absolute path a printed path names under the requested base, or
+   *  undefined when it is refused or the base is unavailable. */
+  private printedPathTarget(
+    rawPath: unknown,
+    opts: { base?: PrintedPathBase; liveCwd?: string; spawnCwd?: string },
+  ): string | undefined {
+    if (typeof rawPath !== "string" || rawPath.length > MAX_RESOLVE_PATH_CHARS || isRefusedPathShape(rawPath)) {
+      return undefined;
+    }
+    let absPath: string;
+    if (opts.base === undefined) {
+      absPath = resolve(this.projectRoot, rawPath);
+    } else {
+      const bases = normalizeBases({ liveCwd: opts.liveCwd, spawnCwd: opts.spawnCwd, checkoutRoot: this.projectRoot });
+      if (opts.base === "a") {
+        if (!isAbsoluteFor(rawPath, process.platform)) return undefined;
+        absPath = resolve(rawPath);
+      } else {
+        const dir = { l: bases.liveCwd, s: bases.spawnCwd, r: bases.checkoutRoot }[opts.base];
+        if (dir === undefined) return undefined;
+        absPath = resolve(dir, rawPath);
       }
     }
-    this.sendMessage(
-      createMessage("file:resolve-path-result", {
-        projectId: this.projectId,
-        requestId,
-        relPath,
-        isDirectory,
-        externalImagePath,
-      }),
-    );
+    return isRefusedPathShape(absPath) ? undefined : absPath;
   }
 
   /** Returns chokidar's close promise so a caller about to delete the watched

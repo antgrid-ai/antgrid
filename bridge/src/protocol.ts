@@ -831,8 +831,17 @@ const FileResolvePathMessage = BaseMessage.extend({
   projectId: z.string(),
   requestId: z.string(),
   // Raw path as it appeared in terminal output (an OSC 8 `file://` hyperlink
-  // target) — absolute on the bridge machine, or already checkout-relative.
-  path: z.string(),
+  // target, or a printed path the bridge linked) — absolute on the bridge
+  // machine, or relative to one of the bases below. `parseMessageFast` never
+  // runs this schema, so the handler re-checks the length and the two optional
+  // fields by hand.
+  path: z.string().max(4096),
+  /** Wire id of the terminal the link was printed in; supplies its spawn and
+   *  live cwd as bases. */
+  terminalId: z.string().max(256).optional(),
+  /** The base the detector matched. Present: resolve against that base ONLY.
+   *  Absent: the checkout root only (file:// links, older apps). */
+  base: z.enum(["a", "l", "s", "r"]).optional(),
   ...CheckoutScoped,
 });
 
@@ -852,6 +861,8 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   // (which applies the same extension gate again) instead of refusing the
   // link outright.
   externalImagePath: z.string().nullable(),
+  /** Whether the resolved path exists as a file or directory right now. */
+  exists: z.boolean(),
   ...CheckoutScoped,
 });
 

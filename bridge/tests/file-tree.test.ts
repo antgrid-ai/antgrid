@@ -477,6 +477,29 @@ describe("file-tree", () => {
       expect(result.error).toBe("File not found");
     });
 
+    // A .png is the one extension that may legitimately sit outside the root, so
+    // without the shape refusal these would reach lstat, which on Windows opens
+    // an SMB session to the named host.
+    it.skipIf(process.platform !== "win32")("refuses UNC paths before touching the filesystem", () => {
+      for (const path of ["//host/share/a.png", "\\\\host\\share\\a.png", "\\\\?\\C:\\x.png"]) {
+        const result = readFile(tempDir, path);
+        expect(result.content).toBeNull();
+        expect(result.error).toBe("Path traversal denied");
+      }
+    });
+
+    it("refuses a relative UNC-looking path under win32 rules", () => {
+      const result = readFile(tempDir, "//host/share/a.png", "win32");
+      expect(result.content).toBeNull();
+      expect(result.error).toBe("Path traversal denied");
+    });
+
+    it.skipIf(process.platform === "win32")("still reads an in-root file whose name contains a colon", () => {
+      writeFileSync(join(tempDir, "notes:2024.txt"), "dated");
+      const result = readFile(tempDir, "notes:2024.txt");
+      expect(result.content).toBe("dated");
+    });
+
     it("detects binary files", () => {
       const binary = Buffer.alloc(100);
       binary[50] = 0; // null byte

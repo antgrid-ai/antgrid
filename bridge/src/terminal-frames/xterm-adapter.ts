@@ -1,4 +1,6 @@
 import type { IBufferCell, IBufferLine, Terminal } from "@xterm/headless";
+import { isAntgridLinkUri } from "../terminal-links/grammar";
+import type { DetectRow } from "../terminal-links/detector";
 import type { TerminalHistoryRow, TerminalHistorySpan } from "./protocol";
 
 interface ExtendedCell extends IBufferCell {
@@ -88,7 +90,49 @@ export class XtermFrameAdapter {
   link(cell: IBufferCell): string | undefined {
     const id = (cell as ExtendedCell).extended?.urlId;
     const uri = id ? this.core._oscLinkService.getLinkData(id)?.uri : undefined;
-    return uri && uri.length <= 8192 && !/[\x00-\x1f\x7f-\x9f]/.test(uri) ? uri : undefined;
+    if (!uri || uri.length > 8192 || /[\x00-\x1f\x7f-\x9f]/.test(uri)) return undefined;
+    // Only the bridge's detector may mint these: a program writing one would
+    // borrow the quiet styling and the detected-link route in the app.
+    return isAntgridLinkUri(uri) ? undefined : uri;
+  }
+
+  /**
+   * One row in the shape the link detector reads, built in a single cell walk.
+   * `full` keeps the row's trailing blanks, which a row that is followed by a
+   * soft-wrapped continuation needs so the join sees the true edge; the last
+   * row of a logical line is cut at its last visible character instead.
+   */
+  detectRow(line: IBufferLine, cols: number, full: boolean): DetectRow {
+    const widthAt = new Uint8Array(cols);
+    const explicit: (string | undefined)[] = new Array<string | undefined>(cols).fill(undefined);
+    const colAt: number[] = [];
+    let text = "";
+    let endCol = 0;
+    let keep = 0;
+    // A fresh cell per column: xterm's loadCell keeps a reused cell's previous
+    // `extended` attributes when the new cell has none, so a scratch cell would
+    // carry one hyperlink's urlId onto every cell after it.
+    for (let col = 0; col < cols; col++) {
+      const cell = line.getCell(col);
+      if (!cell) continue;
+      const width = cell.getWidth();
+      widthAt[col] = width;
+      if (!width) continue;
+      const chars = cell.getChars() || " ";
+      for (let u = 0; u < chars.length; u++) colAt.push(col);
+      text += chars;
+      explicit[col] = this.link(cell);
+      if (chars !== " ") {
+        endCol = col + width;
+        keep = text.length;
+      }
+    }
+    const cut = full ? text.length : keep;
+    return {
+      text: text.slice(0, cut),
+      colAt: Int32Array.from(colAt.slice(0, cut)),
+      widthAt, cols, wrapped: line.isWrapped, endCol, explicit,
+    };
   }
 
   /**
