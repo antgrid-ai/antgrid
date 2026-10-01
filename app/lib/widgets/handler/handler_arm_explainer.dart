@@ -436,11 +436,13 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
 /// an omitted goal leaves the bridge's stored one untouched, so a re-arm is
 /// still exactly the payload-free arm those sessions want.
 ///
-/// The service is resolved AFTER the sheet, never captured before it: the sheet
-/// stays open for as long as the user reads it, and a transport reconnect in
-/// that window disposes the build-time instance, whose `arm` then returns having
-/// sent nothing. The user tapped "Arm Handler", the sheet closed, and they walk
-/// away believing the session is watched.
+/// The project is pinned when the arm starts, since [terminalId] belongs to the
+/// one focused then and focus can move while the sheet or the upgrade screen is
+/// up. Its service is resolved AFTER the sheet, never captured before it: the
+/// sheet stays open for as long as the user reads it, and a transport reconnect
+/// in that window disposes the build-time instance, whose `arm` then returns
+/// having sent nothing. The user tapped "Arm Handler", the sheet closed, and
+/// they walk away believing the session is watched.
 ///
 /// What the sheet sends is a DELTA: a control the user never touched sends
 /// nothing, so an arm cannot clear a judge, a lens or a brief the bridge holds
@@ -453,6 +455,7 @@ Future<void> armWithSheet({
   String? agentLabel,
   bool? judgeCapable,
 }) async {
+  final entryId = container.read(selectedRegistrationIdProvider);
   // Asked BEFORE the arm sheet, never after: a sheet that cannot commit is a
   // form the user fills in only to be told it was never going to send.
   final refusal = focusedServiceOrNull(
@@ -487,10 +490,6 @@ Future<void> armWithSheet({
     explain: !container.read(firstRunProvider).handlerArmedOnce,
   );
   if (decision == null) return;
-  // Resolved once, for the arm and the latch both: the latch must follow the
-  // project this arm went to, not whichever one is focused when the bridge
-  // answers.
-  final entryId = container.read(selectedRegistrationIdProvider);
   final service = entryId == null
       ? null
       : container.read(projectSessionProvider(entryId)).value?.handlerService;

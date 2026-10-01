@@ -1187,6 +1187,36 @@ void main() {
         expect(find.text('Nothing was queued'), findsNothing);
       });
 
+      // The sheet was opened over this project's terminal; the user looking at
+      // another project before tapping Arm does not make it that one's.
+      testWidgets('a focus change while the sheet is open does not move the arm', (
+        tester,
+      ) async {
+        final otherTransport = FakeAgentTransport();
+        final other = await newFakeProjectSession(
+          otherTransport,
+          projectId: 'q',
+        );
+        addTearDown(other.close);
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider('q').overrideWith((ref) => other),
+          ],
+        );
+        await openSheet(tester, container, context);
+        container.read(_armFocus.notifier).set('q');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        bool arms(FakeAgentTransport t) =>
+            t.sent.any((m) => m['type'] == 'handler:configure');
+        expect(arms(transport), isTrue);
+        expect(arms(otherTransport), isFalse);
+        await confirmArmed(tester, transport);
+        expect(find.text('Nothing was queued'), findsNothing);
+      });
+
       // Only a status frame is an answer. Anything else the service emits —
       // an escalation, an optimistic update — carries the refusal the user
       // walked through to get to the sheet, which says nothing about this arm.
@@ -1256,8 +1286,8 @@ void main() {
             ).overrideWith((ref) => Completer<ProjectSession>().future),
           ],
         );
-        await openSheet(tester, container, context);
         container.read(_armFocus.notifier).set('q');
+        await openSheet(tester, container, context);
         await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 

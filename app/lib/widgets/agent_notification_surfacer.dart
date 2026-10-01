@@ -87,7 +87,12 @@ class _AgentNotificationSurfacerState
   /// OS-level notifications, used only while the app is backgrounded. Self
   /// degrading: `init`/`show` swallow platform errors.
   final LocalNotificationService _osNotifications = LocalNotificationService();
-  AppLifecycleState _lifecycle = AppLifecycleState.resumed;
+  /// Seeded from the binding, not assumed: this widget is rebuilt whenever the
+  /// root screen is replaced, which can happen while the window is unfocused,
+  /// and a stale `resumed` would paint a toast nobody can see instead of
+  /// raising the OS notification.
+  AppLifecycleState _lifecycle =
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
   /// Record [id] as surfaced; false if it already was. See
   /// [SurfacedNotificationIds].

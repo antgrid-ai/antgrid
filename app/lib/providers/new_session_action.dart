@@ -398,17 +398,19 @@ Future<void> startNewSession(
       // queued start is a SUCCESS — the entry comes back carrying
       // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
       // session, an older agent's unknown tool) leaves the draft intact for a
-      // return to this canvas; a CODED refusal still raises past here.
+      // return to this canvas; a CODED refusal is reported below, draft kept.
       final SessionEntry? started;
       try {
         started = await starting;
       } on SessionOperationException catch (error) {
-        // Voiced here because no one else is left to: the composer that would
-        // catch it is unmounted by the hand-off above (or by the user leaving
-        // the canvas first), and the service announces no refusal whose
-        // caller holds the reason.
+        // Voiced here, and only here: the composer that would catch it is
+        // normally unmounted by the hand-off above (or by the user leaving the
+        // canvas first), and the service announces no refusal whose caller
+        // holds the reason. Not rethrown — a local bridge can refuse before
+        // the hand-off's rebuild unmounts the composer, which would then toast
+        // the same refusal a second time in its own words.
         reportStartRefusal(ref.read(appToasterProvider), error);
-        rethrow;
+        return;
       }
       if (started == null) {
         abort(NewSessionStartAbortReason.startRefused);
