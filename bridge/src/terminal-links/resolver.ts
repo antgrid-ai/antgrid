@@ -1,5 +1,6 @@
 import { posix, win32 } from "node:path";
 import { externalSafeImageMime } from "../file-tree";
+import { hasDriveLetterAt, isDriveAbsolute, isSeparator } from "./chars";
 import { isRefusedPathShape, type PrintedPathBase, type PrintedPathKind } from "./grammar";
 
 /** Where a printed relative path may be anchored. Every field is optional:
@@ -27,7 +28,7 @@ function pathApi(platform: NodeJS.Platform): typeof posix {
 /** Drive-qualified on Windows: a bare `\x` or `/x` is rooted on the current
  *  drive, which is not a place a printed path can name. */
 export function isAbsoluteFor(path: string, platform: NodeJS.Platform): boolean {
-  return platform === "win32" ? /^[A-Za-z]:[\\/]/.test(path) : path.startsWith("/");
+  return platform === "win32" ? isDriveAbsolute(path) : path.startsWith("/");
 }
 
 function fold(path: string, platform: NodeJS.Platform): string {
@@ -97,7 +98,7 @@ export function candidatesFor(
     }
     // Rooted-without-drive and drive-relative forms resolve against the
     // bridge's own current drive or directory, which means nothing here.
-    if (platform === "win32" && /^(?:[\\/]|[A-Za-z]:)/.test(text)) continue;
+    if (platform === "win32" && (isSeparator(text[0]) || hasDriveLetterAt(text))) continue;
     if (platform !== "win32" && text.startsWith("/")) continue;
     const anchors: Array<[PrintedPathBase, string | undefined]> = [
       ["l", bases.liveCwd],

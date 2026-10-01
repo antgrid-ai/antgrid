@@ -1,4 +1,6 @@
 import { describe, it, expect } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   scanLine,
   splitPathToken,
@@ -501,5 +503,54 @@ describe("pathological lines stay fast", () => {
     trimTrailingPunct(`a${")".repeat(SIZE)}`);
     trimUrl(`https://a${")".repeat(SIZE)}`);
     expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+describe("scanner hand-overs", () => {
+  it("lets an empty quote hand its closing mark over as the next opener", () => {
+    expect(pathsOf('""a.ts"').filter((p) => p.quoted).map((p) => p.text.variants[0])).toEqual(["a.ts"]);
+    expect(pathsOf("‘‘a.ts’").filter((p) => p.quoted).map((p) => p.text.variants[0])).toEqual(["a.ts"]);
+  });
+
+  it("lets an apostrophe that fails as a closer open the next quote", () => {
+    expect(pathsOf("'x'y 'src/a.ts'").filter((p) => p.quoted).map((p) => p.text.variants[0])).toEqual(["src/a.ts"]);
+  });
+
+  it("strips a NAME= prefix only behind at most two dashes", () => {
+    expect(findPath("--out=dist/a.js", "dist/a.js")?.start).toBe(6);
+    expect(findPath("---out=dist/a.js", "---out=dist/a.js")?.start).toBe(0);
+  });
+
+  it("drops an unbalanced closer before a malformed position but keeps a real one", () => {
+    expect(trimTrailingPunct("x)(,5)")).toBe("x)(,5");
+    expect(trimTrailingPunct("x)(1,5)")).toBe("x)(1,5)");
+  });
+
+  it("takes a second number as the column only when it ends the token or meets a colon", () => {
+    expect(splitPathToken("src/a.ts:12:3a", { platform: "linux" })).toEqual({ variants: ["src/a.ts"], line: 12 });
+    expect(splitPathToken("src/a.ts:12:3:msg", { platform: "linux" })).toEqual({ variants: ["src/a.ts"], line: 12, col: 3 });
+  });
+
+  it("reads a #L position from the last hash only", () => {
+    expect(splitPathToken("docs/a#b.md#L4C2-L9", { platform: "linux" })).toEqual({ variants: ["docs/a#b.md"], line: 4, col: 2 });
+  });
+});
+
+describe("terminal-links source", () => {
+  // Detection reads every line a program prints; the scanners are explicit
+  // walks so their cost is linear by construction, and a pattern added later
+  // would reopen the backtracking audit this module was written to avoid.
+  it("uses no regular expressions", () => {
+    const dir = join(import.meta.dir, "../src/terminal-links");
+    const offenders: string[] = [];
+    for (const name of readdirSync(dir).filter((f) => f.endsWith(".ts"))) {
+      const source = readFileSync(join(dir, name), "utf8");
+      source.split("\n").forEach((line, i) => {
+        if (/\bRegExp\b|\.(?:test|exec|match|matchAll|search)\(|\.(?:replace|replaceAll|split)\(\s*\//.test(line)) {
+          offenders.push(`${name}:${i + 1}: ${line.trim()}`);
+        }
+      });
+    }
+    expect(offenders).toEqual([]);
   });
 });

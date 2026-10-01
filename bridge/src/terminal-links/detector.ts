@@ -4,6 +4,8 @@ import {
   decodeFileUrlPath,
   encodePathLink,
   encodeUrlLink,
+  isFileUrl,
+  isTokenStop,
   scanLine,
   splitPathToken,
   trimTrailingPunct,
@@ -11,6 +13,7 @@ import {
   type PathClaimText,
   type ScannedPath,
 } from "./grammar";
+import { isSeparator, isWhitespace } from "./chars";
 import { candidatesFor, classifyPath, type LinkBases } from "./resolver";
 import type { PathStatCache } from "./stat-cache";
 
@@ -58,15 +61,24 @@ export interface DetectResult {
 
 type ScanFn = (text: string) => ReturnType<typeof scanLine>;
 
-/** The tokens a path continuation may be made of: the unquoted-token class of
- *  `scanLine`, without the paren tail. */
-const PATH_PIECE = /^[^\s"'`()\[\]{}<>|*‘’“”]+/;
-/** What a URL continuation may be made of: `_urlContinuation` in
+/** The end of the run starting at `from` whose characters `stop` lets through. */
+function runEnd(text: string, from: number, stop: (code: number) => boolean): number {
+  let i = from;
+  while (i < text.length && !stop(text.charCodeAt(i))) i++;
+  return i;
+}
+
+/** What ends a URL continuation: `_urlContinuation` in
  *  `app/lib/util/wrapped_url.dart`. */
-const URL_PIECE = /^[^\s<>"']+/;
+function isUrlPieceStop(code: number): boolean {
+  return isWhitespace(code) || code === 0x3c || code === 0x3e || code === 0x22 || code === 0x27;
+}
+
 /** Box rules and gutter glyphs an agent TUI repeats at the start of a wrapped
  *  row: `_rowGutter` in `wrapped_url.dart`. */
-const GUTTER = /^[\s│┃|]*/;
+function gutterEnd(text: string): number {
+  return runEnd(text, 0, (code) => !(isWhitespace(code) || code === 0x2502 || code === 0x2503 || code === 0x7c));
+}
 
 interface Line {
   first: number;
@@ -281,11 +293,10 @@ function run(
       for (;;) {
         const nl = lines[cur + 1];
         if (!nl) break;
-        const gutter = GUTTER.exec(nl.text)![0].length;
-        const rest = nl.text.slice(gutter);
-        const m = URL_PIECE.exec(rest);
-        if (!m) break;
-        const piece = m[0];
+        const gutter = gutterEnd(nl.text);
+        const pieceEnd = runEnd(nl.text, gutter, isUrlPieceStop);
+        if (pieceEnd === gutter) break;
+        const piece = nl.text.slice(gutter, pieceEnd);
         // A continuation that opens its own scheme is a second URL.
         if (piece.includes("://")) break;
         joined += piece;
@@ -342,10 +353,11 @@ function run(
     while (out.length < MAX_JOINED_PATH_LINES - 1) {
       const nl = lines[cur + 1];
       if (!nl) break;
-      const gutter = GUTTER.exec(nl.text)![0].length;
-      const m = PATH_PIECE.exec(nl.text.slice(gutter));
-      if (!m) break;
-      const raw = m[0];
+      const gutter = gutterEnd(nl.text);
+      // The unquoted-token class of `scanLine`, without the paren tail.
+      const pieceEnd = runEnd(nl.text, gutter, isTokenStop);
+      if (pieceEnd === gutter) break;
+      const raw = nl.text.slice(gutter, pieceEnd);
       const trimmed = trimTrailingPunct(raw);
       if (trimmed.length === 0) break;
       out.push({ line: nl, lineIndex: cur + 1, start: gutter, end: gutter + trimmed.length });
@@ -373,7 +385,7 @@ function run(
       const text = head.claim.printed + used.map((u) => u.line.text.slice(u.start, u.end)).join("");
       // The scheme and percent escapes belong to the whole printed token, so
       // they are decoded after the pieces are joined: a cut can fall inside one.
-      const joinedPath = /^file:\/\/\//i.test(text) ? decodeFileUrlPath(text, platform) : text;
+      const joinedPath = isFileUrl(text) ? decodeFileUrlPath(text, platform) : text;
       const claim = joinedPath && splitPathToken(joinedPath, { platform, followedByParen: last.line.text[last.end] === "(" });
       if (!claim) continue;
       const joined = track({
@@ -389,7 +401,7 @@ function run(
 
     const printedHead = head.claim.printed;
     const truncatedDirectory =
-      /[\\/]$/.test(printedHead) && !lines[pieces[0]!.lineIndex]!.text.startsWith("…", pieces[0]!.start);
+      isSeparator(printedHead[printedHead.length - 1]) && !lines[pieces[0]!.lineIndex]!.text.startsWith("…", pieces[0]!.start);
     // A head that visibly stops at a directory separator is a directory the
     // output cut short; opening it would present the parent as the target.
     const fallback = truncatedDirectory || head.claim.dead ? [] : [head.claim];

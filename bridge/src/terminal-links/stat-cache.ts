@@ -1,5 +1,6 @@
 import { lstat, readlink, stat } from "node:fs/promises";
 import { posix, win32 } from "node:path";
+import { hasDriveLetterAt, startsWithIgnoreCase } from "./chars";
 import { isRefusedPathShape } from "./grammar";
 import { isLocalVolume as defaultIsLocalVolume } from "./win32-volume";
 
@@ -45,7 +46,14 @@ const MAX_LINKS_PER_CHECK = 8;
 const MAX_WALK_STEPS = 512;
 /** `/net` and `/Network` are autofs roots; case-folded because the default
  *  macOS volume is case-insensitive. */
-const AUTOFS_ROOT = /^\/(?:net|network)(?:\/|$)/i;
+function isAutofsRoot(path: string): boolean {
+  if (path[0] !== "/") return false;
+  for (const root of ["net", "network"]) {
+    const end = 1 + root.length;
+    if (startsWithIgnoreCase(path, root, 1) && (path.length === end || path[end] === "/")) return true;
+  }
+  return false;
+}
 
 const defaultFs: LinkFs = { lstat, stat, readlink };
 
@@ -134,8 +142,7 @@ export class PathStatCache {
   /** Marks the checkout root's drive as allowed even when it is remote: the
    *  bridge already works there, so refusing it would unlink the whole tree. */
   trustVolume(root: string): void {
-    const m = /^([A-Za-z]):/.exec(root);
-    if (m) this.trusted.add(m[1]!.toUpperCase());
+    if (hasDriveLetterAt(root)) this.trusted.add(root[0]!.toUpperCase());
   }
 
   /** Stale included: a lookup that is merely old still answers, and `request`
@@ -332,7 +339,7 @@ export class PathStatCache {
     // An autofs mount contacts the host named in the path, with no click. The
     // default macOS volume ignores case, so `/NET` reaches the same mount.
     if (this.platform === "win32") return !this.localVolume(path);
-    return AUTOFS_ROOT.test(path);
+    return isAutofsRoot(path);
   }
 
   /** Walks `abs` the way the OS does, expanding each link in place and keeping
@@ -380,7 +387,7 @@ export class PathStatCache {
       const targetRoot = pathApi.parse(target).root;
       if (targetRoot !== "") {
         // A rooted target without a drive keeps the drive it was found on.
-        real = win && !/^[A-Za-z]:/.test(targetRoot) ? pathApi.parse(real).root.slice(0, 2) + targetRoot : targetRoot;
+        real = win && !hasDriveLetterAt(targetRoot) ? pathApi.parse(real).root.slice(0, 2) + targetRoot : targetRoot;
         if (this.refusesReal(real)) return "refused";
       }
       parts.unshift(...split(target.slice(targetRoot.length)));

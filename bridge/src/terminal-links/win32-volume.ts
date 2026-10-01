@@ -1,5 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { logger } from "../logger";
+import { hasDriveLetterAt } from "./chars";
 
 const log = logger.child({ component: "win32-volume" });
 
@@ -67,9 +68,8 @@ export function isLocalVolume(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (platform !== "win32") return true;
-  const m = /^([A-Za-z]):/.exec(abs);
-  if (!m) return false;
-  const letter = m[1]!.toUpperCase();
+  if (!hasDriveLetterAt(abs)) return false;
+  const letter = abs[0]!.toUpperCase();
   if (trusted.has(letter) || trusted.has(letter.toLowerCase())) return true;
   return driveIsLocal(letter);
 }
