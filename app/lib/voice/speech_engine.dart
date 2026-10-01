@@ -56,6 +56,11 @@ abstract interface class SpeechEngine {
   Stream<SpeechSetupProgress> prepare();
   Future<bool> requestPermission();
 
+  /// A hint that capture is likely soon: load whatever [start] would
+  /// otherwise load on the critical path. Safe to call repeatedly and while
+  /// not ready; an engine with nothing to load ignores it.
+  void warmUp();
+
   /// Events carrying a stale [capture] are dropped by the caller, so an engine
   /// need not guarantee silence after [cancel].
   void start(int capture, void Function(SpeechEvent) emit);

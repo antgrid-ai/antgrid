@@ -5,6 +5,7 @@ import 'package:antgrid/voice/voice_input.dart';
 import 'package:antgrid/voice/voice_widgets.dart';
 import 'package:antgrid/widgets/transcript/composer/composer_controller.dart';
 import 'package:antgrid/widgets/transcript/composer/rich_composer.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -70,6 +71,23 @@ void main() {
     );
     expect(find.byType(VoiceMic), findsOneWidget);
     expect(find.byTooltip('Start dictation (simulated)'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('a pointer reaching the mic warms the engine', (tester) async {
+    final engine = SimulatedSpeechEngine();
+    final c = VoiceInputController(engine)
+      ..availability = SpeechAvailability.ready;
+    await tester.pumpWidget(host(c, const VoiceMic(target: target)));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(
+      tester.getCenter(find.byTooltip('Start dictation (simulated)')),
+    );
+    await tester.pump();
+    expect(engine.warmUps, 1);
+    await mouse.removePointer();
     await tester.pumpWidget(const SizedBox());
     c.dispose();
   });

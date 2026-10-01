@@ -10,9 +10,11 @@ import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/sessions.dart';
 import '../util/detached.dart';
+import 'android_speech_engine.dart';
 import 'sherpa_speech_engine.dart';
 import 'simulated_speech_engine.dart';
 import 'speech_engine.dart';
+import 'voice_model_catalog.dart';
 import 'voice_model_store.dart';
 
 enum VoicePhase {
@@ -103,6 +105,12 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     _engine = next;
   }
 
+  /// Called on signs that dictation is imminent, never at launch: loaded
+  /// models hold about 1 GB, which someone who never dictates should not pay.
+  void warmUp() {
+    if (canCapture && active == null) _engine.warmUp();
+  }
+
   void start(VoiceTarget target) {
     if (draft(target).text.isNotEmpty) return;
     if (active != null) preserve(active!);
@@ -179,6 +187,8 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
             d.phase = VoicePhase.permission;
           case SpeechReadiness.ready:
             d.phase = VoicePhase.idle;
+            // Someone who just finished setup is about to try it.
+            warmUp();
           case SpeechReadiness.needsModel || SpeechReadiness.unavailable:
             d
               ..phase = VoicePhase.error
@@ -319,12 +329,22 @@ String terminalDictationText(String text) => text
 /// path_provider or microphone plugin.
 final speechEngineProvider = Provider<SpeechEngine>((ref) {
   final real =
-      (Platform.isWindows || Platform.isLinux) &&
       !ref.watch(demoModeProvider) &&
       !Platform.environment.containsKey('FLUTTER_TEST');
-  final engine = real
-      ? SherpaSpeechEngine(VoiceModelStore(voiceModelsRoot))
-      : SimulatedSpeechEngine();
+  final SpeechEngine engine;
+  if (real && (Platform.isWindows || Platform.isLinux)) {
+    engine = SherpaSpeechEngine(VoiceModelStore(voiceModelsRoot));
+  } else if (real && Platform.isAndroid) {
+    // A phone is the low-end tier: the small final model, never the 0.6B.
+    engine = AndroidSpeechEngine(
+      SherpaSpeechEngine(
+        VoiceModelStore(voiceModelsRoot),
+        offline: parakeet110m,
+      ),
+    );
+  } else {
+    engine = SimulatedSpeechEngine();
+  }
   ref.onDispose(engine.dispose);
   return engine;
 });

@@ -318,6 +318,27 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('warm-up is sent after setup and only while ready and idle', (
+    tester,
+  ) async {
+    final engine = SimulatedSpeechEngine();
+    await engine.requestPermission();
+    final c = VoiceInputController(engine);
+    c.warmUp();
+    expect(engine.warmUps, 0, reason: 'not ready yet');
+    c.prepare(a);
+    await tester.pump(const Duration(seconds: 2));
+    expect(c.canCapture, true);
+    expect(engine.warmUps, 1, reason: 'setup just finished');
+    c.start(a);
+    c.warmUp();
+    expect(engine.warmUps, 1, reason: 'already capturing');
+    c.cancel(a);
+    c.warmUp();
+    expect(engine.warmUps, 2);
+    c.dispose();
+  });
+
   testWidgets(
     'revised previews preserve original and commit one undoable edit',
     (tester) async {

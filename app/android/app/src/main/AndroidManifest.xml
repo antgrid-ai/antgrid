@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Dictation (lib/voice/): the OS recognizer and the sherpa-onnx fallback
+         both read the microphone, only while the user holds a capture open. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <application
         android:label="antgrid"
         android:name="${applicationName}"
@@ -91,6 +94,12 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Without this, package visibility hides every recognizer service and
+             isOnDeviceRecognitionAvailable reports false on a phone that has one,
+             silently sending everyone to the downloaded-model fallback. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
         </intent>
     </queries>
 </manifest>

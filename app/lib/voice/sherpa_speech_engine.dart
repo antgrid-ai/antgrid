@@ -109,6 +109,19 @@ class SherpaSpeechEngine implements SpeechEngine {
   }
 
   @override
+  void warmUp() {
+    if (_opened != null) return;
+    _enqueue(() async {
+      if (_opened != null) return;
+      if (_worker == null) {
+        if ((await _missing()).isNotEmpty) return;
+        _worker = _Worker.spawn(_onWorker, _onWorkerExit)..send(await _load());
+      }
+      _armIdle();
+    });
+  }
+
+  @override
   void start(int capture, void Function(SpeechEvent) emit) {
     _idle?.cancel();
     _capture = capture;
@@ -149,10 +162,16 @@ class SherpaSpeechEngine implements SpeechEngine {
     _emit?.call(SpeechEvent(capture, '', error: message));
   }
 
+  Future<_Load> _load() async => _Load(
+    live == null ? null : await _paths(live!),
+    offline == null ? null : await _paths(offline!),
+    math.max(1, math.min(4, Platform.numberOfProcessors ~/ 2)),
+  );
+
   Future<void> _begin(int capture) async {
     if (capture != _capture) return;
-    final livePaths = live == null ? null : await _paths(live!);
-    final offlinePaths = offline == null ? null : await _paths(offline!);
+    _idle?.cancel();
+    final load = await _load();
     // The microphone takes about a second to deliver its first chunk, so it
     // opens while the worker spawns and loads rather than after.
     final worker = _worker ??= _Worker.spawn(_onWorker, _onWorkerExit);
@@ -170,14 +189,7 @@ class SherpaSpeechEngine implements SpeechEngine {
       _fail(capture, 'Could not open the microphone: $error');
       return;
     }
-    worker.send(
-      _Start(
-        capture,
-        livePaths,
-        offlinePaths,
-        math.max(1, math.min(4, Platform.numberOfProcessors ~/ 2)),
-      ),
-    );
+    worker.send(_Start(capture, load));
     _opened = capture;
     final done = _audioDone = Completer<void>();
     _audio = audio.listen(
@@ -221,7 +233,13 @@ class SherpaSpeechEngine implements SpeechEngine {
 
   void _armIdle() {
     _idle?.cancel();
-    _idle = Timer(idleUnload, () => _enqueue(_stopWorker));
+    // Re-checked when it fires: a warm-up queued just ahead of a start arms
+    // this timer after start() has already cancelled the previous one.
+    _idle = Timer(idleUnload, () {
+      _enqueue(() async {
+        if (_opened == null) await _stopWorker();
+      });
+    });
   }
 
   Future<void> _stopWorker() async {
@@ -241,6 +259,9 @@ class SherpaSpeechEngine implements SpeechEngine {
         _emit?.call(SpeechEvent(capture, text, finalized: true));
         _armIdle();
       case _Failed(:final capture, :final message):
+        // A warm-up failure carries no capture anyone is waiting on, so this
+        // line is the only trace of it; the next start retries the load.
+        AbLog.error('Voice', 'speech worker', fields: {'error': message});
         _enqueue(() async {
           if (_opened == capture) await _closeMicrophone();
           _fail(capture, message);
@@ -331,7 +352,11 @@ class _Worker {
       ).then<void>(
         (_) {},
         onError: (Object error) {
-          AbLog.error('Voice', 'spawn speech worker', fields: {'error': '$error'});
+          AbLog.error(
+            'Voice',
+            'spawn speech worker',
+            fields: {'error': '$error'},
+          );
           exited();
         },
       ),
@@ -348,12 +373,17 @@ class _ModelPaths {
   final String tokens;
 }
 
-class _Start {
-  const _Start(this.capture, this.live, this.offline, this.threads);
-  final int capture;
+class _Load {
+  const _Load(this.live, this.offline, this.threads);
   final _ModelPaths? live;
   final _ModelPaths? offline;
   final int threads;
+}
+
+class _Start {
+  const _Start(this.capture, this.load);
+  final int capture;
+  final _Load load;
 }
 
 class _Stop {
@@ -416,11 +446,13 @@ void _speechWorker(SendPort reply) {
     open = false;
   }
 
-  void load(_Start start) {
+  // Paths are recorded only once a recognizer is built, so a load that throws
+  // is retried by the next start instead of leaving that model silently absent.
+  void load(_Load start) {
     if (start.live?.encoder != livePaths?.encoder) {
       live?.free();
       live = null;
-      livePaths = start.live;
+      livePaths = null;
       final paths = start.live;
       if (paths != null) {
         live = so.OnlineRecognizer(
@@ -438,12 +470,13 @@ void _speechWorker(SendPort reply) {
             enableEndpoint: false,
           ),
         );
+        livePaths = paths;
       }
     }
     if (start.offline?.encoder != offlinePaths?.encoder) {
       offline?.free();
       offline = null;
-      offlinePaths = start.offline;
+      offlinePaths = null;
       final paths = start.offline;
       if (paths != null) {
         offline = so.OfflineRecognizer(
@@ -461,6 +494,7 @@ void _speechWorker(SendPort reply) {
             ),
           ),
         );
+        offlinePaths = paths;
       }
     }
   }
@@ -525,10 +559,12 @@ void _speechWorker(SendPort reply) {
   inbox.listen((message) {
     try {
       switch (message) {
+        case _Load():
+          load(message);
         case _Start():
           reset();
           capture = message.capture;
-          load(message);
+          load(message.load);
           stream = live?.createStream();
           open = true;
         case TransferableTypedData():

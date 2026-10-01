@@ -41,17 +41,19 @@ class SimulatedSpeechEngine implements SpeechEngine {
 
   /// What [availability] reports before any setup, for callers that must
   /// show a state synchronously when switching scenario.
-  static SpeechAvailability initial(VoiceScenario scenario) => switch (scenario) {
-    VoiceScenario.unavailable => const SpeechAvailability(
-      SpeechReadiness.unavailable,
-      reason: 'On-device dictation is unavailable for this simulated device.',
-    ),
-    VoiceScenario.modelDownload => const SpeechAvailability(
-      SpeechReadiness.needsModel,
-      downloadBytes: _downloadBytes,
-    ),
-    _ => const SpeechAvailability(SpeechReadiness.needsModel),
-  };
+  static SpeechAvailability initial(VoiceScenario scenario) =>
+      switch (scenario) {
+        VoiceScenario.unavailable => const SpeechAvailability(
+          SpeechReadiness.unavailable,
+          reason:
+              'On-device dictation is unavailable for this simulated device.',
+        ),
+        VoiceScenario.modelDownload => const SpeechAvailability(
+          SpeechReadiness.needsModel,
+          downloadBytes: _downloadBytes,
+        ),
+        _ => const SpeechAvailability(SpeechReadiness.needsModel),
+      };
 
   @override
   bool get onDevice => true;
@@ -88,8 +90,7 @@ class SimulatedSpeechEngine implements SpeechEngine {
 
   @override
   Future<bool> requestPermission() async {
-    _granted =
-        scenario != VoiceScenario.permissionDenied || allowAfterDenial;
+    _granted = scenario != VoiceScenario.permissionDenied || allowAfterDenial;
     return _granted;
   }
 
@@ -135,6 +136,12 @@ class SimulatedSpeechEngine implements SpeechEngine {
     _timer?.cancel();
     _timer = null;
   }
+
+  /// Counts [warmUp] hints so tests can see when the controller sends them.
+  int warmUps = 0;
+
+  @override
+  void warmUp() => warmUps++;
 
   @override
   void dispose() => cancel();

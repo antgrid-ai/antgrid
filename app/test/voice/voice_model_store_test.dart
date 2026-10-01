@@ -17,8 +17,11 @@ final _bodies = {
   'tokens.txt': utf8.encode('a 0\nb 1\n'),
 };
 
-VoiceModelFile _file(String name) =>
-    VoiceModelFile(name, _bodies[name]!.length, '${sha256.convert(_bodies[name]!)}');
+VoiceModelFile _file(String name) => VoiceModelFile(
+  name,
+  _bodies[name]!.length,
+  '${sha256.convert(_bodies[name]!)}',
+);
 
 final _model = VoiceModel(
   id: 'test-model',

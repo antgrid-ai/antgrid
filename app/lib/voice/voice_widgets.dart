@@ -11,6 +11,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../util/detached.dart';
 import '../widgets/transcript/composer/composer_controller.dart';
+import 'android_speech_engine.dart';
 import 'sherpa_speech_engine.dart';
 import 'simulated_speech_engine.dart';
 import 'speech_engine.dart';
@@ -28,39 +29,44 @@ class VoiceMic extends ConsumerWidget {
       listenable: controller,
       builder: (context, _) {
         final d = controller.draft(target);
-        return AbIconButton(
-          icon: d.busy ? AbIcons.stop : AbIcons.microphone,
-          selected: d.busy,
-          tooltip: d.busy
-              ? 'Stop dictation'
-              : d.text.isNotEmpty
-              ? 'Review dictation below'
-              : controller.engine is SimulatedSpeechEngine
-              ? 'Start dictation (simulated)'
-              : 'Start dictation',
-          onTap:
-              d.phase == VoicePhase.finalizing || d.text.isNotEmpty && !d.busy
-              ? null
-              : () {
-                  if (d.busy) {
-                    controller.stop(target);
-                    return;
-                  }
-                  controller.start(target);
-                  if (!controller.canCapture) {
-                    detached(
-                      'Voice',
-                      'show voice setup',
-                      () => showAbAdaptiveSheet<void>(
-                        context,
-                        child: VoiceSetup(
-                          controller: controller,
-                          target: target,
+        // A pointer reaching the mic is the earliest sign of a click: loading
+        // then hides most of the ~5 s the models take behind the approach.
+        return MouseRegion(
+          onEnter: (_) => controller.warmUp(),
+          child: AbIconButton(
+            icon: d.busy ? AbIcons.stop : AbIcons.microphone,
+            selected: d.busy,
+            tooltip: d.busy
+                ? 'Stop dictation'
+                : d.text.isNotEmpty
+                ? 'Review dictation below'
+                : controller.engine is SimulatedSpeechEngine
+                ? 'Start dictation (simulated)'
+                : 'Start dictation',
+            onTap:
+                d.phase == VoicePhase.finalizing || d.text.isNotEmpty && !d.busy
+                ? null
+                : () {
+                    if (d.busy) {
+                      controller.stop(target);
+                      return;
+                    }
+                    controller.start(target);
+                    if (!controller.canCapture) {
+                      detached(
+                        'Voice',
+                        'show voice setup',
+                        () => showAbAdaptiveSheet<void>(
+                          context,
+                          child: VoiceSetup(
+                            controller: controller,
+                            target: target,
+                          ),
                         ),
-                      ),
-                    );
-                  }
-                },
+                      );
+                    }
+                  },
+          ),
         );
       },
     );
@@ -311,13 +317,22 @@ class _VoiceSetupState extends State<VoiceSetup> {
       final downloadMb = (c.availability.downloadBytes / 1e6).round();
       final sherpa = switch (c.engine) {
         final SherpaSpeechEngine e => e,
+        AndroidSpeechEngine(
+          usesFallback: true,
+          fallback: final SherpaSpeechEngine e,
+        ) =>
+          e,
         _ => null,
       };
-      final simulated = sherpa == null;
-      final modelLine = sherpa == null
+      final simulated = c.engine is SimulatedSpeechEngine;
+      final osRecognizer = !simulated && sherpa == null;
+      final modelLine = simulated
           ? installed
                 ? 'Model: simulated, ready · Storage: 0 B'
                 : 'Model: simulated, setup required · Download: 0 B'
+          : sherpa == null
+          ? 'Recognizer: Android on-device speech · English pack '
+                '${installed ? 'installed' : 'not installed'}'
           : 'Models: ${sherpa.models.map((m) => m.label).join(' + ')} · '
                 '${installed ? 'installed' : 'download $downloadMb MB'}';
       return Focus(
@@ -370,6 +385,8 @@ class _VoiceSetupState extends State<VoiceSetup> {
                 Text(
                   simulated
                       ? 'Simulated speech. No microphone access, audio storage, network requests, or real model downloads. Review text before sending or inserting.'
+                      : osRecognizer
+                      ? "Speech is recognized on this phone by Android's on-device recognizer. Audio is never stored or sent anywhere. Review text before sending or inserting."
                       : 'Speech is recognized on this device. Audio is never stored or sent anywhere; the models download once from Hugging Face. Review text before sending or inserting.',
                   style: AbTokens.sansStyle(),
                 ),
@@ -449,6 +466,8 @@ class _VoiceSetupState extends State<VoiceSetup> {
                   Text(
                     simulated
                         ? 'Downloading (simulated)… ${(d.progress * downloadMb).round()} / $downloadMb MB. No data is transferred.'
+                        : osRecognizer
+                        ? 'Android is downloading the English speech pack… ${(d.progress * 100).round()}%'
                         : 'Downloading… ${(d.progress * downloadMb).round()} / $downloadMb MB. Cancel keeps what has arrived; setup resumes from there.',
                     style: AbTokens.sansStyle(),
                   ),
@@ -456,7 +475,7 @@ class _VoiceSetupState extends State<VoiceSetup> {
                   Text(
                     simulated
                         ? 'Microphone access denied (simulated). Choose another scenario to retry.'
-                        : 'Microphone access is blocked. Allow it in the system privacy settings, then try again.',
+                        : 'Microphone access is blocked. Allow it in the system settings, then try again.',
                     style: AbTokens.sansStyle(),
                   ),
                 if (d.message != null)
@@ -471,7 +490,8 @@ class _VoiceSetupState extends State<VoiceSetup> {
                         Navigator.of(context).pop();
                       },
                     ),
-                    if (installed)
+                    // Android owns its speech packs; there is nothing of ours to remove.
+                    if (installed && !osRecognizer)
                       AbButton(
                         label: simulated
                             ? 'Remove simulated model'

@@ -11,8 +11,9 @@ import 'voice_model_catalog.dart';
 
 /// Debug and release builds share this directory on purpose: the models are
 /// immutable per revision, and a second 700 MB copy buys no isolation.
-Future<Directory> voiceModelsRoot() async =>
-    Directory(p.join((await getApplicationSupportDirectory()).path, 'voice-models'));
+Future<Directory> voiceModelsRoot() async => Directory(
+  p.join((await getApplicationSupportDirectory()).path, 'voice-models'),
+);
 
 /// Installed models live at `<root>/<id>/`; a download assembles in
 /// `<root>/.partial/<id>/` and is renamed into place only after every file
@@ -66,8 +67,7 @@ class VoiceModelStore {
           if (response.statusCode == 200 && have > 0) {
             done -= have;
             have = 0;
-          } else if (response.statusCode != 200 &&
-              response.statusCode != 206) {
+          } else if (response.statusCode != 200 && response.statusCode != 206) {
             throw SpeechEngineException(
               'Could not download ${model.label} '
               '(HTTP ${response.statusCode}). Retry setup.',
@@ -128,10 +128,9 @@ class VoiceModelStore {
     }
   }
 
-  SpeechEngineException _interrupted(VoiceModel model) =>
-      SpeechEngineException(
-        'Download of ${model.label} was interrupted. Retry setup to resume.',
-      );
+  SpeechEngineException _interrupted(VoiceModel model) => SpeechEngineException(
+    'Download of ${model.label} was interrupted. Retry setup to resume.',
+  );
 
   /// Hashing the largest encoder takes seconds, so it runs off the UI isolate.
   static Future<bool> _verify(File file, VoiceModelFile expected) async {
