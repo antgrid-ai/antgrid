@@ -69,6 +69,7 @@ class _CapturingConnection extends MachineConnection {
 class _TokenCapturingRelay extends RelayService {
   _TokenCapturingRelay() : super(crypto: CryptoService());
   final tokens = <String>[];
+  String? refuseNextWith;
   AppState _state = const AppState();
   @override
   AppState get currentState => _state;
@@ -81,6 +82,11 @@ class _TokenCapturingRelay extends RelayService {
     String? machineDeviceId,
   }) async {
     tokens.add(licenseToken);
+    final refusal = refuseNextWith;
+    if (refusal != null) {
+      refuseNextWith = null;
+      throw RelayConnectException(code: refusal, retryable: true);
+    }
     _state = const AppState(
       connectionState: RelayConnectionState.authenticated,
     );
@@ -268,8 +274,29 @@ void main() {
     expect(connectionMints, 1);
     expect(mainRecordMints, 0, reason: 'the MAIN record must not be used');
 
-    // Fresh per attempt, never a cached token: one minted before a long backoff
-    // is already expired by the time its dial runs.
+    // A redial reuses the cached token, so a reconnect loop does not hit the
+    // OAuth token endpoint on every attempt.
+    await mech.connect(
+      const ConnCoords(
+        relayUrl: 'wss://relay.test',
+        agentEd25519PubB64: 'agent',
+      ),
+    );
+    expect(relay.tokens.last, 'CONN-1');
+    expect(connectionMints, 1);
+
+    // Once the relay refuses it as expired, the next dial must not present it
+    // again, and the replacement still comes from the CONNECTION minter.
+    relay.refuseNextWith = 'LICENSE_EXPIRED';
+    await expectLater(
+      mech.connect(
+        const ConnCoords(
+          relayUrl: 'wss://relay.test',
+          agentEd25519PubB64: 'agent',
+        ),
+      ),
+      throwsA(isA<RelayConnectException>()),
+    );
     await mech.connect(
       const ConnCoords(
         relayUrl: 'wss://relay.test',
