@@ -9,6 +9,7 @@ import type { Env } from "../env.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
 import { requireBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
+import { heartbeatDayRecorder } from "../usage/heartbeat-day.js";
 
 // mobileAccessEnabled/relayUrl/machineName are agent-only concepts (the
 // bridge always sends them); an app (phone) heartbeat sends only deviceUuid,
@@ -22,6 +23,7 @@ const HeartbeatBody = z.object({
 
 export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   const r = new Hono<{ Variables: AuthVars }>();
+  const recordHeartbeatDay = heartbeatDayRecorder(deps.db);
 
   // Heartbeat is called by both agent (bridge) and app (phone) devices, each
   // presenting an OAuth `client_credentials` JWT (NOT a Better-Auth session
@@ -57,10 +59,11 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
     const body = parsed.data;
 
+    const now = new Date();
     const result = await deps.db.device.updateMany({
       where: { userId, deviceId: body.deviceUuid, revokedAt: null },
       data: {
-        lastSeenAt: new Date(),
+        lastSeenAt: now,
         ...(body.mobileAccessEnabled != null
           ? { mobileAccessEnabled: body.mobileAccessEnabled }
           : {}),
@@ -70,6 +73,7 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     });
     if (result.count === 0) return c.json({ error: "NOT_FOUND" }, 404);
 
+    await recordHeartbeatDay(userId, body.deviceUuid, now);
     return c.json({ ok: true });
   });
 
