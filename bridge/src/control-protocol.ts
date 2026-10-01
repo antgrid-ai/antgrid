@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
-import type { BranchRemoteStatus, StashEntry } from "./git-branches";
+import type { BranchRemoteStatus } from "./git-branches";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
@@ -83,7 +83,6 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     projectPath: z.string().min(1),
     branch: z.string().min(1),
     allowActiveSessions: z.boolean().optional(),
-    stashIfDirty: z.boolean().optional(),
   }),
   // Arms or disarms the CONNECTED app's own frame capture (`antgrid watch
   // --remote`). A phone has no env var and no UI for this, so the desktop's
@@ -300,7 +299,7 @@ export type ControlResponse =
   | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
-  | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
+  | { id: string; ok: true; type: "git:checkout"; current: string }
   | { id: string; ok: true; type: "checkout:path"; path: string }
   | {
       id: string; ok: true; type: "session-bus:remote-directory";

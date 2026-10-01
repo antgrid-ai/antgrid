@@ -64,23 +64,11 @@ void main() {
     expect(find.text('Shift'), findsOneWidget);
   });
 
-  // The sticky Ctrl needs a letter to land on, and the prompt box never sends
-  // one on its own: interrupt has to stay a single key of its own.
-  testWidgets('Ctrl+C is one tap and does not spend an armed modifier', (
-    tester,
-  ) async {
-    final latch = TerminalModifierLatch();
-    final sent = <String>[];
-    await tester.pumpWidget(
-      _harness(latch: latch, onSendInput: (d) => sent.add(latch.apply(d))),
-    );
+  testWidgets('has no dedicated Ctrl+C key', (tester) async {
+    await tester.pumpWidget(_harness());
     await tester.pumpAndSettle();
 
-    await tester.ensureVisible(find.text('Ctrl+C'));
-    await tester.tap(find.text('Ctrl+C'));
-    await tester.pump();
-    expect(sent, ['\x03']);
-    expect(latch.value.isEmpty, isTrue);
+    expect(find.text('Ctrl+C'), findsNothing);
   });
 
   // A tap and a long press on the one pinned key are two different
@@ -167,6 +155,9 @@ void main() {
     expect(zoomOut, findsOneWidget);
     expect(zoomIn, findsOneWidget);
 
+    // The zoom keys sit at the end of the scrolling strip.
+    await tester.ensureVisible(zoomIn);
+    await tester.pump();
     await tester.tap(zoomOut);
     await tester.tap(zoomIn);
     await tester.pump();

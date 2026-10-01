@@ -25,7 +25,7 @@ import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/ab_message.dart'
-    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry, GitStashEntry;
+    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
 import '../models/git_sync_state.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
@@ -88,7 +88,6 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.git;
     _maybeLoadHistory(fileService);
-    _maybeLoadStashes(fileService);
 
     // Loading/error keep the same header (no back affordance) so the panel
     // chrome doesn't jump when data arrives; the data case owns its own header
@@ -147,19 +146,6 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // `loadHistory` touches no BuildContext; a disposed service drops it.
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => fileService.loadHistory(),
-    );
-  }
-
-  /// Same lazy, once-per-service-lifetime fetch as [_maybeLoadHistory], for
-  /// the stash banner's data — see [FileService.claimStashLoad].
-  void _maybeLoadStashes(FileService? fileService) {
-    if (fileService == null) return;
-    if (!fileService.claimStashLoad()) return;
-    // Unguarded for the same reason as [_maybeLoadHistory], and it matters
-    // more here: nothing else in the app ever calls `loadStashes` again, so a
-    // spent claim with no send hides the stash banner for good.
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => fileService.loadStashes(),
     );
   }
 
@@ -310,11 +296,6 @@ class _GitHeaderCounts {
   final Set<String> changedFolders;
 }
 
-/// How much of the panel the stash banners may claim before they scroll among
-/// themselves — about three, leaving the changes list the rest. See where it is
-/// used for why an unbounded run of them is a layout failure, not just noise.
-const double _stashBannerMaxHeight = 132;
-
 /// The shared git-panel chrome: header + separator + expanded body, defined
 /// once so the loading/error/data branches can't drift in how they wrap the
 /// header. [onBack] is forwarded to the header (only the compact diff-viewing
@@ -355,30 +336,6 @@ class _GitPanelScaffold extends StatelessWidget {
         // four seconds; this failure needs an affordance that waits.
         if (git.lastSyncFailure case final failure?)
           _SyncFailureStrip(failure: failure, git: git),
-        // Stashes persist across sessions and reconnects (the list is read
-        // fresh off `git stash list` every time — see [FileService.loadStashes])
-        // so this stays up as long as any stash exists, not just right after
-        // the switch that created one.
-        //
-        // Bounded and scrollable rather than spread straight into this Column:
-        // the list is every stash in the REPOSITORY (shared across worktrees,
-        // and including any made outside Antgrid), so a developer with an
-        // ordinary stash habit stacked a dozen full-width banners above the
-        // changes list, squeezing it to nothing on desktop and overflowing the
-        // viewport outright on a phone. Every entry stays reachable.
-        if (git.stashes.isNotEmpty)
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: _stashBannerMaxHeight),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final stash in git.stashes)
-                    _StashBanner(stash: stash, fileService: fileService),
-                ],
-              ),
-            ),
-          ),
         const AbSeparator.horizontal(),
         Expanded(child: body),
       ],
@@ -1050,63 +1007,6 @@ class _SyncFailureStrip extends ConsumerWidget {
       failure: failure,
       sync: git.sync,
       changed: entries,
-    );
-  }
-}
-
-/// One stashed set of changes, offered as Restore or Discard.
-///
-/// Persists until acted on — same reasoning as [_SyncFailureStrip]: a stash
-/// is exactly the kind of thing a snackbar (gone in four seconds) loses. Most
-/// often this is the ONE stash the New Session composer just created when a
-/// dirty branch switch was confirmed, but it renders every stash in the
-/// repository (`git stash` has one list, shared by every worktree) — so a
-/// stash made outside Antgrid, or a second one from a later switch, shows up
-/// here too rather than being invisible until the user thinks to run `git
-/// stash list` themselves.
-class _StashBanner extends StatelessWidget {
-  const _StashBanner({required this.stash, required this.fileService});
-
-  final GitStashEntry stash;
-  final FileService fileService;
-
-  Future<void> _discard(BuildContext context) async {
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
-      title: 'Discard stash',
-      body:
-          'Permanently delete the changes stashed from '
-          '"${stash.branch.isEmpty ? 'an earlier branch' : stash.branch}"? '
-          'This cannot be undone.',
-      confirmLabel: 'Discard',
-      destructive: true,
-    );
-    if (confirmed) fileService.dropStash(stash.ref);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final from = stash.branch.isEmpty ? 'a branch switch' : stash.branch;
-    return AbInlineBanner(
-      text: 'Uncommitted changes stashed from "$from" are waiting.',
-      color: context.antgrid.warning,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AbButton(
-            label: 'Restore',
-            compact: true,
-            onTap: () => fileService.restoreStash(stash.ref),
-          ),
-          const SizedBox(width: AbTokens.space6),
-          AbButton(
-            label: 'Discard',
-            compact: true,
-            onTap: () =>
-                detached('GitPanel', 'discard stash', () => _discard(context)),
-          ),
-        ],
-      ),
     );
   }
 }

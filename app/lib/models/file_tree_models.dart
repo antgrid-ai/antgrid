@@ -1,5 +1,5 @@
 import 'ab_message.dart'
-    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry, GitStashEntry;
+    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry;
 import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
@@ -316,15 +316,6 @@ class GitPaneState {
   /// panel can offer the agent handoff after the toast has gone.
   final GitSyncFailure? lastSyncFailure;
 
-  /// Every stash in the repository, most recent first — fetched lazily the
-  /// same way [history] is (see [FileService.claimStashLoad]), and re-fetched
-  /// after every checkout, pop, or drop rather than mutated locally: a stash
-  /// list is repo-wide (shared across every worktree), so anything else
-  /// risks drifting from a stash the user or agent created outside this
-  /// panel. Drives the Git panel's Restore/Discard banner — see
-  /// `git_panel.dart`'s `_StashBanner`.
-  final List<GitStashEntry> stashes;
-
   const GitPaneState({
     this.diffPath,
     this.diffContent,
@@ -341,7 +332,6 @@ class GitPaneState {
     this.syncing,
     this.lastSyncFailure,
     this.history = GitHistoryState.empty,
-    this.stashes = const [],
   });
 
   static const empty = GitPaneState();
@@ -367,7 +357,6 @@ class GitPaneState {
     GitSyncFailure? lastSyncFailure,
     bool clearSyncFailure = false,
     GitHistoryState? history,
-    List<GitStashEntry>? stashes,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -393,7 +382,6 @@ class GitPaneState {
           ? null
           : (lastSyncFailure ?? this.lastSyncFailure),
       history: history ?? this.history,
-      stashes: stashes ?? this.stashes,
     );
   }
 }

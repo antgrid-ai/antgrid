@@ -327,4 +327,22 @@ void main() {
       const LocalProject('deep'),
     );
   });
+
+  test('revisiting a session drops its earlier entry from history', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.commit(_loc('a', session: 's1'));
+    nav.commit(_loc('a', session: 's2'));
+    nav.commit(_loc('a', session: 's1'));
+    nav.commit(_loc('a', session: 's2'));
+    nav.commit(_loc('a', session: 's3'));
+
+    final s = c.read(navControllerProvider);
+    expect(s.past, [_loc('a', session: 's1'), _loc('a', session: 's2')]);
+    expect(s.current, _loc('a', session: 's3'));
+
+    nav.back();
+    nav.back();
+    expect(c.read(navControllerProvider).current, _loc('a', session: 's1'));
+    expect(c.read(navControllerProvider).canBack, isFalse);
+  });
 }

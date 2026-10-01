@@ -89,7 +89,7 @@ import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { runGit } from "./git-spawn";
-import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import {
@@ -2187,33 +2187,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         break;
       }
-      case "git:stash-list": {
-        handleGitStashList(runtime, msg.projectId).catch((err) =>
-          log.error("git:stash-list handler failed: %s", err)
-        );
-        break;
-      }
-      case "git:stash-pop": {
-        // Tracked for the same reason `git:sync` below is, and more urgently:
-        // a pop rewrites the whole working tree, so it holds the checkout as
-        // its child's cwd for longer than a push does.
-        trackGitRefresh(
-          runtime,
-          handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-pop handler failed: %s", err)
-          ),
-        );
-        break;
-      }
-      case "git:stash-drop": {
-        trackGitRefresh(
-          runtime,
-          handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-drop handler failed: %s", err)
-          ),
-        );
-        break;
-      }
       case "git:sync": {
         // Tracked, not merely fired: a push/pull holds the checkout as its
         // child's cwd for up to the transfer timeout, and `awaitGitRefreshes`
@@ -3582,55 +3555,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sendGitStatus(runtime);
       sendStatus(runtime);
     }
-  }
-
-  async function handleGitStashList(runtime: CheckoutRuntime, projectId: string) {
-    try {
-      const stashes = await listStashes(runtime.checkout.path);
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", { projectId, stashes }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", {
-        projectId,
-        stashes: [],
-        error: err?.message || String(err),
-      }));
-    }
-  }
-
-  async function handleGitStashPop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashPop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", { projectId, ref, success: true }));
-      await refreshGitStatusAttended(runtime);
-      sendGitStatus(runtime);
-      sendStatus(runtime);
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    // Either outcome moves the stash LIST (removed on success, unchanged on
-    // failure) — the panel's banner needs the fresh read either way to know
-    // whether to keep showing this entry.
-    await handleGitStashList(runtime, projectId);
-  }
-
-  async function handleGitStashDrop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashDrop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", { projectId, ref, success: true }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    await handleGitStashList(runtime, projectId);
   }
 
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
