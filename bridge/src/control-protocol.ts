@@ -218,6 +218,8 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
       .max(MAX_REMOTE_DIRECTORY_WIRE_MACHINES),
     notConnected: z.number().int().min(0).default(0),
   }),
+  z.object({ id: z.string().min(1), type: z.literal("screen-control:get") }),
+  z.object({ id: z.string().min(1), type: z.literal("screen-control:set"), enabled: z.boolean() }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -335,4 +337,6 @@ export type ControlResponse =
    *  describe the state rather than echo the request, for the reason
    *  netwatch:remote's `ttlMs` does. */
   | { id: string; ok: true; type: "log:level"; level: string; ttlMs: number }
+  | { id: string; ok: true; type: "screen-control:get"; enabled: boolean }
+  | { id: string; ok: true; type: "screen-control:set"; enabled: boolean }
   | { id: string; ok: false; error: { code: string; message: string } };

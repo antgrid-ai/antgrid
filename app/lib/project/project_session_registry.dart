@@ -9,6 +9,7 @@ import '../providers/analytics.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/provider_retry.dart';
 import '../providers/registry_eviction.dart';
+import '../providers/screen_control.dart';
 import '../util/device_id.dart';
 import 'limits.dart';
 import 'lru_policy.dart';
@@ -297,6 +298,13 @@ Future<ProjectSession> defaultProjectSessionFactory(
     analytics: isDemoProjectId(projectId)
         ? null
         : ref.read(analyticsServiceProvider),
+    // Machine-wide and shared by every session, so a revocation reaches all of
+    // them at once rather than only the focused one. Only a loopback session
+    // can host a capture, and reading the policy spawns the bridge host — which
+    // the sample project must never do.
+    screenControlPolicy: transport.isLocal && !isDemoProjectId(projectId)
+        ? ref.read(hostScreenControlPolicyProvider)
+        : null,
     onClose: () async {
       // Transport teardown is handled by the agentTransportForProvider's
       // own ref.onDispose, fired when the registry invalidates it.

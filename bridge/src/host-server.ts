@@ -11,6 +11,7 @@ import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
+import { loadScreenControlPolicy, type ScreenControlPolicyStore } from "./screen-control-policy";
 import { resolveAbDir } from "./antgrid-dir";
 import { closeTerminalHistoryStore } from "./terminal-manager";
 import { VERSION } from "./version";
@@ -412,6 +413,11 @@ export class HostServer {
   // above says yes — see `agent-reach-policy.ts` for why the two are separate
   // questions.
   private readonly agentReachPolicy: AgentReachPolicyStore = loadAgentReachPolicy(resolveAbDir());
+  // Whether a remote viewer may watch this machine's screen and drive its input.
+  // Deliberately a second switch rather than a facet of remote access: remote
+  // terminal control must not imply remote screen control. Off on a fresh
+  // install, so `screen:*` is inert until the user turns it on.
+  private readonly screenControlPolicy: ScreenControlPolicyStore = loadScreenControlPolicy(resolveAbDir());
   private stopPhonesWatch: (() => void) | null = null;
   // projectId → {path, label} for every project this machine has opened. Since
   // the per-phone allowlist went away this is the ONLY per-project bound on what
@@ -676,6 +682,11 @@ export class HostServer {
     this.stopPhonesWatch = this.pairedPhonesStore.watch(() => {
       this.readvertiseToControlPlane();
     });
+    // The store runs this synchronously inside every `setEnabled(false)`. The
+    // capture itself lives in the desktop app's peer connection, which the
+    // bridge cannot close — so what it can do is tell that host to stop and each
+    // viewer why its picture ended, before the switch's reply goes out.
+    this.screenControlPolicy.onRevoked(() => void this.revokeScreenSharing("screen control turned off"));
     this.pruneMissingSeenProjects();
     // Fire-and-forget: nothing on this host blocks on the session index being
     // ready, and a lookup that lands before this resolves gets its own
@@ -1168,6 +1179,13 @@ export class HostServer {
       case "mobile-access:get":
         return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.remoteAccessPolicy.isEnabled() };
       case "mobile-access:set": {
+        if (!req.enabled && this.remoteAccessPolicy.isEnabled()) {
+          // Before the switch flips, not after: every project-stream record
+          // re-reads it on the way out, and the peer retirement below closes
+          // those streams outright, so once it is off no viewer can be told why
+          // its picture stopped. Bounded by REVOKE_NOTICE_BUDGET_MS.
+          await this.revokeScreenSharing("remote access turned off");
+        }
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
           this.controlPlaneRelay?.recheckAuthorization();
@@ -1217,6 +1235,34 @@ export class HostServer {
       }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not an agent-reach verb: ${(req as ControlRequest).type}` } };
+    }
+  }
+
+  /** Handle the machine screen-control switch over the loopback control plane —
+   *  the ONLY mutation path for `screen-control-policy.json`, and the only
+   *  reason that store is reachable at all: it defaults off on a fresh install,
+   *  so without this verb screen sharing can never be turned on.
+   *
+   *  Loopback only, like every other `ControlRequest` — `ControlListener` binds
+   *  127.0.0.1 behind the host.json bearer token, and the relay control plane's
+   *  own verb allowlist (`handleControlPlaneVerb`) does not include these. A
+   *  remote peer must never be able to grant itself the screen.
+   *
+   *  Unlike `mobile-access:set` this neither re-advertises nor pushes a
+   *  heartbeat: nothing in `agent:projects` or the account device record derives
+   *  from this switch, so both would be no-op sends. The teardown that DOES
+   *  matter runs inside `setEnabled(false)` — the store's revocation hook, wired
+   *  in the constructor to {@link revokeScreenSharing}. */
+  async handleScreenControlVerb(req: ControlRequest): Promise<ControlResponse> {
+    switch (req.type) {
+      case "screen-control:get":
+        return { id: req.id, ok: true, type: "screen-control:get", enabled: this.screenControlPolicy.isEnabled() };
+      case "screen-control:set": {
+        this.screenControlPolicy.setEnabled(req.enabled);
+        return { id: req.id, ok: true, type: "screen-control:set", enabled: this.screenControlPolicy.isEnabled() };
+      }
+      default:
+        return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a screen-control verb: ${(req as ControlRequest).type}` } };
     }
   }
 
@@ -1724,6 +1770,12 @@ export class HostServer {
     return !!this.cores.get(id)?.promotion;
   }
 
+  /** End every screen share on this machine, in every open project. Resolves
+   *  once the viewers have been told; see `ScreenRelay.revokeAll`. */
+  async revokeScreenSharing(reason: string): Promise<void> {
+    await Promise.all([...this.cores.values()].map((entry) => entry.core.revokeScreenSharing(reason)));
+  }
+
   /** Tear down every promoted native project binding and return each core
    *  to loopback-only. Called when `mobile-access:set` turns the machine off:
    *  the switch is machine-wide, so no project may be left dialable. NOT wired
@@ -1856,6 +1908,9 @@ export class HostServer {
       }
       case "session-bus:remote-directory":
         return this.handleRemoteDirectoryPush(req);
+      case "screen-control:get":
+      case "screen-control:set":
+        return this.handleScreenControlVerb(req);
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -2276,6 +2331,7 @@ export class HostServer {
       // `deliverLocal` does, so it only ever starts a session this host
       // already holds warm — a cold project is not brought up over a notify.
       startSession: (sessionId) => this.startLocalSession(sessionId),
+      screenControlEnabled: () => this.screenControlPolicy.isEnabled(),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();

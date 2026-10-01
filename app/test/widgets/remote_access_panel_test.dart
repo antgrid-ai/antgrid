@@ -5,6 +5,7 @@ import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/providers/screen_control.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
 
@@ -91,6 +92,16 @@ class _FakeReachNotifier extends AgentReachPolicyNotifier {
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
 
+class _FakeScreenControlNotifier extends ScreenControlSwitchNotifier {
+  _FakeScreenControlNotifier(this._enabled);
+  final bool _enabled;
+  final List<bool> writes = [];
+  @override
+  Future<bool> build() async => _enabled;
+  @override
+  Future<void> setEnabled(bool enabled) async => writes.add(enabled);
+}
+
 /// The account inventory the roster joins against. `ph-1` is the bridge-side
 /// id of the one device [_FakeNotifier] lists.
 final _accountDevices = <String, DeviceSummary>{
@@ -113,6 +124,7 @@ Future<void> _pumpPanel(
   required RemoteDevicesNotifier Function() devices,
   RemoteAccessPolicyNotifier Function()? policy,
   AgentReachPolicyNotifier Function()? reach,
+  ScreenControlSwitchNotifier Function()? screen,
   Map<String, DeviceSummary>? accounts,
 }) async {
   await tester.pumpWidget(
@@ -124,6 +136,9 @@ Future<void> _pumpPanel(
         ),
         agentReachPolicyProvider.overrideWith(
           reach ?? () => _FakeReachNotifier(true),
+        ),
+        screenControlSwitchProvider.overrideWith(
+          screen ?? () => _FakeScreenControlNotifier(false),
         ),
         accountDevicesByBridgeIdProvider.overrideWith(
           (ref) async => accounts ?? _accountDevices,
@@ -138,6 +153,7 @@ Future<void> _pumpPanel(
 
 final _remoteSwitch = find.byKey(const Key('remote-access-switch'));
 final _reachSwitch = find.byKey(const Key('agent-reach-switch'));
+final _screenSwitch = find.byKey(const Key('screen-control-switch'));
 
 void main() {
   testWidgets('a device still on the account offers sign-out, not forget', (
@@ -202,6 +218,89 @@ void main() {
     await tester.pumpAndSettle();
     expect(policy.writes, [true]);
   });
+
+  testWidgets('screen control is its own switch, not a facet of remote access', (
+    tester,
+  ) async {
+    final access = _FakePolicyNotifier(true);
+    final screen = _FakeScreenControlNotifier(false);
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => access,
+      screen: () => screen,
+    );
+
+    // A machine on the air does NOT imply its screen is: remote terminal
+    // control and remote screen control are separate grants, and the panel has
+    // to show that rather than fold one into the other.
+    expect(find.text('SCREEN CONTROL'), findsOneWidget);
+    expect(tester.widget<AbSwitch>(_remoteSwitch).value, isTrue);
+    expect(tester.widget<AbSwitch>(_screenSwitch).value, isFalse);
+  });
+
+  testWidgets(
+    'turning screen control ON is confirmed before anything is written',
+    (tester) async {
+      final screen = _FakeScreenControlNotifier(false);
+      await _pumpPanel(
+        tester,
+        devices: _FakeNotifier.new,
+        screen: () => screen,
+      );
+
+      await tester.tap(_screenSwitch);
+      await tester.pumpAndSettle();
+      expect(screen.writes, isEmpty, reason: 'the dialog must gate the write');
+      await tester.tap(find.text('Turn on'));
+      await tester.pumpAndSettle();
+      expect(screen.writes, [true]);
+    },
+  );
+
+  testWidgets('turning screen control OFF needs no confirm', (tester) async {
+    final screen = _FakeScreenControlNotifier(true);
+    await _pumpPanel(tester, devices: _FakeNotifier.new, screen: () => screen);
+
+    await tester.tap(_screenSwitch);
+    await tester.pump();
+    // Same asymmetry as remote access, and it matters more here: this is the
+    // switch that takes the mouse and keyboard back.
+    expect(screen.writes, [false]);
+  });
+
+  testWidgets('screen control ON says so when nothing can reach the machine', (
+    tester,
+  ) async {
+    // The switch grants nothing on its own — the bridge ANDs it with remote
+    // access — so an ON here would otherwise read as a live capability.
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(false),
+      screen: () => _FakeScreenControlNotifier(true),
+    );
+    expect(find.textContaining('Remote access is off'), findsOneWidget);
+  });
+
+  testWidgets(
+    'screen control stays switchable OFF while remote access is off',
+    (tester) async {
+      // Withdrawal must never be gated on the state of another switch.
+      final screen = _FakeScreenControlNotifier(true);
+      await _pumpPanel(
+        tester,
+        devices: _FakeNotifier.new,
+        policy: () => _FakePolicyNotifier(false),
+        screen: () => screen,
+      );
+
+      expect(tester.widget<AbSwitch>(_screenSwitch).onChanged, isNotNull);
+      await tester.tap(_screenSwitch);
+      await tester.pump();
+      expect(screen.writes, [false]);
+    },
+  );
 
   testWidgets('the switch stays reachable when no device has ever connected', (
     tester,
@@ -283,7 +382,10 @@ void main() {
       reach: () => _FakeReachNotifier(true),
     );
 
-    expect(find.textContaining('Nothing until remote access is on'), findsNothing);
+    expect(
+      find.textContaining('Nothing until remote access is on'),
+      findsNothing,
+    );
     expect(find.textContaining("Couldn't read remote access"), findsOne);
   });
 

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./agent-core";
 import { MessageBus, type ClientKey } from "./message-bus";
+import { ScreenRelay } from "./screen-relay";
 import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
@@ -53,6 +54,11 @@ export interface ProjectCoreDeps extends BuildAgentCoreOptions {
    *  rather than a session this bridge does not hold — see the coordinator's
    *  `addressable`. */
   machineDeviceId?: () => string | null;
+  /** The machine's screen-control switch, read live like
+   *  {@link ProjectCoreDeps.remoteAccessEnabled} so revoking it takes effect on
+   *  an already-warm core. Its own boolean: remote *terminal* control must not
+   *  imply remote *screen* control. Fail-closed when unwired. */
+  screenControlEnabled?: () => boolean;
 }
 
 /** Handle for a native project binding added to an already-open core via {@link ProjectCore.promote}.
@@ -80,6 +86,7 @@ export class ProjectCore {
   private core: AgentCore | null = null;
   private bus: MessageBus | null = null;
   private listener: LocalListener | null = null;
+  private screenRelay: ScreenRelay | null = null;
   /** This core's project stream with the push subscriber that rides it: the
    *  primary binding for a remote-mode core, the promoted one for a local-mode
    *  core. {@link sendToAppSession} has no other way to reach the wire, so a
@@ -354,6 +361,10 @@ export class ProjectCore {
    *  {@link clientGone}. */
   noteClientGone(client: ClientKey): void {
     this.commitWork(clientGone(this._work, client));
+    // The same signal ends a screen share: a viewer whose Iroh session closed
+    // is watching nothing, and a host whose loopback socket dropped is
+    // capturing nothing.
+    this.screenRelay?.clientGone(client);
     // The core keeps its own copy of what each client has on screen (the setup
     // push reads it); a stale entry there mutes that push for good.
     this.core?.noteClientGone(client);
@@ -568,6 +579,7 @@ export class ProjectCore {
     });
     await listener.start();
     this.listener = listener;
+    this.installScreenRelay(bus, listener);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
@@ -575,6 +587,34 @@ export class ProjectCore {
     log.info(`local listener ready on port ${listener.port}`);
 
     core.onHandshakeComplete();
+  }
+
+  /** Route `screen:*` signalling between remote viewers and the desktop capture
+   *  host, which is this core's loopback owner. Installed from
+   *  {@link bindLoopback} — NOT from a promotion path, which only runs in local
+   *  mode: a project a phone cold-started is a remote-mode core that still has a
+   *  loopback owner, and that is the case this feature exists for. Wraps the
+   *  inbound handler, so everything that isn't `screen:*` falls through
+   *  untouched, peer id and all. */
+  private installScreenRelay(bus: MessageBus, listener: LocalListener): void {
+    const relay = new ScreenRelay({
+      bus,
+      hasOwner: () => listener.hasOwner,
+      remoteAccessEnabled: this.deps.remoteAccessEnabled,
+      screenControlEnabled: this.deps.screenControlEnabled,
+    });
+    this.screenRelay = relay;
+    const coreInbound = bus.inboundHandler;
+    bus.setInboundHandler((msg, channel, source, peerId) => {
+      if (relay.handleInbound(msg, channel, source, peerId)) return;
+      coreInbound?.(msg, channel, source, peerId);
+    });
+  }
+
+  /** The screen-control or remote-access switch went off: end every capture
+   *  this core is relaying. See {@link ScreenRelay.revokeAll}. */
+  revokeScreenSharing(reason: string): Promise<void> {
+    return this.screenRelay?.revokeAll(reason) ?? Promise.resolve();
   }
 
   private async startLocal(core: AgentCore, bus: MessageBus): Promise<void> {

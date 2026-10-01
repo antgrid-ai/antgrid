@@ -313,6 +313,25 @@ class RemoteDirectoryAck {
   }
 }
 
+/// The machine-level screen-control switch: may a remote device watch this
+/// machine's screen and drive its input. Mirror of control-protocol.ts
+/// `screen-control:get`/`set`.
+///
+/// Deliberately not a field of [RemoteAccessPolicy], mirroring the bridge's two
+/// separate stores: remote *terminal* control must not imply remote *screen*
+/// control, and a single struct invites exactly that conflation.
+///
+/// Absent `enabled` reads as off, which is also what an older bridge that has
+/// never heard of this verb amounts to — it answers `ok:false`, so the read
+/// throws before this parses, and the caller's fail-closed default stands.
+class ScreenControlSwitch {
+  final bool enabled;
+  const ScreenControlSwitch({required this.enabled});
+
+  factory ScreenControlSwitch.fromJson(Map<String, dynamic> json) =>
+      ScreenControlSwitch(enabled: json['enabled'] == true);
+}
+
 /// Thrown on a transport error, a non-200 status, or an `ok:false` body.
 class HostControlException implements Exception {
   final String code;
@@ -810,6 +829,21 @@ class HostControlClient {
       );
     }
     return path;
+  }
+
+  Future<ScreenControlSwitch> screenControlGet({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final m = await _post({'type': 'screen-control:get'}, timeout: timeout);
+    return ScreenControlSwitch.fromJson(m);
+  }
+
+  /// Grant or withdraw remote screen control for the whole machine. Returns the
+  /// resulting state as the bridge sees it, so the caller never has to assume
+  /// the write landed as requested.
+  Future<ScreenControlSwitch> screenControlSet(bool enabled) async {
+    final m = await _post({'type': 'screen-control:set', 'enabled': enabled});
+    return ScreenControlSwitch.fromJson(m);
   }
 
   void close() => _http.close();

@@ -15,6 +15,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
+import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
@@ -41,10 +42,16 @@ import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
 import '../widgets/send_to_agent_comment.dart';
+import '../widgets/screen_preview_panel.dart';
 import '../design/widgets/ab_loading.dart';
 import 'preview_context_menu_script.dart';
 import 'preview_element_picker_script.dart';
 import 'preview_screenshot_script.dart';
+
+/// What the preview panel is showing. Two peers, not a default and a fallback:
+/// the HTTP tunnel previews a dev server, the native mode previews a desktop
+/// window over WebRTC, and neither can stand in for the other.
+enum _PreviewMode { web, app }
 
 /// The browser preview screen. A URL bar at the top of the panel with
 /// refresh/external-browser/element-picker actions, a popup tab switcher
@@ -180,6 +187,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   int? _refreshingPort;
   static const _kPullRefreshThreshold = 70.0;
   static const _kPullRefreshMax = 100.0;
+
+  _PreviewMode _mode = _PreviewMode.web;
 
   late final TextEditingController _addrController;
   late final FocusNode _addrFocus;
@@ -507,6 +516,46 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _buildModeBar(),
+        // The native panel keeps its own state in ScreenViewService, so this
+        // Expanded can swap without touching a live peer connection.
+        Expanded(
+          child: _mode == _PreviewMode.app
+              ? const ScreenPreviewPanel()
+              : _buildWebPreview(),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModeBar() {
+    return AbToolbar.custom(
+      height: AbTokens.rowHeightSm,
+      children: [
+        const SizedBox(width: AbTokens.space4),
+        AbSegmented<_PreviewMode>(
+          segments: const [
+            AbSegment(
+              value: _PreviewMode.web,
+              label: 'Web',
+              icon: AbIcons.browser,
+            ),
+            AbSegment(
+              value: _PreviewMode.app,
+              label: 'App',
+              icon: AbIcons.deviceDesktop,
+            ),
+          ],
+          selected: _mode,
+          onSelect: (mode) => setState(() => _mode = mode),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWebPreview() {
     final previewStateAsync = ref.watch(previewStateProvider);
     // watch, not the `ref.read` in [_backFromPreview]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
@@ -596,8 +645,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       (s) => s.previewService,
     );
     for (final tab in state.tabs) {
-      final initialUrl =
-          tab.currentUrl ?? 'http://localhost:${tab.localPort}';
+      final initialUrl = tab.currentUrl ?? 'http://localhost:${tab.localPort}';
       final tabState = _tabStates.putIfAbsent(tab.port, _TabWebViewState.new);
       final linkTarget = previewService?.takeNavRequest(tab.port);
       // Rebuild only on an actual target change: webview_flutter builds the

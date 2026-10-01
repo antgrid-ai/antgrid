@@ -43,6 +43,8 @@ import '../services/command_service.dart';
 import '../services/preferences_service.dart';
 import '../util/device_id.dart';
 import '../models/preferences_models.dart';
+import '../services/screen_share_service.dart';
+import '../services/screen_view_service.dart';
 import '../services/search_service.dart';
 import '../models/search_models.dart';
 import '../models/handler_state.dart';
@@ -704,6 +706,30 @@ final previewServiceProvider = _focusedCheckoutService<PreviewService>(
 final previewStateProvider = StreamProvider<PreviewState>((ref) {
   final service = focusedCheckoutServicesOrNull(ref)?.previewService;
   if (service == null) return const Stream<PreviewState>.empty();
+  return seededStream(() => service.currentState, service.stateStream);
+});
+
+/// Per-project ScreenShareService façade.
+final screenShareServiceProvider = _focusedService<ScreenShareService>(
+  (s) => s.screenShareService,
+  name: 'screenShareService',
+);
+
+final screenShareStateProvider = StreamProvider<ScreenShareState>((ref) {
+  final service = focusedSessionOrNull(ref)?.screenShareService;
+  if (service == null) return const Stream<ScreenShareState>.empty();
+  return seededStream(() => service.currentState, service.stateStream);
+});
+
+/// Per-project ScreenViewService façade — the viewer half of the same feature.
+final screenViewServiceProvider = _focusedService<ScreenViewService>(
+  (s) => s.screenViewService,
+  name: 'screenViewService',
+);
+
+final screenViewStateProvider = StreamProvider<ScreenViewState>((ref) {
+  final service = focusedSessionOrNull(ref)?.screenViewService;
+  if (service == null) return const Stream<ScreenViewState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });
 

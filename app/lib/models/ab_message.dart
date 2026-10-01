@@ -8,6 +8,7 @@ import 'handler_state.dart'
     show HandlerActivityRecord, HandlerAskOption, HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
+import 'screen_models.dart';
 import 'service_status.dart';
 
 // --- Data classes ---
@@ -2606,6 +2607,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           truncated: truncated,
         );
       }
+    case 'screen:request':
+    case 'screen:windows':
+    case 'screen:pick':
+    case 'screen:state':
+    case 'screen:offer':
+    case 'screen:answer':
+    case 'screen:ice':
+    case 'screen:stop':
+      return parseScreenMessage(json);
 
     case 'agent:turn-start':
     case 'agent:session-reset':

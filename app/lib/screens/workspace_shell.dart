@@ -69,6 +69,7 @@ import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/pane_swipe_exclusion.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
+import '../widgets/screen_share_consent_gate.dart';
 import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
@@ -1510,6 +1511,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         child: Column(
           children: [
             const OperationalErrorToaster(),
+            // Zero-size: a remote screen request has to reach the user
+            // wherever they are in the workspace, not only on the preview tab.
+            const ScreenShareConsentGate(),
             const AbBanner(),
             const AbHostBanner(),
             Expanded(

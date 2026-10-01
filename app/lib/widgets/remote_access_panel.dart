@@ -17,6 +17,7 @@ import '../launcher/host_control_client.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
 import '../providers/remote_access.dart';
+import '../providers/screen_control.dart';
 import '../services/devices_api.dart';
 import '../util/relative_time.dart';
 
@@ -49,11 +50,40 @@ class RemoteAccessPanel extends ConsumerWidget {
       children: [
         const _AccessSection(),
         Container(height: 1, color: p.borderSubtle),
+        const _ScreenControlSection(),
+        Container(height: 1, color: p.borderSubtle),
         const _DevicesSection(),
       ],
     );
   }
 }
+
+/// The two machine grants' confirm dialogs, top-level because the preview panel
+/// offers the same flips from its own preflight. One copy of the sentence that
+/// describes what is being handed over — two would drift, and this is the last
+/// thing the user reads before granting it.
+Future<bool> confirmRemoteAccessOn(
+  BuildContext context,
+) => AbConfirmDialog.show(
+  context: context,
+  title: 'Turn on remote access?',
+  body:
+      'Every device signed in to your account will be able to open and drive '
+      'every project on this machine, until you turn it off.',
+  confirmLabel: 'Turn on',
+);
+
+Future<bool> confirmScreenControlOn(
+  BuildContext context,
+) => AbConfirmDialog.show(
+  context: context,
+  title: 'Turn on screen control?',
+  body:
+      'A device signed in to your account will be able to watch a window on '
+      'this machine and drive its mouse and keyboard. You pick the window '
+      'every time, and nothing is shared until you do.',
+  confirmLabel: 'Turn on',
+);
 
 /// The one confirm-then-enable flow for machine-wide remote access. Reused by
 /// the panel switch below and the New Session remote-access nudge — the wording
@@ -68,14 +98,7 @@ Future<void> confirmAndEnableRemoteAccess(
 ) async {
   final container = ref.container;
   final notifier = ref.read(remoteAccessPolicyProvider.notifier);
-  final ok = await AbConfirmDialog.show(
-    context: context,
-    title: 'Turn on remote access?',
-    body:
-        'Every device signed in to your account will be able to open and '
-        'drive every project on this machine, until you turn it off.',
-    confirmLabel: 'Turn on',
-  );
+  final ok = await confirmRemoteAccessOn(context);
   if (!ok) return;
   await notifier.setEnabled(true);
   // Once remote access has been on — from ANY surface — the one-time soft
@@ -293,6 +316,122 @@ String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
       "Couldn't read remote access, so whether this is in effect right "
           'now is unknown. $effect',
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Screen control
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The machine's screen-control switch — the second, narrower grant that sits on
+/// top of remote access.
+///
+/// Its own switch because the two capabilities are not the same size: remote
+/// access hands over a terminal, this hands over the mouse and keyboard of a
+/// window the user is looking at. The bridge keeps them in separate stores for
+/// that reason and ANDs them at every check, so this one alone grants nothing.
+///
+/// Deliberately still tappable while remote access is off. The pairing is a
+/// preference the user is entitled to set ahead of time, and — the load-bearing
+/// half — withdrawing it must never be gated on the state of some other switch.
+class _ScreenControlSection extends ConsumerWidget {
+  const _ScreenControlSection();
+
+  Future<void> _set(BuildContext context, WidgetRef ref, bool next) async {
+    // Resolved before the dialog, for the same reason as the access section: a
+    // WidgetRef read after an await can land on a disposed element.
+    final notifier = ref.read(screenControlSwitchProvider.notifier);
+    if (next) {
+      final ok = await AbConfirmDialog.show(
+        context: context,
+        title: 'Turn on screen control?',
+        body:
+            'A device signed in to your account will be able to watch a window '
+            'on this machine and drive its mouse and keyboard. You pick the '
+            'window every time, and nothing is shared until you do.',
+        confirmLabel: 'Turn on',
+      );
+      if (!ok) return;
+    }
+    await notifier.setEnabled(next);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.antgrid;
+    // Surface a failed read or flip here rather than leaving the switch to
+    // silently disagree with the machine. Only on the transition INTO error, so
+    // a rebuild doesn't re-toast.
+    ref.listen<AsyncValue<bool>>(screenControlSwitchProvider, (prev, next) {
+      if (next is AsyncError && prev is! AsyncError) {
+        showAbToast(context, 'Could not update screen control. Try again.');
+      }
+    });
+
+    final async = ref.watch(screenControlSwitchProvider);
+    final enabled = async.value;
+    final on = enabled == true;
+    // Same contract as the access switch: inert until the machine's real state
+    // is known, and locked while a flip is in flight.
+    final live = enabled != null && !async.isLoading;
+    final remoteOn =
+        ref.watch(remoteAccessPolicyProvider).value?.enabled == true;
+
+    final control = AbSwitch(
+      key: const Key('screen-control-switch'),
+      value: on,
+      semanticLabel: 'Screen control',
+      tone: p.statusRunning,
+      onChanged: live ? (next) => _set(context, ref, next) : null,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.all(AbTokens.space8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'SCREEN CONTROL',
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    letterSpacing: 0.66,
+                    color: p.textMuted,
+                  ),
+                ),
+              ),
+              async.isLoading ? PulsingOpacity(child: control) : control,
+            ],
+          ),
+          const SizedBox(height: AbTokens.space6),
+          Text(
+            enabled == null
+                ? "Couldn't read this machine's setting. It stays as it was."
+                : 'Your devices can watch one window on this machine and drive '
+                      'its mouse and keyboard. You pick the window each time.',
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXxs,
+              color: enabled == null ? p.error : p.textMuted,
+            ),
+          ),
+          // Said only when it changes the answer: this switch grants nothing on
+          // its own, and a machine nothing can reach makes an ON here read as a
+          // capability that is live when it is not.
+          if (on && !remoteOn) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              'Remote access is off, so nothing can reach this machine yet.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: p.warning,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

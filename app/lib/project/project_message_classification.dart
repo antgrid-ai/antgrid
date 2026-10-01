@@ -237,6 +237,17 @@ const Set<String> _statusTypes = <String>{
   'session-bus:thread:result',
   'session-bus:arrived',
   'file:upload-result',
+  // WebRTC signalling for the native-window preview. Status tier rather than
+  // heavy: the heavy stream is focus-gated, so a live screen session would stall
+  // its negotiation the moment the user looked at another panel.
+  'screen:request',
+  'screen:windows',
+  'screen:pick',
+  'screen:state',
+  'screen:offer',
+  'screen:answer',
+  'screen:ice',
+  'screen:stop',
 };
 
 /// Inbound parser types (`parseAbMessage` cases in `models/ab_message.dart`)

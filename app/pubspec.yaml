@@ -111,11 +111,19 @@ dependencies:
   # Parses the Sparkle appcast macOS detects from (lib/update/). Transitive
   # already; promoted for the same reason as pub_semver above.
   xml: ^6.6.1
-  # Allocator for the kernel32 job-object calls in
-  # lib/launcher/windows_job_object.dart. Transitive already; promoted because
-  # dart:ffi ships no allocator of its own.
+  # Native allocator (`calloc`) for lib/native/'s hand-rolled Win32 FFI and
+  # the kernel32 job-object calls in lib/launcher/windows_job_object.dart —
+  # dart:ffi ships no allocator of its own. Deliberately NOT package:win32,
+  # whose INPUT union layout moved between major versions.
   ffi: ^2.2.0
   sign_in_with_apple: ^8.2.0
+  # Native-window capture + the P2P media/input transport for the desktop
+  # preview (lib/services/screen_share_service.dart). Pulls in libwebrtc as a
+  # prebuilt native library per desktop platform — the single largest binary in
+  # the tree. Windows window capture routes through Windows.Graphics.Capture,
+  # which is what makes it immune to occlusion; see
+  # docs/plans/2026-08-01-native-app-preview.md §3.
+  flutter_webrtc: ^1.5.2
 
 dev_dependencies:
   flutter_test:

@@ -2297,6 +2297,119 @@ const PreviewSnapshotMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// ── Native window preview (screen:*) ──────────────────────────────────────────
+// WebRTC signalling between a remote viewer and the desktop capture host. The
+// bridge only routes these between a viewer's project stream and its loopback
+// owner (`screen-relay.ts`); the media and the input datachannel are
+// peer-to-peer and never reach it.
+
+/** Which viewer a frame belongs to: the Iroh peer id of the viewer's connection.
+ *  Meaningful only on the loopback leg. The bridge stamps it onto every frame a
+ *  viewer sends, overwriting anything the viewer put there, and routes the
+ *  host's replies to exactly the peer it names — so it is never something a
+ *  viewer can choose. */
+const ScreenAddressed = { viewerId: z.string().min(1).optional() };
+
+const ScreenRequestMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:request"),
+  projectId: z.string(),
+  /** Which end picks the window. Absent means the host does — that is what every
+   *  client written before viewer-side picking sends, and it must stay the
+   *  reading of silence. */
+  chooser: z.enum(["host", "viewer"]).optional(),
+});
+
+/** Host → viewer. The catalog a viewer picks from, published only in answer to a
+ *  `chooser:"viewer"` request and only while the machine's screen-control switch
+ *  is on.
+ *
+ *  Titles only, and that is a security property rather than an economy: a
+ *  thumbnail is a picture of a window the user has NOT agreed to share, so
+ *  shipping one per window would make the catalog a wider disclosure than the
+ *  session it exists to start. The local picker still shows thumbnails because
+ *  they never leave the machine. */
+const ScreenWindowsMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:windows"),
+  windows: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      /** Picking this one un-minimises it on the host machine, which libwebrtc
+       *  requires before it will capture. Sent so the viewer can decide whether
+       *  that visible change to someone else's desktop is worth making, rather
+       *  than discovering it after the fact. */
+      minimised: z.boolean().optional(),
+    }),
+  ),
+});
+
+/** Viewer → host. Names one window from the catalog the host just published.
+ *
+ *  The id is checked against that catalog on arrival and nothing else bounds it
+ *  — the same shape as `seenProjects` for project ids. A window the host never
+ *  offered is not capturable by naming it here. */
+const ScreenPickMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:pick"),
+  windowId: z.string(),
+});
+
+const ScreenStateMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:state"),
+  // `no-host` means the desktop capture app isn't connected over loopback. It is
+  // load-bearing rather than cosmetic: without it a request lands on no owner and
+  // the viewer waits forever with nothing to time out against.
+  //
+  // `interrupted` is the same argument applied to the media path: ICE passes
+  // through `disconnected` on any network change, and without a status for it the
+  // viewer keeps rendering the last frame it received and calls it live.
+  status: z.enum(["idle", "no-host", "awaiting-consent", "live", "interrupted", "ended"]),
+  reason: z.string().optional(),
+  windowTitle: z.string().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+
+const ScreenOfferMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:offer"),
+  sdp: z.string(),
+  // Carried inside the lease-authenticated Iroh connection, so the media
+  // session binds to an endpoint the authorization snapshot named — DTLS-SRTP
+  // is a second crypto path, and this is what stops a party that can rewrite
+  // signalling from substituting its own certificate.
+  dtlsFingerprint: z.string(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+});
+
+const ScreenAnswerMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:answer"),
+  sdp: z.string(),
+  dtlsFingerprint: z.string(),
+});
+
+const ScreenIceMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:ice"),
+  // Empty string is the end-of-candidates signal, so this is not `.min(1)`.
+  candidate: z.string(),
+  // libwebrtc supplies one or both of these; neither is guaranteed present, and
+  // an index of 0 is meaningful — keep them nullable rather than falsy-checked.
+  sdpMid: z.string().nullable().optional(),
+  sdpMLineIndex: z.number().int().nonnegative().nullable().optional(),
+});
+
+const ScreenStopMessage = BaseMessage.extend({
+  ...ScreenAddressed,
+  type: z.literal("screen:stop"),
+  reason: z.string(),
+});
+
 const RpcErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
@@ -2802,6 +2915,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   FileFindResultMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
+  ScreenRequestMessage,
+  ScreenWindowsMessage,
+  ScreenPickMessage,
+  ScreenStateMessage,
+  ScreenOfferMessage,
+  ScreenAnswerMessage,
+  ScreenIceMessage,
+  ScreenStopMessage,
   RequestMessage,
   ResponseMessage,
   AgentTurnStartMessage,
@@ -2994,6 +3115,14 @@ export type FileFindResult = z.infer<typeof FileFindResultMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
+export type ScreenRequest = z.infer<typeof ScreenRequestMessage>;
+export type ScreenWindows = z.infer<typeof ScreenWindowsMessage>;
+export type ScreenPick = z.infer<typeof ScreenPickMessage>;
+export type ScreenState = z.infer<typeof ScreenStateMessage>;
+export type ScreenOffer = z.infer<typeof ScreenOfferMessage>;
+export type ScreenAnswer = z.infer<typeof ScreenAnswerMessage>;
+export type ScreenIce = z.infer<typeof ScreenIceMessage>;
+export type ScreenStop = z.infer<typeof ScreenStopMessage>;
 export type RpcRequest = z.infer<typeof RequestMessage>;
 export type RpcResponse = z.infer<typeof ResponseMessage>;
 export type AgentItem = z.infer<typeof AgentItemSchema>;
@@ -3228,6 +3357,8 @@ const KNOWN_TYPES = new Set<string>([
   "file:tree:subscribe",
   "file:find", "file:find-result",
   "preview:snapshot:request", "preview:snapshot",
+  "screen:request", "screen:windows", "screen:pick", "screen:state", "screen:offer",
+  "screen:answer", "screen:ice", "screen:stop",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
   "agent:item-added", "agent:item-delta", "agent:item-updated",

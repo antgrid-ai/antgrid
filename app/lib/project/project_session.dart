@@ -11,6 +11,8 @@ import '../services/file_service.dart';
 import '../services/agent_session_service.dart';
 import '../services/handler_service.dart';
 import '../services/preview_service.dart';
+import '../services/screen_share_service.dart';
+import '../services/screen_view_service.dart';
 import '../services/search_service.dart';
 import '../services/sessions_service.dart';
 import '../services/terminal_service.dart';
@@ -73,6 +75,12 @@ class ProjectSession {
   SearchService get searchService => _mainCheckoutServices.searchService;
   CommandService get commandService => _mainCheckoutServices.commandService;
   PreviewService get previewService => _mainCheckoutServices.previewService;
+  // Session-scoped, deliberately NOT in [CheckoutServices]: a screen share
+  // is a machine's windows, and a machine has one desktop however many
+  // checkouts are open. A bundle per checkout would put several services in
+  // contention for the same host.
+  late final ScreenShareService screenShareService;
+  late final ScreenViewService screenViewService;
   late final HandlerService handlerService;
   late final AgentSessionService agentSessionService;
   UploadService get uploadService => _mainCheckoutServices.uploadService;
@@ -108,6 +116,7 @@ class ProjectSession {
     required this.cachedSessionsStore,
     required Future<void> Function() onClose,
     this.analytics,
+    ScreenControlPolicy? screenControlPolicy,
   }) : _onClose = onClose,
        wireProjectId = mode == ProjectSessionMode.relay
            ? baseProjectId(projectId)
@@ -156,6 +165,16 @@ class ProjectSession {
       _sweepCheckouts(live);
     });
     _checkoutRefusalSub = statusStream.listen(_onCheckoutRefusal);
+    // Null only in tests and on a platform with no loopback host: the service
+    // fails closed without a policy, since it cannot tell "off" from "unknown".
+    screenShareService = ScreenShareService.fromSession(
+      this,
+      policy: screenControlPolicy,
+    );
+    // The viewer half. Only one of the two ever engages — the service itself
+    // decides from the transport, since a loopback session owns the windows and
+    // a remote (Iroh peer) session is looking at someone else's.
+    screenViewService = ScreenViewService.fromSession(this);
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
     if (transport is StreamTransport) {
@@ -521,6 +540,8 @@ class ProjectSession {
       if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
       if (_checkoutRefusalSub != null) _checkoutRefusalSub!.cancel(),
       sessionsService.dispose(),
+      screenShareService.dispose(),
+      screenViewService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),
       for (final bundle in _checkoutServices.values) bundle.dispose(),
