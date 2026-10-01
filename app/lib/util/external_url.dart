@@ -271,6 +271,30 @@ Future<void> _openPrintedPathLink(
   FileService? Function() fileService,
   void Function(WorkspaceView) revealView,
   Object? Function()? focusedTarget,
+) => _resolveAndShow(
+  context,
+  fileService,
+  revealView,
+  focusedTarget,
+  link.line,
+  'open path link failed',
+  (service) => service.resolveTerminalPath(
+    link.path,
+    terminalId: terminalId,
+    base: link.base,
+  ),
+);
+
+/// The tap-to-open flow both link kinds share: look the service up, resolve,
+/// drop the answer if the screen moved on, then act on it.
+Future<void> _resolveAndShow(
+  BuildContext context,
+  FileService? Function() fileService,
+  void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
+  int? line,
+  String logMessage,
+  Future<FileResolvePathResultMessage> Function(FileService) resolve,
 ) async {
   try {
     final service = fileService();
@@ -281,16 +305,12 @@ Future<void> _openPrintedPathLink(
       return;
     }
     final target = focusedTarget?.call();
-    final result = await service.resolveTerminalPath(
-      link.path,
-      terminalId: terminalId,
-      base: link.base,
-    );
+    final result = await resolve(service);
     if (!context.mounted ||
         !_stillWanted(service, fileService, target, focusedTarget)) {
       return;
     }
-    await _showResolvedPath(context, service, result, link.line, revealView);
+    await _showResolvedPath(context, service, result, line, revealView);
   } on TimeoutException {
     if (context.mounted) showAbToast(context, _unreachableMessage);
   } on SessionDownException {
@@ -300,7 +320,7 @@ Future<void> _openPrintedPathLink(
   } catch (error, stack) {
     AbLog.error(
       'ContentLink',
-      'open path link failed',
+      logMessage,
       fields: {'error': '$error', 'stack': '$stack'},
     );
   }
@@ -326,37 +346,31 @@ Future<void> _openFileLink(
   void Function(WorkspaceView) revealView,
   Object? Function()? focusedTarget,
 ) async {
+  final String? path;
   try {
-    final path = terminalFilePath(rawUri);
-    if (path == null) {
-      if (context.mounted) showAbToast(context, 'Could not open that link.');
-      return;
-    }
-    final service = fileService();
-    if (service == null) {
-      if (context.mounted) {
-        showAbToast(context, "Can't open that path right now.");
-      }
-      return;
-    }
-    final target = focusedTarget?.call();
-    final result = await service.resolveTerminalPath(path);
-    if (!context.mounted ||
-        !_stillWanted(service, fileService, target, focusedTarget)) {
-      return;
-    }
-    await _showResolvedPath(context, service, result, null, revealView);
-  } on TimeoutException {
-    if (context.mounted) showAbToast(context, _unreachableMessage);
-  } on SessionDownException {
-    if (context.mounted) showAbToast(context, _unreachableMessage);
+    path = terminalFilePath(rawUri);
   } catch (error, stack) {
     AbLog.error(
       'ContentLink',
       'open file link failed',
       fields: {'error': '$error', 'stack': '$stack'},
     );
+    return;
   }
+  if (path == null) {
+    if (context.mounted) showAbToast(context, 'Could not open that link.');
+    return;
+  }
+  final filePath = path;
+  await _resolveAndShow(
+    context,
+    fileService,
+    revealView,
+    focusedTarget,
+    null,
+    'open file link failed',
+    (service) => service.resolveTerminalPath(filePath),
+  );
 }
 
 /// Whether a path lookup that just completed still belongs to what is on
