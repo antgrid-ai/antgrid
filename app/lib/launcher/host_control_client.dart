@@ -766,7 +766,6 @@ class HostControlClient {
     required String projectPath,
     required String branch,
     bool allowActiveSessions = false,
-    bool stashIfDirty = false,
     Duration timeout = const Duration(seconds: 10),
   }) async {
     final m = await _post({
@@ -775,7 +774,6 @@ class HostControlClient {
       'projectPath': projectPath,
       'branch': branch,
       'allowActiveSessions': allowActiveSessions,
-      'stashIfDirty': stashIfDirty,
     }, timeout: timeout);
     final current = m['current'];
     if (current is! String) {
