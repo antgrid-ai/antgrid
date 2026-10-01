@@ -61,17 +61,36 @@ class NavController extends Notifier<NavState> {
   /// Record-only: the calling user-intent site has already written the
   /// underlying providers; this just appends to history. No-op when [loc] names
   /// the destination history is already at (avoids duplicate entries on
-  /// re-taps).
+  /// re-taps). An earlier entry for the same destination is dropped, so
+  /// bouncing between sessions leaves each one in `past` once and back() never
+  /// walks the same place twice.
   void commit(NavLocation loc) {
     if (_namesCurrentDestination(loc)) return;
-    final past = state.current == null
+    final trail = state.current == null
         ? <NavLocation>[]
         : [...state.past, state.current!];
+    final past = _isPlainLocation(loc)
+        ? [
+            for (final entry in trail)
+              if (!(_isPlainLocation(entry) && _sameDestination(entry, loc)))
+                entry,
+          ]
+        : trail;
     final capped = past.length > kNavHistoryCap
         ? past.sublist(past.length - kNavHistoryCap)
         : past;
     state = NavState(past: capped, current: loc, future: const []);
   }
+
+  /// A location that asks for nothing beyond its destination — see
+  /// [_namesCurrentDestination] for why the others are distinct requests.
+  bool _isPlainLocation(NavLocation loc) =>
+      loc.view == null && loc.settingsSection == null && loc.file == null;
+
+  bool _sameDestination(NavLocation a, NavLocation b) =>
+      a.target == b.target &&
+      a.surface == b.surface &&
+      a.sessionId == b.sessionId;
 
   /// Whether [loc] is the place `current` already is.
   ///

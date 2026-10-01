@@ -327,7 +327,7 @@ void main() {
 
       // Centred inside the letterbox box itself, not the wrapper: the wrapper
       // also carries chrome, so its centre is not the box the child aligns in.
-      final box = tester.getRect(find.byType(FittedBox));
+      final box = tester.getRect(_letterboxFit);
       expect(painted.center.dx, closeTo(box.center.dx, _epsilon));
       expect(painted.center.dy, closeTo(box.center.dy, _epsilon));
 
@@ -446,7 +446,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_letterboxFit, findsOneWidget);
     expect(_wrappingScrollView, findsNothing);
 
     debugDefaultTargetPlatformOverride = null;
@@ -764,7 +764,7 @@ void main() {
         closeTo(authoritativeWidth, _epsilon),
       );
       expect(
-        tester.getSize(find.byType(FittedBox)).width,
+        tester.getSize(_letterboxFit).width,
         closeTo(600, _epsilon),
       );
 
@@ -933,3 +933,8 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 }
+
+// The reader letterbox specifically; SVG icons (e.g. the take-control strip) also build a FittedBox.
+Finder get _letterboxFit => find.byWidgetPredicate(
+  (w) => w is FittedBox && w.fit == BoxFit.scaleDown,
+);
