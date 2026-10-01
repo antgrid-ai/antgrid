@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
@@ -73,7 +73,9 @@ import {
 } from "../billing/cancel-subscription.js";
 import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
+import { StatsPage } from "../ui/stats.js";
 import { fetchConnections } from "../relay/push.js";
+import { loadUsageStats, summarizeLiveRelay } from "../usage/stats.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
 import { AccountPage, AccountDeletedPage } from "../ui/account.js";
 import {
@@ -115,7 +117,7 @@ import {
 import { TeamPage } from "../ui/team.js";
 import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 
-// Internal relay-connections view is restricted to named operators. Gate on
+// Internal operator pages (/internal/*) are restricted to named operators. Gate on
 // email (lowercased) — Better-Auth verifies email ownership at sign-in, so it's
 // a safe identity anchor here. Non-operators get 404, not 403: don't reveal the
 // route exists.
@@ -1506,37 +1508,53 @@ export function uiRoutes(deps: {
     );
   });
 
+  function requireOperator(page: string): MiddlewareHandler<{ Variables: AuthVars }> {
+    return async (c, next) => {
+      const email = c.get("userEmail")?.toLowerCase() ?? "";
+      const allowed = INTERNAL_OPERATOR_EMAILS.has(email);
+      // Audit every access and every denied probe: these pages read the
+      // live-connection map and account-wide usage, which the relay can't
+      // attribute (it only authenticates "web"), so operator attribution must
+      // be logged here, at the gate — and a non-operator fishing for the route
+      // is exactly what the trail should capture.
+      const line = JSON.stringify({
+        evt: `internal.${page}.${allowed ? "access" : "denied"}`,
+        userId: c.get("userId"),
+        email,
+        at: new Date().toISOString(),
+      });
+      if (!allowed) {
+        console.warn(line);
+        return c.notFound();
+      }
+      console.info(line);
+      await next();
+    };
+  }
+
+  r.get(
+    "/internal/stats",
+    requireUserOrRedirect({ auth: deps.auth }),
+    requireOperator("stats"),
+    async (c) => {
+      const [stats, live] = await Promise.all([
+        loadUsageStats(deps.db),
+        fetchConnections(deps.relay)
+          .catch((e) => {
+            console.warn("[internal.stats] relay fetch failed", e);
+            return null;
+          })
+          .then((connections) => connections && summarizeLiveRelay(deps.db, connections)),
+      ]);
+      return c.html(<StatsPage user={layoutUser(c)} stats={stats} live={live} />);
+    },
+  );
+
   r.get(
     "/internal/connections",
     requireUserOrRedirect({ auth: deps.auth }),
+    requireOperator("connections"),
     async (c) => {
-      const email = c.get("userEmail")?.toLowerCase() ?? "";
-      if (!INTERNAL_OPERATOR_EMAILS.has(email)) {
-        // Record denied probes too — for a surveillance endpoint, a non-operator
-        // fishing for the route is exactly what the audit trail should capture.
-        console.warn(
-          JSON.stringify({
-            evt: "internal.connections.denied",
-            userId: c.get("userId"),
-            email,
-            at: new Date().toISOString(),
-          }),
-        );
-        return c.notFound();
-      }
-
-      // Audit every access: a read of the live-connection map is a surveillance
-      // capability the relay can't attribute (it only authenticates "web"), so
-      // operator attribution must be logged here, at the gate.
-      console.info(
-        JSON.stringify({
-          evt: "internal.connections.access",
-          userId: c.get("userId"),
-          email,
-          at: new Date().toISOString(),
-        }),
-      );
-
       let connections: Awaited<ReturnType<typeof fetchConnections>> | null;
       try {
         connections = await fetchConnections(deps.relay);
