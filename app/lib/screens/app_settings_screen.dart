@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -14,7 +13,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../keyboard/app_shortcuts.dart';
 import '../models/pending_nav.dart';
@@ -169,9 +168,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref.container);
+        if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
-        showAbSnackBar(
+        showAbToast(
           context,
           'Could not delete account. Check your connection and try again.',
           clearPrevious: true,
@@ -459,12 +458,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.account,
                     body: [
-                      // Not on iOS: the web account page signs in with GitHub
-                      // and Google but not with Apple, which App Review rejects
-                      // under guideline 4.8 even inside an in-app Safari view.
-                      // The sign-in screen's password reset covers iOS.
-                      if (ref.watch(currentUserProvider).value != null &&
-                          defaultTargetPlatform != TargetPlatform.iOS) ...[
+                      if (ref.watch(currentUserProvider).value != null) ...[
                         const SizedBox(height: AbTokens.space8),
                         Text(
                           'Set or change your password on the web, where a '

@@ -18,6 +18,7 @@ import 'package:antgrid/widgets/drawer_entry_row.dart';
 
 import '../helpers/test_store_overrides.dart';
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 LocalProjectEntry _entry(String id) => LocalProjectEntry(
   AbProject(
@@ -33,7 +34,10 @@ LocalProjectEntry _entry(String id) => LocalProjectEntry(
 Widget _wrap(Widget child, {required List<Override> overrides}) {
   return ProviderScope(
     overrides: overrides,
-    child: MaterialApp(home: Scaffold(body: child)),
+    child: MaterialApp(
+      builder: abToastHostBuilder,
+      home: Scaffold(body: child),
+    ),
   );
 }
 

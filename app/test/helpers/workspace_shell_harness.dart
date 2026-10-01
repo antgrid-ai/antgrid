@@ -26,6 +26,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'prefs_test_mock.dart';
 import 'test_store_overrides.dart';
+import 'toast_host.dart';
 
 /// The focused entry id these tests mount the shell on: a remote PROJECT, i.e.
 /// the compound `<machineUuid>.<projectId>` shape.
@@ -132,7 +133,7 @@ Future<ProviderContainer> pumpWorkspaceShell(
         // Last so a caller can replace any of the defaults above.
         ...extraOverrides,
       ],
-      child: const MaterialApp(home: AppShell()),
+      child: const MaterialApp(builder: abToastHostBuilder, home: AppShell()),
     ),
   );
   await tester.pump();

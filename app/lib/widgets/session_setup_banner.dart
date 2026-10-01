@@ -12,7 +12,7 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_progress_rule.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/session_entry.dart';
 import '../models/terminal_models.dart';
 import '../providers/agent_transport.dart';
@@ -408,7 +408,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           // has logged it either way, and a refusal narrated over a DIFFERENT
           // session's banner reads as that session having failed.
           if (container.read(activeSessionIdProvider) != sessionId) return;
-          showAbSnackBar(
+          showAbToast(
             context,
             '${sessionSetupFailureCopy(verb)} — ${result.error}',
           );

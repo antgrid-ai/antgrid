@@ -62,18 +62,6 @@ ThemeData buildAbTheme([AbColors palette = kDefaultPalette]) {
       space: 1,
     ),
 
-    snackBarTheme: SnackBarThemeData(
-      // Floating; the bounded width is injected per-MediaQuery in main.dart's
-      // builder. Together they keep snackbars from spanning the full window.
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: palette.bgElevated,
-      contentTextStyle: AbTokens.sansStyle(color: palette.textPrimary),
-      shape: RoundedRectangleBorder(
-        borderRadius: AbTokens.borderRadius8,
-        side: BorderSide(color: palette.borderDefault),
-      ),
-    ),
-
     textSelectionTheme: TextSelectionThemeData(
       cursorColor: palette.accent,
       selectionColor: palette.accent.withValues(alpha: 0.3),

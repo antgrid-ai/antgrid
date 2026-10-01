@@ -104,6 +104,33 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
 /// no widget behind it, and a `WidgetRef` read after the teardown's awaits
 /// would throw on a disposed element anyway.
 Future<void> performHardSignOut(ProviderContainer ref) async {
+  final progress = ref.read(_hardSignOutProgressProvider);
+  progress.running = true;
+  try {
+    await _performHardSignOut(ref);
+  } finally {
+    progress.running = false;
+  }
+}
+
+/// Whether a [performHardSignOut] is running. The server-side revoke inside it
+/// is itself heard as a revocation — the local host's relay is told within a
+/// second — so the revocation paths ask this before starting a second
+/// teardown on top of the first.
+bool hardSignOutInFlight(ProviderContainer ref) =>
+    ref.read(_hardSignOutProgressProvider).running;
+
+class _HardSignOutProgress {
+  bool running = false;
+}
+
+/// A plain holder no teardown step invalidates, so it outlives the provider
+/// resets it brackets.
+final _hardSignOutProgressProvider = Provider<_HardSignOutProgress>(
+  (_) => _HardSignOutProgress(),
+);
+
+Future<void> _performHardSignOut(ProviderContainer ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
   ref.read(signOutCleanupErrorProvider.notifier).set(null);
   ref.read(chatComposerDraftsProvider).clear();

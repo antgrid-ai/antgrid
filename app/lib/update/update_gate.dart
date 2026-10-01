@@ -34,8 +34,8 @@ final afterUpdateLaunchProvider = Provider<String?>((ref) => null);
 /// user happens to open it. A restart-ready outcome (Android) surfaces as a
 /// toast AND lights the row: the toast times out, and a missed one must not
 /// leave the downloaded update affordance-less until the next throttled
-/// check. Toasts mount below the MaterialApp `Overlay` for
-/// [showAbToastOverlay].
+/// check. Mounted as the MaterialApp's home rather than above it so it sits
+/// under the app's [AbToastHost]: [showAbToastOverlay] is a no-op outside one.
 class UpdateGate extends ConsumerStatefulWidget {
   const UpdateGate({super.key, required this.child});
 

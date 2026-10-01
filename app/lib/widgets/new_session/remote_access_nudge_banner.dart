@@ -7,7 +7,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../launcher/host_control_client.dart';
 import '../../providers/first_run.dart';
 import '../../providers/remote_access.dart';
@@ -47,7 +47,7 @@ class RemoteAccessNudgeBanner extends ConsumerWidget {
       // misses enables performed while no nudge renders, so it lives in
       // confirmAndEnableRemoteAccess — the flow every enable routes through.)
       if (next is AsyncError && prev is! AsyncError) {
-        showAbSnackBar(context, 'Could not update remote access. Try again.');
+        showAbToast(context, 'Could not update remote access. Try again.');
       }
     });
 

@@ -9,6 +9,8 @@ import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 
+import '../helpers/toast_host.dart';
+
 NavLocation _loc(String projectId) => NavLocation(
   target: LocalProject(projectId),
   surface: WorkbenchSurface.workspace,
@@ -46,6 +48,7 @@ void main() {
       UncontrolledProviderScope(
         container: c,
         child: const MaterialApp(
+          builder: abToastHostBuilder,
           home: AppBackScope(child: Scaffold(body: SizedBox.shrink())),
         ),
       ),
@@ -109,6 +112,7 @@ void main() {
       await systemBack(tester);
       expect(exits, 0);
       expect(c.read(backExitGateProvider), isNotNull);
+      expect(find.text('Press back again to exit'), findsOneWidget);
 
       now = now.add(const Duration(milliseconds: 400));
       await systemBack(tester);

@@ -1,7 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
@@ -48,7 +48,7 @@ Future<void> answerHandlerEscalation(
     // here reads as an answer given. The tap arm needs none of this: the
     // card declines to latch and the user is out one tap.
     if (!sent && context.mounted) {
-      showAbSnackBar(
+      showAbToast(
         context,
         'That question changed while you were answering — your answer was '
         'not sent. Handler is waiting on it here.',

@@ -142,18 +142,12 @@ class LaunchResult {
   final bool owned;
   final String projectId;
 
-  /// Structured events emitted by the agent via stderr JSON lines.
-  /// Closed when the agent process exits.
-  /// Empty stream for orphan-attached agents (no process to listen to).
-  final Stream<AgentEvent> events;
-
   LaunchResult({
     required this.transport,
     required this.agentPid,
     required this.owned,
     required this.projectId,
-    Stream<AgentEvent>? events,
-  }) : events = events ?? const Stream.empty();
+  });
 }
 
 void _log(String msg) {
@@ -330,7 +324,6 @@ class LocalAgentLauncher {
         agentPid: host.pid,
         owned: _host.ownedHostPid != null,
         projectId: projectId,
-        events: _host.hostEvents,
       );
     } catch (_) {
       // Any failure against the cached host — control error, data-plane

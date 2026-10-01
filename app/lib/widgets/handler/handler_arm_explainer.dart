@@ -12,8 +12,8 @@ import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
-import '../../navigation/root_navigator.dart';
 import '../../providers/agent_catalog.dart';
+import '../../providers/app_toaster.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
@@ -807,28 +807,14 @@ void _reportArmRefused(
 }
 
 /// The one way this flow speaks once its widgets are gone.
-///
-/// The navigator's OVERLAY, not its context: `Overlay.maybeOf` reads an
-/// inherited marker planted inside each overlay entry, so it answers only from
-/// within a mounted route. The navigator's own element sits above every entry
-/// and resolves to null, which would make this whole path a silent no-op — and
-/// there is no widget of ours alive here to ask instead.
 void _reportArmFailure(
   ProviderContainer container, {
   required String title,
   required String description,
 }) {
-  final overlay = container
-      .read(rootNavigatorKeyProvider)
-      .currentState
-      ?.overlay;
-  if (overlay == null) return;
-  showAbToastOn(
-    overlay,
-    toast: AbToast(
-      icon: AbIcons.warning,
-      title: title,
-      description: description,
-    ),
-  );
+  container
+      .read(appToasterProvider)
+      .show(
+        AbToast(icon: AbIcons.warning, title: title, description: description),
+      );
 }

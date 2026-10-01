@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { parse as parseDotenv } from "dotenv";
 import { parseTrustedProxies, peerAuthorizationSnapshotSchema } from "antgrid-wire";
 import { z } from "zod";
+import { parseApplePrivateKey } from "./auth/apple-client-secret.js";
 import { billingToEnvFields, resolveBillingConfig } from "./config/billing.js";
 import { PeerPolicyTargetsSchema } from "./relay/peer-policy-outbox.js";
 
@@ -21,6 +22,20 @@ const EnvSchema = z
     GITHUB_CLIENT_SECRET: z.string().min(1),
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
+    // Sign in with Apple. Optional as a group: all four or none, checked in the
+    // transform below. APPLE_CLIENT_ID is the Services ID the web flow
+    // authenticates as; APPLE_PRIVATE_KEY is the .p8 PEM, with newlines
+    // escaped as \n when the value has to fit on one line.
+    APPLE_CLIENT_ID: z.string().min(1).optional(),
+    APPLE_TEAM_ID: z.string().min(1).optional(),
+    APPLE_KEY_ID: z.string().min(1).optional(),
+    APPLE_PRIVATE_KEY: z
+      .string()
+      .min(1)
+      .optional()
+      .transform((s) => s?.replace(/\\n/g, "\n")),
+    // Audience of the identity tokens the native iOS and macOS apps present.
+    APPLE_APP_BUNDLE_ID: z.string().min(1).default("ai.radhaai.antgrid"),
     ZEPTOMAIL_TOKEN: z.string().optional(),
     ZEPTOMAIL_WEBHOOK_SECRET: z.string().min(16).optional(),
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
@@ -134,6 +149,33 @@ const EnvSchema = z
           : "Expected https:// relay origins with no credentials, query or path",
       });
       return z.NEVER;
+    }
+    const appleKeys = [
+      "APPLE_CLIENT_ID",
+      "APPLE_TEAM_ID",
+      "APPLE_KEY_ID",
+      "APPLE_PRIVATE_KEY",
+    ] as const;
+    const appleMissing = appleKeys.filter((key) => !raw[key]);
+    if (appleMissing.length > 0 && appleMissing.length < appleKeys.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: [appleMissing[0]],
+        message: `Sign in with Apple needs all of ${appleKeys.join(", ")}; missing ${appleMissing.join(", ")}`,
+      });
+      return z.NEVER;
+    }
+    if (raw.APPLE_PRIVATE_KEY) {
+      try {
+        parseApplePrivateKey(raw.APPLE_PRIVATE_KEY);
+      } catch (err) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["APPLE_PRIVATE_KEY"],
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return z.NEVER;
+      }
     }
     const billing =
       raw.NODE_ENV === "test" ? {} : billingToEnvFields(resolveBillingConfig(raw.NODE_ENV));

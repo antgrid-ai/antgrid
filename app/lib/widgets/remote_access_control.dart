@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_state_chip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
@@ -37,7 +37,7 @@ class RemoteAccessControl extends ConsumerWidget {
       next,
     ) {
       if (next is AsyncError && prev is! AsyncError) {
-        showAbSnackBar(context, 'Could not update remote access. Try again.');
+        showAbToast(context, 'Could not update remote access. Try again.');
       }
     });
 

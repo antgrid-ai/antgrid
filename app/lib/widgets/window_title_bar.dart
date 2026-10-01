@@ -12,7 +12,7 @@ import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_branch_pill.dart';
 import '../design/widgets/ab_breadcrumb.dart';
 import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../keyboard/app_shortcuts.dart';
 import '../navigation/back_intent.dart';
@@ -609,7 +609,7 @@ class SessionBranchPill extends ConsumerWidget {
       onTap: () => detached('WindowTitleBar', 'copy branch name', () async {
         await Clipboard.setData(ClipboardData(text: gitBranch));
         if (!context.mounted) return;
-        showAbSnackBar(
+        showAbToast(
           context,
           'Copied "$gitBranch"',
           duration: const Duration(seconds: 2),

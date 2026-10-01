@@ -269,6 +269,26 @@ String crossPlatformManageUrl({
   return '$base/dashboard';
 }
 
+/// Where an iOS user goes to cancel the subscription that blocks deleting their
+/// account. Never a web purchase page, which App Store guideline 3.1.1 rejects:
+/// a store subscription opens that store's own settings, and anything else the
+/// dashboard with pricing hidden, where a web subscription is cancelled.
+String iosManageSubscriptionUrl({
+  required String? provider,
+  required String licenseApiUrl,
+}) {
+  final base = licenseApiUrl.replaceAll(RegExp(r'/+$'), '');
+  if (provider != null &&
+      (isAppStoreBillingProvider(provider) ||
+          isPlayStoreBillingProvider(provider))) {
+    return crossPlatformManageUrl(
+      provider: provider,
+      licenseApiUrl: licenseApiUrl,
+    );
+  }
+  return '$base/dashboard?hidePricing=1';
+}
+
 String crossPlatformDialogTitle(String provider) {
   if (isWebBillingProvider(provider)) return 'Manage subscription on the web';
   if (isAppStoreBillingProvider(provider)) {

@@ -8,7 +8,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../project/checkout_readiness.dart';
 import '../project/project_session_registry.dart';
@@ -252,7 +252,7 @@ class _StoppedSessionEmptyStateState
         fields: {'sessionId': sessionId, 'entryId': entryId},
       );
       if (mounted) {
-        showAbSnackBar(
+        showAbToast(
           context,
           "Couldn't reach this project. Reopen it and try again.",
         );
@@ -266,7 +266,7 @@ class _StoppedSessionEmptyStateState
       // session's isolated checkout is gone. That is a different sentence from
       // the timeout below, which invites a retry: retrying a refusal just earns
       // the same refusal.
-      if (mounted) reportStartRefusal(context, error);
+      if (mounted) reportStartRefusal(AbToaster.maybeOf(context), error);
     } on TimeoutException catch (_) {
       // The button the user just pressed is still on screen and the session is
       // still stopped, so a silent swallow reads as a dropped tap. A dropped
@@ -274,14 +274,14 @@ class _StoppedSessionEmptyStateState
       // PTY anyway, in which case `session:updated` replaces this empty state
       // on its own — so the copy invites a retry without claiming either way.
       if (mounted) {
-        showAbSnackBar(
+        showAbToast(
           context,
           "The agent didn't answer. If the session doesn't come up in a moment, "
           'try again.',
         );
       }
     } on SessionDownException catch (e) {
-      if (mounted) showAbSnackBar(context, e.toString());
+      if (mounted) showAbToast(context, e.toString());
     }
   }
 
@@ -383,7 +383,7 @@ class _ProvisioningSessionStateState
         // below: a press that produces no wire traffic and no message is
         // indistinguishable from a dropped tap.
         if (mounted) {
-          showAbSnackBar(
+          showAbToast(
             context,
             '${sessionSetupFailureCopy(verb)} — this project is reconnecting.',
           );
@@ -404,7 +404,7 @@ class _ProvisioningSessionStateState
       if (container.read(activeSessionIdProvider) != widget.sessionId) return;
       // Nothing else on screen changes when a setup verb is refused, so a log
       // line alone would make a refusal indistinguishable from a dropped press.
-      showAbSnackBar(
+      showAbToast(
         context,
         '${sessionSetupFailureCopy(verb)} — ${result.error}',
       );

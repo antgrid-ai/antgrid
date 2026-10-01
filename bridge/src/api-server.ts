@@ -137,6 +137,10 @@ export const NotifyBodySchema = z.object({
   // matches on, so a second, unrelated block on the same slot still lands.
   // Never on the wire: the app is shown the message, not the tool.
   promptTool: z.string().optional(),
+  // The agent's permission mode when it posted (Claude's `permission_mode`).
+  // Logged only: in auto mode a prompt the classifier later approves still
+  // announces itself, and nothing else tells the two apart after the fact.
+  permissionMode: z.string().optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -405,6 +409,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
         if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
+        // Logged before any drop below so a status the user disputes can be
+        // traced to the notification that set it, and the mode it arrived in.
+        log.info("notify %s for %s (tool %s, permission mode %s): %s", parsed.data.type,
+          parsed.data.terminalId ?? "unattributed", parsed.data.promptTool ?? "none",
+          parsed.data.permissionMode ?? "unknown", parsed.data.message ?? "");
         // `awaiting_input` IS the notification hook's verdict that this is the
         // post-completion idle nudge — a live block classifies as
         // `permission_request` — so the type already carries the reading

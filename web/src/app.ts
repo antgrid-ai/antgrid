@@ -19,6 +19,8 @@ import { emailWebhookRoutes } from "./routes/email-webhooks.js";
 import { devBillingRoutes } from "./routes/dev-billing.js";
 import { oauthHandoffRoutes } from "./routes/oauth-handoff.js";
 import { oauthStartRoutes } from "./routes/oauth-start.js";
+import { appleRoutes } from "./routes/apple.js";
+import { createAppleTokenClient, type AppleTokenClient } from "./auth/apple-tokens.js";
 import { eventsRoutes } from "./routes/events.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { uiRoutes } from "./routes/ui.js";
@@ -30,6 +32,8 @@ import type { Env } from "./env.js";
 import type { RelayPushConfig } from "./relay/push.js";
 import type { SendEmail } from "./auth/email.js";
 import { makeClientIpResolver } from "./util/client-ip.js";
+import { hidePricingMiddleware } from "./ui/pricing-visibility.js";
+import { oauthTokenRateLimit } from "./auth/oauth-token-rate-limit.js";
 
 export type AppDeps = {
   db: DB;
@@ -41,9 +45,14 @@ export type AppDeps = {
    *  reference: invite mail is sent from a plain Hono handler, which has no
    *  `auth.api.*` endpoint behind it to borrow the sender from. */
   sendEmail: SendEmail;
+  /** Replaces the client built from `env`, so tests need not reach Apple.
+   *  An explicit undefined turns Apple's server calls off. */
+  appleTokens?: AppleTokenClient;
 };
 
 export function buildApp(deps: AppDeps) {
+  const appleTokens =
+    "appleTokens" in deps ? deps.appleTokens : createAppleTokenClient(deps.env);
   const app = new Hono();
   const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS);
   // Layout renders og:image, which a scraper fetches with no page to resolve a
@@ -57,6 +66,7 @@ export function buildApp(deps: AppDeps) {
   // mounted above this line renders with no context and silently falls back
   // to the OS scheme. tests/routes/account-page.test.ts pins the order.
   app.use("*", contextStorage());
+  app.use("*", hidePricingMiddleware());
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact
@@ -121,6 +131,7 @@ export function buildApp(deps: AppDeps) {
   // do. These endpoints are reachable over HTTP as well as via `auth.api.*`, so
   // without this the raw client-supplied chain would reach them untouched. No
   // peer address (no socket) means nothing here is trustworthy — drop it.
+  app.use("/api/auth/*", oauthTokenRateLimit(clientIp));
   app.all("/api/auth/*", (c) => {
     const headers = new Headers(c.req.raw.headers);
     const ip = clientIp(c);
@@ -131,7 +142,8 @@ export function buildApp(deps: AppDeps) {
   app.route("/", health);
   app.route("/", eventsRoutes({ db: deps.db, clientIp }));
   app.route("/", waitlistRoutes({ db: deps.db, clientIp }));
-  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay }));
+  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens }));
+  app.route("/", appleRoutes({ db: deps.db, auth: deps.auth, apple: appleTokens }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", peerAuthorizationRoutes(deps));
   app.route("/", irohAccessRoutes(deps));
@@ -158,7 +170,7 @@ export function buildApp(deps: AppDeps) {
   }
 
   app.route("/", oauthHandoffRoutes({ auth: deps.auth }));
-  app.route("/", oauthStartRoutes({ auth: deps.auth }));
+  app.route("/", oauthStartRoutes({ auth: deps.auth, env: deps.env }));
   app.route("/", uiRoutes({
     db: deps.db,
     auth: deps.auth,
@@ -166,6 +178,7 @@ export function buildApp(deps: AppDeps) {
     relay: deps.relay,
     clientIp,
     sendEmail: deps.sendEmail,
+    apple: appleTokens,
   }));
 
   // Last-resort logger for anything thrown past a route handler — without this,

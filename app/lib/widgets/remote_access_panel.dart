@@ -9,7 +9,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
@@ -146,17 +146,32 @@ class _AccessSection extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: AbTokens.space6),
-          Text(
-            policy == null
-                ? "Couldn't read this machine's setting. It stays as it was."
-                : 'Any device signed in to your account — phone, tablet or '
-                      'another desktop — can open and drive every project on '
-                      'this machine.',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXxs,
-              color: policy == null ? p.error : p.textMuted,
+          if (policy == null)
+            _Note(
+              text: "Couldn't read this machine's setting. It stays as it was.",
+              color: p.error,
+              // The switch is inert without a value, so without this a read
+              // that failed for good leaves nothing to press but an app
+              // restart.
+              action: async.hasError && !async.isLoading
+                  ? AbButton(
+                      key: const Key('remote-access-retry'),
+                      label: 'Retry',
+                      compact: true,
+                      onTap: () => ref.invalidate(remoteAccessPolicyProvider),
+                    )
+                  : null,
+            )
+          else
+            Text(
+              'Any device signed in to your account — phone, tablet or '
+              'another desktop — can open and drive every project on this '
+              'machine.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: p.textMuted,
+              ),
             ),
-          ),
           const SizedBox(height: AbTokens.space10),
           // The nullable policy, not the coerced `enabled` above: this row
           // says what the bit does RIGHT NOW, and "remote access is off" is a
@@ -199,7 +214,7 @@ class _AgentReachRow extends ConsumerWidget {
       next,
     ) {
       if (next is AsyncError && prev is! AsyncError) {
-        showAbSnackBar(context, 'Could not update agent reach. Try again.');
+        showAbToast(context, 'Could not update agent reach. Try again.');
       }
     });
     final async = ref.watch(agentReachPolicyProvider);
@@ -404,7 +419,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     if (!mounted) return;
     setState(() => _busy = false);
     if (!revoked) {
-      showAbSnackBar(context, "Couldn't sign $name out. It still has access.");
+      showAbToast(context, "Couldn't sign $name out. It still has access.");
     }
   }
 

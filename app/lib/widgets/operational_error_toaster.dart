@@ -1,7 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 
@@ -11,7 +11,7 @@ import '../providers/sessions.dart';
 /// in the focused services' state but have no in-context UI of their own
 /// (unlike file-read/search,
 /// which render their error where they happen). This surfaces them as a
-/// snackbar so they aren't silently swallowed — without a persistent drawer
+/// toast so they aren't silently swallowed — without a persistent drawer
 /// dot (reserved for structural config errors).
 ///
 /// Errors are de-duplicated per project. The focused-state providers re-emit
@@ -61,7 +61,7 @@ class _OperationalErrorToasterState
     }
     if (seen[projectId] == error) return;
     seen[projectId] = error;
-    showAbSnackBar(context, format(error));
+    showAbToast(context, format(error));
   }
 
   /// Toast a git op result once per (project, seq). Unlike [_announce], de-dup
@@ -72,7 +72,7 @@ class _OperationalErrorToasterState
     if (projectId == null || seq == null || seq == 0 || message == null) return;
     if (_lastGitOpSeq[projectId] == seq) return;
     _lastGitOpSeq[projectId] = seq;
-    showAbSnackBar(context, message);
+    showAbToast(context, message);
   }
 
   @override

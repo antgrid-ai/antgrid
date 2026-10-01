@@ -19,7 +19,7 @@ import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_segmented.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
@@ -1760,7 +1760,7 @@ class _CommitHeaderRow extends StatelessWidget {
     await Clipboard.setData(
       ClipboardData(text: action == 'sha' ? commit.sha : commit.shortSha),
     );
-    if (context.mounted) showAbSnackBar(context, 'Copied to clipboard');
+    if (context.mounted) showAbToast(context, 'Copied to clipboard');
   }
 
   @override

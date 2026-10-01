@@ -31,6 +31,24 @@ class ExpandedDrawerIdsNotifier extends Notifier<Set<String>> {
   }
 }
 
+/// Whether the "This machine" band has folded its local projects away.
+///
+/// In-memory and default-open, unlike the remote machines: collapsing here
+/// hides rows that are already listed rather than gating a socket, so there is
+/// nothing to protect on launch and a persisted fold would only hide the user's
+/// own projects from them on the next start.
+class LocalMachineCollapsedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void toggle() => state = !state;
+}
+
+final localMachineCollapsedProvider =
+    NotifierProvider<LocalMachineCollapsedNotifier, bool>(
+      LocalMachineCollapsedNotifier.new,
+    );
+
 final expandedDrawerIdsProvider =
     NotifierProvider<ExpandedDrawerIdsNotifier, Set<String>>(
       ExpandedDrawerIdsNotifier.new,

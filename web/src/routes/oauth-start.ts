@@ -3,7 +3,8 @@
 
 import { Hono } from "hono";
 import { isAPIError } from "better-auth/api";
-import type { Auth } from "../auth/better-auth.js";
+import { appleSignInConfigured, type Auth } from "../auth/better-auth.js";
+import type { Env } from "../env.js";
 
 /**
  * Browser-navigable entry point for social sign-in.
@@ -19,7 +20,13 @@ import type { Auth } from "../auth/better-auth.js";
  * (OAuth state / PKCE verifier) MUST be forwarded, or the provider callback's
  * state validation fails — hence `returnHeaders: true`.
  */
-const PROVIDERS = new Set(["github", "google"]);
+type SocialProvider = "github" | "google" | "apple";
+
+function providers(env: Env): ReadonlySet<SocialProvider> {
+  const enabled: SocialProvider[] = ["github", "google"];
+  if (appleSignInConfigured(env)) enabled.push("apple");
+  return new Set(enabled);
+}
 
 /**
  * Accept ONLY a same-origin relative path as the post-login redirect target.
@@ -37,11 +44,12 @@ export function safeCallbackURL(raw: string | undefined): string {
   return raw && /^\/(?![/\\])/.test(raw) ? raw : "/dashboard";
 }
 
-export function oauthStartRoutes(deps: { auth: Auth }) {
+export function oauthStartRoutes(deps: { auth: Auth; env: Env }) {
+  const enabled = providers(deps.env);
   const r = new Hono();
   r.get("/oauth/start", async (c) => {
-    const provider = c.req.query("provider") ?? "";
-    if (!PROVIDERS.has(provider)) {
+    const provider = (c.req.query("provider") ?? "") as SocialProvider;
+    if (!enabled.has(provider)) {
       return c.text(`Unknown provider: ${provider || "(none)"}`, 400);
     }
     // Restrict the post-login redirect to a same-origin relative path. Do NOT
@@ -51,7 +59,7 @@ export function oauthStartRoutes(deps: { auth: Auth }) {
 
     try {
       const { headers, response } = await deps.auth.api.signInSocial({
-        body: { provider: provider as "github" | "google", callbackURL },
+        body: { provider, callbackURL },
         returnHeaders: true,
       });
       if (!response?.url) {

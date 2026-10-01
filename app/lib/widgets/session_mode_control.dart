@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../keyboard/app_command_registry.dart';
 import '../keyboard/app_shortcuts.dart';
@@ -174,7 +174,7 @@ class SessionModeShortcut extends ConsumerWidget {
 /// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
 /// text-menu host (the mobile overflow popup) instead of a segmented
 /// control. A menu row has no room to show the option NOT being picked, so
-/// the label names the action ("Switch to Terminal"/"Switch to Chat")
+/// the label names the action ("Switch to Terminal"/"Switch to Chat UI")
 /// instead of the two-state choice. Same visibility/capability rules as
 /// [SessionModeControl] — keep the two in lockstep by hand; neither is a
 /// special case of the other's build method.
@@ -190,7 +190,7 @@ class SessionModeMenuItem extends ConsumerWidget {
     final inFlight = flip.inFlight;
 
     final row = AbLiveMenuRow(
-      label: target == 'chat' ? 'Switch to Chat' : 'Switch to Terminal',
+      label: target == 'chat' ? 'Switch to Chat UI' : 'Switch to Terminal',
       icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
       enabled: flip.enabled,
       disabledReason: flip.disabledReason,
@@ -314,7 +314,7 @@ Future<void> _switchMode(
             ?.sessionsService;
   if (service == null) {
     if (context.mounted) {
-      showAbSnackBar(
+      showAbToast(
         context,
         "Couldn't switch to $target — this project isn't connected yet. Try "
         'again in a moment.',
@@ -356,7 +356,7 @@ Future<void> _switchMode(
         "Couldn't switch to $target. The session is still in "
         '${session.mode} mode.';
   }
-  // A snack bar, not a second modal: the user already confirmed once, and the
+  // A toast, not a second modal: the user already confirmed once, and the
   // session is no worse off than before the tap.
-  showAbSnackBar(context, body, duration: const Duration(seconds: 8));
+  showAbToast(context, body, duration: const Duration(seconds: 8));
 }

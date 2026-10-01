@@ -115,6 +115,7 @@ dependencies:
   # lib/launcher/windows_job_object.dart. Transitive already; promoted because
   # dart:ffi ships no allocator of its own.
   ffi: ^2.2.0
+  sign_in_with_apple: ^8.2.0
 
 dev_dependencies:
   flutter_test:
