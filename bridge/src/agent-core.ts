@@ -5168,8 +5168,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
     absorbIdleNudge: (terminalId) => {
+      // A keystroke through a held AskUserQuestion has already cleared the work
+      // reduction's record of that block.
+      if (openAgentPrompts.hasAny(terminalId)) return false;
       const absorbed = opts.absorbIdleNudge?.(terminalId) ?? false;
-      if (absorbed) statusShadow?.observe(terminalId, { kind: "notify", type: "awaiting_input" });
+      if (absorbed) statusShadow?.observe(terminalId, { kind: "at-prompt" });
       return absorbed;
     },
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),

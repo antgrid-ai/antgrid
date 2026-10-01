@@ -61,6 +61,7 @@ export type ShadowEvent =
   | { kind: "notify"; type: NotificationType }
   | { kind: "ask-open" }
   | { kind: "ask-answered" }
+  | { kind: "at-prompt" }
   | { kind: "turn-end" }
   | { kind: "key"; key: ShadowKey; via: "user" | "bus" };
 
@@ -193,11 +194,12 @@ function observeOther(s: ShadowSession, ev: Exclude<ShadowEvent, { kind: "title"
       let next = s;
       if (ev.type === "permission_request" || ev.type === "question") next = open(s, "notify");
       else if (ev.type === "task_complete" || ev.type === "idle" || ev.type === "error") next = retire(s);
-      // The idle nudge carries no promptTool, so it passes the open-prompt drop
-      // while an AskUserQuestion is held; it must not retire that block.
-      else if (ev.type === "awaiting_input") next = retireUnlessAsk(s);
+      // A forwarded idle nudge means the old reducer still holds a block, so it
+      // retires nothing here; an absorbed one arrives as at-prompt.
       return withEvidence(next, now, `notify:${ev.type}`);
     }
+    case "at-prompt":
+      return withEvidence(retire(s), now, "at-prompt");
     case "ask-open":
       return withEvidence({ ...s, block: "ask" }, now, "ask:open");
     case "ask-answered":

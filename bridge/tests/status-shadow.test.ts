@@ -173,11 +173,12 @@ describe("block lifecycle", () => {
       expect(cls(s, idleAt)).toBe("idle");
     }
   });
-  test("awaiting_input retires a notify block but spares an ask block", () => {
-    let s = ev(observable(), { kind: "notify", type: "permission_request" }, 200);
-    expect(cls(ev(s, { kind: "notify", type: "awaiting_input" }, 300), idleAt)).toBe("idle");
-    s = ev(observable(), { kind: "ask-open" }, 200);
-    expect(cls(ev(s, { kind: "notify", type: "awaiting_input" }, 300), idleAt)).toBe("needs-you");
+  test("a forwarded idle nudge retires nothing; an absorbed one (at-prompt) retires the block", () => {
+    for (const open of [{ kind: "notify", type: "permission_request" }, { kind: "ask-open" }] as const) {
+      const s = ev(observable(), open, 200);
+      expect(cls(ev(s, { kind: "notify", type: "awaiting_input" }, 300), idleAt)).toBe("needs-you");
+      expect(cls(ev(s, { kind: "at-prompt" }, 300), idleAt)).toBe("idle");
+    }
   });
   test("ask-open replaces a notify block, which then survives submit", () => {
     let s = ev(observable(), { kind: "notify", type: "question" }, 200);
@@ -267,7 +268,7 @@ describe("block lifecycle", () => {
       { kind: "key", key: "esc", via: "user" },
       { kind: "key", key: "ctrl-c", via: "user" },
       { kind: "key", key: "submit", via: "bus" },
-      { kind: "notify", type: "awaiting_input" },
+      { kind: "at-prompt" },
       { kind: "notify", type: "idle" },
     ];
     for (const e of retirers) {

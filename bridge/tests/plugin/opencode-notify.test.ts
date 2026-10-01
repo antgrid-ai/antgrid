@@ -63,6 +63,7 @@ const questionAsked = (id: string, sessionID: string) =>
   ({ type: "question.asked", properties: { id, sessionID, questions: [{ question: "Which branch?", header: "Branch", options: [] }] } });
 
 const paths = (hits: Hit[]) => hits.map((h) => h.path);
+const kinds = (hits: Hit[]) => hits.map((h) => [h.path, h.body.type ?? h.body.event]);
 
 test("a root run posts one turn start and closes it with both closers on idle", async () => {
   const { hits, fire } = await start({ terminalId: "t1" });
@@ -95,7 +96,7 @@ test("an interrupt ends the turn as idle, not as an error", async () => {
   await fire(status("ses_root", "busy"),
     { type: "session.error", properties: { sessionID: "ses_root", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
     status("ses_root", "idle"));
-  expect(hits.map((h) => [h.path, h.body.type ?? h.body.event])).toEqual([
+  expect(kinds(hits)).toEqual([
     ["/turn-start", undefined], ["/notify", "idle"], ["/handler-event", "turn_end"],
   ]);
 });
@@ -214,7 +215,7 @@ test("a prompt dropped by an interrupt is retired before the turn closes", async
   await fire(status("ses_root", "busy"), permissionAsked("per_1", "ses_root"));
   hits.length = 0;
   await fire(status("ses_root", "idle"));
-  expect(hits.map((h) => [h.path, h.body.type ?? h.body.event])).toEqual([
+  expect(kinds(hits)).toEqual([
     ["/handler-event", "prompt_answered"], ["/notify", "idle"], ["/handler-event", "turn_end"],
   ]);
 });
@@ -233,6 +234,16 @@ test("a long run re-asserts its turn at most once a minute", async () => {
   ]);
 });
 
+test("one root session stopping while another still runs does not end the terminal's turn", async () => {
+  const { hits, fire } = await start({ terminalId: "t1" });
+  await fire(status("ses_a", "busy"), status("ses_b", "busy"), status("ses_a", "idle"));
+  expect(paths(hits)).toEqual(["/turn-start"]);
+  await fire(status("ses_b", "idle"));
+  expect(kinds(hits)).toEqual([
+    ["/turn-start", undefined], ["/notify", "idle"], ["/handler-event", "turn_end"],
+  ]);
+});
+
 test("without a terminal id no turn is opened, and idle still notifies", async () => {
   const { hits, fire } = await start();
   await fire(status("ses_root", "busy"), status("ses_root", "idle"));
@@ -244,7 +255,7 @@ test("disposing mid-run closes the turn it opened", async () => {
   await fire(status("ses_root", "busy"), questionAsked("que_1", "ses_root"));
   hits.length = 0;
   await plugin.dispose();
-  expect(hits.map((h) => [h.path, h.body.type ?? h.body.event])).toEqual([
+  expect(kinds(hits)).toEqual([
     ["/handler-event", "prompt_answered"], ["/notify", "idle"], ["/handler-event", "turn_end"],
   ]);
   hits.length = 0;

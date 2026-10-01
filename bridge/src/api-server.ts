@@ -63,7 +63,9 @@ export interface AgentContext {
    *  close any turn still open on it and answer true — the nudge says the
    *  agent is at its prompt and nothing more, so the route drops it rather than
    *  light the session up as needing the user. Wired in buildAgentCore to the
-   *  owner's reduction ({@link isIdleAtPrompt}).
+   *  owner's reduction ({@link isIdleAtPrompt}) AND the open agent prompts: the
+   *  nudge names no tool, so the open-prompt drop above it cannot catch a held
+   *  AskUserQuestion.
    *
    *  Deliberately not asked by /handler-event: that drop stays on
    *  {@link isStaleIdleNudge}, so a supervisor still hears about the open turn. */
@@ -449,12 +451,12 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           log.debug("Dropped a re-announcing %s for %s", parsed.data.type, parsed.data.terminalId);
           return json({ ok: true, suppressed: true });
         }
-        // After the open-prompt drop: a prompt on screen is a block whether or
-        // not its own notification has folded yet, and must keep its turn open.
+        // A prompt on screen is a block whether or not its own notification has
+        // folded yet, and must keep its turn open.
         if (parsed.data.type === "awaiting_input"
           && parsed.data.terminalId
           && ctx.absorbIdleNudge?.(parsed.data.terminalId)) {
-          log.info("Idle nudge closed %s's turn: nothing on record waits on the user", parsed.data.terminalId);
+          log.info("Absorbed an idle nudge for %s: nothing on record waits on the user", parsed.data.terminalId);
           return json({ ok: true, stale: true });
         }
         const dedupKey = JSON.stringify(parsed.data);

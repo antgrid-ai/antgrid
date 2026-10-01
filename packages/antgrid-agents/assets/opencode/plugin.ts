@@ -126,6 +126,11 @@ export const AntgridSessionNamer: Plugin = async () => {
       const errored = failed.has(sessionID);
       const message = failed.get(sessionID);
       failed.delete(sessionID);
+      // The bridge holds one turn per terminal, and a user can leave one root
+      // session running while starting another: until the last of them stops,
+      // the terminal is still working. A failure still closes the turn at once;
+      // the survivor's next `busy` opens a new one.
+      if (working.size > 0 && !errored) return [];
       turnOpen = false;
       return [notify(errored ? "error" : "idle", message), ...handler("turn_end")];
     };
@@ -170,7 +175,7 @@ export const AntgridSessionNamer: Plugin = async () => {
           // An idle for a session never seen busy is not the end of a turn this
           // plugin opened: opencode also reports idle for a cancel with nothing
           // running, and publishes one idle per layer that stops a run.
-          return !children.has(sessionId) && working.has(sessionId) ? [...posts, ...endTurn(sessionId)] : posts;
+          return working.has(sessionId) ? [...posts, ...endTurn(sessionId)] : posts;
         }
         // `retry` is a run waiting out a provider error before trying again —
         // still the same turn, still working.
