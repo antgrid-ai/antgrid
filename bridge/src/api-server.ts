@@ -59,6 +59,15 @@ export interface AgentContext {
    *  block that never reaches the Handler leaves a blocked agent unsupervised,
    *  with no further event able to raise it. */
   isStaleIdleNudge?: (terminalId: string) => boolean;
+  /** /notify only: when this slot has nothing on record waiting on the user,
+   *  close any turn still open on it and answer true — the nudge says the
+   *  agent is at its prompt and nothing more, so the route drops it rather than
+   *  light the session up as needing the user. Wired in buildAgentCore to the
+   *  owner's reduction ({@link isIdleAtPrompt}).
+   *
+   *  Deliberately not asked by /handler-event: that drop stays on
+   *  {@link isStaleIdleNudge}, so a supervisor still hears about the open turn. */
+  absorbIdleNudge?: (terminalId: string) => boolean;
   /** True when the AGENT is already displaying [promptTool]'s own prompt on this
    *  slot — an AskUserQuestion, reported by its pre/post tool hooks. Claude
    *  schedules a permission notification seconds after any prompt appears, so
@@ -439,6 +448,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
           log.debug("Dropped a re-announcing %s for %s", parsed.data.type, parsed.data.terminalId);
           return json({ ok: true, suppressed: true });
+        }
+        // After the open-prompt drop: a prompt on screen is a block whether or
+        // not its own notification has folded yet, and must keep its turn open.
+        if (parsed.data.type === "awaiting_input"
+          && parsed.data.terminalId
+          && ctx.absorbIdleNudge?.(parsed.data.terminalId)) {
+          log.info("Idle nudge closed %s's turn: nothing on record waits on the user", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
         }
         const dedupKey = JSON.stringify(parsed.data);
         const now = Date.now();

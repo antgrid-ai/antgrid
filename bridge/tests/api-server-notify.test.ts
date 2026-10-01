@@ -301,6 +301,52 @@ describe("POST /notify — the open-prompt suppression", () => {
   });
 });
 
+describe("POST /notify — an idle nudge with nothing waiting on the user", () => {
+  test("is absorbed: the slot is asked to close its turn and nothing is emitted", async () => {
+    // Without it, a turn whose Stop never fired reads "needs you" on the
+    // agent's 60s idle reminder, and the app toasts "Needs your input".
+    const absorbed: string[] = [];
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      absorbIdleNudge: (id) => { absorbed.push(id); return true; },
+    }));
+    try {
+      const res = await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, stale: true });
+      expect(absorbed).toEqual(["t1"]);
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("is emitted when the slot declines it", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), absorbIdleNudge: () => false }));
+    try {
+      await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["awaiting_input"]);
+    } finally { srv.stop(); }
+  });
+
+  test("is never asked about a live block, nor past a prompt on screen", async () => {
+    const absorbed: string[] = [];
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      absorbIdleNudge: (id) => { absorbed.push(id); return true; },
+      hasOpenAgentPrompt: (id) => id === "t2",
+    }));
+    try {
+      await post(srv.port, { type: "permission_request", terminalId: "t1" });
+      expect(await (await post(srv.port, { type: "awaiting_input", terminalId: "t2" })).json())
+        .toEqual({ ok: true, suppressed: true });
+      expect(absorbed).toEqual([]);
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["permission_request"]);
+    } finally { srv.stop(); }
+  });
+});
+
 describe("POST /notify — the gates a claude hook invocation needs", () => {
   test("the post-completion idle nudge is dropped, the same fact /handler-event refuses", async () => {
     // Past the hook's own classification this kind can only BE the nudge — a

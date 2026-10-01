@@ -509,6 +509,10 @@ export interface BuildAgentCoreOptions {
    *  nudge's phone push; an absent hook forwards, which is the direction a
    *  supervisor has to fail in. */
   isStaleIdleNudge?: (sessionId: string) => boolean;
+  /** Close [sessionId]'s turn if nothing on record waits on the user, and say
+   *  whether it did — see `AgentContext.absorbIdleNudge`. Absent forwards the
+   *  nudge as before. */
+  absorbIdleNudge?: (sessionId: string) => boolean;
   /** True while [sessionId] has an open turn, per the owner's own work-status
    *  reduction — the gate {@link shouldArmInterruptConfirm} asks before arming a
    *  transcript-interrupt confirmation on a lone Esc/Ctrl+C: idle Ctrl+C is
@@ -5126,6 +5130,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       opts.onTurnActivity?.(terminalId);
     },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    absorbIdleNudge: (terminalId) => opts.absorbIdleNudge?.(terminalId) ?? false,
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
