@@ -43,6 +43,10 @@ class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
   final String? selectedFilePath;
+
+  /// A folder to mark and scroll to in place of [selectedFilePath] — what a
+  /// terminal link to a directory reveals.
+  final String? revealedDirectoryPath;
   final List<GitFileStatusEntry> gitFileEntries;
   final bool changesOnly;
 
@@ -68,6 +72,7 @@ class FileTreeView extends StatefulWidget {
     required this.root,
     required this.expandedPaths,
     this.selectedFilePath,
+    this.revealedDirectoryPath,
     this.gitFileEntries = const [],
     this.changesOnly = false,
     this.collapsedPaths = const {},
@@ -98,18 +103,34 @@ class _FileTreeViewState extends State<FileTreeView> {
   double? _rowExtent;
   List<_TreeRow> _lastFlatList = const [];
 
+  /// A target still owed a scroll. It waits for its row rather than being
+  /// tried once: the ancestors `FileService` expands to reveal it load their
+  /// children asynchronously, so on the frame the target changes its row is
+  /// usually not in the list yet.
+  String? _pendingReveal;
+
+  String? get _highlightPath =>
+      widget.revealedDirectoryPath ?? widget.selectedFilePath;
+
+  @override
+  void initState() {
+    super.initState();
+    // A link that switches to the Files tab can build this tree with its
+    // target already set, so there is no change for didUpdateWidget to see.
+    _pendingReveal = _highlightPath;
+  }
+
   @override
   void didUpdateWidget(FileTreeView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // A newly opened file (terminal link, search result, git "view file", …)
-    // should be scrolled into view, not just expanded-and-hoped-visible —
-    // that's the whole point of the ancestor-expansion `FileService` already
-    // does. A re-select of the SAME file (e.g. reopening from a dialog) isn't
-    // worth re-animating the scroll for.
-    if (widget.selectedFilePath != null &&
-        widget.selectedFilePath != oldWidget.selectedFilePath) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _revealSelected());
-    }
+    // A newly opened file or revealed folder (terminal link, search result,
+    // git "view file", …) should be scrolled into view, not just
+    // expanded-and-hoped-visible. A re-select of the SAME target (e.g.
+    // reopening from a dialog) isn't worth re-animating the scroll for.
+    final target = _highlightPath;
+    final previous =
+        oldWidget.revealedDirectoryPath ?? oldWidget.selectedFilePath;
+    if (target != previous) _pendingReveal = target;
   }
 
   @override
@@ -142,7 +163,7 @@ class _FileTreeViewState extends State<FileTreeView> {
       (entry) =>
           !entry.truncationNotice &&
           !entry.loadingNotice &&
-          entry.node.path == widget.selectedFilePath,
+          entry.node.path == _highlightPath,
     );
     if (index < 0) return;
     final position = _scrollController.position;
@@ -205,6 +226,17 @@ class _FileTreeViewState extends State<FileTreeView> {
           )
         : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
     _lastFlatList = flatList;
+    final pending = _pendingReveal;
+    if (pending != null &&
+        flatList.any(
+          (entry) =>
+              !entry.truncationNotice &&
+              !entry.loadingNotice &&
+              entry.node.path == pending,
+        )) {
+      _pendingReveal = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealSelected());
+    }
 
     if (flatList.isEmpty) {
       return AbEmptyState(
@@ -249,7 +281,7 @@ class _FileTreeViewState extends State<FileTreeView> {
             isExpanded: widget.changesOnly
                 ? !widget.collapsedPaths.contains(node.path)
                 : widget.expandedPaths.contains(node.path),
-            isSelected: node.path == widget.selectedFilePath,
+            isSelected: node.path == _highlightPath,
             changeEntries: entriesByPath[node.path] ?? const [],
             // A folded folder answers for what it hides, so it carries the
             // rollup its children can no longer show; an open one stays bare
@@ -267,7 +299,10 @@ class _FileTreeViewState extends State<FileTreeView> {
             onResolveConflict: widget.onResolveConflict,
           );
           if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
-          if (!isDirectory && node.path == widget.selectedFilePath) {
+          // Matched on kind as well as path: a file replaced by a folder of
+          // the same name yields two rows here, and a GlobalKey takes one.
+          if (node.path == _highlightPath &&
+              isDirectory == (widget.revealedDirectoryPath != null)) {
             row = KeyedSubtree(key: _selectedRowKey, child: row);
           }
           return row;

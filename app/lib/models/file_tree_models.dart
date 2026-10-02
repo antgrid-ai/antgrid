@@ -146,6 +146,11 @@ class FilesPaneState {
   final int? searchLine;
   final String? searchQuery;
 
+  /// A folder a terminal link revealed. A folder has no
+  /// [selectedFilePath] of its own, so this is what the tree marks and
+  /// scrolls to; selecting a file clears it.
+  final String? revealedDirectoryPath;
+
   const FilesPaneState({
     this.selectedFilePath,
     this.viewingFile,
@@ -153,6 +158,7 @@ class FilesPaneState {
     this.fileModifiedExternally = false,
     this.searchLine,
     this.searchQuery,
+    this.revealedDirectoryPath,
   });
 
   static const empty = FilesPaneState();
@@ -168,6 +174,8 @@ class FilesPaneState {
     bool clearSearchLine = false,
     String? searchQuery,
     bool clearSearchQuery = false,
+    String? revealedDirectoryPath,
+    bool clearRevealedDirectoryPath = false,
   }) {
     return FilesPaneState(
       selectedFilePath: clearSelectedFilePath
@@ -179,6 +187,9 @@ class FilesPaneState {
           fileModifiedExternally ?? this.fileModifiedExternally,
       searchLine: clearSearchLine ? null : (searchLine ?? this.searchLine),
       searchQuery: clearSearchQuery ? null : (searchQuery ?? this.searchQuery),
+      revealedDirectoryPath: clearRevealedDirectoryPath
+          ? null
+          : (revealedDirectoryPath ?? this.revealedDirectoryPath),
     );
   }
 }

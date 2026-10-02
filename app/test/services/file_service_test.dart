@@ -1207,6 +1207,23 @@ void main() {
     });
   });
 
+  test('a revealed folder is marked until a file is opened', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = session.fileService;
+
+    unawaited(svc.revealDirectory('app/lib/'));
+    await _pump();
+    expect(svc.currentState.files.revealedDirectoryPath, 'app/lib');
+    expect(svc.currentState.expandedPaths, containsAll(['app', 'app/lib']));
+
+    svc.selectFile('app/lib/main.dart');
+    await _pump();
+    expect(svc.currentState.files.revealedDirectoryPath, isNull);
+
+    await session.close();
+  });
+
   test('fresh tree:update applied after snapshot', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);

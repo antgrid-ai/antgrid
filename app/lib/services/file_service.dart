@@ -1506,7 +1506,8 @@ class FileService {
   /// actually renders rather than sitting on stale or empty content — unlike
   /// [toggleExpanded]'s single directory, nothing else will ever ask for
   /// these. Used to reveal a folder a terminal link pointed at, which —
-  /// unlike a file — has no `selectedFilePath` of its own to make it visible.
+  /// unlike a file — has no `selectedFilePath` of its own to make it visible,
+  /// so it is recorded as [FilesPaneState.revealedDirectoryPath] instead.
   Future<void> revealDirectory(String path) async {
     final segments = path.split('/').where((s) => s.isNotEmpty);
     final expanded = Set<String>.from(_state.expandedPaths);
@@ -1516,7 +1517,14 @@ class FileService {
       acc = acc.isEmpty ? segment : '$acc/$segment';
       if (expanded.add(acc)) newlyExpanded.add(acc);
     }
-    _setState(_state.copyWith(expandedPaths: expanded));
+    _setState(
+      _state.copyWith(
+        expandedPaths: expanded,
+        files: acc.isEmpty
+            ? _state.files.copyWith(clearRevealedDirectoryPath: true)
+            : _state.files.copyWith(revealedDirectoryPath: acc),
+      ),
+    );
     await _fetchChildrenChunked(newlyExpanded);
   }
 
@@ -1666,6 +1674,7 @@ class FileService {
           searchQuery: searchQuery,
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
+          clearRevealedDirectoryPath: true,
         ),
         expandedPaths: expandedWithAncestors,
       ),
