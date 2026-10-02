@@ -91,7 +91,12 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     }
 
     final runKey = '$sessionId|${setup.startedAt}';
-    if (ui.hiddenRunKeys.contains(runKey)) {
+    final uiController = ref.read(sessionSetupBannerUiProvider.notifier);
+    if (phase == SessionSetupPhase.running) uiController.noteRunning(runKey);
+    // A success this app never saw coming is history, not news; one finished
+    // while the panel was unmounted goes unannounced.
+    if (ui.hiddenRunKeys.contains(runKey) ||
+        (phase == SessionSetupPhase.done && !uiController.sawRunning(runKey))) {
       _syncTail(null, null);
       return const SizedBox.shrink();
     }

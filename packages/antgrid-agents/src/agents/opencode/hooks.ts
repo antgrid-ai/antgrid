@@ -43,9 +43,11 @@ export function inject({ abDir }: HookInjectCtx): LaunchAugmentation {
 // `bridge hook` and has no event for the runner to allowlist.
 export const events = [] as const;
 
-// Empty for the same reason `events` is: the in-runtime plugin's turn signals
-// never pass through `bridge hook`, so nothing here could close an inferred
-// turn.
+// Empty for the same reason `events` is: the in-runtime plugin posts its own
+// turn start (a root session going busy) and turn end (that session going idle)
+// straight to /turn-start and /notify + /handler-event, never through
+// `bridge hook`. Empty `start` with empty `end` also keeps opencode out of the
+// keystroke inference, which the plugin's own start makes unnecessary.
 export const turnBoundaryEvents = {
   start: [],
   end: [],
@@ -54,8 +56,8 @@ export const turnBoundaryEvents = {
 // Posted by assets/opencode/plugin.ts from inside opencode's own Bun
 // runtime, not by `toPosts` — which is why this list is not derivable from
 // `events`.
-export const posts = ["/session-title", "/notify", "/handler-event"] as const;
-export const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: false } as const;
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
+export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // Unreachable while `events` is empty — hook-runner drops every invocation at
 // the allowlist check before dispatch. Present so the profile stays one shape

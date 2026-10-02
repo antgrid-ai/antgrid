@@ -447,9 +447,14 @@ class TerminalService {
       StreamController<TerminalNotificationMessage>.broadcast();
   final StreamController<NotificationPushMessage> _pushController =
       StreamController<NotificationPushMessage>.broadcast();
+
+  /// Branch-list and checkout failures, one message each, with no replay —
+  /// `OperationalErrorToaster` says why they are not on [TerminalState].
+  final _gitErrorController = StreamController<String>.broadcast();
   TerminalState _state = const TerminalState();
 
   Stream<TerminalState> get stateStream => _stateController.stream;
+  Stream<String> get gitErrors => _gitErrorController.stream;
   Stream<TerminalNotificationMessage> get notificationStream =>
       _notificationController.stream;
   Stream<NotificationPushMessage> get pushNotificationStream =>
@@ -1817,13 +1822,10 @@ class TerminalService {
         // keeping the previous counts beside a cleared branch is worse than 0.
         gitAhead: msg.git?.ahead ?? 0,
         gitBehind: msg.git?.behind ?? 0,
-        // Carried, not defaulted: a status frame says nothing about an
-        // in-flight branch list or a checkout error, and rebuilding without
-        // them empties an open branch picker and swallows the failure toast.
+        // Carried, not defaulted: a status frame says nothing about a pending
+        // branch list; dropping it empties an open picker.
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
-        gitBranchesError: _state.gitBranchesError,
-        gitCheckoutError: _state.gitCheckoutError,
         needsFirstRun: msg.needsFirstRun,
       ),
     );
@@ -2238,9 +2240,7 @@ class TerminalService {
   }
 
   void requestBranches() {
-    _setState(
-      _state.copyWith(gitBranchesLoading: true, clearGitBranchesError: true),
-    );
+    _setState(_state.copyWith(gitBranchesLoading: true));
     // Tier-2 one-shot: bound the wait on git:branches so a dropped send /
     // session-down clears the spinner instead of stranding it.
     _branchesLatch?.settle();
@@ -2257,21 +2257,16 @@ class TerminalService {
         // Surface the drop, symmetric with checkoutBranch's timeout: an empty
         // gitBranches with the spinner cleared is indistinguishable from a repo
         // that genuinely has no branches, so a lost reply would read as success.
-        _setState(
-          _state.copyWith(
-            gitBranchesLoading: false,
-            gitBranchesError:
-                'Loading branches timed out — no response from the agent',
-          ),
+        _setState(_state.copyWith(gitBranchesLoading: false));
+        _emitGitError(
+          'Loading branches timed out — no response from the agent',
         );
       }),
     );
   }
 
   void checkoutBranch(String branch) {
-    _setState(
-      _state.copyWith(gitBranchesLoading: true, clearGitCheckoutError: true),
-    );
+    _setState(_state.copyWith(gitBranchesLoading: true));
     _checkoutLatch?.settle();
     final latch = _checkoutLatch = ReplyLatch();
     _send(
@@ -2286,12 +2281,8 @@ class TerminalService {
       ) {
         if (_disposed || _checkoutLatch != latch) return;
         _checkoutLatch = null;
-        _setState(
-          _state.copyWith(
-            gitBranchesLoading: false,
-            gitCheckoutError: 'Checkout timed out — no response from the agent',
-          ),
-        );
+        _setState(_state.copyWith(gitBranchesLoading: false));
+        _emitGitError('Checkout timed out — no response from the agent');
       }),
     );
   }
@@ -2304,9 +2295,13 @@ class TerminalService {
         gitBranches: msg.branches,
         gitBranch: msg.current,
         gitBranchesLoading: false,
-        clearGitBranchesError: true,
       ),
     );
+  }
+
+  void _emitGitError(String message) {
+    if (_disposed) return;
+    _gitErrorController.add(message);
   }
 
   void _handleGitCheckoutResult(GitCheckoutResultMessage msg) {
@@ -2314,19 +2309,11 @@ class TerminalService {
     _checkoutLatch = null;
     if (msg.success) {
       _setState(
-        _state.copyWith(
-          gitBranch: msg.branch,
-          gitBranchesLoading: false,
-          clearGitCheckoutError: true,
-        ),
+        _state.copyWith(gitBranch: msg.branch, gitBranchesLoading: false),
       );
     } else {
-      _setState(
-        _state.copyWith(
-          gitBranchesLoading: false,
-          gitCheckoutError: msg.error ?? 'Checkout failed',
-        ),
-      );
+      _setState(_state.copyWith(gitBranchesLoading: false));
+      _emitGitError(msg.error ?? 'Checkout failed');
     }
   }
 
@@ -2416,5 +2403,6 @@ class TerminalService {
     await _stateController.close();
     await _notificationController.close();
     await _pushController.close();
+    await _gitErrorController.close();
   }
 }

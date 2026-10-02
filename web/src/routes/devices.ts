@@ -6,7 +6,13 @@ import { z } from "zod";
 import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
-import { checkCapAndUpsert, listActiveDevices, type DeviceKind } from "../models/device.js";
+import {
+  checkCapAndUpsert,
+  isMobilePlatform,
+  listActiveDevices,
+  PlatformSchema,
+  type DeviceKind,
+} from "../models/device.js";
 import { revokeUserDevice } from "../services/device.js";
 import { deleteUserAccount } from "../services/account.js";
 import {
@@ -25,7 +31,7 @@ const UuidSchema = z.uuid();
 const CreateDeviceBody = z.object({
   deviceUuid: z.string().uuid(),
   ed25519Pub: z.string().min(1),
-  platform: z.enum(["macos", "windows", "linux", "ios", "android"]),
+  platform: PlatformSchema,
   displayName: z.string().min(1).max(120),
   // Desktop controllers register as kind:"app" despite a desktop platform.
   kind: z.enum(["app", "agent"]).optional(),
@@ -65,7 +71,7 @@ export function deviceRoutes(deps: {
     // The kind is load-bearing: `listMobileEnabledAgents` (the machine picker)
     // reads `agent` rows only.
     const kind: DeviceKind =
-      body.kind ?? (body.platform === "ios" || body.platform === "android" ? "app" : "agent");
+      body.kind ?? (isMobilePlatform(body.platform) ? "app" : "agent");
 
     // If this device UUID already exists, the desktop app may have lost its
     // keychain copy of the OAuth client secret. Create a fresh OAuth client and

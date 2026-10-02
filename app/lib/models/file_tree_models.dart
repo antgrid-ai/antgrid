@@ -1,5 +1,5 @@
 import 'ab_message.dart'
-    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry, GitStashEntry;
+    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry;
 import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
@@ -327,15 +327,6 @@ class GitPaneState {
   /// panel can offer the agent handoff after the toast has gone.
   final GitSyncFailure? lastSyncFailure;
 
-  /// Every stash in the repository, most recent first — fetched lazily the
-  /// same way [history] is (see [FileService.claimStashLoad]), and re-fetched
-  /// after every checkout, pop, or drop rather than mutated locally: a stash
-  /// list is repo-wide (shared across every worktree), so anything else
-  /// risks drifting from a stash the user or agent created outside this
-  /// panel. Drives the Git panel's Restore/Discard banner — see
-  /// `git_panel.dart`'s `_StashBanner`.
-  final List<GitStashEntry> stashes;
-
   const GitPaneState({
     this.diffPath,
     this.diffContent,
@@ -352,7 +343,6 @@ class GitPaneState {
     this.syncing,
     this.lastSyncFailure,
     this.history = GitHistoryState.empty,
-    this.stashes = const [],
   });
 
   static const empty = GitPaneState();
@@ -378,7 +368,6 @@ class GitPaneState {
     GitSyncFailure? lastSyncFailure,
     bool clearSyncFailure = false,
     GitHistoryState? history,
-    List<GitStashEntry>? stashes,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -404,7 +393,6 @@ class GitPaneState {
           ? null
           : (lastSyncFailure ?? this.lastSyncFailure),
       history: history ?? this.history,
-      stashes: stashes ?? this.stashes,
     );
   }
 }
@@ -470,14 +458,6 @@ class FileTreeState {
   final GitPaneState git;
   final PreviewPaneState preview;
 
-  /// Last git commit/discard result message. Paired with [gitOpFeedbackSeq]:
-  /// it's a one-shot *event*, not durable state. The message string may repeat
-  /// verbatim (two "Discarded changes"), so consumers (the toaster) de-dup on
-  /// the monotonically-increasing seq, which makes every op a distinct event
-  /// without anyone having to clear the message first.
-  final String? gitOpFeedback;
-  final int gitOpFeedbackSeq;
-
   const FileTreeState({
     this.root,
     this.expandedPaths = const {},
@@ -488,8 +468,6 @@ class FileTreeState {
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
     this.preview = PreviewPaneState.empty,
-    this.gitOpFeedback,
-    this.gitOpFeedbackSeq = 0,
   });
 
   FileTreeState copyWith({
@@ -502,8 +480,6 @@ class FileTreeState {
     FilesPaneState? files,
     GitPaneState? git,
     PreviewPaneState? preview,
-    String? gitOpFeedback,
-    int? gitOpFeedbackSeq,
   }) {
     return FileTreeState(
       root: root ?? this.root,
@@ -515,8 +491,6 @@ class FileTreeState {
       files: files ?? this.files,
       git: git ?? this.git,
       preview: preview ?? this.preview,
-      gitOpFeedback: gitOpFeedback ?? this.gitOpFeedback,
-      gitOpFeedbackSeq: gitOpFeedbackSeq ?? this.gitOpFeedbackSeq,
     );
   }
 }

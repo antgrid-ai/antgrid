@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, attentionEdges, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, closeTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -258,6 +258,30 @@ test("a keystroke-inferred turn start also closes the window", () => {
   const done = fold([sessions(1, { tool: "cursor-agent" }), push("task_complete", "r0")]);
   const typed = userReply(done, "r0", { typed: true });
   expect(isStaleIdleNudge(userReply(typed, "r0", { submitted: true }), "r0")).toBe(false);
+});
+
+// ── isIdleAtPrompt (what /notify absorbs) ───────────────────────────────────
+
+test("isIdleAtPrompt holds on an open turn with nothing waiting on the user", () => {
+  // A typed prompt abandoned for a local /compact opens a turn and fires no
+  // Stop; the agent's idle nudge 60s later is the only word that it is idle.
+  expect(isIdleAtPrompt(turnStart(fold([sessions(1)]), "r0"), "r0")).toBe(true);
+  expect(isIdleAtPrompt(fold([sessions(1)]), "r0")).toBe(true);
+  expect(isIdleAtPrompt(fold([sessions(1), push("task_complete", "r0")]), "r0")).toBe(true);
+});
+
+test("isIdleAtPrompt never holds over a block on record", () => {
+  const working = turnStart(fold([sessions(1)]), "r0");
+  for (const n of ["permission_request", "question", "awaiting_input", "error"]) {
+    expect(isIdleAtPrompt(reduceWorkStatus(working, push(n, "r0")), "r0")).toBe(false);
+  }
+  expect(isIdleAtPrompt(reduceWorkStatus(working, permission("r0")), "r0")).toBe(false);
+});
+
+test("isIdleAtPrompt never answers for a slot that is not a running session", () => {
+  // Its notification would fall back to the unattributed key, which cannot
+  // prove whose block it would be dismissing.
+  expect(isIdleAtPrompt(fold([sessions(1)]), "service-terminal-1")).toBe(false);
 });
 
 test("an unknown session id is not stale", () => {

@@ -94,23 +94,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
                     busy: uploadBusy,
                     onError: onUploadError,
                   ),
-                  _zoomButton(
-                    context,
-                    icon: AbIcons.zoomOut,
-                    semanticLabel: 'Decrease terminal text size',
-                    onTap: onZoomOut,
-                  ),
-                  _zoomButton(
-                    context,
-                    icon: AbIcons.zoomIn,
-                    semanticLabel: 'Increase terminal text size',
-                    onTap: onZoomIn,
-                  ),
                   _actionButton(context, 'Esc', '\x1b'),
-                  // Interrupt stays one tap: Ctrl then a letter is two taps
-                  // plus a keyboard, which is the wrong price for the chord a
-                  // phone reaches for most.
-                  _actionButton(context, 'Ctrl+C', '\x03'),
                   _actionButton(context, 'Tab', '\t'),
                   ValueListenableBuilder<TerminalModifiers>(
                     valueListenable: modifiers,
@@ -147,6 +131,18 @@ class TerminalQuickActionsBar extends StatelessWidget {
                   _actionButton(context, '↓', '\x1b[B'),
                   _actionButton(context, '←', '\x1b[D'),
                   _actionButton(context, '→', '\x1b[C'),
+                  _zoomButton(
+                    context,
+                    icon: AbIcons.zoomOut,
+                    semanticLabel: 'Decrease terminal text size',
+                    onTap: onZoomOut,
+                  ),
+                  _zoomButton(
+                    context,
+                    icon: AbIcons.zoomIn,
+                    semanticLabel: 'Increase terminal text size',
+                    onTap: onZoomIn,
+                  ),
                 ],
               ),
             ),

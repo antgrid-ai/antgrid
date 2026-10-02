@@ -15,6 +15,7 @@ import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_empty_state.dart';
@@ -2355,6 +2356,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 draft: _composeDraft,
                 focusNode: _composeFocus,
                 onSend: _composeSend,
+                onDirectInput: _toggleDirectInput,
                 maxLines: maxLines,
               ),
             ),
@@ -2366,48 +2368,78 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 }
 
 /// The fixed row under a terminal another device is sizing: says so, and holds
-/// the one action that changes it.
+/// the one action that changes it. The pane is letterboxed to the other
+/// device's grid, so on a roomy surface the strip also says why it looks that
+/// way; a phone-width pane keeps just the title.
 class _TakeControlStrip extends StatelessWidget {
   const _TakeControlStrip({required this.busy, required this.onTap});
 
   final bool busy;
   final VoidCallback? onTap;
 
+  static const double _roomyWidth = 480;
+
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    return Container(
-      decoration: BoxDecoration(
-        color: p.bgElevated,
-        border: Border(top: BorderSide(color: p.borderSubtle)),
-      ),
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space8,
-        vertical: AbTokens.space4,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'Sized by another device',
-              overflow: TextOverflow.ellipsis,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: p.textMuted,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final roomy = constraints.maxWidth >= _roomyWidth;
+        return Container(
+          decoration: BoxDecoration(
+            color: p.bgElevated,
+            border: Border(top: BorderSide(color: p.borderDefault)),
+          ),
+          padding: EdgeInsets.symmetric(
+            horizontal: roomy ? AbTokens.space12 : AbTokens.space8,
+            vertical: roomy ? AbTokens.space8 : AbTokens.space4,
+          ),
+          child: Row(
+            children: [
+              AbIcon(AbIcons.deviceMobile, size: 14, color: p.accent),
+              const SizedBox(width: AbTokens.space8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sized by another device',
+                      overflow: TextOverflow.ellipsis,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        fontWeight: FontWeight.w600,
+                        color: p.textSecondary,
+                      ),
+                    ),
+                    if (roomy)
+                      Text(
+                        'The terminal is fitted to that screen. Take control '
+                        'to resize it to this window.',
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
+              const SizedBox(width: AbTokens.space8),
+              AbTooltip(
+                message:
+                    'Fit the shared terminal to this device. Other viewers will follow this size.',
+                child: AbButton(
+                  compact: !roomy,
+                  variant: AbButtonVariant.primary,
+                  label: busy ? 'Taking control…' : 'Take control',
+                  onTap: onTap,
+                ),
+              ),
+            ],
           ),
-          AbTooltip(
-            message:
-                'Fit the shared terminal to this device. Other viewers will follow this size.',
-            child: AbButton(
-              compact: true,
-              label: busy ? 'Taking control…' : 'Take control',
-              onTap: onTap,
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

@@ -1338,38 +1338,25 @@ void main() {
     await session.close();
   });
 
-  test(
-    'repeat identical discard result advances the op seq (re-toast)',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+  test('a discard or commit result is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
-      t.emit('git:discard-result', {
-        'projectId': 'p',
-        'success': true,
-        'files': ['a.dart'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Discarded changes');
-      final firstSeq = svc.currentState.gitOpFeedbackSeq;
-      expect(firstSeq, greaterThan(0));
+    t.emit('git:discard-result', {
+      'projectId': 'p',
+      'success': true,
+      'files': ['a.dart'],
+    });
+    t.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await Future<void>.delayed(Duration.zero);
+    expect(feedback, ['Discarded changes', 'Committed']);
 
-      // An identical result message must still register as a distinct event so
-      // the toaster re-fires — the seq advances even though the text repeats.
-      t.emit('git:discard-result', {
-        'projectId': 'p',
-        'success': true,
-        'files': ['a.dart'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Discarded changes');
-      expect(svc.currentState.gitOpFeedbackSeq, greaterThan(firstSeq));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
 
   test('discard sends git:discard with files', () async {
     final t = FakeAgentTransport();
@@ -1405,29 +1392,6 @@ void main() {
     await svc.dispose();
     await session.close();
   });
-
-  test(
-    'repeat identical commit result advances the op seq (re-toast)',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      t.emit('git:commit-result', {'projectId': 'p', 'success': true});
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Committed');
-      final firstSeq = svc.currentState.gitOpFeedbackSeq;
-      expect(firstSeq, greaterThan(0));
-
-      t.emit('git:commit-result', {'projectId': 'p', 'success': true});
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitOpFeedback, 'Committed');
-      expect(svc.currentState.gitOpFeedbackSeq, greaterThan(firstSeq));
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
 
   test('commit sends git:commit with message, no file list', () async {
     final t = FakeAgentTransport();
@@ -1478,154 +1442,12 @@ void main() {
     await session.close();
   });
 
-  test('loadStashes sends git:stash-list with seeded projectId', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
-
-    svc.loadStashes();
-    await Future<void>.delayed(Duration.zero);
-
-    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-list');
-    expect(msg['projectId'], 'p');
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('git:stash-list-result populates git.stashes', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
-
-    t.emit('git:stash-list-result', {
-      'projectId': 'p',
-      'stashes': [
-        {
-          'ref': 'stash@{0}',
-          'branch': 'main',
-          'message': 'Before switching to dev',
-          'createdAt': 1700000000,
-        },
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(svc.currentState.git.stashes, hasLength(1));
-    expect(svc.currentState.git.stashes.single.ref, 'stash@{0}');
-    expect(svc.currentState.git.stashes.single.branch, 'main');
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('restoreStash sends git:stash-pop with ref', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
-
-    svc.restoreStash('stash@{0}');
-    await Future<void>.delayed(Duration.zero);
-
-    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-pop');
-    expect(msg['projectId'], 'p');
-    expect(msg['ref'], 'stash@{0}');
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('dropStash sends git:stash-drop with ref', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
-
-    svc.dropStash('stash@{0}');
-    await Future<void>.delayed(Duration.zero);
-
-    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-drop');
-    expect(msg['projectId'], 'p');
-    expect(msg['ref'], 'stash@{0}');
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // Neither result asks for the list back: the agent follows every pop and
-  // drop with a fresh `git:stash-list-result` on BOTH outcomes, so a request
-  // from here is a second round trip for a list already on the wire.
-  test(
-    'git:stash-pop-result failure surfaces gitOpFeedback without re-asking',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      t.emit('git:stash-pop-result', {
-        'projectId': 'p',
-        'ref': 'stash@{0}',
-        'success': false,
-        'error': 'conflict',
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      expect(svc.currentState.gitOpFeedback, 'conflict');
-      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
-
-  test(
-    'git:stash-drop-result success stays silent and re-asks nothing',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      t.emit('git:stash-drop-result', {
-        'projectId': 'p',
-        'ref': 'stash@{0}',
-        'success': true,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      expect(svc.currentState.gitOpFeedback, isNull);
-      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
-
-  // A one-way claim spent by a build whose send never runs hides the banner for
-  // the service's whole life, so `loadStashes` also registers a hydrator: the
-  // list has to survive a reconnect, and nothing else ever re-reads it.
-  test('loadStashes re-asks on every re-establish', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = FileService.fromSession(session);
-
-    svc.loadStashes();
-    await Future<void>.delayed(Duration.zero);
-    expect(t.sent.where((m) => m['type'] == 'git:stash-list'), hasLength(1));
-
-    t.redriveHydrators();
-    await Future<void>.delayed(Duration.zero);
-    expect(
-      t.sent.where((m) => m['type'] == 'git:stash-list').length,
-      greaterThan(1),
-    );
-
-    await svc.dispose();
-    await session.close();
-  });
-
   test('git:stage-result failure surfaces gitOpFeedback', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
       'projectId': 'p',
@@ -1634,7 +1456,7 @@ void main() {
       'error': 'boom',
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.gitOpFeedback, 'boom');
+    expect(feedback, ['boom']);
 
     await svc.dispose();
     await session.close();
@@ -1644,6 +1466,8 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
+    final feedback = <String>[];
+    svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
       'projectId': 'p',
@@ -1651,7 +1475,7 @@ void main() {
       'files': ['a.dart'],
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.gitOpFeedback, isNull);
+    expect(feedback, isEmpty);
 
     await svc.dispose();
     await session.close();

@@ -245,9 +245,8 @@ class NotificationPushMessage {
   final String? message;
   final String? sessionTitle;
 
-  /// Which session fired this, when the hook carried a terminal id. Absent for
-  /// an unattributed hook. Lets the surfacer stay quiet about the chat the user
-  /// is already reading — see workspace_shell's _onAgentNotificationPush.
+  /// Which session fired this; absent for an unattributed hook. Lets the
+  /// surfacer stay quiet about the chat the user is already reading.
   final String? sessionId;
   final String? projectId;
 
@@ -936,79 +935,6 @@ class GitUnstageResultMessage {
     required this.projectId,
     required this.success,
     required this.files,
-    this.error,
-  });
-}
-
-/// One `git stash` entry, as `git:stash-list-result` reports it.
-class GitStashEntry {
-  /// e.g. `stash@{0}` — stable only until the next pop/drop shifts the list.
-  final String ref;
-
-  /// The branch HEAD pointed at when this stash was created; "" if the
-  /// bridge couldn't parse it back off git's own reflog subject.
-  final String branch;
-  final String message;
-
-  /// Unix seconds.
-  final int createdAt;
-
-  const GitStashEntry({
-    required this.ref,
-    required this.branch,
-    required this.message,
-    required this.createdAt,
-  });
-}
-
-class GitStashListResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final List<GitStashEntry> stashes;
-  final String? error;
-
-  const GitStashListResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.stashes,
-    this.error,
-  });
-}
-
-class GitStashPopResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final String ref;
-  final bool success;
-  final String? error;
-
-  const GitStashPopResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.ref,
-    required this.success,
-    this.error,
-  });
-}
-
-class GitStashDropResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final String ref;
-  final bool success;
-  final String? error;
-
-  const GitStashDropResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.ref,
-    required this.success,
     this.error,
   });
 }
@@ -1943,76 +1869,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         projectId: unstageProjectId,
         success: unstageSuccess,
         files: unstageFiles,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-list-result':
-      final stashProjectId = json['projectId'];
-      if (stashProjectId is! String) return null;
-      final stashesJson = json['stashes'];
-      final stashes = <GitStashEntry>[];
-      if (stashesJson is List) {
-        for (final s in stashesJson) {
-          if (s is! Map) continue;
-          final ref = s['ref'];
-          final branch = s['branch'];
-          final message = s['message'];
-          final createdAt = s['createdAt'];
-          if (ref is! String ||
-              branch is! String ||
-              message is! String ||
-              createdAt is! int) {
-            continue;
-          }
-          stashes.add(
-            GitStashEntry(
-              ref: ref,
-              branch: branch,
-              message: message,
-              createdAt: createdAt,
-            ),
-          );
-        }
-      }
-      return GitStashListResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: stashProjectId,
-        stashes: stashes,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-pop-result':
-      final popProjectId = json['projectId'];
-      final popRef = json['ref'];
-      final popSuccess = json['success'];
-      if (popProjectId is! String || popRef is! String || popSuccess is! bool) {
-        return null;
-      }
-      return GitStashPopResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: popProjectId,
-        ref: popRef,
-        success: popSuccess,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-drop-result':
-      final dropProjectId = json['projectId'];
-      final dropRef = json['ref'];
-      final dropSuccess = json['success'];
-      if (dropProjectId is! String ||
-          dropRef is! String ||
-          dropSuccess is! bool) {
-        return null;
-      }
-      return GitStashDropResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: dropProjectId,
-        ref: dropRef,
-        success: dropSuccess,
         error: json['error'] as String?,
       );
 
