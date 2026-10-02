@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/file_service.dart';
@@ -1204,6 +1205,23 @@ void main() {
 
       await session.close();
     });
+  });
+
+  test('a revealed folder is marked until a file is opened', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = session.fileService;
+
+    unawaited(svc.revealDirectory('app/lib/'));
+    await _pump();
+    expect(svc.currentState.files.revealedDirectoryPath, 'app/lib');
+    expect(svc.currentState.expandedPaths, containsAll(['app', 'app/lib']));
+
+    svc.selectFile('app/lib/main.dart');
+    await _pump();
+    expect(svc.currentState.files.revealedDirectoryPath, isNull);
+
+    await session.close();
   });
 
   test('fresh tree:update applied after snapshot', () async {
@@ -2685,6 +2703,86 @@ void main() {
 
       await svc.dispose();
       await session.close();
+    });
+  });
+
+  group('resolveTerminalPath', () {
+    Map<String, dynamic> request(FakeAgentTransport t) =>
+        t.sent.singleWhere((m) => m['type'] == 'file:resolve-path');
+
+    test('sends terminalId and base only when given', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+
+      unawaited(
+        svc
+            .resolveTerminalPath('src/a.ts', terminalId: 't1', base: 's')
+            .then((_) {}, onError: (_) {}),
+      );
+      await _pump();
+      final withBoth = request(t);
+      expect(withBoth['path'], 'src/a.ts');
+      expect(withBoth['terminalId'], 't1');
+      expect(withBoth['base'], 's');
+
+      t.clearSent();
+      unawaited(
+        svc.resolveTerminalPath('src/a.ts').then((_) {}, onError: (_) {}),
+      );
+      await _pump();
+      final bare = request(t);
+      expect(bare.containsKey('terminalId'), isFalse);
+      expect(bare.containsKey('base'), isFalse);
+
+      await session.close();
+    });
+
+    Future<FileResolvePathResultMessage> resolveWith(
+      Map<String, dynamic> extra,
+    ) async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final future = session.fileService.resolveTerminalPath('src/a.ts');
+      await _pump();
+      t.emit('file:resolve-path-result', {
+        'projectId': 'p',
+        'requestId': request(t)['requestId'],
+        'relPath': null,
+        'isDirectory': false,
+        'externalImagePath': null,
+        ...extra,
+      });
+      final result = await future;
+      await session.close();
+      return result;
+    }
+
+    test('parses exists as true, false, or null when absent', () async {
+      expect((await resolveWith({'exists': true})).exists, isTrue);
+      expect((await resolveWith({'exists': false})).exists, isFalse);
+      expect((await resolveWith({})).exists, isNull);
+    });
+
+    test('a non-bool exists is null rather than a throw', () async {
+      expect((await resolveWith({'exists': 'yes'})).exists, isNull);
+      expect((await resolveWith({'exists': 1})).exists, isNull);
+      expect((await resolveWith({'exists': null})).exists, isNull);
+    });
+
+    test('parses timedOut, defaulting to false when absent or malformed', () async {
+      expect((await resolveWith({'timedOut': true})).timedOut, isTrue);
+      expect((await resolveWith({'timedOut': false})).timedOut, isFalse);
+      expect((await resolveWith({})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': 'yes'})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': 1})).timedOut, isFalse);
+      expect((await resolveWith({'timedOut': null})).timedOut, isFalse);
+    });
+
+    test('a timed-out answer keeps its exists value unchanged', () async {
+      final result = await resolveWith({'exists': false, 'timedOut': true});
+      expect(result.exists, isFalse);
+      expect(result.timedOut, isTrue);
     });
   });
 }

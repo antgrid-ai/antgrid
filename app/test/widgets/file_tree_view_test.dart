@@ -214,6 +214,126 @@ void main() {
       expect(find.text('file59.dart'), findsOneWidget);
     });
 
+    group('reveal', () {
+      FileNode longTree({bool deepLoaded = true}) => FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          for (var i = 0; i < 60; i++)
+            FileNode(
+              name: 'file$i.dart',
+              path: 'project/file$i.dart',
+              type: FileNodeType.file,
+              extension: 'dart',
+            ),
+          FileNode(
+            name: 'zdeep',
+            path: 'project/zdeep',
+            type: FileNodeType.directory,
+            childrenLoaded: deepLoaded,
+            children: deepLoaded
+                ? const [
+                    FileNode(
+                      name: 'target.dart',
+                      path: 'project/zdeep/target.dart',
+                      type: FileNodeType.file,
+                      extension: 'dart',
+                    ),
+                  ]
+                : const [],
+          ),
+        ],
+      );
+
+      Widget themed({
+        required FileNode root,
+        Set<String> expandedPaths = const {'project/zdeep'},
+        String? selectedFilePath,
+        String? revealedDirectoryPath,
+      }) => MaterialApp(
+        theme: ThemeData(extensions: const [kDefaultPalette]),
+        home: Scaffold(
+          body: FileTreeView(
+            root: root,
+            expandedPaths: expandedPaths,
+            selectedFilePath: selectedFilePath,
+            revealedDirectoryPath: revealedDirectoryPath,
+            onToggleExpanded: (_) {},
+            onFileSelected: (_) {},
+          ),
+        ),
+      );
+
+      void smallView(WidgetTester tester) {
+        tester.view.physicalSize = const Size(400, 300);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+      }
+
+      testWidgets('a revealed folder off the viewport is scrolled to and marked', (
+        tester,
+      ) async {
+        smallView(tester);
+        await tester.pumpWidget(themed(root: longTree()));
+        expect(find.text('zdeep'), findsNothing);
+
+        await tester.pumpWidget(
+          themed(
+            root: longTree(),
+            selectedFilePath: 'project/file0.dart',
+            revealedDirectoryPath: 'project/zdeep',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('zdeep'), findsOneWidget);
+        expect(_labelColor(tester, 'zdeep'), kDefaultPalette.accent);
+      });
+
+      testWidgets('a target whose row loads after it was selected is still scrolled to', (
+        tester,
+      ) async {
+        smallView(tester);
+        await tester.pumpWidget(themed(root: longTree(deepLoaded: false)));
+
+        // The link selects the file while its folder's children are still in
+        // flight, so on this frame there is no row to scroll to.
+        await tester.pumpWidget(
+          themed(
+            root: longTree(deepLoaded: false),
+            selectedFilePath: 'project/zdeep/target.dart',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('target.dart'), findsNothing);
+
+        await tester.pumpWidget(
+          themed(
+            root: longTree(),
+            selectedFilePath: 'project/zdeep/target.dart',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('target.dart'), findsOneWidget);
+      });
+
+      testWidgets('a tree built with its target already set scrolls to it', (
+        tester,
+      ) async {
+        smallView(tester);
+        // A link that switches to the Files tab builds the tree fresh, with
+        // the selection already in place: there is no change to react to.
+        await tester.pumpWidget(
+          themed(root: longTree(), selectedFilePath: 'project/zdeep/target.dart'),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('target.dart'), findsOneWidget);
+      });
+    });
+
     testWidgets('a filename wider than the panel does not overflow', (
       tester,
     ) async {

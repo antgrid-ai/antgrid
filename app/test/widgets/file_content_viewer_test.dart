@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/models/file_tree_models.dart';
@@ -221,6 +222,61 @@ void main() {
 
       expect(axis(tester, AxisDirection.right).pixels, greaterThan(0));
       expect(axis(tester, AxisDirection.down).pixels, 0);
+    });
+  });
+
+  // A jump to a printed line marks it, placed from re_editor's own record of
+  // where each visible line is drawn. That record is published from inside
+  // re_editor's layout pass, so anything that REBUILDS in response throws
+  // "Build scheduled during frame" — which is how the mark first failed to
+  // appear for a file that was not already open.
+  group('line mark', () {
+    final content = FileContent(
+      path: 'notes.txt',
+      content: [for (var i = 1; i <= 300; i++) 'line $i'].join('\n'),
+      size: 3000,
+    );
+
+    Widget host({FileContent? fileContent, int? searchLine}) => ProviderScope(
+      child: MaterialApp(
+        theme: ThemeData(extensions: const [kDefaultPalette]),
+        home: Scaffold(
+          body: FileContentViewer(
+            fileContent: fileContent,
+            isLoading: false,
+            selectedFilePath: 'notes.txt',
+            searchLine: searchLine,
+          ),
+        ),
+      ),
+    );
+
+    final mark = find.byWidgetPredicate(
+      (w) =>
+          w is CustomPaint &&
+          w.painter.runtimeType.toString() == '_LineMarkPainter',
+    );
+    final markColor = kDefaultPalette.accent.withValues(alpha: 0.18);
+
+    testWidgets('a file opened at a line marks that line', (tester) async {
+      await tester.pumpWidget(host());
+      await tester.pumpWidget(host(fileContent: content, searchLine: 200));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(mark, findsOneWidget);
+      expect(tester.renderObject(mark), paints..rect(color: markColor));
+    });
+
+    testWidgets('a press in the editor clears the mark', (tester) async {
+      await tester.pumpWidget(host(fileContent: content, searchLine: 200));
+      await tester.pumpAndSettle();
+      expect(mark, findsOneWidget);
+
+      await tester.tap(find.byType(CodeEditor));
+      await tester.pumpAndSettle();
+
+      expect(mark, findsNothing);
     });
   });
 }

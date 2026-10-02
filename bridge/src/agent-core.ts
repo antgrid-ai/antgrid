@@ -32,7 +32,9 @@ import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
-import { FileWatcher } from "./file-watcher";
+import { FileWatcher, unresolvedResolvePathReply } from "./file-watcher";
+import { linkHistoryRows } from "./terminal-links/history-links";
+import type { LinkBases } from "./terminal-links/resolver";
 import { FileUploadManager, type UploadResultFields, type UploadStreamServer } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { FileFinder } from "./file-find";
@@ -830,6 +832,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const frameHub = new TerminalFrameHub();
   // Each authenticated app owns its attachments and acknowledgment window.
   const viewerConnections = new Map<ClientKey, TerminalViewerConnection>();
+  /** Concurrent `file:resolve-path` stats per client: every one can hit the
+   *  disk, so a client that floods them is cut off at a small constant. */
+  const resolveInFlight = new Map<ClientKey, number>();
+  let resolveDroppedWarnAt = 0;
   // Authorization is rechecked for each viewer; one backgrounded app must not
   // pause a sibling, and loopback control remains exempt from remote access.
   function viewerTransportFor(source: ClientKey): TerminalViewerTransport {
@@ -1008,6 +1014,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Zod `.max(64)` never runs on the live path — see git-log.ts's MAX_LOG_PAGE
   // comment. Clamped here instead.
   const MAX_CHILDREN_REQUEST_PATHS = 64;
+  const MAX_RESOLVE_IN_FLIGHT = 8;
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
@@ -1025,6 +1032,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // owner row, and a restarted slot reuses the same namespaced id.
     terminalOwners.set(namespaced, { checkoutId: runtime.checkout.id, externalId: terminalId });
     return namespaced;
+  }
+
+  /** internalTerminalId's lookup without its writes: a client-supplied id must
+   *  not grow configuredTerminalIds or terminalOwners. */
+  function peekInternalTerminalId(runtime: CheckoutRuntime, externalId: string): string | undefined {
+    if (sessions?.get(externalId) || runtime.checkout.id === "main") return externalId;
+    return runtime.configuredTerminalIds.get(externalId);
   }
 
   /** Filesystem root a supervised slot actually runs in. Falls back to the
@@ -2075,12 +2089,59 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:resolve-path": {
+        // A request this case will not resolve still gets an answer: the app
+        // waits on the requestId, and silence reads there as an unreachable
+        // machine after its timeout. `busy` marks a request turned away
+        // unexamined, which is not evidence that the path is absent.
+        const answerUnresolved = (busy: boolean): void => {
+          sendAbToItsChannel(createMessage("file:resolve-path-result", {
+            ...unresolvedResolvePathReply(msg.projectId, msg.requestId, busy),
+            checkoutId: runtime.checkout.id,
+          }), client);
+        };
         const fw = runtime.fileWatcher;
-        if (fw) {
-          fw.handleResolvePathRequest(msg.requestId, msg.path);
-        } else {
+        if (!fw) {
           log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+          answerUnresolved(false);
+          break;
         }
+        const pending = resolveInFlight.get(client) ?? 0;
+        if (pending >= MAX_RESOLVE_IN_FLIGHT) {
+          const now = Date.now();
+          if (now - resolveDroppedWarnAt > 5000) {
+            resolveDroppedWarnAt = now;
+            log.warn("file:resolve-path dropped: client already has %d in flight", pending);
+          }
+          answerUnresolved(true);
+          break;
+        }
+        // `parseMessageFast` checked the type and nothing else.
+        const raw = msg as { path?: unknown; terminalId?: unknown; base?: unknown };
+        const terminalId = typeof raw.terminalId === "string" && raw.terminalId.length <= 256
+          ? raw.terminalId : undefined;
+        const base = raw.base === "a" || raw.base === "l" || raw.base === "s" || raw.base === "r"
+          ? raw.base : undefined;
+        let extra: LinkBases | undefined;
+        if (terminalId !== undefined && manager) {
+          const internal = peekInternalTerminalId(runtime, terminalId);
+          // A terminal of another checkout would hand this request its cwd.
+          if (internal !== undefined && manager.has(internal)
+            && terminalOwner(internal).runtime.checkout.id === runtime.checkout.id) {
+            extra = manager.linkBases(internal);
+          }
+        }
+        resolveInFlight.set(client, pending + 1);
+        fw.resolvePath(raw.path, { base, liveCwd: extra?.liveCwd, spawnCwd: extra?.spawnCwd, requestId: msg.requestId })
+          // Targeted: `externalImagePath` is an absolute path, and only the
+          // requester asked for it.
+          .then((reply) => sendAbToItsChannel(
+            createMessage("file:resolve-path-result", { ...reply, checkoutId: runtime.checkout.id }), client))
+          .catch((error) => log.warn("file:resolve-path reply failed: %s", error))
+          .finally(() => {
+            const left = (resolveInFlight.get(client) ?? 1) - 1;
+            if (left <= 0) resolveInFlight.delete(client);
+            else resolveInFlight.set(client, left);
+          });
         break;
       }
       case "file:upload-local": {
@@ -2681,21 +2742,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
         if (!page) break;
+        // A dead run's rows resolve against the checkout alone: its own cwds
+        // went with it, and the live terminal's belong to a different run.
+        const liveRun = manager.runId(internalId) === msg.runId;
+        const bases: LinkBases = liveRun
+          ? { ...manager.linkBases(internalId), checkoutRoot: owner.checkout.path }
+          : { checkoutRoot: owner.checkout.path };
+        // The page is the only point where every archived row is reachable with
+        // its neighbours and there is time to await a stat; archived rows never
+        // carry detected links themselves.
+        //
         // Bulk row data, targeted rather than broadcast: a history page answers
         // one request's own `beforeRowId` cursor into scrollback the requester
         // may already partly hold, so the wire it did not arrive on has no use
         // for it and must not be charged for it, including sibling relay apps.
-        sendAbToItsChannel(createMessage("terminal:history:page", {
-          checkoutId,
-          terminalId: msg.terminalId,
-          runId: msg.runId,
-          attachmentId: msg.attachmentId,
-          requestId: msg.requestId,
-          history: page.history,
-          expired: page.expired,
-          beforeRowId: page.beforeRowId,
-          rows: page.rows,
-        }), client);
+        void linkHistoryRows(page.rows, bases, {
+          context: manager.historyContext(msg.runId, page, liveRun ? internalId : undefined),
+        })
+          .catch(() => page.rows)
+          .then((rows) => sendAbToItsChannel(createMessage("terminal:history:page", {
+            checkoutId,
+            terminalId: msg.terminalId,
+            runId: msg.runId,
+            attachmentId: msg.attachmentId,
+            requestId: msg.requestId,
+            history: page.history,
+            expired: page.expired,
+            beforeRowId: page.beforeRowId,
+            rows,
+          }), client))
+          .catch((error) => log.warn("terminal:history:page reply failed: %s", error));
         break;
       }
       case "preview:snapshot:request": {
@@ -4181,6 +4257,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // disagree about which checkout owns this terminal.
       onRunStarted: (id, runId, source) => {
         const { runtime, externalId } = terminalOwner(id);
+        // Before register: a restored screen is captured by register's own tick,
+        // and that frame must already know where relative paths resolve. Links
+        // are optional; a root that cannot be set must not fail the run.
+        try { source.setLinkRoot(runtime.checkout.path); } catch { /* unlinked paths */ }
         frameHub.register({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, source, runId);
       },
       // The graceful close, available only where the emulator outlives the PTY

@@ -136,6 +136,7 @@ class TerminalHistoryView extends StatefulWidget {
     required this.minimumContrastRatio,
     this.onOpenHyperlink,
     this.onHyperlinkHover,
+    this.isQuietHyperlink,
     this.initialRowId,
     this.screenRows = const [],
     this.onPosition,
@@ -170,6 +171,10 @@ class TerminalHistoryView extends StatefulWidget {
 
   final Future<void> Function(String uri)? onOpenHyperlink;
   final ValueChanged<String?>? onHyperlinkHover;
+
+  /// Forwarded to the engine view so links the bridge detected in archived rows
+  /// are styled quietly, exactly as they are on the live pane.
+  final bool Function(String uri)? isQuietHyperlink;
 
   @override
   State<TerminalHistoryView> createState() => TerminalHistoryViewState();
@@ -959,6 +964,7 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
       hyperlinkColor: colors.accent,
       onOpenHyperlink: widget.onOpenHyperlink,
       onHyperlinkHover: widget.onHyperlinkHover,
+      isQuietHyperlink: widget.isQuietHyperlink,
       showHeader: false,
       showFocusRing: false,
       showVerticalScrollbar: false,
