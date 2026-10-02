@@ -11,6 +11,8 @@ const log = logger.child({ component: "agent-core" });
 // A machine's project streams share each physical viewer's terminal budget.
 const terminalConnectionBudgets = new Map<ClientKey, { bytes: number; users: number }>();
 import { TerminalManager } from "./terminal-manager";
+import { StatusShadowTracker } from "./status-shadow-tracker";
+import { shadowAgent } from "./status-shadow";
 import {
   TerminalFrameHub, TerminalViewerConnection,
   type TerminalAddress, type TerminalViewerTransport,
@@ -509,6 +511,10 @@ export interface BuildAgentCoreOptions {
    *  nudge's phone push; an absent hook forwards, which is the direction a
    *  supervisor has to fail in. */
   isStaleIdleNudge?: (sessionId: string) => boolean;
+  /** Close [sessionId]'s turn if nothing on record waits on the user, and say
+   *  whether it did — see `AgentContext.absorbIdleNudge`. Absent forwards the
+   *  nudge as before. */
+  absorbIdleNudge?: (sessionId: string) => boolean;
   /** True while [sessionId] has an open turn, per the owner's own work-status
    *  reduction — the gate {@link shouldArmInterruptConfirm} asks before arming a
    *  transcript-interrupt confirmation on a lone Esc/Ctrl+C: idle Ctrl+C is
@@ -1058,6 +1064,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionTitle: session.name,
         projectId: project.id,
       }));
+      statusShadow?.observe(session.id, { kind: "notify", type: normalized.type });
       return;
     }
     const stamped = { ...msg, terminalId: externalId } as AbMessage;
@@ -1823,6 +1830,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         if (line === null) manager.write(id, msg.data);
         else manager.submit(id, line);
+        statusShadow?.input(msg.terminalId, msg.data, "user");
         // Everything below reads the frame as "the user did something". A focus
         // or mouse report is the viewer's VT engine answering a mode the guest
         // turned on, so it goes to the PTY and stops there.
@@ -2780,6 +2788,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
+    statusShadow?.reset();
     for (const observer of titleObservers) observer.stop();
     titleObservers = [];
     // Awaited with the rest, not voided: a chat runtime's dispose now waits out
@@ -2827,12 +2836,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let dropCheckoutReplay: (checkoutId: string) => void = (_c) => {};
   let isShuttingDown = false;
 
+  // Needs the injected work-status read to have anything to compare against, so
+  // a core built without it (most tests) tracks nothing.
+  const statusShadow = opts.sessionWorkStatusFor && process.env.ANTGRID_STATUS_SHADOW !== "0"
+    ? new StatusShadowTracker({ oldStatusFor: opts.sessionWorkStatusFor })
+    : null;
+
   // Kept as the single funnel for notification:push producers even though it now
   // only forwards: the work reduction folds these off the bus
   // (ProjectCore.observeWorkStatus), so a producer that bypassed sendAb entirely
   // is the one mistake that would still lose the signal.
   function sendNotifying(msg: AbMessage): void {
     sendAb(msg);
+    if (msg.type === "notification:push" && msg.origin === "agent" && msg.sessionId) {
+      statusShadow?.observe(msg.sessionId, { kind: "notify", type: msg.notificationType });
+    }
   }
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
@@ -2866,7 +2884,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // through this adapter is text a renderer produced, where a digest is a
       // diagnostic. The other way into `manager.submit` is `terminal:input`,
       // which is a human's own keystrokes and gets none.
-      submit: (terminalId, line) => manager?.submit(terminalId, line, lineKey(line).sha),
+      submit: (terminalId, line) => {
+        const r = manager?.submit(terminalId, line, lineKey(line).sha);
+        statusShadow?.observe(terminalId, { kind: "key", key: "submit", via: "bus" });
+        return r;
+      },
       getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
       getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
     }),
@@ -4116,6 +4138,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // banner's "View setup log" reads, exactly when the run has failed.
         // Released with the rest of the checkout in `teardownCheckoutRuntime`.
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        // Before noteExited: that fires session:updated synchronously and the
+        // status prune would otherwise resolve an open span as "unobservable".
+        statusShadow?.exited(id);
         // Whatever the agent was displaying died with its terminal, and a slot
         // is reused by a same-id restart — a stale entry would silence the new
         // run's every block.
@@ -4147,6 +4172,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId });
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
+        statusShadow?.exited(id);
       },
       // Register/evict this terminal's run with the frame-delivery
       // hub. `terminalOwner` (not `runtimeFor`/`?? mainRuntime`) is the same
@@ -4499,6 +4525,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Clears the previous spawn's verdict; `armHookAliveProbe` starts the new
     // deadline. Unconditional, or a no-probe respawn leaves the id stale.
     manager.onSessionCreated((session) => hookAliveState.delete(session.terminalId));
+
+    // Same spec resolution the spawn used: checkoutRuntimes.prepare has cached
+    // the checkout's spec by now, and main reads the project config.
+    manager.onSessionCreated((session) => {
+      const entry = sessions?.get(session.terminalId);
+      if (!entry || !statusShadow) return;
+      const spec = entry.checkoutId && entry.checkoutId !== "main" ? checkoutRuntimes.agentSpec(entry.checkoutId) : undefined;
+      const agent = shadowAgent(entry.tool ?? (entry.command ? undefined : (spec ?? agentSpecFromConfig()).name));
+      if (!agent) return;
+      statusShadow.track(session.terminalId, agent, session);
+      session.onTitleObserved((t) => statusShadow.title(session.terminalId, session, t));
+    });
 
     // Forward URL detections to the app as port:detected messages.
     pd.onDetection((event) => {
@@ -4905,8 +4943,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // needed" it exists to drop.
       if (body.event === "question") {
         openAgentPrompts.open(body.terminalId, body.promptId, body.promptTool);
+        statusShadow?.observe(body.terminalId, { kind: "ask-open" });
       } else if (body.event === "prompt_answered") {
         openAgentPrompts.close(body.terminalId, body.promptId);
+        statusShadow?.observe(body.terminalId, { kind: "ask-answered" });
       } else if (body.event === "turn_end" || body.event === "turn_failed") {
         // A prompt cannot outlive its turn, which is the same rule work-status's
         // closeTurn already applies. This is the last resort, not the interrupt
@@ -4915,6 +4955,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Claude fires neither Stop nor StopFailure on a user interrupt, so
         // nothing here would ever run for it.
         openAgentPrompts.clear(body.terminalId);
+        statusShadow?.observe(body.terminalId, { kind: "turn-end" });
       }
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
@@ -5050,6 +5091,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       opts.onTurnActivity?.(terminalId);
     },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    absorbIdleNudge: (terminalId) => {
+      // A keystroke through a held AskUserQuestion has already cleared the work
+      // reduction's record of that block.
+      if (openAgentPrompts.hasAny(terminalId)) return false;
+      const absorbed = opts.absorbIdleNudge?.(terminalId) ?? false;
+      if (absorbed) statusShadow?.observe(terminalId, { kind: "at-prompt" });
+      return absorbed;
+    },
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
@@ -5312,6 +5361,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     injectBusLine,
     refreshSessionWork(): void {
       sessions?.refreshWorkStatus();
+      statusShadow?.reconcile();
     },
     async refreshGitState(): Promise<void> {
       await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatusAttended(mainRuntime)]);
