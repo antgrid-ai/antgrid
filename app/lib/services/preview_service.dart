@@ -79,8 +79,8 @@ class PreviewService {
     this.probeTimeout = const Duration(seconds: 15),
     PreviewHandoff? handoff,
   }) : _handoff = handoff ?? PreviewHandoff.shared {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onJson);
     if (!session.transport.isLocal) {
       final parked = _handoff.claim(_handoffKey, _adoptLate);
       if (parked != null) _adoptParked(parked);
@@ -185,13 +185,20 @@ class PreviewService {
     _stateController.add(state);
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessage(json);
-    if (parsed == null) return;
-    _handle(parsed);
-  }
+  // Checked before parseAbMessage builds a payload nothing here reads. One set
+  // serves both tiers because classifyAbMessage moves any error-bearing frame
+  // to status whatever its type, and [_handle] accepts all four on either tier.
+  // A type [_handle] acts on but this set omits is dropped without a trace, so
+  // the set and [_handle] change together.
+  static const Set<String> _handledTypes = {
+    'ports:update',
+    'port:detected',
+    'preview:snapshot',
+    'preview:url',
+  };
 
-  void _onStatusJson(Map<String, dynamic> json) {
+  void _onJson(Map<String, dynamic> json) {
+    if (!_handledTypes.contains(json['type'])) return;
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     _handle(parsed);

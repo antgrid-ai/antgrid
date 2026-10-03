@@ -5,6 +5,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/command_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -54,7 +55,7 @@ void main() {
     Duration pollInterval = const Duration(milliseconds: 5),
   }) async {
     final deadline = DateTime.now().add(timeout);
-    while (service.currentState.current?.output.value.isEmpty ?? true) {
+    while (service.currentState.current?.output.isEmpty ?? true) {
       if (DateTime.now().isAfter(deadline)) {
         fail('Command output was still empty after $timeout');
       }
@@ -110,7 +111,66 @@ void main() {
       });
       await waitForOutput(svc);
 
-      expect(svc.currentState.current!.output.value, 'hello');
+      expect(svc.currentState.current!.output.text, 'hello');
+
+      await heavySub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a long-running command keeps only the newest output within the cap',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = CommandService.fromSession(session);
+
+      svc.runCommand('build');
+      final heavySub = session.heavyStream.listen((_) {});
+
+      final line = '${'x' * 99}\n';
+      for (var i = 0; i < kCommandOutputMaxChars ~/ 4000 + 10; i++) {
+        t.emit('command:output', {
+          'projectId': 'p',
+          'commandName': 'build',
+          'data': line * 40,
+        });
+      }
+      t.emit('command:output', {
+        'projectId': 'p',
+        'commandName': 'build',
+        'data': 'END\n',
+      });
+      await waitFor(
+        () => svc.currentState.current!.output.text.endsWith('END\n'),
+      );
+
+      final output = svc.currentState.current!.output;
+      expect(output.length, lessThanOrEqualTo(kCommandOutputMaxChars));
+      expect(output.trimmed, isTrue);
+      expect(output.text.endsWith('END\n'), isTrue);
+
+      await heavySub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('output split across messages reaches the panel in order', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = CommandService.fromSession(session);
+
+      svc.runCommand('build');
+      final heavySub = session.heavyStream.listen((_) {});
+
+      for (final data in ['a', 'b\n', 'c']) {
+        t.emit('command:output', {
+          'projectId': 'p',
+          'commandName': 'build',
+          'data': data,
+        });
+      }
+      await waitFor(() => svc.currentState.current!.output.text == 'ab\nc');
+      expect(svc.currentState.current!.output.text, 'ab\nc');
 
       await heavySub.cancel();
       await svc.dispose();
@@ -170,7 +230,7 @@ void main() {
           'data': 'hello',
         });
         await waitForOutput(svc);
-        expect(svc.currentState.current!.output.value, 'hello');
+        expect(svc.currentState.current!.output.text, 'hello');
 
         t.emit('command:done', {
           'projectId': 'proj-c',
@@ -211,6 +271,30 @@ void main() {
       await svc.dispose();
 
       await session.close();
+    });
+  });
+
+  group('frame type pre-check', () {
+    test('CommandService hands every frame type it acts on to the parser', () async {
+      final probe = await ParseProbe.open();
+      final svc = probe.build(() => CommandService.fromSession(probe.session));
+      addTearDown(svc.dispose);
+      await probe.expectParsed([
+        heavyProbe('command:output'),
+        statusProbe('command:done'),
+      ]);
+    });
+
+    test('CommandService never parses a frame type it does not act on', () async {
+      final probe = await ParseProbe.open();
+      final svc = probe.build(() => CommandService.fromSession(probe.session));
+      addTearDown(svc.dispose);
+      await probe.expectNeverParsed([
+        heavyProbe('agent:item-delta'),
+        heavyProbe('file:tree:children'),
+        statusProbe('git:status'),
+        statusProbe('agent:status'),
+      ]);
     });
   });
 }

@@ -50,7 +50,11 @@ class CommandService {
     _stateController.add(newState);
   }
 
+  // Each tier delivers every frame for this checkout, and parseAbMessage builds
+  // the whole payload (a tree batch can be thousands of nodes) before the `is`
+  // check could reject it, so other types are turned away unparsed.
   void _onHeavyJson(Map<String, dynamic> json) {
+    if (json['type'] != 'command:output') return;
     final abMsg = parseAbMessage(json);
     if (abMsg == null) return;
     if (abMsg is CommandOutputMessage) {
@@ -59,6 +63,7 @@ class CommandService {
   }
 
   void _onStatusJson(Map<String, dynamic> json) {
+    if (json['type'] != 'command:done') return;
     final abMsg = parseAbMessage(json);
     if (abMsg == null) return;
     if (abMsg is CommandDoneMessage) {
@@ -86,7 +91,7 @@ class CommandService {
     if (buf == null || buf.isEmpty) return;
     final current = _state.current;
     if (current != null) {
-      current.output.value += buf.toString();
+      current.output.append(buf.toString());
     }
     _outputBuffer = null;
   }
