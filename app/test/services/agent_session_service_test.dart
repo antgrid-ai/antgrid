@@ -3,6 +3,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -1128,6 +1129,103 @@ void main() {
       expect(s.turns.map((t) => t.turnId), ['resumed:0', 'turn-0']);
       expect(s.openTurn?.turnId, 'turn-0');
     });
+
+    test('hydration never rewrites a turn list or item list it already '
+        'published', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      final heldTurns = svc.stateFor('p').turns;
+      final heldTurn = heldTurns.single;
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'activeTurnId': null,
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(heldTurns, hasLength(1));
+      expect(identical(heldTurns.single, heldTurn), isTrue);
+      expect(heldTurn.stopReason, isNull);
+      expect(svc.stateFor('p').turns.single.stopReason, 'end_turn');
+
+      // The held open turn is re-appended inside the fold, and the live frame
+      // then upserts into it within that same fold.
+      final t2 = FakeAgentTransport();
+      final svc2 = await midTurn(t2);
+      final heldItems = svc2.stateFor('p').turns.single.items;
+      t2.requestHandler = (method, params) => {
+        ...snapshot('turn-0'),
+        'live': [
+          {
+            'type': 'agent:item-added',
+            'sessionId': 'p',
+            'turnId': 'turn-0',
+            'itemId': 'a2',
+            'item': {
+              'itemId': 'a2',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'more',
+            },
+          },
+        ],
+      };
+
+      await svc2.hydrateIfNeeded('p');
+
+      expect(heldItems, hasLength(1));
+      expect(heldItems.single.text, 'the whole');
+      final s = svc2.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), ['resumed:0', 'turn-0']);
+      expect(s.turns.last.items.map((i) => i.text), ['the whole', 'more']);
+    });
+
+    test('an item in the snapshot live set lands on the merged open turn',
+        () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => {
+        'frames': [
+          {'type': 'agent:turn-start', 'sessionId': 'p', 'turnId': 'turn-0'},
+          for (final id in ['a1', 'a2'])
+            {
+              'type': 'agent:item-added',
+              'sessionId': 'p',
+              'turnId': 'turn-0',
+              'itemId': id,
+              'item': {
+                'itemId': id,
+                'kind': 'message',
+                'role': 'assistant',
+                'text': 'disk $id',
+              },
+            },
+        ],
+        'activeTurnId': 'turn-0',
+        'live': [
+          {
+            'type': 'agent:item-added',
+            'sessionId': 'p',
+            'turnId': 'turn-0',
+            'itemId': 'a3',
+            'item': {
+              'itemId': 'a3',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'live a3',
+            },
+          },
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').openTurn!.items.map((i) => i.text), [
+        'the whole',
+        'disk a2',
+        'live a3',
+      ]);
+    });
   });
 
   group('a snapshot live set', () {
@@ -1347,5 +1445,458 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     // A rollback does not kill background processes — the list carries over.
     expect(svc.stateFor('p').backgroundTasks?.tasks, hasLength(1));
+  });
+
+  group('batch replay and streaming', () {
+    Map<String, dynamic> frame(
+      String type,
+      int ts, [
+      Map<String, dynamic> extra = const {},
+    ]) => {
+      'id': 'f$ts',
+      'timestamp': ts,
+      'type': type,
+      'sessionId': 'p',
+      ...extra,
+    };
+
+    Map<String, dynamic> itemAdded(
+      String turnId,
+      String itemId,
+      int ts, {
+      String kind = 'message',
+      String role = 'assistant',
+      String? text,
+      String? status,
+    }) => frame('agent:item-added', ts, {
+      'turnId': turnId,
+      'itemId': itemId,
+      'item': {
+        'itemId': itemId,
+        'kind': kind,
+        'role': role,
+        'text': ?text,
+        'status': ?status,
+      },
+    });
+
+    List<Map<String, dynamic>> threeTurns() => [
+      for (var n = 0; n < 3; n++) ...[
+        frame('agent:turn-start', 1, {'turnId': 'r$n'}),
+        itemAdded('r$n', 'u$n', 1, role: 'user', text: 'q$n'),
+        itemAdded('r$n', 'a$n', 1, text: 'a$n'),
+        frame('agent:turn-end', 1, {
+          'turnId': 'r$n',
+          'stopReason': 'end_turn',
+        }),
+      ],
+    ];
+
+    test('a transcript snapshot reaches listeners as one state', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      final seen = <AgentSessionState>[];
+      svc.stateStreamFor('p').listen(seen.add);
+      t.requestHandler = (method, params) => {'frames': threeTurns()};
+
+      await svc.hydrateIfNeeded('p');
+      await Future<void>.delayed(Duration.zero);
+
+      final withTurns = seen.where((s) => s.turns.isNotEmpty).toList();
+      expect(withTurns, hasLength(1));
+      expect(withTurns.single.turns.map((t) => t.turnId), ['r0', 'r1', 'r2']);
+      expect(withTurns.single.turns.every((t) => t.items.length == 2), isTrue);
+      expect(withTurns.single.loading, isFalse);
+      expect(identical(seen.last, svc.stateFor('p')), isTrue);
+    });
+
+    test('a pushed transcript replay reaches listeners as one state', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      final seen = <AgentSessionState>[];
+      svc.stateStreamFor('p').listen(seen.add);
+
+      t.emit('agent:transcript-replay', {
+        'sessionId': 'p',
+        'frames': threeTurns(),
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final withTurns = seen.where((s) => s.turns.isNotEmpty).toList();
+      expect(withTurns, hasLength(1));
+      final turns = withTurns.single.turns;
+      expect(turns.map((t) => t.turnId), ['r0', 'r1', 'r2']);
+      expect(turns.every((t) => t.stopReason == 'end_turn'), isTrue);
+      expect(turns.every((t) => t.items.length == 2), isTrue);
+    });
+
+    test('a streamed delta copies only the turn it lands in', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      for (var n = 0; n < 20; n++) {
+        t.emitJson(frame('agent:turn-start', 1, {'turnId': 's$n'}));
+        t.emitJson(itemAdded('s$n', 'm$n', 1, text: 'x'));
+        t.emitJson(
+          frame('agent:turn-end', 1, {
+            'turnId': 's$n',
+            'stopReason': 'end_turn',
+          }),
+        );
+      }
+      t.emitJson(frame('agent:turn-start', 1, {'turnId': 'open'}));
+      t.emitJson(itemAdded('open', 'live', 1, text: 'He'));
+      await Future<void>.delayed(Duration.zero);
+      final before = svc.debugCollectionCopies;
+      final prior = svc.stateFor('p');
+
+      t.emitJson(
+        frame('agent:item-delta', 1, {
+          'turnId': 'open',
+          'itemId': 'live',
+          'textChunk': 'llo',
+        }),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // One turn list in _flushDeltas plus one item list, the open turn's.
+      expect(svc.debugCollectionCopies - before, equals(2));
+      expect(svc.stateFor('p').turns.last.items.single.text, 'Hello');
+      for (var i = 0; i < 20; i++) {
+        expect(
+          identical(svc.stateFor('p').turns[i], prior.turns[i]),
+          isTrue,
+        );
+      }
+    });
+
+    test("hydrating a long transcript copies each turn's items once", () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      const base = 1000000;
+      t.requestHandler = (method, params) => {
+        'frames': [
+          for (var n = 0; n < 30; n++) ...[
+            frame('agent:turn-start', base, {'turnId': 'r$n'}),
+            itemAdded('r$n', 'u$n', base, role: 'user', text: 'q$n'),
+            itemAdded('r$n', 'a$n', base, text: 'a$n'),
+            frame('agent:usage', base, {
+              'turnId': 'r$n',
+              'itemId': 'a$n',
+              'total': <String, Object?>{},
+              'last': {'totalTokens': n},
+            }),
+            itemAdded(
+              'r$n',
+              't$n',
+              base,
+              kind: 'tool_call',
+              status: 'running',
+            ),
+            frame('agent:item-updated', base + 60000, {
+              'turnId': 'r$n',
+              'itemId': 't$n',
+              'item': {
+                'itemId': 't$n',
+                'kind': 'tool_call',
+                'status': 'completed',
+              },
+            }),
+            frame('agent:turn-end', base, {
+              'turnId': 'r$n',
+              'stopReason': 'end_turn',
+            }),
+          ],
+        ],
+      };
+      final before = svc.debugCollectionCopies;
+
+      await svc.hydrateIfNeeded('p');
+
+      // 1 turn list on the first append after the reset to const [], plus 30
+      // item lists (one per turn, on its first item), plus 1 usageByItem map.
+      expect(svc.debugCollectionCopies - before, equals(32));
+      final s = svc.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), [for (var n = 0; n < 30; n++) 'r$n']);
+      expect(s.turns.every((t) => t.items.length == 3), isTrue);
+      for (final turn in s.turns) {
+        final tool = turn.items.last;
+        expect(tool.status, 'completed');
+        expect(tool.timestamp, DateTime.fromMillisecondsSinceEpoch(base));
+      }
+      expect(s.usageByItem, hasLength(30));
+      for (var n = 0; n < 30; n++) {
+        expect(s.usageByItem['a$n']?.totalTokens, n);
+      }
+      expect(s.loading, isFalse);
+    });
+
+    test('a replayed batch builds the same transcript as the same frames '
+        'streamed live', () async {
+      var k = 0;
+      Map<String, dynamic> f(String type, Map<String, dynamic> extra) =>
+          frame(type, 1000000 + 1000 * k++, extra);
+      final frames = [
+        f('agent:turn-start', {'turnId': 't1'}),
+        itemAdded('t1', 'u1', 0, role: 'user', text: 'q1'),
+        itemAdded('t1', 'c1', 0, kind: 'tool_call', status: 'running'),
+        f('agent:item-updated', {
+          'turnId': 't1',
+          'itemId': 'c1',
+          'item': {'itemId': 'c1', 'kind': 'tool_call', 'status': 'completed'},
+        }),
+        itemAdded('t1', 'm1', 0, text: 'a1'),
+        f('agent:usage', {
+          'turnId': 't1',
+          'itemId': 'm1',
+          'total': <String, Object?>{},
+          'last': {'totalTokens': 10},
+        }),
+        f('agent:snapshot', {
+          'turnId': 't1',
+          'items': [
+            {'itemId': 'u1', 'kind': 'message', 'role': 'user', 'text': 'q1'},
+            {
+              'itemId': 'm1',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'a1 final',
+            },
+          ],
+        }),
+        f('agent:turn-end', {'turnId': 't1', 'stopReason': 'end_turn'}),
+        f('agent:turn-start', {'turnId': 't2'}),
+        itemAdded('t2', 'u2', 0, role: 'user', text: 'q2'),
+        f('agent:usage', {
+          'turnId': 't2',
+          'total': {'totalTokens': 50},
+          'last': {'totalTokens': 20},
+          'contextWindow': 1000,
+        }),
+        f('agent:permission-request', {
+          'permissionId': 'perm1',
+          'title': 'Run?',
+          'options': [
+            {'optionId': 'ok', 'label': 'Allow', 'kind': 'allow_once'},
+          ],
+        }),
+        itemAdded('t2', 'm2', 0, text: 'He'),
+        f('agent:item-delta', {
+          'turnId': 't2',
+          'itemId': 'm2',
+          'textChunk': 'llo',
+        }),
+      ];
+      // itemAdded stamps its own ts; restamp so every frame has a distinct one.
+      for (var i = 0; i < frames.length; i++) {
+        frames[i]['timestamp'] = 1000000 + 1000 * i;
+      }
+
+      final ta = FakeAgentTransport();
+      final a = AgentSessionService.fromSession(await newSession(ta));
+      for (final fr in frames) {
+        ta.emit(fr['type'] as String, fr);
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      final tb = FakeAgentTransport();
+      final b = AgentSessionService.fromSession(await newSession(tb));
+      tb.emit('agent:transcript-replay', {'sessionId': 'p', 'frames': frames});
+      await Future<void>.delayed(Duration.zero);
+
+      String describe(AgentSessionState s) {
+        int? ms(DateTime? d) => d?.millisecondsSinceEpoch;
+        return [
+          for (final turn in s.turns)
+            '${turn.turnId}|${turn.stopReason}|${ms(turn.startedAt)}|'
+                '${ms(turn.endedAt)}|${[
+                  for (final i in turn.items)
+                    '${i.itemId}/${i.kind}/${i.role}/${i.text}/${i.status}/'
+                        '${ms(i.timestamp)}',
+                ]}',
+          'item usage ${[
+            for (final e in s.usageByItem.entries) '${e.key}=${e.value.totalTokens}',
+          ]}',
+          'turn usage ${[
+            for (final e in s.usageByTurn.entries) '${e.key}=${e.value.totalTokens}',
+          ]}',
+          'meter ${s.usage?.total.totalTokens}/${s.usage?.last?.totalTokens}/'
+              '${s.usage?.contextWindow}',
+          'perms ${s.pendingPermissions.map((p) => p.permissionId).toList()}',
+          'loading ${s.loading}',
+        ].join('\n');
+      }
+
+      expect(describe(b.stateFor('p')), describe(a.stateFor('p')));
+      expect(b.stateFor('p').turns, hasLength(2));
+    });
+
+    test('hydration never rewrites a usage map it already published', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.emitJson(
+        frame('agent:usage', 1, {
+          'itemId': 'x',
+          'total': <String, Object?>{},
+          'last': {'totalTokens': 1},
+        }),
+      );
+      await Future<void>.delayed(Duration.zero);
+      final heldUsage = svc.stateFor('p').usageByItem;
+      expect(heldUsage.keys, ['x']);
+      t.requestHandler = (method, params) => {
+        'frames': [
+          frame('agent:turn-start', 1, {'turnId': 'r0'}),
+          frame('agent:usage', 1, {
+            'turnId': 'r0',
+            'itemId': 'y',
+            'total': <String, Object?>{},
+            'last': {'totalTokens': 2},
+          }),
+          frame('agent:turn-end', 1, {
+            'turnId': 'r0',
+            'stopReason': 'end_turn',
+          }),
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(heldUsage.keys, ['x']);
+      expect(svc.stateFor('p').usageByItem.keys, unorderedEquals(['x', 'y']));
+    });
+
+    test('a live frame after hydration never rewrites the list hydration '
+        'published', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.requestHandler = (method, params) => {
+        'frames': [
+          frame('agent:turn-start', 1, {'turnId': 'live'}),
+          itemAdded('live', 'i1', 1, text: 'one'),
+          frame('agent:usage', 1, {
+            'turnId': 'live',
+            'itemId': 'i1',
+            'total': <String, Object?>{},
+            'last': {'totalTokens': 1},
+          }),
+        ],
+        'activeTurnId': 'live',
+      };
+      await svc.hydrateIfNeeded('p');
+      final published = svc.stateFor('p');
+      final heldTurns = published.turns;
+      final heldItems = published.turns.single.items;
+      final heldUsage = published.usageByItem;
+
+      t.emitJson(itemAdded('live', 'i2', 2, text: 'two'));
+      t.emitJson(
+        frame('agent:usage', 2, {
+          'turnId': 'live',
+          'itemId': 'i2',
+          'total': <String, Object?>{},
+          'last': {'totalTokens': 2},
+        }),
+      );
+      t.emitJson(frame('agent:turn-start', 2, {'turnId': 'next'}));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(heldTurns, hasLength(1));
+      expect(heldItems, hasLength(1));
+      expect(heldUsage, hasLength(1));
+      final s = svc.stateFor('p');
+      expect(s.turns, hasLength(2));
+      expect(s.turns.first.items, hasLength(2));
+      expect(s.usageByItem, hasLength(2));
+    });
+
+    test('a buffered delta follows its item into the turn that now holds it',
+        () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+
+      t.emit('agent:transcript-replay', {
+        'sessionId': 'p',
+        'frames': [
+          frame('agent:turn-start', 1, {'turnId': 'a'}),
+          itemAdded('a', 'X', 1, text: 'He'),
+          frame('agent:item-delta', 1, {
+            'turnId': 'a',
+            'itemId': 'X',
+            'textChunk': 'llo',
+          }),
+          frame('agent:snapshot', 1, {
+            'turnId': 'a',
+            'items': [
+              {
+                'itemId': 'Y',
+                'kind': 'message',
+                'role': 'assistant',
+                'text': 'y',
+              },
+            ],
+          }),
+          itemAdded('b', 'X', 1, text: 'He'),
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final turns = svc.stateFor('p').turns;
+      expect(turns.firstWhere((t) => t.turnId == 'b').items.single.text,
+          'Hello');
+      expect(
+        turns.firstWhere((t) => t.turnId == 'a').items.map((i) => i.itemId),
+        ['Y'],
+      );
+    });
+  });
+
+  group('frame type pre-check', () {
+    test('AgentSessionService hands every agent event it acts on to the parser',
+        () async {
+      final probe = await ParseProbe.open();
+      final svc = probe.build(
+        () => AgentSessionService.fromSession(probe.session),
+      );
+      addTearDown(svc.dispose);
+
+      await probe.expectParsed([
+        statusProbe('agent:turn-start'),
+        statusProbe('agent:session-reset'),
+        statusProbe('agent:turn-end'),
+        statusProbe('agent:permission-request'),
+        statusProbe('agent:question'),
+        statusProbe('agent:request-retracted'),
+        statusProbe('agent:usage'),
+        statusProbe('agent:capabilities'),
+        statusProbe('agent:background-tasks'),
+        statusProbe('agent:updateAvailable'),
+        statusProbe('agent:updateResult'),
+        heavyProbe('agent:transcript-replay'),
+        heavyProbe('agent:item-added'),
+        heavyProbe('agent:item-delta'),
+        heavyProbe('agent:item-updated'),
+        heavyProbe('agent:snapshot'),
+      ]);
+    });
+
+    test(
+      'AgentSessionService never parses file, git, terminal or agent:error frames',
+      () async {
+        final probe = await ParseProbe.open();
+        final svc = probe.build(
+          () => AgentSessionService.fromSession(probe.session),
+        );
+        addTearDown(svc.dispose);
+
+        await probe.expectNeverParsed([
+          heavyProbe('file:tree:children'),
+          heavyProbe('terminal:frame'),
+          heavyProbe('handler:activity'),
+          statusProbe('git:status'),
+          statusProbe('agent:status'),
+          statusProbe('agent:error'),
+        ]);
+      },
+    );
   });
 }

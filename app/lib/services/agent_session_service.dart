@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../models/ab_message.dart';
 import '../models/agent_event.dart';
 import '../project/project_session.dart';
@@ -149,12 +151,31 @@ class AgentSessionService {
   final Map<String, StringBuffer> _deltaBuffers = {};
   final Map<String, StringBuffer> _terminalBuffers = {};
 
-  // Item ids touched by deltas since the last flush, per session. Delta-driven
-  // state emission is coalesced to one rebuild per microtask — codex streams a
-  // frame per token, and emitting a whole-transcript copy per token is
-  // quadratic.
+  // Item ids touched by deltas since the last flush, per session. The flush
+  // runs in a microtask, which merges only deltas dispatched inside one
+  // synchronous handler (a replay batch). A streamed delta reaches _onJson
+  // through async stream controllers, one event per microtask, so live
+  // streaming flushes once per delta. That is why a flush copies only the item
+  // lists it writes into.
   Map<String, Set<String>> _dirtyItems = {};
   bool _flushScheduled = false;
+
+  // A batch replay runs every frame through _onJson so each keeps its side
+  // effects: retry consumption in _endTurn, cancel fallbacks, prompts, usage,
+  // capabilities and update state. Only the state the batch ends on is worth
+  // publishing, and until it ends nothing outside can see the lists it builds,
+  // so they are written in place. Ownership is re-proven by identity on every
+  // use, so a frame that installs a list of its own costs one fresh copy and is
+  // never written through.
+  final Map<String, _Fold> _folds = {};
+
+  int _collectionCopies = 0;
+
+  /// How many fresh copies of an existing turn list, a turn's item list or a
+  /// usageByItem map have been made, so tests can pin how much one frame or one
+  /// batch rewrites.
+  @visibleForTesting
+  int get debugCollectionCopies => _collectionCopies;
 
   // sessionIds whose last hydrateIfNeeded() call came back with no turns (a
   // mid-turn attach: the in-flight turn was excluded from the snapshot).
@@ -206,7 +227,28 @@ class AgentSessionService {
           _awaitingHydrate.contains(sessionId),
     );
     _states[sessionId] = s;
+    final fold = _folds[sessionId];
+    if (fold != null) {
+      fold.dirty = true;
+      return;
+    }
     _controllers[sessionId]?.add(s);
+  }
+
+  void _folded(String sessionId, void Function() body) {
+    if (_folds.containsKey(sessionId)) {
+      body();
+      return;
+    }
+    final fold = _folds[sessionId] = _Fold();
+    try {
+      body();
+    } finally {
+      _folds.remove(sessionId);
+      if (fold.dirty && !_disposed) {
+        _controllers[sessionId]?.add(_states[sessionId]!);
+      }
+    }
   }
 
   String _bufKey(String sessionId, String itemId) => '$sessionId/$itemId';
@@ -290,7 +332,7 @@ class AgentSessionService {
     final s = stateFor(sessionId);
     final carried = _turnById(sessionId, open.turnId);
     if (carried == null) {
-      _setState(sessionId, s.copyWith(turns: [...s.turns, open]));
+      _setState(sessionId, s.copyWith(turns: _appendTurn(sessionId, open)));
       return;
     }
     final heldIds = {for (final i in open.items) i.itemId};
@@ -334,29 +376,56 @@ class AgentSessionService {
     }
   }
 
+  // Both project-wide tiers deliver every checkout's tree, git and terminal
+  // traffic here, and parseAbMessage builds the whole payload before an arm
+  // could reject it. A type an arm acts on but this set omits is dropped
+  // without a trace, so the set and the arms change together. agent:error is
+  // absent because no arm reads it.
+  static const Set<String> _handledTypes = {
+    'agent:transcript-replay',
+    'agent:turn-start',
+    'agent:session-reset',
+    'agent:item-added',
+    'agent:item-delta',
+    'agent:item-updated',
+    'agent:turn-end',
+    'agent:permission-request',
+    'agent:question',
+    'agent:request-retracted',
+    'agent:snapshot',
+    'agent:usage',
+    'agent:capabilities',
+    'agent:background-tasks',
+    'agent:updateAvailable',
+    'agent:updateResult',
+  };
+
   void _onJson(Map<String, dynamic> json) {
     if (_disposed) return;
+    if (!_handledTypes.contains(json['type'])) return;
     final parsed = parseAbMessage(json);
     if (parsed is AgentTranscriptReplay) {
-      _applyFullTranscript(parsed.sessionId, parsed.frames);
+      _folded(
+        parsed.sessionId,
+        () => _applyFullTranscript(parsed.sessionId, parsed.frames),
+      );
       return;
     }
     final at = _envTime(json);
     if (parsed is AgentTurnStart) {
-      final s = stateFor(parsed.sessionId);
-      final exists = s.turns.any((t) => t.turnId == parsed.turnId);
-      if (!exists) {
+      final sid = parsed.sessionId;
+      if (_turnById(sid, parsed.turnId) == null) {
         _setState(
-          parsed.sessionId,
-          s.copyWith(
-            turns: [
-              ...s.turns,
+          sid,
+          stateFor(sid).copyWith(
+            turns: _appendTurn(
+              sid,
               AgentTurn(
                 turnId: parsed.turnId,
                 items: const [],
                 startedAt: at ?? DateTime.now(),
               ),
-            ],
+            ),
           ),
         );
       }
@@ -412,7 +481,13 @@ class AgentSessionService {
         // historical message and must not rewind the session meter.
         _setState(
           parsed.sessionId,
-          s.copyWith(usageByItem: {...s.usageByItem, itemId: perMessage}),
+          s.copyWith(
+            usageByItem: _usageByItemWith(
+              parsed.sessionId,
+              itemId,
+              perMessage,
+            ),
+          ),
         );
       } else {
         // Capacity and occupancy may arrive independently; retain the last
@@ -465,16 +540,102 @@ class AgentSessionService {
     }
   }
 
-  AgentTurn? _turnById(String sessionId, String turnId) {
-    for (final t in stateFor(sessionId).turns) {
-      if (t.turnId == turnId) return t;
+  static int _lastIndexOfTurn(List<AgentTurn> turns, String turnId) {
+    for (var i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].turnId == turnId) return i;
     }
-    return null;
+    return -1;
   }
 
-  List<AgentTurn> _replaceTurn(String sessionId, AgentTurn updated) => stateFor(
-    sessionId,
-  ).turns.map((t) => t.turnId == updated.turnId ? updated : t).toList();
+  // Searches from the end because the turn a live frame names is almost always
+  // the last one; turn ids are unique per session because every append checks
+  // for the id first, so the direction never changes which turn is found.
+  AgentTurn? _turnById(String sessionId, String turnId) {
+    final turns = stateFor(sessionId).turns;
+    final fold = _folds[sessionId];
+    if (fold != null && identical(fold.turns, turns)) {
+      final i = fold.turnAt[turnId];
+      return i == null ? null : turns[i];
+    }
+    final i = _lastIndexOfTurn(turns, turnId);
+    return i < 0 ? null : turns[i];
+  }
+
+  List<AgentTurn>? _ownTurns(String sessionId) {
+    final fold = _folds[sessionId];
+    if (fold == null) return null;
+    final current = stateFor(sessionId).turns;
+    if (identical(fold.turns, current)) return fold.turns;
+    _collectionCopies++;
+    final owned = List<AgentTurn>.of(current);
+    fold.turnAt.clear();
+    for (var i = 0; i < owned.length; i++) {
+      fold.turnAt.putIfAbsent(owned[i].turnId, () => i);
+    }
+    fold.turns = owned;
+    return owned;
+  }
+
+  List<AgentTurn> _replaceTurn(String sessionId, AgentTurn updated) {
+    final owned = _ownTurns(sessionId);
+    if (owned != null) {
+      final i = _folds[sessionId]!.turnAt[updated.turnId];
+      if (i != null) owned[i] = updated;
+      return owned;
+    }
+    _collectionCopies++;
+    final next = List<AgentTurn>.of(stateFor(sessionId).turns);
+    final i = _lastIndexOfTurn(next, updated.turnId);
+    if (i >= 0) next[i] = updated;
+    return next;
+  }
+
+  // The result must go straight into `_setState(...copyWith(turns: result))`:
+  // that install keeps the fold's list identical to the current state's, so the
+  // next frame writes in place instead of copying again.
+  List<AgentTurn> _appendTurn(String sessionId, AgentTurn turn) {
+    final owned = _ownTurns(sessionId);
+    if (owned == null) {
+      _collectionCopies++;
+      return [...stateFor(sessionId).turns, turn];
+    }
+    _folds[sessionId]!.turnAt.putIfAbsent(turn.turnId, () => owned.length);
+    owned.add(turn);
+    return owned;
+  }
+
+  _OwnedItems? _ownItems(String sessionId, AgentTurn turn) {
+    final fold = _folds[sessionId];
+    if (fold == null) return null;
+    final held = fold.items[turn.turnId];
+    if (held != null && identical(held.list, turn.items)) return held;
+    _collectionCopies++;
+    final list = List<AgentItem>.of(turn.items);
+    final at = <String, int>{};
+    for (var i = 0; i < list.length; i++) {
+      at.putIfAbsent(list[i].itemId, () => i);
+    }
+    return fold.items[turn.turnId] = _OwnedItems(list, at);
+  }
+
+  Map<String, AgentTokenUsage> _usageByItemWith(
+    String sessionId,
+    String itemId,
+    AgentTokenUsage usage,
+  ) {
+    final current = stateFor(sessionId).usageByItem;
+    final fold = _folds[sessionId];
+    if (fold == null) {
+      _collectionCopies++;
+      return {...current, itemId: usage};
+    }
+    if (!identical(fold.usageByItem, current)) {
+      _collectionCopies++;
+      fold.usageByItem = {...current};
+    }
+    fold.usageByItem![itemId] = usage;
+    return fold.usageByItem!;
+  }
 
   void _upsertItem(
     String sessionId,
@@ -492,15 +653,27 @@ class AgentSessionService {
         items: const [],
         startedAt: at ?? DateTime.now(),
       );
-      final s = stateFor(sessionId);
-      _setState(sessionId, s.copyWith(turns: [...s.turns, turn]));
+      _setState(
+        sessionId,
+        stateFor(sessionId).copyWith(turns: _appendTurn(sessionId, turn)),
+      );
     }
-    final items = List<AgentItem>.from(turn.items);
-    final idx = items.indexWhere((i) => i.itemId == item.itemId);
+    final owned = _ownItems(sessionId, turn);
+    final List<AgentItem> items;
+    final int idx;
+    if (owned != null) {
+      items = owned.list;
+      idx = owned.at[item.itemId] ?? -1;
+    } else {
+      _collectionCopies++;
+      items = List<AgentItem>.from(turn.items);
+      idx = items.indexWhere((i) => i.itemId == item.itemId);
+    }
     if (idx >= 0) {
       // Keep the first-seen time; a snapshot/update re-parse carries no time.
       items[idx] = item.copyWith(timestamp: items[idx].timestamp ?? at);
     } else {
+      owned?.at[item.itemId] = items.length;
       items.add(item.copyWith(timestamp: at));
     }
     _setState(
@@ -550,30 +723,35 @@ class AgentSessionService {
       final sessionId = entry.key;
       final dirty = entry.value;
       if (dirty.isEmpty) continue;
-      final turns = stateFor(sessionId).turns.map((turn) {
-        var changed = false;
-        final items = List<AgentItem>.from(turn.items);
-        for (var i = 0; i < items.length; i++) {
-          if (!dirty.contains(items[i].itemId)) continue;
-          final key = _bufKey(sessionId, items[i].itemId);
-          final buf = _deltaBuffers[key];
-          if (buf != null) {
-            items[i] = items[i].copyWith(text: buf.toString());
-            changed = true;
-            continue;
-          }
-          final term = _terminalBuffers[key];
-          if (term != null) {
-            items[i] = items[i].copyWith(
-              content: _withTerminalData(items[i], term.toString()),
-            );
-            changed = true;
-          }
-        }
-        return changed ? turn.copyWith(items: items) : turn;
-      }).toList();
+      _collectionCopies++;
+      final turns = stateFor(sessionId).turns
+          .map((turn) => _withBuffered(sessionId, turn, dirty))
+          .toList();
       _setState(sessionId, stateFor(sessionId).copyWith(turns: turns));
     }
+  }
+
+  // Visits every turn on purpose: a buffered id must land wherever it sits when
+  // the flush runs, not only in the turn its delta named. That covers a turn a
+  // snapshot moved it to, and every turn holding the same id.
+  AgentTurn _withBuffered(String sessionId, AgentTurn turn, Set<String> dirty) {
+    List<AgentItem>? items;
+    for (var i = 0; i < turn.items.length; i++) {
+      final item = turn.items[i];
+      if (!dirty.contains(item.itemId)) continue;
+      final key = _bufKey(sessionId, item.itemId);
+      final buf = _deltaBuffers[key];
+      final term = buf == null ? _terminalBuffers[key] : null;
+      if (buf == null && term == null) continue;
+      if (items == null) {
+        _collectionCopies++;
+        items = List<AgentItem>.of(turn.items);
+      }
+      items[i] = buf != null
+          ? item.copyWith(text: buf.toString())
+          : item.copyWith(content: _withTerminalData(item, term!.toString()));
+    }
+    return items == null ? turn : turn.copyWith(items: items);
   }
 
   void _clearBuffers(String sessionId, String itemId) {
@@ -643,7 +821,10 @@ class AgentSessionService {
             .copyWith(items: items);
     final s = stateFor(snap.sessionId);
     if (turn == null) {
-      _setState(snap.sessionId, s.copyWith(turns: [...s.turns, updated]));
+      _setState(
+        snap.sessionId,
+        s.copyWith(turns: _appendTurn(snap.sessionId, updated)),
+      );
     } else {
       _setState(
         snap.sessionId,
@@ -915,33 +1096,35 @@ class AgentSessionService {
         'session.transcriptSnapshot',
         params: {'sessionId': sessionId},
       );
-      _hydrating.remove(sessionId);
-      _applyFullTranscript(
-        sessionId,
-        (res['frames'] as List?) ?? const [],
-        reportsLiveTurn: res.containsKey('activeTurnId'),
-        liveTurnId: res['activeTurnId'] as String?,
-      );
-      final live = res['live'];
-      if (live is List) _applyLive(sessionId, live);
-      final update = res['update'];
-      if (update is Map) _applyUpdateState(sessionId, update);
-      if (armRetryOnEmpty && stateFor(sessionId).turns.isEmpty) {
-        _pendingHydrationRetry.add(sessionId);
-      } else {
-        _pendingHydrationRetry.remove(sessionId);
-      }
-      // A successful hydrate must settle `loading` even when the snapshot came
-      // back empty (an idle running session with no completed turns) — otherwise
-      // the transcript body stays on its loading seed until the next agent:*
-      // event. Unconditional: this emit is what re-publishes state now that
-      // sessionId is out of _hydrating, and it clears any stale hydrationFailed
-      // in the same pass.
-      final s = stateFor(sessionId);
-      _setState(
-        sessionId,
-        s.hydrationFailed ? s.copyWith(hydrationFailed: false) : s,
-      );
+      _folded(sessionId, () {
+        _hydrating.remove(sessionId);
+        _applyFullTranscript(
+          sessionId,
+          (res['frames'] as List?) ?? const [],
+          reportsLiveTurn: res.containsKey('activeTurnId'),
+          liveTurnId: res['activeTurnId'] as String?,
+        );
+        final live = res['live'];
+        if (live is List) _applyLive(sessionId, live);
+        final update = res['update'];
+        if (update is Map) _applyUpdateState(sessionId, update);
+        if (armRetryOnEmpty && stateFor(sessionId).turns.isEmpty) {
+          _pendingHydrationRetry.add(sessionId);
+        } else {
+          _pendingHydrationRetry.remove(sessionId);
+        }
+        // A successful hydrate must settle `loading` even when the snapshot came
+        // back empty (an idle running session with no completed turns) — otherwise
+        // the transcript body stays on its loading seed until the next agent:*
+        // event. Unconditional: this emit is what re-publishes state now that
+        // sessionId is out of _hydrating, and it clears any stale hydrationFailed
+        // in the same pass.
+        final s = stateFor(sessionId);
+        _setState(
+          sessionId,
+          s.hydrationFailed ? s.copyWith(hydrationFailed: false) : s,
+        );
+      });
     } catch (_) {
       _hydrating.remove(sessionId);
       _setState(sessionId, stateFor(sessionId).copyWith(hydrationFailed: true));
@@ -973,4 +1156,21 @@ class AgentSessionService {
       await c.close();
     }
   }
+}
+
+class _Fold {
+  bool dirty = false;
+  List<AgentTurn>? turns;
+  final Map<String, int> turnAt = {};
+  final Map<String, _OwnedItems> items = {};
+  Map<String, AgentTokenUsage>? usageByItem;
+}
+
+class _OwnedItems {
+  _OwnedItems(this.list, this.at);
+
+  final List<AgentItem> list;
+
+  /// Item id to its FIRST index, matching what indexWhere finds.
+  final Map<String, int> at;
 }
