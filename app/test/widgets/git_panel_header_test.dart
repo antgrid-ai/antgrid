@@ -698,6 +698,72 @@ void main() {
     );
   });
 
+  Finder changesHeader() => find.byWidgetPredicate(
+    (w) => w.runtimeType.toString() == '_ChangesSectionHeader',
+  );
+  Object headerCounts(WidgetTester tester) =>
+      (tester.widget(changesHeader()) as dynamic).counts as Object;
+
+  testWidgets('an update that leaves the change list alone keeps the header counts', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
+    ]);
+    final before = headerCounts(tester);
+    final historyList = find.byWidgetPredicate(
+      (w) => w.runtimeType.toString() == '_HistoryList',
+    );
+    expect(historyList, findsOneWidget);
+
+    session.fileService.toggleHistoryCollapsed();
+    await tester.pump();
+    await tester.pump();
+
+    expect(historyList, findsNothing);
+    expect(identical(headerCounts(tester), before), isTrue);
+  });
+
+  testWidgets('resizing the panel keeps the header counts', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
+    ]);
+    final before = headerCounts(tester);
+
+    final dpr = tester.view.devicePixelRatio;
+    tester.view.physicalSize = Size(700 * dpr, 600 * dpr);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pump();
+
+    expect(changesHeader(), findsOneWidget);
+    expect(identical(headerCounts(tester), before), isTrue);
+  });
+
+  testWidgets('a new git status re-derives the header', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+    final before = headerCounts(tester);
+    expect(find.text('Commit'), findsOneWidget);
+
+    transport.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'b.dart', 'status': 'M', 'staged': false},
+      ],
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Commit (1)'), findsOneWidget);
+    expect(
+      find.descendant(of: changesHeader(), matching: find.text('2')),
+      findsOneWidget,
+    );
+    expect(identical(headerCounts(tester), before), isFalse);
+  });
+
   testWidgets('a cancelled Mark Resolved stages nothing', (tester) async {
     await withRowButtons(tester, () async {
       await pumpWithStatus(tester, [

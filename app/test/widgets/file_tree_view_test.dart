@@ -328,6 +328,40 @@ void main() {
       expect(find.text('README.md'), findsNothing);
     });
 
+    testWidgets(
+      'the changes tree orders names that differ only in case the way the file tree does',
+      (tester) async {
+        const upper = GitFileStatusEntry(
+          path: 'project/README.md',
+          status: 'M',
+          staged: false,
+        );
+        const lower = GitFileStatusEntry(
+          path: 'project/readme.md',
+          status: 'M',
+          staged: false,
+        );
+
+        for (final entries in [
+          const [upper, lower],
+          const [lower, upper],
+        ]) {
+          await tester.pumpWidget(
+            buildTestWidget(
+              root: null,
+              changesOnly: true,
+              gitFileEntries: entries,
+            ),
+          );
+
+          expect(
+            tester.getRect(find.text('readme.md')).top,
+            lessThan(tester.getRect(find.text('README.md')).top),
+          );
+        }
+      },
+    );
+
     testWidgets('a collapsed folder hides its files but keeps its own row', (
       tester,
     ) async {
@@ -666,7 +700,8 @@ void main() {
         buildTestWidget(
           root: makeTree(),
           changesOnly: true,
-          gitFileEntries: entries,
+          // A copy, not the same list: the rows are cached by the list's identity, so the same instance would replay the first build's rows instead of deriving them again with the tree present.
+          gitFileEntries: List.of(entries),
         ),
       );
 
@@ -1659,4 +1694,325 @@ void main() {
       },
     );
   });
+
+  group('FileTreeView reuse across rebuilds', () {
+    Widget rowFor(WidgetTester tester, String path, FileNodeType type) =>
+        tester.widget(find.byKey(ValueKey((path, type))));
+
+    List<GitFileStatusEntry> mainEntries(int additions) => [
+      GitFileStatusEntry(
+        path: 'project/lib/main.dart',
+        status: 'M',
+        staged: false,
+        additions: additions,
+        deletions: 1,
+      ),
+    ];
+
+    testWidgets(
+      "rebuilding with the same change set reuses each changed row's node and entries",
+      (tester) async {
+        final entries = mainEntries(3);
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: makeTree(),
+            changesOnly: true,
+            gitFileEntries: entries,
+          ),
+        );
+        final before = rowFor(
+          tester,
+          'project/lib/main.dart',
+          FileNodeType.file,
+        );
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: makeTree(),
+            changesOnly: true,
+            gitFileEntries: entries,
+          ),
+        );
+        final after = rowFor(
+          tester,
+          'project/lib/main.dart',
+          FileNodeType.file,
+        );
+
+        expect(identical(before, after), isFalse);
+        expect(identical((before as dynamic).node, (after as dynamic).node), isTrue);
+        expect(
+          identical(
+            (before as dynamic).changeEntries,
+            (after as dynamic).changeEntries,
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets('folding a folder reuses the change tree instead of rebuilding it', (
+      tester,
+    ) async {
+      final entries = mainEntries(3);
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          gitFileEntries: entries,
+        ),
+      );
+      final before = rowFor(tester, 'project/lib', FileNodeType.directory);
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          gitFileEntries: entries,
+          collapsedPaths: {'project/lib'},
+        ),
+      );
+      final after = rowFor(tester, 'project/lib', FileNodeType.directory);
+
+      expect(find.text('main.dart'), findsNothing);
+      expect(identical((before as dynamic).node, (after as dynamic).node), isTrue);
+    });
+
+    testWidgets('a folded folder keeps one rollup across rebuilds', (
+      tester,
+    ) async {
+      final entries = mainEntries(3);
+      final folded = {'project/lib'};
+      Widget build() => buildTestWidget(
+        root: makeTree(),
+        changesOnly: true,
+        gitFileEntries: entries,
+        collapsedPaths: folded,
+      );
+      await tester.pumpWidget(build());
+      final before = rowFor(tester, 'project/lib', FileNodeType.directory);
+      await tester.pumpWidget(build());
+      final after = rowFor(tester, 'project/lib', FileNodeType.directory);
+
+      expect(find.text('+3'), findsOneWidget);
+      expect(
+        identical(
+          (before as dynamic).rollupEntries,
+          (after as dynamic).rollupEntries,
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('a file-tree update does not rebuild the change list', (
+      tester,
+    ) async {
+      final entries = mainEntries(3);
+      final folded = {'project/lib'};
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: null,
+          changesOnly: true,
+          gitFileEntries: entries,
+          collapsedPaths: folded,
+        ),
+      );
+      final before = rowFor(tester, 'project/lib', FileNodeType.directory);
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          gitFileEntries: entries,
+          collapsedPaths: folded,
+        ),
+      );
+      final after = rowFor(tester, 'project/lib', FileNodeType.directory);
+
+      expect(identical(before, after), isFalse);
+      expect(identical((before as dynamic).node, (after as dynamic).node), isTrue);
+      expect(
+        identical(
+          (before as dynamic).rollupEntries,
+          (after as dynamic).rollupEntries,
+        ),
+        isTrue,
+      );
+      expect(find.text('+3'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a replaced change list is re-derived even when it names the same paths',
+      (tester) async {
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: makeTree(),
+            changesOnly: true,
+            gitFileEntries: mainEntries(3),
+          ),
+        );
+        final before = rowFor(
+          tester,
+          'project/lib/main.dart',
+          FileNodeType.file,
+        );
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: makeTree(),
+            changesOnly: true,
+            gitFileEntries: mainEntries(5),
+          ),
+        );
+        final after = rowFor(
+          tester,
+          'project/lib/main.dart',
+          FileNodeType.file,
+        );
+
+        expect(find.text('+5'), findsOneWidget);
+        expect(find.text('+3'), findsNothing);
+        expect(identical((before as dynamic).node, (after as dynamic).node), isFalse);
+      },
+    );
+
+    testWidgets("a replaced change list updates a folded folder's rollup", (
+      tester,
+    ) async {
+      final folded = {'project/lib'};
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          gitFileEntries: mainEntries(3),
+          collapsedPaths: folded,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          gitFileEntries: mainEntries(5),
+          collapsedPaths: folded,
+        ),
+      );
+
+      expect(find.text('+5'), findsOneWidget);
+      expect(find.text('+3'), findsNothing);
+    });
+
+    testWidgets('a replaced change list updates the badges on an unchanged file tree', (
+      tester,
+    ) async {
+      final tree = makeTree();
+      final expanded = {'project/lib'};
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: tree,
+          expandedPaths: expanded,
+          gitFileEntries: mainEntries(3),
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: tree,
+          expandedPaths: expanded,
+          gitFileEntries: mainEntries(5),
+        ),
+      );
+
+      expect(find.text('+5'), findsOneWidget);
+      expect(find.text('+3'), findsNothing);
+    });
+
+    testWidgets('an unchanged file tree is not re-walked on rebuild', (
+      tester,
+    ) async {
+      final root = _CountingRoot(makeTree().children);
+      final expanded = {'project/lib'};
+      await tester.pumpWidget(
+        buildTestWidget(root: root, expandedPaths: expanded),
+      );
+      final reads = root.childrenReads;
+      expect(reads, greaterThan(0));
+
+      await tester.pumpWidget(
+        buildTestWidget(root: root, expandedPaths: expanded),
+      );
+
+      expect(root.childrenReads, reads);
+      expect(find.text('main.dart'), findsOneWidget);
+    });
+
+    testWidgets('a new expansion set or a replaced tree still reaches the rows', (
+      tester,
+    ) async {
+      final tree = makeTree();
+      await tester.pumpWidget(
+        buildTestWidget(root: tree, expandedPaths: <String>{}),
+      );
+      expect(find.text('main.dart'), findsNothing);
+
+      final expanded = {'project/lib'};
+      await tester.pumpWidget(
+        buildTestWidget(root: tree, expandedPaths: expanded),
+      );
+      expect(find.text('main.dart'), findsOneWidget);
+
+      final replaced = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'lib',
+            path: 'project/lib',
+            type: FileNodeType.directory,
+            children: [
+              FileNode(
+                name: 'main.dart',
+                path: 'project/lib/main.dart',
+                type: FileNodeType.file,
+              ),
+              FileNode(
+                name: 'utils.dart',
+                path: 'project/lib/utils.dart',
+                type: FileNodeType.file,
+              ),
+              FileNode(
+                name: 'new.dart',
+                path: 'project/lib/new.dart',
+                type: FileNodeType.file,
+              ),
+            ],
+          ),
+          FileNode(
+            name: 'README.md',
+            path: 'project/README.md',
+            type: FileNodeType.file,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildTestWidget(root: replaced, expandedPaths: expanded),
+      );
+      expect(find.text('new.dart'), findsOneWidget);
+    });
+  });
+}
+
+/// A tree root that counts reads of its children — the read every flatten of
+/// the Files tree makes.
+class _CountingRoot extends FileNode {
+  _CountingRoot(List<FileNode> children)
+    : super(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: children,
+      );
+
+  int childrenReads = 0;
+
+  @override
+  List<FileNode> get children {
+    childrenReads++;
+    return super.children;
+  }
 }

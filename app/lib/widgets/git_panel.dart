@@ -78,6 +78,20 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   /// `historyCollapsed` does: nothing outside this widget reads it.
   bool _changesCollapsed = false;
 
+  // FileService swaps `gitFileEntries` whole on each `git:status` and carries the
+  // same instance through every other emission (tree deltas, file loads, diffs,
+  // history pages), so the list's identity is a complete key for a derivation
+  // that walks every change several times.
+  List<GitFileStatusEntry>? _countsSource;
+  _GitHeaderCounts? _counts;
+
+  _GitHeaderCounts _countsFor(List<GitFileStatusEntry>? entries) {
+    final cached = _counts;
+    if (cached != null && identical(entries, _countsSource)) return cached;
+    _countsSource = entries;
+    return _counts = _GitHeaderCounts.of(entries);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -96,6 +110,13 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   }
 
   @override
+  void reassemble() {
+    super.reassemble();
+    // Hot reload replaces the derivation's code but not its input.
+    _counts = null;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
@@ -110,7 +131,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           setState(() => _changesCollapsed = !_changesCollapsed),
     );
     final treeStateAsync = ref.watch(fileTreeStateProvider);
-    final counts = _GitHeaderCounts.of(treeStateAsync.value?.gitFileEntries);
+    final counts = _countsFor(treeStateAsync.value?.gitFileEntries);
     final git = treeStateAsync.value?.git;
     // watch, not the `ref.read` in [_backFromViewer]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
@@ -143,7 +164,8 @@ class _GitPanelState extends ConsumerState<GitPanel> {
             ),
           ),
         ),
-        data: (state) => _GitPanelBody(state: state, panel: panel),
+        data: (state) =>
+            _GitPanelBody(state: state, panel: panel, counts: counts),
       ),
     );
   }
@@ -1009,9 +1031,12 @@ class _ChangesSectionHeader extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
 
+  // Collapse All hands this very set to FileService, so until a folder is
+  // reopened the answer is identity rather than a walk over every folder.
   bool get _allFoldersCollapsed =>
       counts.changedFolders.isNotEmpty &&
-      collapsedPaths.containsAll(counts.changedFolders);
+      (identical(collapsedPaths, counts.changedFolders) ||
+          collapsedPaths.containsAll(counts.changedFolders));
 
   Future<void> _revertAll(BuildContext context) async {
     final paths = counts.revertablePaths;
@@ -1064,6 +1089,7 @@ class _ChangesSectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showStat = counts.additions > 0 || counts.deletions > 0;
+    final allFoldersCollapsed = _allFoldersCollapsed;
     return _SectionHeaderBand(
       children: [
         _SectionToggle(
@@ -1099,14 +1125,14 @@ class _ChangesSectionHeader extends StatelessWidget {
         // current state — the tree itself already shows which folders are open.
         if (counts.changedFolders.isNotEmpty)
           AbIconButton(
-            icon: _allFoldersCollapsed
+            icon: allFoldersCollapsed
                 ? AbIcons.expandAll
                 : AbIcons.collapseAll,
-            tooltip: _allFoldersCollapsed
+            tooltip: allFoldersCollapsed
                 ? 'Expand All Folders'
                 : 'Collapse All Folders',
             onTap: () => fileService.setGitCollapsedFolders(
-              _allFoldersCollapsed ? const {} : counts.changedFolders,
+              allFoldersCollapsed ? const {} : counts.changedFolders,
             ),
           ),
         AbIconButton(
@@ -1267,10 +1293,18 @@ class _CompactViewerBar extends StatelessWidget {
 }
 
 class _GitPanelBody extends ConsumerWidget {
-  const _GitPanelBody({required this.state, required this.panel});
+  const _GitPanelBody({
+    required this.state,
+    required this.panel,
+    required this.counts,
+  });
 
   final FileTreeState state;
   final _PanelContext panel;
+
+  /// Derived once per change list by [_GitPanelState] — the [LayoutBuilder]
+  /// below re-runs on every resize.
+  final _GitHeaderCounts counts;
 
   FileService get fileService => panel.fileService;
 
@@ -1284,14 +1318,13 @@ class _GitPanelBody extends ConsumerWidget {
         final showSideBySide = constraints.maxWidth >= kCompactBreakpoint;
         final git = state.git;
         final isViewing = git.diffPath != null || git.viewingPath != null;
-        final counts = _GitHeaderCounts.of(state.gitFileEntries);
 
         if (showSideBySide) {
           return Row(
             children: [
               SizedBox(
                 width: _columnWidth,
-                child: _buildColumn(context, counts),
+                child: _buildColumn(context),
               ),
               const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
               Expanded(child: _buildContentArea(context, ref)),
@@ -1316,7 +1349,7 @@ class _GitPanelBody extends ConsumerWidget {
             ],
           );
         }
-        return _buildColumn(context, counts);
+        return _buildColumn(context);
       },
     );
   }
@@ -1330,7 +1363,7 @@ class _GitPanelBody extends ConsumerWidget {
   /// With no working-tree changes the Changes section is dropped entirely
   /// rather than showing an empty tree, and History attaches directly under
   /// the branch bar.
-  Widget _buildColumn(BuildContext context, _GitHeaderCounts counts) {
+  Widget _buildColumn(BuildContext context) {
     final git = state.git;
     final hasChanges = counts.hasChanges;
     final changesOpen = hasChanges && !panel.changesCollapsed;

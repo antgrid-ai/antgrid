@@ -39,6 +39,11 @@ import '../utils/platform_utils.dart';
 /// whether or not the file tree has arrived yet. [collapsedPaths] is how the
 /// user folds a folder back up once the list is long enough to need it; a
 /// folded folder then carries the rollup of what it hides.
+///
+/// The collections passed in — [root], [expandedPaths], [collapsedPaths] and
+/// [gitFileEntries] — are compared by identity between builds, and what is
+/// derived from them is reused while they are unchanged, so a caller changes
+/// one by passing a new instance, never by editing it in place.
 class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
@@ -98,6 +103,24 @@ class _FileTreeViewState extends State<FileTreeView> {
   double? _rowExtent;
   List<_TreeRow> _lastFlatList = const [];
 
+  // Derived from [FileTreeView.gitFileEntries] alone and rebuilt only when a
+  // new list arrives — see the class doc.
+  List<GitFileStatusEntry>? _entriesSource;
+  Map<String, List<GitFileStatusEntry>> _entriesByPath = const {};
+  Set<String> _dirsWithConflicts = const {};
+  FileNode? _changesRoot;
+
+  // What [_lastFlatList] was built from. Changes-only rows come from the change
+  // list and never from [FileTreeView.root], so a tree update must not rebuild
+  // them. Null [_rowsChangesOnly] means nothing has been built yet.
+  bool? _rowsChangesOnly;
+  Object? _rowsTree;
+  Set<String>? _rowsOpenSet;
+
+  // A folded folder's rollup depends only on the change list and the subtree it
+  // walks, so it lives exactly as long as the entries and rows it came from.
+  final Map<String, List<GitFileStatusEntry>> _rollups = {};
+
   @override
   void didUpdateWidget(FileTreeView oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -116,6 +139,65 @@ class _FileTreeViewState extends State<FileTreeView> {
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    // Hot reload replaces the code the cached rows were derived with, not their
+    // inputs, so force both derivations to run again.
+    _entriesSource = null;
+    _rowsChangesOnly = null;
+  }
+
+  void _syncEntries() {
+    if (identical(widget.gitFileEntries, _entriesSource)) return;
+    _entriesSource = widget.gitFileEntries;
+    final entriesByPath = <String, List<GitFileStatusEntry>>{};
+    // The ancestors of every CONFLICTED path — what lets a folder sort ahead
+    // of its siblings for holding one somewhere below (see
+    // [_flattenChangesOnly]).
+    final dirsWithConflicts = <String>{};
+    for (final e in widget.gitFileEntries) {
+      entriesByPath.putIfAbsent(e.path, () => []).add(e);
+      if (e.status != '!') continue;
+      var dir = e.path;
+      var slash = dir.lastIndexOf('/');
+      while (slash >= 0) {
+        dir = dir.substring(0, slash);
+        // Already recorded => every ancestor above it was too, on an earlier
+        // conflict's walk.
+        if (!dirsWithConflicts.add(dir)) break;
+        slash = dir.lastIndexOf('/');
+      }
+    }
+    _entriesByPath = entriesByPath;
+    _dirsWithConflicts = dirsWithConflicts;
+    _changesRoot = null;
+    _rollups.clear();
+  }
+
+  List<_TreeRow> _rows() {
+    final changesOnly = widget.changesOnly;
+    final Object? tree = changesOnly ? widget.gitFileEntries : widget.root;
+    final openSet = changesOnly ? widget.collapsedPaths : widget.expandedPaths;
+    if (_rowsChangesOnly == changesOnly &&
+        identical(_rowsTree, tree) &&
+        identical(_rowsOpenSet, openSet)) {
+      return _lastFlatList;
+    }
+    _rowsChangesOnly = changesOnly;
+    _rowsTree = tree;
+    _rowsOpenSet = openSet;
+    _rollups.clear();
+    return _lastFlatList = changesOnly
+        ? _flattenChangesOnly(
+            _changesRoot ??= _changesTree(_entriesByPath.keys),
+            _entriesByPath,
+            _dirsWithConflicts,
+            widget.collapsedPaths,
+          )
+        : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
   }
 
   void _revealSelected() {
@@ -178,33 +260,9 @@ class _FileTreeViewState extends State<FileTreeView> {
       );
     }
 
-    final entriesByPath = <String, List<GitFileStatusEntry>>{};
-    // The ancestors of every CONFLICTED path — what lets a folder sort ahead
-    // of its siblings for holding one somewhere below (see
-    // [_flattenChangesOnly]).
-    final dirsWithConflicts = <String>{};
-    for (final e in widget.gitFileEntries) {
-      entriesByPath.putIfAbsent(e.path, () => []).add(e);
-      if (e.status != '!') continue;
-      var dir = e.path;
-      var slash = dir.lastIndexOf('/');
-      while (slash >= 0) {
-        dir = dir.substring(0, slash);
-        // Already recorded => every ancestor above it was too, on an earlier
-        // conflict's walk.
-        if (!dirsWithConflicts.add(dir)) break;
-        slash = dir.lastIndexOf('/');
-      }
-    }
-
-    final flatList = widget.changesOnly
-        ? _flattenChangesOnly(
-            entriesByPath,
-            dirsWithConflicts,
-            widget.collapsedPaths,
-          )
-        : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
-    _lastFlatList = flatList;
+    _syncEntries();
+    final entriesByPath = _entriesByPath;
+    final flatList = _rows();
 
     if (flatList.isEmpty) {
       return AbEmptyState(
@@ -256,7 +314,10 @@ class _FileTreeViewState extends State<FileTreeView> {
             // (its rows are right there, and a second stat over them is noise).
             rollupEntries:
                 isDirectory && widget.collapsedPaths.contains(node.path)
-                ? _descendantEntries(node, entriesByPath)
+                ? _rollups.putIfAbsent(
+                    node.path,
+                    () => _descendantEntries(node, entriesByPath),
+                  )
                 : const [],
             onTap: isDirectory
                 ? () => widget.onToggleExpanded(node.path)
@@ -376,7 +437,11 @@ void _flattenNormal(
 ///
 /// [collapsedPaths] hides a folder's descendants without dropping the folder
 /// itself, which then carries the rollup of what it hides.
+///
+/// [changesRoot] is [_changesTree] over [entriesByPath]'s keys; the caller
+/// builds it so it can be kept for as long as the change list is unchanged.
 List<_TreeRow> _flattenChangesOnly(
+  FileNode changesRoot,
   Map<String, List<GitFileStatusEntry>> entriesByPath,
   Set<String> dirsWithConflicts,
   Set<String> collapsedPaths,
@@ -409,13 +474,13 @@ List<_TreeRow> _flattenChangesOnly(
     }
   }
 
-  walk(_changesTree(entriesByPath.keys), 0);
+  walk(changesRoot, 0);
   return result;
 }
 
-/// Assembles [paths] into a directory tree of their own, sorted the way
-/// [FileNode.fromJson] sorts the real one (directories first, then
-/// case-insensitively by name) so the two tabs agree on order.
+/// Assembles [paths] into a directory tree of their own, ordered by
+/// [sortFileNodes] (directories first, then case-insensitively by name), the
+/// order the real tree uses, so the two tabs agree.
 ///
 /// Only the three fields a changed-file row reads are filled in — a real
 /// [FileNode]'s size and extension have no reader here, and inventing values
@@ -455,7 +520,7 @@ class _ChangesDir {
       subdirs.putIfAbsent(name, () => _ChangesDir(_childPath(name)));
 
   FileNode build(String name) {
-    final children = <FileNode>[
+    final children = sortFileNodes(<FileNode>[
       for (final entry in subdirs.entries) entry.value.build(entry.key),
       for (final filePath in filePaths)
         FileNode(
@@ -463,12 +528,7 @@ class _ChangesDir {
           path: filePath,
           type: FileNodeType.file,
         ),
-    ]..sort((a, b) {
-      if (a.type != b.type) {
-        return a.type == FileNodeType.directory ? -1 : 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
+    ]);
     return FileNode(
       name: name,
       path: path,
