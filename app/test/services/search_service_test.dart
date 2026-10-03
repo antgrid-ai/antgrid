@@ -5,6 +5,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/search_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -179,6 +180,171 @@ void main() {
       await session.close();
     });
 
+    Map<String, dynamic> hit(
+      String path,
+      int line, {
+      int column = 0,
+      String lineContent = 'foo',
+      List<String> contextBefore = const [],
+      List<String> contextAfter = const [],
+    }) => {
+      'path': path,
+      'line': line,
+      'column': column,
+      'lineContent': lineContent,
+      'contextBefore': contextBefore,
+      'contextAfter': contextAfter,
+    };
+
+    Future<void> emitResult(
+      FakeAgentTransport t,
+      String? reqId,
+      List<Map<String, dynamic>> matches,
+    ) async {
+      t.emit('file:search-result', {
+        'projectId': 'p',
+        'requestId': reqId,
+        'matches': matches,
+      });
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    List<String> shape(SearchService svc) => [
+      for (final g in svc.currentState.results)
+        '${g.path}:${g.matches.map((m) => m.line).join(',')}',
+    ];
+
+    test('a batch that interleaves files keeps first-seen file order and each '
+        "file's arrival order", () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      final reqId = svc.currentState.currentRequestId;
+
+      await emitResult(t, reqId, [
+        hit('a', 1),
+        hit('b', 1),
+        hit('a', 2),
+        hit('c', 1),
+        hit('b', 2),
+      ]);
+      expect(shape(svc), ['a:1,2', 'b:1,2', 'c:1']);
+
+      await emitResult(t, reqId, [hit('c', 2), hit('a', 3), hit('d', 1)]);
+      expect(shape(svc), ['a:1,2,3', 'b:1,2', 'c:1,2', 'd:1']);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a file the batch did not touch keeps the same group object',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      final reqId = svc.currentState.currentRequestId;
+
+      await emitResult(t, reqId, [hit('a', 1), hit('b', 1)]);
+      final aGroup = svc.currentState.results[0];
+      await emitResult(t, reqId, [hit('b', 2)]);
+
+      expect(identical(svc.currentState.results[0], aGroup), isTrue);
+      expect(svc.currentState.results[1].matches.map((m) => m.line), [1, 2]);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('merged matches keep line, column, content and context', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      final reqId = svc.currentState.currentRequestId;
+
+      await emitResult(t, reqId, [
+        hit(
+          'a.txt',
+          1,
+          column: 4,
+          lineContent: 'x foo',
+          contextBefore: ['b1'],
+          contextAfter: ['a1'],
+        ),
+        hit(
+          'a.txt',
+          2,
+          column: 2,
+          lineContent: 'foo y',
+          contextBefore: ['b2'],
+          contextAfter: ['a2'],
+        ),
+      ]);
+
+      final matches = svc.currentState.results[0].matches;
+      expect(matches, hasLength(2));
+      expect(matches[0].line, 1);
+      expect(matches[0].column, 4);
+      expect(matches[0].lineContent, 'x foo');
+      expect(matches[0].contextBefore, ['b1']);
+      expect(matches[0].contextAfter, ['a1']);
+      expect(matches[1].line, 2);
+      expect(matches[1].column, 2);
+      expect(matches[1].lineContent, 'foo y');
+      expect(matches[1].contextBefore, ['b2']);
+      expect(matches[1].contextAfter, ['a2']);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a new search groups its results from scratch', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 1)]);
+
+      svc.search('bar');
+      await Future<void>.delayed(Duration.zero);
+      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 5)]);
+
+      expect(shape(svc), ['a:5']);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a batch for a superseded search is dropped', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      final first = svc.currentState.currentRequestId;
+      svc.search('bar');
+      final second = svc.currentState.currentRequestId;
+      await Future<void>.delayed(Duration.zero);
+
+      await emitResult(t, first, [hit('a', 1)]);
+
+      expect(svc.currentState.results, isEmpty);
+      expect(svc.currentState.currentRequestId, second);
+
+      await svc.dispose();
+      await session.close();
+    });
+
     test('dispose is idempotent', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
@@ -188,6 +354,33 @@ void main() {
       await svc.dispose(); // idempotent
 
       await session.close();
+    });
+  });
+
+  group('frame type pre-check', () {
+    test('SearchService hands search results and completion to the parser',
+        () async {
+      final probe = await ParseProbe.open();
+      final svc = probe.build(() => SearchService.fromSession(probe.session));
+      addTearDown(svc.dispose);
+
+      await probe.expectParsed([
+        heavyProbe('file:search-result'),
+        heavyProbe('file:search-done'),
+      ]);
+    });
+
+    test('SearchService never parses a frame type it does not act on',
+        () async {
+      final probe = await ParseProbe.open();
+      final svc = probe.build(() => SearchService.fromSession(probe.session));
+      addTearDown(svc.dispose);
+
+      await probe.expectNeverParsed([
+        heavyProbe('file:tree:children'),
+        heavyProbe('agent:item-delta'),
+        heavyProbe('file:content'),
+      ]);
     });
   });
 
@@ -254,6 +447,32 @@ void main() {
         await session.close();
       },
     );
+
+    test('an empty result batch still keeps a live search alive', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(
+        session,
+        searchIdleTimeout: const Duration(milliseconds: 80),
+      );
+
+      svc.search('foo');
+      final reqId = svc.currentState.currentRequestId;
+
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      t.emit('file:search-result', {
+        'projectId': 'p',
+        'requestId': reqId,
+        'matches': <Map<String, dynamic>>[],
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(svc.currentState.isSearching, isTrue);
+      expect(svc.currentState.error, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
 
     test(
       'file:search-done cancels the idle guard — no late stall error',

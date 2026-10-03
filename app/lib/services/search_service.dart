@@ -53,7 +53,17 @@ class SearchService {
     _stateController.add(state);
   }
 
+  // The checkout's whole heavy tier reaches _onHeavyJson, tree batches and file
+  // reads included, and parseAbMessage builds the whole payload before a branch
+  // could reject it. A type a branch acts on but this set omits is dropped
+  // without a trace, so the set and the branches change together.
+  static const Set<String> _handledHeavyTypes = {
+    'file:search-result',
+    'file:search-done',
+  };
+
   void _onHeavyJson(Map<String, dynamic> json) {
+    if (!_handledHeavyTypes.contains(json['type'])) return;
     final abMsg = parseAbMessage(json);
     if (abMsg == null) return;
     if (abMsg is FileSearchResultMessage) {
@@ -147,25 +157,32 @@ class SearchService {
 
     final resultsCopy = [..._state.results];
 
+    // Group by path first: addMatches copies the file's whole accumulated list,
+    // so it runs once per path per batch rather than once per match.
+    final batchByPath = <String, List<SearchMatch>>{};
     for (final match in msg.matches) {
-      final searchMatch = SearchMatch(
-        line: match.line,
-        column: match.column,
-        lineContent: match.lineContent,
-        contextBefore: match.contextBefore,
-        contextAfter: match.contextAfter,
-      );
+      batchByPath
+          .putIfAbsent(match.path, () => <SearchMatch>[])
+          .add(
+            SearchMatch(
+              line: match.line,
+              column: match.column,
+              lineContent: match.lineContent,
+              contextBefore: match.contextBefore,
+              contextAfter: match.contextAfter,
+            ),
+          );
+    }
 
-      final existingIndex = _resultIndex[match.path];
+    for (final MapEntry(key: path, value: matches) in batchByPath.entries) {
+      final existingIndex = _resultIndex[path];
       if (existingIndex != null) {
-        resultsCopy[existingIndex] = resultsCopy[existingIndex].addMatches([
-          searchMatch,
-        ]);
-      } else {
-        _resultIndex[match.path] = resultsCopy.length;
-        resultsCopy.add(
-          SearchFileGroup(path: match.path, matches: [searchMatch]),
+        resultsCopy[existingIndex] = resultsCopy[existingIndex].addMatches(
+          matches,
         );
+      } else {
+        _resultIndex[path] = resultsCopy.length;
+        resultsCopy.add(SearchFileGroup(path: path, matches: matches));
       }
     }
 

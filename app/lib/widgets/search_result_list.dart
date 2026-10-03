@@ -29,98 +29,126 @@ class _SearchResultListState extends State<SearchResultList> {
 
   @override
   Widget build(BuildContext context) {
+    final rows = <_ResultRow>[];
+    for (final group in widget.results) {
+      rows.add(_HeaderItem(group));
+      if (_collapsedFiles.contains(group.path)) continue;
+      for (final match in group.matches) {
+        rows.add(_MatchItem(group, match));
+      }
+    }
+    final highlightQuery = widget.caseSensitive
+        ? widget.query
+        : widget.query.toLowerCase();
+
     return ListView.builder(
       key: const PageStorageKey('search_results'),
-      itemCount: widget.results.length,
-      itemBuilder: (context, index) {
-        final group = widget.results[index];
-        final isCollapsed = _collapsedFiles.contains(group.path);
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  if (isCollapsed) {
-                    _collapsedFiles.remove(group.path);
-                  } else {
-                    _collapsedFiles.add(group.path);
-                  }
-                });
-              },
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AbTokens.space12,
-                    vertical: AbTokens.space6,
-                  ),
-                  color: context.antgrid.bgDeep,
-                  child: Row(
-                    children: [
-                      Text(
-                        isCollapsed ? '\u25B6' : '\u25BC',
-                        style: TextStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: context.antgrid.iconMuted,
-                        ),
-                      ),
-                      const SizedBox(width: AbTokens.space6),
-                      Expanded(
-                        child: Text(
-                          group.path,
-                          style: AbTokens.monoStyle(
-                            fontWeight: FontWeight.w600,
-                            color: context.antgrid.textSecondary,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: AbTokens.space6,
-                          vertical: 1,
-                        ), // 1px badge inset
-                        decoration: BoxDecoration(
-                          color: context.antgrid.bgElevated,
-                          borderRadius: AbTokens.borderRadius3,
-                        ),
-                        child: Text(
-                          '${group.matches.length}',
-                          style: AbTokens.monoStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: context.antgrid.textMuted,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            if (!isCollapsed)
-              ...group.matches.map(
-                (match) => _MatchRow(
-                  match: match,
-                  query: widget.query,
-                  isRegex: widget.isRegex,
-                  caseSensitive: widget.caseSensitive,
-                  filePath: group.path,
-                  onTap: () =>
-                      widget.onMatchTap(group.path, match.line, match.column),
-                ),
-              ),
-          ],
-        );
+      itemCount: rows.length,
+      itemBuilder: (context, index) => switch (rows[index]) {
+        _HeaderItem(:final group) => _buildFileHeader(context, group),
+        _MatchItem(:final group, :final match) => _MatchRow(
+          match: match,
+          query: widget.query,
+          highlightQuery: highlightQuery,
+          isRegex: widget.isRegex,
+          caseSensitive: widget.caseSensitive,
+          filePath: group.path,
+          onTap: () => widget.onMatchTap(group.path, match.line, match.column),
+        ),
       },
     );
   }
+
+  Widget _buildFileHeader(BuildContext context, SearchFileGroup group) {
+    final isCollapsed = _collapsedFiles.contains(group.path);
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          if (isCollapsed) {
+            _collapsedFiles.remove(group.path);
+          } else {
+            _collapsedFiles.add(group.path);
+          }
+        });
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: AbTokens.space6,
+          ),
+          color: context.antgrid.bgDeep,
+          child: Row(
+            children: [
+              Text(
+                isCollapsed ? '\u25B6' : '\u25BC',
+                style: TextStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: context.antgrid.iconMuted,
+                ),
+              ),
+              const SizedBox(width: AbTokens.space6),
+              Expanded(
+                child: Text(
+                  group.path,
+                  style: AbTokens.monoStyle(
+                    fontWeight: FontWeight.w600,
+                    color: context.antgrid.textSecondary,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space6,
+                  vertical: 1,
+                ), // 1px badge inset
+                decoration: BoxDecoration(
+                  color: context.antgrid.bgElevated,
+                  borderRadius: AbTokens.borderRadius3,
+                ),
+                child: Text(
+                  '${group.matches.length}',
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Flat so the list builds only the rows on screen; holding a file's rows in
+/// one item would build and lay out every one of them, off-screen rows
+/// included.
+sealed class _ResultRow {
+  const _ResultRow(this.group);
+  final SearchFileGroup group;
+}
+
+class _HeaderItem extends _ResultRow {
+  const _HeaderItem(super.group);
+}
+
+class _MatchItem extends _ResultRow {
+  const _MatchItem(super.group, this.match);
+  final SearchMatch match;
 }
 
 class _MatchRow extends StatelessWidget {
   final SearchMatch match;
   final String query;
+
+  /// [query] in the form lines are matched against (lowercased unless
+  /// [caseSensitive]); passed in so it is computed once per list build, not
+  /// once per row.
+  final String highlightQuery;
   final bool isRegex;
   final bool caseSensitive;
   final String filePath;
@@ -129,6 +157,7 @@ class _MatchRow extends StatelessWidget {
   const _MatchRow({
     required this.match,
     required this.query,
+    required this.highlightQuery,
     required this.isRegex,
     this.caseSensitive = false,
     required this.filePath,
@@ -181,12 +210,11 @@ class _MatchRow extends StatelessWidget {
     }
 
     final searchLine = caseSensitive ? line : line.toLowerCase();
-    final searchQuery = caseSensitive ? query : query.toLowerCase();
     final spans = <TextSpan>[];
     int start = 0;
 
     while (start < line.length) {
-      final index = searchLine.indexOf(searchQuery, start);
+      final index = searchLine.indexOf(highlightQuery, start);
       if (index == -1) {
         spans.add(TextSpan(text: line.substring(start)));
         break;
