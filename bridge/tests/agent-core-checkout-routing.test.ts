@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
+import { TerminalManager } from "../src/terminal-manager";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionEntry } from "../src/protocol";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
@@ -694,3 +695,68 @@ test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, NOT_ALLOWED f
   const admittedMain = await core!.uploadStreams.admit("modern-peer", "main");
   expect(admittedMain.ok).toBe(true);
 }, 20000);
+
+async function startIsolatedTerminal(
+  bus: MessageBus,
+  sent: AbMessage[],
+  terminalId: string,
+  cwd: string,
+  checkoutId: string,
+): Promise<void> {
+  bus.dispatchInbound(createMessage("terminal:start", { terminalId, cwd, checkoutId }), "control", "loopback");
+  await waitFor(sent, (m) => m.type === "terminal:started" && m.terminalId === terminalId, 10_000);
+}
+
+test("file:resolve-path takes a base only from a terminal of the checkout it names", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const { bus, sent, checkoutId, checkoutPath } = await startWithIsolatedSession();
+  await startIsolatedTerminal(bus, sent, "iso-term", checkoutPath, checkoutId);
+  await startIsolatedTerminal(bus, sent, "main-term", root, "main");
+  const linkBases = spyOn(TerminalManager.prototype, "linkBases");
+  try {
+    const ask = async (requestId: string, asked: string, terminalId: string): Promise<void> => {
+      bus.dispatchInbound(createMessage("file:resolve-path", {
+        projectId: core!.projectId, requestId, path: "same.txt", terminalId, base: "s", checkoutId: asked,
+      }), "control", "loopback");
+      await waitFor(sent, (m) => m.type === "file:resolve-path-result" && m.requestId === requestId);
+    };
+
+    // The isolated terminal's internal id is namespaced, and main passes any id through.
+    await ask("main-names-isolated", "main", `${checkoutId}:iso-term`);
+    expect(linkBases).not.toHaveBeenCalled();
+    await ask("isolated-names-main", checkoutId, "main-term");
+    expect(linkBases).not.toHaveBeenCalled();
+
+    await ask("main-names-main", "main", "main-term");
+    expect(linkBases).toHaveBeenCalledTimes(1);
+    await ask("isolated-names-isolated", checkoutId, "iso-term");
+    expect(linkBases).toHaveBeenCalledTimes(2);
+  } finally {
+    linkBases.mockRestore();
+  }
+}, 30_000);
+
+test("file:resolve-path with terminal ids that name nothing records no terminal of any checkout", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const { bus, sent, checkoutId } = await startWithIsolatedSession();
+  const recorded: string[] = [];
+  const set = Map.prototype.set;
+  const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+    if (typeof key === "string" && key.includes("ghost-")) recorded.push(key);
+    if (typeof value === "string" && value.includes("ghost-")) recorded.push(value);
+    return set.call(this, key, value);
+  });
+  try {
+    for (let i = 0; i < 20; i++) {
+      bus.dispatchInbound(createMessage("file:resolve-path", {
+        projectId: core!.projectId, requestId: `req-${i}`, path: "same.txt", terminalId: `ghost-${i}`, base: "s", checkoutId,
+      }), "control", "loopback");
+      await waitFor(sent, (m) => m.type === "file:resolve-path-result" && m.requestId === `req-${i}`);
+    }
+  } finally {
+    spy.mockRestore();
+  }
+  expect(recorded).toEqual([]);
+}, 30_000);

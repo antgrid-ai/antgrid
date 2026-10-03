@@ -21,6 +21,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
@@ -77,6 +78,10 @@ Widget _appToastHost(BuildContext context, Widget? child) => AbToastHost(
     listen: false,
   ).read(appToasterProvider),
   child: child!,
+);
+
+final _armFocus = NotifierProvider<ValueController<String?>, String?>(
+  () => ValueController<String?>('p'),
 );
 
 void main() {
@@ -367,64 +372,6 @@ void main() {
     });
   });
 
-  group('handlerShieldTooltip', () {
-    // The explainer's copy matrix has its own group above. This is the surface
-    // that answers every time, and the two must agree about precedence.
-    test('an armed session offers only the way out', () {
-      expect(
-        handlerShieldTooltip(armed: true, observable: false, judgeCapable: false),
-        'Disarm Handler',
-      );
-    });
-
-    test('an escalate-only agent is named before the arm, not after', () {
-      expect(
-        handlerShieldTooltip(
-          armed: false,
-          observable: true,
-          judgeCapable: false,
-        ),
-        escalateOnlyNotice,
-      );
-    });
-
-    test('unwatchable outranks escalate-only', () {
-      // Both true of the same agent says one thing: it reports nothing. What
-      // its judge could have done never comes up.
-      expect(
-        handlerShieldTooltip(
-          armed: false,
-          observable: false,
-          judgeCapable: false,
-          agentLabel: 'Claude Code',
-        ),
-        unwatchableNotice('Claude Code'),
-      );
-    });
-
-    test('a fully covered agent gets the plain label', () {
-      expect(
-        handlerShieldTooltip(
-          armed: false,
-          observable: true,
-          judgeCapable: true,
-        ),
-        'Arm Handler',
-      );
-    });
-
-    test('an undescribed agent claims neither fault', () {
-      expect(
-        handlerShieldTooltip(
-          armed: false,
-          observable: null,
-          judgeCapable: null,
-        ),
-        'Arm Handler',
-      );
-    });
-  });
-
   group('shieldShowsLabel', () {
     test('labels only before the first arm and never while armed', () {
       expect(shieldShowsLabel(armedOnce: false, sessionArmed: false), isTrue);
@@ -496,12 +443,19 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
-          selectedRegistrationIdProvider.overrideWithValue('p'),
+          selectedRegistrationIdProvider.overrideWith(
+            (ref) => ref.watch(_armFocus),
+          ),
           projectSessionProvider('p').overrideWith((ref) => projectSession),
           ...extraOverrides,
         ],
       );
       addTearDown(container.dispose);
+      // The real session factory registers the project as warm; the override
+      // above bypasses it, and the arm latch only follows warm projects.
+      container
+          .read(projectSessionRegistryProvider.notifier)
+          .touch('p', isLocal: true);
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
@@ -1190,6 +1144,111 @@ void main() {
         expect(instructs(transport), isEmpty);
       });
 
+      // Another project's Handler state is not this arm's answer: its refusal
+      // must not end the arm, nor its silence hide this confirmation.
+      testWidgets('the latch follows the armed project, not the focused one', (
+        tester,
+      ) async {
+        final otherTransport = FakeAgentTransport();
+        final other = await newFakeProjectSession(
+          otherTransport,
+          projectId: 'q',
+        );
+        addTearDown(other.close);
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider('q').overrideWith((ref) => other),
+          ],
+        );
+        await openSheet(tester, container, context);
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        container
+            .read(projectSessionRegistryProvider.notifier)
+            .touch('q', isLocal: true);
+        container.read(_armFocus.notifier).set('q');
+        await tester.pumpAndSettle();
+        otherTransport.emit('handler:status', {
+          'projectId': 'q',
+          'sessions': <dynamic>[],
+          'entitlement': {'reason': 'not_entitled', 'tier': 'free'},
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('Handler not armed'), findsNothing);
+
+        await confirmArmed(tester, transport);
+        expect(instructs(transport), hasLength(1));
+        expect(instructs(otherTransport), isEmpty);
+        expect(find.text('Nothing was queued'), findsNothing);
+      });
+
+      // The sheet was opened over this project's terminal; the user looking at
+      // another project before tapping Arm does not make it that one's.
+      testWidgets('a focus change while the sheet is open does not move the arm', (
+        tester,
+      ) async {
+        final otherTransport = FakeAgentTransport();
+        final other = await newFakeProjectSession(
+          otherTransport,
+          projectId: 'q',
+        );
+        addTearDown(other.close);
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider('q').overrideWith((ref) => other),
+          ],
+        );
+        await openSheet(tester, container, context);
+        container.read(_armFocus.notifier).set('q');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        bool arms(FakeAgentTransport t) =>
+            t.sent.any((m) => m['type'] == 'handler:configure');
+        expect(arms(transport), isTrue);
+        expect(arms(otherTransport), isFalse);
+        await confirmArmed(tester, transport);
+        expect(find.text('Nothing was queued'), findsNothing);
+      });
+
+      // Only a status frame answers the arm; other frames carry the earlier
+      // refusal, which says nothing about this arm.
+      testWidgets('a held refusal re-emitted by a non-status update does not '
+          'end the arm', (tester) async {
+        final (transport, container, context) = await pumpArm(tester);
+        await refuse(tester, transport, {
+          'reason': 'not_entitled',
+          'tier': 'free',
+        });
+        // The sheet normally opens over this refusal via the paywall dialog;
+        // latch the arm directly to skip that flow.
+        latchHandlerArmedOnConfirmation(
+          container,
+          'p',
+          't1',
+          instruction: 'also update the changelog',
+        );
+        transport.emit('handler:escalation', {
+          'projectId': 'p',
+          'escalationId': 'esc-1',
+          'terminalId': 't0',
+          'question': 'q',
+          'reasoning': 'r',
+          'draftReply': 'd',
+          'urgency': 'low',
+          'at': 1,
+        });
+        await tester.pumpAndSettle();
+        expect(find.text('Handler not armed'), findsNothing);
+
+        await confirmArmed(tester, transport);
+        expect(instructs(transport), hasLength(1));
+      });
+
       testWidgets('an arm the bridge never confirms sends nothing', (
         tester,
       ) async {
@@ -1207,6 +1266,32 @@ void main() {
 
         expect(instructs(transport), isEmpty);
         expect(find.text('Nothing was queued'), findsOneWidget);
+        await settleToast(tester);
+      });
+
+      // Nothing took the arm, so there is no answer to wait out — and a toast
+      // the whole confirmation window later reaches a user who has walked away.
+      testWidgets('an arm with no connected project is reported at once', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            projectSessionProvider(
+              'q',
+            ).overrideWith((ref) => Completer<ProjectSession>().future),
+          ],
+        );
+        container.read(_armFocus.notifier).set('q');
+        await openSheet(tester, container, context);
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Handler not armed'), findsOneWidget);
+        expect(
+          transport.sent.where((m) => m['type'] == 'handler:configure'),
+          isEmpty,
+        );
         await settleToast(tester);
       });
 

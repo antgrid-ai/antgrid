@@ -2,7 +2,6 @@
 // only ones whose refusal is handed to the agent rather than to a toast — so
 // these pin what each button sends, when each is dead, and that a failure
 // leaves an affordance behind instead of vanishing with the snackbar.
-import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -297,14 +296,27 @@ void main() {
     expect(find.byTooltip('Push'), findsOneWidget);
   });
 
-  testWidgets('the commit button still renders beside the sync control', (
+  testWidgets('a clean tree keeps the remote action without Commit', (
     tester,
   ) async {
-    // The header is width-constrained and the sync control ate part of that
-    // budget; Commit is what must survive.
+    // Nothing to commit, but the push a clean tree is usually waiting for has
+    // to stay reachable.
     await pump(tester, sync: syncState(ahead: 2, behind: 1));
-    expect(find.byType(AbButton), findsWidgets);
-    expect(find.text('Commit'), findsOneWidget);
+    expect(find.text('Commit'), findsNothing);
+    expect(find.byTooltip('Push 2 commits'), findsOneWidget);
+    expect(find.byTooltip('Pull 1 commit'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an unpublished branch is marked local only', (tester) async {
+    await pump(tester, sync: syncState(hasUpstream: false));
+    expect(find.text('main'), findsOneWidget);
+    expect(find.text('Local only'), findsOneWidget);
+  });
+
+  testWidgets('a tracking branch names its remote', (tester) async {
+    await pump(tester, sync: syncState());
+    expect(find.text('→ origin'), findsOneWidget);
+    expect(find.text('Local only'), findsNothing);
   });
 }

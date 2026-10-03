@@ -28,13 +28,19 @@ import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/providers/agent_transport.dart'
+    show selectedTargetProvider;
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/util/terminal_links.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
@@ -96,7 +102,6 @@ const _keysWithdrawn = 'Keys are off while the scrollback is open';
 const _touchKeys = <String, String>{
   'Tab': '\t',
   'Esc': '\x1b',
-  'Ctrl+C': '\x03',
   '↑': '\x1b[A',
   '↓': '\x1b[B',
   '→': '\x1b[C',
@@ -2234,6 +2239,211 @@ void main() {
       expect(
         h.transport.sent.where((m) => m['type'] == 'terminal:start'),
         hasLength(1),
+      );
+    });
+  });
+
+  group('detected terminal links', () {
+    Map<String, dynamic> resolveRequest(FakeAgentTransport transport) =>
+        transport.sent.lastWhere((m) => m['type'] == 'file:resolve-path');
+
+    /// Answers the pending `file:resolve-path` on the real event loop, where
+    /// the transport's listeners live, then lets the fake clock carry the
+    /// result onward.
+    Future<void> reply(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+      Map<String, dynamic> result,
+    ) async {
+      await tester.runAsync(() async {
+        transport.emit('file:resolve-path-result', {
+          'projectId': 'p',
+          'requestId': resolveRequest(transport)['requestId'],
+          'isDirectory': false,
+          'externalImagePath': null,
+          ...result,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+    }
+
+    testWidgets('are styled quietly on the live pane and in the reader', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      expect(_liveView(tester).isQuietHyperlink, same(isDetectedTerminalLink));
+
+      _liveView(tester).onScrollPastTop!();
+      await tester.pump();
+
+      final reader = tester.widget<TerminalHistoryView>(
+        find.byType(TerminalHistoryView),
+      );
+      expect(reader.isQuietHyperlink, same(isDetectedTerminalLink));
+      // Without both engines mounted `.last` is the live pane again, and the
+      // reader's own engine would go unchecked.
+      expect(find.byType(GhosttyTerminalView), findsNWidgets(2));
+      final readerEngine = tester.widget<GhosttyTerminalView>(
+        find.byType(GhosttyTerminalView).last,
+      );
+      expect(readerEngine.isQuietHyperlink, same(isDetectedTerminalLink));
+    });
+
+    testWidgets('a path link resolves against the terminal it was printed in', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-path:?p=src%2Fa.ts&b=s&k=f&n=12',
+        ),
+      );
+      await tester.pump();
+
+      final request = resolveRequest(h.transport);
+      expect(request['path'], 'src/a.ts');
+      expect(request['terminalId'], 't1');
+      expect(request['base'], 's');
+
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+      final files = h.service.session.fileService.currentState.files;
+      expect(files.selectedFilePath, 'src/a.ts');
+      expect(files.searchLine, 12);
+    });
+
+    testWidgets('a path link with no workspace menu hands its tab to the shell', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      expect(container.read(workspaceMenuControlProvider), isNull);
+      const focused = LocalProject('p');
+      container.read(selectedTargetProvider.notifier).set(focused);
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      final pending = container.read(pendingWorkspaceViewProvider);
+      expect(pending?.value, WorkspaceView.files);
+      expect(
+        pending?.target,
+        focused,
+        reason: 'the shell drops a handover stamped for a different session',
+      );
+    });
+
+    testWidgets('a path link answered after the focus moved is dropped', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('p'));
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('other'));
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      expect(container.read(pendingWorkspaceViewProvider), isNull);
+      expect(
+        h.service.session.fileService.currentState.files.selectedFilePath,
+        isNull,
+      );
+    });
+
+    testWidgets('a path link reveals through the workspace menu when present', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      final revealed = <WorkspaceView>[];
+      container
+          .read(workspaceMenuControlProvider.notifier)
+          .set((active: null, reveal: revealed.add));
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      expect(revealed, [WorkspaceView.files]);
+      expect(container.read(pendingWorkspaceViewProvider), isNull);
+    });
+
+    testWidgets('a detected local URL opens in the preview tab', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final preview = h.service.session.previewService;
+      await preview.openTab(5173);
+
+      unawaited(
+        _liveView(
+          tester,
+        ).onOpenHyperlink!('antgrid-url:http://localhost:5173/x?y=1#z'),
+      );
+      await tester.pump();
+
+      expect(
+        preview.takeNavRequest(5173),
+        Uri.parse('http://localhost:5173/x?y=1#z'),
       );
     });
   });

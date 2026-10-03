@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ProjectCore } from "../../src/project-core";
-import { initialWorkStatus, reduceWorkStatus } from "../../src/work-status";
+import { initialWorkStatus, reduceWorkStatus, turnStart } from "../../src/work-status";
 import type { AbMessage } from "../../src/protocol";
 
 // The port a hook posts to is discovered from the api-server's own port file —
@@ -135,4 +135,52 @@ test("turn_end is forwarded from the same latched state", async () => {
   const res = await postHandlerEvent(port, { terminalId: "term-1", event: "turn_end" });
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ ok: true });
+});
+
+function postNotify(port: number, body: unknown): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/notify`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
+/** [sessionId] running with a turn open and no Stop to come — the state a typed
+ *  prompt abandoned for a local `/compact` leaves behind — plus [extra] folded
+ *  on top. Installed the way {@link endTurn} installs its state, and for the
+ *  same reason. */
+function openTurn(core: ProjectCore, sessionId: string, extra: AbMessage[] = []): void {
+  const listed = reduceWorkStatus(initialWorkStatus, {
+    id: "m", timestamp: 0, type: "session:updated",
+    sessions: [{ id: sessionId, name: sessionId, createdAt: 0, lastUsedAt: 0, archived: false, running: true }],
+  } as unknown as AbMessage);
+  (core as any)._work = extra.reduce(reduceWorkStatus, turnStart(listed, sessionId));
+}
+
+/** Records the turn closes the core is asked for. Patched on the instance: the
+ *  owner's own re-emitted (empty) session list prunes the fixture session, so
+ *  the reduction afterwards cannot show whether the close happened. */
+function spyTurnEnds(core: ProjectCore): string[] {
+  const closed: string[] = [];
+  const real = (core as any).noteHookTurnEnd.bind(core);
+  (core as any).noteHookTurnEnd = (id: string) => { closed.push(id); real(id); };
+  return closed;
+}
+
+test("/notify absorbs an idle nudge on an open turn with nothing waiting, closing the turn", async () => {
+  const { core, port } = await startCore();
+  openTurn(core, "term-1");
+  const closed = spyTurnEnds(core);
+  const res = await postNotify(port, { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" });
+  expect(await res.json()).toEqual({ ok: true, stale: true });
+  expect(closed).toEqual(["term-1"]);
+});
+
+test("/notify still raises an idle nudge over a recorded block", async () => {
+  const { core, port } = await startCore();
+  openTurn(core, "term-1", [
+    { id: "m", timestamp: 0, type: "notification:push", notificationType: "permission_request", sessionId: "term-1" } as unknown as AbMessage,
+  ]);
+  const closed = spyTurnEnds(core);
+  const res = await postNotify(port, { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" });
+  expect(await res.json()).toEqual({ ok: true });
+  expect(closed).toEqual([]);
 });

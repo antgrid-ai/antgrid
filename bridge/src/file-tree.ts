@@ -1,6 +1,8 @@
 import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
-import { join, resolve, relative, extname, basename, sep } from "node:path";
+import { join, resolve, relative, extname, basename } from "node:path";
 import ignore, { type Ignore } from "ignore";
+import { isInsideResolved, refusedUnderRoot } from "./terminal-links/containment";
+import { isRefusedPathShape } from "./terminal-links/grammar";
 
 export type FileTreeNode = {
   name: string;
@@ -230,16 +232,6 @@ export type DirectoryListing = {
  * that carries PTY reads and relay pongs. */
 const MAX_LISTING_SCAN = 20_000;
 
-function containedBy(absPath: string, root: string): boolean {
-  // Case-folded on Windows, mirroring `FileWatcher.handleResolvePathRequest` —
-  // the only other containment check in the bridge that folds — because a
-  // checkout-relative path and the root it is checked against can arrive with
-  // different casing for the same drive letter.
-  const cmpPath = process.platform === "win32" ? absPath.toLowerCase() : absPath;
-  const cmpRoot = process.platform === "win32" ? root.toLowerCase() : root;
-  return cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
-}
-
 /** Resolves `relPath` (checkout-relative, `/`-separated; `""` is the root)
  * against `projectRoot` and confirms containment, REJECTING anything that
  * would resolve outside it rather than clamping it back in.
@@ -259,10 +251,10 @@ function guardedAbsolutePath(relPath: string, projectRoot: string): string | nul
 
   const normalizedRoot = resolve(projectRoot);
   const absPath = relPath === "" ? normalizedRoot : resolve(normalizedRoot, relPath);
-  if (!containedBy(absPath, normalizedRoot)) return null;
+  if (!isInsideResolved(absPath, normalizedRoot)) return null;
 
   try {
-    if (!containedBy(realpathSync.native(absPath), realpathSync.native(normalizedRoot))) return null;
+    if (!isInsideResolved(realpathSync.native(absPath), realpathSync.native(normalizedRoot))) return null;
   } catch {
     // A path that cannot be resolved cannot be vouched for either.
     return null;
@@ -494,23 +486,41 @@ function tooLarge(size: number, cap: number): ReadFileResult {
   return { content: null, size, error: `File too large (${size} bytes, max ${cap})` };
 }
 
+/** `lstat` inspects only a path's final component, so a file reached through a
+ *  link in one of its parent directories is lexically inside the checkout and
+ *  really somewhere else. Such a file is served only as the safe image
+ *  an outside path may be, and only if the file it lands on is one too. */
+function leadsOutOfCheckout(absPath: string, root: string): boolean {
+  const real = realpathSync.native(absPath);
+  if (isInsideResolved(real, realpathSync.native(root))) return false;
+  return !(externalSafeImageMime(absPath) && externalSafeImageMime(real));
+}
+
 export function readFile(
   projectRoot: string,
   relPath: string,
+  platform: NodeJS.Platform = process.platform,
 ): ReadFileResult {
   // Path traversal protection — except for a recognized image extension,
   // which may be served from outside the checkout root entirely. See
   // EXTERNAL_SAFE_IMAGE_MIME for why this narrow carve-out is safe where a
   // general one would not be: `file:read`'s caller for this case is always
   // FileService.openPreview off a resolved `externalImagePath` (see
-  // `file-watcher.ts`'s handleResolvePathRequest), never a bare user-typed
+  // `file-watcher.ts`'s resolvePath), never a bare user-typed
   // path, and the extension gate rules out anything that could carry a
   // script (.svg) or a heavier parser (.pdf).
+  //
+  // Refused before any fs call: a Windows stat of a UNC path opens an SMB
+  // session that hands the user's NTLM hash to whoever named the host. What the
+  // caller supplied is judged whole, even when it spells the root's own share;
+  // the root is judged only by what follows it.
+  if (isRefusedPathShape(relPath, platform)) {
+    return { content: null, size: 0, error: "Path traversal denied" };
+  }
   const absPath = resolve(projectRoot, relPath);
   const normalizedRoot = resolve(projectRoot);
-  const insideRoot =
-    absPath === normalizedRoot || absPath.startsWith(normalizedRoot + sep);
-  if (!insideRoot && !externalSafeImageMime(absPath)) {
+  const insideRoot = isInsideResolved(absPath, normalizedRoot);
+  if (refusedUnderRoot(absPath, normalizedRoot, platform) || (!insideRoot && !externalSafeImageMime(absPath))) {
     return { content: null, size: 0, error: "Path traversal denied" };
   }
 
@@ -523,6 +533,10 @@ export function readFile(
 
     if (!lstat.isFile()) {
       return { content: null, size: 0, error: "Not a file" };
+    }
+
+    if (insideRoot && leadsOutOfCheckout(absPath, normalizedRoot)) {
+      return { content: null, size: 0, error: "Path traversal denied" };
     }
 
     const stat = lstat;

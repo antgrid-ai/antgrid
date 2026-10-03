@@ -48,7 +48,6 @@ class FileService {
 
   /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
   int _snapshotEpoch = -1;
-  int _gitOpSeq = 0;
   bool _disposed = false;
   bool _treeRecoveryPending = false;
   final Set<Object> _treeOwners = {};
@@ -126,6 +125,11 @@ class FileService {
 
   Stream<FileTreeState> get stateStream => _stateController.stream;
   FileTreeState get currentState => _state;
+
+  /// One message per finished git op, with no replay; see
+  /// `OperationalErrorToaster` for why it is not a field on [FileTreeState].
+  final _gitOpFeedbackController = StreamController<String>.broadcast();
+  Stream<String> get gitOpFeedback => _gitOpFeedbackController.stream;
 
   String get projectId => session.projectId;
 
@@ -248,9 +252,6 @@ class FileService {
   /// Restores selected-file and preview pulls independently of full-tree demand.
   void activate() {
     if (_disposed) return;
-    if (_stashesRequested) {
-      session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
-    }
     if (_state.files.selectedFilePath != null) {
       session.hydrateCheckout(
         checkoutId,
@@ -266,7 +267,6 @@ class FileService {
   /// Leaves cached content and feature-owned tree demand intact.
   void deactivate() {
     if (_disposed) return;
-    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, 'file:preview');
   }
@@ -526,29 +526,6 @@ class FileService {
       if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
       return;
     }
-    if (parsed is GitStashListResultMessage) {
-      if (parsed.error == null) {
-        _setState(
-          _state.copyWith(git: _state.git.copyWith(stashes: parsed.stashes)),
-        );
-      }
-      return;
-    }
-    // Neither result asks for the list back: the agent already follows every
-    // pop and drop with a fresh `git:stash-list-result` on both outcomes, so a
-    // request here is a second round trip for a list already on its way.
-    if (parsed is GitStashPopResultMessage) {
-      if (!parsed.success) {
-        _emitOpFeedback(parsed.error ?? 'Could not restore the stash');
-      }
-      return;
-    }
-    if (parsed is GitStashDropResultMessage) {
-      if (!parsed.success) {
-        _emitOpFeedback(parsed.error ?? 'Could not discard the stash');
-      }
-      return;
-    }
     if (parsed is GitSyncResultMessage) {
       _handleGitSyncResult(parsed);
       return;
@@ -602,13 +579,9 @@ class FileService {
     );
   }
 
-  /// Surface a one-shot git op result. Bumping the seq makes each result a
-  /// distinct event so the toaster re-fires even on an identical message — no
-  /// clear-first dance, no coupling to the toaster's de-dup internals.
   void _emitOpFeedback(String message) {
-    _setState(
-      _state.copyWith(gitOpFeedback: message, gitOpFeedbackSeq: ++_gitOpSeq),
-    );
+    if (_disposed) return;
+    _gitOpFeedbackController.add(message);
   }
 
   /// Applies an incremental `tree:update` delta using the same
@@ -1506,7 +1479,8 @@ class FileService {
   /// actually renders rather than sitting on stale or empty content — unlike
   /// [toggleExpanded]'s single directory, nothing else will ever ask for
   /// these. Used to reveal a folder a terminal link pointed at, which —
-  /// unlike a file — has no `selectedFilePath` of its own to make it visible.
+  /// unlike a file — has no `selectedFilePath` of its own to make it visible,
+  /// so it is recorded as [FilesPaneState.revealedDirectoryPath] instead.
   Future<void> revealDirectory(String path) async {
     final segments = path.split('/').where((s) => s.isNotEmpty);
     final expanded = Set<String>.from(_state.expandedPaths);
@@ -1516,7 +1490,14 @@ class FileService {
       acc = acc.isEmpty ? segment : '$acc/$segment';
       if (expanded.add(acc)) newlyExpanded.add(acc);
     }
-    _setState(_state.copyWith(expandedPaths: expanded));
+    _setState(
+      _state.copyWith(
+        expandedPaths: expanded,
+        files: acc.isEmpty
+            ? _state.files.copyWith(clearRevealedDirectoryPath: true)
+            : _state.files.copyWith(revealedDirectoryPath: acc),
+      ),
+    );
     await _fetchChildrenChunked(newlyExpanded);
   }
 
@@ -1526,7 +1507,17 @@ class FileService {
   /// when it doesn't resolve inside this checkout. Only the bridge can answer
   /// this: the app never learns the checkout's absolute root (see
   /// `docs/architecture.md`), so it cannot relativize the path itself.
-  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+  ///
+  /// [terminalId] and [base] come from a bridge-detected path link: the first
+  /// names the terminal whose working directories the path may be relative to,
+  /// the second the one base the detector matched, and the bridge resolves
+  /// against that base alone. Both are omitted for a `file://` link, which the
+  /// bridge resolves against the checkout root only.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(
+    String rawPath, {
+    String? terminalId,
+    String? base,
+  }) {
     final requestId = const Uuid().v4();
     final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
@@ -1539,6 +1530,8 @@ class FileService {
         'projectId': projectId,
         'requestId': requestId,
         'path': rawPath,
+        'terminalId': ?terminalId,
+        'base': ?base,
       }),
     );
     return pending.future;
@@ -1654,6 +1647,7 @@ class FileService {
           searchQuery: searchQuery,
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
+          clearRevealedDirectoryPath: true,
         ),
         expandedPaths: expandedWithAncestors,
       ),
@@ -1790,11 +1784,8 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
   }
 
-  /// Commit whatever is currently staged, with [message]. Result (success or
-  /// error) arrives as git:commit-result and is surfaced via [gitOpFeedback];
-  /// the changed-file list refreshes automatically from the bridge's
-  /// git:status. Which files land in the commit is decided by prior
-  /// [stageFiles]/[unstageFiles] calls, not by this one.
+  /// Commit whatever is currently staged, with [message]. Which files land
+  /// is decided by prior [stageFiles]/[unstageFiles] calls.
   void commit(String message) {
     session.sendForCheckout(
       checkoutId,
@@ -1961,65 +1952,6 @@ class FileService {
     return true;
   }
 
-  bool _stashesRequested = false;
-
-  /// Claims the first-ever stash load for this service's lifetime — same
-  /// contract as [claimHistoryLoad], and for the same reason: `GitPanel`
-  /// calls this on every build, and only the winning call may fire the
-  /// `git:stash-list` send.
-  bool claimStashLoad() {
-    if (_stashesRequested) return false;
-    _stashesRequested = true;
-    return true;
-  }
-
-  /// Fetch every stash in the repository. Called once when the Git tab first
-  /// mounts (via [claimStashLoad]); the agent pushes a fresh list itself after
-  /// every pop and drop, since the list is the only honest record of what is
-  /// left — see [GitPaneState.stashes].
-  void loadStashes() {
-    // Registered on the first ask rather than in the constructor, for the same
-    // reason history is not hydrated at all: a FileService exists whether or
-    // not the Git panel is ever opened. Once the panel HAS asked, the list has
-    // to survive a reconnect — [claimStashLoad] is one-shot for the service's
-    // lifetime and nothing else ever re-reads it, so the banner would go on
-    // offering a stash the agent popped while the socket was down.
-    // Registering IS the first ask — a hydrator fires immediately when the
-    // session is already established and on the next establishment otherwise,
-    // so a separate send here would only double it. Re-registering under the
-    // same key supersedes, so repeat calls are free.
-    session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
-  }
-
-  static const _stashHydratorKey = 'git:stash-list';
-
-  Future<void> _hydrateStashes() => session.sendForCheckout(
-    checkoutId,
-    createAbMessage('git:stash-list', {'projectId': projectId}),
-  );
-
-  /// Reapplies [ref] and drops it on success — the Git panel banner's
-  /// "Restore". Callers on a branch OTHER than the one the stash was made on
-  /// should switch first: a pop is a 3-way merge against the stash's own
-  /// base, and popping onto an unrelated branch invites a conflict that has
-  /// nothing to do with what the user asked for.
-  void restoreStash(String ref) {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('git:stash-pop', {'projectId': projectId, 'ref': ref}),
-    );
-  }
-
-  /// Discards [ref] permanently — the Git panel banner's "Discard". Callers
-  /// must confirm first.
-  void dropStash(String ref) {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('git:stash-drop', {'projectId': projectId, 'ref': ref}),
-    );
-  }
-
-  /// History tab: fetch the first page of commits, replacing whatever was
   /// loaded before. Called once when the tab is first shown.
   void loadHistory() {
     _historyLatch?.settle();
@@ -2348,7 +2280,6 @@ class FileService {
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _subscriptionHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
-    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     _subscriptionSendTimer?.cancel();
     _subscriptionSendTimer = null;
     await _heavySub?.cancel();
@@ -2357,6 +2288,7 @@ class FileService {
     _statusSub = null;
     await _resumeSub?.cancel();
     _resumeSub = null;
+    await _gitOpFeedbackController.close();
     await _stateController.close();
   }
 }

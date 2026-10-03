@@ -9,11 +9,13 @@ void main() {
   late TextEditingController draft;
   late FocusNode focus;
   final sent = <String>[];
+  var direct = 0;
 
   setUp(() {
     draft = TextEditingController();
     focus = FocusNode();
     sent.clear();
+    direct = 0;
   });
   tearDown(() {
     draft.dispose();
@@ -34,6 +36,7 @@ void main() {
                   focusNode: focus,
                   maxLines: maxLines,
                   onSend: sent.add,
+                  onDirectInput: () => direct++,
                 ),
               ),
             ),
@@ -96,4 +99,25 @@ void main() {
       lessThan(100),
     );
   });
+
+  testWidgets(
+    'direct-input key works while empty and is off once typing starts',
+    (tester) async {
+      await pump(tester);
+      final key = find.byTooltip('Type directly in terminal');
+
+      await tester.tap(key);
+      expect(direct, 1);
+
+      draft.text = 'ls';
+      await tester.pump();
+      await tester.tap(key, warnIfMissed: false);
+      expect(direct, 1);
+
+      draft.clear();
+      await tester.pump();
+      await tester.tap(key);
+      expect(direct, 2);
+    },
+  );
 }

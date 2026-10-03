@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TerminalManager, closeTerminalHistoryStore } from "../src/terminal-manager";
@@ -254,4 +254,140 @@ describe("terminal history lifecycle", () => {
       manager.killAll();
     }
   });
+});
+
+describe("link detection policy of a terminal's screen", () => {
+  const ESC = String.fromCharCode(27);
+  const ALT_ON = `${ESC}[?1049h${ESC}[H`;
+
+  // A terminal's cwd is held open on Windows until its process is gone, so the
+  // directory it started in cannot live under the `root` the outer hook removes.
+  let workDir: string;
+
+  /** Records each run's source, the way the host hands them to the frame hub,
+   *  and gives them the checkout root that the host would set. */
+  function linkedManager(): { manager: TerminalManager; screens: Map<string, TerminalFrameSource> } {
+    const screens = new Map<string, TerminalFrameSource>();
+    const manager = new TerminalManager(() => {}, {
+      onRunStarted: (id, _runId, source) => {
+        source.setLinkRoot(workDir);
+        screens.set(id, source);
+      },
+    }, createConnState());
+    return { manager, screens };
+  }
+
+  const hasLink = (screen: TerminalFrameSource): boolean =>
+    screen.capture(performance.now())?.ansi.includes("antgrid-path:") === true;
+
+  /** Re-captures until the stat has landed, or reports false once it is clear none will. */
+  async function linksWithin(screen: TerminalFrameSource, ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      await screen.settle();
+      if (hasLink(screen)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+  }
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "antgrid-tm-links-"));
+    writeFileSync(join(workDir, "top.ts"), "x");
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(workDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch { /* a cwd handle that outlives the process only leaves a temp directory */ }
+  });
+
+  function spawnAs(manager: TerminalManager, terminalId: string, type?: "agent"): void {
+    manager.spawn({
+      terminalId, type, cwd: workDir, rows: SMALL_ROWS, command: process.execPath, args: ["-e", IDLE],
+    });
+  }
+
+  test("only an agent's screen is checked for links while it is on the alternate buffer", async () => {
+    const { manager, screens } = linkedManager();
+    try {
+      spawnAs(manager, "agent", "agent");
+      spawnAs(manager, "plain");
+      await new Promise((resolve) => setTimeout(resolve, CONPTY_STARTUP_MS));
+      for (const screen of screens.values()) {
+        screen.feed("see top.ts");
+        await screen.settle();
+      }
+      // Both detect on the normal buffer, which is what makes the next step a difference.
+      expect(await linksWithin(screens.get("agent")!, 5000)).toBe(true);
+      expect(await linksWithin(screens.get("plain")!, 5000)).toBe(true);
+
+      for (const screen of screens.values()) {
+        screen.feed(`${ALT_ON}see top.ts`);
+        await screen.settle();
+      }
+      expect(await linksWithin(screens.get("agent")!, 5000)).toBe(true);
+      expect(await linksWithin(screens.get("plain")!, 600)).toBe(false);
+    } finally {
+      manager.killAll();
+    }
+  }, 30000);
+
+  test("a screen resolves relative paths against the directory its terminal started in", async () => {
+    const { manager, screens } = linkedManager();
+    try {
+      spawnAs(manager, "plain");
+      expect(screens.get("plain")!.linkBases().spawnCwd).toBe(workDir);
+    } finally {
+      manager.killAll();
+    }
+  });
+
+  test("the saved final screen carries no bridge-minted links", async () => {
+    const { manager, screens } = linkedManager();
+    try {
+      spawnAs(manager, "plain");
+      await new Promise((resolve) => setTimeout(resolve, CONPTY_STARTUP_MS));
+      const screen = screens.get("plain")!;
+      screen.feed("see top.ts");
+      await screen.settle();
+      expect(await linksWithin(screen, 5000)).toBe(true);
+
+      manager.kill("plain");
+      const reader = openReader();
+      const saved = await waitFor(() => reader.latestFinal("default", "plain")?.frame, 15000);
+
+      expect(saved?.ansi).toContain("top.ts");
+      expect(saved?.ansi).not.toContain("antgrid-path:");
+    } finally {
+      manager.killAll();
+    }
+  }, 30000);
+
+  test("a restored screen is checked on the normal buffer only", async () => {
+    const { manager, screens } = linkedManager();
+    try {
+      spawnAs(manager, "normal");
+      spawnAs(manager, "alt");
+      await new Promise((resolve) => setTimeout(resolve, CONPTY_STARTUP_MS));
+      screens.get("normal")!.feed("see top.ts");
+      screens.get("alt")!.feed(`${ALT_ON}see top.ts`);
+      for (const screen of screens.values()) await screen.settle();
+      manager.kill("normal");
+      manager.kill("alt");
+      const reader = openReader();
+      await waitFor(() => reader.latestFinal("default", "normal")?.frame, 15000);
+      await waitFor(() => reader.latestFinal("default", "alt")?.frame, 15000);
+      await waitFor(() => (manager.runId("normal") === undefined && manager.runId("alt") === undefined) || undefined, 15000);
+      screens.clear();
+
+      await manager.restoreArchivedTerminal("normal");
+      await manager.restoreArchivedTerminal("alt");
+
+      expect(await linksWithin(screens.get("normal")!, 5000)).toBe(true);
+      expect(await linksWithin(screens.get("alt")!, 600)).toBe(false);
+    } finally {
+      manager.killAll();
+    }
+  }, 40000);
 });

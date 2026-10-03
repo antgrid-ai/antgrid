@@ -260,8 +260,6 @@ class TerminalState {
   final int gitBehind;
   final List<String> gitBranches;
   final bool gitBranchesLoading;
-  final String? gitBranchesError;
-  final String? gitCheckoutError;
   final bool? needsFirstRun;
 
   /// Per-terminal attach stage, recomputed by `TerminalService._setState` on
@@ -290,8 +288,6 @@ class TerminalState {
     this.gitBehind = 0,
     this.gitBranches = const [],
     this.gitBranchesLoading = false,
-    this.gitBranchesError,
-    this.gitCheckoutError,
     this.needsFirstRun,
     this.hydration = const {},
     this.attach = CheckoutAttachStatus.unknown,
@@ -322,10 +318,6 @@ class TerminalState {
     int? gitBehind,
     List<String>? gitBranches,
     bool? gitBranchesLoading,
-    String? gitBranchesError,
-    bool clearGitBranchesError = false,
-    String? gitCheckoutError,
-    bool clearGitCheckoutError = false,
     bool clearActiveTerminal = false,
     bool? needsFirstRun,
     Map<String, TerminalHydration>? hydration,
@@ -346,12 +338,6 @@ class TerminalState {
       gitBehind: gitBehind ?? this.gitBehind,
       gitBranches: gitBranches ?? this.gitBranches,
       gitBranchesLoading: gitBranchesLoading ?? this.gitBranchesLoading,
-      gitBranchesError: clearGitBranchesError
-          ? null
-          : (gitBranchesError ?? this.gitBranchesError),
-      gitCheckoutError: clearGitCheckoutError
-          ? null
-          : (gitCheckoutError ?? this.gitCheckoutError),
       needsFirstRun: needsFirstRun ?? this.needsFirstRun,
       hydration: hydration ?? this.hydration,
       attach: attach ?? this.attach,

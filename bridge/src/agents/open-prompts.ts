@@ -55,6 +55,13 @@ export class OpenAgentPrompts {
     return false;
   }
 
+  /** Is ANY prompt on screen for [terminalId]? Safe only for a check that keeps
+   *  a block alive; a yes here must never silence a push, which is {@link has},
+   *  keyed by tool. */
+  hasAny(terminalId: string): boolean {
+    return this.byTerminal.has(terminalId);
+  }
+
   /** Everything the slot was displaying is gone — its turn ended, or the
    *  terminal did. A prompt cannot outlive its turn, and a slot id is reused by
    *  a same-id restart, so a stale entry would silence the next run's blocks. */
