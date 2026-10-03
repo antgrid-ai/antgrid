@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
@@ -22,6 +23,8 @@ class FileFindSuperseded implements Exception {
   @override
   String toString() => 'A newer file:find superseded this one.';
 }
+
+typedef _ParentDelta = ({Set<String> removed, List<FileNode> upserts});
 
 /// Per-project file tree + git status + viewing-file service.
 ///
@@ -354,8 +357,7 @@ class FileService {
   /// Shallowest-first, so a chunk's replies can be placed under parents that
   /// are already on the spine — see [_handleChildrenMessage].
   Future<void> _fetchChildrenChunked(Iterable<String> paths) {
-    final ordered = paths.toSet().toList()
-      ..sort((a, b) => _depthOf(a).compareTo(_depthOf(b)));
+    final ordered = _shallowestFirst(paths.toSet(), (p) => p);
     if (ordered.isEmpty) return Future.value();
     _markLoading(ordered);
     // Claimed when the request is ISSUED, not when the reply is applied —
@@ -375,7 +377,26 @@ class FileService {
     return Future.wait(sends);
   }
 
-  int _depthOf(String path) => path.isEmpty ? 0 : path.split('/').length;
+  static const int _slash = 0x2F;
+
+  static int _depthOf(String path) {
+    if (path.isEmpty) return 0;
+    var depth = 1;
+    for (var i = 0; i < path.length; i++) {
+      if (path.codeUnitAt(i) == _slash) depth++;
+    }
+    return depth;
+  }
+
+  static List<T> _shallowestFirst<T>(
+    Iterable<T> items,
+    String Function(T item) pathOf,
+  ) {
+    final keyed = [
+      for (final item in items) (depth: _depthOf(pathOf(item)), item: item),
+    ]..sort((a, b) => a.depth.compareTo(b.depth));
+    return [for (final k in keyed) k.item];
+  }
 
   /// Marks every directory about to be listed as pending, so the tree's
   /// loading row covers the expanded-set restore, reveal, select and the
@@ -417,7 +438,46 @@ class FileService {
     _stateController.add(state);
   }
 
+  // Each tier delivers every frame for this checkout, and parseAbMessage
+  // builds the whole payload (a children batch can be thousands of nodes)
+  // before a branch could reject it. A type a branch acts on but its set omits
+  // is dropped without a trace, so sets and branches change together.
+  //
+  // `file:content` and `file:find-result` are in both sets because
+  // classifyAbMessage moves an error-bearing frame to status whatever its
+  // type.
+  //
+  // `tree:full` is deliberately in neither set: an old bridge's
+  // watcher-overflow resend (superseded by `file:tree:invalidated`, see
+  // [_handleInvalidated]) is dropped unparsed, a harmless no-op.
+  static const Set<String> _handledHeavyTypes = {
+    'file:tree:unchanged',
+    'file:tree:children',
+    'file:tree:invalidated',
+    'tree:update',
+    'file:content',
+    'file:resolve-path-result',
+    'file:find-result',
+  };
+
+  static const Set<String> _handledStatusTypes = {
+    'file:content',
+    'file:find-result',
+    'git:status',
+    'git:diff-content',
+    'git:commit-result',
+    'git:discard-result',
+    'git:stage-result',
+    'git:unstage-result',
+    'git:sync-result',
+    'git:sync-state',
+    'git:log-result',
+    'git:commit-files-result',
+    'git:commit-diff-content',
+  };
+
   void _onHeavyJson(Map<String, dynamic> json) {
+    if (!_handledHeavyTypes.contains(json['type'])) return;
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeUnchangedMessage) {
@@ -460,9 +520,6 @@ class FileService {
       }
       return;
     }
-    // `tree:full` has no handler: an old bridge's watcher-overflow resend
-    // (superseded by `file:tree:invalidated`, see [_handleInvalidated]) falls
-    // through every branch here and is a harmless no-op, not an exception.
     if (parsed is FileContentMessage) {
       _handleFileContent(parsed);
       return;
@@ -475,6 +532,7 @@ class FileService {
   }
 
   void _onStatusJson(Map<String, dynamic> json) {
+    if (!_handledStatusTypes.contains(json['type'])) return;
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     // An error-bearing file:content is coerced onto this tier by
@@ -584,43 +642,13 @@ class FileService {
     _gitOpFeedbackController.add(message);
   }
 
-  /// Applies an incremental `tree:update` delta using the same
-  /// identity-preserving spine copy [_handleChildrenMessage] uses — see
-  /// [_updateAt]. A delta into a directory this app has never fetched has
-  /// nothing to insert INTO (dropped); a delta into one whose listing was
-  /// TRUNCATED cannot be inserted locally either — `children` there is an
-  /// ordered PREFIX, and there is no way to know whether the changed node
-  /// belongs inside that prefix or past the cut the bridge already made — so
-  /// that directory is queued for [_fetchChildrenChunked] instead.
+  /// Applies a `tree:update` frame via [applyTreeDelta], then raises the open
+  /// file's changed-on-disk flag and dispatches any re-list.
   void _applyTreeUpdate(TreeUpdateMessage msg) {
     final currentRoot = _state.root;
     if (currentRoot == null) return;
 
-    var root = currentRoot;
-    final relist = <String>{};
-
-    for (final removedPath in msg.removed) {
-      root = _applyToParent(root, removedPath, relist, (parent) {
-        final children = parent.children
-            .where((c) => c.path != removedPath)
-            .toList();
-        return _rebuild(parent, children: children);
-      });
-    }
-
-    for (final node in [...msg.added, ...msg.modified]) {
-      root = _applyToParent(root, node.path, relist, (parent) {
-        FileNode? prior;
-        for (final child in parent.children) {
-          if (child.path == node.path) prior = child;
-        }
-        final children = _sorted([
-          ...parent.children.where((c) => c.path != node.path),
-          _deltaNode(node, prior),
-        ]);
-        return _rebuild(parent, children: children);
-      });
-    }
+    final (:root, :relist) = applyTreeDelta(currentRoot, msg);
 
     final viewingModified =
         _state.files.selectedFilePath != null &&
@@ -646,6 +674,70 @@ class FileService {
     }
   }
 
+  static String _parentPathOf(String path) {
+    final cut = path.lastIndexOf('/');
+    return cut < 0 ? '' : path.substring(0, cut);
+  }
+
+  /// Applies one `tree:update` frame to [root] with the identity-preserving
+  /// spine copy [_handleChildrenMessage] uses — see [_updateAt]. A delta into
+  /// a directory this app has never fetched has nothing to insert INTO
+  /// (dropped); a delta into one whose listing was TRUNCATED cannot be
+  /// inserted locally either — `children` there is an ordered PREFIX, and
+  /// there is no way to know whether the changed node belongs inside that
+  /// prefix or past the cut the bridge already made — so that directory is
+  /// returned in `relist` for [_fetchChildrenChunked] instead.
+  ///
+  /// Entries are grouped by parent, so a frame of K entries into one
+  /// directory spine-copies and sorts it once, not K times. Parents are
+  /// applied shallowest first, so an entry that removes or replaces a
+  /// directory lands before entries inside it are routed, and those entries
+  /// see it gone or unloaded.
+  ///
+  /// Static and pure so tests can count the work a frame does.
+  @visibleForTesting
+  static ({FileNode root, Set<String> relist}) applyTreeDelta(
+    FileNode root,
+    TreeUpdateMessage msg,
+  ) {
+    final byParent = <String, _ParentDelta>{};
+    _ParentDelta deltaFor(String path) => byParent.putIfAbsent(
+      _parentPathOf(path),
+      () => (removed: <String>{}, upserts: <FileNode>[]),
+    );
+    for (final removedPath in msg.removed) {
+      deltaFor(removedPath).removed.add(removedPath);
+    }
+    for (final node in msg.added) {
+      deltaFor(node.path).upserts.add(node);
+    }
+    for (final node in msg.modified) {
+      deltaFor(node.path).upserts.add(node);
+    }
+
+    var next = root;
+    final relist = <String>{};
+    for (final parentPath in _shallowestFirst(byParent.keys, (p) => p)) {
+      final delta = byParent[parentPath]!;
+      next = _applyToParent(
+        root,
+        next,
+        parentPath,
+        relist,
+        (parent) => _rebuild(
+          parent,
+          children: applyChildrenDelta(
+            parent.children,
+            removed: delta.removed,
+            upserts: delta.upserts,
+            reconcile: _deltaNode,
+          ),
+        ),
+      );
+    }
+    return (root: next, relist: relist);
+  }
+
   /// Reconciles one `tree:update` entry with what the app already holds at
   /// that path.
   ///
@@ -656,7 +748,7 @@ class FileService {
   /// means the bridge listed it" rule reads it as an authoritative empty and
   /// blanks whatever was expanded there. Neither the carried-over state nor
   /// the unloaded fallback can be wrong: the bridge did not look inside.
-  FileNode _deltaNode(FileNode node, FileNode? prior) {
+  static FileNode _deltaNode(FileNode node, FileNode? prior) {
     if (node.type != FileNodeType.directory) return node;
     if (prior == null || prior.type != FileNodeType.directory) {
       return _rebuild(node, children: const [], childrenLoaded: false);
@@ -670,23 +762,39 @@ class FileService {
     );
   }
 
-  /// Routes one `tree:update` entry (add/modify/remove, named by
-  /// [targetPath]) to its parent directory and applies [edit] to it — or, if
-  /// the parent is not loaded or is truncated, leaves [root] untouched (and
-  /// for a truncated parent, records it in [relist]). See
-  /// [_applyTreeUpdate]'s doc for why those two cases cannot apply locally.
-  FileNode _applyToParent(
+  /// Edits the directory at [parentPath] with [edit] — or, if it is not
+  /// loaded or is truncated, leaves [root] untouched (and for a truncated
+  /// one, records it in [relist]). See [applyTreeDelta]'s doc for why those
+  /// two cases cannot apply locally. [before] is the tree as it was before
+  /// this frame; [root] is that tree as already edited by shallower parents.
+  static FileNode _applyToParent(
+    FileNode before,
     FileNode root,
-    String targetPath,
+    String parentPath,
     Set<String> relist,
     FileNode Function(FileNode parent) edit,
   ) {
-    final parts = targetPath.split('/');
-    final parentPath = parts.length <= 1
-        ? ''
-        : parts.sublist(0, parts.length - 1).join('/');
     final parent = _findNode(root, parentPath);
-    if (parent == null || !parent.childrenLoaded) return root;
+    // A delta routes only into a directory. A path this frame turned into a
+    // file has nothing to insert into.
+    if (parent == null || parent.type != FileNodeType.directory) return root;
+    if (!parent.childrenLoaded) {
+      // Unloaded now but a loaded, truncated listing before this frame means
+      // the frame removed and recreated it (a directory entry with no
+      // directory prior lands unloaded; see [_deltaNode]). Its entries would
+      // have forced a re-list of the old one, and dropping them silently
+      // leaves a directory the user may have open rendering empty, with
+      // nothing to retry from.
+      final prior = _findNode(before, parentPath);
+      if (prior != null &&
+          prior.type == FileNodeType.directory &&
+          prior.childrenLoaded &&
+          prior.truncated &&
+          !prior.childrenLoading) {
+        relist.add(parentPath);
+      }
+      return root;
+    }
     if (parent.truncated) {
       // A re-list already in flight covers every delta that lands while it
       // is out — without this a directory under a build's churn re-lists up
@@ -699,7 +807,7 @@ class FileService {
   }
 
   /// Read-only lookup by path — the root's own path is `''`.
-  FileNode? _findNode(FileNode node, String path) {
+  static FileNode? _findNode(FileNode node, String path) {
     if (node.path == path) return node;
     if (node.type != FileNodeType.directory) return null;
     for (final child in node.children) {
@@ -720,7 +828,7 @@ class FileService {
   /// "drop a delta into an unloaded directory" contract [_applyToParent]
   /// relies on for the shallower unloaded-parent case, and load-bearing on
   /// its own wherever a caller passes a path with no live caller-side check.
-  FileNode _updateAt(
+  static FileNode _updateAt(
     FileNode root,
     String dirPath,
     FileNode Function(FileNode dir) fn,
@@ -745,7 +853,7 @@ class FileService {
   /// carried over unchanged. The one node constructor every spine-copy site
   /// below goes through, so a field added to [FileNode] only has to be
   /// threaded here.
-  FileNode _rebuild(
+  static FileNode _rebuild(
     FileNode node, {
     List<FileNode>? children,
     bool? truncated,
@@ -763,22 +871,6 @@ class FileService {
     childrenLoading: childrenLoading ?? node.childrenLoading,
     ignored: node.ignored,
   );
-
-  List<FileNode> _sorted(List<FileNode> nodes) {
-    final sorted = List<FileNode>.of(nodes);
-    sorted.sort((a, b) {
-      if (a.type == FileNodeType.directory &&
-          b.type != FileNodeType.directory) {
-        return -1;
-      }
-      if (a.type != FileNodeType.directory &&
-          b.type == FileNodeType.directory) {
-        return 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return sorted;
-  }
 
   Timer? _subscriptionSendTimer;
 
@@ -923,13 +1015,19 @@ class FileService {
     // descendants stay claimed and must — re-expanding re-lists depth 1 only
     // and `_carryLoaded` carries the stale subtree back in) are what should
     // go first.
-    final paths = _loadedDirectoryPaths().toList()
-      ..sort((a, b) {
-        final byVisibility =
-            (expanded.contains(a) ? 0 : 1) - (expanded.contains(b) ? 0 : 1);
+    final keyed = [
+      for (final path in _loadedDirectoryPaths())
+        (
+          visibleRank: expanded.contains(path) ? 0 : 1,
+          depth: _depthOf(path),
+          path: path,
+        ),
+    ]..sort((a, b) {
+        final byVisibility = a.visibleRank - b.visibleRank;
         if (byVisibility != 0) return byVisibility;
-        return _depthOf(a).compareTo(_depthOf(b));
+        return a.depth.compareTo(b.depth);
       });
+    final paths = [for (final k in keyed) k.path];
     final capped = paths.length > _maxSubscribedPaths
         ? paths.sublist(0, _maxSubscribedPaths)
         : paths;
@@ -960,8 +1058,7 @@ class FileService {
     // only be placed under a parent already on the spine, so applying a
     // child's listing before its parent's is the one order guaranteed to
     // lose it.
-    final ordered = msg.listings.toList()
-      ..sort((a, b) => _depthOf(a.path).compareTo(_depthOf(b.path)));
+    final ordered = _shallowestFirst(msg.listings, (l) => l.path);
 
     var root = _state.root;
     for (final listing in ordered) {
@@ -1014,7 +1111,7 @@ class FileService {
         name: root?.name ?? '',
         path: '',
         type: FileNodeType.directory,
-        children: _sorted(_carryLoaded(listing.children, root)),
+        children: sortFileNodes(_carryLoaded(listing.children, root)),
         truncated: listing.truncated,
         childrenLoaded: true,
         childrenLoading: false,
@@ -1027,7 +1124,7 @@ class FileService {
       listing.path,
       (dir) => _rebuild(
         dir,
-        children: _sorted(_carryLoaded(listing.children, dir)),
+        children: sortFileNodes(_carryLoaded(listing.children, dir)),
         truncated: listing.truncated,
         childrenLoaded: true,
         childrenLoading: false,

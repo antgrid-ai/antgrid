@@ -1,5 +1,9 @@
+import 'dart:math';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/file_tree_models.dart';
+
+import '../helpers/counting_file_node.dart';
 
 void main() {
   group('FileNodeType', () {
@@ -185,6 +189,184 @@ void main() {
         'beta.ts',
         'zebra.ts',
       ]);
+    });
+  });
+
+  group('sortFileNodes and applyChildrenDelta', () {
+    List<CountingFileNode> counting(int n) => [
+      for (var i = 0; i < n; i++)
+        CountingFileNode('f${i.toString().padLeft(3, '0')}.txt'),
+    ];
+
+    test(
+      'applyChildrenDelta rewrites entries that keep their position without reading any untouched sibling',
+      () {
+        final children = counting(300);
+        for (final c in children) {
+          c.nameReads = 0;
+        }
+        final upserts = [
+          for (var i = 0; i < 300; i += 12)
+            FileNode(
+              name: children[i].path,
+              path: children[i].path,
+              type: FileNodeType.file,
+              size: 99,
+            ),
+        ];
+        expect(upserts, hasLength(25));
+        final result = applyChildrenDelta(
+          children,
+          removed: {},
+          upserts: upserts,
+          reconcile: (incoming, prior) => incoming,
+        );
+        final upsertedPaths = {for (final u in upserts) u.path};
+        for (var i = 0; i < 300; i++) {
+          if (upsertedPaths.contains(children[i].path)) {
+            expect(result[i].size, 99);
+            expect(identical(result[i], children[i]), isFalse);
+          } else {
+            expect(children[i].nameReads, 0);
+            expect(identical(result[i], children[i]), isTrue);
+          }
+        }
+        expect(
+          result.map((c) => c.path),
+          children.map((c) => c.path),
+        );
+      },
+    );
+
+    test('applyChildrenDelta sorts a directory once for a whole frame of additions', () {
+      final children = <CountingFileNode>[
+        for (var i = 0; i < 100; i++)
+          CountingFileNode(
+            'd${i.toString().padLeft(3, '0')}',
+            type: FileNodeType.directory,
+          ),
+        for (var i = 0; i < 200; i++)
+          CountingFileNode('f${i.toString().padLeft(3, '0')}.txt'),
+      ];
+      for (final c in children) {
+        c.nameReads = 0;
+      }
+      final added = <FileNode>[
+        for (var i = 0; i < 25; i++)
+          FileNode(
+            name: 'f${(i * 8).toString().padLeft(3, '0')}a.txt',
+            path: 'f${(i * 8).toString().padLeft(3, '0')}a.txt',
+            type: FileNodeType.file,
+          ),
+      ];
+      final result = applyChildrenDelta(
+        children,
+        removed: {},
+        upserts: added,
+        reconcile: (incoming, prior) => incoming,
+      );
+      for (final c in children) {
+        expect(c.nameReads, lessThanOrEqualTo(1));
+      }
+      final all = [...children, ...added];
+      final expected = [...all]
+        ..sort((a, b) {
+          final ad = a.type == FileNodeType.directory ? 0 : 1;
+          final bd = b.type == FileNodeType.directory ? 0 : 1;
+          if (ad != bd) return ad - bd;
+          return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+        });
+      expect(
+        result.map((c) => c.path),
+        expected.map((c) => c.path),
+      );
+    });
+
+    test('names equal ignoring case sort lowercase first whatever order they arrive in', () {
+      List<Map<String, dynamic>> twins(List<String> names) => [
+        for (final n in names) {'name': n, 'path': n, 'type': 'file'},
+      ];
+      List<String> childNames(List<String> names) => FileNode.fromJson({
+        'name': 'root',
+        'path': '',
+        'type': 'directory',
+        'children': twins(names),
+      })!.children.map((c) => c.name).toList();
+      expect(childNames(['README.md', 'readme.md']), ['readme.md', 'README.md']);
+      expect(childNames(['readme.md', 'README.md']), ['readme.md', 'README.md']);
+
+      final nodes = <FileNode>[
+        for (var i = 0; i < 34; i++)
+          FileNode(
+            name: 'n${i.toString().padLeft(2, '0')}.txt',
+            path: 'n${i.toString().padLeft(2, '0')}.txt',
+            type: FileNodeType.file,
+          ),
+        for (final n in ['Alpha', 'alpha'])
+          FileNode(name: n, path: n, type: FileNodeType.directory),
+        for (final n in ['README.md', 'readme.md', 'Readme.md', 'ReadMe.md'])
+          FileNode(name: n, path: n, type: FileNodeType.file),
+      ];
+      List<String>? first;
+      for (final seed in [1, 2, 3, 4, 5]) {
+        final shuffled = [...nodes]..shuffle(Random(seed));
+        final paths = sortFileNodes(shuffled).map((c) => c.path).toList();
+        first ??= paths;
+        expect(paths, first);
+      }
+      expect(first!.take(2), ['alpha', 'Alpha']);
+      expect(first.indexOf('readme.md'), lessThan(first.indexOf('README.md')));
+      expect(first.indexOf('readme.md'), lessThan(first.indexOf('Readme.md')));
+    });
+
+    test('applyChildrenDelta reconciles each upsert against the entry it replaces', () {
+      FileNode file(String p, {int? size}) =>
+          FileNode(name: p, path: p, type: FileNodeType.file, size: size);
+      final children = [file('a'), file('b'), file('c')];
+      final calls = <(String, FileNode?)>[];
+      FileNode record(FileNode incoming, FileNode? prior) {
+        calls.add((incoming.path, prior));
+        return FileNode(
+          name: incoming.name,
+          path: incoming.path,
+          type: incoming.type,
+          size: (prior?.size ?? 0) + 1,
+        );
+      }
+
+      final result = applyChildrenDelta(
+        children,
+        removed: {'a', 'zzz'},
+        upserts: [file('a'), file('b'), file('b'), file('x')],
+        reconcile: record,
+      );
+      expect(calls[0], ('a', null));
+      expect(calls[1].$1, 'b');
+      expect(identical(calls[1].$2, children[1]), isTrue);
+      expect(calls[2].$1, 'b');
+      expect(calls[2].$2!.size, 1);
+      expect(calls[3], ('x', null));
+      expect(result.map((c) => c.path), ['a', 'b', 'c', 'x']);
+      expect(result.where((c) => c.path == 'b'), hasLength(1));
+      expect(result.firstWhere((c) => c.path == 'b').size, 2);
+
+      final untouched = applyChildrenDelta(
+        children,
+        removed: {'nope'},
+        upserts: const [],
+        reconcile: record,
+      );
+      expect(untouched.map((c) => c.path), ['a', 'b', 'c']);
+
+      final retyped = applyChildrenDelta(
+        children,
+        removed: {},
+        upserts: [
+          const FileNode(name: 'c', path: 'c', type: FileNodeType.directory),
+        ],
+        reconcile: (incoming, prior) => incoming,
+      );
+      expect(retyped.map((c) => c.path), ['c', 'a', 'b']);
     });
   });
 
