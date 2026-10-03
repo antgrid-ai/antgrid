@@ -27,8 +27,24 @@ class SearchResultList extends StatefulWidget {
 class _SearchResultListState extends State<SearchResultList> {
   final Set<String> _collapsedFiles = {};
 
+  // The flat rows depend only on the results list and which files are
+  // collapsed, so a parent rebuild must not reallocate one item per match.
+  List<_ResultRow> _rows = const [];
+  List<SearchFileGroup>? _rowsSource;
+  int _collapseVersion = 0;
+  int _rowsVersion = -1;
+
   @override
-  Widget build(BuildContext context) {
+  void reassemble() {
+    super.reassemble();
+    _rowsSource = null;
+  }
+
+  List<_ResultRow> _flatRows() {
+    if (identical(widget.results, _rowsSource) &&
+        _rowsVersion == _collapseVersion) {
+      return _rows;
+    }
     final rows = <_ResultRow>[];
     for (final group in widget.results) {
       rows.add(_HeaderItem(group));
@@ -37,6 +53,14 @@ class _SearchResultListState extends State<SearchResultList> {
         rows.add(_MatchItem(group, match));
       }
     }
+    _rowsSource = widget.results;
+    _rowsVersion = _collapseVersion;
+    return _rows = rows;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = _flatRows();
     final highlightQuery = widget.caseSensitive
         ? widget.query
         : widget.query.toLowerCase();
@@ -64,6 +88,7 @@ class _SearchResultListState extends State<SearchResultList> {
     return GestureDetector(
       onTap: () {
         setState(() {
+          _collapseVersion++;
           if (isCollapsed) {
             _collapsedFiles.remove(group.path);
           } else {

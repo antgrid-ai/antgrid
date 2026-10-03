@@ -63,7 +63,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
   // item's stream reuses its split and its encode instead of redoing them every
   // frame. JSON is keyed by label and hits only on the identical value.
   final _terminalCache =
-      <ToolContent, ({bool showAll, int lineCount, String visible})>{};
+      <ToolContent, ({bool showAll, int lineCount, bool truncated, String visible})>{};
   final _jsonCache = <String, ({Object value, String pretty})>{};
 
   @override
@@ -249,7 +249,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
   // Visible tail = exactly what the widget renders; drives both the on-screen
   // Text and the copy source so selection copy and the screen stay in lockstep.
-  ({bool showAll, int lineCount, String visible}) _terminalTail(
+  ({bool showAll, int lineCount, bool truncated, String visible}) _terminalTail(
     ToolContent block,
   ) {
     final hit = _terminalCache[block];
@@ -260,6 +260,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
     return _terminalCache[block] = (
       showAll: _showAllOutput,
       lineCount: lines.length,
+      truncated: truncated,
       visible: truncated
           ? lines.sublist(lines.length - _kTerminalTailLines).join('\n')
           : data,
@@ -268,7 +269,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
   Widget _terminal(ToolContent block, AbColors c) {
     final tail = _terminalTail(block);
-    final truncated = !_showAllOutput && tail.lineCount > _kTerminalTailLines;
+    final truncated = tail.truncated;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

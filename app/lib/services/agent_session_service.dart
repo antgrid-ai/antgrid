@@ -171,6 +171,23 @@ class AgentSessionService {
 
   int _collectionCopies = 0;
 
+  // Counted in debug builds only; the counter exists for tests.
+  List<T> _copyList<T>(Iterable<T> source) {
+    assert(() {
+      _collectionCopies++;
+      return true;
+    }());
+    return List<T>.of(source);
+  }
+
+  Map<String, AgentTokenUsage> _copyUsage(Map<String, AgentTokenUsage> source) {
+    assert(() {
+      _collectionCopies++;
+      return true;
+    }());
+    return {...source};
+  }
+
   /// How many fresh copies of an existing turn list, a turn's item list or a
   /// usageByItem map have been made, so tests can pin how much one frame or one
   /// batch rewrites.
@@ -376,11 +393,7 @@ class AgentSessionService {
     }
   }
 
-  // Both project-wide tiers deliver every checkout's tree, git and terminal
-  // traffic here, and parseAbMessage builds the whole payload before an arm
-  // could reject it. A type an arm acts on but this set omits is dropped
-  // without a trace, so the set and the arms change together. agent:error is
-  // absent because no arm reads it.
+  // agent:error is absent because no arm reads it.
   static const Set<String> _handledTypes = {
     'agent:transcript-replay',
     'agent:turn-start',
@@ -402,8 +415,8 @@ class AgentSessionService {
 
   void _onJson(Map<String, dynamic> json) {
     if (_disposed) return;
-    if (!_handledTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledTypes);
+    if (parsed == null) return;
     if (parsed is AgentTranscriptReplay) {
       _folded(
         parsed.sessionId,
@@ -540,13 +553,6 @@ class AgentSessionService {
     }
   }
 
-  static int _lastIndexOfTurn(List<AgentTurn> turns, String turnId) {
-    for (var i = turns.length - 1; i >= 0; i--) {
-      if (turns[i].turnId == turnId) return i;
-    }
-    return -1;
-  }
-
   // Searches from the end because the turn a live frame names is almost always
   // the last one; turn ids are unique per session because every append checks
   // for the id first, so the direction never changes which turn is found.
@@ -557,7 +563,7 @@ class AgentSessionService {
       final i = fold.turnAt[turnId];
       return i == null ? null : turns[i];
     }
-    final i = _lastIndexOfTurn(turns, turnId);
+    final i = turns.lastIndexWhere((t) => t.turnId == turnId);
     return i < 0 ? null : turns[i];
   }
 
@@ -566,8 +572,7 @@ class AgentSessionService {
     if (fold == null) return null;
     final current = stateFor(sessionId).turns;
     if (identical(fold.turns, current)) return fold.turns;
-    _collectionCopies++;
-    final owned = List<AgentTurn>.of(current);
+    final owned = _copyList(current);
     fold.turnAt.clear();
     for (var i = 0; i < owned.length; i++) {
       fold.turnAt.putIfAbsent(owned[i].turnId, () => i);
@@ -583,9 +588,8 @@ class AgentSessionService {
       if (i != null) owned[i] = updated;
       return owned;
     }
-    _collectionCopies++;
-    final next = List<AgentTurn>.of(stateFor(sessionId).turns);
-    final i = _lastIndexOfTurn(next, updated.turnId);
+    final next = _copyList(stateFor(sessionId).turns);
+    final i = next.lastIndexWhere((t) => t.turnId == updated.turnId);
     if (i >= 0) next[i] = updated;
     return next;
   }
@@ -596,8 +600,7 @@ class AgentSessionService {
   List<AgentTurn> _appendTurn(String sessionId, AgentTurn turn) {
     final owned = _ownTurns(sessionId);
     if (owned == null) {
-      _collectionCopies++;
-      return [...stateFor(sessionId).turns, turn];
+      return _copyList(stateFor(sessionId).turns)..add(turn);
     }
     _folds[sessionId]!.turnAt.putIfAbsent(turn.turnId, () => owned.length);
     owned.add(turn);
@@ -609,8 +612,7 @@ class AgentSessionService {
     if (fold == null) return null;
     final held = fold.items[turn.turnId];
     if (held != null && identical(held.list, turn.items)) return held;
-    _collectionCopies++;
-    final list = List<AgentItem>.of(turn.items);
+    final list = _copyList(turn.items);
     final at = <String, int>{};
     for (var i = 0; i < list.length; i++) {
       at.putIfAbsent(list[i].itemId, () => i);
@@ -626,12 +628,10 @@ class AgentSessionService {
     final current = stateFor(sessionId).usageByItem;
     final fold = _folds[sessionId];
     if (fold == null) {
-      _collectionCopies++;
-      return {...current, itemId: usage};
+      return _copyUsage(current)..[itemId] = usage;
     }
     if (!identical(fold.usageByItem, current)) {
-      _collectionCopies++;
-      fold.usageByItem = {...current};
+      fold.usageByItem = _copyUsage(current);
     }
     fold.usageByItem![itemId] = usage;
     return fold.usageByItem!;
@@ -665,8 +665,7 @@ class AgentSessionService {
       items = owned.list;
       idx = owned.at[item.itemId] ?? -1;
     } else {
-      _collectionCopies++;
-      items = List<AgentItem>.from(turn.items);
+      items = _copyList(turn.items);
       idx = items.indexWhere((i) => i.itemId == item.itemId);
     }
     if (idx >= 0) {
@@ -723,10 +722,11 @@ class AgentSessionService {
       final sessionId = entry.key;
       final dirty = entry.value;
       if (dirty.isEmpty) continue;
-      _collectionCopies++;
-      final turns = stateFor(sessionId).turns
-          .map((turn) => _withBuffered(sessionId, turn, dirty))
-          .toList();
+      final turns = _copyList(
+        stateFor(sessionId).turns.map(
+          (turn) => _withBuffered(sessionId, turn, dirty),
+        ),
+      );
       _setState(sessionId, stateFor(sessionId).copyWith(turns: turns));
     }
   }
@@ -743,10 +743,7 @@ class AgentSessionService {
       final buf = _deltaBuffers[key];
       final term = buf == null ? _terminalBuffers[key] : null;
       if (buf == null && term == null) continue;
-      if (items == null) {
-        _collectionCopies++;
-        items = List<AgentItem>.of(turn.items);
-      }
+      items ??= _copyList(turn.items);
       items[i] = buf != null
           ? item.copyWith(text: buf.toString())
           : item.copyWith(content: _withTerminalData(item, term!.toString()));

@@ -59,14 +59,32 @@ const int _historyRenderMaxLines = 6000;
 /// blanks go -- a trailing block the TUI painted is content, not padding.
 @visibleForTesting
 Uint8List encodeTerminalHistoryRows(List<TerminalHistoryRow> rows) {
-  final buffer = StringBuffer();
-  for (var i = 0; i < rows.length; i++) {
-    final row = rows[i];
-    if (i > 0 && !row.wrapped) buffer.write('\r\n');
-    final endsLine = i == rows.length - 1 || !rows[i + 1].wrapped;
-    _writeRow(buffer, row, endsLine: endsLine);
+  final out = BytesBuilder(copy: false);
+  for (final (:startsLine, :bytes) in _encodedRows(rows)) {
+    if (startsLine) out.add(_crlf);
+    out.add(bytes);
   }
-  return Uint8List.fromList(utf8.encode(buffer.toString()));
+  return out.takeBytes();
+}
+
+/// Each row's bytes, flagged when a line break belongs before it. The one place
+/// the logical-line join rules live, so the encoder and the measurer cannot
+/// disagree about what the engine is fed.
+Iterable<({bool startsLine, Uint8List bytes})> _encodedRows(
+  List<TerminalHistoryRow> rows,
+) sync* {
+  for (var i = 0; i < rows.length; i++) {
+    final buffer = StringBuffer();
+    _writeRow(
+      buffer,
+      rows[i],
+      endsLine: i == rows.length - 1 || !rows[i + 1].wrapped,
+    );
+    yield (
+      startsLine: i > 0 && !rows[i].wrapped,
+      bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
+    );
+  }
 }
 
 const List<int> _crlf = <int>[0x0d, 0x0a];
@@ -118,25 +136,19 @@ int _lowerBoundByRowId(List<TerminalHistoryRow> rows, int rowId) {
   try {
     final out = BytesBuilder(copy: false);
     final starts = <int>[];
-    for (var i = 0; i < rows.length; i++) {
-      if (i > 0 && !rows[i].wrapped) {
+    var i = 0;
+    for (final (:startsLine, :bytes) in _encodedRows(rows)) {
+      if (startsLine) {
         terminal.writeBytes(_crlf);
         out.add(_crlf);
       }
       starts.add(
         terminal.totalRows -
             1 +
-            (rows[i].wrapped && terminal.cursorPendingWrap ? 1 : 0),
+            (rows[i++].wrapped && terminal.cursorPendingWrap ? 1 : 0),
       );
-      final buffer = StringBuffer();
-      _writeRow(
-        buffer,
-        rows[i],
-        endsLine: i == rows.length - 1 || !rows[i + 1].wrapped,
-      );
-      final rowBytes = utf8.encode(buffer.toString());
-      terminal.writeBytes(rowBytes);
-      out.add(rowBytes);
+      terminal.writeBytes(bytes);
+      out.add(bytes);
     }
     return (bytes: out.takeBytes(), rowStarts: starts, lines: terminal.totalRows);
   } finally {
@@ -634,8 +646,7 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
   int _evictedLineCount(int lastKeptRowId) {
     final kept = _lowerBoundByRowId(_renderedRows, lastKeptRowId + 1);
     if (_lineStartsCols == _controller.cols &&
-        kept < _renderedRows.length &&
-        _lineStarts.length == _renderedRows.length) {
+        kept < _renderedRows.length) {
       if (kept == 0) return _measuredLines;
       if (!_renderedRows[kept].wrapped) return _measuredLines - _lineStarts[kept];
       var j = kept - 1;
@@ -649,16 +660,8 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
         _renderedLineCount(_renderedRows.sublist(0, kept));
   }
 
-  int _renderedLineCount(List<TerminalHistoryRow> rows) {
-    if (rows.isEmpty) return 0;
-    final terminal = _openScratchEngine(_controller.cols);
-    try {
-      terminal.writeBytes(encodeTerminalHistoryRows(rows));
-      return terminal.totalRows;
-    } finally {
-      terminal.close();
-    }
-  }
+  int _renderedLineCount(List<TerminalHistoryRow> rows) =>
+      measureTerminalHistoryRows(rows, cols: _controller.cols).lines;
 
   /// A narrow phone can turn one archived row into hundreds of display lines.
   /// Window the renderer as well as the cache so native trimming never changes

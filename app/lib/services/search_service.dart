@@ -53,18 +53,13 @@ class SearchService {
     _stateController.add(state);
   }
 
-  // The checkout's whole heavy tier reaches _onHeavyJson, tree batches and file
-  // reads included, and parseAbMessage builds the whole payload before a branch
-  // could reject it. A type a branch acts on but this set omits is dropped
-  // without a trace, so the set and the branches change together.
   static const Set<String> _handledHeavyTypes = {
     'file:search-result',
     'file:search-done',
   };
 
   void _onHeavyJson(Map<String, dynamic> json) {
-    if (!_handledHeavyTypes.contains(json['type'])) return;
-    final abMsg = parseAbMessage(json);
+    final abMsg = parseAbMessageOfType(json, _handledHeavyTypes);
     if (abMsg == null) return;
     if (abMsg is FileSearchResultMessage) {
       _handleSearchResult(abMsg);

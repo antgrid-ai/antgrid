@@ -438,11 +438,6 @@ class FileService {
     _stateController.add(state);
   }
 
-  // Each tier delivers every frame for this checkout, and parseAbMessage
-  // builds the whole payload (a children batch can be thousands of nodes)
-  // before a branch could reject it. A type a branch acts on but its set omits
-  // is dropped without a trace, so sets and branches change together.
-  //
   // `file:content` and `file:find-result` are in both sets because
   // classifyAbMessage moves an error-bearing frame to status whatever its
   // type.
@@ -477,8 +472,7 @@ class FileService {
   };
 
   void _onHeavyJson(Map<String, dynamic> json) {
-    if (!_handledHeavyTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledHeavyTypes);
     if (parsed == null) return;
     if (parsed is FileTreeUnchangedMessage) {
       // Nothing to apply — the agent is confirming the revision we claimed.
@@ -532,8 +526,7 @@ class FileService {
   }
 
   void _onStatusJson(Map<String, dynamic> json) {
-    if (!_handledStatusTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledStatusTypes);
     if (parsed == null) return;
     // An error-bearing file:content is coerced onto this tier by
     // classifyAbMessage, so the heavy handler never sees it; without this the

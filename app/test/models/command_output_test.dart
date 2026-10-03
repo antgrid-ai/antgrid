@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:antgrid/models/command_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -86,5 +88,35 @@ void main() {
     small.addListener(() => smallCalls++);
     small.append('aaaa\nbbbb\ncccc\ndddd\neeee\nffff\n');
     expect(smallCalls, 1);
+  });
+
+  test('block boundaries do not depend on how the text is chunked', () {
+    final whole = [
+      'p' * 100,
+      '\r' * 30,
+      'q' * 200,
+      '\r\n',
+      'r' * 50,
+      '\n\n',
+      's' * 300,
+      '\r' * 5,
+      't' * 20,
+    ].join();
+    for (final maxChars in [1 << 20, 150]) {
+      final one = CommandOutput(blockChars: 16, maxChars: maxChars)
+        ..append(whole);
+      for (final size in [1, 3, 7]) {
+        final many = CommandOutput(blockChars: 16, maxChars: maxChars);
+        for (var i = 0; i < whole.length; i += size) {
+          many.append(whole.substring(i, min(i + size, whole.length)));
+        }
+        final reason = 'size $size max $maxChars';
+        expect(many.text, one.text, reason: reason);
+        expect(many.tail, one.tail, reason: reason);
+        if (maxChars > whole.length) {
+          expect(many.blocks, one.blocks, reason: reason);
+        }
+      }
+    }
   });
 }

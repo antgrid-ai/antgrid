@@ -244,7 +244,6 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   int _ephemeralVersion = 0;
   int _cachedVersion = -1;
   Widget? _cachedList;
-  List<TranscriptRow>? _cachedListRows;
 
   @override
   void dispose() {
@@ -800,14 +799,12 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       if (!identical(state, _cachedState) ||
           _cachedVersion != _ephemeralVersion ||
           _cachedRows == null) {
-        _cachedRows = _rowCache
-            .derive(state, expandedTurnIds: _expandedTurnIds)
-            .where(
-              (r) =>
-                  r is! ErrorRowData ||
-                  !_dismissedErrorTurnIds.contains(r.turnId),
-            )
-            .toList();
+        _cachedRows = _rowCache.derive(
+          state,
+          expandedTurnIds: _expandedTurnIds,
+          dismissedErrorTurnIds: _dismissedErrorTurnIds,
+        );
+        _cachedList = null;
         _cachedState = state;
         _cachedVersion = _ephemeralVersion;
       }
@@ -1104,25 +1101,21 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   }
 
   /// The selectable, scrolling transcript list, handed back verbatim while
-  /// [rows] is the same list. SliverChildBuilderDelegate.shouldRebuild is
+  /// the rows are unchanged. SliverChildBuilderDelegate.shouldRebuild is
   /// always true, so a fresh ListView here re-runs every visible row's build,
   /// and each assistant row's markdown, on every setState in this State: one
   /// per composer keystroke and caret move, per hover, per upload-progress
   /// tick, per scroll-follow flip. Handing back the identical instance lets
   /// Element.updateChild skip the subtree, the same shape as
-  /// _MarkdownPreviewState._document. [rows] identity is the whole key because
-  /// [_cachedRows] is replaced whenever the session state or
-  /// [_ephemeralVersion] changes, and nothing else this subtree reads while
-  /// building can move without one of those: backgroundItemIds comes from the
-  /// state, and every mutation of the expansion and dismiss sets [_buildRow]
-  /// reads bumps the version. Narrowing [_cachedRows]'s key narrows this one
-  /// too. A State field the item builder starts reading must bump the version
-  /// or join this key, or it renders stale with nothing warning. Rows read the
-  /// theme themselves, so a palette switch still restyles them.
+  /// _MarkdownPreviewState._document. The memo is dropped exactly when
+  /// [_cachedRows] is recomputed, i.e. when the session state or
+  /// [_ephemeralVersion] changes. A State field the item builder starts reading
+  /// must bump the version or clear the memo, or it renders stale with nothing
+  /// warning. Rows read the theme themselves, so a palette switch still
+  /// restyles them.
   Widget _transcriptList(AgentSessionState state, List<TranscriptRow> rows) {
     final cached = _cachedList;
-    if (cached != null && identical(rows, _cachedListRows)) return cached;
-    _cachedListRows = rows;
+    if (cached != null) return cached;
     final backgroundItemIds = <String>{
       for (final t
           in state.backgroundTasks?.tasks ?? const <AgentBackgroundTask>[])

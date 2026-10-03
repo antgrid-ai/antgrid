@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:math' show max;
 
 import 'package:flutter/foundation.dart';
 
@@ -38,6 +39,11 @@ class CommandOutput extends ChangeNotifier {
   /// Parallel to [_blocks]; each entry is '\n' or '\r\n'.
   final List<String> _terminators = [];
   String _tail = '';
+
+  /// No '\n' lies in `_tail[blockChars + 1, _noNewlineTo)`. Output that never
+  /// breaks a line (a progress bar redrawn with '\r') would otherwise be
+  /// rescanned in full on every append.
+  int _noNewlineTo = 0;
 
   /// The sum of every block's length plus its terminator's length.
   int _sealedChars = 0;
@@ -83,7 +89,8 @@ class CommandOutput extends ChangeNotifier {
   int _blockEnd(int start) {
     var nl = _tail.lastIndexOf('\n', start + blockChars);
     if (nl < start || _displayEnd(start, nl) == start) {
-      nl = _tail.indexOf('\n', start + blockChars + 1);
+      nl = _tail.indexOf('\n', max(start + blockChars + 1, _noNewlineTo));
+      if (nl < 0) _noNewlineTo = _tail.length;
     }
     if (nl < 0 || nl == _tail.length - 1) return -1;
     return nl;
@@ -103,7 +110,10 @@ class CommandOutput extends ChangeNotifier {
       _sealedChars += nl + 1 - start;
       start = nl + 1;
     }
-    if (start > 0) _tail = _tail.substring(start);
+    if (start > 0) {
+      _tail = _tail.substring(start);
+      _noNewlineTo = max(0, _noNewlineTo - start);
+    }
   }
 
   void _trim() {
@@ -130,6 +140,7 @@ class CommandOutput extends ChangeNotifier {
         cut++;
       }
       _tail = _tail.substring(cut);
+      _noNewlineTo = max(0, _noNewlineTo - cut);
       _trimmed = true;
     }
   }

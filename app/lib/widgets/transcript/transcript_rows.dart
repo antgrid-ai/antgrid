@@ -138,8 +138,6 @@ class _TurnRows {
   final List<TranscriptRow> rows;
   final AgentTokenUsage? turnUsage;
 
-  /// The map the anchors were read from; settled turns only, null otherwise.
-  final Map<String, AgentTokenUsage>? usageByItem;
   final List<String> anchorIds;
   final List<AgentTokenUsage?> anchorUsages;
 
@@ -148,19 +146,18 @@ class _TurnRows {
     required this.expanded,
     required this.rows,
     required this.turnUsage,
-    required this.usageByItem,
     required this.anchorIds,
     required this.anchorUsages,
   });
 
   // Usage is compared per value, not by map identity: every live agent:usage
   // installs new maps, and a settled turn must not re-derive when only another
-  // turn's entry changed.
+  // turn's entry changed. The map itself is deliberately not retained, or each
+  // reused entry would pin the version it was derived from.
   bool holdsFor(AgentTurn t, bool exp, AgentSessionState state) {
     if (!identical(turn, t) || expanded != exp) return false;
     if (t.stopReason == null) return true;
     if (!identical(state.usageByTurn[t.turnId], turnUsage)) return false;
-    if (identical(state.usageByItem, usageByItem)) return true;
     for (var i = 0; i < anchorIds.length; i++) {
       if (!identical(state.usageByItem[anchorIds[i]], anchorUsages[i])) {
         return false;
@@ -176,22 +173,9 @@ class _TurnRows {
 List<TranscriptRow> deriveRows(
   AgentSessionState state, {
   required Set<String> expandedTurnIds,
-}) {
-  final rows = <TranscriptRow>[];
-  for (final turn in state.turns) {
-    rows.addAll(
-      _deriveTurn(
-        turn,
-        state,
-        expanded: _isExpanded(turn, expandedTurnIds),
-      ).rows,
-    );
-  }
-  _addPromptAndWorkingRows(rows, state);
-  return rows;
-}
+}) => TranscriptRowCache().derive(state, expandedTurnIds: expandedTurnIds);
 
-/// [deriveRows] with per-turn reuse. A view re-derives on every state change;
+/// The row derivation with per-turn reuse. A view re-derives on every state change;
 /// a turn whose object, fold state and attached usage are unchanged keeps the
 /// rows it was last given, so a streamed delta costs its own turn's rows plus
 /// one reference pass over the rest.
@@ -204,6 +188,7 @@ class TranscriptRowCache {
   List<TranscriptRow> derive(
     AgentSessionState state, {
     required Set<String> expandedTurnIds,
+    Set<String> dismissedErrorTurnIds = const {},
   }) {
     final rows = <TranscriptRow>[];
     final next = <String, _TurnRows>{};
@@ -214,7 +199,18 @@ class TranscriptRowCache {
           ? prior
           : _deriveTurn(turn, state, expanded: expanded);
       next[turn.turnId] = entry;
-      rows.addAll(entry.rows);
+      // Filtered here rather than in the entry so cached rows never depend on
+      // which errors the user has dismissed.
+      if (dismissedErrorTurnIds.isEmpty) {
+        rows.addAll(entry.rows);
+      } else {
+        for (final r in entry.rows) {
+          if (r is ErrorRowData && dismissedErrorTurnIds.contains(r.turnId)) {
+            continue;
+          }
+          rows.add(r);
+        }
+      }
     }
     _byTurnId = next;
     _addPromptAndWorkingRows(rows, state);
@@ -348,7 +344,6 @@ _TurnRows _deriveTurn(
     expanded: expanded,
     rows: turnRows,
     turnUsage: turnUsage,
-    usageByItem: settled ? state.usageByItem : null,
     anchorIds: anchorIds,
     anchorUsages: anchorUsages,
   );

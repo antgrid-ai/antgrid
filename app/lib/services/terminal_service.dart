@@ -748,9 +748,6 @@ class TerminalService {
     });
   }
 
-  // Each tier delivers every frame for this checkout, and parseAbMessage builds
-  // the whole payload before a branch could reject it. A type a branch acts on
-  // but its set omits is dropped without a trace, so they change together.
   static const Set<String> _handledHeavyTypes = {
     'terminal:frame',
     'terminal:history:page',
@@ -758,8 +755,7 @@ class TerminalService {
 
   void _onHeavyJson(Map<String, dynamic> json) {
     if (_disposed) return;
-    if (!_handledHeavyTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledHeavyTypes);
     if (parsed == null) return;
     if (parsed is TerminalFrameMessage) {
       _handleTerminalFrame(parsed);
@@ -1332,7 +1328,7 @@ class TerminalService {
 
   // --- Message dispatch ---
 
-  // One entry per arm of [_handle]; see [_handledHeavyTypes] for why.
+  // One entry per arm of [_handle].
   static const Set<String> _handledStatusTypes = {
     'terminal:started',
     'terminal:exited',
@@ -1349,8 +1345,7 @@ class TerminalService {
 
   void _onStatusJson(Map<String, dynamic> json) {
     if (_disposed) return;
-    if (!_handledStatusTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledStatusTypes);
     if (parsed == null) return;
     _handle(parsed);
   }

@@ -185,11 +185,8 @@ class PreviewService {
     _stateController.add(state);
   }
 
-  // Checked before parseAbMessage builds a payload nothing here reads. One set
-  // serves both tiers because classifyAbMessage moves any error-bearing frame
-  // to status whatever its type, and [_handle] accepts all four on either tier.
-  // A type [_handle] acts on but this set omits is dropped without a trace, so
-  // the set and [_handle] change together.
+  // One set serves both tiers: classifyAbMessage moves any error-bearing frame
+  // to status whatever its type.
   static const Set<String> _handledTypes = {
     'ports:update',
     'port:detected',
@@ -198,8 +195,7 @@ class PreviewService {
   };
 
   void _onJson(Map<String, dynamic> json) {
-    if (!_handledTypes.contains(json['type'])) return;
-    final parsed = parseAbMessage(json);
+    final parsed = parseAbMessageOfType(json, _handledTypes);
     if (parsed == null) return;
     _handle(parsed);
   }
