@@ -450,4 +450,156 @@ void main() {
       expect(toggled, isFalse);
     });
   });
+
+  group('render caches', () {
+    Future<void> pumpRebuildable(
+      WidgetTester tester,
+      AgentItem item,
+      void Function(StateSetter) capture,
+    ) async {
+      final controller = TranscriptSelectionController();
+      await tester.pumpWidget(
+        StatefulBuilder(
+          builder: (context, setState) {
+            capture(setState);
+            return MaterialApp(
+              home: Scaffold(
+                body: TranscriptSelectionScope(
+                  controller: controller,
+                  child: SelectionArea(
+                    child: SingleChildScrollView(
+                      child: ToolCallCard(
+                        data: ToolCallRowData(item),
+                        rowIndex: 0,
+                        expanded: true,
+                        isBackground: false,
+                        onToggle: () {},
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      're-rendering an expanded card with the same terminal block does not re-read its output',
+      (tester) async {
+        final block = _CountingTerminal('one\ntwo');
+        final item = _item(status: 'completed', title: 'Run', content: [block]);
+        late StateSetter rebuild;
+        await pumpRebuildable(tester, item, (s) => rebuild = s);
+        expect(find.textContaining('two'), findsOneWidget);
+
+        final readsBefore = block.reads;
+        rebuild(() {});
+        await tester.pump();
+
+        expect(block.reads, readsBefore);
+      },
+    );
+
+    testWidgets(
+      're-rendering an expanded card with the same raw input does not re-encode it',
+      (tester) async {
+        final raw = _CountingJson();
+        final item = _item(
+          status: 'completed',
+          toolKind: 'mcp',
+          title: 'call tool',
+          rawInput: raw,
+        );
+        late StateSetter rebuild;
+        await pumpRebuildable(tester, item, (s) => rebuild = s);
+        expect(find.textContaining('"a": 1'), findsOneWidget);
+
+        final before = raw.encodes;
+        rebuild(() {});
+        await tester.pump();
+
+        expect(raw.encodes, before);
+      },
+    );
+
+    testWidgets(
+      'an expanded terminal block re-rendered with new output shows the new tail',
+      (tester) async {
+        await _pump(
+          tester,
+          item: _item(
+            status: 'completed',
+            title: 'Run',
+            content: [ToolContent(type: 'terminal', data: 'one')],
+          ),
+          expanded: true,
+        );
+        await tester.pumpAndSettle();
+        await _pump(
+          tester,
+          item: _item(
+            status: 'completed',
+            title: 'Run',
+            content: [ToolContent(type: 'terminal', data: 'one\ntwo')],
+          ),
+          expanded: true,
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('two'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a new raw input value re-renders its JSON', (tester) async {
+      await _pump(
+        tester,
+        item: _item(
+          status: 'completed',
+          toolKind: 'mcp',
+          title: 'call tool',
+          rawInput: {'a': 1},
+        ),
+        expanded: true,
+      );
+      await tester.pumpAndSettle();
+      await _pump(
+        tester,
+        item: _item(
+          status: 'completed',
+          toolKind: 'mcp',
+          title: 'call tool',
+          rawInput: {'a': 2},
+        ),
+        expanded: true,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('"a": 2'), findsOneWidget);
+      expect(find.textContaining('"a": 1'), findsNothing);
+    });
+  });
+}
+
+class _CountingTerminal extends ToolContent {
+  _CountingTerminal(this._output) : super(type: 'terminal');
+  final String _output;
+  int reads = 0;
+
+  @override
+  String? get data {
+    reads++;
+    return _output;
+  }
+}
+
+class _CountingJson {
+  int encodes = 0;
+
+  Map<String, Object?> toJson() {
+    encodes++;
+    return {'a': 1};
+  }
 }

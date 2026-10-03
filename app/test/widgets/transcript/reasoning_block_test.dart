@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/pulsing_opacity.dart';
@@ -117,6 +119,37 @@ void main() {
       await tester.pump();
 
       expect(find.text('full reasoning text here'), findsOneWidget);
+    });
+  });
+
+  group('streaming preview edge cases', () {
+    testWidgets('keeps exactly the last two lines of edge-case texts', (
+      tester,
+    ) async {
+      const inputs = [
+        'only',
+        'a\nb',
+        'a\nb\nc',
+        'a\n\n',
+        '\nb',
+        '\n\nb',
+        'x\ny\n',
+        '\n\n\n',
+        'l0\nl1\nl2\nl3',
+      ];
+      for (final t in inputs) {
+        final lines = t.split('\n');
+        final oracle = lines.length <= 2
+            ? t
+            : lines.sublist(lines.length - 2).join('\n');
+        await _pump(tester, item: _item(text: t), isStreaming: true);
+        await tester.pump();
+        expect(
+          find.text(oracle),
+          findsOneWidget,
+          reason: 'input ${jsonEncode(t)}',
+        );
+      }
     });
   });
 }

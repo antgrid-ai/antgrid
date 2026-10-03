@@ -137,6 +137,12 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   // Signature of the last catalog persisted for this session, so the post-frame
   // remember runs once per distinct catalog rather than on every rebuild.
   String? _lastCachedSig;
+  // AgentSessionService replaces the capabilities object wholesale on each
+  // frame and never mutates one, so the same instance under the same key can
+  // only re-derive the signature already held in [_lastCachedSig], and this
+  // build runs on every composer keystroke.
+  AgentCapabilities? _lastSigCaps;
+  String? _lastSigKey;
   final List<ComposerAttachment> _attachments = [];
 
   // The service the transcript hydrator was registered on, pinned so dispose can
@@ -223,15 +229,22 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     setState(() => _inputFocused = _inputFocus.hasFocus);
   }
 
-  // deriveRows is pure over (state, expansion/dismiss sets). Cache its result so
-  // setState-driven rebuilds (scroll, toggles) don't re-derive+re-allocate the
-  // whole row list. `_ephemeralVersion` bumps on every mutation of the four sets
-  // below (all routed through _toggle / the dismiss handler), so a stale cache
-  // can't outlive a set change; a new state object from the stream also misses.
+  // Rows are a pure function of (state, expansion/dismiss sets). This gate
+  // skips re-deriving on setState-only rebuilds (scroll, typing).
+  // `_ephemeralVersion` bumps on every mutation of the four sets below (all
+  // routed through _toggle / the dismiss handler), so a stale list can't
+  // outlive a set change, and a new state object from the stream also misses.
+  // A miss goes through TranscriptRowCache: it hands back the previous rows of
+  // every turn whose object, fold state and usage are unchanged, and it reads
+  // `_expandedTurnIds` at derive time. So an item or reasoning toggle
+  // re-derives cheaply, and a fold toggle needs no reset of its own.
+  final _rowCache = TranscriptRowCache();
   List<TranscriptRow>? _cachedRows;
   AgentSessionState? _cachedState;
   int _ephemeralVersion = 0;
   int _cachedVersion = -1;
+  Widget? _cachedList;
+  List<TranscriptRow>? _cachedListRows;
 
   @override
   void dispose() {
@@ -787,7 +800,8 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       if (!identical(state, _cachedState) ||
           _cachedVersion != _ephemeralVersion ||
           _cachedRows == null) {
-        _cachedRows = deriveRows(state, expandedTurnIds: _expandedTurnIds)
+        _cachedRows = _rowCache
+            .derive(state, expandedTurnIds: _expandedTurnIds)
             .where(
               (r) =>
                   r is! ErrorRowData ||
@@ -798,16 +812,14 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         _cachedVersion = _ephemeralVersion;
       }
       final rows = _cachedRows!;
-      final backgroundItemIds = <String>{
-        for (final t
-            in state.backgroundTasks?.tasks ?? const <AgentBackgroundTask>[])
-          if (t.itemId != null) t.itemId!,
-      };
 
       // Stick-to-bottom: jump after the frame that laid out any new rows, but
       // only while the user hasn't scrolled away to read earlier history. Only
       // register the callback when following so we don't schedule a closure
       // every build; the inner guard still re-checks in case state changed.
+      // It stays outside [_transcriptList]'s memo: a composer that grows by a
+      // line shrinks the viewport on a keystroke that changes no row, and this
+      // jump is what keeps the newest row in view.
       if (_following) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_following && _scroll.hasClients) {
@@ -884,44 +896,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                 // wrong text (StaticSelectionContainerDelegate.didChangeSelectables).
                 child: Stack(
                   children: [
-                    SelectionArea(
-                      onSelectionChanged: (content) =>
-                          _selection.onSelectionChanged(content?.plainText),
-                      contextMenuBuilder: _selectionMenu,
-                      child: NotificationListener<UserScrollNotification>(
-                        onNotification: (notification) {
-                          if (notification.direction ==
-                              ScrollDirection.forward) {
-                            if (_following) setState(() => _following = false);
-                          } else if (_scroll.hasClients &&
-                              _scroll.position.maxScrollExtent -
-                                      _scroll.position.pixels <=
-                                  40) {
-                            if (!_following || _newSinceScroll) {
-                              setState(() {
-                                _following = true;
-                                _newSinceScroll = false;
-                              });
-                            }
-                          }
-                          return false;
-                        },
-                        child: ListView.builder(
-                          controller: _scroll,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: AbTokens.space8,
-                          ),
-                          itemCount: rows.length,
-                          itemBuilder: (context, i) {
-                            final row = rows[i];
-                            return KeyedSubtree(
-                              key: ValueKey(row.rowKey),
-                              child: _buildRow(row, i, backgroundItemIds),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
+                    _transcriptList(state, rows),
                     if (!_following)
                       Positioned(
                         bottom: AbTokens.space8,
@@ -974,7 +949,12 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       // not in the Riverpod-unaware AgentSessionService. Persist post-frame —
       // mutating a provider during build throws — and only when the catalog
       // changed (models, modes, or commands).
-      if (live != null && live.ready && live.models.isNotEmpty) {
+      if (live != null &&
+          live.ready &&
+          live.models.isNotEmpty &&
+          !(identical(live, _lastSigCaps) && cacheKey == _lastSigKey)) {
+        _lastSigCaps = live;
+        _lastSigKey = cacheKey;
         final catalog = CapabilityCatalog.fromCapabilities(live);
         final sig = '$cacheKey:${jsonEncode(catalog.toJson())}';
         if (sig != _lastCachedSig) {
@@ -1110,6 +1090,75 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    // A hot reload must rebuild the list with the new code rather than hand
+    // back the instance the old code built.
+    _cachedList = null;
+  }
+
+  /// The selectable, scrolling transcript list, handed back verbatim while
+  /// [rows] is the same list. SliverChildBuilderDelegate.shouldRebuild is
+  /// always true, so a fresh ListView here re-runs every visible row's build,
+  /// and each assistant row's markdown, on every setState in this State: one
+  /// per composer keystroke and caret move, per hover, per upload-progress
+  /// tick, per scroll-follow flip. Handing back the identical instance lets
+  /// Element.updateChild skip the subtree, the same shape as
+  /// _MarkdownPreviewState._document. [rows] identity is the whole key because
+  /// [_cachedRows] is replaced whenever the session state or
+  /// [_ephemeralVersion] changes, and nothing else this subtree reads while
+  /// building can move without one of those: backgroundItemIds comes from the
+  /// state, and every mutation of the expansion and dismiss sets [_buildRow]
+  /// reads bumps the version. Narrowing [_cachedRows]'s key narrows this one
+  /// too. A State field the item builder starts reading must bump the version
+  /// or join this key, or it renders stale with nothing warning. Rows read the
+  /// theme themselves, so a palette switch still restyles them.
+  Widget _transcriptList(AgentSessionState state, List<TranscriptRow> rows) {
+    final cached = _cachedList;
+    if (cached != null && identical(rows, _cachedListRows)) return cached;
+    _cachedListRows = rows;
+    final backgroundItemIds = <String>{
+      for (final t
+          in state.backgroundTasks?.tasks ?? const <AgentBackgroundTask>[])
+        if (t.itemId != null) t.itemId!,
+    };
+    return _cachedList = SelectionArea(
+      onSelectionChanged: (content) =>
+          _selection.onSelectionChanged(content?.plainText),
+      contextMenuBuilder: _selectionMenu,
+      child: NotificationListener<UserScrollNotification>(
+        onNotification: (notification) {
+          if (notification.direction == ScrollDirection.forward) {
+            if (_following) setState(() => _following = false);
+          } else if (_scroll.hasClients &&
+              _scroll.position.maxScrollExtent - _scroll.position.pixels <=
+                  40) {
+            if (!_following || _newSinceScroll) {
+              setState(() {
+                _following = true;
+                _newSinceScroll = false;
+              });
+            }
+          }
+          return false;
+        },
+        child: ListView.builder(
+          controller: _scroll,
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+          itemCount: rows.length,
+          itemBuilder: (context, i) {
+            final row = rows[i];
+            return KeyedSubtree(
+              key: ValueKey(row.rowKey),
+              child: _buildRow(row, i, backgroundItemIds),
+            );
+          },
         ),
       ),
     );

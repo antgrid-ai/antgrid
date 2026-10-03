@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+import 'package:markdown_widget/markdown_widget.dart' show MarkdownBlock;
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/agent_event.dart';
 import 'package:antgrid/providers/now_ticker.dart';
 import 'package:antgrid/providers/session_bus_inbox.dart';
@@ -315,6 +319,160 @@ void main() {
 
       expect(find.text('Sent'), findsNothing);
       expect(find.textContaining('Delivered'), findsNothing);
+    });
+  });
+
+  group('markdown memo', () {
+    late String text;
+    late AbColors palette;
+    late StateSetter rebuild;
+
+    Future<void> pumpRebuildable(WidgetTester tester) async {
+      text = 'hi **bold**';
+      palette = kPresets[AbThemePreset.zinc]!;
+      final controller = TranscriptSelectionController();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            nowMinuteProvider.overrideWith(
+              (ref) => Stream.value(DateTime(2026, 7, 3, 12, 5)),
+            ),
+          ],
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              return MaterialApp(
+                builder: (context, child) => Theme(
+                  data: ThemeData(
+                    extensions: <ThemeExtension<dynamic>>[palette],
+                  ),
+                  child: child!,
+                ),
+                home: Scaffold(
+                  body: TranscriptSelectionScope(
+                    controller: controller,
+                    child: SelectionArea(
+                      child: MessageRow(
+                        data: MessageRowData(_item(text: text), isUser: false),
+                        rowIndex: 0,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+    }
+
+    testWidgets('a rebuild with unchanged text keeps the rendered markdown', (
+      tester,
+    ) async {
+      await pumpRebuildable(tester);
+      await tester.pumpAndSettle();
+      final md = tester.widget<TranscriptMarkdown>(
+        find.byType(TranscriptMarkdown),
+      );
+      final block = tester.widget<MarkdownBlock>(find.byType(MarkdownBlock));
+
+      rebuild(() {});
+      await tester.pump();
+
+      expect(
+        identical(
+          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
+          md,
+        ),
+        isTrue,
+      );
+      expect(
+        identical(tester.widget<MarkdownBlock>(find.byType(MarkdownBlock)), block),
+        isTrue,
+      );
+    });
+
+    testWidgets('a rebuild with new text re-renders the markdown', (
+      tester,
+    ) async {
+      await pumpRebuildable(tester);
+      await tester.pumpAndSettle();
+      final md = tester.widget<TranscriptMarkdown>(
+        find.byType(TranscriptMarkdown),
+      );
+
+      rebuild(() => text = 'bye *now*');
+      await tester.pump();
+
+      expect(
+        identical(
+          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
+          md,
+        ),
+        isFalse,
+      );
+      expect(find.textContaining('bye', findRichText: true), findsWidgets);
+      expect(find.textContaining('hi', findRichText: true), findsNothing);
+    });
+
+    testWidgets('a theme switch restyles markdown the row kept', (tester) async {
+      await pumpRebuildable(tester);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
+            .config!
+            .p
+            .textStyle
+            .color,
+        kPresets[AbThemePreset.zinc]!.textPrimary,
+      );
+
+      rebuild(() => palette = kPresets[AbThemePreset.light]!);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        tester
+            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
+            .config!
+            .p
+            .textStyle
+            .color,
+        kPresets[AbThemePreset.light]!.textPrimary,
+      );
+    });
+
+    testWidgets('a weight-offset change re-renders markdown the row kept', (
+      tester,
+    ) async {
+      await pumpRebuildable(tester);
+      await tester.pumpAndSettle();
+      final md = tester.widget<TranscriptMarkdown>(
+        find.byType(TranscriptMarkdown),
+      );
+
+      AbTokens.activeWeightOffset = 1;
+      addTearDown(() => AbTokens.activeWeightOffset = 0);
+      rebuild(() {});
+      await tester.pump();
+
+      expect(
+        identical(
+          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
+          md,
+        ),
+        isFalse,
+      );
+      expect(
+        tester
+            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
+            .config!
+            .p
+            .textStyle
+            .fontWeight,
+        FontWeight.w500,
+      );
     });
   });
 }
