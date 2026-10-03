@@ -603,4 +603,47 @@ void main() {
     expect(m.cursor, isNull);
     expect(m.canLoadMore, isFalse);
   });
+
+  test('a repeated seek while its page is in flight notifies nobody', () {
+    final model = TerminalHistoryModel()
+      ..applyBoundary(_boundary(nextRowId: 10000));
+    model.seek(2000);
+    model.markRequested('r');
+    var count = 0;
+    model.addListener(() => count++);
+
+    model.seek(2000);
+    expect(count, 0);
+    expect(model.cursor, 2000);
+    model.seek(2000, newer: true);
+    expect(count, 1);
+    model.seek(3000, newer: true);
+    expect(count, 2);
+  });
+
+  test('a repeated seek with nothing in flight still notifies', () {
+    final model = TerminalHistoryModel()
+      ..applyBoundary(_boundary(nextRowId: 10000));
+    model.seek(2000);
+    var count = 0;
+    model.addListener(() => count++);
+
+    model.seek(2000);
+    expect(count, 1);
+  });
+
+  test('a seek after the window was retained notifies even at the same '
+      'target', () {
+    final model = TerminalHistoryModel()
+      ..applyBoundary(_boundary(nextRowId: 10000));
+    model.seek(2000);
+    model.markRequested('r');
+    model.retainWindow();
+    var count = 0;
+    model.addListener(() => count++);
+
+    model.seek(2000);
+    expect(count, 1);
+    expect(model.hasPendingSeek, isTrue);
+  });
 }

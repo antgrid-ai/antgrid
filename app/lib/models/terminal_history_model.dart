@@ -74,8 +74,21 @@ class TerminalHistoryModel extends ChangeNotifier {
   void seek(int beforeRowId, {bool newer = false}) {
     final b = _boundary;
     if (b == null || b.firstRowId >= b.nextRowId) return;
+    final target = beforeRowId.clamp(b.firstRowId + 1, b.nextRowId);
+    // With a page in flight a repeat changes nothing and nothing can
+    // re-request until it lands; with nothing in flight the notify is what
+    // drives the reader's re-request, so it must still fire.
+    if (loading &&
+        !_discardOutstandingPage &&
+        _seekBefore == target &&
+        _towardNewer == newer &&
+        _replacePage &&
+        !_atOldest &&
+        _failure == null) {
+      return;
+    }
     _discardOutstandingPage = false;
-    _seekBefore = beforeRowId.clamp(b.firstRowId + 1, b.nextRowId);
+    _seekBefore = target;
     _towardNewer = newer;
     _replacePage = true;
     _atOldest = false;

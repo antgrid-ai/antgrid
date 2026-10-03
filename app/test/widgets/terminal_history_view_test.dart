@@ -1779,5 +1779,150 @@ void main() {
         expect(() => scroll.addListener(() {}), throwsFlutterError);
       },
     );
+
+    testWidgets('a page landing serializes each rendered row once', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      addTearDown(() {
+        debugTerminalHistoryScratchEngines = 0;
+        debugTerminalHistoryRowEncodes = 0;
+      });
+      final m = _loadedModel(count: 200);
+      await tester.pumpWidget(_wrap(_view(model: m)));
+      await tester.pumpAndSettle();
+      debugTerminalHistoryScratchEngines = 0;
+      debugTerminalHistoryRowEncodes = 0;
+
+      m.markRequested('older');
+      m.applyPage(
+        _page(
+          requestId: 'older',
+          rows: _rowsBelow(800),
+          history: _boundary(nextRowId: 1000),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(debugTerminalHistoryScratchEngines, 1);
+      expect(debugTerminalHistoryRowEncodes, 400);
+    });
+
+    for (final wrapped in [false, true]) {
+      testWidgets(
+        wrapped
+            ? 'an eviction that cuts through a wrapped line still keeps the '
+                  "reader's place"
+            : 'a page that evicts newer rows keeps the reader\'s place '
+                  'without re-measuring the old window',
+        (tester) async {
+          if (_skipWithoutNative()) return;
+          addTearDown(() {
+            debugTerminalHistoryScratchEngines = 0;
+            debugTerminalHistoryRowEncodes = 0;
+          });
+          List<TerminalHistoryRow> pageRows(int end) => List.generate(200, (i) {
+            final id = end - 200 + i;
+            return _row(
+              rowId: id,
+              // Row 600, the window's oldest, starts a line of its own, while
+              // 800, the first evicted row, continues the line 799 is in, so
+              // the cut falls inside a logical line.
+              wrapped: wrapped && id % 3 != 0,
+              spans: [_span(wrapped ? 'row $id'.padRight(60) : 'row $id')],
+            );
+          });
+          final m = TerminalHistoryModel(maxRows: 400)
+            ..applyBoundary(_boundary());
+          m.markRequested('seed');
+          m.applyPage(_page(requestId: 'seed', rows: pageRows(1000)));
+          m.markRequested('older');
+          m.applyPage(_page(requestId: 'older', rows: pageRows(800)));
+          await tester.pumpWidget(_wrap(_view(model: m)));
+          await tester.pumpAndSettle();
+          final controller = _mountedTerminal(tester).controller;
+          String visible() => controller.renderSnapshot!.rowsData
+              .map((row) => row.cells.map((cell) => cell.text).join())
+              .join('\n');
+          controller.scrollViewportToTop();
+          await tester.pumpAndSettle();
+          final before = visible();
+          debugTerminalHistoryScratchEngines = 0;
+
+          m.markRequested('page-600');
+          m.applyPage(_page(requestId: 'page-600', rows: pageRows(600)));
+          for (var i = 0; i < 12; i++) {
+            await tester.pump(const Duration(milliseconds: 50));
+          }
+
+          expect(visible(), before);
+          expect(debugTerminalHistoryScratchEngines, wrapped ? 2 : 1);
+        },
+      );
+    }
+
+    test('measured window bytes match the encoder and its line counts match '
+        'a fresh engine', () {
+      if (_skipWithoutNative()) return;
+      addTearDown(() => debugTerminalHistoryScratchEngines = 0);
+      final rows = [
+        _row(rowId: 0, spans: [_span('plain')]),
+        _row(rowId: 1, spans: [_span('long row that wraps ' * 2)]),
+        _row(rowId: 2, wrapped: true, spans: [_span('continues here')]),
+        _row(rowId: 3, wrapped: true, spans: [_span('and again   ')]),
+        _row(rowId: 4, spans: [_span('界界界界界界')]),
+        _row(rowId: 5, spans: [_span('ééé')]),
+        _row(
+          rowId: 6,
+          spans: [_span('link', uri: 'https://example.com'), _span('   ')],
+        ),
+        _row(rowId: 7, wrapped: true, spans: [_span('tail  ')]),
+        _row(rowId: 8, spans: [_span('0123456789')]),
+        _row(rowId: 9, spans: [_span('padded    ')]),
+        _row(rowId: 10, wrapped: true, spans: [_span('x')]),
+        _row(rowId: 11, spans: [_span('end')]),
+      ];
+      int fresh(List<TerminalHistoryRow> list) {
+        if (list.isEmpty) return 0;
+        final t = GhosttyVt.newTerminal(
+          cols: 10,
+          rows: 1,
+          maxScrollback: 64 << 20,
+        );
+        try {
+          t.writeBytes(encodeTerminalHistoryRows(list));
+          return t.totalRows;
+        } finally {
+          t.close();
+        }
+      }
+
+      final m = measureTerminalHistoryRows(rows, cols: 10);
+      expect(m.bytes, orderedEquals(encodeTerminalHistoryRows(rows)));
+      expect(m.lines, fresh(rows));
+      expect(m.rowStarts.length, rows.length);
+      expect(m.rowStarts[0], 0);
+      for (var k = 1; k < rows.length; k++) {
+        if (!rows[k].wrapped) {
+          expect(m.rowStarts[k], fresh(rows.sublist(0, k)), reason: 'row $k');
+        } else {
+          var j = k - 1;
+          while (j > 0 && rows[j].wrapped) {
+            j--;
+          }
+          expect(
+            m.rowStarts[j] + fresh(rows.sublist(j, k)),
+            fresh(rows.sublist(0, k)),
+            reason: 'wrapped row $k',
+          );
+        }
+      }
+      debugTerminalHistoryScratchEngines = 0;
+      final empty = measureTerminalHistoryRows(const [], cols: 10);
+      expect(empty.bytes, isEmpty);
+      expect(empty.rowStarts, isEmpty);
+      expect(empty.lines, 0);
+      expect(debugTerminalHistoryScratchEngines, 0);
+    });
   });
 }
