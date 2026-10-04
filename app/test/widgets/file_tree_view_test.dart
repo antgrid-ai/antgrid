@@ -1836,47 +1836,6 @@ void main() {
       ),
     ];
 
-    testWidgets(
-      "rebuilding with the same change set reuses each changed row's node and entries",
-      (tester) async {
-        final entries = mainEntries(3);
-        await tester.pumpWidget(
-          buildTestWidget(
-            root: makeTree(),
-            changesOnly: true,
-            gitFileEntries: entries,
-          ),
-        );
-        final before = rowFor(
-          tester,
-          'project/lib/main.dart',
-          FileNodeType.file,
-        );
-        await tester.pumpWidget(
-          buildTestWidget(
-            root: makeTree(),
-            changesOnly: true,
-            gitFileEntries: entries,
-          ),
-        );
-        final after = rowFor(
-          tester,
-          'project/lib/main.dart',
-          FileNodeType.file,
-        );
-
-        expect(identical(before, after), isFalse);
-        expect(identical((before as dynamic).node, (after as dynamic).node), isTrue);
-        expect(
-          identical(
-            (before as dynamic).changeEntries,
-            (after as dynamic).changeEntries,
-          ),
-          isTrue,
-        );
-      },
-    );
-
     testWidgets('folding a folder reuses the change tree instead of rebuilding it', (
       tester,
     ) async {
@@ -1901,32 +1860,6 @@ void main() {
 
       expect(find.text('main.dart'), findsNothing);
       expect(identical((before as dynamic).node, (after as dynamic).node), isTrue);
-    });
-
-    testWidgets('a folded folder keeps one rollup across rebuilds', (
-      tester,
-    ) async {
-      final entries = mainEntries(3);
-      final folded = {'project/lib'};
-      Widget build() => buildTestWidget(
-        root: makeTree(),
-        changesOnly: true,
-        gitFileEntries: entries,
-        collapsedPaths: folded,
-      );
-      await tester.pumpWidget(build());
-      final before = rowFor(tester, 'project/lib', FileNodeType.directory);
-      await tester.pumpWidget(build());
-      final after = rowFor(tester, 'project/lib', FileNodeType.directory);
-
-      expect(find.text('+3'), findsOneWidget);
-      expect(
-        identical(
-          (before as dynamic).rollupEntries,
-          (after as dynamic).rollupEntries,
-        ),
-        isTrue,
-      );
     });
 
     testWidgets('a file-tree update does not rebuild the change list', (

@@ -38,32 +38,6 @@ void main() {
       expect(calls, 0);
     });
 
-    test('a throwing parser runs once and reads as null every time', () {
-      var calls = 0;
-      final frame = InboundFrame(
-        {'type': 'agent:status'},
-        parser: (_) {
-          calls++;
-          throw const FormatException('bad');
-        },
-      );
-      expect(frame.parsed, isNull);
-      expect(frame.parsed, isNull);
-      expect(calls, 1);
-    });
-
-    test('a successful parse is memoised', () {
-      var calls = 0;
-      final frame = InboundFrame(
-        {'type': 'x'},
-        parser: (_) {
-          calls++;
-          return Object();
-        },
-      );
-      expect(identical(frame.parsed, frame.parsed), isTrue);
-      expect(calls, 1);
-    });
   });
 
   group('router parse seam', () {

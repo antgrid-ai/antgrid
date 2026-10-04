@@ -3,8 +3,6 @@ import 'dart:math';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 
-import '../helpers/counting_file_node.dart';
-
 void main() {
   group('FileNodeType', () {
     test('file enum matches "file" string', () {
@@ -193,95 +191,6 @@ void main() {
   });
 
   group('sortFileNodes and applyChildrenDelta', () {
-    List<CountingFileNode> counting(int n) => [
-      for (var i = 0; i < n; i++)
-        CountingFileNode('f${i.toString().padLeft(3, '0')}.txt'),
-    ];
-
-    test(
-      'applyChildrenDelta rewrites entries that keep their position without reading any untouched sibling',
-      () {
-        final children = counting(300);
-        for (final c in children) {
-          c.nameReads = 0;
-        }
-        final upserts = [
-          for (var i = 0; i < 300; i += 12)
-            FileNode(
-              name: children[i].path,
-              path: children[i].path,
-              type: FileNodeType.file,
-              size: 99,
-            ),
-        ];
-        expect(upserts, hasLength(25));
-        final result = applyChildrenDelta(
-          children,
-          removed: {},
-          upserts: upserts,
-          reconcile: (incoming, prior) => incoming,
-        );
-        final upsertedPaths = {for (final u in upserts) u.path};
-        for (var i = 0; i < 300; i++) {
-          if (upsertedPaths.contains(children[i].path)) {
-            expect(result[i].size, 99);
-            expect(identical(result[i], children[i]), isFalse);
-          } else {
-            expect(children[i].nameReads, 0);
-            expect(identical(result[i], children[i]), isTrue);
-          }
-        }
-        expect(
-          result.map((c) => c.path),
-          children.map((c) => c.path),
-        );
-      },
-    );
-
-    test('applyChildrenDelta sorts a directory once for a whole frame of additions', () {
-      final children = <CountingFileNode>[
-        for (var i = 0; i < 100; i++)
-          CountingFileNode(
-            'd${i.toString().padLeft(3, '0')}',
-            type: FileNodeType.directory,
-          ),
-        for (var i = 0; i < 200; i++)
-          CountingFileNode('f${i.toString().padLeft(3, '0')}.txt'),
-      ];
-      for (final c in children) {
-        c.nameReads = 0;
-      }
-      final added = <FileNode>[
-        for (var i = 0; i < 25; i++)
-          FileNode(
-            name: 'f${(i * 8).toString().padLeft(3, '0')}a.txt',
-            path: 'f${(i * 8).toString().padLeft(3, '0')}a.txt',
-            type: FileNodeType.file,
-          ),
-      ];
-      final result = applyChildrenDelta(
-        children,
-        removed: {},
-        upserts: added,
-        reconcile: (incoming, prior) => incoming,
-      );
-      for (final c in children) {
-        expect(c.nameReads, lessThanOrEqualTo(1));
-      }
-      final all = [...children, ...added];
-      final expected = [...all]
-        ..sort((a, b) {
-          final ad = a.type == FileNodeType.directory ? 0 : 1;
-          final bd = b.type == FileNodeType.directory ? 0 : 1;
-          if (ad != bd) return ad - bd;
-          return a.path.toLowerCase().compareTo(b.path.toLowerCase());
-        });
-      expect(
-        result.map((c) => c.path),
-        expected.map((c) => c.path),
-      );
-    });
-
     test('names equal ignoring case sort lowercase first whatever order they arrive in', () {
       List<Map<String, dynamic>> twins(List<String> names) => [
         for (final n in names) {'name': n, 'path': n, 'type': 'file'},

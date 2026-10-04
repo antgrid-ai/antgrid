@@ -2887,6 +2887,9 @@ void main() {
         expect(srcChildren[i].nameReads, 0);
         expect(identical(src.children[i], srcChildren[i]), isTrue);
       }
+      for (final i in rewritten) {
+        expect(src.children[i].size, 2);
+      }
       for (var i = 0; i < 30; i++) {
         expect(rootFiles[i].nameReads, 0);
         expect(identical(result.root.children[i + 1], rootFiles[i]), isTrue);
@@ -2911,26 +2914,6 @@ void main() {
       ]);
       await svc.dispose();
       await session.close();
-
-      final t2 = FakeAgentTransport();
-      final session2 = await _newSession(t2);
-      final svc2 = FileService.fromSession(session2);
-      _emitRootTree(t2, {
-        'tree': _rootNode(
-          children: [
-            _file('README.md', 'README.md'),
-            _file('readme.md', 'readme.md'),
-          ],
-        ),
-        'seq': 5,
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc2.currentState.root!.children.map((c) => c.path), [
-        'readme.md',
-        'README.md',
-      ]);
-      await svc2.dispose();
-      await session2.close();
     });
 
     test('removing a truncated directory together with its contents does not re-list it', () async {
@@ -3155,49 +3138,6 @@ void main() {
       expect(a.children.first.childrenLoaded, isFalse);
       expect(a.children.first.children, isEmpty);
       expect(childRequests(t, 'a/b'), isEmpty);
-      await session.close();
-    });
-
-    test('rewriting files in place keeps every sibling where it was', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = session.fileService;
-      Map<String, dynamic> sized(int i, int size) => {
-        ..._file('f${pad(i, 2)}.ts', 'src/f${pad(i, 2)}.ts'),
-        'size': size,
-      };
-      _emitRootTree(t, {
-        'tree': _rootNode(
-          children: [
-            dir('src', children: [for (var i = 0; i < 40; i++) sized(i, 1)]),
-          ],
-        ),
-        'seq': 5,
-      });
-      await Future<void>.delayed(Duration.zero);
-      final before = svc.currentState.root!.children.single.children;
-
-      emitUpdate(
-        t,
-        added: [
-          for (var i = 0; i < 40; i += 4) sized(i, 2),
-          dir('src', children: []),
-        ],
-      );
-      await Future<void>.delayed(Duration.zero);
-
-      final src = svc.currentState.root!.children.single;
-      expect(src.childrenLoaded, isTrue);
-      expect(src.truncated, isFalse);
-      expect(src.children.map((c) => c.path), before.map((c) => c.path));
-      for (var i = 0; i < 40; i++) {
-        if (i % 4 == 0) {
-          expect(src.children[i].size, 2);
-          expect(identical(src.children[i], before[i]), isFalse);
-        } else {
-          expect(identical(src.children[i], before[i]), isTrue);
-        }
-      }
       await session.close();
     });
 

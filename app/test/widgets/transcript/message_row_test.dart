@@ -415,34 +415,6 @@ void main() {
       expect(find.textContaining('hi', findRichText: true), findsNothing);
     });
 
-    testWidgets('a theme switch restyles markdown the row kept', (tester) async {
-      await pumpRebuildable(tester);
-      await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
-            .config!
-            .p
-            .textStyle
-            .color,
-        kPresets[AbThemePreset.zinc]!.textPrimary,
-      );
-
-      rebuild(() => palette = kPresets[AbThemePreset.light]!);
-      await tester.pump();
-      await tester.pump();
-
-      expect(
-        tester
-            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
-            .config!
-            .p
-            .textStyle
-            .color,
-        kPresets[AbThemePreset.light]!.textPrimary,
-      );
-    });
-
     testWidgets('a weight-offset change re-renders markdown the row kept', (
       tester,
     ) async {

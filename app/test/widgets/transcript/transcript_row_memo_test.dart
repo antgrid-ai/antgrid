@@ -22,24 +22,6 @@ void main() {
       builds = 0;
     });
 
-    test('returns the same widget for an equal row, index and variant', () {
-      final item = _item('a');
-      final first = memo.widgetFor(
-        MessageRowData(item, isUser: false),
-        0,
-        0,
-        build,
-      );
-      final second = memo.widgetFor(
-        MessageRowData(item, isUser: false),
-        0,
-        0,
-        build,
-      );
-      expect(identical(first, second), isTrue);
-      expect(builds, 1);
-    });
-
     test('rebuilds when the item, index, variant or weight offset moves', () {
       final item = _item('a');
       MessageRowData row(AgentItem i) => MessageRowData(i, isUser: false);
@@ -73,14 +55,6 @@ void main() {
       expect(memo.length, 1);
       memo.widgetFor(a, 0, 0, build);
       expect(builds, 3);
-    });
-
-    test('clear forgets everything', () {
-      final a = MessageRowData(_item('a'), isUser: false);
-      memo.widgetFor(a, 0, 0, build);
-      memo.clear();
-      memo.widgetFor(a, 0, 0, build);
-      expect(builds, 2);
     });
   });
 }

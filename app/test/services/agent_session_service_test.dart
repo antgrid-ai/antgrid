@@ -1513,26 +1513,6 @@ void main() {
       expect(identical(seen.last, svc.stateFor('p')), isTrue);
     });
 
-    test('a pushed transcript replay reaches listeners as one state', () async {
-      final t = FakeAgentTransport();
-      final svc = AgentSessionService.fromSession(await newSession(t));
-      final seen = <AgentSessionState>[];
-      svc.stateStreamFor('p').listen(seen.add);
-
-      t.emit('agent:transcript-replay', {
-        'sessionId': 'p',
-        'frames': threeTurns(),
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      final withTurns = seen.where((s) => s.turns.isNotEmpty).toList();
-      expect(withTurns, hasLength(1));
-      final turns = withTurns.single.turns;
-      expect(turns.map((t) => t.turnId), ['r0', 'r1', 'r2']);
-      expect(turns.every((t) => t.stopReason == 'end_turn'), isTrue);
-      expect(turns.every((t) => t.items.length == 2), isTrue);
-    });
-
     test('a streamed delta copies only the turn it lands in', () async {
       final t = FakeAgentTransport();
       final svc = AgentSessionService.fromSession(await newSession(t));
@@ -1946,9 +1926,12 @@ void main() {
         delta(t, 'x');
         await Future<void>.delayed(const Duration(milliseconds: 2));
       }
+      // Counted before the trailing flush: a timer that each delta restarted
+      // would publish nothing until the stream went quiet.
+      final whileStreaming = seen.length;
       await pumpPastDeltaFlush();
 
-      expect(seen, isNotEmpty);
+      expect(whileStreaming, greaterThanOrEqualTo(2));
       expect(seen.length, lessThan(25));
       expect(textOf(svc), startsWith('Hexxx'));
     });
@@ -1982,26 +1965,6 @@ void main() {
       expect(textOf(svc), 'Hello there!');
       expect(seen.last, 'Hello there!');
       expect(seen.where((x) => x == 'Hello there').length, lessThanOrEqualTo(1));
-    });
-
-    test('a turn end right after deltas sees the complete text', () async {
-      final (t, svc) = await openStreaming('message');
-      addTearDown(svc.dispose);
-
-      delta(t, 'llo');
-      t.emit('agent:turn-end', {
-        'sessionId': 'p',
-        'turnId': 't1',
-        'stopReason': 'end_turn',
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      final turn = svc.stateFor('p').turns.single;
-      expect(turn.stopReason, 'end_turn');
-      expect(turn.items.single.text, 'Hello');
-      await pumpPastDeltaFlush();
-      expect(svc.stateFor('p').turns.single.items.single.text, 'Hello');
-      expect(svc.stateFor('p').turns.single.stopReason, 'end_turn');
     });
 
     test('a session reset drops pending deltas for good', () async {

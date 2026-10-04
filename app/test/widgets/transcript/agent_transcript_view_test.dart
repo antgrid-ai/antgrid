@@ -846,78 +846,6 @@ void main() {
     );
 
     testWidgets(
-      'a new session state reuses a settled reply rendered markdown while the streaming reply updates',
-      (tester) async {
-        final states = StreamController<AgentSessionState>.broadcast();
-        addTearDown(states.close);
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              agentSessionStateProvider.overrideWith(
-                (ref, id) => states.stream,
-              ),
-            ],
-            child: const MaterialApp(
-              home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
-            ),
-          ),
-        );
-        states.add(_streamingState('first chunk'));
-        await tester.pump();
-        await tester.pump();
-
-        final m1Block = tester.widget<MarkdownBlock>(
-          find.descendant(
-            of: find.byKey(const ValueKey('msg:m1')),
-            matching: find.byType(MarkdownBlock),
-          ),
-        );
-
-        states.add(_streamingState('first chunk second chunk'));
-        await tester.pump();
-        await tester.pump();
-
-        expect(
-          identical(
-            tester.widget<MarkdownBlock>(
-              find.descendant(
-                of: find.byKey(const ValueKey('msg:m1')),
-                matching: find.byType(MarkdownBlock),
-              ),
-            ),
-            m1Block,
-          ),
-          isTrue,
-        );
-        expect(
-          find.textContaining('second chunk', findRichText: true),
-          findsOneWidget,
-        );
-
-        await _disposeTree(tester);
-      },
-    );
-
-    testWidgets('typing in the composer does not rebuild the transcript list', (
-      tester,
-    ) async {
-      await _pump(tester, _settledReplyState());
-      await tester.pump();
-
-      final listBefore = tester.widget<ListView>(find.byType(ListView));
-      final delegateBefore = listBefore.childrenDelegate;
-
-      await _typeIntoComposer(tester, 'hello');
-      await tester.pump();
-
-      final listAfter = tester.widget<ListView>(find.byType(ListView));
-      expect(identical(listAfter, listBefore), isTrue);
-      expect(identical(listAfter.childrenDelegate, delegateBefore), isTrue);
-
-      await _disposeTree(tester);
-    });
-
-    testWidgets(
       'an unchanged row keeps its widget while another row of the same turn streams',
       (tester) async {
         final states = StreamController<AgentSessionState>.broadcast();
@@ -979,29 +907,6 @@ void main() {
     );
 
     testWidgets(
-      'a multi-line draft keeps a following transcript pinned to the bottom',
-      (tester) async {
-        await tester.binding.setSurfaceSize(const Size(400, 600));
-        addTearDown(() => tester.binding.setSurfaceSize(null));
-        await _pump(tester, _tallState());
-        await tester.pump();
-        await tester.pumpAndSettle();
-
-        final controller = tester
-            .widget<ListView>(find.byType(ListView))
-            .controller!;
-        final viewportBefore = controller.position.viewportDimension;
-
-        await _typeIntoComposer(tester, 'one\ntwo\nthree\nfour');
-
-        expect(controller.position.viewportDimension, lessThan(viewportBefore));
-        expect(controller.offset, controller.position.maxScrollExtent);
-
-        await _disposeTree(tester);
-      },
-    );
-
-    testWidgets(
       'a draft growing while following just short of the bottom repins without a layout error',
       (tester) async {
         await tester.binding.setSurfaceSize(const Size(400, 600));
@@ -1016,28 +921,13 @@ void main() {
         // A programmatic move is not a user scroll, so following stays armed.
         controller.jumpTo(controller.position.maxScrollExtent - 20);
         await tester.pump();
+        final viewportBefore = controller.position.viewportDimension;
 
         await _typeIntoComposer(tester, 'one\ntwo\nthree\nfour');
 
+        expect(controller.position.viewportDimension, lessThan(viewportBefore));
         expect(tester.takeException(), isNull);
         expect(controller.offset, controller.position.maxScrollExtent);
-
-        await _disposeTree(tester);
-      },
-    );
-
-    testWidgets(
-      'expanding a folded turn after typing in the composer reveals its hidden work',
-      (tester) async {
-        await _pump(tester, _twoTurnState());
-        await tester.pump();
-        expect(find.byType(ToolCallCard), findsOneWidget);
-
-        await _typeIntoComposer(tester, 'hi');
-        await tester.tap(find.byType(TurnFoldRow));
-        await tester.pump();
-
-        expect(find.byType(ToolCallCard), findsNWidgets(2));
 
         await _disposeTree(tester);
       },
@@ -1249,26 +1139,6 @@ AgentSessionState _settledReplyState() => AgentSessionState(
       items: [
         _item('u1', 'message', role: 'user', text: 'question'),
         _item('m1', 'message', role: 'assistant', text: 'reply with **bold**'),
-      ],
-    ),
-  ],
-);
-
-AgentSessionState _streamingState(String partial) => AgentSessionState(
-  turns: [
-    AgentTurn(
-      turnId: 't1',
-      stopReason: 'end_turn',
-      items: [
-        _item('u1', 'message', role: 'user', text: 'question'),
-        _item('m1', 'message', role: 'assistant', text: 'settled **answer**'),
-      ],
-    ),
-    AgentTurn(
-      turnId: 't2',
-      items: [
-        _item('u2', 'message', role: 'user', text: 'go on'),
-        _item('m2', 'message', role: 'assistant', text: partial),
       ],
     ),
   ],

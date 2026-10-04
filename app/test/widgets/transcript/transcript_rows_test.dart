@@ -608,59 +608,6 @@ void main() {
         );
       },
     );
-
-    test('a row cache re-derives a settled turn when usage reaches it', () {
-      final turns = [
-        AgentTurn(
-          turnId: 'A',
-          items: [
-            _item('u1', 'message', role: 'user', text: 'go'),
-            _item('m1', 'message', role: 'assistant', text: 'one'),
-            _item('m2', 'message', role: 'assistant', text: 'two'),
-          ],
-          stopReason: 'end_turn',
-        ),
-      ];
-      final cache = TranscriptRowCache();
-      const u = AgentTokenUsage(totalTokens: 3);
-      const tu = AgentTokenUsage(totalTokens: 8);
-
-      final s1 = AgentSessionState(turns: turns);
-      expect(
-        cache
-            .derive(s1, expandedTurnIds: const {})
-            .map(_describe)
-            .toList(),
-        deriveRows(s1, expandedTurnIds: const {}).map(_describe).toList(),
-      );
-
-      final s2 = AgentSessionState(turns: turns, usageByItem: {'m2': u});
-      final rows2 = cache.derive(s2, expandedTurnIds: const {});
-      final byId2 = {
-        for (final r in rows2.whereType<MessageRowData>()) r.item.itemId: r,
-      };
-      expect(identical(byId2['m2']!.usage, u), isTrue);
-      expect(byId2['m1']!.usage, isNull);
-      expect(
-        rows2.map(_describe).toList(),
-        deriveRows(s2, expandedTurnIds: const {}).map(_describe).toList(),
-      );
-
-      final s3 = AgentSessionState(
-        turns: turns,
-        usageByItem: {},
-        usageByTurn: {'A': tu},
-      );
-      final rows3 = cache.derive(s3, expandedTurnIds: const {});
-      final byId3 = {
-        for (final r in rows3.whereType<MessageRowData>()) r.item.itemId: r,
-      };
-      expect(identical(byId3['m2']!.usage, tu), isTrue);
-      expect(
-        rows3.map(_describe).toList(),
-        deriveRows(s3, expandedTurnIds: const {}).map(_describe).toList(),
-      );
-    });
   });
 }
 

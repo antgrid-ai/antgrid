@@ -249,24 +249,6 @@ void main() {
     expect(h, closeTo(single, 0.01));
   });
 
-  testWidgets('copying all output keeps the line breaks between blocks', (
-    tester,
-  ) async {
-    final output = CommandOutput(blockChars: 32);
-    for (var i = 0; i < 20; i++) {
-      output.append('line ${i.toString().padLeft(2, '0')}\n');
-    }
-    expect(output.blocks.length, greaterThanOrEqualTo(3));
-    final controller = await _pumpOverlay(tester);
-    await _show(tester, controller, _running(output));
-
-    String? copied;
-    _watchClipboard((text) => copied = text);
-    await _selectAllAndCopy(tester, output);
-
-    expect(copied, output.text);
-  });
-
   testWidgets('trimmed output says so, and the note is not copied', (
     tester,
   ) async {

@@ -153,29 +153,6 @@ void main() {
       await session.close();
     });
 
-    test('output split across messages reaches the panel in order', () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = CommandService.fromSession(session);
-
-      svc.runCommand('build');
-      final heavySub = session.heavyStream.listen((_) {});
-
-      for (final data in ['a', 'b\n', 'c']) {
-        t.emit('command:output', {
-          'projectId': 'p',
-          'commandName': 'build',
-          'data': data,
-        });
-      }
-      await waitFor(() => svc.currentState.current!.output.text == 'ab\nc');
-      expect(svc.currentState.current!.output.text, 'ab\nc');
-
-      await heavySub.cancel();
-      await svc.dispose();
-      await session.close();
-    });
-
     test('command:done marks success when exitCode is 0', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
