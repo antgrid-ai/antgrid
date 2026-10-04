@@ -708,10 +708,12 @@ void main() {
     ]);
     expect(find.text('Commit'), findsOneWidget);
 
+    // a.dart is partially staged: two entries, one changed path.
     transport.emit('git:status', {
       'projectId': 'p',
       'files': [
         {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'a.dart', 'status': 'M', 'staged': false},
         {'path': 'b.dart', 'status': 'M', 'staged': false},
       ],
     });

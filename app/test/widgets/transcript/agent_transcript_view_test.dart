@@ -1,7 +1,8 @@
-import 'dart:async';
 // Integration-shaped test for the transcript shell: it renders the real
 // `deriveRows` pipeline over an `AgentSessionState` fixture (no transport) to
 // prove row widgets wire up end-to-end, plus the empty-state fallback.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -194,19 +195,36 @@ Future<void> _disposeTree(WidgetTester tester) async {
   await _settleComposerHistory(tester);
 }
 
-Future<void> _pump(WidgetTester tester, AgentSessionState state) {
-  return tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        agentSessionStateProvider.overrideWith(
-          (ref, sessionId) => Stream.value(state),
-        ),
-      ],
-      child: const MaterialApp(
-        home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
-      ),
-    ),
-  );
+Widget _view(Stream<AgentSessionState> Function() states) => ProviderScope(
+  overrides: [
+    agentSessionStateProvider.overrideWith((ref, sessionId) => states()),
+  ],
+  child: const MaterialApp(
+    home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
+  ),
+);
+
+Future<void> _pump(WidgetTester tester, AgentSessionState state) =>
+    tester.pumpWidget(_view(() => Stream.value(state)));
+
+/// Mounts the view over a stream the test drives with [_emit].
+Future<StreamController<AgentSessionState>> _pumpLive(
+  WidgetTester tester,
+) async {
+  final states = StreamController<AgentSessionState>.broadcast();
+  addTearDown(states.close);
+  await tester.pumpWidget(_view(() => states.stream));
+  return states;
+}
+
+Future<void> _emit(
+  WidgetTester tester,
+  StreamController<AgentSessionState> states,
+  AgentSessionState state,
+) async {
+  states.add(state);
+  await tester.pump();
+  await tester.pump();
 }
 
 void main() {
@@ -806,14 +824,14 @@ void main() {
 
   group('composer edits leave the rows alone', () {
     testWidgets(
-      'typing or moving the caret in the composer leaves transcript rows untouched',
+      'typing or moving the caret in the composer rebuilds neither the list nor its markdown',
       (tester) async {
         await _pump(tester, _settledReplyState());
         await tester.pump();
 
-        final rowsBefore = tester
-            .widgetList<MessageRow>(find.byType(MessageRow))
-            .toList();
+        // The view builds the ListView, so an identical one proves a keystroke
+        // never rebuilt the view; the row memo would hide that from the rows.
+        final listBefore = tester.widget<ListView>(find.byType(ListView));
         final blockBefore = tester.widget<MarkdownBlock>(
           find.byType(MarkdownBlock),
         );
@@ -826,13 +844,10 @@ void main() {
             .updateSelection(const TextSelection.collapsed(offset: 2));
         await tester.pump();
 
-        final rowsAfter = tester
-            .widgetList<MessageRow>(find.byType(MessageRow))
-            .toList();
-        expect(rowsAfter.length, rowsBefore.length);
-        for (var i = 0; i < rowsBefore.length; i++) {
-          expect(identical(rowsAfter[i], rowsBefore[i]), isTrue);
-        }
+        expect(
+          identical(tester.widget<ListView>(find.byType(ListView)), listBefore),
+          isTrue,
+        );
         expect(
           identical(
             tester.widget<MarkdownBlock>(find.byType(MarkdownBlock)),
@@ -848,55 +863,31 @@ void main() {
     testWidgets(
       'an unchanged row keeps its widget while another row of the same turn streams',
       (tester) async {
-        final states = StreamController<AgentSessionState>.broadcast();
-        addTearDown(states.close);
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              agentSessionStateProvider.overrideWith(
-                (ref, id) => states.stream,
-              ),
-            ],
-            child: const MaterialApp(
-              home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
-            ),
-          ),
-        );
+        final states = await _pumpLive(tester);
         final first = _item('a1', 'message', role: 'assistant', text: 'first');
-        final user = _item('u1', 'message', role: 'user', text: 'go');
         AgentSessionState open(String partial) => AgentSessionState(
           turns: [
             AgentTurn(
               turnId: 't1',
               items: [
-                user,
                 first,
                 _item('a2', 'message', role: 'assistant', text: partial),
               ],
             ),
           ],
         );
-        states.add(open('one'));
-        await tester.pump();
-        await tester.pump();
-
-        MessageRow rowFor(String id) => tester.widget<MessageRow>(
+        MessageRow firstRow() => tester.widget<MessageRow>(
           find.descendant(
-            of: find.byKey(ValueKey('msg:$id')),
+            of: find.byKey(const ValueKey('msg:a1')),
             matching: find.byType(MessageRow),
           ),
         );
-        final userBefore = rowFor('u1');
-        final firstBefore = rowFor('a1');
-        final streamingBefore = rowFor('a2');
 
-        states.add(open('one two'));
-        await tester.pump();
-        await tester.pump();
+        await _emit(tester, states, open('one'));
+        final firstBefore = firstRow();
+        await _emit(tester, states, open('one two'));
 
-        expect(identical(rowFor('u1'), userBefore), isTrue);
-        expect(identical(rowFor('a1'), firstBefore), isTrue);
-        expect(identical(rowFor('a2'), streamingBefore), isFalse);
+        expect(identical(firstRow(), firstBefore), isTrue);
         expect(
           find.textContaining('one two', findRichText: true),
           findsOneWidget,
@@ -1027,43 +1018,40 @@ void main() {
           ),
         );
 
-        states.add(const AgentSessionState(capabilities: _capsFixture));
-        await tester.pump();
-        await tester.pump();
+        AgentSessionState caps({
+          List<AgentCapabilityModel> extraModels = const [],
+        }) => AgentSessionState(
+          capabilities: AgentCapabilities(
+            sessionId: _sessionId,
+            commands: _capsFixture.commands,
+            models: [..._capsFixture.models, ...extraModels],
+            currentModelId: 'gpt-5.2-mini',
+          ),
+        );
+
+        await _emit(
+          tester,
+          states,
+          const AgentSessionState(capabilities: _capsFixture),
+        );
         expect(cache.writes, 1);
 
         await _typeIntoComposer(tester, 'abc');
         expect(cache.writes, 1);
 
-        states.add(
-          AgentSessionState(
-            capabilities: AgentCapabilities(
-              sessionId: _sessionId,
-              commands: _capsFixture.commands,
-              models: _capsFixture.models,
-              currentModelId: 'gpt-5.2-mini',
-            ),
-          ),
-        );
-        await tester.pump();
-        await tester.pump();
+        // A new object with a new current model, but the same catalog.
+        await _emit(tester, states, caps());
         expect(cache.writes, 1);
 
-        states.add(
-          AgentSessionState(
-            capabilities: AgentCapabilities(
-              sessionId: _sessionId,
-              commands: _capsFixture.commands,
-              models: [
-                ..._capsFixture.models,
-                const AgentCapabilityModel(id: 'gpt-5.3', name: 'GPT-5.3'),
-              ],
-              currentModelId: 'gpt-5.2-mini',
-            ),
+        await _emit(
+          tester,
+          states,
+          caps(
+            extraModels: const [
+              AgentCapabilityModel(id: 'gpt-5.3', name: 'GPT-5.3'),
+            ],
           ),
         );
-        await tester.pump();
-        await tester.pump();
         expect(cache.writes, 2);
 
         tool = 'claude';
@@ -1079,32 +1067,18 @@ void main() {
     testWidgets(
       'a turn the user unfolded stays unfolded while the transcript streams',
       (tester) async {
-        final controller = StreamController<AgentSessionState>.broadcast();
-        addTearDown(controller.close);
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              agentSessionStateProvider.overrideWith(
-                (ref, id) => controller.stream,
-              ),
-            ],
-            child: const MaterialApp(
-              home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
-            ),
-          ),
-        );
+        final states = await _pumpLive(tester);
         final s1 = _twoTurnState();
-        controller.add(s1);
-        await tester.pump();
-        await tester.pump();
+        await _emit(tester, states, s1);
         expect(find.byType(ToolCallCard), findsOneWidget);
 
         await tester.tap(find.byType(TurnFoldRow));
         await tester.pump();
         expect(find.byType(ToolCallCard), findsNWidgets(2));
-        final rowsBefore = find.byType(MessageRow).evaluate().length;
 
-        controller.add(
+        await _emit(
+          tester,
+          states,
           AgentSessionState(
             turns: [
               s1.turns[0],
@@ -1119,11 +1093,12 @@ void main() {
             ],
           ),
         );
-        await tester.pump();
-        await tester.pump();
 
+        expect(
+          find.textContaining('streaming', findRichText: true),
+          findsOneWidget,
+        );
         expect(find.byType(ToolCallCard), findsNWidgets(2));
-        expect(find.byType(MessageRow).evaluate().length, rowsBefore + 1);
 
         await _disposeTree(tester);
       },

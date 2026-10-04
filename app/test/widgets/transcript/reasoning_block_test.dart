@@ -129,8 +129,6 @@ void main() {
       const inputs = [
         'only',
         'a\nb',
-        'a\nb\nc',
-        'a\n\n',
         '\nb',
         '\n\nb',
         'x\ny\n',

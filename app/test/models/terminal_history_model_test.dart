@@ -604,46 +604,25 @@ void main() {
     expect(m.canLoadMore, isFalse);
   });
 
-  test('a repeated seek while its page is in flight notifies nobody', () {
-    final model = TerminalHistoryModel()
-      ..applyBoundary(_boundary(nextRowId: 10000));
-    model.seek(2000);
-    model.markRequested('r');
-    var count = 0;
-    model.addListener(() => count++);
+  test('a seek notifies unless it repeats the one whose page is in flight', () {
+    for (final (name, inFlight, retained, newer, target, notifies) in [
+      ('a repeat in flight', true, false, false, 2000, false),
+      ('the other direction', true, false, true, 2000, true),
+      ('another target', true, false, false, 3000, true),
+      ('nothing in flight', false, false, false, 2000, true),
+      ('a retained window', true, true, false, 2000, true),
+    ]) {
+      final model = TerminalHistoryModel()
+        ..applyBoundary(_boundary(nextRowId: 10000))
+        ..seek(2000);
+      if (inFlight) model.markRequested('r');
+      if (retained) model.retainWindow();
+      var count = 0;
+      model.addListener(() => count++);
 
-    model.seek(2000);
-    expect(count, 0);
-    expect(model.cursor, 2000);
-    model.seek(2000, newer: true);
-    expect(count, 1);
-    model.seek(3000, newer: true);
-    expect(count, 2);
-  });
-
-  test('a repeated seek with nothing in flight still notifies', () {
-    final model = TerminalHistoryModel()
-      ..applyBoundary(_boundary(nextRowId: 10000));
-    model.seek(2000);
-    var count = 0;
-    model.addListener(() => count++);
-
-    model.seek(2000);
-    expect(count, 1);
-  });
-
-  test('a seek after the window was retained notifies even at the same '
-      'target', () {
-    final model = TerminalHistoryModel()
-      ..applyBoundary(_boundary(nextRowId: 10000));
-    model.seek(2000);
-    model.markRequested('r');
-    model.retainWindow();
-    var count = 0;
-    model.addListener(() => count++);
-
-    model.seek(2000);
-    expect(count, 1);
-    expect(model.hasPendingSeek, isTrue);
+      model.seek(target, newer: newer);
+      expect(count, notifies ? 1 : 0, reason: name);
+      expect(model.hasPendingSeek, isTrue, reason: name);
+    }
   });
 }

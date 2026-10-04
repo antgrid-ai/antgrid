@@ -206,8 +206,8 @@ void main() {
         '${g.path}:${g.matches.map((m) => m.line).join(',')}',
     ];
 
-    test('a batch that interleaves files keeps first-seen file order and each '
-        "file's arrival order", () async {
+    test("a batch keeps first-seen file order, each file's arrival order, "
+        'and the same group object for every file it did not touch', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = SearchService.fromSession(session);
@@ -224,69 +224,34 @@ void main() {
         hit('b', 2),
       ]);
       expect(shape(svc), ['a:1,2', 'b:1,2', 'c:1']);
+      final bGroup = svc.currentState.results[1];
 
       await emitResult(t, reqId, [hit('c', 2), hit('a', 3), hit('d', 1)]);
       expect(shape(svc), ['a:1,2,3', 'b:1,2', 'c:1,2', 'd:1']);
+      expect(identical(svc.currentState.results[1], bGroup), isTrue);
 
       await svc.dispose();
       await session.close();
     });
 
-    test('a file the batch did not touch keeps the same group object',
-        () async {
+    test('a new search drops batches for the one it superseded and groups its '
+        'own from scratch', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = SearchService.fromSession(session);
 
       svc.search('foo');
       await Future<void>.delayed(Duration.zero);
-      final reqId = svc.currentState.currentRequestId;
-
-      await emitResult(t, reqId, [hit('a', 1), hit('b', 1)]);
-      final aGroup = svc.currentState.results[0];
-      await emitResult(t, reqId, [hit('b', 2)]);
-
-      expect(identical(svc.currentState.results[0], aGroup), isTrue);
-      expect(svc.currentState.results[1].matches.map((m) => m.line), [1, 2]);
-
-      await svc.dispose();
-      await session.close();
-    });
-
-    test('a new search groups its results from scratch', () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = SearchService.fromSession(session);
-
-      svc.search('foo');
-      await Future<void>.delayed(Duration.zero);
-      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 1)]);
-
-      svc.search('bar');
-      await Future<void>.delayed(Duration.zero);
-      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 5)]);
-
-      expect(shape(svc), ['a:5']);
-
-      await svc.dispose();
-      await session.close();
-    });
-
-    test('a batch for a superseded search is dropped', () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = SearchService.fromSession(session);
-
-      svc.search('foo');
       final first = svc.currentState.currentRequestId;
-      svc.search('bar');
-      final second = svc.currentState.currentRequestId;
-      await Future<void>.delayed(Duration.zero);
-
       await emitResult(t, first, [hit('a', 1)]);
 
+      svc.search('bar');
+      await Future<void>.delayed(Duration.zero);
+      await emitResult(t, first, [hit('a', 9)]);
       expect(svc.currentState.results, isEmpty);
-      expect(svc.currentState.currentRequestId, second);
+
+      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 5)]);
+      expect(shape(svc), ['a:5']);
 
       await svc.dispose();
       await session.close();

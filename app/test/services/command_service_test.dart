@@ -126,18 +126,11 @@ void main() {
       svc.runCommand('build');
       final heavySub = session.heavyStream.listen((_) {});
 
-      final line = '${'x' * 99}\n';
-      for (var i = 0; i < kCommandOutputMaxChars ~/ 4000 + 10; i++) {
-        t.emit('command:output', {
-          'projectId': 'p',
-          'commandName': 'build',
-          'data': line * 40,
-        });
-      }
+      final overCap = '${'x' * 99}\n' * (kCommandOutputMaxChars ~/ 100 + 10);
       t.emit('command:output', {
         'projectId': 'p',
         'commandName': 'build',
-        'data': 'END\n',
+        'data': '${overCap}END\n',
       });
       await waitFor(
         () => svc.currentState.current!.output.text.endsWith('END\n'),
@@ -146,7 +139,6 @@ void main() {
       final output = svc.currentState.current!.output;
       expect(output.length, lessThanOrEqualTo(kCommandOutputMaxChars));
       expect(output.trimmed, isTrue);
-      expect(output.text.endsWith('END\n'), isTrue);
 
       await heavySub.cancel();
       await svc.dispose();

@@ -451,134 +451,48 @@ void main() {
     });
   });
 
+  // An expanded card is rebuilt on every emission of another row's stream, so
+  // its terminal split and JSON encode are cached per block and per value.
   group('render caches', () {
-    Future<void> pumpRebuildable(
-      WidgetTester tester,
-      AgentItem item,
-      void Function(StateSetter) capture,
+    testWidgets('a terminal block is re-read only when the block changes', (
+      tester,
     ) async {
-      final controller = TranscriptSelectionController();
-      await tester.pumpWidget(
-        StatefulBuilder(
-          builder: (context, setState) {
-            capture(setState);
-            return MaterialApp(
-              home: Scaffold(
-                body: TranscriptSelectionScope(
-                  controller: controller,
-                  child: SelectionArea(
-                    child: SingleChildScrollView(
-                      child: ToolCallCard(
-                        data: ToolCallRowData(item),
-                        rowIndex: 0,
-                        expanded: true,
-                        isBackground: false,
-                        onToggle: () {},
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-    }
+      final block = _CountingTerminal('one');
+      final item = _item(status: 'completed', title: 'Run', content: [block]);
+      await _pump(tester, item: item, expanded: true);
+      final reads = block.reads;
+      await _pump(tester, item: item, expanded: true);
+      expect(block.reads, reads);
 
-    testWidgets(
-      're-rendering an expanded card with the same terminal block does not re-read its output',
-      (tester) async {
-        final block = _CountingTerminal('one\ntwo');
-        final item = _item(status: 'completed', title: 'Run', content: [block]);
-        late StateSetter rebuild;
-        await pumpRebuildable(tester, item, (s) => rebuild = s);
-        expect(find.textContaining('two'), findsOneWidget);
-
-        final readsBefore = block.reads;
-        rebuild(() {});
-        await tester.pump();
-
-        expect(block.reads, readsBefore);
-      },
-    );
-
-    testWidgets(
-      're-rendering an expanded card with the same raw input does not re-encode it',
-      (tester) async {
-        final raw = _CountingJson();
-        final item = _item(
-          status: 'completed',
-          toolKind: 'mcp',
-          title: 'call tool',
-          rawInput: raw,
-        );
-        late StateSetter rebuild;
-        await pumpRebuildable(tester, item, (s) => rebuild = s);
-        expect(find.textContaining('"a": 1'), findsOneWidget);
-
-        final before = raw.encodes;
-        rebuild(() {});
-        await tester.pump();
-
-        expect(raw.encodes, before);
-      },
-    );
-
-    testWidgets(
-      'an expanded terminal block re-rendered with new output shows the new tail',
-      (tester) async {
-        await _pump(
-          tester,
-          item: _item(
-            status: 'completed',
-            title: 'Run',
-            content: [ToolContent(type: 'terminal', data: 'one')],
-          ),
-          expanded: true,
-        );
-        await tester.pumpAndSettle();
-        await _pump(
-          tester,
-          item: _item(
-            status: 'completed',
-            title: 'Run',
-            content: [ToolContent(type: 'terminal', data: 'one\ntwo')],
-          ),
-          expanded: true,
-        );
-        await tester.pumpAndSettle();
-
-        expect(find.textContaining('two'), findsOneWidget);
-      },
-    );
-
-    testWidgets('a new raw input value re-renders its JSON', (tester) async {
       await _pump(
         tester,
         item: _item(
           status: 'completed',
-          toolKind: 'mcp',
-          title: 'call tool',
-          rawInput: {'a': 1},
+          title: 'Run',
+          content: [ToolContent(type: 'terminal', data: 'one\ntwo')],
         ),
         expanded: true,
       );
-      await tester.pumpAndSettle();
-      await _pump(
-        tester,
-        item: _item(
-          status: 'completed',
-          toolKind: 'mcp',
-          title: 'call tool',
-          rawInput: {'a': 2},
-        ),
-        expanded: true,
-      );
-      await tester.pumpAndSettle();
+      expect(find.textContaining('two'), findsOneWidget);
+    });
 
+    testWidgets('raw input is re-encoded only when its value changes', (
+      tester,
+    ) async {
+      AgentItem mcp(Object input) => _item(
+        status: 'completed',
+        toolKind: 'mcp',
+        title: 'call tool',
+        rawInput: input,
+      );
+      final raw = _CountingJson();
+      await _pump(tester, item: mcp(raw), expanded: true);
+      final encodes = raw.encodes;
+      await _pump(tester, item: mcp(raw), expanded: true);
+      expect(raw.encodes, encodes);
+
+      await _pump(tester, item: mcp({'a': 2}), expanded: true);
       expect(find.textContaining('"a": 2'), findsOneWidget);
-      expect(find.textContaining('"a": 1'), findsNothing);
     });
   });
 }

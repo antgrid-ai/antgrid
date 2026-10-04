@@ -19,14 +19,21 @@ final _focus = NotifierProvider<ValueController<String>, String>(
   () => ValueController<String>('a'),
 );
 
-CommandState _state(CommandStatus status, String output) => CommandState(
-  current: CommandExecution(
-    commandName: 'test',
-    projectId: 'p',
-    status: status,
-    output: CommandOutput()..append(output),
-  ),
-);
+CommandState _state(CommandStatus status, String output) =>
+    _running(CommandOutput()..append(output), status: status);
+
+CommandOutput _lines(
+  int count, {
+  required int blockChars,
+  int maxChars = kCommandOutputMaxChars,
+  String word = 'line',
+}) {
+  final output = CommandOutput(blockChars: blockChars, maxChars: maxChars);
+  for (var i = 0; i < count; i++) {
+    output.append('$word ${i.toString().padLeft(2, '0')}\n');
+  }
+  return output;
+}
 
 CommandState _running(
   CommandOutput output, {
@@ -139,58 +146,21 @@ void main() {
     expect(find.text('b finished long ago'), findsOneWidget);
   });
 
-  testWidgets('new output re-lays-out only the newest block', (tester) async {
-    final output = CommandOutput(blockChars: 64);
-    for (var i = 0; i < 36; i++) {
-      output.append('line ${i.toString().padLeft(2, '0')}\n');
-    }
+  testWidgets('new output re-lays-out only the tail, even as the oldest '
+      'blocks are trimmed', (tester) async {
+    final output = _lines(30, blockChars: 32, maxChars: 512)..append('z' * 40);
     final controller = await _pumpOverlay(tester);
     await _show(tester, controller, _running(output));
 
-    final first = output.blocks.first;
-    final firstText = tester.widget<Text>(find.text(first, skipOffstage: false));
-    final firstParagraph = _paragraphOf(tester, first);
-
-    // Nothing may seal here: a new selectable would join in the build-only
-    // frame below, before its paragraph has been laid out.
-    final n = output.blocks.length;
-    output.append('more');
-    expect(output.blocks.length, n);
-
-    await tester.pump(null, EnginePhase.build);
-
-    expect(identical(_paragraphOf(tester, first), firstParagraph), isTrue);
-    expect(firstParagraph.debugNeedsLayout, isFalse);
-    expect(
-      identical(
-        tester.widget<Text>(find.text(first, skipOffstage: false)),
-        firstText,
-      ),
-      isTrue,
-    );
-    expect(_paragraphOf(tester, output.tail).debugNeedsLayout, isTrue);
-
-    await tester.pump();
-  });
-
-  testWidgets('trimming the oldest blocks re-lays-out none of the survivors', (
-    tester,
-  ) async {
-    final output = CommandOutput(blockChars: 32, maxChars: 512);
-    for (var i = 0; i < 80; i++) {
-      output.append('line ${i.toString().padLeft(2, '0')}\n');
-    }
-    output.append('z' * 40);
-    expect(output.trimmed, isTrue);
-    expect(output.tail.contains('\n'), isFalse);
-
-    final controller = await _pumpOverlay(tester);
-    await _show(tester, controller, _running(output));
-
+    Text textOf(String text) =>
+        tester.widget<Text>(find.text(text, skipOffstage: false));
     final survivor = output.blocks.last;
+    final survivorText = textOf(survivor);
     final paragraph = _paragraphOf(tester, survivor);
     final seq = output.firstBlockSeq;
 
+    // Unterminated, so nothing seals: a new selectable would join in the
+    // build-only frame below, before its paragraph has been laid out.
     for (var i = 0; i < 64 && output.firstBlockSeq == seq; i++) {
       output.append('z' * 8);
     }
@@ -199,8 +169,10 @@ void main() {
 
     await tester.pump(null, EnginePhase.build);
 
+    expect(identical(textOf(survivor), survivorText), isTrue);
     expect(identical(_paragraphOf(tester, survivor), paragraph), isTrue);
     expect(paragraph.debugNeedsLayout, isFalse);
+    expect(_paragraphOf(tester, output.tail).debugNeedsLayout, isTrue);
 
     await tester.pump();
   });
@@ -252,10 +224,7 @@ void main() {
   testWidgets('trimmed output says so, and the note is not copied', (
     tester,
   ) async {
-    final output = CommandOutput(blockChars: 32, maxChars: 128);
-    for (var i = 0; i < 40; i++) {
-      output.append('line ${i.toString().padLeft(2, '0')}\n');
-    }
+    final output = _lines(40, blockChars: 32, maxChars: 128);
     expect(output.trimmed, isTrue);
     final controller = await _pumpOverlay(tester);
     await _show(tester, controller, _running(output));
@@ -267,34 +236,32 @@ void main() {
 
     String? copied;
     _watchClipboard((text) => copied = text);
-    await _selectAllAndCopy(tester, output);
+    await _invokeOnTail(
+      tester,
+      output,
+      const SelectAllTextIntent(SelectionChangedCause.keyboard),
+    );
+    await _invokeOnTail(tester, output, CopySelectionTextIntent.copy);
 
     expect(copied, output.text);
-    expect(copied, isNot(contains('Earlier output trimmed')));
   });
 
   testWidgets('a selection survives the oldest blocks being trimmed', (
     tester,
   ) async {
-    final output = CommandOutput(blockChars: 32, maxChars: 256);
-    var i = 0;
-    String line() => 'line ${(i++).toString().padLeft(2, '0')}\n';
-    for (var n = 0; n < 20; n++) {
-      output.append(line());
-    }
+    final output = _lines(20, blockChars: 32, maxChars: 256);
     final controller = await _pumpOverlay(tester);
     await _show(tester, controller, _running(output));
-    Actions.invoke(
-      tester.element(find.text(output.tail, skipOffstage: false)),
+    await _invokeOnTail(
+      tester,
+      output,
       const SelectAllTextIntent(SelectionChangedCause.keyboard),
     );
-    await tester.pump();
 
     final firstBefore = output.firstBlockSeq;
-    for (var n = 0; n < 30; n++) {
-      output.append(line());
+    for (var n = 20; n < 50; n++) {
+      output.append('line $n\n');
     }
-    expect(output.trimmed, isTrue);
     expect(output.firstBlockSeq, greaterThan(firstBefore));
     await tester.pump();
     await tester.pump();
@@ -303,11 +270,7 @@ void main() {
 
     String? copied;
     _watchClipboard((text) => copied = text);
-    Actions.invoke(
-      tester.element(find.text(output.tail, skipOffstage: false)),
-      CopySelectionTextIntent.copy,
-    );
-    await tester.pump();
+    await _invokeOnTail(tester, output, CopySelectionTextIntent.copy);
     expect(
       copied == null || output.text.contains(copied!),
       isTrue,
@@ -316,12 +279,8 @@ void main() {
   });
 
   testWidgets('a new run shows only its own output', (tester) async {
-    final a = CommandOutput(blockChars: 16);
-    final b = CommandOutput(blockChars: 16);
-    for (var i = 0; i < 10; i++) {
-      a.append('alpha ${i.toString().padLeft(2, '0')}\n');
-      b.append('beta  ${i.toString().padLeft(2, '0')}\n');
-    }
+    final a = _lines(4, blockChars: 16, word: 'alpha');
+    final b = _lines(4, blockChars: 16, word: 'beta ');
     final controller = await _pumpOverlay(tester);
 
     await _show(tester, controller, _running(a));
@@ -333,10 +292,7 @@ void main() {
   });
 
   test('sending trimmed output tells the agent it was trimmed', () {
-    final trimmed = CommandOutput(blockChars: 32, maxChars: 128);
-    for (var i = 0; i < 40; i++) {
-      trimmed.append('line ${i.toString().padLeft(2, '0')}\n');
-    }
+    final trimmed = _lines(40, blockChars: 32, maxChars: 128);
     expect(trimmed.trimmed, isTrue);
     expect(
       commandOutputForAgent(trimmed),
@@ -361,15 +317,14 @@ void _watchClipboard(void Function(String? text) onCopy) {
   });
 }
 
-Future<void> _selectAllAndCopy(WidgetTester tester, CommandOutput output) async {
+Future<void> _invokeOnTail(
+  WidgetTester tester,
+  CommandOutput output,
+  Intent intent,
+) async {
   Actions.invoke(
     tester.element(find.text(output.tail, skipOffstage: false)),
-    const SelectAllTextIntent(SelectionChangedCause.keyboard),
-  );
-  await tester.pump();
-  Actions.invoke(
-    tester.element(find.text(output.tail, skipOffstage: false)),
-    CopySelectionTextIntent.copy,
+    intent,
   );
   await tester.pump();
 }

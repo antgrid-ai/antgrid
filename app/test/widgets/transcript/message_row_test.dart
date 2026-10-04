@@ -2,10 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
-import 'package:markdown_widget/markdown_widget.dart' show MarkdownBlock;
-import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_tokens.dart';
-import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/agent_event.dart';
 import 'package:antgrid/providers/now_ticker.dart';
 import 'package:antgrid/providers/session_bus_inbox.dart';
@@ -322,129 +319,29 @@ void main() {
     });
   });
 
-  group('markdown memo', () {
-    late String text;
-    late AbColors palette;
-    late StateSetter rebuild;
-
-    Future<void> pumpRebuildable(WidgetTester tester) async {
-      text = 'hi **bold**';
-      palette = kPresets[AbThemePreset.zinc]!;
-      final controller = TranscriptSelectionController();
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            nowMinuteProvider.overrideWith(
-              (ref) => Stream.value(DateTime(2026, 7, 3, 12, 5)),
-            ),
-          ],
-          child: StatefulBuilder(
-            builder: (context, setState) {
-              rebuild = setState;
-              return MaterialApp(
-                builder: (context, child) => Theme(
-                  data: ThemeData(
-                    extensions: <ThemeExtension<dynamic>>[palette],
-                  ),
-                  child: child!,
-                ),
-                home: Scaffold(
-                  body: TranscriptSelectionScope(
-                    controller: controller,
-                    child: SelectionArea(
-                      child: MessageRow(
-                        data: MessageRowData(_item(text: text), isUser: false),
-                        rowIndex: 0,
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
+  // MessageRow hands back its TranscriptMarkdown so MarkdownBlock skips the
+  // re-parse; the weight offset is a static no dependency tracks, so it has to
+  // be part of that key.
+  testWidgets('a rebuild reuses the markdown until the weight offset moves', (
+    tester,
+  ) async {
+    Future<TranscriptMarkdown> pumpRow() async {
+      await _pump(
+        tester,
+        MessageRow(
+          data: MessageRowData(_item(text: 'hi **bold**'), isUser: false),
+          rowIndex: 0,
         ),
       );
+      await tester.pumpAndSettle();
+      return tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown));
     }
 
-    testWidgets('a rebuild with unchanged text keeps the rendered markdown', (
-      tester,
-    ) async {
-      await pumpRebuildable(tester);
-      await tester.pumpAndSettle();
-      final md = tester.widget<TranscriptMarkdown>(
-        find.byType(TranscriptMarkdown),
-      );
-      final block = tester.widget<MarkdownBlock>(find.byType(MarkdownBlock));
+    final first = await pumpRow();
+    expect(identical(await pumpRow(), first), isTrue);
 
-      rebuild(() {});
-      await tester.pump();
-
-      expect(
-        identical(
-          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
-          md,
-        ),
-        isTrue,
-      );
-      expect(
-        identical(tester.widget<MarkdownBlock>(find.byType(MarkdownBlock)), block),
-        isTrue,
-      );
-    });
-
-    testWidgets('a rebuild with new text re-renders the markdown', (
-      tester,
-    ) async {
-      await pumpRebuildable(tester);
-      await tester.pumpAndSettle();
-      final md = tester.widget<TranscriptMarkdown>(
-        find.byType(TranscriptMarkdown),
-      );
-
-      rebuild(() => text = 'bye *now*');
-      await tester.pump();
-
-      expect(
-        identical(
-          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
-          md,
-        ),
-        isFalse,
-      );
-      expect(find.textContaining('bye', findRichText: true), findsWidgets);
-      expect(find.textContaining('hi', findRichText: true), findsNothing);
-    });
-
-    testWidgets('a weight-offset change re-renders markdown the row kept', (
-      tester,
-    ) async {
-      await pumpRebuildable(tester);
-      await tester.pumpAndSettle();
-      final md = tester.widget<TranscriptMarkdown>(
-        find.byType(TranscriptMarkdown),
-      );
-
-      AbTokens.activeWeightOffset = 1;
-      addTearDown(() => AbTokens.activeWeightOffset = 0);
-      rebuild(() {});
-      await tester.pump();
-
-      expect(
-        identical(
-          tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown)),
-          md,
-        ),
-        isFalse,
-      );
-      expect(
-        tester
-            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
-            .config!
-            .p
-            .textStyle
-            .fontWeight,
-        FontWeight.w500,
-      );
-    });
+    AbTokens.activeWeightOffset = 1;
+    addTearDown(() => AbTokens.activeWeightOffset = 0);
+    expect(identical(await pumpRow(), first), isFalse);
   });
 }

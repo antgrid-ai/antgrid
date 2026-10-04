@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/project/inbound_frame.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -37,18 +35,15 @@ void main() {
       expect(frame.checkoutId, 'main');
       expect(calls, 0);
     });
-
   });
 
   group('router parse seam', () {
     late FakeAgentTransport transport;
     late ProjectSession session;
-    late Map<Map<String, dynamic>, int> calls;
     late Map<Object?, int> callsById;
 
     setUp(() async {
       transport = FakeAgentTransport();
-      calls = Map.identity();
       callsById = {};
       final cache = await CachedSessionsStore.open();
       session = ProjectSession(
@@ -58,7 +53,6 @@ void main() {
         cachedSessionsStore: cache,
         onClose: () async => await transport.dispose(),
         frameParser: (json) {
-          calls[json] = (calls[json] ?? 0) + 1;
           callsById[json['id']] = (callsById[json['id']] ?? 0) + 1;
           return parseAbMessage(json);
         },
@@ -67,26 +61,21 @@ void main() {
 
     tearDown(() => session.close());
 
+    // A parse that throws out of a listener fails the test as an uncaught
+    // error, so no guard zone is needed to see it.
     test(
       'a malformed frame is swallowed once and the next valid frame applies',
       () async {
-        final errors = <Object>[];
-        await runZonedGuarded(() async {
-          final bad = {
-            'id': '7',
-            'timestamp': 0,
-            'type': 'agent:status',
-            'terminals': 7,
-          };
-          transport.emitJson(bad);
-          await Future<void>.delayed(Duration.zero);
-          transport.emitJson(_statusFrame('1'));
-          await Future<void>.delayed(Duration.zero);
+        transport.emitJson({
+          'id': '7',
+          'timestamp': 'not a number',
+          'type': 'agent:status',
+        });
+        await Future<void>.delayed(Duration.zero);
+        transport.emitJson(_statusFrame('1'));
+        await Future<void>.delayed(Duration.zero);
 
-          expect(calls[bad], 1);
-        }, (e, _) => errors.add(e));
-
-        expect(errors, isEmpty);
+        expect(callsById['7'], 1);
         expect(session.status.value.services, isNotEmpty);
       },
     );

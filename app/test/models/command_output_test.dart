@@ -4,37 +4,48 @@ import 'package:antgrid/models/command_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('reproduces appended output exactly across block boundaries', () {
-    final output = CommandOutput(blockChars: 16, maxChars: 1 << 20);
-    final chunks = [
-      'first line\n',
-      'second line\r\n',
-      'abc\r',
-      '\ndef\n',
-      '\n\n\n',
-      'a line that is much longer than sixteen chars\n',
+  test('output is reproduced exactly, with no empty block and no CR left at a '
+      "block's end, however it is chunked", () {
+    final whole = [
+      'first line\r\nabc\r\ndef\n\n\n',
       'emoji \u{1F600} line\n',
-      'tail\r\nmore\r\n',
-      'x' * 40,
-      '\nend\n',
+      'p' * 40,
+      '\r' * 20,
+      'q' * 50,
+      '\r\n',
+      'r' * 30,
+      '\n\n',
+      's' * 60,
+      '\r' * 5,
       'unterminated',
-    ];
-    var all = '';
-    for (final chunk in chunks) {
-      output.append(chunk);
-      all += chunk;
-      expect(output.text, all);
-      expect(output.length, all.length);
-      for (final block in output.blocks) {
-        expect(block, isNotEmpty);
-        expect(block.endsWith('\r'), isFalse);
+    ].join();
+    for (final maxChars in [1 << 20, 150]) {
+      final one = CommandOutput(blockChars: 16, maxChars: maxChars)
+        ..append(whole);
+      for (final size in [1, 3, 7]) {
+        final reason = 'chunk $size, cap $maxChars';
+        final many = CommandOutput(blockChars: 16, maxChars: maxChars);
+        for (var i = 0; i < whole.length; i += size) {
+          many.append(whole.substring(i, min(i + size, whole.length)));
+          for (final block in many.blocks) {
+            expect(block, isNotEmpty, reason: reason);
+            expect(block.endsWith('\r'), isFalse, reason: reason);
+          }
+          expect(many.tail, isNotEmpty, reason: reason);
+        }
+        expect(many.text, one.text, reason: reason);
+        expect(many.tail, one.tail, reason: reason);
+        if (maxChars > whole.length) {
+          expect(many.text, whole, reason: reason);
+          expect(many.length, whole.length, reason: reason);
+          expect(many.blocks, one.blocks, reason: reason);
+          expect(many.blocks.length, greaterThanOrEqualTo(3), reason: reason);
+        }
       }
-      expect(output.tail, isNotEmpty);
     }
-    expect(output.blocks.length, greaterThanOrEqualTo(3));
   });
 
-  test('appending leaves earlier blocks untouched', () {
+  test('appending leaves earlier blocks untouched and the tail bounded', () {
     final output = CommandOutput(blockChars: 64);
     var i = 0;
     String line() => 'line ${(i++).toString().padLeft(2, '0')}\n';
@@ -42,7 +53,7 @@ void main() {
       output.append(line());
     }
     final first = output.blocks.first;
-    for (var n = 0; n < 200; n++) {
+    for (var n = 0; n < 30; n++) {
       output.append(line());
       expect(identical(output.blocks.first, first), isTrue);
       expect(output.tail.length, lessThanOrEqualTo(64 + 8));
@@ -74,49 +85,15 @@ void main() {
     expect(output.text.codeUnitAt(0), isNot(0xDE00));
   });
 
-  test('notifies once per append and ignores empty appends', () {
-    final output = CommandOutput();
+  test('an append that seals and trims notifies once; an empty one not at all',
+      () {
+    final output = CommandOutput(blockChars: 8, maxChars: 16);
     var calls = 0;
     output.addListener(() => calls++);
-    output.append('a');
-    expect(calls, 1);
     output.append('');
+    expect(calls, 0);
+    output.append('aaaa\nbbbb\ncccc\ndddd\neeee\nffff\n');
     expect(calls, 1);
-
-    final small = CommandOutput(blockChars: 8, maxChars: 16);
-    var smallCalls = 0;
-    small.addListener(() => smallCalls++);
-    small.append('aaaa\nbbbb\ncccc\ndddd\neeee\nffff\n');
-    expect(smallCalls, 1);
-  });
-
-  test('block boundaries do not depend on how the text is chunked', () {
-    final whole = [
-      'p' * 100,
-      '\r' * 30,
-      'q' * 200,
-      '\r\n',
-      'r' * 50,
-      '\n\n',
-      's' * 300,
-      '\r' * 5,
-      't' * 20,
-    ].join();
-    for (final maxChars in [1 << 20, 150]) {
-      final one = CommandOutput(blockChars: 16, maxChars: maxChars)
-        ..append(whole);
-      for (final size in [1, 3, 7]) {
-        final many = CommandOutput(blockChars: 16, maxChars: maxChars);
-        for (var i = 0; i < whole.length; i += size) {
-          many.append(whole.substring(i, min(i + size, whole.length)));
-        }
-        final reason = 'size $size max $maxChars';
-        expect(many.text, one.text, reason: reason);
-        expect(many.tail, one.tail, reason: reason);
-        if (maxChars > whole.length) {
-          expect(many.blocks, one.blocks, reason: reason);
-        }
-      }
-    }
+    expect(output.trimmed, isTrue);
   });
 }

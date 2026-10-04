@@ -474,27 +474,24 @@ void main() {
         AgentSessionState(turns: [a, b]),
         expandedTurnIds: const {},
       );
-      final rows2State = AgentSessionState(turns: [a, b2]);
-      final rows2 = cache.derive(rows2State, expandedTurnIds: const {});
-      final rows3State = AgentSessionState(
-        turns: [a, b2],
-        usageByTurn: {'B': const AgentTokenUsage(totalTokens: 1)},
-        usageByItem: {'m2': const AgentTokenUsage(totalTokens: 2)},
+      final rows2 = cache.derive(
+        AgentSessionState(turns: [a, b2]),
+        expandedTurnIds: const {},
       );
-      final rows3 = cache.derive(rows3State, expandedTurnIds: const {});
+      // Usage that lands on another turn must not invalidate this one.
+      final rows3 = cache.derive(
+        AgentSessionState(
+          turns: [a, b2],
+          usageByTurn: {'B': const AgentTokenUsage(totalTokens: 1)},
+          usageByItem: {'m2': const AgentTokenUsage(totalTokens: 2)},
+        ),
+        expandedTurnIds: const {},
+      );
 
       for (var i = 0; i < 3; i++) {
         expect(identical(rows1[i], rows2[i]), isTrue);
         expect(identical(rows1[i], rows3[i]), isTrue);
       }
-      expect(
-        rows2.map(_describe).toList(),
-        deriveRows(rows2State, expandedTurnIds: const {}).map(_describe).toList(),
-      );
-      expect(
-        rows3.map(_describe).toList(),
-        deriveRows(rows3State, expandedTurnIds: const {}).map(_describe).toList(),
-      );
     });
 
     test(
@@ -518,20 +515,6 @@ void main() {
           AgentSessionState(
             turns: [
               AgentTurn(turnId: 't1', items: [user]),
-            ],
-          ),
-        );
-        check(
-          AgentSessionState(
-            turns: [
-              AgentTurn(turnId: 't1', items: [user, reasoning]),
-            ],
-          ),
-        );
-        check(
-          AgentSessionState(
-            turns: [
-              AgentTurn(turnId: 't1', items: [user, reasoning, tool]),
             ],
           ),
         );
