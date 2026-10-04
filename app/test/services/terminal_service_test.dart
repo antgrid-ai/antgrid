@@ -5,7 +5,6 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -391,44 +390,5 @@ void main() {
 
     await svc.dispose();
     await session.close();
-  });
-
-  group('frame type pre-check', () {
-    test('TerminalService hands every frame type it acts on to the parser',
-        () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => TerminalService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectParsed([
-        heavyProbe('terminal:frame'),
-        heavyProbe('terminal:history:page'),
-        statusProbe('terminal:started'),
-        statusProbe('terminal:exited'),
-        statusProbe('agent:status'),
-        statusProbe('git:branches'),
-        statusProbe('git:checkout-result'),
-        statusProbe('terminal:notification'),
-        statusProbe('terminal:bell'),
-        statusProbe('notification:push'),
-        statusProbe('terminal:size'),
-        statusProbe('terminal:subscribed'),
-        statusProbe('terminal:display:status'),
-      ]);
-    });
-
-    test('TerminalService never parses a frame type it does not act on',
-        () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => TerminalService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectNeverParsed([
-        heavyProbe('terminal:output'),
-        heavyProbe('file:tree:children'),
-        heavyProbe('agent:item-delta'),
-        statusProbe('git:status'),
-        statusProbe('command:done'),
-        statusProbe('agent:turn-end'),
-      ]);
-    });
   });
 }

@@ -5,7 +5,6 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/search_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -354,33 +353,6 @@ void main() {
       await svc.dispose(); // idempotent
 
       await session.close();
-    });
-  });
-
-  group('frame type pre-check', () {
-    test('SearchService hands search results and completion to the parser',
-        () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => SearchService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-
-      await probe.expectParsed([
-        heavyProbe('file:search-result'),
-        heavyProbe('file:search-done'),
-      ]);
-    });
-
-    test('SearchService never parses a frame type it does not act on',
-        () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => SearchService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-
-      await probe.expectNeverParsed([
-        heavyProbe('file:tree:children'),
-        heavyProbe('agent:item-delta'),
-        heavyProbe('file:content'),
-      ]);
     });
   });
 

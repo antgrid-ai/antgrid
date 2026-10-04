@@ -158,16 +158,16 @@ class AgentSessionService {
   final Map<String, StringBuffer> _terminalBuffers = {};
 
   // Item ids touched by deltas since the last flush, per session. A streamed
-  // delta reaches _onJson through async stream controllers, one event per
+  // delta reaches _onFrame through async stream controllers, one event per
   // microtask, so only a timer can merge a live stream into one publish per
   // frame. It is a Timer rather than a frame callback because frames stop while
   // the window is hidden, which would leave buffered text unpublished. Every
-  // other inbound frame flushes first (see _onJson), so no event reads or
+  // other agent frame flushes first (see _onFrame), so no event reads or
   // replaces turns while text is still buffered.
   Map<String, Set<String>> _dirtyItems = {};
   Timer? _flushTimer;
 
-  // A batch replay runs every frame through _onJson so each keeps its side
+  // A batch replay runs every frame through _onFrame so each keeps its side
   // effects: retry consumption in _endTurn, cancel fallbacks, prompts, usage,
   // capabilities and update state. Only the state the batch ends on is worth
   // publishing, and until it ends nothing outside can see the lists it builds,
@@ -229,8 +229,8 @@ class AgentSessionService {
   String get projectId => session.projectId;
 
   AgentSessionService.fromSession(this.session) {
-    _heavySub = session.heavyStream.listen((f) => _onJson(f.json));
-    _statusSub = session.statusStream.listen((f) => _onJson(f.json));
+    _heavySub = session.heavyStream.listen(_onFrame);
+    _statusSub = session.statusStream.listen(_onFrame);
   }
 
   AgentSessionState stateFor(String sessionId) =>
@@ -297,7 +297,7 @@ class AgentSessionService {
   /// turns keep their original times rather than the batch's send time.
   void _dispatchFrames(Iterable<Object?> frames) {
     for (final f in frames) {
-      if (f is Map) _onJson(f.cast<String, dynamic>());
+      if (f is Map) _onFrame(InboundFrame(f.cast<String, dynamic>()));
     }
   }
 
@@ -398,48 +398,33 @@ class AgentSessionService {
     if (!stateFor(sessionId).updating || update['running'] == true) return;
     final result = update['result'];
     if (result is Map) {
-      _onJson({...result.cast<String, dynamic>(), 'sessionId': sessionId});
+      _onFrame(
+        InboundFrame({...result.cast<String, dynamic>(), 'sessionId': sessionId}),
+      );
     } else {
       _setState(sessionId, stateFor(sessionId).copyWith(updating: false));
     }
   }
 
-  // agent:error is absent because no arm reads it.
-  static const Set<String> _handledTypes = {
-    'agent:transcript-replay',
-    'agent:turn-start',
-    'agent:session-reset',
-    'agent:item-added',
-    'agent:item-delta',
-    'agent:item-updated',
-    'agent:turn-end',
-    'agent:permission-request',
-    'agent:question',
-    'agent:request-retracted',
-    'agent:snapshot',
-    'agent:usage',
-    'agent:capabilities',
-    'agent:background-tasks',
-    'agent:updateAvailable',
-    'agent:updateResult',
-  };
-
-  void _onJson(Map<String, dynamic> json) {
+  void _onFrame(InboundFrame f) {
     if (_disposed) return;
-    final parsed = parseAbMessageOfType(json, _handledTypes);
-    if (parsed == null) return;
+    // Cheap prefix test first so the many non-agent frames never reach a parse.
+    if (!(f.type?.startsWith('agent:') ?? false)) return;
+    final event = f.parsed;
+    if (event is! AgentEvent) return;
     // Inside a batch replay the buffered text is published with the batch's
     // final state, so flushing per frame would copy the turn list repeatedly.
-    if (parsed is! AgentItemDelta && _folds.isEmpty) _flushDeltas();
-    if (parsed is AgentTranscriptReplay) {
+    // Only agent events reach this line: a flush on an unrelated frame would
+    // defeat the 16 ms coalescing of a live stream.
+    if (event is! AgentItemDelta && _folds.isEmpty) _flushDeltas();
+    final at = _envTime(f.json);
+    switch (event) {
+      case final AgentTranscriptReplay parsed:
       _folded(
         parsed.sessionId,
         () => _applyFullTranscript(parsed.sessionId, parsed.frames),
       );
-      return;
-    }
-    final at = _envTime(json);
-    if (parsed is AgentTurnStart) {
+      case final AgentTurnStart parsed:
       final sid = parsed.sessionId;
       if (_turnById(sid, parsed.turnId) == null) {
         _setState(
@@ -456,31 +441,31 @@ class AgentSessionService {
           ),
         );
       }
-    } else if (parsed is AgentSessionReset) {
+      case final AgentSessionReset parsed:
       _clearSession(parsed.sessionId);
-    } else if (parsed is AgentItemAdded) {
+      case final AgentItemAdded parsed:
       _upsertItem(parsed.sessionId, parsed.turnId, parsed.item, at);
-    } else if (parsed is AgentItemDelta) {
+      case final AgentItemDelta parsed:
       _applyDelta(parsed);
-    } else if (parsed is AgentItemUpdated) {
+      case final AgentItemUpdated parsed:
       // Snapshot supersedes any pending delta accumulation.
       _clearBuffers(parsed.sessionId, parsed.item.itemId);
       _upsertItem(parsed.sessionId, parsed.turnId, parsed.item, at);
-    } else if (parsed is AgentTurnEnd) {
+      case final AgentTurnEnd parsed:
       _endTurn(parsed, at);
-    } else if (parsed is AgentPermissionRequest) {
+      case final AgentPermissionRequest parsed:
       final s = stateFor(parsed.sessionId);
       _setState(
         parsed.sessionId,
         s.copyWith(pendingPermissions: [...s.pendingPermissions, parsed]),
       );
-    } else if (parsed is AgentQuestion) {
+      case final AgentQuestion parsed:
       final s = stateFor(parsed.sessionId);
       _setState(
         parsed.sessionId,
         s.copyWith(pendingQuestions: [...s.pendingQuestions, parsed]),
       );
-    } else if (parsed is AgentRequestRetracted) {
+      case final AgentRequestRetracted parsed:
       final s = stateFor(parsed.sessionId);
       _setState(
         parsed.sessionId,
@@ -497,9 +482,9 @@ class AgentSessionService {
                     .toList(),
         ),
       );
-    } else if (parsed is AgentSnapshot) {
+      case final AgentSnapshot parsed:
       _applySnapshot(parsed, at);
-    } else if (parsed is AgentUsageEvent) {
+      case final AgentUsageEvent parsed:
       final s = stateFor(parsed.sessionId);
       final perMessage = parsed.usage.last ?? parsed.usage.total;
       final itemId = parsed.itemId;
@@ -535,22 +520,22 @@ class AgentSessionService {
           ),
         );
       }
-    } else if (parsed is AgentCapabilities) {
+      case final AgentCapabilities parsed:
       _setState(
         parsed.sessionId,
         stateFor(parsed.sessionId).copyWith(capabilities: parsed),
       );
-    } else if (parsed is AgentBackgroundTasks) {
+      case final AgentBackgroundTasks parsed:
       _setState(
         parsed.sessionId,
         stateFor(parsed.sessionId).copyWith(backgroundTasks: parsed),
       );
-    } else if (parsed is AgentUpdateAvailable) {
+      case final AgentUpdateAvailable parsed:
       final sid = parsed.sessionId;
       if (sid != null) {
         _setState(sid, stateFor(sid).copyWith(updateAvailable: parsed));
       }
-    } else if (parsed is AgentUpdateResult) {
+      case final AgentUpdateResult parsed:
       final sid = parsed.sessionId;
       if (sid != null) {
         _setState(
@@ -564,6 +549,9 @@ class AgentSessionService {
           ),
         );
       }
+      case AgentErrorMessage():
+        // No arm reads it.
+        break;
     }
   }
 
@@ -1037,7 +1025,7 @@ class AgentSessionService {
   }
 
   /// Fetch this session's completed-turn transcript from the bridge and apply
-  /// it through the normal inbound pipe (`_onJson`), for a chat session that's
+  /// it through the normal inbound pipe (`_onFrame`), for a chat session that's
   /// already running on the bridge but has no locally cached turns — e.g. a
   /// mobile client attaching to a session desktop started earlier. Idempotent:
   /// safe to call repeatedly (a call while turns are already populated is a

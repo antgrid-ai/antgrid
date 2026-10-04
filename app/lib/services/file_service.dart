@@ -213,8 +213,8 @@ class FileService {
     this.gitActionTimeout = const Duration(seconds: 15),
     this.gitSyncTimeout = const Duration(seconds: 150),
   }) : _state = FileTreeState(projectId: session.projectId) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
-    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyFrame);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
     // The bridge caches `git:sync-state` for replay, but only a checkout whose
     // bundle existed at connect time receives that replay — an isolated
     // session's does not. Asking also re-fires on every reconnect, which is
@@ -440,41 +440,12 @@ class FileService {
     _stateController.add(state);
   }
 
-  // `file:content` and `file:find-result` are in both sets because
-  // classifyAbMessage moves an error-bearing frame to status whatever its
-  // type.
-  //
-  // `tree:full` is deliberately in neither set: an old bridge's
+  // `tree:full` has no arm on either handler: an old bridge's
   // watcher-overflow resend (superseded by `file:tree:invalidated`, see
-  // [_handleInvalidated]) is dropped unparsed, a harmless no-op.
-  static const Set<String> _handledHeavyTypes = {
-    'file:tree:unchanged',
-    'file:tree:children',
-    'file:tree:invalidated',
-    'tree:update',
-    'file:content',
-    'file:resolve-path-result',
-    'file:find-result',
-  };
+  // [_handleInvalidated]) is a harmless no-op.
 
-  static const Set<String> _handledStatusTypes = {
-    'file:content',
-    'file:find-result',
-    'git:status',
-    'git:diff-content',
-    'git:commit-result',
-    'git:discard-result',
-    'git:stage-result',
-    'git:unstage-result',
-    'git:sync-result',
-    'git:sync-state',
-    'git:log-result',
-    'git:commit-files-result',
-    'git:commit-diff-content',
-  };
-
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessageOfType(json, _handledHeavyTypes);
+  void _onHeavyFrame(InboundFrame f) {
+    final parsed = f.parsed;
     if (parsed == null) return;
     if (parsed is FileTreeUnchangedMessage) {
       // Nothing to apply — the agent is confirming the revision we claimed.
@@ -527,8 +498,8 @@ class FileService {
     if (_completeFind(parsed)) return;
   }
 
-  void _onStatusJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessageOfType(json, _handledStatusTypes);
+  void _onStatusFrame(InboundFrame f) {
+    final parsed = f.parsed;
     if (parsed == null) return;
     // An error-bearing file:content is coerced onto this tier by
     // classifyAbMessage, so the heavy handler never sees it; without this the

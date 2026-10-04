@@ -80,8 +80,8 @@ class PreviewService {
     this.probeTimeout = const Duration(seconds: 15),
     PreviewHandoff? handoff,
   }) : _handoff = handoff ?? PreviewHandoff.shared {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onJson(f.json));
-    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onJson(f.json));
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onFrame);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onFrame);
     if (!session.transport.isLocal) {
       final parked = _handoff.claim(_handoffKey, _adoptLate);
       if (parked != null) _adoptParked(parked);
@@ -186,30 +186,18 @@ class PreviewService {
     _stateController.add(state);
   }
 
-  // One set serves both tiers: classifyAbMessage moves any error-bearing frame
-  // to status whatever its type.
-  static const Set<String> _handledTypes = {
-    'ports:update',
-    'port:detected',
-    'preview:snapshot',
-    'preview:url',
-  };
-
-  void _onJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessageOfType(json, _handledTypes);
-    if (parsed == null) return;
-    _handle(parsed);
-  }
-
-  void _handle(Object message) {
-    if (message is PortsUpdateMessage) {
-      _handlePortsUpdate(message);
-    } else if (message is PortDetectedMessage) {
-      _handlePortDetected(message);
-    } else if (message is PreviewSnapshotMessage) {
-      _mergePreviewEntries(message.urls);
-    } else if (message is PreviewUrlMessage) {
-      _mergePreviewEntries([message.entry]);
+  // One handler serves both tiers: classifyAbMessage moves any error-bearing
+  // frame to status whatever its type.
+  void _onFrame(InboundFrame f) {
+    switch (f.parsed) {
+      case final PortsUpdateMessage msg:
+        _handlePortsUpdate(msg);
+      case final PortDetectedMessage msg:
+        _handlePortDetected(msg);
+      case final PreviewSnapshotMessage msg:
+        _mergePreviewEntries(msg.urls);
+      case final PreviewUrlMessage msg:
+        _mergePreviewEntries([msg.entry]);
     }
   }
 

@@ -36,8 +36,8 @@ class CommandService {
   String get projectId => session.projectId;
 
   CommandService.fromSession(this.session, {this.checkoutId = 'main'}) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
-    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavy);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatus);
   }
 
   void _setState(CommandState newState) {
@@ -51,23 +51,12 @@ class CommandService {
     _stateController.add(newState);
   }
 
-  static const Set<String> _outputTypes = {'command:output'};
-  static const Set<String> _doneTypes = {'command:done'};
-
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessageOfType(json, _outputTypes);
-    if (abMsg == null) return;
-    if (abMsg is CommandOutputMessage) {
-      _handleCommandOutput(abMsg);
-    }
+  void _onHeavy(InboundFrame f) {
+    if (f.parsed case final CommandOutputMessage msg) _handleCommandOutput(msg);
   }
 
-  void _onStatusJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessageOfType(json, _doneTypes);
-    if (abMsg == null) return;
-    if (abMsg is CommandDoneMessage) {
-      _handleCommandDone(abMsg);
-    }
+  void _onStatus(InboundFrame f) {
+    if (f.parsed case final CommandDoneMessage msg) _handleCommandDone(msg);
   }
 
   // --- Message handlers ---

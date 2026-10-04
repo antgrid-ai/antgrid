@@ -10,7 +10,6 @@ import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/counting_file_node.dart';
 import '../helpers/fake_agent_transport.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Map<String, dynamic> _rootNode({
@@ -3249,56 +3248,5 @@ void main() {
       await svc.dispose();
       await session.close();
     });
-  });
-
-  group('frame type pre-check', () {
-    test(
-      'FileService hands every tree, file and git frame it acts on to the parser',
-      () async {
-        final probe = await ParseProbe.open();
-        final svc = probe.build(() => FileService.fromSession(probe.session));
-        addTearDown(svc.dispose);
-        await probe.expectParsed([
-          heavyProbe('file:tree:unchanged'),
-          heavyProbe('file:tree:children'),
-          heavyProbe('file:tree:invalidated'),
-          heavyProbe('tree:update'),
-          heavyProbe('file:content'),
-          heavyProbe('file:resolve-path-result'),
-          heavyProbe('file:find-result'),
-          statusProbe('git:status'),
-          statusProbe('git:diff-content'),
-          statusProbe('git:commit-result'),
-          statusProbe('git:discard-result'),
-          statusProbe('git:stage-result'),
-          statusProbe('git:unstage-result'),
-          statusProbe('git:sync-result'),
-          statusProbe('git:sync-state'),
-          statusProbe('git:log-result'),
-          statusProbe('git:commit-files-result'),
-          statusProbe('git:commit-diff-content'),
-          statusProbe('file:content', withError: true),
-          statusProbe('file:find-result', withError: true),
-        ]);
-      },
-    );
-
-    test(
-      'FileService never parses a frame type it does not act on, tree:full included',
-      () async {
-        final probe = await ParseProbe.open();
-        final svc = probe.build(() => FileService.fromSession(probe.session));
-        addTearDown(svc.dispose);
-        await probe.expectNeverParsed([
-          heavyProbe('tree:full'),
-          heavyProbe('agent:item-delta'),
-          heavyProbe('terminal:frame'),
-          heavyProbe('file:search-result'),
-          statusProbe('agent:status'),
-          statusProbe('git:branches'),
-          statusProbe('command:done'),
-        ]);
-      },
-    );
   });
 }

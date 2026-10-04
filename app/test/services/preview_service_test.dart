@@ -10,7 +10,6 @@ import 'package:antgrid/services/preview_service.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
 import '../helpers/free_port.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -925,33 +924,6 @@ void main() {
       expect(svc.takeNavRequest(4000), isNull);
       expect(svc.currentState.activeTabId, 4000);
       expect(svc.currentState.tabs.last.currentUrl, 'http://localhost:4000');
-    });
-  });
-
-  group('frame type pre-check', () {
-    test('PreviewService hands every frame type it acts on to the parser', () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => PreviewService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectParsed([
-        statusProbe('ports:update'),
-        statusProbe('port:detected'),
-        heavyProbe('preview:url'),
-        heavyProbe('preview:snapshot'),
-        statusProbe('preview:url', withError: true),
-      ]);
-    });
-
-    test('PreviewService never parses a frame type it does not act on', () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => PreviewService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectNeverParsed([
-        heavyProbe('agent:item-delta'),
-        heavyProbe('file:tree:children'),
-        statusProbe('git:status'),
-        statusProbe('agent:status'),
-      ]);
     });
   });
 }

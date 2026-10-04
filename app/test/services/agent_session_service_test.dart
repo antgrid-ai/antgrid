@@ -3,7 +3,6 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -1910,6 +1909,32 @@ void main() {
       expect(seen.single.turns.single.items.single.text, 'Hello world');
     });
 
+    test('non-agent frames between deltas do not flush them early', () async {
+      final (t, svc) = await openStreaming('message');
+      addTearDown(svc.dispose);
+      final seen = <AgentSessionState>[];
+      svc.stateStreamFor('p').listen(seen.add);
+
+      delta(t, 'l');
+      await Future<void>.value();
+      t.emit('terminal:frame', {'terminalId': 'x'});
+      await Future<void>.value();
+      delta(t, 'o');
+      await Future<void>.value();
+      t.emit('tree:update', {'changes': <Object?>[]});
+      await Future<void>.value();
+      delta(t, '!');
+      await Future<void>.value();
+
+      expect(seen, isEmpty);
+      expect(textOf(svc), 'He');
+
+      await pumpPastDeltaFlush();
+
+      expect(seen, hasLength(1));
+      expect(textOf(svc), 'Helo!');
+    });
+
     test('a steady stream still publishes once per interval', () async {
       final (t, svc) = await openStreaming('message');
       addTearDown(svc.dispose);
@@ -2004,55 +2029,5 @@ void main() {
 
       expect(seen, isEmpty);
     });
-  });
-
-  group('frame type pre-check', () {
-    test('AgentSessionService hands every agent event it acts on to the parser',
-        () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(
-        () => AgentSessionService.fromSession(probe.session),
-      );
-      addTearDown(svc.dispose);
-
-      await probe.expectParsed([
-        statusProbe('agent:turn-start'),
-        statusProbe('agent:session-reset'),
-        statusProbe('agent:turn-end'),
-        statusProbe('agent:permission-request'),
-        statusProbe('agent:question'),
-        statusProbe('agent:request-retracted'),
-        statusProbe('agent:usage'),
-        statusProbe('agent:capabilities'),
-        statusProbe('agent:background-tasks'),
-        statusProbe('agent:updateAvailable'),
-        statusProbe('agent:updateResult'),
-        heavyProbe('agent:transcript-replay'),
-        heavyProbe('agent:item-added'),
-        heavyProbe('agent:item-delta'),
-        heavyProbe('agent:item-updated'),
-        heavyProbe('agent:snapshot'),
-      ]);
-    });
-
-    test(
-      'AgentSessionService never parses file, git, terminal or agent:error frames',
-      () async {
-        final probe = await ParseProbe.open();
-        final svc = probe.build(
-          () => AgentSessionService.fromSession(probe.session),
-        );
-        addTearDown(svc.dispose);
-
-        await probe.expectNeverParsed([
-          heavyProbe('file:tree:children'),
-          heavyProbe('terminal:frame'),
-          heavyProbe('handler:activity'),
-          statusProbe('git:status'),
-          statusProbe('agent:status'),
-          statusProbe('agent:error'),
-        ]);
-      },
-    );
   });
 }

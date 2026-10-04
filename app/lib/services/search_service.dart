@@ -45,7 +45,7 @@ class SearchService {
     this.checkoutId = 'main',
     this.searchIdleTimeout = const Duration(seconds: 12),
   }) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavy);
   }
 
   void _setState(SearchState state) {
@@ -54,18 +54,12 @@ class SearchService {
     _stateController.add(state);
   }
 
-  static const Set<String> _handledHeavyTypes = {
-    'file:search-result',
-    'file:search-done',
-  };
-
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessageOfType(json, _handledHeavyTypes);
-    if (abMsg == null) return;
-    if (abMsg is FileSearchResultMessage) {
-      _handleSearchResult(abMsg);
-    } else if (abMsg is FileSearchDoneMessage) {
-      _handleSearchDone(abMsg);
+  void _onHeavy(InboundFrame f) {
+    switch (f.parsed) {
+      case final FileSearchResultMessage msg:
+        _handleSearchResult(msg);
+      case final FileSearchDoneMessage msg:
+        _handleSearchDone(msg);
     }
   }
 

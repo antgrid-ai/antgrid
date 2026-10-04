@@ -70,10 +70,12 @@ void main() {
     late FakeAgentTransport transport;
     late ProjectSession session;
     late Map<Map<String, dynamic>, int> calls;
+    late Map<Object?, int> callsById;
 
     setUp(() async {
       transport = FakeAgentTransport();
       calls = Map.identity();
+      callsById = {};
       final cache = await CachedSessionsStore.open();
       session = ProjectSession(
         projectId: 'p',
@@ -83,6 +85,7 @@ void main() {
         onClose: () async => await transport.dispose(),
         frameParser: (json) {
           calls[json] = (calls[json] ?? 0) + 1;
+          callsById[json['id']] = (callsById[json['id']] ?? 0) + 1;
           return parseAbMessage(json);
         },
       );
@@ -127,6 +130,17 @@ void main() {
           'removed': [],
         },
         {'id': '3', 'timestamp': 0, 'type': 'session:updated'},
+        {'id': '4', 'timestamp': 0, 'type': 'git:status', 'files': []},
+        {
+          'id': '5',
+          'timestamp': 0,
+          'type': 'agent:item-added',
+          'sessionId': 's',
+          'turnId': 't',
+          'item': {'itemId': 'i', 'kind': 'message', 'role': 'assistant'},
+        },
+        {'id': '6', 'timestamp': 0, 'type': 'handler:activity'},
+        {'id': '7', 'timestamp': 0, 'type': 'terminal:frame'},
       ];
       for (final f in frames) {
         transport.emitJson(f);
@@ -139,8 +153,11 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await sub.cancel();
 
-      for (final f in frames) {
-        expect(calls[f] ?? 0, lessThanOrEqualTo(1), reason: '${f['type']}');
+      // Counted by envelope id, not map identity: a consumer parsing its own
+      // copy of a frame must count against the same envelope.
+      expect(callsById, isNotEmpty, reason: 'nothing was parsed at all');
+      for (final MapEntry(key: id, value: n) in callsById.entries) {
+        expect(n, 1, reason: 'envelope $id');
       }
     });
   });

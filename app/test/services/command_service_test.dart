@@ -5,7 +5,6 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/command_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
-import '../helpers/parse_probe.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -271,30 +270,6 @@ void main() {
       await svc.dispose();
 
       await session.close();
-    });
-  });
-
-  group('frame type pre-check', () {
-    test('CommandService hands every frame type it acts on to the parser', () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => CommandService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectParsed([
-        heavyProbe('command:output'),
-        statusProbe('command:done'),
-      ]);
-    });
-
-    test('CommandService never parses a frame type it does not act on', () async {
-      final probe = await ParseProbe.open();
-      final svc = probe.build(() => CommandService.fromSession(probe.session));
-      addTearDown(svc.dispose);
-      await probe.expectNeverParsed([
-        heavyProbe('agent:item-delta'),
-        heavyProbe('file:tree:children'),
-        statusProbe('git:status'),
-        statusProbe('agent:status'),
-      ]);
     });
   });
 }

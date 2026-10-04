@@ -1365,17 +1365,6 @@ class PreviewSnapshotMessage {
 
 // --- Parser ---
 
-/// [parseAbMessage] for a frame whose `type` is in [types], else null.
-///
-/// A service's heavy and status tiers deliver every frame for the checkout, and
-/// parsing builds the whole payload (a tree batch can be thousands of nodes)
-/// before a branch could reject it. A type a branch acts on but its set omits
-/// is dropped without a trace, so each set and its branches change together.
-Object? parseAbMessageOfType(Map<String, dynamic> json, Set<String> types) {
-  if (!types.contains(json['type'])) return null;
-  return parseAbMessage(json);
-}
-
 Object? parseAbMessage(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   final id = json['id'] as String? ?? '';
