@@ -9,6 +9,7 @@ import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
 import '../models/git_status_index.dart';
 import '../models/git_sync_state.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -45,8 +46,8 @@ class FileService {
   /// drives it from.
   static const Duration findDebounce = Duration(milliseconds: 250);
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
 
@@ -212,8 +213,8 @@ class FileService {
     this.gitActionTimeout = const Duration(seconds: 15),
     this.gitSyncTimeout = const Duration(seconds: 150),
   }) : _state = FileTreeState(projectId: session.projectId) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
+    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
     // The bridge caches `git:sync-state` for replay, but only a checkout whose
     // bundle existed at connect time receives that replay — an isolated
     // session's does not. Asking also re-fires on every reconnect, which is

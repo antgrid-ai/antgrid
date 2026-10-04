@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fake_agent_transport.dart';
 import 'fake_project_session.dart';
+import 'package:antgrid/project/inbound_frame.dart';
 
 /// A probe frame and the tier the router must deliver it on.
 typedef ParseProbeFrame = ({Map<String, dynamic> frame, MessageTier tier});
@@ -51,7 +52,7 @@ class ParseProbe {
     MessageTier.heavy: <String>{},
     MessageTier.status: <String>{},
   };
-  final List<StreamSubscription<Map<String, dynamic>>> _taps = [];
+  final List<StreamSubscription<InboundFrame>> _taps = [];
 
   /// The loopback fake by default, so no PreviewService in the session claims
   /// the process-wide PreviewHandoff.
@@ -71,8 +72,8 @@ class ParseProbe {
         session
             .checkoutHeavyStream('main')
             .listen(
-              (json) => probe._delivered[MessageTier.heavy]!.add(
-                '${json['type']}',
+              (f) => probe._delivered[MessageTier.heavy]!.add(
+                '${f.type}',
               ),
             ),
       )
@@ -80,8 +81,8 @@ class ParseProbe {
         session
             .checkoutStatusStream('main')
             .listen(
-              (json) => probe._delivered[MessageTier.status]!.add(
-                '${json['type']}',
+              (f) => probe._delivered[MessageTier.status]!.add(
+                '${f.type}',
               ),
             ),
       );

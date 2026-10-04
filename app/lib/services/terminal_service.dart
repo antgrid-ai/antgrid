@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
@@ -19,8 +20,8 @@ class TerminalService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
   final Map<Object, String> _displayOwners = {};
@@ -473,11 +474,11 @@ class TerminalService {
     this.prefetchTimeout = const Duration(seconds: 5),
     this.endedDrainTimeout = const Duration(seconds: 2),
   }) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
 
     // Routed through the focus-gated router status stream so all dispatch goes
     // through one path.
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
   }
 
   static const _frameHydratorKey = 'terminal:frames';

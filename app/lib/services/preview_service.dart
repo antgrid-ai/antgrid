@@ -7,6 +7,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../demo/demo_identity.dart';
 import '../models/preview_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -33,8 +34,8 @@ class PreviewService {
 
   final PreviewHandoff _handoff;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   bool _disposed = false;
 
   final _stateController = StreamController<PreviewState>.broadcast();
@@ -79,8 +80,8 @@ class PreviewService {
     this.probeTimeout = const Duration(seconds: 15),
     PreviewHandoff? handoff,
   }) : _handoff = handoff ?? PreviewHandoff.shared {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onJson(f.json));
+    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onJson(f.json));
     if (!session.transport.isLocal) {
       final parked = _handoff.claim(_handoffKey, _adoptLate);
       if (parked != null) _adoptParked(parked);

@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/ab_message.dart';
 import '../models/handler_state.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 
 /// What became of a call to [HandlerService.instruct]. A bool could not tell
@@ -20,8 +21,8 @@ class HandlerService {
 
   static const _activityCap = 200;
 
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
   final _stateController = StreamController<HandlerState>.broadcast();
   // Fires once per genuinely-new escalation (post-dedup). Separate from
   // [stateStream] — the state replays on refocus and carries the full list,
@@ -155,8 +156,8 @@ class HandlerService {
     this.session, {
     this.historyTimeout = const Duration(seconds: 15),
   }) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
+    _statusSub = session.statusStream.listen((f) => _onStatusJson(f.json));
+    _heavySub = session.heavyStream.listen((f) => _onHeavyJson(f.json));
   }
 
   // Escalations this app has already put an answer on the wire for. A status

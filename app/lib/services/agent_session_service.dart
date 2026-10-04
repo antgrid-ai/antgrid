@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../models/ab_message.dart';
 import '../models/agent_event.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 
 /// One turn's assembled state.
@@ -142,8 +143,8 @@ const Duration kAgentDeltaFlushInterval = Duration(milliseconds: 16);
 class AgentSessionService {
   final ProjectSession session;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   bool _disposed = false;
 
   final Map<String, AgentSessionState> _states = {};
@@ -228,8 +229,8 @@ class AgentSessionService {
   String get projectId => session.projectId;
 
   AgentSessionService.fromSession(this.session) {
-    _heavySub = session.heavyStream.listen(_onJson);
-    _statusSub = session.statusStream.listen(_onJson);
+    _heavySub = session.heavyStream.listen((f) => _onJson(f.json));
+    _statusSub = session.statusStream.listen((f) => _onJson(f.json));
   }
 
   AgentSessionState stateFor(String sessionId) =>

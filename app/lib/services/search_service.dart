@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../analytics/events.dart';
 import '../models/search_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import 'idle_action_guard.dart';
 
@@ -19,7 +20,7 @@ class SearchService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
+  StreamSubscription<InboundFrame>? _heavySub;
   bool _disposed = false;
 
   /// Idle-timeout for the in-flight search. A search that neither yields a
@@ -44,7 +45,7 @@ class SearchService {
     this.checkoutId = 'main',
     this.searchIdleTimeout = const Duration(seconds: 12),
   }) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
   }
 
   void _setState(SearchState state) {

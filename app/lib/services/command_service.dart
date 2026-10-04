@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../models/command_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 
 /// Per-project on-demand command runner.
@@ -18,8 +19,8 @@ class CommandService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   bool _disposed = false;
 
   final _stateController = StreamController<CommandState>.broadcast();
@@ -35,8 +36,8 @@ class CommandService {
   String get projectId => session.projectId;
 
   CommandService.fromSession(this.session, {this.checkoutId = 'main'}) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen((f) => _onHeavyJson(f.json));
+    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
   }
 
   void _setState(CommandState newState) {

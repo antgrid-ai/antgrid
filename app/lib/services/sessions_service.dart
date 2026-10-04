@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/session_entry.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../storage/cached_sessions_store.dart';
 import 'pending_reply.dart';
@@ -105,7 +106,7 @@ class SessionsService {
   final ProjectSession session;
   final CachedSessionsStore cache;
 
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _statusSub;
   final _stateController = StreamController<SessionsState>.broadcast();
   final _listingsController = StreamController<SessionListing>.broadcast();
 
@@ -138,7 +139,7 @@ class SessionsService {
 
   SessionsService.fromSession(this.session, {required this.cache})
     : _state = SessionsState(projectId: session.projectId, sessions: const []) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
+    _statusSub = session.statusStream.listen((f) => _onStatusJson(f.json));
     final cached = cache.get(session.projectId);
     if (cached.isNotEmpty) {
       _setState(_state.copyWith(sessions: cached));
