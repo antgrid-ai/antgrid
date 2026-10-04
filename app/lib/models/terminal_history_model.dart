@@ -79,7 +79,6 @@ class TerminalHistoryModel extends ChangeNotifier {
     // re-request until it lands; with nothing in flight the notify is what
     // drives the reader's re-request, so it must still fire.
     if (loading &&
-        !_discardOutstandingPage &&
         _seekBefore == target &&
         _towardNewer == newer &&
         _replacePage &&
