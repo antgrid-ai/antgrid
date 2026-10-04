@@ -21,6 +21,7 @@ class _Native implements PeerConnectionContract {
   Completer<void>? forceGate;
   Object? releaseError;
   Object? forceError;
+  bool establishFails = false;
 
   @override
   Stream<PeerConnectionEvent> get events => _events.stream;
@@ -53,6 +54,7 @@ class _Native implements PeerConnectionContract {
   @override
   Future<void> establishSession() async {
     establishCalls++;
+    if (establishFails) throw StateError('handshake failed');
     await establishGate?.future;
     established = true;
   }
@@ -118,6 +120,7 @@ NativeConnectionSupervisor _supervisor(
   DateTime Function()? now,
   Duration graceful = const Duration(milliseconds: 10),
   Duration forced = const Duration(milliseconds: 10),
+  void Function(BlockReason, String?)? onBlocked,
 }) => NativeConnectionSupervisor(
   native,
   backoffBaseMs: 0,
@@ -126,9 +129,88 @@ NativeConnectionSupervisor _supervisor(
   now: now,
   gracefulStopTimeout: graceful,
   forcedStopTimeout: forced,
+  onBlocked: onBlocked,
 );
 
 void main() {
+  test('peer rejection blocks once and reports its failure code', () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    await _settle();
+    expect(supervisor.status, const Connected());
+
+    supervisor.notePeerRejected('AUTHORIZATION_DENIED');
+    await _settle();
+    expect(supervisor.status, const Blocked(BlockReason.peerRejected));
+    expect(blocks, [(BlockReason.peerRejected, 'AUTHORIZATION_DENIED')]);
+
+    supervisor.notePeerRejected('OTHER_CODE');
+    await _settle();
+    expect(blocks.length, 1);
+
+    supervisor.retry();
+    await _settle();
+    expect(supervisor.status, const Connected());
+    supervisor.notePeerRejected('SECOND');
+    await _settle();
+    expect(blocks.length, 2);
+    expect(blocks.last, (BlockReason.peerRejected, 'SECOND'));
+  });
+
+  test('auth verdicts report their license code; unknown codes report nothing',
+      () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    await _settle();
+
+    supervisor.noteAuthError('SOMETHING_ELSE');
+    await _settle();
+    expect(blocks, isEmpty);
+
+    supervisor.noteAuthError('LICENSE_INVALID');
+    await _settle();
+    expect(blocks, [(BlockReason.deviceRevoked, 'LICENSE_INVALID')]);
+  });
+
+  test('an exhausted handshake reports a block with no code', () async {
+    final native = _Native()..establishFails = true;
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    for (var i = 0; i < 200 && supervisor.status is! Blocked; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(supervisor.status, const Blocked(BlockReason.handshakeFailing));
+    expect(blocks, [(BlockReason.handshakeFailing, null)]);
+  });
+
+  test('a throwing block observer cannot break the ladder', () async {
+    final native = _Native();
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (_, _) => throw StateError('observer'),
+    );
+    supervisor.setWanted(true);
+    await _settle();
+
+    expect(() => supervisor.notePeerRejected('X'), returnsNormally);
+    expect(supervisor.status, const Blocked(BlockReason.peerRejected));
+  });
+
   test('native ladder climbs coords, payload, established', () async {
     final native = _Native();
     final supervisor = _supervisor(native);
