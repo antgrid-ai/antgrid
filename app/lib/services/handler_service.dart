@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/ab_message.dart';
 import '../models/handler_state.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 
 /// What became of a call to [HandlerService.instruct]. A bool could not tell
@@ -20,8 +21,8 @@ class HandlerService {
 
   static const _activityCap = 200;
 
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
   final _stateController = StreamController<HandlerState>.broadcast();
   // Fires once per genuinely-new escalation (post-dedup). Separate from
   // [stateStream] — the state replays on refocus and carries the full list,
@@ -155,13 +156,13 @@ class HandlerService {
     this.session, {
     this.historyTimeout = const Duration(seconds: 15),
   }) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
+    _statusSub = session.statusStream.listen(_onStatus);
+    _heavySub = session.heavyStream.listen(_onHeavy);
   }
 
   // Escalations this app has already put an answer on the wire for. A status
   // frame the bridge computed BEFORE that answer arrived still lists them, and
-  // `_onStatusJson` rebuilds the list wholesale — so without this the row comes
+  // `_onStatus` rebuilds the list wholesale — so without this the row comes
   // back one-tappable and a second tap puts the same line into the session
   // twice. Same hazard and same shape as [HandlerState.pendingUndo], minus its
   // consolation: the bridge serializes undo per id, and nothing absorbs a
@@ -262,7 +263,7 @@ class HandlerService {
   /// for a change of its own rather than inheriting this one's.
   ///
   /// A backlog already AT the cap appends nothing and emits no status at all,
-  /// so it is not reachable from here — [_onHeavyJson] retires that one off its
+  /// so it is not reachable from here — [_onHeavy] retires that one off its
   /// own activity record. The two outcomes that record a row AND emit a frame —
   /// an amendment, and a cap hit that still had room for part of the batch —
   /// are why [_creditedStatus] exists: that frame re-baselines the survivors
@@ -340,10 +341,10 @@ class HandlerService {
     return next;
   }
 
-  void _onStatusJson(Map<String, dynamic> json) {
+  void _onStatus(InboundFrame f) {
     if (_disposed) return;
-    if (json['type'] != 'handler:status') return;
-    final msg = parseAbMessage(json);
+    if (f.type != 'handler:status') return;
+    final msg = f.parsed;
     if (msg is! HandlerStatusMessage) return;
     final sessions = <String, HandlerSessionState>{};
     for (final raw in msg.sessions) {
@@ -443,11 +444,11 @@ class HandlerService {
     if (!_disposed) _statusFrameController.add(_state);
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
+  void _onHeavy(InboundFrame f) {
     if (_disposed) return;
-    switch (json['type']) {
+    switch (f.type) {
       case 'handler:escalation':
-        final msg = parseAbMessage(json);
+        final msg = f.parsed;
         if (msg is! HandlerEscalationMessage) return;
         if (_state.escalations.any((e) => e.escalationId == msg.escalationId)) {
           return; // dedup
@@ -486,7 +487,7 @@ class HandlerService {
         );
         break;
       case 'handler:snapshot':
-        final msg = parseAbMessage(json);
+        final msg = f.parsed;
         if (msg is! HandlerSnapshotMessage) return;
         final snapshot = HandlerSnapshot.fromWire(msg.snapshot);
         if (snapshot == null) return;
@@ -506,7 +507,7 @@ class HandlerService {
         );
         break;
       case 'handler:activity':
-        final msg = parseAbMessage(json);
+        final msg = f.parsed;
         if (msg is! HandlerActivityMessage) return;
         // The outcomes an instruction can reach that [_retirePending] cannot read
         // off the item count: a backlog at the bridge's cap appends nothing at
@@ -551,7 +552,7 @@ class HandlerService {
         );
         break;
       case 'handler:history:page':
-        final msg = parseAbMessage(json);
+        final msg = f.parsed;
         if (msg is! HandlerHistoryPageMessage) return;
         _applyHistoryPage(msg);
         break;

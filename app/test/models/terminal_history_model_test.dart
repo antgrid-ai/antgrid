@@ -603,4 +603,26 @@ void main() {
     expect(m.cursor, isNull);
     expect(m.canLoadMore, isFalse);
   });
+
+  test('a seek notifies unless it repeats the one whose page is in flight', () {
+    for (final (name, inFlight, retained, newer, target, notifies) in [
+      ('a repeat in flight', true, false, false, 2000, false),
+      ('the other direction', true, false, true, 2000, true),
+      ('another target', true, false, false, 3000, true),
+      ('nothing in flight', false, false, false, 2000, true),
+      ('a retained window', true, true, false, 2000, true),
+    ]) {
+      final model = TerminalHistoryModel()
+        ..applyBoundary(_boundary(nextRowId: 10000))
+        ..seek(2000);
+      if (inFlight) model.markRequested('r');
+      if (retained) model.retainWindow();
+      var count = 0;
+      model.addListener(() => count++);
+
+      model.seek(target, newer: newer);
+      expect(count, notifies ? 1 : 0, reason: name);
+      expect(model.hasPendingSeek, isTrue, reason: name);
+    }
+  });
 }

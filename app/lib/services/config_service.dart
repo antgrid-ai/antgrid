@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../models/ab_config.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import 'pending_reply.dart';
 
@@ -58,7 +59,7 @@ class ConfigService {
   /// timer the returned future — and the UI awaiting it — hangs forever.
   final Duration requestTimeout;
 
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _statusSub;
   final _stateController = StreamController<ConfigState>.broadcast();
   ConfigState _state = const ConfigState();
   bool _disposed = false;
@@ -76,7 +77,7 @@ class ConfigService {
     this.checkoutId = 'main',
     this.requestTimeout = const Duration(seconds: 15),
   }) {
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen((f) => _onStatusJson(f.json));
   }
 
   static const _readHydratorKey = 'config:read';

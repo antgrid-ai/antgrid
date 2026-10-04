@@ -21,12 +21,14 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
+import 'package:antgrid/models/terminal_history_model.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
@@ -210,6 +212,16 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   return (service: service, transport: transport);
 }
 
+class _RecordingHistoryModel extends TerminalHistoryModel {
+  final seeks = <int>[];
+
+  @override
+  void seek(int beforeRowId, {bool newer = false}) {
+    seeks.add(beforeRowId);
+    super.seek(beforeRowId, newer: newer);
+  }
+}
+
 /// A frame-mode tab, built directly (not through TerminalService) so its
 /// TerminalDisplayMode.frame is explicit rather than reached by driving the
 /// subscribe handshake — the state machine that gets there is the service
@@ -220,6 +232,7 @@ TerminalTab _tab({
   TerminalDisplayMode mode = TerminalDisplayMode.frame,
   TerminalSessionState sessionState = TerminalSessionState.running,
   List<int>? pty,
+  TerminalHistoryModel? history,
 }) {
   final tab = TerminalTab(
     terminalId: id,
@@ -229,6 +242,7 @@ TerminalTab _tab({
     cols: 80,
     rows: 24,
     mode: mode,
+    history: history,
   );
   // [pty] stands in for the running program: everything the engine's transport
   // accepts is a byte the guest on the other end would have read.
@@ -2240,6 +2254,126 @@ void main() {
         h.transport.sent.where((m) => m['type'] == 'terminal:start'),
         hasLength(1),
       );
+    });
+  });
+
+  group('the open reader under scrollbar drags and pane resizes', () {
+    testWidgets('a scrollbar drag hands the reader one target per frame', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final history = _RecordingHistoryModel();
+      final tab = _tab(id: 't1', history: history);
+      _archive(tab, nextRowId: 100000);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+      history.seeks.clear();
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(_historyScrollbar),
+      );
+      for (var i = 0; i < 4; i++) {
+        await gesture.moveBy(const Offset(0, -30));
+      }
+      await tester.pump();
+
+      expect(history.seeks, isNotEmpty);
+      final position = tester
+          .widget<TerminalHistoryScrollbar>(_historyScrollbar)
+          .position;
+      expect(history.seeks.toSet(), {math.min(position + 100, 100000)});
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('the reader reporting its position rebuilds only the '
+        'scrollbar', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+
+      TerminalHistoryView reader() =>
+          tester.widget<TerminalHistoryView>(find.byType(TerminalHistoryView));
+      final before = reader();
+      final live = _liveView(tester);
+
+      await tester.pump();
+      expect(identical(reader(), before), isTrue);
+
+      before.onPosition!(123);
+      await tester.pump();
+
+      expect(identical(reader(), before), isTrue);
+      expect(identical(_liveView(tester), live), isTrue);
+      expect(
+        tester.widget<TerminalHistoryScrollbar>(_historyScrollbar).position,
+        123,
+      );
+    });
+
+    testWidgets('narrowing a driver pane re-wraps the open reader once, after '
+        'the drag settles', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+      final width = ValueNotifier<double>(300);
+      addTearDown(width.dispose);
+
+      await tester.pumpWidget(
+        _wrap(
+          ValueListenableBuilder<double>(
+            valueListenable: width,
+            builder: (context, w, child) => _pane(tab, h.service, width: w),
+          ),
+          terminalState: Stream.value(_stateWith()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settleWire(tester, h);
+      h.transport.sent.clear();
+
+      int readerCols() => tester
+          .widget<GhosttyTerminalView>(
+            find.descendant(
+              of: find.byType(TerminalHistoryView),
+              matching: find.byType(GhosttyTerminalView),
+            ),
+          )
+          .controller
+          .cols;
+      final cols = readerCols();
+      addTearDown(() => debugTerminalHistoryScratchEngines = 0);
+      debugTerminalHistoryScratchEngines = 0;
+
+      for (final w in [260.0, 220.0, 180.0]) {
+        width.value = w;
+        await tester.pump(const Duration(milliseconds: 16));
+        expect(readerCols(), cols);
+        expect(debugTerminalHistoryScratchEngines, 0);
+        expect(_resizes(h), isEmpty);
+      }
+
+      await _settle(tester);
+      expect(readerCols(), lessThan(cols));
+      expect(debugTerminalHistoryScratchEngines, 1);
     });
   });
 

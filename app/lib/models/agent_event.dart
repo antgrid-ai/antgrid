@@ -253,18 +253,22 @@ class PermissionOption {
 
 // ── Message classes ──
 
-class AgentTurnStart {
+/// Every typed `agent:*` frame, so a consumer can switch over them
+/// exhaustively.
+sealed class AgentEvent {}
+
+class AgentTurnStart implements AgentEvent {
   final String sessionId;
   final String turnId;
   const AgentTurnStart({required this.sessionId, required this.turnId});
 }
 
-class AgentSessionReset {
+class AgentSessionReset implements AgentEvent {
   final String sessionId;
   const AgentSessionReset({required this.sessionId});
 }
 
-class AgentTurnEnd {
+class AgentTurnEnd implements AgentEvent {
   final String sessionId;
   final String turnId;
   final String stopReason;
@@ -277,7 +281,7 @@ class AgentTurnEnd {
   });
 }
 
-class AgentItemAdded {
+class AgentItemAdded implements AgentEvent {
   final String sessionId;
   final String turnId;
   final AgentItem item;
@@ -292,13 +296,13 @@ class AgentItemAdded {
 /// AbMessage maps to be re-dispatched individually — the bridge batches them
 /// because the relay drops (and never resends) frames past its rate limit,
 /// which would otherwise truncate a replayed transcript mid-turn.
-class AgentTranscriptReplay {
+class AgentTranscriptReplay implements AgentEvent {
   final String sessionId;
   final List<Map<String, dynamic>> frames;
   const AgentTranscriptReplay({required this.sessionId, required this.frames});
 }
 
-class AgentItemDelta {
+class AgentItemDelta implements AgentEvent {
   final String sessionId;
   final String turnId;
   final String itemId;
@@ -311,7 +315,7 @@ class AgentItemDelta {
   });
 }
 
-class AgentItemUpdated {
+class AgentItemUpdated implements AgentEvent {
   final String sessionId;
   final String turnId;
   final AgentItem item;
@@ -322,7 +326,7 @@ class AgentItemUpdated {
   });
 }
 
-class AgentSnapshot {
+class AgentSnapshot implements AgentEvent {
   final String sessionId;
   final String turnId;
   final List<AgentItem> items;
@@ -333,7 +337,7 @@ class AgentSnapshot {
   });
 }
 
-class AgentPermissionRequest {
+class AgentPermissionRequest implements AgentEvent {
   final String sessionId;
   final String permissionId;
   final String? itemId;
@@ -361,7 +365,7 @@ class AgentQuestionOption {
   });
 }
 
-class AgentQuestion {
+class AgentQuestion implements AgentEvent {
   final String sessionId;
   final String questionId;
   final String? itemId;
@@ -383,7 +387,7 @@ class AgentQuestion {
 /// The bridge withdrew a pending permission/question (a client answered it,
 /// the agent retracted it, the turn ended, or the driver was disposed).
 /// Exactly one id is set.
-class AgentRequestRetracted {
+class AgentRequestRetracted implements AgentEvent {
   final String sessionId;
   final String? permissionId;
   final String? questionId;
@@ -394,7 +398,7 @@ class AgentRequestRetracted {
   });
 }
 
-class AgentErrorMessage {
+class AgentErrorMessage implements AgentEvent {
   final String sessionId;
   final String? turnId;
   final AgentError error;
@@ -405,7 +409,7 @@ class AgentErrorMessage {
   });
 }
 
-class AgentUsageEvent {
+class AgentUsageEvent implements AgentEvent {
   final String sessionId;
   final String? turnId;
 
@@ -445,7 +449,7 @@ class AgentBackgroundTask {
 
 /// Latest-wins full list of a session's live background tasks. A finished
 /// task simply drops out of the next frame.
-class AgentBackgroundTasks {
+class AgentBackgroundTasks implements AgentEvent {
   final String sessionId;
   final List<AgentBackgroundTask> tasks;
   const AgentBackgroundTasks({required this.sessionId, this.tasks = const []});
@@ -493,7 +497,7 @@ class AgentCapabilityModel {
 /// What the running agent session can do (models, modes, slash commands) plus
 /// the currently-applied ids. Latest frame wins; an all-empty frame means the
 /// session advertises nothing (composer selectors hide).
-class AgentCapabilities {
+class AgentCapabilities implements AgentEvent {
   final String sessionId;
 
   /// False while the driver is still discovering models/modes (an early frame
@@ -527,7 +531,7 @@ class AgentCapabilities {
 /// A newer coding-agent CLI exists (bridge proactively detected the spawned
 /// binary is behind the registry's latest). Advisory: the UI shows a
 /// dismissible chip, not a modal. `tool` is the agent spec id ("codex" | ...).
-class AgentUpdateAvailable {
+class AgentUpdateAvailable implements AgentEvent {
   final String tool;
   final String installed;
   final String latest;
@@ -543,7 +547,7 @@ class AgentUpdateAvailable {
 /// Terminal outcome of an in-app `agent:update` run (bridge -> app). On success
 /// [installed] is the re-probed version; on failure [output] carries a bounded
 /// tail of the updater's stdout+stderr for the user to read.
-class AgentUpdateResult {
+class AgentUpdateResult implements AgentEvent {
   final String tool;
   final String? sessionId;
   final bool ok;
@@ -562,7 +566,7 @@ class AgentUpdateResult {
 
 /// Parse a raw JSON envelope into a typed agent:* event, or null if it is not
 /// one (or is malformed). Mirrors parseAbMessage's null-on-unknown contract.
-Object? parseAgentEvent(Map<String, dynamic> json) {
+AgentEvent? parseAgentEvent(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   switch (type) {
     case 'agent:turn-start':

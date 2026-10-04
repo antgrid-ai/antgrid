@@ -10,6 +10,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -58,14 +59,101 @@ const int _historyRenderMaxLines = 6000;
 /// blanks go -- a trailing block the TUI painted is content, not padding.
 @visibleForTesting
 Uint8List encodeTerminalHistoryRows(List<TerminalHistoryRow> rows) {
-  final buffer = StringBuffer();
-  for (var i = 0; i < rows.length; i++) {
-    final row = rows[i];
-    if (i > 0 && !row.wrapped) buffer.write('\r\n');
-    final endsLine = i == rows.length - 1 || !rows[i + 1].wrapped;
-    _writeRow(buffer, row, endsLine: endsLine);
+  final out = BytesBuilder(copy: false);
+  for (final (:startsLine, :bytes) in _encodedRows(rows)) {
+    if (startsLine) out.add(_crlf);
+    out.add(bytes);
   }
-  return Uint8List.fromList(utf8.encode(buffer.toString()));
+  return out.takeBytes();
+}
+
+/// Each row's bytes, flagged when a line break belongs before it. The one place
+/// the logical-line join rules live, so the encoder and the measurer cannot
+/// disagree about what the engine is fed.
+Iterable<({bool startsLine, Uint8List bytes})> _encodedRows(
+  List<TerminalHistoryRow> rows,
+) sync* {
+  for (var i = 0; i < rows.length; i++) {
+    final buffer = StringBuffer();
+    _writeRow(
+      buffer,
+      rows[i],
+      endsLine: i == rows.length - 1 || !rows[i + 1].wrapped,
+    );
+    yield (
+      startsLine: i > 0 && !rows[i].wrapped,
+      bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
+    );
+  }
+}
+
+const List<int> _crlf = <int>[0x0d, 0x0a];
+
+/// Debug-build counters that tests reset.
+@visibleForTesting
+int debugTerminalHistoryScratchEngines = 0;
+
+/// Debug-build counters that tests reset.
+@visibleForTesting
+int debugTerminalHistoryRowEncodes = 0;
+
+VtTerminal _openScratchEngine(int cols) {
+  assert(() {
+    debugTerminalHistoryScratchEngines++;
+    return true;
+  }());
+  return GhosttyVt.newTerminal(cols: cols, rows: 1, maxScrollback: 64 << 20);
+}
+
+/// First index whose rowId is >= [rowId], or `rows.length`. [rows] must be
+/// sorted by rowId.
+int _lowerBoundByRowId(List<TerminalHistoryRow> rows, int rowId) {
+  var low = 0;
+  var high = rows.length;
+  while (low < high) {
+    final mid = (low + high) >> 1;
+    if (rows[mid].rowId >= rowId) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return low;
+}
+
+/// Serializes [rows] once, feeding the same bytes to a scratch engine for row
+/// starts and the total line count and returning them for the reader to
+/// ingest, which is what keeps the starts true of the reader's own engine.
+@visibleForTesting
+({Uint8List bytes, List<int> rowStarts, int lines}) measureTerminalHistoryRows(
+  List<TerminalHistoryRow> rows, {
+  required int cols,
+}) {
+  if (rows.isEmpty) {
+    return (bytes: Uint8List(0), rowStarts: const <int>[], lines: 0);
+  }
+  final terminal = _openScratchEngine(cols);
+  try {
+    final out = BytesBuilder(copy: false);
+    final starts = <int>[];
+    var i = 0;
+    for (final (:startsLine, :bytes) in _encodedRows(rows)) {
+      if (startsLine) {
+        terminal.writeBytes(_crlf);
+        out.add(_crlf);
+      }
+      starts.add(
+        terminal.totalRows -
+            1 +
+            (rows[i++].wrapped && terminal.cursorPendingWrap ? 1 : 0),
+      );
+      terminal.writeBytes(bytes);
+      out.add(bytes);
+    }
+    return (bytes: out.takeBytes(), rowStarts: starts, lines: terminal.totalRows);
+  } finally {
+    terminal.close();
+  }
 }
 
 void _writeRow(
@@ -73,6 +161,10 @@ void _writeRow(
   TerminalHistoryRow row, {
   required bool endsLine,
 }) {
+  assert(() {
+    debugTerminalHistoryRowEncodes++;
+    return true;
+  }());
   final parts = <(String sgr, String? uri, String text)>[
     for (final span in row.spans)
       (
@@ -215,6 +307,12 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
   final _selectionController = GhosttyTerminalSelectionController();
   bool _hasSelection = false;
   int? _measuredCols;
+  int _measuredLines = 0;
+
+  /// The width [_lineStarts] and [_measuredLines] were measured at.
+  /// [_measuredCols] cannot serve, because [_onEngineChanged] overwrites it
+  /// before the re-measure it schedules.
+  int? _lineStartsCols;
   int _anchorLineOffset = 0;
 
   void _towardLive() {
@@ -292,8 +390,8 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
       }
       return;
     }
-    final index = _renderedRows.indexWhere((r) => r.rowId >= target);
-    if (index < 0) return;
+    final index = _lowerBoundByRowId(_renderedRows, target);
+    if (index >= _renderedRows.length) return;
     _restoring = true;
     final before = _lineStarts[index];
     final bar = _controller.viewportScrollbar;
@@ -493,6 +591,12 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
               widget.model.rows.last.rowId >= boundary - 1))
         ...widget.screenRows,
     ];
+    assert(() {
+      for (var i = 1; i < candidates.length; i++) {
+        if (candidates[i].rowId < candidates[i - 1].rowId) return false;
+      }
+      return true;
+    }(), 'render candidates must be sorted by rowId: the row-id binary searches depend on it');
     final rows = _renderWindow(candidates);
     final signature = rows.isEmpty
         ? null
@@ -508,17 +612,18 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
         rows.isNotEmpty &&
         _renderedRows.isNotEmpty &&
         rows.last.rowId < _renderedRows.last.rowId) {
-      final retained = _renderedRows
-          .where((row) => row.rowId <= rows.last.rowId)
-          .toList(growable: false);
       // Count engine lines, not archive records: one evicted row can wrap over
       // several display lines, including wide and combining characters.
-      final removedLines =
-          _renderedLineCount(_renderedRows) - _renderedLineCount(retained);
-      rowsFromBottom = math.max(0, rowsFromBottom - removedLines);
+      rowsFromBottom = math.max(
+        0,
+        rowsFromBottom - _evictedLineCount(rows.last.rowId),
+      );
     }
+    final measured = measureTerminalHistoryRows(rows, cols: _controller.cols);
     _renderedRows = rows.toList(growable: false);
-    _lineStarts = _measureRowStarts(rows);
+    _lineStarts = measured.rowStarts;
+    _measuredLines = measured.lines;
+    _lineStartsCols = _controller.cols;
     _measuredCols = _controller.cols;
     // Armed on every rebuild the guard lets through, null included: a reader
     // sitting at the live bottom when a page lands wants to stay there, and an
@@ -528,7 +633,7 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
     _restoring = true;
     _controller.clear();
     if (rows.isNotEmpty) {
-      _controller.appendOutputBytes(encodeTerminalHistoryRows(rows));
+      _controller.appendOutputBytes(measured.bytes);
     }
     _restoring = false;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -536,20 +641,32 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
     });
   }
 
-  int _renderedLineCount(List<TerminalHistoryRow> rows) {
-    if (rows.isEmpty) return 0;
-    final terminal = GhosttyVt.newTerminal(
-      cols: _controller.cols,
-      rows: 1,
-      maxScrollback: 64 << 20,
-    );
-    try {
-      terminal.writeBytes(encodeTerminalHistoryRows(rows));
-      return terminal.totalRows;
-    } finally {
-      terminal.close();
+  /// Engine lines that fall away when every row after [lastKeptRowId] is
+  /// evicted from the rendered window.
+  ///
+  /// The retained rows keep their measured bytes except that the last kept row
+  /// now ends its line and loses its trailing blanks. Every row ends with a pen
+  /// reset and no open link, so the lines before that row's logical line are
+  /// exactly its measured start, and only that one logical line is re-counted.
+  int _evictedLineCount(int lastKeptRowId) {
+    final kept = _lowerBoundByRowId(_renderedRows, lastKeptRowId + 1);
+    if (_lineStartsCols == _controller.cols &&
+        kept < _renderedRows.length) {
+      if (kept == 0) return _measuredLines;
+      if (!_renderedRows[kept].wrapped) return _measuredLines - _lineStarts[kept];
+      var j = kept - 1;
+      while (j > 0 && _renderedRows[j].wrapped) {
+        j--;
+      }
+      return _measuredLines -
+          (_lineStarts[j] + _renderedLineCount(_renderedRows.sublist(j, kept)));
     }
+    return _renderedLineCount(_renderedRows) -
+        _renderedLineCount(_renderedRows.sublist(0, kept));
   }
+
+  int _renderedLineCount(List<TerminalHistoryRow> rows) =>
+      measureTerminalHistoryRows(rows, cols: _controller.cols).lines;
 
   /// A narrow phone can turn one archived row into hundreds of display lines.
   /// Window the renderer as well as the cache so native trimming never changes
@@ -557,8 +674,8 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
   List<TerminalHistoryRow> _renderWindow(List<TerminalHistoryRow> rows) {
     if (rows.isEmpty) return rows;
     final anchor = _targetRow ?? _lastPosition ?? rows.last.rowId;
-    var center = rows.indexWhere((row) => row.rowId >= anchor);
-    if (center < 0) center = rows.length - 1;
+    var center = _lowerBoundByRowId(rows, anchor);
+    if (center >= rows.length) center = rows.length - 1;
     int cost(int index) =>
         (rows[index].cols / math.max(1, _controller.cols)).ceil() + 1;
     var first = center;
@@ -573,35 +690,6 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
       lines += cost(++last);
     }
     return rows.sublist(first, last + 1);
-  }
-
-  List<int> _measureRowStarts(List<TerminalHistoryRow> rows) {
-    final terminal = GhosttyVt.newTerminal(
-      cols: _controller.cols,
-      rows: 1,
-      maxScrollback: 64 << 20,
-    );
-    try {
-      final starts = <int>[];
-      for (var i = 0; i < rows.length; i++) {
-        if (i > 0 && !rows[i].wrapped) terminal.writeBytes(utf8.encode('\r\n'));
-        starts.add(
-          terminal.totalRows -
-              1 +
-              (rows[i].wrapped && terminal.cursorPendingWrap ? 1 : 0),
-        );
-        final encoded = StringBuffer();
-        _writeRow(
-          encoded,
-          rows[i],
-          endsLine: i == rows.length - 1 || !rows[i + 1].wrapped,
-        );
-        terminal.writeBytes(utf8.encode(encoded.toString()));
-      }
-      return starts;
-    } finally {
-      terminal.close();
-    }
   }
 
   void _armRestore(int? rowsFromBottom) {
@@ -625,7 +713,10 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
         setState(() => _syncEngine(preserveOffset: false));
         _restoreTarget();
         if (anchor != null) {
-          final index = _renderedRows.indexWhere((r) => r.rowId == anchor);
+          final i = _lowerBoundByRowId(_renderedRows, anchor);
+          final index = i < _renderedRows.length && _renderedRows[i].rowId == anchor
+              ? i
+              : -1;
           final bar = _controller.viewportScrollbar;
           if (index >= 0 && bar != null) {
             _restoring = true;

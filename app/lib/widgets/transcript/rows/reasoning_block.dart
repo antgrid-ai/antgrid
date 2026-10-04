@@ -28,10 +28,7 @@ class ReasoningBlock extends StatelessWidget {
     final text = data.item.text ?? '';
 
     if (data.isStreaming) {
-      final lines = text.split('\n');
-      final preview = lines.length <= 2
-          ? text
-          : lines.sublist(lines.length - 2).join('\n');
+      final preview = _lastTwoLines(text);
       return Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: AbTokens.space8,
@@ -114,4 +111,14 @@ class ReasoningBlock extends StatelessWidget {
       ),
     );
   }
+}
+
+// A streaming thought is rebuilt on every emission and only its tail is shown,
+// so scan back from the end instead of splitting the whole text. Returns what
+// split('\n') would keep of the last two lines.
+String _lastTwoLines(String text) {
+  final last = text.lastIndexOf('\n');
+  if (last <= 0) return text;
+  final prev = text.lastIndexOf('\n', last - 1);
+  return prev < 0 ? text : text.substring(prev + 1);
 }

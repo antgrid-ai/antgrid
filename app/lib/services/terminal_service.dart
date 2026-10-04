@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
@@ -19,8 +20,8 @@ class TerminalService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
   final Map<Object, String> _displayOwners = {};
@@ -473,13 +474,11 @@ class TerminalService {
     this.prefetchTimeout = const Duration(seconds: 5),
     this.endedDrainTimeout = const Duration(seconds: 2),
   }) {
-    // Heavy tier — terminal:output (HEAVY tier messages).
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyFrame);
 
-    // Status tier — terminal:started, terminal:exited, agent:status,
-    // git:branches, git:checkout-result. Routed through the focus-gated
-    // router status stream so all dispatch goes through one path.
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    // Routed through the focus-gated router status stream so all dispatch goes
+    // through one path.
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
   }
 
   static const _frameHydratorKey = 'terminal:frames';
@@ -750,10 +749,9 @@ class TerminalService {
     });
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
+  void _onHeavyFrame(InboundFrame f) {
     if (_disposed) return;
-    final parsed = parseAbMessage(json);
-    if (parsed == null) return;
+    final parsed = f.parsed;
     if (parsed is TerminalFrameMessage) {
       _handleTerminalFrame(parsed);
       return;
@@ -946,7 +944,9 @@ class TerminalService {
     _attachmentHandles[terminalId] = handle;
     _attachmentMsgSubs[terminalId] = handle.messages.listen((json) {
       if (_disposed) return;
-      final parsed = parseAbMessage(json);
+      // Not router-delivered, so wrap it: a malformed frame is logged by
+      // InboundFrame instead of throwing out of this listener.
+      final parsed = InboundFrame(json).parsed;
       if (parsed == null) return;
       if (parsed is TerminalFrameMessage) {
         _handleTerminalFrame(parsed);
@@ -1325,17 +1325,17 @@ class TerminalService {
 
   // --- Message dispatch ---
 
-  void _onStatusJson(Map<String, dynamic> json) {
+  void _onStatusFrame(InboundFrame f) {
     if (_disposed) return;
-    final parsed = parseAbMessage(json);
+    final parsed = f.parsed;
     if (parsed == null) return;
     _handle(parsed);
   }
 
   void _handle(Object message) {
-    // terminal:output is heavy-tier and dispatched via _onHeavyJson; never
-    // reaches this status-tier handler. agent:hello is consumed by
-    // ProjectStatusNotifier, not here.
+    // terminal:frame and terminal:history:page are heavy-tier and dispatched
+    // via _onHeavyFrame; they never reach this status-tier handler. agent:hello
+    // is consumed by ProjectStatusNotifier, not here.
     if (message is TerminalStartedMessage) {
       _handleTerminalStarted(message);
     } else if (message is TerminalExitedMessage) {

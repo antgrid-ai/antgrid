@@ -171,9 +171,9 @@ void main() {
           "    case 'handler:escalation':",
           '      }',
         ),
-        "HandlerService._onHeavyJson case 'handler:escalation'": _copySource(
+        "HandlerService._onHeavy case 'handler:escalation'": _copySource(
           service,
-          "_onHeavyJson's handler:escalation case",
+          "_onHeavy's handler:escalation case",
           "      case 'handler:escalation':",
           '        break;',
         ),

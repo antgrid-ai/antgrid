@@ -445,4 +445,179 @@ void main() {
       );
     });
   });
+
+  group('TranscriptRowCache', () {
+    test('a row cache reuses the rows of a turn that did not change', () {
+      final a = AgentTurn(
+        turnId: 'A',
+        items: [
+          _item('u1', 'message', role: 'user', text: 'go'),
+          _item('c1', 'tool_call'),
+          _item('m1', 'message', role: 'assistant', text: 'done'),
+        ],
+        stopReason: 'end_turn',
+      );
+      final b = AgentTurn(
+        turnId: 'B',
+        items: [_item('u2', 'message', role: 'user', text: 'more')],
+      );
+      final b2 = AgentTurn(
+        turnId: 'B',
+        items: [
+          ...b.items,
+          _item('m2', 'message', role: 'assistant', text: 'working'),
+        ],
+      );
+      final cache = TranscriptRowCache();
+
+      final rows1 = cache.derive(
+        AgentSessionState(turns: [a, b]),
+        expandedTurnIds: const {},
+      );
+      final rows2 = cache.derive(
+        AgentSessionState(turns: [a, b2]),
+        expandedTurnIds: const {},
+      );
+      // Usage that lands on another turn must not invalidate this one.
+      final rows3 = cache.derive(
+        AgentSessionState(
+          turns: [a, b2],
+          usageByTurn: {'B': const AgentTokenUsage(totalTokens: 1)},
+          usageByItem: {'m2': const AgentTokenUsage(totalTokens: 2)},
+        ),
+        expandedTurnIds: const {},
+      );
+
+      for (var i = 0; i < 3; i++) {
+        expect(identical(rows1[i], rows2[i]), isTrue);
+        expect(identical(rows1[i], rows3[i]), isTrue);
+      }
+    });
+
+    test(
+      'a row cache matches a fresh derive as a session streams, settles and unfolds',
+      () {
+        final cache = TranscriptRowCache();
+        final expanded = <String>{};
+        void check(AgentSessionState s) {
+          expect(
+            cache.derive(s, expandedTurnIds: expanded).map(_describe).toList(),
+            deriveRows(s, expandedTurnIds: expanded).map(_describe).toList(),
+          );
+        }
+
+        final user = _item('u1', 'message', role: 'user', text: 'go');
+        final reasoning = _item('r1', 'reasoning', text: 'hmm');
+        final tool = _item('c1', 'tool_call');
+        final answer = _item('m1', 'message', role: 'assistant', text: 'done');
+
+        check(
+          AgentSessionState(
+            turns: [
+              AgentTurn(turnId: 't1', items: [user]),
+            ],
+          ),
+        );
+        final openAll = AgentTurn(
+          turnId: 't1',
+          items: [user, reasoning, tool, answer],
+        );
+        check(AgentSessionState(turns: [openAll]));
+        final settled = AgentTurn(
+          turnId: 't1',
+          items: openAll.items,
+          stopReason: 'end_turn',
+          startedAt: DateTime(2026, 1, 1, 0, 0, 0),
+          endedAt: DateTime(2026, 1, 1, 0, 1, 0),
+        );
+        final settledState = AgentSessionState(turns: [settled]);
+        check(settledState);
+        expanded.add('t1');
+        check(settledState);
+        final withItemUsage = AgentSessionState(
+          turns: [settled],
+          usageByItem: {'m1': const AgentTokenUsage(totalTokens: 5)},
+        );
+        check(withItemUsage);
+        final withTurnUsage = AgentSessionState(
+          turns: [settled],
+          usageByItem: {'m1': const AgentTokenUsage(totalTokens: 5)},
+          usageByTurn: {'t1': const AgentTokenUsage(totalTokens: 9)},
+        );
+        check(withTurnUsage);
+        expanded.remove('t1');
+        check(withTurnUsage);
+        final next = AgentTurn(
+          turnId: 't2',
+          items: [_item('u2', 'message', role: 'user', text: 'again')],
+        );
+        check(AgentSessionState(turns: [settled, next]));
+        final failed = AgentTurn(
+          turnId: 't2',
+          items: next.items,
+          stopReason: 'error',
+          error: const AgentError(
+            category: 'unknown',
+            message: 'boom',
+            retryable: false,
+          ),
+        );
+        final failedState = AgentSessionState(turns: [settled, failed]);
+        check(failedState);
+        check(
+          AgentSessionState(
+            turns: [settled, failed],
+            pendingPermissions: const [
+              AgentPermissionRequest(
+                sessionId: 's',
+                permissionId: 'p1',
+                title: 'Run?',
+                options: [],
+              ),
+            ],
+          ),
+        );
+        check(
+          AgentSessionState(
+            turns: [
+              AgentTurn(
+                turnId: 't9',
+                items: settled.items,
+                stopReason: 'end_turn',
+              ),
+              failed,
+            ],
+          ),
+        );
+      },
+    );
+  });
+}
+
+String _describe(TranscriptRow r) {
+  final id = identityHashCode;
+  return switch (r) {
+    MessageRowData() =>
+      'Message ${r.rowKey} item=${id(r.item)} turn=${r.turnId} user=${r.isUser} '
+          'ts=${r.timestamp} usage=${r.usage == null ? null : id(r.usage)}',
+    ReasoningRowData() =>
+      'Reasoning ${r.rowKey} item=${id(r.item)} streaming=${r.isStreaming}',
+    ToolCallRowData() => 'Tool ${r.rowKey} item=${id(r.item)}',
+    PlanRowData() => 'Plan ${r.rowKey} item=${id(r.item)}',
+    SubtaskRowData() => 'Subtask ${r.rowKey} item=${id(r.item)}',
+    CompactionRowData() => 'Compaction ${r.rowKey} item=${id(r.item)}',
+    UnknownRowData() => 'Unknown ${r.rowKey} item=${id(r.item)}',
+    TurnFoldRowData() =>
+      'Fold ${r.rowKey} hidden=${r.hiddenCount} err=${r.hasError} '
+          'cancelled=${r.cancelled} duration=${r.duration}',
+    WorkingRowData() =>
+      'Working ${r.rowKey} turn=${r.turnId} started=${r.startedAt} '
+          'waiting=${r.waitingOnUser}',
+    ErrorRowData() =>
+      'Error ${r.rowKey} turn=${r.turnId} error=${id(r.error)}',
+    PromptMarkerRowData() =>
+      'Prompt ${r.rowKey} id=${r.id} permission=${r.isPermission}',
+    UsageRowData() =>
+      'Usage ${r.rowKey} anchor=${r.anchorKey} usage=${id(r.usage)}',
+  };
 }

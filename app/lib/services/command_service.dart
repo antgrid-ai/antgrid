@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../models/command_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 
 /// Per-project on-demand command runner.
@@ -18,8 +19,8 @@ class CommandService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   bool _disposed = false;
 
   final _stateController = StreamController<CommandState>.broadcast();
@@ -35,8 +36,8 @@ class CommandService {
   String get projectId => session.projectId;
 
   CommandService.fromSession(this.session, {this.checkoutId = 'main'}) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavy);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatus);
   }
 
   void _setState(CommandState newState) {
@@ -50,20 +51,12 @@ class CommandService {
     _stateController.add(newState);
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessage(json);
-    if (abMsg == null) return;
-    if (abMsg is CommandOutputMessage) {
-      _handleCommandOutput(abMsg);
-    }
+  void _onHeavy(InboundFrame f) {
+    if (f.parsed case final CommandOutputMessage msg) _handleCommandOutput(msg);
   }
 
-  void _onStatusJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessage(json);
-    if (abMsg == null) return;
-    if (abMsg is CommandDoneMessage) {
-      _handleCommandDone(abMsg);
-    }
+  void _onStatus(InboundFrame f) {
+    if (f.parsed case final CommandDoneMessage msg) _handleCommandDone(msg);
   }
 
   // --- Message handlers ---
@@ -86,7 +79,7 @@ class CommandService {
     if (buf == null || buf.isEmpty) return;
     final current = _state.current;
     if (current != null) {
-      current.output.value += buf.toString();
+      current.output.append(buf.toString());
     }
     _outputBuffer = null;
   }

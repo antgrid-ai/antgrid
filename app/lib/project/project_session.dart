@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:flutter/foundation.dart';
 
 import '../analytics/analytics_service.dart';
+import '../models/ab_message.dart';
 import '../providers/seeded_stream.dart';
 import '../services/command_service.dart';
 import '../services/config_service.dart';
@@ -19,6 +21,7 @@ import '../services/pending_reply.dart';
 import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
 import '../util/detached.dart';
+import 'inbound_frame.dart';
 import 'message_router.dart';
 import 'project_message_classification.dart';
 import 'project_status.dart';
@@ -108,6 +111,7 @@ class ProjectSession {
     required this.cachedSessionsStore,
     required Future<void> Function() onClose,
     this.analytics,
+    @visibleForTesting FrameParser? frameParser,
   }) : _onClose = onClose,
        wireProjectId = mode == ProjectSessionMode.relay
            ? baseProjectId(projectId)
@@ -120,7 +124,7 @@ class ProjectSession {
            ? !transport.isEstablished
            : (transport.currentState == TransportState.disconnected ||
                  transport.currentState == TransportState.error) {
-    _router = MessageRouter(transport: transport);
+    _router = MessageRouter(transport: transport, parser: frameParser ?? parseAbMessage);
     // Main's SLICE, not the whole tier. This notifier is the PROJECT's
     // status, and an isolated session's worktree runs its own copy of
     // antgrid.yaml — same service names, its own ports, its own config
@@ -292,11 +296,11 @@ class ProjectSession {
 
   /// Heavy-tier inbound stream. Subscription presence is one of the two inputs
   /// to the agent's `client:focus-state`; see [setLifecyclePaused].
-  Stream<Map<String, dynamic>> get heavyStream => _router.heavy;
+  Stream<InboundFrame> get heavyStream => _router.heavy;
 
   /// Single-subscription — see [_checkoutStream]. Call this per consumer
   /// rather than sharing one returned stream between listeners.
-  Stream<Map<String, dynamic>> checkoutHeavyStream(String checkoutId) =>
+  Stream<InboundFrame> checkoutHeavyStream(String checkoutId) =>
       _checkoutStream(heavyStream, checkoutId, MessageTier.heavy);
 
   /// Declares app-level background state to the agent, gating both the heavy
@@ -322,11 +326,11 @@ class ProjectSession {
   /// Status-tier inbound stream. Always-on (no focus gating), used by sessions
   /// and config services which need to react to small state-tier messages
   /// without burdening the agent's heavy pipeline.
-  Stream<Map<String, dynamic>> get statusStream => _router.status;
+  Stream<InboundFrame> get statusStream => _router.status;
 
   /// Single-subscription — see [_checkoutStream]. Call this per consumer
   /// rather than sharing one returned stream between listeners.
-  Stream<Map<String, dynamic>> checkoutStatusStream(String checkoutId) =>
+  Stream<InboundFrame> checkoutStatusStream(String checkoutId) =>
       _checkoutStream(statusStream, checkoutId, MessageTier.status);
 
   /// [checkoutId]'s slice of a tier, seeded with the durable frames the router
@@ -344,13 +348,13 @@ class ProjectSession {
   /// `onListen` only for its first listener and would silently hand every later
   /// one an unseeded stream. A duplicate same-value emit is harmless — every
   /// seeded type is a latest-wins snapshot.
-  Stream<Map<String, dynamic>> _checkoutStream(
-    Stream<Map<String, dynamic>> tier,
+  Stream<InboundFrame> _checkoutStream(
+    Stream<InboundFrame> tier,
     String checkoutId,
     MessageTier tierKind,
-  ) => seededStreamAll(
+  ) => seededStreamAll<InboundFrame>(
     () => _router.replayFor(checkoutId, tierKind),
-    tier.where((json) => checkoutIdForEnvelope(json) == checkoutId),
+    tier.where((f) => f.checkoutId == checkoutId),
   );
 
   /// Send an outbound message through the transport.
@@ -426,7 +430,8 @@ class ProjectSession {
     }.where((id) => !live.contains(id)).toSet();
   }
 
-  void _onCheckoutRefusal(Map<String, dynamic> json) {
+  void _onCheckoutRefusal(InboundFrame f) {
+    final json = f.json;
     if (_closed || json['type'] != 'control:result' || json['ok'] != false) {
       return;
     }
