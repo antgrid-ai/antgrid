@@ -15,6 +15,8 @@ import {
   TerminalFrameHub, type TerminalAddress, type TerminalViewerTransport,
 } from "../src/terminal-frames/delivery";
 import { TerminalFrameSource } from "../src/terminal-frames/source";
+import { PathStatCache } from "../src/terminal-links/stat-cache";
+import { AsyncFs } from "./support/terminal-links-fixtures";
 import { TERMINAL_FRAME_INTERVAL_MS, TERMINAL_PROTOCOL_VERSION } from "../src/terminal-frames/protocol";
 
 setLogLevel("error");
@@ -104,6 +106,71 @@ describe("a finished run's last frame", () => {
     connection.acknowledge(addr(), { runId, attachmentId: attachmentId!, sequence: last.sequence });
     hub.tick();
     expect(statuses(transport).find((m) => m.code === "ENDED")?.exitCode).toBe(0);
+  });
+
+  test("waits for the stats of paths printed just before the exit, so the frozen screen has their links", async () => {
+    const fs = new AsyncFs();
+    fs.add("/r/src/a.ts");
+    const cache = new PathStatCache({ fs, platform: "linux" });
+    const screen = new TerminalFrameSource(40, 6, undefined, {
+      alternateScreen: true, cache, hostname: "test", platform: "linux", timer: () => ({ cancel() {} }),
+    });
+    screen.setLinkRoot("/r");
+    sources.push(screen);
+    let now = 1000;
+    const hub = new TerminalFrameHub(() => now);
+    const runId = crypto.randomUUID();
+    hub.register(addr(), screen, runId);
+    const transport = new FakeTransport();
+    const connection = hub.connect(transport);
+    const attachmentId = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID()))!;
+
+    screen.feed("error in src/a.ts" + String.fromCharCode(13, 10));
+    now += TERMINAL_FRAME_INTERVAL_MS;
+    await hub.finish(addr(), runId, 1);
+    // The viewer saw the pre-stat frame first and acknowledges it, as a real one does.
+    const early = frames(transport).at(-1)!;
+    connection.acknowledge(addr(), { runId, attachmentId, sequence: early.sequence });
+    now += TERMINAL_FRAME_INTERVAL_MS;
+    hub.tick();
+
+    expect(frames(transport).at(-1)!.ansi).toContain("antgrid-path:");
+    hub.dispose();
+  });
+
+  test("freezes a finished run whose stats never answer once the wait is spent", async () => {
+    const fs = new AsyncFs();
+    fs.add("/r/src/a.ts");
+    fs.hold("/r/src/a.ts");
+    const cache = new PathStatCache({ fs, platform: "linux" });
+    const screen = new TerminalFrameSource(40, 6, undefined, {
+      alternateScreen: true, cache, hostname: "test", platform: "linux", timer: () => ({ cancel() {} }),
+    });
+    screen.setLinkRoot("/r");
+    sources.push(screen);
+    let now = 1000;
+    const hub = new TerminalFrameHub(() => now);
+    const runId = crypto.randomUUID();
+    hub.register(addr(), screen, runId);
+    const transport = new FakeTransport();
+    const connection = hub.connect(transport);
+    const attachmentId = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID()))!;
+
+    screen.feed("error in src/a.ts" + String.fromCharCode(13, 10));
+    now += TERMINAL_FRAME_INTERVAL_MS;
+    // The cache's own timers are unref'd, so a held stat would let the runner exit.
+    const keepAlive = setInterval(() => {}, 50);
+    const started = performance.now();
+    await hub.finish(addr(), runId, 1);
+    clearInterval(keepAlive);
+    hub.tick();
+
+    expect(performance.now() - started).toBeLessThan(1500);
+    const last = frames(transport).at(-1)!;
+    expect(last.ansi).toContain("error in src/a.ts");
+    expect(last.ansi).not.toContain("antgrid-path:");
+    fs.release("/r/src/a.ts");
+    hub.dispose();
   });
 
   test("is captured even though the guest exited inside an unclosed frame block", async () => {

@@ -1542,7 +1542,8 @@ class FileService {
   /// actually renders rather than sitting on stale or empty content — unlike
   /// [toggleExpanded]'s single directory, nothing else will ever ask for
   /// these. Used to reveal a folder a terminal link pointed at, which —
-  /// unlike a file — has no `selectedFilePath` of its own to make it visible.
+  /// unlike a file — has no `selectedFilePath` of its own to make it visible,
+  /// so it is recorded as [FilesPaneState.revealedDirectoryPath] instead.
   Future<void> revealDirectory(String path) async {
     final segments = path.split('/').where((s) => s.isNotEmpty);
     final expanded = Set<String>.from(_state.expandedPaths);
@@ -1552,7 +1553,14 @@ class FileService {
       acc = acc.isEmpty ? segment : '$acc/$segment';
       if (expanded.add(acc)) newlyExpanded.add(acc);
     }
-    _setState(_state.copyWith(expandedPaths: expanded));
+    _setState(
+      _state.copyWith(
+        expandedPaths: expanded,
+        files: acc.isEmpty
+            ? _state.files.copyWith(clearRevealedDirectoryPath: true)
+            : _state.files.copyWith(revealedDirectoryPath: acc),
+      ),
+    );
     await _fetchChildrenChunked(newlyExpanded);
   }
 
@@ -1562,7 +1570,17 @@ class FileService {
   /// when it doesn't resolve inside this checkout. Only the bridge can answer
   /// this: the app never learns the checkout's absolute root (see
   /// `docs/architecture.md`), so it cannot relativize the path itself.
-  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+  ///
+  /// [terminalId] and [base] come from a bridge-detected path link: the first
+  /// names the terminal whose working directories the path may be relative to,
+  /// the second the one base the detector matched, and the bridge resolves
+  /// against that base alone. Both are omitted for a `file://` link, which the
+  /// bridge resolves against the checkout root only.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(
+    String rawPath, {
+    String? terminalId,
+    String? base,
+  }) {
     final requestId = const Uuid().v4();
     final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
@@ -1575,6 +1593,8 @@ class FileService {
         'projectId': projectId,
         'requestId': requestId,
         'path': rawPath,
+        'terminalId': ?terminalId,
+        'base': ?base,
       }),
     );
     return pending.future;
@@ -1690,6 +1710,7 @@ class FileService {
           searchQuery: searchQuery,
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
+          clearRevealedDirectoryPath: true,
         ),
         expandedPaths: expandedWithAncestors,
       ),

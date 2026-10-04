@@ -1,4 +1,6 @@
+import { hostname as osHostname } from "node:os";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import type { IBufferLine } from "@xterm/headless";
 import { TerminalScreen } from "../terminal-screen";
 import { logger } from "../logger";
 import { TerminalModeTracker } from "../terminal-modes";
@@ -9,6 +11,10 @@ import {
 } from "./protocol";
 import type { TerminalRunHistory } from "./history";
 import { installTerminalQueries, OscQueryTerminators, type TerminalQueryColors } from "./queries";
+import { NO_EXPLICIT_LINKS, detectLinks, type DetectedSpan, type DetectResult, type DetectRow } from "../terminal-links/detector";
+import { parseOsc7, scanLine } from "../terminal-links/grammar";
+import { normalizeBases, type LinkBases } from "../terminal-links/resolver";
+import { defaultTimer, sharedPathStatCache, type PathStatCache, type PathStatus } from "../terminal-links/stat-cache";
 export { TERMINAL_FRAME_INTERVAL_MS as FRAME_INTERVAL_MS } from "./protocol";
 export const TerminalFrameSchema = TerminalScreenFrameSchema;
 export type { TerminalScreenFrame };
@@ -49,6 +55,77 @@ const MAX_PENDING_CHARS = 16_000_000;
  */
 const MAX_WRITE_CHARS = 65_536;
 const OSC_CLOSE = "\x1b]8;;\x1b\\";
+/** Rows above the viewport read for detection, so a path that hard-wrapped
+ *  into the top row still joins with its head. */
+const LINK_CONTEXT_ROWS = 8;
+/** How far back a soft-wrapped top row is followed to the start of its line,
+ *  so a mention that crosses the top edge is read whole. A run longer than
+ *  this leaves its first row a continuation, which the detector will not link. */
+const LINK_RUN_ROWS = 64;
+const LIVE_LINK_BUDGET = { lookups: 2048, newStats: 64 };
+/** A static screen has nothing else to wake it, so a lookup answered "missing"
+ *  is retried this long after the last frame. */
+const NEGATIVE_RECHECK_MS = 5000;
+const SCAN_MEMO_MAX = 512;
+/** A key is a whole logical line, and one endless soft-wrapped line makes every
+ *  capture's key a little longer than the last, so the count alone would let a
+ *  terminal hold hundreds of near-identical megabyte strings. */
+const SCAN_MEMO_MAX_CHARS = 262_144;
+/** Past this a line is scanned again each time rather than remembered: it is
+ *  too large to be worth a slot, and too rare to be missed. */
+const SCAN_MEMO_MAX_KEY = 16_384;
+
+export interface TerminalLinkOptions {
+  /** The directory the terminal was started in. Never `process.cwd()`. */
+  spawnCwd?: string;
+  /** Detect inside the alternate screen too. Off for anything but an agent
+   *  session: a detected link is an OSC 8 cell to the viewer, so under mouse
+   *  reporting a click on it would never reach the program. */
+  alternateScreen: boolean;
+  cache?: PathStatCache;
+  hostname?: string;
+  timer?: (fn: () => void, ms: number) => { cancel(): void };
+  frameBudgetBytes?: number;
+  /** Tests only: the platform whose path rules apply. */
+  platform?: NodeJS.Platform;
+}
+
+/** What the last capture's detection was waiting on or standing on. */
+type LinkDeps = Omit<DetectResult, "spans">;
+
+interface LinkState {
+  readonly opts: TerminalLinkOptions;
+  readonly cache: PathStatCache;
+  readonly platform: NodeJS.Platform;
+  readonly timer: (fn: () => void, ms: number) => { cancel(): void };
+  readonly scanMemo: Map<string, ReturnType<typeof scanLine>>;
+  /** Total length of the keys in `scanMemo`. */
+  scanMemoChars: number;
+  readonly detach: Array<() => void>;
+  liveCwd?: string;
+  checkoutRoot?: string;
+  deps?: LinkDeps;
+  depsRevision: number;
+  recheckedRevision: number;
+  recheck?: { cancel(): void };
+  invalidateQueued: boolean;
+}
+
+function blankDetectRow(cols: number): DetectRow {
+  return {
+    text: "", colAt: new Int32Array(0), widthAt: new Uint8Array(cols), cols, wrapped: false, endCol: 0,
+    explicit: NO_EXPLICIT_LINKS,
+  };
+}
+
+/** The spans of one row in column order, clipped to `cols`, or undefined when
+ *  two of them overlap: the later one then wins per cell, which only a cell-by-
+ *  cell walk reproduces. */
+function disjointRuns(spans: readonly DetectedSpan[], cols: number): DetectedSpan[] | undefined {
+  const runs = spans.filter((s) => s.startCol < cols && s.startCol < s.endCol).sort((a, c) => a.startCol - c.startCol);
+  for (let i = 1; i < runs.length; i++) if (runs[i]!.startCol < runs[i - 1]!.endCol) return undefined;
+  return runs;
+}
 
 /** What the row archive could not record faithfully, for the epoch the source
  *  is currently recording into. */
@@ -94,8 +171,12 @@ export class TerminalFrameSource extends TerminalScreen {
   private gaps = 0;
   private rewraps = 0;
   private discarded = 0;
+  private readonly link?: LinkState;
+  /** An OSC 8 reached the parser. Until one does no cell can carry a program's
+   *  own link, and the overlay need not look at rows with nothing detected. */
+  private sawHyperlink = false;
 
-  constructor(cols: number, rows: number, private readonly history?: TerminalRunHistory) {
+  constructor(cols: number, rows: number, private readonly history?: TerminalRunHistory, links?: TerminalLinkOptions) {
     super(cols, rows);
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = "11";
@@ -163,6 +244,123 @@ export class TerminalFrameSource extends TerminalScreen {
         return true;
       });
     }
+    this.term.parser.registerOscHandler(8, () => {
+      this.sawHyperlink = true;
+      // Handled by xterm's own link service, which is what stores the uri.
+      return false;
+    });
+    if (links) {
+      const cache = links.cache ?? sharedPathStatCache();
+      const platform = links.platform ?? process.platform;
+      const hostname = links.hostname ?? osHostname();
+      const state: LinkState = {
+        opts: links, cache, platform, timer: links.timer ?? defaultTimer,
+        scanMemo: new Map(), scanMemoChars: 0, detach: [], depsRevision: -1, recheckedRevision: -1, invalidateQueued: false,
+      };
+      this.link = state;
+      this.term.parser.registerOscHandler(7, (data) => {
+        try { state.liveCwd = parseOsc7(data, hostname, platform) ?? state.liveCwd; } catch { /* a cwd report is a hint */ }
+        return true;
+      });
+      state.detach.push(
+        cache.onChange((abs, status) => this.onLinkStatus(abs, status)),
+        cache.onDrain(() => { if (state.deps?.starved) this.queueInvalidate(); }),
+      );
+    }
+  }
+
+  /** Ignores a root that is refused or not absolute; links are optional, so an
+   *  unusable root only means relative paths stay unlinked. */
+  setLinkRoot(root: string): void {
+    const link = this.link;
+    const usable = link ? normalizeBases({ checkoutRoot: root }, link.platform).checkoutRoot : undefined;
+    if (!link || usable === undefined) return;
+    const changed = link.checkoutRoot !== root;
+    link.checkoutRoot = root;
+    link.cache.trustVolume(root);
+    // A source that already framed its screen did so without this root, and a
+    // restored screen never parses again to prompt another capture.
+    if (changed && link.depsRevision >= 0) this.queueInvalidate();
+  }
+
+  /** Waits, within `budgetMs`, for the stats the last capture is still
+   *  waiting on, so a screen that is about to freeze gets its links. Resolves
+   *  true only when the screen changed because of them, which is when a
+   *  re-capture is worth taking. */
+  async settleLinks(budgetMs: number): Promise<boolean> {
+    const link = this.link;
+    const pending = link?.deps?.pending;
+    if (!link || !pending || pending.size === 0 || this.isDisposed || this.failed) return false;
+    const before = this._revision;
+    await link.cache.prefetch([...pending], budgetMs);
+    // The change a stat produced is applied on a microtask of its own.
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    return this._revision !== before;
+  }
+
+  /** The first rows of the normal screen, which is where the archive's output
+   *  continues: the row after the newest archived one is the screen's top.
+   *  `complete` is true when these are every row there is. */
+  screenTop(count: number): { rows: Array<Omit<TerminalHistoryRow, "rowId">>; complete: boolean } {
+    const normal = this.term.buffer.normal;
+    const rows: Array<Omit<TerminalHistoryRow, "rowId">> = [];
+    for (let i = 0; i < Math.min(count, this.term.rows); i++) {
+      const row = this.adapter.normalRow(normal.baseY + i);
+      if (!row) break;
+      rows.push(row);
+    }
+    return { rows, complete: rows.length === this.term.rows };
+  }
+
+  /** The raw bases, unfiltered: each caller runs them through `normalizeBases`
+   *  against the root it trusts. */
+  linkBases(): LinkBases {
+    return { liveCwd: this.link?.liveCwd, spawnCwd: this.link?.opts.spawnCwd, checkoutRoot: this.link?.checkoutRoot };
+  }
+
+  /** Re-frames the screen when a stat the last frame depended on changed. A
+   *  status that moves a key nothing waited on, or a re-stat that came back the
+   *  same, costs nothing. */
+  private onLinkStatus(abs: string, status: PathStatus): void {
+    const deps = this.link?.deps;
+    if (!deps) return;
+    const found = status === "file" || status === "dir";
+    if (deps.pending.has(abs) || deps.refining.has(abs) || (found && deps.negatives.has(abs)) ||
+        (!found && deps.linked.has(abs))) {
+      this.queueInvalidate();
+    }
+  }
+
+  /** Coalesced to one microtask: a cache settles many keys in the same turn. */
+  private queueInvalidate(): void {
+    const link = this.link;
+    if (!link || link.invalidateQueued || this.isDisposed || this.failed) return;
+    link.invalidateQueued = true;
+    queueMicrotask(() => {
+      link.invalidateQueued = false;
+      this.invalidate();
+    });
+  }
+
+  private invalidate(): void {
+    if (this.isDisposed || this.failed) return;
+    this._revision++;
+    for (const l of this.listeners) this.guarded(l);
+  }
+
+  /** One timer per source, debounced: a lookup that came back "missing" is the
+   *  only thing a static screen can still be waiting on, and nothing but this
+   *  would ever ask the filesystem again. */
+  private armRecheck(link: LinkState): void {
+    link.recheck?.cancel();
+    link.recheck = link.timer(() => {
+      link.recheck = undefined;
+      const deps = link.deps;
+      if (this.isDisposed || this.failed || !deps) return;
+      if (this._revision !== link.depsRevision || link.recheckedRevision === link.depsRevision) return;
+      link.recheckedRevision = link.depsRevision;
+      for (const key of deps.negatives) link.cache.request(key);
+    }, NEGATIVE_RECHECK_MS);
   }
 
   /**
@@ -453,7 +651,7 @@ export class TerminalFrameSource extends TerminalScreen {
    *  be half-drawn", and that is exactly true of a waived hold. A viewer
    *  distinguishing the two would be reading the elapsed timer, which no
    *  consumer wants and no frame carries. */
-  capture(now: number, opts: { final?: boolean } = {}): TerminalScreenFrame | null {
+  capture(now: number, opts: { final?: boolean; detectedLinks?: boolean } = {}): TerminalScreenFrame | null {
     if (this.failed) throw this.failed;
     if (this.isDisposed || (this.hasPendingTail && !this.atBoundary)) return null;
     const syncing = this.term.modes.synchronizedOutputMode;
@@ -472,14 +670,24 @@ export class TerminalFrameSource extends TerminalScreen {
     // under default attributes before replaying the alternate buffer's cells.
     const screen = this.serializeNow().replace("\x1b[?1049h\x1b[H", "\x1b[?1049h\x1b[0m\x1b[2J\x1b[H");
     // A source's unfinished OSC 8 span must not leak across independent frames.
-    const ansi = "\x1b[?2026h\x1b[?1049l\x1b[3J" + OSC_CLOSE + screen
-      + this.linkOverlay() + this.modes.supplementalPrelude()
+    const head = "\x1b[?2026h\x1b[?1049l\x1b[3J" + OSC_CLOSE + screen;
+    const detected = opts.detectedLinks !== false;
+    const overlay = this.linkOverlay(detected);
+    const tail = this.modes.supplementalPrelude()
       + cursor + `\x1b[=${this.keyboard[buffer.type].at(-1)};1u\x1b[?2026l`;
+    let ansi = head + overlay + tail;
     // Measured as the transport will carry it, against the cap derived from the
     // same budget the sender checks — so a frame this accepts cannot be refused
     // downstream. A skip, never a latch: an oversize screen is a property of
     // this frame, and the source stays usable for every frame after it.
-    this._oversize = encodedJsonBytes(ansi) > TERMINAL_FRAME_MAX_ANSI_BYTES;
+    const budget = this.link?.opts.frameBudgetBytes ?? TERMINAL_FRAME_MAX_ANSI_BYTES;
+    this._oversize = encodedJsonBytes(ansi) > budget;
+    if (this._oversize && this.link && detected) {
+      // Detected links are decoration that can push a near-cap screen over the
+      // limit; the program's own links alone are what the screen needs.
+      ansi = head + this.linkOverlay(false) + tail;
+      this._oversize = encodedJsonBytes(ansi) > budget;
+    }
     if (this._oversize) return null;
     return {
       version: TERMINAL_PROTOCOL_VERSION, revision: this._revision, cols: this.term.cols, rows: this.term.rows,
@@ -546,29 +754,84 @@ export class TerminalFrameSource extends TerminalScreen {
     this.discarded = 0;
   }
 
-  private linkOverlay(): string {
+  /**
+   * The links found in plain text, as the spans each viewport row holds. Runs inside
+   * `capture()`, so it only ever peeks the stat cache: a stat that is not
+   * answered yet is requested and the screen is re-framed when it lands.
+   *
+   * Never throws. A throw out of `capture()` latches the whole run as
+   * `DISPLAY_FAILED`, which is far worse than a screen without its decoration.
+   */
+  private detectLinkSpans(): Array<DetectedSpan[] | undefined> | undefined {
+    const link = this.link;
+    if (!link) return undefined;
+    const buffer = this.term.buffer.active;
+    if (buffer.type !== "normal" && !link.opts.alternateScreen) {
+      link.deps = undefined;
+      return undefined;
+    }
+    try {
+      const { cols, rows } = this.term;
+      // The alternate screen has no scrollback to read above its viewport.
+      let first = buffer.type === "normal" ? Math.max(0, buffer.baseY - LINK_CONTEXT_ROWS) : buffer.baseY;
+      if (buffer.type === "normal") {
+        while (first > 0 && buffer.baseY - first < LINK_CONTEXT_ROWS + LINK_RUN_ROWS && buffer.getLine(first)?.isWrapped === true) {
+          first--;
+        }
+      }
+      const context = buffer.baseY - first;
+      const detectRows: DetectRow[] = [];
+      for (let index = first; index < buffer.baseY + rows; index++) {
+        const line = buffer.getLine(index);
+        detectRows.push(line ? this.adapter.detectRow(line, cols, buffer.getLine(index + 1), this.sawHyperlink) : blankDetectRow(cols));
+      }
+      const memoScan = (text: string): ReturnType<typeof scanLine> => {
+        if (text.length > SCAN_MEMO_MAX_KEY) return scanLine(text, link.platform);
+        let scanned = link.scanMemo.get(text);
+        if (scanned) {
+          // Re-inserted so the oldest entry is the least recently used one.
+          link.scanMemo.delete(text);
+        } else {
+          scanned = scanLine(text, link.platform);
+          link.scanMemoChars += text.length;
+        }
+        link.scanMemo.set(text, scanned);
+        while (link.scanMemo.size > SCAN_MEMO_MAX || link.scanMemoChars > SCAN_MEMO_MAX_CHARS) {
+          const oldest = link.scanMemo.keys().next().value!;
+          link.scanMemo.delete(oldest);
+          link.scanMemoChars -= oldest.length;
+        }
+        return scanned;
+      };
+      const result = detectLinks(detectRows, context, normalizeBases(this.linkBases(), link.platform), link.cache,
+        LIVE_LINK_BUDGET, memoScan, link.platform);
+      const { spans, ...deps } = result;
+      link.deps = deps;
+      link.depsRevision = this._revision;
+      const spansAt: Array<DetectedSpan[] | undefined> = [];
+      for (const span of spans) (spansAt[span.row - context] ??= []).push(span);
+      if (deps.negatives.size > 0) this.armRecheck(link);
+      return spansAt;
+    } catch {
+      link.deps = undefined;
+      return undefined;
+    }
+  }
+
+  private linkOverlay(detected: boolean): string {
     const buffer = this.term.buffer.active;
     const parts: string[] = [];
+    const detectedAt = detected ? this.detectLinkSpans() : undefined;
     for (let row = 0; row < this.term.rows; row++) {
+      const found = detectedAt?.[row];
+      // With no OSC 8 ever parsed, a row holding no detected link has nothing
+      // to repaint.
+      if (!found && !this.sawHyperlink) continue;
       const line = buffer.getLine(buffer.baseY + row);
       if (!line) continue;
-      let lastId = "";
-      let lastStyle = "";
-      for (let col = 0; col < this.term.cols; col++) {
-        const cell = line.getCell(col);
-        const id = cell ? this.adapter.link(cell) ?? "" : "";
-        if (!cell || cell.getWidth() === 0) continue;
-        if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
-        // `adapter.link()` has already rejected control characters and anything
-        // past 8192 bytes, so an id that arrives here is safe to emit verbatim.
-        if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
-        const style = this.adapter.style(cell);
-        if (style !== lastStyle) parts.push(style);
-        parts.push(cell.getChars() || " ");
-        lastId = id;
-        lastStyle = style;
-      }
-      if (lastId) parts.push(OSC_CLOSE);
+      const runs = this.sawHyperlink ? undefined : disjointRuns(found!, this.term.cols);
+      if (runs) this.paintRuns(parts, row, line, runs);
+      else this.paintRow(parts, row, line, found);
     }
     if (!parts.length) return "";
     // Overpainting carries native OSC 8 metadata into Ghostty. Save/restore
@@ -579,10 +842,80 @@ export class TerminalFrameSource extends TerminalScreen {
       + `\x1b[?7${this.term.modes.wraparoundMode ? "h" : "l"}`;
   }
 
+  /** The whole row, cell by cell: a program link can sit under any of them. */
+  private paintRow(parts: string[], row: number, line: IBufferLine, found: DetectedSpan[] | undefined): void {
+    let uris: Array<string | undefined> | undefined;
+    if (found) {
+      uris = [];
+      for (const span of found) for (let col = span.startCol; col < span.endCol && col < this.term.cols; col++) uris[col] = span.uri;
+    }
+    let lastId = "";
+    let lastStyle = "";
+    for (let col = 0; col < this.term.cols; col++) {
+      const cell = this.adapter.cellAt(line, col);
+      // A detected link never covers a cell that already has the program's
+      // own link: the detector drops such a mention.
+      const id = uris?.[col] ?? (cell && this.sawHyperlink ? this.adapter.link(cell) ?? "" : "");
+      if (!cell || cell.getWidth() === 0) continue;
+      if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
+      // `adapter.link()` has already rejected control characters and anything
+      // past 8192 bytes, so an id that arrives here is safe to emit verbatim.
+      if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
+      const style = this.adapter.style(cell);
+      if (style !== lastStyle) parts.push(style);
+      parts.push(cell.getChars() || " ");
+      lastId = id;
+      lastStyle = style;
+    }
+    if (lastId) parts.push(OSC_CLOSE);
+  }
+
+  /** Only the columns a detected link covers, for a screen no program link can
+   *  be on. Emits exactly what `paintRow` would: a gap between two runs closes
+   *  the open link at its first cell that has a width. */
+  private paintRuns(parts: string[], row: number, line: IBufferLine, runs: DetectedSpan[]): void {
+    let lastId = "";
+    let lastStyle = "";
+    let reached = 0;
+    for (const run of runs) {
+      if (lastId) {
+        for (let col = reached; col < run.startCol; col++) {
+          const cell = this.adapter.cellAt(line, col);
+          if (!cell || cell.getWidth() === 0) continue;
+          parts.push(OSC_CLOSE);
+          lastId = "";
+          lastStyle = "";
+          break;
+        }
+      }
+      const to = Math.min(run.endCol, this.term.cols);
+      for (let col = run.startCol; col < to; col++) {
+        const cell = this.adapter.cellAt(line, col);
+        if (!cell || cell.getWidth() === 0) continue;
+        const id = run.uri;
+        if (!id) { if (lastId) parts.push(OSC_CLOSE); lastId = ""; lastStyle = ""; continue; }
+        if (lastId !== id) parts.push(`\x1b[${row + 1};${col + 1}H\x1b]8;;${id}\x1b\\`);
+        const style = this.adapter.style(cell);
+        if (style !== lastStyle) parts.push(style);
+        parts.push(cell.getChars() || " ");
+        lastId = id;
+        lastStyle = style;
+      }
+      reached = to;
+    }
+    if (lastId) parts.push(OSC_CLOSE);
+  }
+
   override dispose(): void {
     this.closeDropEpisode();
     this.detachQueries?.();
     this.detachArchive?.();
+    if (this.link) {
+      for (const detach of this.link.detach) detach();
+      this.link.detach.length = 0;
+      this.link.recheck?.cancel();
+      this.link.recheck = undefined;
+    }
     this.listeners.clear();
     // TerminalManager disposes every screen in one bare loop, so a throw here
     // would abandon it and leak every xterm instance behind this one.

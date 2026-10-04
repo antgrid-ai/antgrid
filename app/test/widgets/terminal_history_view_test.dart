@@ -22,6 +22,7 @@ import 'package:antgrid/design/widgets/ab_inline_banner.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/terminal_history_model.dart';
+import 'package:antgrid/util/terminal_links.dart';
 import 'package:antgrid/widgets/terminal_history_view.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -846,6 +847,90 @@ void main() {
         expect(controller.plainText, contains('row 965'));
       },
     );
+
+    testWidgets('forwards the quiet-link predicate to its engine view', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      bool predicate(String uri) => uri.startsWith('x:');
+
+      await tester.pumpWidget(
+        _wrap(
+          TerminalHistoryView(
+            model: _loadedModel(count: 20),
+            onLoadMore: () {},
+            onClose: () {},
+            fontSize: 13,
+            fontWeight: FontWeight.w400,
+            boldFontWeight: FontWeight.w700,
+            minimumContrastRatio: 1.0,
+            isQuietHyperlink: predicate,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(_mountedTerminal(tester).isQuietHyperlink, same(predicate));
+    });
+
+    testWidgets('an archived detected link reports and opens its own uri', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      const uri = 'antgrid-path:?p=src%2Fa.ts&b=r&k=f&n=12';
+      final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1));
+      m.markRequested('seed');
+      m.applyPage(
+        _page(
+          requestId: 'seed',
+          rows: [
+            _row(
+              rowId: 0,
+              spans: [_span('src/a.ts:12', uri: uri)],
+            ),
+          ],
+          history: _boundary(nextRowId: 1),
+        ),
+      );
+      final hovered = <String?>[];
+      final opened = <String>[];
+
+      await tester.pumpWidget(
+        _wrap(
+          TerminalHistoryView(
+            model: m,
+            onLoadMore: () {},
+            onClose: () {},
+            fontSize: 13,
+            fontWeight: FontWeight.w400,
+            boldFontWeight: FontWeight.w700,
+            minimumContrastRatio: 1.0,
+            onHyperlinkHover: hovered.add,
+            onOpenHyperlink: (u) async => opened.add(u),
+            isQuietHyperlink: isDetectedTerminalLink,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Where the single row landed is the engine's business, so look for it.
+      final box = tester.getRect(find.byType(GhosttyTerminalView));
+      final pointer = TestPointer(1, PointerDeviceKind.mouse);
+      Offset? onLink;
+      for (var y = box.top + 2; y < box.bottom && onLink == null; y += 4) {
+        final at = Offset(box.left + 24, y);
+        await tester.sendEventToBinding(pointer.hover(at));
+        await tester.pump();
+        if (hovered.contains(uri)) onLink = at;
+      }
+      expect(onLink, isNotNull, reason: 'the link was never hoverable');
+
+      await tester.tapAt(onLink!, kind: PointerDeviceKind.mouse);
+      await tester.pump();
+      expect(opened, [uri]);
+      // A click leaves a multi-click window timer running.
+      await tester.pump(const Duration(seconds: 1));
+    });
 
     testWidgets(
       'applying a page preserves the reader\'s scroll offset instead of '

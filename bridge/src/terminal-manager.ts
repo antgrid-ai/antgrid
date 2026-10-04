@@ -11,7 +11,9 @@ import { submitPlan } from "./pty-submit";
 import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
 import { GuestReadiness, SubmitGate } from "./submit-gate";
 import { TerminalScreen } from "./terminal-screen";
-import { TerminalFrameSource } from "./terminal-frames/source";
+import { TerminalFrameSource, type TerminalLinkOptions } from "./terminal-frames/source";
+import type { LinkBases } from "./terminal-links/resolver";
+import type { HistoryContext } from "./terminal-links/history-links";
 import { TerminalHistoryStore, type HistoryPage, type TerminalRunHistory } from "./terminal-frames/history";
 import {
   TERMINAL_FRAME_INTERVAL_MS,
@@ -52,6 +54,10 @@ import type { ConnState } from "./conn-state";
  * exit even with no attachment on the run.
  */
 const EXIT_DRAIN_MS = 5 * TERMINAL_FRAME_INTERVAL_MS;
+/** Rows read on each side of a served history page for link detection: enough
+ *  for a soft-wrapped line of a few thousand characters, which is longer than
+ *  any URL the grammar will link. */
+const HISTORY_CONTEXT_ROWS = 48;
 
 // --- Terminal history store: the real run lifecycle ---------------------------
 //
@@ -574,7 +580,13 @@ export class TerminalManager {
     const runId = crypto.randomUUID();
     this.runIds.set(terminalId, runId);
     try {
-      screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId));
+      screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId), {
+        spawnCwd: config.cwd,
+        // Only an agent session gets alternate-screen detection: an agent's TUI
+        // already owns the mouse, so a detected link costs nothing there, while
+        // any other full-screen program would lose its clicks to the link.
+        alternateScreen: config.type === "agent",
+      });
     } catch (error) {
       this.sessions.delete(terminalId);
       this.scrollbacks.delete(terminalId);
@@ -738,7 +750,9 @@ export class TerminalManager {
     try {
       const screen = this.screens.get(terminalId);
       if (runId && screen instanceof TerminalFrameSource) {
-        const frame = screen.capture(performance.now(), { final: true });
+        // A saved frame is replayed through xterm, which would turn bridge-minted
+        // links into program-authored ones that the adapter then drops.
+        const frame = screen.capture(performance.now(), { final: true, detectedLinks: false });
         if (frame) liveTerminalHistoryStore()?.saveFinal(runId, frame);
       }
     } catch (error) {
@@ -769,9 +783,10 @@ export class TerminalManager {
 
   private constructScreen(
     terminalId: string, cols: number, rows: number, history?: TerminalRunHistory,
+    links?: TerminalLinkOptions,
   ): TerminalFrameSource {
     try {
-      return new TerminalFrameSource(cols, rows, history);
+      return new TerminalFrameSource(cols, rows, history, links);
     } catch (error) {
       log.error(
         `Terminal "${terminalId}" frame source construction failed: %s`,
@@ -1116,6 +1131,40 @@ export class TerminalManager {
     return store.openRun(runId).page(epoch, beforeRowId);
   }
 
+  /** The output around a served page, so detection can judge a line that
+   *  crosses the page's edge. The archive supplies the rows beside the page; for
+   *  the live run the screen supplies what follows the newest archived row. A
+   *  dead run's last screen is not in the archive, so nothing after its newest
+   *  page is ever known to be the end. */
+  historyContext(runId: string, page: HistoryPage, liveTerminalId: string | undefined): HistoryContext | undefined {
+    try {
+      const first = page.rows[0];
+      const last = page.rows[page.rows.length - 1];
+      const store = terminalHistoryStore();
+      if (!first || !last || !store?.record(runId)) return undefined;
+      const near = store.openRun(runId).neighbours(page.history.epoch, first.rowId, last.rowId + 1, HISTORY_CONTEXT_ROWS);
+      const after: Array<Omit<TerminalHistoryRow, "rowId">> = near.after.slice();
+      let afterComplete = false;
+      const screen = liveTerminalId === undefined ? undefined : this.screens.get(liveTerminalId);
+      if (near.reachedEnd && screen instanceof TerminalFrameSource) {
+        const top = screen.screenTop(HISTORY_CONTEXT_ROWS);
+        after.push(...top.rows);
+        afterComplete = top.complete;
+      }
+      return { before: near.before, after, afterComplete };
+    } catch {
+      // Context only sharpens a link, so a page is still served without it.
+      return undefined;
+    }
+  }
+
+  /** The raw (unfiltered) bases a terminal's detector resolves relative paths
+   *  against; callers run them through `normalizeBases` with their own root. */
+  linkBases(terminalId: string): LinkBases | undefined {
+    const screen = this.screens.get(terminalId);
+    return screen instanceof TerminalFrameSource ? screen.linkBases() : undefined;
+  }
+
   ownsHistoryRun(terminalId: string, runId: string): boolean {
     return terminalHistoryStore()?.ownsRun(runId, this.historyScope, terminalId) === true;
   }
@@ -1139,7 +1188,10 @@ export class TerminalManager {
       runId: saved.runId, append: () => {}, clear: () => {}, noteGap: () => {},
       flush: () => history.flush(), boundary: () => history.boundary(),
     } as unknown as TerminalRunHistory;
-    const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory);
+    // Normal-buffer detection only: the run that drew this frame is gone, so
+    // nothing here says whether its program still owns the mouse.
+    const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory,
+      { alternateScreen: false });
     if (saved.frame) source.feed(saved.frame.ansi);
     await source.settle();
     if (this.runIds.has(terminalId) || !store.ownsRun(saved.runId, this.historyScope, terminalId)) {
