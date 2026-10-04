@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Directory, Platform, Process;
 
 import 'package:flutter/gestures.dart'
     show PointerDownEvent, PointerMoveEvent, PointerUpEvent, VelocityTracker;
@@ -20,7 +19,6 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_toast.dart';
 import '../launcher/host_control_client.dart' show HostControlException;
-import '../launcher/host_discovery.dart' show hostDir;
 import '../models/preferences_models.dart';
 import '../models/session_entry.dart';
 import '../project/checkout_readiness.dart' show CheckoutReadiness;
@@ -50,6 +48,7 @@ import '../util/detached.dart';
 import '../widgets/ab_status_helpers.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
+import '../widgets/log_files_button.dart';
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/pane_swipe_exclusion.dart';
 import '../widgets/projects_drawer.dart';
@@ -2838,6 +2837,11 @@ Object? workspaceBlockingError({
 bool _takesOverMidSession(BlockReason reason) =>
     blockReasonPresentation(reason).interruptsWorkspace;
 
+/// A phone has no host.log and no log folder; its logs leave through the
+/// share sheet.
+const String _shareLogsTip =
+    'If it keeps failing, share logs and attach them to a report.';
+
 /// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
 /// sources — a reader who checks only the first will conclude this screen
 /// cannot be the one on the user's display:
@@ -2850,7 +2854,8 @@ bool _takesOverMidSession(BlockReason reason) =>
 ///    over mid-use, a license verdict, a revoked device.
 ///
 /// Every path leaves the user with at least one button that changes the
-/// state: Retry re-runs the launch; Open log opens the host log directory;
+/// state: Retry re-runs the launch; the log action opens the host log directory
+/// on desktop and shares app.log on a phone;
 /// Back returns to the home screen.
 class _LocalLaunchErrorScreen extends StatelessWidget {
   final Object error;
@@ -2993,51 +2998,35 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
     if (msg.contains('no live control plane')) {
       return (
         headline: 'host control plane did not answer',
-        tip:
-            'The host process started but its control plane was not reachable '
-            'within 30s. Check host.log in the log directory for the '
-            'startup error, then Retry.',
+        tip: isMobilePlatform
+            ? 'The host process started but its control plane was not '
+                  'reachable within 30s. Retry; $_shareLogsTip'
+            : 'The host process started but its control plane was not '
+                  'reachable within 30s. Check host.log in the log directory '
+                  'for the startup error, then Retry.',
         retryLabel: 'retry',
       );
     }
     if (msg.contains('no connect info')) {
       return (
         headline: 'host did not return connection info',
-        tip:
-            'The host control plane answered but returned no socket address for '
-            'this project. Retry; if it persists, check host.log for an error '
-            'near the project:open call.',
+        tip: isMobilePlatform
+            ? 'The host control plane answered but returned no socket address '
+                  'for this project. Retry; $_shareLogsTip'
+            : 'The host control plane answered but returned no socket address '
+                  'for this project. Retry; if it persists, check host.log for '
+                  'an error near the project:open call.',
         retryLabel: 'retry',
       );
     }
     return (
       headline: 'agent failed to start',
-      tip:
-          'Retry runs the launcher again. If it keeps failing, open the log '
-          'directory and check host.log for the underlying stderr trace.',
+      tip: isMobilePlatform
+          ? 'Retry runs the launcher again. $_shareLogsTip'
+          : 'Retry runs the launcher again. If it keeps failing, open the log '
+                'directory and check host.log for the underlying stderr trace.',
       retryLabel: 'retry',
     );
-  }
-
-  Future<void> _openLogFolder() async {
-    final dir = hostDir(); // host.log lives here now (one host per machine)
-    try {
-      await Directory(dir).create(recursive: true);
-      if (Platform.isWindows) {
-        // hostDir() yields a mixed-separator path (e.g. C:\Users\me/.antgrid).
-        // explorer.exe treats '/' as a switch prefix and silently opens the
-        // default Documents view, so hand it pure backslashes.
-        await Process.start('explorer.exe', [
-          dir.replaceAll('/', r'\'),
-        ], runInShell: false);
-      } else if (Platform.isMacOS) {
-        await Process.start('open', [dir]);
-      } else {
-        await Process.start('xdg-open', [dir]);
-      }
-    } catch (_) {
-      /* best effort */
-    }
   }
 
   @override
@@ -3101,12 +3090,8 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
                       onTap: onRetry,
                       compact: true,
                     ),
-                  if (projectId != null)
-                    AbButton(
-                      label: 'open log folder',
-                      onTap: _openLogFolder,
-                      compact: true,
-                    ),
+                  if (projectId != null || isMobilePlatform)
+                    const LogFilesButton(compact: true),
                   AbButton(label: 'back', onTap: onBack, compact: true),
                 ],
               ),

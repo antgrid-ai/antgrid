@@ -182,5 +182,14 @@ Future<void> pushBackgroundHandler(RemoteMessage message) async {
       'pushBackgroundHandler failed',
       fields: {'error': '$e'},
     );
+  } finally {
+    // The headless engine is destroyed once this returns, so the lines above
+    // reach disk only if the log file is attached and drained first. No file
+    // name here: the memo already holds pushBackgroundMain's app-push.log
+    // lookup, and in the main isolate a retry belongs on app.log.
+    try {
+      await AbLog.initLogDirectory();
+      await AbLog.flush();
+    } catch (_) {}
   }
 }

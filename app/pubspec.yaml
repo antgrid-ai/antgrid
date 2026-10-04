@@ -66,6 +66,9 @@ dependencies:
   re_editor: ^0.9.0
   re_highlight: ^0.0.3
   path_provider: ^2.1.5
+  # Share sheet for the phone's app.log; 12.x because 13 needs win32 6, which
+  # device_info_plus 11 forbids.
+  share_plus: ^12.0.2
   iconify_flutter: ^0.0.7
   flutter_svg: ^2.2.4
   file_selector: ^1.1.0
