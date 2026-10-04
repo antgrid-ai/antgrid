@@ -131,6 +131,11 @@ class AgentSessionState {
   );
 }
 
+/// How long live text and terminal deltas accumulate before one state is
+/// published: about a frame, so a token stream costs consumers one rebuild per
+/// frame instead of one per token.
+const Duration kAgentDeltaFlushInterval = Duration(milliseconds: 16);
+
 /// Per-project structured-agent transcript service. Mirrors TerminalService:
 /// subscribes at construction (welcome-replay safe), keys state by the chat
 /// session id so one project can hold several concurrent chat sessions.
@@ -151,14 +156,15 @@ class AgentSessionService {
   final Map<String, StringBuffer> _deltaBuffers = {};
   final Map<String, StringBuffer> _terminalBuffers = {};
 
-  // Item ids touched by deltas since the last flush, per session. The flush
-  // runs in a microtask, which merges only deltas dispatched inside one
-  // synchronous handler (a replay batch). A streamed delta reaches _onJson
-  // through async stream controllers, one event per microtask, so live
-  // streaming flushes once per delta. That is why a flush copies only the item
-  // lists it writes into.
+  // Item ids touched by deltas since the last flush, per session. A streamed
+  // delta reaches _onJson through async stream controllers, one event per
+  // microtask, so only a timer can merge a live stream into one publish per
+  // frame. It is a Timer rather than a frame callback because frames stop while
+  // the window is hidden, which would leave buffered text unpublished. Every
+  // other inbound frame flushes first (see _onJson), so no event reads or
+  // replaces turns while text is still buffered.
   Map<String, Set<String>> _dirtyItems = {};
-  bool _flushScheduled = false;
+  Timer? _flushTimer;
 
   // A batch replay runs every frame through _onJson so each keeps its side
   // effects: retry consumption in _endTurn, cancel fallbacks, prompts, usage,
@@ -257,10 +263,14 @@ class AgentSessionService {
       body();
       return;
     }
+    _flushDeltas();
     final fold = _folds[sessionId] = _Fold();
     try {
       body();
     } finally {
+      // Folded into the batch's single publish, so a replay never shows one
+      // frame of its final state without the text buffered inside it.
+      _flushDeltas();
       _folds.remove(sessionId);
       if (fold.dirty && !_disposed) {
         _controllers[sessionId]?.add(_states[sessionId]!);
@@ -417,6 +427,9 @@ class AgentSessionService {
     if (_disposed) return;
     final parsed = parseAbMessageOfType(json, _handledTypes);
     if (parsed == null) return;
+    // Inside a batch replay the buffered text is published with the batch's
+    // final state, so flushing per frame would copy the turn list repeatedly.
+    if (parsed is! AgentItemDelta && _folds.isEmpty) _flushDeltas();
     if (parsed is AgentTranscriptReplay) {
       _folded(
         parsed.sessionId,
@@ -707,14 +720,16 @@ class AgentSessionService {
     _scheduleFlush();
   }
 
+  // Not restarted by later deltas: a steady stream must still publish once per
+  // interval rather than starve until it pauses.
   void _scheduleFlush() {
-    if (_flushScheduled || _disposed) return;
-    _flushScheduled = true;
-    scheduleMicrotask(_flushDeltas);
+    if (_disposed) return;
+    _flushTimer ??= Timer(kAgentDeltaFlushInterval, _flushDeltas);
   }
 
   void _flushDeltas() {
-    _flushScheduled = false;
+    _flushTimer?.cancel();
+    _flushTimer = null;
     if (_disposed || _dirtyItems.isEmpty) return;
     final dirtyBySession = _dirtyItems;
     _dirtyItems = {};
@@ -896,6 +911,7 @@ class AgentSessionService {
     _cancelFallbacks[sessionId] = Timer(_cancelFallbackDelay, () {
       _cancelFallbacks.remove(sessionId);
       if (_disposed) return;
+      _flushDeltas();
       final turn = _turnById(sessionId, turnId);
       if (turn == null || turn.stopReason != null) return;
       _setState(
@@ -1134,6 +1150,8 @@ class AgentSessionService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _flushTimer?.cancel();
+    _flushTimer = null;
     for (final t in _cancelFallbacks.values) {
       t.cancel();
     }
