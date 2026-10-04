@@ -898,6 +898,86 @@ void main() {
       },
     );
 
+    testWidgets('typing in the composer does not rebuild the transcript list', (
+      tester,
+    ) async {
+      await _pump(tester, _settledReplyState());
+      await tester.pump();
+
+      final listBefore = tester.widget<ListView>(find.byType(ListView));
+      final delegateBefore = listBefore.childrenDelegate;
+
+      await _typeIntoComposer(tester, 'hello');
+      await tester.pump();
+
+      final listAfter = tester.widget<ListView>(find.byType(ListView));
+      expect(identical(listAfter, listBefore), isTrue);
+      expect(identical(listAfter.childrenDelegate, delegateBefore), isTrue);
+
+      await _disposeTree(tester);
+    });
+
+    testWidgets(
+      'an unchanged row keeps its widget while another row of the same turn streams',
+      (tester) async {
+        final states = StreamController<AgentSessionState>.broadcast();
+        addTearDown(states.close);
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              agentSessionStateProvider.overrideWith(
+                (ref, id) => states.stream,
+              ),
+            ],
+            child: const MaterialApp(
+              home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
+            ),
+          ),
+        );
+        final first = _item('a1', 'message', role: 'assistant', text: 'first');
+        final user = _item('u1', 'message', role: 'user', text: 'go');
+        AgentSessionState open(String partial) => AgentSessionState(
+          turns: [
+            AgentTurn(
+              turnId: 't1',
+              items: [
+                user,
+                first,
+                _item('a2', 'message', role: 'assistant', text: partial),
+              ],
+            ),
+          ],
+        );
+        states.add(open('one'));
+        await tester.pump();
+        await tester.pump();
+
+        MessageRow rowFor(String id) => tester.widget<MessageRow>(
+          find.descendant(
+            of: find.byKey(ValueKey('msg:$id')),
+            matching: find.byType(MessageRow),
+          ),
+        );
+        final userBefore = rowFor('u1');
+        final firstBefore = rowFor('a1');
+        final streamingBefore = rowFor('a2');
+
+        states.add(open('one two'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(identical(rowFor('u1'), userBefore), isTrue);
+        expect(identical(rowFor('a1'), firstBefore), isTrue);
+        expect(identical(rowFor('a2'), streamingBefore), isFalse);
+        expect(
+          find.textContaining('one two', findRichText: true),
+          findsOneWidget,
+        );
+
+        await _disposeTree(tester);
+      },
+    );
+
     testWidgets(
       'a multi-line draft keeps a following transcript pinned to the bottom',
       (tester) async {
@@ -915,6 +995,31 @@ void main() {
         await _typeIntoComposer(tester, 'one\ntwo\nthree\nfour');
 
         expect(controller.position.viewportDimension, lessThan(viewportBefore));
+        expect(controller.offset, controller.position.maxScrollExtent);
+
+        await _disposeTree(tester);
+      },
+    );
+
+    testWidgets(
+      'a draft growing while following just short of the bottom repins without a layout error',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(400, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await _pump(tester, _tallState());
+        await tester.pump();
+        await tester.pumpAndSettle();
+
+        final controller = tester
+            .widget<ListView>(find.byType(ListView))
+            .controller!;
+        // A programmatic move is not a user scroll, so following stays armed.
+        controller.jumpTo(controller.position.maxScrollExtent - 20);
+        await tester.pump();
+
+        await _typeIntoComposer(tester, 'one\ntwo\nthree\nfour');
+
+        expect(tester.takeException(), isNull);
         expect(controller.offset, controller.position.maxScrollExtent);
 
         await _disposeTree(tester);
