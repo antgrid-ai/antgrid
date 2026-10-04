@@ -15,6 +15,7 @@ import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
+import '../models/git_status_index.dart';
 import '../utils/platform_utils.dart';
 
 /// A widget that renders a file tree with expand/collapse, file selection,
@@ -24,7 +25,7 @@ import '../utils/platform_utils.dart';
 /// explorer swaps this whole widget out for a flat results list while a
 /// filter query is active instead.
 ///
-/// [gitFileEntries] is optional decoration: pass it (with
+/// [gitStatus] is optional decoration: pass it (with
 /// [onStage]/[onUnstage]/[onDiscard]/[onResolveConflict]) from the Git tab to
 /// get a +N/-N diff-stat badge on changed files, a dot on one with nothing to
 /// count, and stage/unstage/discard/resolve actions — hover-revealed icon
@@ -40,15 +41,16 @@ import '../utils/platform_utils.dart';
 /// user folds a folder back up once the list is long enough to need it; a
 /// folded folder then carries the rollup of what it hides.
 ///
-/// The collections passed in — [root], [expandedPaths], [collapsedPaths] and
-/// [gitFileEntries] — are compared by identity between builds, and what is
-/// derived from them is reused while they are unchanged, so a caller changes
-/// one by passing a new instance, never by editing it in place.
+/// [root], [expandedPaths] and [collapsedPaths] are compared by identity
+/// between builds, and the rows derived from them are reused while they are
+/// unchanged, so a caller changes one by passing a new instance, never by
+/// editing it in place. [gitStatus] is immutable, so its identity is exact.
 class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
   final String? selectedFilePath;
-  final List<GitFileStatusEntry> gitFileEntries;
+  final GitStatusIndex? _gitStatus;
+  GitStatusIndex get gitStatus => _gitStatus ?? GitStatusIndex.empty;
   final bool changesOnly;
 
   /// Folders folded shut, in [changesOnly] mode only. Empty means the whole
@@ -73,7 +75,7 @@ class FileTreeView extends StatefulWidget {
     required this.root,
     required this.expandedPaths,
     this.selectedFilePath,
-    this.gitFileEntries = const [],
+    GitStatusIndex? gitStatus,
     this.changesOnly = false,
     this.collapsedPaths = const {},
     required this.onToggleExpanded,
@@ -82,7 +84,7 @@ class FileTreeView extends StatefulWidget {
     this.onUnstage,
     this.onDiscard,
     this.onResolveConflict,
-  });
+  }) : _gitStatus = gitStatus;
 
   @override
   State<FileTreeView> createState() => _FileTreeViewState();
@@ -103,11 +105,9 @@ class _FileTreeViewState extends State<FileTreeView> {
   double? _rowExtent;
   List<_TreeRow> _lastFlatList = const [];
 
-  // Derived from [FileTreeView.gitFileEntries] alone and rebuilt only when a
-  // new list arrives — see the class doc.
-  List<GitFileStatusEntry>? _entriesSource;
-  Map<String, List<GitFileStatusEntry>> _entriesByPath = const {};
-  Set<String> _dirsWithConflicts = const {};
+  // The changed-files tree and the rollups walk it, both pure in the status
+  // index, so they live exactly as long as the index they came from.
+  GitStatusIndex? _indexSource;
   FileNode? _changesRoot;
 
   // What [_lastFlatList] was built from. Changes-only rows come from the change
@@ -145,41 +145,22 @@ class _FileTreeViewState extends State<FileTreeView> {
   void reassemble() {
     super.reassemble();
     // Hot reload replaces the code the cached rows were derived with, not their
-    // inputs, so force both derivations to run again.
-    _entriesSource = null;
+    // inputs.
     _rowsChangesOnly = null;
+    _changesRoot = null;
+    _rollups.clear();
   }
 
-  void _syncEntries() {
-    if (identical(widget.gitFileEntries, _entriesSource)) return;
-    _entriesSource = widget.gitFileEntries;
-    final entriesByPath = <String, List<GitFileStatusEntry>>{};
-    // The ancestors of every CONFLICTED path — what lets a folder sort ahead
-    // of its siblings for holding one somewhere below (see
-    // [_flattenChangesOnly]).
-    final dirsWithConflicts = <String>{};
-    for (final e in widget.gitFileEntries) {
-      entriesByPath.putIfAbsent(e.path, () => []).add(e);
-      if (e.status != '!') continue;
-      var dir = e.path;
-      var slash = dir.lastIndexOf('/');
-      while (slash >= 0) {
-        dir = dir.substring(0, slash);
-        // Already recorded => every ancestor above it was too, on an earlier
-        // conflict's walk.
-        if (!dirsWithConflicts.add(dir)) break;
-        slash = dir.lastIndexOf('/');
-      }
-    }
-    _entriesByPath = entriesByPath;
-    _dirsWithConflicts = dirsWithConflicts;
+  void _syncIndex() {
+    if (identical(widget.gitStatus, _indexSource)) return;
+    _indexSource = widget.gitStatus;
     _changesRoot = null;
     _rollups.clear();
   }
 
   List<_TreeRow> _rows() {
     final changesOnly = widget.changesOnly;
-    final Object? tree = changesOnly ? widget.gitFileEntries : widget.root;
+    final Object? tree = changesOnly ? widget.gitStatus : widget.root;
     final openSet = changesOnly ? widget.collapsedPaths : widget.expandedPaths;
     if (_rowsChangesOnly == changesOnly &&
         identical(_rowsTree, tree) &&
@@ -192,9 +173,9 @@ class _FileTreeViewState extends State<FileTreeView> {
     _rollups.clear();
     return _lastFlatList = changesOnly
         ? _flattenChangesOnly(
-            _changesRoot ??= _changesTree(_entriesByPath.keys),
-            _entriesByPath,
-            _dirsWithConflicts,
+            _changesRoot ??= _changesTree(widget.gitStatus.byPath.keys),
+            widget.gitStatus.byPath,
+            widget.gitStatus.dirsWithConflicts,
             widget.collapsedPaths,
           )
         : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
@@ -248,7 +229,7 @@ class _FileTreeViewState extends State<FileTreeView> {
 
   @override
   Widget build(BuildContext context) {
-    // [changesOnly] answers from [gitFileEntries] alone, nesting included, so
+    // [changesOnly] answers from [gitStatus] alone, nesting included, so
     // it has nothing to bail out of: the two arrive independently
     // (`git:status` is a push — `file_service.dart`'s `_handleGitStatus` —
     // while `root` waits on a lazy per-checkout tree hydration), and the Git
@@ -260,8 +241,8 @@ class _FileTreeViewState extends State<FileTreeView> {
       );
     }
 
-    _syncEntries();
-    final entriesByPath = _entriesByPath;
+    _syncIndex();
+    final entriesByPath = widget.gitStatus.byPath;
     final flatList = _rows();
 
     if (flatList.isEmpty) {
@@ -544,7 +525,7 @@ class _ChangesDir {
 /// One entry per changed file anywhere under [dir] — what a folded folder
 /// summarizes. ONE per path, not one per git entry: a partially staged file
 /// arrives twice carrying the SAME combined-vs-HEAD counts on both, so keeping
-/// both would double it (the same dedup `_GitHeaderCounts` does for the header).
+/// both would double it (the same dedup `GitStatusIndex` does for the header totals).
 List<GitFileStatusEntry> _descendantEntries(
   FileNode dir,
   Map<String, List<GitFileStatusEntry>> entriesByPath,

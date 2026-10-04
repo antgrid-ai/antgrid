@@ -8,6 +8,7 @@ import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
 
 import '../helpers/hover.dart';
@@ -17,6 +18,12 @@ import '../helpers/hover.dart';
 /// dimming this pins lives entirely in how the widget renders that flag.
 Color _labelColor(WidgetTester tester, String name) =>
     tester.widget<Text>(find.text(name)).style!.color!;
+
+// One index per list instance, as FileService carries one per git:status, so a
+// test that re-pumps the same list is re-pumping the same status.
+final _indexes = Expando<GitStatusIndex>();
+GitStatusIndex _indexFor(List<GitFileStatusEntry> entries) =>
+    _indexes[entries] ??= GitStatusIndex(entries);
 
 void main() {
   FileNode makeTree() {
@@ -74,7 +81,7 @@ void main() {
           root: root,
           expandedPaths: expandedPaths,
           selectedFilePath: selectedFilePath,
-          gitFileEntries: gitFileEntries,
+          gitStatus: _indexFor(gitFileEntries),
           changesOnly: changesOnly,
           collapsedPaths: collapsedPaths,
           onToggleExpanded: onToggleExpanded ?? (_) {},
@@ -700,7 +707,7 @@ void main() {
         buildTestWidget(
           root: makeTree(),
           changesOnly: true,
-          // A copy, not the same list: the rows are cached by the list's identity, so the same instance would replay the first build's rows instead of deriving them again with the tree present.
+          // A copy, so the index is built afresh rather than replayed.
           gitFileEntries: List.of(entries),
         ),
       );
@@ -1204,13 +1211,13 @@ void main() {
                   FileTreeView(
                     root: makeTree(),
                     expandedPaths: const {'project/lib'},
-                    gitFileEntries: const [
+                    gitStatus: GitStatusIndex(const [
                       GitFileStatusEntry(
                         path: 'project/lib/main.dart',
                         status: 'M',
                         staged: false,
                       ),
-                    ],
+                    ]),
                     onToggleExpanded: (_) {},
                     onFileSelected: (_) {},
                     onStage: (_) {},

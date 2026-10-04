@@ -27,6 +27,7 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/ab_message.dart'
     show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
+import '../models/git_status_index.dart';
 import '../models/git_sync_state.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
@@ -78,20 +79,6 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   /// `historyCollapsed` does: nothing outside this widget reads it.
   bool _changesCollapsed = false;
 
-  // FileService swaps `gitFileEntries` whole on each `git:status` and carries the
-  // same instance through every other emission (tree deltas, file loads, diffs,
-  // history pages), so the list's identity is a complete key for a derivation
-  // that walks every change several times.
-  List<GitFileStatusEntry>? _countsSource;
-  _GitHeaderCounts? _counts;
-
-  _GitHeaderCounts _countsFor(List<GitFileStatusEntry>? entries) {
-    final cached = _counts;
-    if (cached != null && identical(entries, _countsSource)) return cached;
-    _countsSource = entries;
-    return _counts = _GitHeaderCounts.of(entries);
-  }
-
   @override
   void initState() {
     super.initState();
@@ -110,13 +97,6 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   }
 
   @override
-  void reassemble() {
-    super.reassemble();
-    // Hot reload replaces the derivation's code but not its input.
-    _counts = null;
-  }
-
-  @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
@@ -131,7 +111,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           setState(() => _changesCollapsed = !_changesCollapsed),
     );
     final treeStateAsync = ref.watch(fileTreeStateProvider);
-    final counts = _countsFor(treeStateAsync.value?.gitFileEntries);
+    final counts = treeStateAsync.value?.gitStatus ?? GitStatusIndex.empty;
     final git = treeStateAsync.value?.git;
     // watch, not the `ref.read` in [_backFromViewer]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
@@ -247,127 +227,6 @@ class _PanelContext {
   final VoidCallback onToggleChanges;
 }
 
-/// What the Stage All / Revert All / Commit actions operate on, derived from
-/// the raw entry list in ONE place.
-///
-/// Every branch of the panel (loading, error, data) renders the same branch
-/// bar, and each used to re-derive these itself — so a change to what counts
-/// as unstaged reached only whichever copies were remembered.
-class _GitHeaderCounts {
-  const _GitHeaderCounts({
-    required this.stagedCount,
-    required this.unstagedPaths,
-    required this.revertablePaths,
-    this.changedCount = 0,
-    this.conflictPaths = const [],
-    this.unresolvedConflictPaths = const [],
-    this.changedFolders = const {},
-    this.additions = 0,
-    this.deletions = 0,
-  });
-
-  /// A conflict ("!") is in [unstagedPaths] — staging one IS how git resolves
-  /// it, so Stage All has to be able to reach it — but never in
-  /// [revertablePaths]: resolving a conflict is not a restore to HEAD.
-  ///
-  /// A path with BOTH a staged and an unstaged change has two entries, so
-  /// [revertablePaths] dedups — Revert All names each path once.
-  factory _GitHeaderCounts.of(List<GitFileStatusEntry>? entries) {
-    if (entries == null) {
-      return const _GitHeaderCounts(
-        stagedCount: 0,
-        unstagedPaths: [],
-        revertablePaths: [],
-      );
-    }
-    final revertable = <String>{
-      for (final e in entries)
-        if (e.status != '!') e.path,
-    };
-    // Keyed by path for the same dedup reason: both entries of a
-    // partially-staged file carry the SAME combined-vs-HEAD line counts.
-    final perPath = <String, GitFileStatusEntry>{};
-    for (final e in entries) {
-      perPath.putIfAbsent(e.path, () => e);
-    }
-    return _GitHeaderCounts(
-      changedCount: perPath.length,
-      additions: perPath.values.fold(0, (sum, e) => sum + e.additions),
-      deletions: perPath.values.fold(0, (sum, e) => sum + e.deletions),
-      stagedCount: entries.where((e) => e.staged).length,
-      unstagedPaths: [
-        for (final e in entries)
-          if (!e.staged) e.path,
-      ],
-      revertablePaths: revertable.toList(),
-      conflictPaths: [
-        for (final e in entries)
-          if (e.isConflict) e.path,
-      ],
-      unresolvedConflictPaths: [
-        for (final e in entries)
-          if (e.isUnresolvedConflict) e.path,
-      ],
-      changedFolders: {for (final e in entries) ..._ancestorsOf(e.path)},
-    );
-  }
-
-  /// Every directory prefix of [path], which is exactly the set of folder rows
-  /// the changed-files tree will produce for it. Derived from the PATHS rather
-  /// than read off the rendered tree: the header is built on the loading and
-  /// error branches too, where there is no tree yet, and a Collapse All that
-  /// appeared only once the tree hydrated would flicker in on a cold tab.
-  ///
-  /// The trailing slash git puts on an untracked directory it did not walk into
-  /// is dropped first: the tree renders that path verbatim as a LEAF, so the
-  /// name before the slash is not a folder row and counting it as one leaves
-  /// [changedFolders] holding a folder nothing can ever collapse.
-  static Iterable<String> _ancestorsOf(String path) sync* {
-    var dir = path.endsWith('/') ? path.substring(0, path.length - 1) : path;
-    var slash = dir.lastIndexOf('/');
-    while (slash >= 0) {
-      dir = dir.substring(0, slash);
-      yield dir;
-      slash = dir.lastIndexOf('/');
-    }
-  }
-
-  final int stagedCount;
-  final List<String> unstagedPaths;
-
-  /// Distinct changed paths, conflicts included — the Changes section's count.
-  final int changedCount;
-
-  /// Unmerged paths, resolved or not — git refuses a commit while ANY of them
-  /// is unmerged, so this is what the branch bar counts to explain why Commit
-  /// is refused, and what keeps the bulk actions on a conflict-only tree.
-  final List<String> conflictPaths;
-
-  /// The conflicts with markers still in them — the ones staging would resolve
-  /// on the user's word alone, which is what Stage All asks about before it
-  /// stages anything. The rest need no question; see
-  /// [GitFileStatusEntry.conflictResolved].
-  final List<String> unresolvedConflictPaths;
-
-  /// Whether anything at all is changed — a conflict counts, which is why this
-  /// is not `revertablePaths.isNotEmpty`.
-  bool get hasChanges => revertablePaths.isNotEmpty || conflictPaths.isNotEmpty;
-
-  /// Lines added/removed across every changed path — the same worktree total
-  /// the workspace menu carries (`gitDiffTotalsProvider`), recomputed here off
-  /// the entries this header was already given rather than watched separately.
-  final int additions;
-  final int deletions;
-
-  /// Every changed path, staged side included — Revert All means "back to
-  /// HEAD", so a file whose only change is already staged is still in scope.
-  final List<String> revertablePaths;
-
-  /// Every folder the changed-files tree nests something under — what Collapse
-  /// All folds, and what tells Expand All when there is nothing left to fold.
-  final Set<String> changedFolders;
-}
-
 /// The loading/error chrome: the branch bar over a placeholder body, so the
 /// bar is already in place when the data branch takes over.
 class _GitPanelScaffold extends StatelessWidget {
@@ -379,7 +238,7 @@ class _GitPanelScaffold extends StatelessWidget {
   });
 
   final _PanelContext panel;
-  final _GitHeaderCounts counts;
+  final GitStatusIndex counts;
   final Widget body;
   final GitPaneState git;
 
@@ -413,7 +272,7 @@ class _GitBranchBar extends StatelessWidget {
   });
 
   final _PanelContext panel;
-  final _GitHeaderCounts counts;
+  final GitStatusIndex counts;
   final GitPaneState git;
 
   FileService get _fileService => panel.fileService;
@@ -1021,7 +880,7 @@ class _ChangesSectionHeader extends StatelessWidget {
     required this.onToggle,
   });
 
-  final _GitHeaderCounts counts;
+  final GitStatusIndex counts;
   final FileService fileService;
 
   /// Folders currently folded shut. Only used to decide which way the fold
@@ -1302,9 +1161,9 @@ class _GitPanelBody extends ConsumerWidget {
   final FileTreeState state;
   final _PanelContext panel;
 
-  /// Derived once per change list by [_GitPanelState] — the [LayoutBuilder]
-  /// below re-runs on every resize.
-  final _GitHeaderCounts counts;
+  /// Read off the index rather than re-derived: the [LayoutBuilder] below
+  /// re-runs on every resize.
+  final GitStatusIndex counts;
 
   FileService get fileService => panel.fileService;
 
@@ -1424,7 +1283,7 @@ class _GitPanelBody extends ConsumerWidget {
         root: state.root,
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.git.diffPath ?? state.git.viewingPath,
-        gitFileEntries: state.gitFileEntries,
+        gitStatus: state.gitStatus,
         changesOnly: true,
         collapsedPaths: state.git.collapsedPaths,
         // The Git tab's own fold state, never the Files tab's `toggleExpanded`
@@ -1450,9 +1309,7 @@ class _GitPanelBody extends ConsumerWidget {
   /// reason. Anything the bridge could not be sure about reports unresolved, so
   /// the unknown case still asks.
   Future<void> _confirmResolve(BuildContext context, String path) async {
-    final entries = state.gitFileEntries
-        .where((e) => e.path == path)
-        .toList(growable: false);
+    final entries = state.gitStatus.byPath[path] ?? const [];
     if (entries.isNotEmpty && !entries.any((e) => e.isUnresolvedConflict)) {
       fileService.stageFiles([path]);
       return;
@@ -1485,7 +1342,7 @@ class _GitPanelBody extends ConsumerWidget {
     // Read the per-entry list, not the deduped `gitFileStatuses` map: a path
     // with BOTH a staged and an unstaged change collapses to one letter there,
     // which cannot answer the question the copy below turns on.
-    final entries = state.gitFileEntries.where((e) => e.path == path);
+    final entries = state.gitStatus.byPath[path] ?? const [];
     // Nothing at HEAD to restore, whether the file is untracked or already in
     // the index — reverting one means deleting it.
     final isNew = entries.any(

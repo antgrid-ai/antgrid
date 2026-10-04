@@ -7,6 +7,7 @@ import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
+import '../models/git_status_index.dart';
 import '../models/git_sync_state.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
@@ -1278,7 +1279,7 @@ class FileService {
     _setState(
       _state.copyWith(
         gitFileStatuses: statuses,
-        gitFileEntries: msg.files,
+        gitStatus: GitStatusIndex(msg.files),
         git: clearStaleGit
             ? _state.git.copyWith(clearDiff: true, clearViewing: true)
             : _state.git,

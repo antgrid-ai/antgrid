@@ -1297,6 +1297,42 @@ void main() {
     await session.close();
   });
 
+  test('a tree emission after git:status keeps the same status index', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'lib/main.dart', 'status': 'M'},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final index = svc.currentState.gitStatus;
+
+    _emitRootTree(t, {
+      'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+      'seq': 5,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.root, isNotNull);
+    expect(identical(svc.currentState.gitStatus, index), isTrue);
+
+    t.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'lib/main.dart', 'status': 'M'},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(identical(svc.currentState.gitStatus, index), isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   test('git:diff-content routed via status tier updates diffContent', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);

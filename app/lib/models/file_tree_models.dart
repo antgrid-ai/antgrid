@@ -1,5 +1,6 @@
 import 'ab_message.dart'
     show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry;
+import 'git_status_index.dart';
 import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
@@ -540,9 +541,12 @@ class FileTreeState {
   final Set<String> expandedPaths;
   final String? projectId;
   final Map<String, String> gitFileStatuses; // path → M/A/D/R/U/! (deduped)
-  /// Raw per-entry list (a path can appear twice — once staged, once
-  /// unstaged) backing the Git tab's sectioned Staged/Changes/Merge view.
-  final List<GitFileStatusEntry> gitFileEntries;
+  final GitStatusIndex? _gitStatus;
+
+  /// Built once per `git:status`; every other emission carries the same
+  /// instance, so identity says whether the status changed. Null-backed so the
+  /// state itself stays const-constructible.
+  GitStatusIndex get gitStatus => _gitStatus ?? GitStatusIndex.empty;
   final bool showChangedOnly;
   final FilesPaneState files;
   final GitPaneState git;
@@ -553,19 +557,23 @@ class FileTreeState {
     this.expandedPaths = const {},
     this.projectId,
     this.gitFileStatuses = const {},
-    this.gitFileEntries = const [],
+    GitStatusIndex? gitStatus,
     this.showChangedOnly = false,
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
     this.preview = PreviewPaneState.empty,
-  });
+  }) : _gitStatus = gitStatus;
+
+  /// Raw per-entry list (a path can appear twice — once staged, once
+  /// unstaged).
+  List<GitFileStatusEntry> get gitFileEntries => gitStatus.entries;
 
   FileTreeState copyWith({
     FileNode? root,
     Set<String>? expandedPaths,
     String? projectId,
     Map<String, String>? gitFileStatuses,
-    List<GitFileStatusEntry>? gitFileEntries,
+    GitStatusIndex? gitStatus,
     bool? showChangedOnly,
     FilesPaneState? files,
     GitPaneState? git,
@@ -576,7 +584,7 @@ class FileTreeState {
       expandedPaths: expandedPaths ?? this.expandedPaths,
       projectId: projectId ?? this.projectId,
       gitFileStatuses: gitFileStatuses ?? this.gitFileStatuses,
-      gitFileEntries: gitFileEntries ?? this.gitFileEntries,
+      gitStatus: gitStatus ?? _gitStatus,
       showChangedOnly: showChangedOnly ?? this.showChangedOnly,
       files: files ?? this.files,
       git: git ?? this.git,
