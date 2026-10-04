@@ -182,6 +182,22 @@ void main() {
     expect(blocks, [(BlockReason.deviceRevoked, 'LICENSE_INVALID')]);
   });
 
+  test('a rejection arriving during teardown reports nothing', () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    await _settle();
+
+    final stopping = supervisor.stop();
+    supervisor.notePeerRejected('DISPOSED_AFTER_CONNECT');
+    await stopping;
+    expect(blocks, isEmpty);
+  });
+
   test('an exhausted handshake reports a block with no code', () async {
     final native = _Native()..establishFails = true;
     final blocks = <(BlockReason, String?)>[];

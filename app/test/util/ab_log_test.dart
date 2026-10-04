@@ -228,6 +228,22 @@ void main() {
     expect(File('$dir/$kAppLogFileName').existsSync(), isFalse);
   });
 
+  test('a retry naming no file keeps the file the failed lookup named', () async {
+    AbLog.configurePendingForTest();
+    AbLog.info('C', 'push');
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () async => throw const FileSystemException('no'),
+        fileName: kPushLogFileName,
+      ),
+      isNull,
+    );
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    await AbLog.flush();
+    expect(File('$dir/$kPushLogFileName').existsSync(), isTrue);
+    expect(File('$dir/$kAppLogFileName').existsSync(), isFalse);
+  });
+
   test('a supportDir that throws synchronously is not memoised either', () async {
     AbLog.configurePendingForTest();
     expect(

@@ -371,6 +371,9 @@ class NativeConnectionSupervisor {
       'blocked: ${reason.name}',
       fields: {'reason': reason.name, 'code': ?code, 'from': '$from'},
     );
+    // A terminal failure surfacing while the connection is torn down (a
+    // runtime disposed under an in-flight dial) strands nobody.
+    if (_stopping) return;
     try {
       onBlocked?.call(reason, code);
     } catch (error) {

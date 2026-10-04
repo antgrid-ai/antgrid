@@ -39,6 +39,7 @@ class AbLog {
 
   static String? _dir;
   static Future<String?>? _dirInit;
+  static String? _fileName;
 
   /// The directory app.log is written to, or null while unresolved, under test
   /// (unless [configureForTest] named a file), or after resolution failed.
@@ -60,12 +61,15 @@ class AbLog {
   /// Desktop and tests return at once without touching path_provider.
   /// Memoised while in flight or after success; a failure clears the memo so a
   /// later caller (the share action) retries. [fileName] names the file inside
-  /// the directory and is honoured only by the call that performs the attach.
+  /// the directory; the first call to name one fixes it for the isolate, so a
+  /// retry that names none after a failed lookup cannot move the push
+  /// isolate's lines onto the main isolate's app.log.
   static Future<String?> initLogDirectory({
     Future<Directory> Function()? supportDir,
-    String fileName = kAppLogFileName,
+    String? fileName,
   }) {
-    final init = _dirInit ??= _initLogDirectory(supportDir, fileName);
+    final name = _fileName ??= fileName ?? kAppLogFileName;
+    final init = _dirInit ??= _initLogDirectory(supportDir, name);
     // Cleared here rather than inside _initLogDirectory because its early
     // returns also yield null without reaching the catch (writer not pending,
     // or replaced while the lookup was in flight), and those must not stay
@@ -130,6 +134,7 @@ class AbLog {
     _writer = _AbLogWriter(path, mirror: mirror);
     _dir = File(path).parent.path;
     _dirInit = null;
+    _fileName = null;
   }
 
   /// Test seam: a writer that holds lines until [initLogDirectory] attaches a
@@ -143,6 +148,7 @@ class AbLog {
     _writer = _AbLogWriter.pending(capacity: capacity, mirror: mirror);
     _dir = null;
     _dirInit = null;
+    _fileName = null;
   }
 
   /// Drain queued lines to disk now: before sharing the file, before a
@@ -156,6 +162,7 @@ class AbLog {
     _writer = null;
     _dir = null;
     _dirInit = null;
+    _fileName = null;
   }
 }
 
@@ -186,13 +193,13 @@ class _AbLogWriter {
     String msg,
     Map<String, Object?>? fields,
   ) {
-    // Encoded now, not at attach, so a held line keeps its original timestamp.
-    final line = _encode(level, component, msg, fields);
     final sink = _sink;
     final pending = _pending;
     if (sink != null) {
-      sink.add(line);
+      sink.add(_encode(level, component, msg, fields));
     } else if (pending != null) {
+      // Encoded now, not at attach, so a held line keeps its original time.
+      final line = _encode(level, component, msg, fields);
       if (pending.length >= _capacity) {
         pending.removeFirst();
         _overflow++;
