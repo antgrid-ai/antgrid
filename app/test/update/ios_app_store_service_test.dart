@@ -1,3 +1,4 @@
+import 'package:antgrid/update/update_check_result.dart';
 import 'dart:convert';
 
 import 'package:antgrid/update/ios_app_store_update_service.dart';
@@ -6,7 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
-// Exercises isUpdateAvailable's fetch/decode/error paths with an injected
+// Exercises the check's fetch/decode/error paths with an injected
 // MockClient and mocked PackageInfo; the pure reply interpretation is covered
 // separately in ios_app_store_decision_test.dart.
 void main() {
@@ -54,7 +55,7 @@ void main() {
       });
       final s = service(client);
       expect(s.listingUrl, isNull);
-      expect(await s.isUpdateAvailable(), isTrue);
+      expect((await s.check()).status, UpdateCheckStatus.available);
       expect(s.listingUrl, 'https://apps.apple.com/app/id123');
     },
   );
@@ -64,7 +65,7 @@ void main() {
       (_) async => http.Response(lookupBody(version: '1.0.6'), 200),
     );
     final s = service(client);
-    expect(await s.isUpdateAvailable(), isFalse);
+    expect((await s.check()).status, UpdateCheckStatus.upToDate);
     expect(s.listingUrl, isNull);
   });
 
@@ -73,7 +74,10 @@ void main() {
       (_) async =>
           http.Response(jsonEncode({'resultCount': 0, 'results': []}), 200),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect(
+      (await service(client).check()).status,
+      UpdateCheckStatus.unsupported,
+    );
   });
 
   test('listing needs a newer OS than the device → false', () async {
@@ -81,8 +85,8 @@ void main() {
       (_) async => http.Response(lookupBody(minimumOsVersion: '19.0'), 200),
     );
     expect(
-      await service(client, systemVersion: '18.5').isUpdateAvailable(),
-      isFalse,
+      (await service(client, systemVersion: '18.5').check()).status,
+      UpdateCheckStatus.unsupported,
     );
   });
 
@@ -91,8 +95,8 @@ void main() {
       (_) async => http.Response(lookupBody(minimumOsVersion: '19.0'), 200),
     );
     expect(
-      await service(client, systemVersion: null).isUpdateAvailable(),
-      isTrue,
+      (await service(client, systemVersion: null).check()).status,
+      UpdateCheckStatus.available,
     );
   });
 
@@ -100,20 +104,20 @@ void main() {
     final client = MockClient(
       (_) async => http.Response('service unavailable', 503),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 
   test('malformed body → false', () async {
     final client = MockClient(
       (_) async => http.Response('<!doctype html>not json', 200),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 
   test('network failure → false', () async {
     final client = MockClient(
       (_) async => throw http.ClientException('connection refused'),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 }

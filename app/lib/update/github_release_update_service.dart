@@ -5,6 +5,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:pub_semver/pub_semver.dart';
 
 import '../util/ab_log.dart';
+import 'update_check_result.dart';
 
 /// Pure "is the released tag newer than what's installed?" comparison,
 /// isolated so it can be unit-tested without network or platform channels.
@@ -33,8 +34,7 @@ bool isNewerVersion({required String current, required String latestTag}) {
 /// public, so the unauthenticated API suffices; `UpdateGate`'s 30-minute
 /// throttle keeps us far under the 60 req/hr anonymous rate limit.
 ///
-/// Never throws — any failure (offline, rate-limited, malformed reply)
-/// resolves to `false`.
+/// Failures remain distinct from a successful check with no newer version.
 class GithubReleaseUpdateService {
   GithubReleaseUpdateService({http.Client? httpClient})
     : _injected = httpClient;
@@ -60,7 +60,7 @@ class GithubReleaseUpdateService {
   static const String latestDownloadPageUrl =
       'https://github.com/antgrid-ai/antgrid/releases/latest';
 
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     final client = _injected ?? http.Client();
     try {
       final info = _packageInfo ??= await PackageInfo.fromPlatform();
@@ -70,7 +70,7 @@ class GithubReleaseUpdateService {
       // false forever with no signal — make that failure mode loud.
       if (info.version.isEmpty) {
         AbLog.warn('Update', 'PackageInfo.version is empty (check skipped)');
-        return false;
+        return UpdateCheckResult.failed;
       }
       final res = await client
           .get(
@@ -84,19 +84,31 @@ class GithubReleaseUpdateService {
           'release check got non-200 (ignored)',
           fields: {'status': '${res.statusCode}'},
         );
-        return false;
+        return UpdateCheckResult.failed;
       }
       final body = jsonDecode(res.body);
       final tag = body is Map<String, Object?> ? body['tag_name'] : null;
-      if (tag is! String) return false;
-      return isNewerVersion(current: info.version, latestTag: tag);
+      if (tag is! String) return UpdateCheckResult.failed;
+      var version = tag.trim();
+      if (version.startsWith('v') || version.startsWith('V')) {
+        version = version.substring(1);
+      }
+      Version.parse(info.version.trim());
+      Version.parse(version);
+      return isNewerVersion(current: info.version, latestTag: tag)
+          ? UpdateCheckResult(
+              UpdateCheckStatus.available,
+              version: version,
+              candidateId: tag,
+            )
+          : UpdateCheckResult.upToDate;
     } catch (e) {
       AbLog.warn(
         'Update',
-        'GithubReleaseUpdateService.isUpdateAvailable failed (ignored)',
+        'GithubReleaseUpdateService.check failed',
         fields: {'error': '$e'},
       );
-      return false;
+      return UpdateCheckResult.failed;
     } finally {
       if (_injected == null) client.close();
     }
