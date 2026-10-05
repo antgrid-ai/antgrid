@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import type { Context, MiddlewareHandler } from "hono";
+import { safeReturnPath } from "./contracts.js";
+import { recordStage } from "./flows.js";
 import type { Auth } from "./better-auth.js";
 import { getSignedCookie } from "hono/cookie";
 import type { DB } from "../db/index.js";
@@ -46,21 +48,29 @@ function setAuthVars(c: Context<{ Variables: AuthVars }>, s: Session): void {
 }
 
 /** Gate a JSON route. Returns 401 when unauthenticated. */
-export function requireUser(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
+export function requireUser(deps: { auth: Auth; db?: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
     const s = await loadSession(deps.auth, c);
     if (!s) return c.json({ error: "UNAUTHENTICATED" }, 401);
     setAuthVars(c, s);
+    if (deps.db) {
+      const flows = await deps.db.authFlow.findMany({ where: { sessionId: s.sessionId }, select: { id: true } });
+      for (const flow of flows) await recordStage(deps.db, flow.id, "first_client_use");
+    }
     await next();
   };
 }
 
 /** Gate a UI route. Redirects to /login when unauthenticated. */
-export function requireUserOrRedirect(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
+export function requireUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
     const s = await loadSession(deps.auth, c);
-    if (!s) return c.redirect("/login");
+    if (!s) return c.redirect("/login?returnPath=" + encodeURIComponent(safeReturnPath(new URL(c.req.url).pathname + new URL(c.req.url).search)));
     setAuthVars(c, s);
+    if (deps.db) {
+      const flows = await deps.db.authFlow.findMany({ where: { sessionId: s.sessionId }, select: { id: true } });
+      for (const flow of flows) await recordStage(deps.db, flow.id, "first_client_use");
+    }
     await next();
   };
 }
