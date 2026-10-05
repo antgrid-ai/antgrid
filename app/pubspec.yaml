@@ -188,6 +188,10 @@ flutter_native_splash:
 # docs/dart-terminal-fork-release.md. `ref` is a commit SHA on purpose — the fork
 # cuts no VTE release, and a branch would make every `pub get` a moving target.
 dependency_overrides:
+  # Forward Sparkle cycle completion, including Remind Me Later / Skip This
+  # Version (see the vendored README).
+  auto_updater_macos:
+    path: ../packages/auto_updater_macos
   # The fork's packages need hooks 2.x, which needs meta ^1.19.0; the Flutter SDK
   # pins 1.18.0, so solving fails outright without this.
   meta: 1.19.0

@@ -99,8 +99,7 @@ Uri? openableTerminalHyperlink(String uri) {
 /// make, and a caller that has no readout must not inherit one by omission.
 ///
 /// [open] and [confirm] are injectable so tests can assert what would be
-/// launched instead of handing a URL to the real browser, matching
-/// `HelpAboutSection.openUrl`.
+/// launched instead of handing a URL to the real browser.
 Future<void> openTerminalHyperlink(
   BuildContext context,
   String uri, {

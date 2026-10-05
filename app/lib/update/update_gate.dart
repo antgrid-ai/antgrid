@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -10,6 +8,8 @@ import '../providers/update_available.dart';
 import '../util/detached.dart';
 import 'update_install_controller.dart';
 import 'update_strategy.dart';
+import 'update_check_controller.dart';
+import 'update_check_result.dart';
 
 /// The version this launch replaced, or null when nothing was replaced.
 ///
@@ -47,26 +47,7 @@ class UpdateGate extends ConsumerStatefulWidget {
 
 class _UpdateGateState extends ConsumerState<UpdateGate>
     with WidgetsBindingObserver {
-  static const _throttle = Duration(minutes: 30);
-
-  /// The platform's strategy when this build actively checks, null for both
-  /// disabled states (no strategy for the platform, or an inactive dev
-  /// build) — `active` is immutable per-process, so collapsing them here
-  /// leaves one question everywhere below. Resolved once in initState: the
-  /// provider is a root singleton, and a field keeps dispose() off `ref`,
-  /// which throws once the state is disposed.
   UpdateStrategy? _strategy;
-
-  DateTime? _lastCheck;
-  StreamSubscription<void>? _retraction;
-
-  /// Set once the platform's own install flow has refused what a check
-  /// advertised. Terminal for the process on purpose: the feed does not change
-  /// under us, so the next check reads the same refused item, re-lights the row
-  /// the retraction just put out and fires the announcement toast again — on
-  /// every throttled resume, for an Update button that still cannot do
-  /// anything.
-  bool _retracted = false;
 
   @override
   void initState() {
@@ -82,47 +63,36 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
     final strategy = ref.read(updateStrategyProvider);
     if (strategy == null || !strategy.active) return;
     _strategy = strategy;
-    unawaited(strategy.prepare());
-    // Subscribed before the first check, so a retraction arriving from the
-    // platform's own flow is never missed.
-    final retracted = strategy.updateRetracted;
-    if (retracted != null) {
-      _retraction = retracted.listen((_) {
-        if (!mounted) return;
-        _retracted = true;
-        ref.read(updateAvailableProvider.notifier).set(false);
-      });
-    }
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeCheck());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _requestCheck());
   }
 
   @override
   void dispose() {
-    unawaited(_retraction?.cancel());
     if (_strategy != null) WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _maybeCheck();
+    if (state == AppLifecycleState.resumed) _requestCheck();
   }
 
-  Future<void> _maybeCheck() async {
-    // The post-frame callback from initState can fire after a same-frame
-    // dispose; `ref` throws on a disposed ConsumerState.
-    if (!mounted) return;
-    final strategy = _strategy;
-    if (strategy == null || _retracted) return;
-    final now = DateTime.now();
-    final last = _lastCheck;
-    if (last != null && now.difference(last) < _throttle) return;
-    _lastCheck = now;
+  void _requestCheck() =>
+      detached('UpdateGate', 'automatic check', _maybeCheck);
 
+  Future<void> _maybeCheck() async {
+    if (!mounted || _strategy == null) return;
     final rowAlreadyLit = ref.read(updateAvailableProvider);
-    final outcome = await strategy.check(rowAlreadyLit: rowAlreadyLit);
+    final outcome = await ref
+        .read(updateCheckControllerProvider.notifier)
+        .checkAutomatically();
     if (!mounted) return;
+    if (ref
+        .read(updateCheckControllerProvider.notifier)
+        .automaticResultSuppressed) {
+      return;
+    }
     switch (outcome) {
       case UpdateCheckOutcome.none:
         break;
@@ -139,6 +109,19 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         // sequence as a tap, minus the dialog. Anything else would hand a
         // live bridge to an MSIX replacement.
         _startInstall(confirm: false);
+      case UpdateCheckOutcome.startDownloadQuiet:
+        final container = ref.container;
+        await container
+            .read(updateInstallControllerProvider.notifier)
+            .start(context, confirm: false);
+        if (!mounted) return;
+        final checker = container.read(updateCheckControllerProvider.notifier);
+        if (!checker.automaticResultSuppressed &&
+            !rowAlreadyLit &&
+            container.read(updateCheckControllerProvider).result?.status ==
+                UpdateCheckStatus.restartReady) {
+          _showRestartPrompt();
+        }
       case UpdateCheckOutcome.restartReady:
         ref.read(updateAvailableProvider.notifier).set(true);
         // Same false→true rule as above: Play keeps reporting a downloaded
@@ -211,9 +194,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         icon: AbIcons.check,
         // Not "and reopened your sessions": nothing restores what the bridge
         // host was running.
-        title: version == 'dev'
-            ? 'Update installed'
-            : 'Updated to $version',
+        title: version == 'dev' ? 'Update installed' : 'Updated to $version',
         description: note == null
             ? 'Replaced $replaced.'
             : 'Replaced $replaced. $note',
