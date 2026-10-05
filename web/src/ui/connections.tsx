@@ -5,6 +5,7 @@ import { Layout, type LayoutUser } from "./layout.js";
 import type { ConnectionSummary } from "../relay/push.js";
 import { fmtAge } from "./format.js";
 import { Notice, RelayUnreachable } from "./notice.js";
+import { OperatorNav } from "./operator-nav.js";
 
 export function ConnectionsPage(props: {
   user: LayoutUser;
@@ -13,7 +14,8 @@ export function ConnectionsPage(props: {
 }) {
   const { user, connections, now } = props;
   return (
-    <Layout title="Relay connections" user={user}>
+    <Layout title="Relay connections" user={user} analytics={false}>
+      <OperatorNav section="connections" />
       <div class="flex items-baseline gap-3 mb-4">
         <h1 class="text-xl font-semibold">Relay connections</h1>
         {connections && (

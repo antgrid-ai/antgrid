@@ -31,6 +31,7 @@ export type LayoutProps = {
   title: string;
   user?: LayoutUser | null;
   section?: NavSection;
+  analytics?: boolean;
   children: Child;
 };
 
@@ -53,7 +54,7 @@ const NAV: { section: NavSection; href: string; label: string }[] = [
   { section: "pricing", href: "/pricing", label: "Pricing" },
 ];
 
-export function Layout({ title, user, section, children }: LayoutProps) {
+export function Layout({ title, user, section, children, analytics = true }: LayoutProps) {
   // Rendered into the markup rather than applied by a script: the first frame
   // is then already the reader's scheme, with nothing to flash. Absent when
   // there is no override, and hono/jsx omits an undefined attribute, so the
@@ -170,7 +171,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             <script dangerouslySetInnerHTML={{ __html: THEME_TOGGLE_SCRIPT }} />
           </>
         )}
-        <Analytics />
+        {analytics && <Analytics />}
       </body>
     </html>
   );

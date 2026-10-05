@@ -4,6 +4,7 @@
 import { Layout, type LayoutUser } from "./layout.js";
 import type { LiveRelaySummary, UsageStats } from "../usage/stats.js";
 import { Notice, RelayUnreachable } from "./notice.js";
+import { OperatorNav } from "./operator-nav.js";
 
 const n = (v: number) => v.toLocaleString("en-US");
 
@@ -64,7 +65,8 @@ function Table({ head, rows, empty }: { head: string[]; rows: (string | number)[
 export function StatsPage(props: { user: LayoutUser; stats: UsageStats; live: LiveRelaySummary | null }) {
   const { user, stats, live } = props;
   return (
-    <Layout title="Usage" user={user}>
+    <Layout title="Usage" user={user} analytics={false}>
+      <OperatorNav section="stats" />
       <div class="flex items-baseline gap-3 mb-4">
         <h1 class="text-xl font-semibold">Usage</h1>
         <a href="/internal/connections" class="link text-xs text-muted2">
