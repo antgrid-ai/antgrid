@@ -3,6 +3,7 @@
 
 import type { Context, MiddlewareHandler } from "hono";
 import type { Auth } from "./better-auth.js";
+import { getSignedCookie } from "hono/cookie";
 import type { DB } from "../db/index.js";
 import type { Env } from "../env.js";
 import { requireDeviceBearerJwt } from "./jwt-bearer.js";
@@ -133,5 +134,26 @@ export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<
     if (actual && actual.toLowerCase() === asEmail.toLowerCase()) return next();
 
     return c.redirect(`/integrations/switch-account?asEmail=${encodeURIComponent(asEmail)}`);
+  };
+}
+
+/** Gate a UI route without touching the session: operator pages only observe. */
+export function requireReadOnlyUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
+  return async (c, next) => {
+    // Better-Auth's getSession refreshes old sessions and deletes expired ones.
+    // Operator observations must not change the records they inspect.
+    const context = await deps.auth.$context;
+    const token = await getSignedCookie(c, context.secret, context.authCookies.sessionToken.name);
+    if (!token) return c.redirect("/login");
+    const row = await deps.db.session.findUnique({
+      where: { token },
+      select: {
+        id: true, expiresAt: true,
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+    if (!row || row.expiresAt <= new Date()) return c.redirect("/login");
+    setAuthVars(c, { sessionId: row.id, userId: row.user.id, email: row.user.email, name: row.user.name });
+    await next();
   };
 }

@@ -464,6 +464,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           if (!mounted) return;
           if (!widget.terminalService.session.transport.isEstablished) {
             _cancelTakeover();
+            widget.tab.ghostty.cancelPendingMouseMotion();
           }
           setState(() {});
         });
@@ -909,6 +910,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// every one of them.
   void _openHistory() {
     if (_historyOpen || !_frameOwnsPane || !_hasArchivedRows) return;
+    widget.tab.ghostty.cancelPendingMouseMotion();
     // The card names a link in the live pane and is laid out against a
     // position in it. The reader is about to cover both.
     _pendingHoverUri = null;

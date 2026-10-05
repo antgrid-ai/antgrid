@@ -113,6 +113,7 @@ class TerminalTab {
            GhosttyTerminalController(
              initialCols: cols,
              initialRows: rows,
+             mouseMotionReportInterval: const Duration(milliseconds: 50),
              maxLines: 10000,
              // Rows, not bytes: at an agent-sized 202 columns a 10k-row
              // history is roughly 17 MB, so the ceiling is generous enough

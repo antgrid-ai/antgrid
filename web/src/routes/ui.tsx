@@ -17,6 +17,7 @@ import {
   requireUser,
   requireUserOrRedirect,
   requireMatchingAccount,
+  requireReadOnlyUserOrRedirect,
   type AuthVars,
 } from "../auth/middleware.js";
 import { listActiveDevices } from "../models/device.js";
@@ -75,7 +76,9 @@ import {
 import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
 import { StatsPage } from "../ui/stats.js";
-import { fetchConnections } from "../relay/push.js";
+import { OperatorUsersPage, OperatorUserPage, OperatorAccountsPage, OperatorAccountPage } from "../ui/operator.js";
+import { OperatorUsersQuerySchema, OperatorAccountsQuerySchema, loadOperatorUsers, loadOperatorUser, loadOperatorAccounts, loadOperatorAccount } from "../models/operator.js";
+import { fetchConnections, fetchUserConnections } from "../relay/push.js";
 import { loadUsageStats, summarizeLiveRelay } from "../usage/stats.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
 import { AccountPage, AccountDeletedPage } from "../ui/account.js";
@@ -1579,6 +1582,9 @@ export function uiRoutes(deps: {
       const line = JSON.stringify({
         evt: `internal.${page}.${allowed ? "access" : "denied"}`,
         userId: c.get("userId"),
+        actorId: c.get("userId"),
+        ...(page === "users.detail" ? { targetUserId: c.req.param("id") } : {}),
+        ...(page === "accounts.detail" ? { targetAccountId: c.req.param("id") } : {}),
         email,
         at: new Date().toISOString(),
       });
@@ -1591,9 +1597,56 @@ export function uiRoutes(deps: {
     };
   }
 
+  r.use("/internal/*", async (c, next) => {
+    c.header("Cache-Control", "private, no-store");
+    await next();
+  });
+
+  function operatorQuery(c: UiContext) {
+    const params = c.req.queries();
+    if (Object.values(params).some((values) => values.length !== 1)) return null;
+    return Object.fromEntries(Object.entries(params).map(([key, values]) => [key, values[0]]));
+  }
+
+  r.get("/internal/users", requireReadOnlyUserOrRedirect(deps), requireOperator("users"), async (c) => {
+    const query = OperatorUsersQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorUsers(deps.db, query.data);
+    return c.html(<OperatorUsersPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/users/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("users.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.string().min(1).max(256).safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorUser(deps.db, id, now);
+    if (!data) return c.notFound();
+    const connections = await fetchUserConnections(deps.relay, id).catch((error) => {
+      console.warn("[internal.users.detail] relay fetch failed", error);
+      return null;
+    });
+    return c.html(<OperatorUserPage user={layoutUser(c)} data={data} connections={connections} now={now} />);
+  });
+
+  r.get("/internal/accounts", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts"), async (c) => {
+    const query = OperatorAccountsQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorAccounts(deps.db, query.data);
+    return c.html(<OperatorAccountsPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/accounts/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.uuid().safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorAccount(deps.db, id, now);
+    if (!data) return c.notFound();
+    return c.html(<OperatorAccountPage user={layoutUser(c)} data={data} now={now} />);
+  });
+
   r.get(
     "/internal/stats",
-    requireUserOrRedirect({ auth: deps.auth }),
+    requireReadOnlyUserOrRedirect(deps),
     requireOperator("stats"),
     async (c) => {
       const [stats, live] = await Promise.all([
@@ -1611,7 +1664,7 @@ export function uiRoutes(deps: {
 
   r.get(
     "/internal/connections",
-    requireUserOrRedirect({ auth: deps.auth }),
+    requireReadOnlyUserOrRedirect(deps),
     requireOperator("connections"),
     async (c) => {
       let connections: Awaited<ReturnType<typeof fetchConnections>> | null;
