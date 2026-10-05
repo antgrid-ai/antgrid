@@ -18,6 +18,16 @@ export const LAST_REVIEWED = "2026-10-05";
 
 export const ROADMAP: readonly RoadmapEntry[] = [
   {
+    id: "scheduler",
+    title: "Scheduled agent sessions",
+    description: "Run recurring prompts on your desktop and manage schedules from connected devices.",
+    area: "Agent sessions",
+    status: "now",
+    update: "Agreed specification: recurring prompts with a persistent workspace owned by each schedule.",
+    updatedAt: "2026-10-05",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/blob/main/docs/specs/scheduler.md",
+  },
+  {
     id: "public-roadmap",
     title: "Public roadmap",
     description: "Follow what Antgrid is building and what is done.",
