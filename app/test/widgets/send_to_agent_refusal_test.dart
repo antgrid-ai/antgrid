@@ -31,6 +31,7 @@ import 'package:antgrid/widgets/send_capture_to_agent.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _kEntryId = 'p';
 const _kRefusalText = "couldn't send — the session is reconnecting";
@@ -86,6 +87,7 @@ Future<({BuildContext context, ProviderContainer container})> _pump(
         ...extraOverrides,
       ],
       child: MaterialApp(
+        builder: abToastHostBuilder,
         home: Scaffold(
           body: Consumer(
             builder: (context, ref, _) {

@@ -6,6 +6,7 @@ import '../models/agent_hello.dart';
 import '../models/preview_models.dart';
 import '../models/service_status.dart';
 import '../models/ab_message.dart';
+import 'inbound_frame.dart';
 import 'project_message_classification.dart';
 
 /// Immutable snapshot of the aggregate status for a single project.
@@ -126,18 +127,8 @@ class ProjectStatus {
 /// status-tier envelope stream (typically `MessageRouter.status`) and applies
 /// updates immutably.
 class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
-  StreamSubscription<Map<String, dynamic>>? _sub;
+  StreamSubscription<InboundFrame>? _sub;
   bool _disposed = false;
-
-  // Status-tier types this notifier reduces into [ProjectStatus] (beyond the
-  // config dot). Anything else round-trips through parseAbMessage for nothing,
-  // so it's skipped. Frame-invariant — a static const, not a per-call literal.
-  static const Set<String> _reducerTypes = {
-    'agent:status',
-    'agent:hello',
-    'ports:update',
-    'command:done',
-  };
 
   /// [statusStream] must already be scoped to ONE checkout — `ProjectSession`
   /// hands it main's slice. This is the PROJECT's status, and an isolated
@@ -146,7 +137,7 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
   /// every checkout's answer in here as the project's own, last writer wins,
   /// and then cache and persist it. The reducers below deliberately do no
   /// filtering of their own.
-  ProjectStatusNotifier(Stream<Map<String, dynamic>> statusStream)
+  ProjectStatusNotifier(Stream<InboundFrame> statusStream)
     : super(const ProjectStatus.empty()) {
     _sub = statusStream.listen(_apply);
   }
@@ -157,12 +148,12 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
     value = cached;
   }
 
-  void _apply(Map<String, dynamic> envelope) {
+  void _apply(InboundFrame frame) {
     if (_disposed) return;
     var next = value;
 
-    final type = envelope['type'];
-    final rawErr = envelope['error'];
+    final type = frame.type;
+    final rawErr = frame.json['error'];
     final frameHasError = rawErr is String && rawErr.isNotEmpty;
 
     // The drawer dot tracks structural (config) problems only — the project
@@ -170,7 +161,7 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
     // (file read, search, git checkout, session) are surfaced where they
     // happen, not via this persistent flag. [kConfigValidityTypes] is the
     // shared source of truth for which frames carry config validity.
-    if (type is String && kConfigValidityTypes.contains(type)) {
+    if (type != null && kConfigValidityTypes.contains(type)) {
       if (frameHasError) {
         // Only on a genuine transition (new error or changed message): a
         // repeated identical error frame must not churn the drawer/cache.
@@ -193,12 +184,7 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
       }
     }
 
-    if (type is! String || !_reducerTypes.contains(type)) {
-      if (next != value) value = next;
-      return;
-    }
-
-    final parsed = parseAbMessage(envelope);
+    final parsed = frame.parsed;
     if (parsed is AgentStatusMessage) {
       // Guarded on a genuine change, like the config branch above: the bump
       // alone makes `next != value` (lastUpdatedAt is part of ==), so an

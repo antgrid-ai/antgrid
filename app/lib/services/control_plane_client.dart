@@ -834,7 +834,6 @@ class ControlPlaneClient {
     required String projectId,
     required String branch,
     bool allowActiveSessions = false,
-    bool stashIfDirty = false,
   }) async {
     final res = await transport.request(
       'git.checkout',
@@ -842,7 +841,6 @@ class ControlPlaneClient {
         'projectId': projectId,
         'branch': branch,
         'allowActiveSessions': allowActiveSessions,
-        'stashIfDirty': stashIfDirty,
       },
     );
     final current = res['current'];

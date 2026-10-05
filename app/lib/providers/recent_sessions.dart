@@ -5,7 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../demo/demo_identity.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
 import '../services/control_plane_client.dart';
@@ -378,7 +378,7 @@ Future<void> openRecentSession(
     // project is gone from the local list and there's no machine to cold-open
     // it on. Left unmessaged, that was a tap that does nothing forever.
     if (context.mounted) {
-      showAbSnackBar(
+      showAbToast(
         context,
         'Could not open "${row.session.name}" — its project is no longer available.',
       );

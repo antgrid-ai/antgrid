@@ -31,9 +31,21 @@ class PeerTerminalAuthError extends PeerConnectionEvent {
   final String code;
 }
 
+/// The native payload failed in a way the supervisor treats as a peer
+/// rejection. [code] names the failure that made it terminal so a sticky
+/// block can be traced to its cause; it is one of the transport's fixed
+/// upper-case failure constants, never free text.
 class PeerTerminalError extends PeerConnectionEvent {
-  const PeerTerminalError();
+  const PeerTerminalError(this.code);
+  final String code;
 }
+
+/// Codes for the two terminal verdicts whose exceptions carry none: a
+/// `PeerAuthorizationDenied` or `FormatException` that escapes
+/// `PeerRuntime.connect` unwrapped (e.g. from enrollment registration). A lease
+/// refresh denial arrives wrapped as `AUTHORIZATION_UNAVAILABLE` instead.
+const String kPeerAuthorizationDeniedCode = 'PEER_AUTHORIZATION_DENIED';
+const String kPeerAuthorizationMalformedCode = 'PEER_AUTHORIZATION_MALFORMED';
 
 class PeerSessionDown extends PeerConnectionEvent {
   const PeerSessionDown();
@@ -91,6 +103,7 @@ class NativeConnectionSupervisor {
     this.gracefulStopTimeout = const Duration(seconds: 5),
     this.forcedStopTimeout = const Duration(seconds: 5),
     this.onCoordsResolved,
+    this.onBlocked,
   }) : _jitter = jitter ?? _defaultJitter,
        _now = now ?? DateTime.now,
        _timerFactory = timerFactory ?? _defaultTimerFactory;
@@ -104,6 +117,12 @@ class NativeConnectionSupervisor {
   final Duration gracefulStopTimeout;
   final Duration forcedStopTimeout;
   final void Function(ConnCoords coords)? onCoordsResolved;
+
+  /// Observes every transition INTO a block, with the failure code the input
+  /// carried (null when the supervisor blocked on its own, e.g. an exhausted
+  /// handshake). Reporting lives behind this seam so the policy class stays
+  /// free of any telemetry dependency.
+  final void Function(BlockReason reason, String? code)? onBlocked;
 
   static final Random _random = Random();
   static int _defaultJitter(int max) => max <= 0 ? 0 : _random.nextInt(max);
@@ -167,18 +186,18 @@ class NativeConnectionSupervisor {
   }
 
   void noteSessionDown() => _kick();
-  void notePeerRejected() {
-    _block(BlockReason.peerRejected);
+  void notePeerRejected(String code) {
+    _block(BlockReason.peerRejected, code: code);
     _kick();
   }
 
   void noteAuthError(String code) {
     switch (code) {
       case 'LICENSE_EXPIRED':
-        _block(BlockReason.licenseExpired);
+        _block(BlockReason.licenseExpired, code: code);
       case 'LICENSE_REVOKED':
       case 'LICENSE_INVALID':
-        _block(BlockReason.deviceRevoked);
+        _block(BlockReason.deviceRevoked, code: code);
       default:
         break;
     }
@@ -342,8 +361,29 @@ class NativeConnectionSupervisor {
     });
   }
 
-  void _block(BlockReason reason) {
-    _emit(Blocked(reason));
+  void _block(BlockReason reason, {String? code}) {
+    final next = Blocked(reason);
+    if (_status == next) return;
+    final from = _status;
+    _emit(next);
+    AbLog.warn(
+      'NativeConnectionSupervisor',
+      'blocked: ${reason.name}',
+      fields: {'reason': reason.name, 'code': ?code, 'from': '$from'},
+    );
+    // A terminal failure surfacing while the connection is torn down (a
+    // runtime disposed under an in-flight dial) strands nobody.
+    if (_stopping) return;
+    try {
+      onBlocked?.call(reason, code);
+    } catch (error) {
+      // Telemetry must never be what breaks the connection ladder.
+      AbLog.warn(
+        'NativeConnectionSupervisor',
+        'block observer failed',
+        fields: {'error': '$error'},
+      );
+    }
   }
 
   void _clearBlock() {

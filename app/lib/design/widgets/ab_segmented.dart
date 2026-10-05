@@ -4,7 +4,7 @@ import '../ab_colors.dart';
 import '../ab_tokens.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
-import 'ab_snack_bar.dart';
+import 'ab_toast.dart';
 import 'ab_tooltip.dart';
 
 /// One cell of an [AbSegmented] control.
@@ -32,7 +32,7 @@ class AbSegment<T> {
   final bool enabled;
 
   /// Why this cell is disabled. Surfaces as a tooltip on hover and as a
-  /// snack bar when the cell is tapped (see [AbSegmented.onDisabledTap]).
+  /// toast when the cell is tapped (see [AbSegmented.onDisabledTap]).
   final String? disabledReason;
 
   final Key? key;
@@ -48,7 +48,7 @@ class AbSegment<T> {
 ///
 /// Disabled cells diverge from the AbChip disabled contract on purpose: they
 /// keep hit-testing (no 0.4-opacity dead zone) so [AbSegment.disabledReason]
-/// stays reachable — tooltip on hover, snack bar on tap (see [onDisabledTap]).
+/// stays reachable — tooltip on hover, toast on tap (see [onDisabledTap]).
 class AbSegmented<T> extends StatelessWidget {
   const AbSegmented({
     super.key,
@@ -84,7 +84,7 @@ class AbSegmented<T> extends StatelessWidget {
   final bool inactive;
 
   /// Tap on a disabled cell. Defaults to surfacing [AbSegment.disabledReason]
-  /// as a snack bar — hover can't be relied on for the reason (touch
+  /// as a toast — hover can't be relied on for the reason (touch
   /// platforms, clicks before the tooltip dwell). Provide this to override.
   final ValueChanged<AbSegment<T>>? onDisabledTap;
 
@@ -164,7 +164,7 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
       if (onDisabledTap != null) {
         onDisabledTap(s);
       } else if (s.disabledReason != null) {
-        showAbSnackBar(context, s.disabledReason!);
+        showAbToast(context, s.disabledReason!);
       }
       return;
     }

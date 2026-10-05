@@ -1,24 +1,26 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_separator.dart';
+import 'pane_swipe_exclusion.dart';
+import 'terminal_modifier_keys.dart';
 import 'terminal_upload_button.dart';
 
 /// The touch-input helper bar shown under the terminal on devices without a
 /// physical keyboard (mobile/remote). A horizontally-scrolling strip of upload
 /// + control-key shortcuts, with a large Keyboard toggle pinned to the right
-/// corner (thumb-reachable, key-sized).
+/// corner (thumb-reachable, key-sized) that opens and closes the prompt box,
+/// and on a long press raises the raw soft keyboard onto the terminal instead.
 ///
 /// All dependencies are plain callbacks so the bar renders without a session,
 /// a picker, or the Ghostty engine (see the golden test).
 class TerminalQuickActionsBar extends StatelessWidget {
   const TerminalQuickActionsBar({
     super.key,
-    required this.softKeyboardController,
     required this.onPick,
     required this.onPicked,
     required this.uploadBusy,
@@ -27,9 +29,29 @@ class TerminalQuickActionsBar extends StatelessWidget {
     required this.onZoomOut,
     required this.onZoomIn,
     required this.onZoomReset,
+    required this.modifiers,
+    required this.onToggleModifier,
+    required this.composeOpen,
+    required this.onToggleCompose,
+    required this.onDirectInput,
   });
 
-  final GhosttyTerminalSoftKeyboardController softKeyboardController;
+  /// Sticky Ctrl/Alt/Shift, armed here and spent by the next keystroke from
+  /// this bar or the soft keyboard (see [TerminalModifierLatch]).
+  final ValueListenable<TerminalModifiers> modifiers;
+  final void Function(TerminalModifierKey key) onToggleModifier;
+
+  /// Whether the prompt box is up. The keyboard key opens it — typing goes to
+  /// the box and reaches the terminal on Send, never key by key — and closes it.
+  final bool composeOpen;
+  final VoidCallback onToggleCompose;
+
+  /// Long press on the keyboard key: the raw soft keyboard on the terminal,
+  /// key by key. The prompt box always submits, and terminal taps never raise
+  /// the IME, so without this a phone has no way to send one keystroke — no
+  /// letter for an armed Ctrl or Alt to land on, no tab completion, no
+  /// single-key TUI.
+  final VoidCallback onDirectInput;
   final Future<PickedUpload?> Function() onPick;
   final Future<void> Function(PickedUpload picked) onPicked;
 
@@ -47,6 +69,12 @@ class TerminalQuickActionsBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The key strip scrolls sideways; a swipe along it must not also open the
+    // sidebar the way a swipe over the terminal above it does.
+    return PaneSwipeExclusion(child: _buildBar(context));
+  }
+
+  Widget _buildBar(BuildContext context) {
     return Container(
       color: context.antgrid.bgElevated,
       padding: const EdgeInsets.symmetric(
@@ -66,6 +94,43 @@ class TerminalQuickActionsBar extends StatelessWidget {
                     busy: uploadBusy,
                     onError: onUploadError,
                   ),
+                  _actionButton(context, 'Esc', '\x1b'),
+                  _actionButton(context, 'Tab', '\t'),
+                  ValueListenableBuilder<TerminalModifiers>(
+                    valueListenable: modifiers,
+                    builder: (context, m, _) => Row(
+                      children: [
+                        _modifierButton(
+                          context,
+                          'Ctrl',
+                          TerminalModifierKey.ctrl,
+                          m.ctrl,
+                        ),
+                        _modifierButton(
+                          context,
+                          'Alt',
+                          TerminalModifierKey.alt,
+                          m.alt,
+                        ),
+                        _modifierButton(
+                          context,
+                          'Shift',
+                          TerminalModifierKey.shift,
+                          m.shift,
+                        ),
+                      ],
+                    ),
+                  ),
+                  _key(
+                    context,
+                    icon: AbIcons.enterKey,
+                    semanticLabel: 'Enter',
+                    onTap: () => onSendInput('\r'),
+                  ),
+                  _actionButton(context, '↑', '\x1b[A'),
+                  _actionButton(context, '↓', '\x1b[B'),
+                  _actionButton(context, '←', '\x1b[D'),
+                  _actionButton(context, '→', '\x1b[C'),
                   _zoomButton(
                     context,
                     icon: AbIcons.zoomOut,
@@ -78,14 +143,6 @@ class TerminalQuickActionsBar extends StatelessWidget {
                     semanticLabel: 'Increase terminal text size',
                     onTap: onZoomIn,
                   ),
-                  _actionButton(context, 'Tab', '\t'),
-                  _actionButton(context, 'Esc', '\x1b'),
-                  _actionButton(context, 'Ctrl+C', '\x03'),
-                  _actionButton(context, 'Ctrl+D', '\x04'),
-                  _actionButton(context, '↑', '\x1b[A'),
-                  _actionButton(context, '↓', '\x1b[B'),
-                  _actionButton(context, '→', '\x1b[C'),
-                  _actionButton(context, '←', '\x1b[D'),
                 ],
               ),
             ),
@@ -99,9 +156,14 @@ class TerminalQuickActionsBar extends StatelessWidget {
           ),
           // Pinned trailing control in the right corner (thumb-reachable),
           // kept OUT of the horizontal scroll so it never slides off-screen.
-          // Taps no longer summon the IME (showKeyboardOnInteraction false), so
-          // this is the one way in — `toggle` also dismisses it on a 2nd press.
-          _KeyboardToggleButton(controller: softKeyboardController),
+          // Terminal taps never summon the IME (showKeyboardOnInteraction
+          // false), so this key is the one way in: a tap for the prompt box,
+          // a long press for the raw keyboard.
+          _KeyboardToggleButton(
+            open: composeOpen,
+            onTap: onToggleCompose,
+            onLongPress: onDirectInput,
+          ),
         ],
       ),
     );
@@ -141,28 +203,74 @@ class TerminalQuickActionsBar extends StatelessWidget {
     );
   }
 
-  Widget _actionButton(BuildContext context, String label, String data) {
+  Widget _actionButton(
+    BuildContext context,
+    String label,
+    String data, {
+    String? semanticLabel,
+  }) => _key(
+    context,
+    label: label,
+    semanticLabel: semanticLabel,
+    onTap: () => onSendInput(data),
+  );
+
+  Widget _modifierButton(
+    BuildContext context,
+    String label,
+    TerminalModifierKey key,
+    bool armed,
+  ) => Semantics(
+    toggled: armed,
+    child: _key(
+      context,
+      label: label,
+      armed: armed,
+      onTap: () => onToggleModifier(key),
+    ),
+  );
+
+  /// One key of the strip: a [label], or an [icon] for a key whose symbol the
+  /// mono font lacks (its fallback glyph drew at a different size).
+  Widget _key(
+    BuildContext context, {
+    String? label,
+    String? icon,
+    required VoidCallback onTap,
+    String? semanticLabel,
+    bool armed = false,
+  }) {
     final p = context.antgrid;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => onSendInput(data),
-        child: Container(
-          height: AbTokens.rowHeightXl,
-          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: p.bgSurface,
-            borderRadius: AbTokens.borderRadius5,
-            border: Border.all(color: p.borderDefault),
-          ),
-          child: Text(
-            label,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontLg,
-              color: p.textSecondary,
+      child: Semantics(
+        label: semanticLabel,
+        button: true,
+        excludeSemantics: semanticLabel != null,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: Container(
+            height: AbTokens.rowHeightXl,
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
+            alignment: Alignment.center,
+            // Armed wears the primary button's pair: accent-on-accentMuted all
+            // but vanished on the slate theme, and a latched key has to be
+            // unmistakable before the next keystroke spends it.
+            decoration: BoxDecoration(
+              color: armed ? p.accent : p.bgSurface,
+              borderRadius: AbTokens.borderRadius5,
+              border: Border.all(color: armed ? p.accent : p.borderDefault),
             ),
+            child: icon != null
+                ? AbIcon(icon, size: AbTokens.fontLg, color: p.textSecondary)
+                : Text(
+                    label ?? '',
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontLg,
+                      color: armed ? p.accentForeground : p.textSecondary,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -171,52 +279,23 @@ class TerminalQuickActionsBar extends StatelessWidget {
 }
 
 /// The pinned keyboard control: the keyboard glyph plus a SINGLE state-driven
-/// arrowhead — an up-chevron ABOVE it while the keyboard is closed (tap to
+/// arrowhead — an up-chevron ABOVE it while the prompt box is closed (tap to
 /// raise), a down-chevron BELOW it while it is open (tap to dismiss). Only one
 /// arrowhead shows at a time, so the glyph always points the way the tap moves
-/// the keyboard.
-///
-/// Stateful + [WidgetsBindingObserver] so it rebuilds on every IME show/hide —
-/// including a system Back-button dismiss, which changes the window insets
-/// without routing through [GhosttyTerminalSoftKeyboardController.toggle].
-class _KeyboardToggleButton extends StatefulWidget {
-  const _KeyboardToggleButton({required this.controller});
+/// the box. A long press bypasses the box and raises the raw keyboard.
+class _KeyboardToggleButton extends StatelessWidget {
+  const _KeyboardToggleButton({
+    required this.open,
+    required this.onTap,
+    required this.onLongPress,
+  });
 
-  final GhosttyTerminalSoftKeyboardController controller;
-
-  @override
-  State<_KeyboardToggleButton> createState() => _KeyboardToggleButtonState();
-}
-
-class _KeyboardToggleButtonState extends State<_KeyboardToggleButton>
-    with WidgetsBindingObserver {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeMetrics() {
-    // Keyboard show/hide changes the bottom view inset — rebuild so the
-    // arrowhead follows the new state (a Back-button dismiss lands here too).
-    if (mounted) setState(() {});
-  }
+  final bool open;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
-    // Window bottom inset (keyboard height) is the primary signal — robust
-    // regardless of Scaffold resize handling; fall back to the view's live IME
-    // state so a system dismiss the insets haven't caught up to still flips.
-    final keyboardUp =
-        MediaQuery.viewInsetsOf(context).bottom > 0 ||
-        widget.controller.isVisible;
     final color = context.antgrid.textSecondary;
     final keyboard = AbIcon(
       AbIcons.keyboard,
@@ -224,17 +303,22 @@ class _KeyboardToggleButtonState extends State<_KeyboardToggleButton>
       color: color,
     );
     final chevron = AbIcon(
-      keyboardUp ? AbIcons.chevronDown : AbIcons.chevronUp,
+      open ? AbIcons.chevronDown : AbIcons.chevronUp,
       size: AbTokens.space10,
       color: color,
     );
     return Padding(
       padding: const EdgeInsets.only(left: AbTokens.space2),
       child: Tooltip(
-        message: keyboardUp ? 'Hide keyboard' : 'Show keyboard',
+        message: open ? 'Hide keyboard' : 'Show keyboard',
+        // The tooltip's own long-press trigger would race the one below for
+        // the pointer; this bar only mounts on touch, where hover never shows
+        // it anyway, so the message is left as the key's accessible name.
+        triggerMode: TooltipTriggerMode.manual,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: widget.controller.toggle,
+          onTap: onTap,
+          onLongPress: onLongPress,
           child: SizedBox(
             width: AbTokens.rowHeightXl,
             height: AbTokens.rowHeightXl,
@@ -242,7 +326,7 @@ class _KeyboardToggleButtonState extends State<_KeyboardToggleButton>
               mainAxisAlignment: MainAxisAlignment.center,
               // Chevron sits above the keyboard when closed (points up/raise),
               // below it when open (points down/dismiss).
-              children: keyboardUp ? [keyboard, chevron] : [chevron, keyboard],
+              children: open ? [keyboard, chevron] : [chevron, keyboard],
             ),
           ),
         ),

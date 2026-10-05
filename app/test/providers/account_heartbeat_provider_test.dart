@@ -7,6 +7,9 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/services/license_token_minter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 /// Counts heartbeat attempts. `readIfMatchesUser` is the first await inside
 /// `beat()` and returning null aborts it there, so the count is an exact "a
@@ -17,11 +20,12 @@ class _CountingStore extends KeychainDeviceStore {
   _CountingStore() : super(storage: _NullStorage());
 
   int beats = 0;
+  DeviceRecord? record;
 
   @override
   Future<DeviceRecord?> readIfMatchesUser(String userId) async {
     beats++;
-    return null;
+    return record;
   }
 }
 
@@ -42,6 +46,7 @@ const _interval = Duration(minutes: 5);
 void _settle(FakeAsync async) => async.elapse(const Duration(seconds: 1));
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   // Activated with `container.listen`, never a bare `read`: in riverpod 3 a
   // read closes its subscription immediately, which deactivates the provider's
   // own `ref.listen(currentUserProvider, ...)` before any sign-in lands. Same
@@ -70,6 +75,59 @@ void main() {
       h.container.dispose();
     });
   });
+
+  test(
+    'heartbeats renew their token before it expires without minting every tick',
+    () {
+      fakeAsync((clock) {
+        var mints = 0;
+        final minter = LicenseTokenMinter(
+          licenseApiUrl: 'https://api.antgrid.test',
+          clientId: 'cid',
+          clientSecret: 'secret',
+          now: () => DateTime.utc(2026).add(clock.elapsed),
+          httpClient: MockClient(
+            (_) async => http.Response(
+              '{"access_token":"tok-${++mints}","expires_in":3600}',
+              200,
+            ),
+          ),
+        );
+        final store = _CountingStore()
+          ..record = DeviceRecord(
+            userId: 'u-1',
+            deviceUuid: 'device',
+            clientId: 'cid',
+            clientSecret: 'secret',
+            ed25519Pub: '',
+            ed25519Priv: '',
+            x25519Pub: '',
+            x25519Priv: '',
+          );
+        final container = ProviderContainer(
+          overrides: [
+            keychainDeviceStoreProvider.overrideWithValue(store),
+            licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
+            licenseTokenMinterProvider.overrideWith((_) async => minter),
+            currentUserProvider.overrideWith(
+              (_) => CurrentUser(userId: 'u-1', email: 'a@b.test', tier: 'pro'),
+            ),
+          ],
+        );
+        container.listen(accountHeartbeatProvider, (_, _) {});
+        _settle(clock);
+        expect(mints, 1);
+        clock.elapse(const Duration(minutes: 40));
+        expect(mints, 1);
+        clock.elapse(const Duration(minutes: 10));
+        expect(mints, 2);
+        clock.elapse(const Duration(minutes: 15));
+        expect(mints, 2);
+        expect(minter.getToken(), 'tok-2');
+        container.dispose();
+      });
+    },
+  );
 
   test('beats immediately on sign-in, then once per interval', () {
     fakeAsync((async) {

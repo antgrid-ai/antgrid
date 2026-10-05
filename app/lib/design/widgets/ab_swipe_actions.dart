@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 
 import '../ab_tokens.dart';
@@ -39,8 +40,11 @@ class AbSwipeAction {
 final ValueNotifier<Object?> _openTray = ValueNotifier<Object?>(null);
 
 /// Fraction of the tray that must be revealed for a release to open it rather
-/// than snap back. Below it the gesture reads as a slip, not a reach.
-const double _openFraction = 0.45;
+/// than snap back. Below it the gesture reads as a slip, not a reach. At 0.45
+/// an ordinary unhurried thumb swipe on a phone (~80dp) snapped back, which
+/// read as the swipe not working at all; the vertical-drag arena already
+/// filters the scroll slips this exists for.
+const double _openFraction = 0.3;
 
 /// The tray may never take more than this much of the row: what is left has to
 /// keep saying which row the actions belong to. On a narrow pane the cells
@@ -317,11 +321,23 @@ class _AbSwipeActionsState extends State<AbSwipeActions>
         // not after.
         final fullSwipeArmed = fullSwipeAt != null && _travel >= fullSwipeAt;
 
-        return GestureDetector(
-          onHorizontalDragStart: _onDragStart,
-          onHorizontalDragUpdate: (d) => _onDragUpdate(d, rowWidth),
-          onHorizontalDragEnd: (d) => _onDragEnd(d, rowWidth),
-          onHorizontalDragCancel: _close,
+        return RawGestureDetector(
+          gestures: {
+            _LeftwardDragRecognizer:
+                GestureRecognizerFactoryWithHandlers<_LeftwardDragRecognizer>(
+                  _LeftwardDragRecognizer.new,
+                  (r) => r
+                    // From the touch, not from where the slop was crossed: the
+                    // row follows the whole of the finger's travel instead of
+                    // losing its first ~18dp, which is most of a short swipe.
+                    ..dragStartBehavior = DragStartBehavior.down
+                    ..claimsRightward = (() => _isOpen)
+                    ..onStart = _onDragStart
+                    ..onUpdate = ((d) => _onDragUpdate(d, rowWidth))
+                    ..onEnd = ((d) => _onDragEnd(d, rowWidth))
+                    ..onCancel = _close,
+                ),
+          },
           child: Stack(
             children: [
               if (_offset > 0)
@@ -375,6 +391,46 @@ class _AbSwipeActionsState extends State<AbSwipeActions>
         );
       },
     );
+  }
+}
+
+/// A horizontal drag that walks away from a RIGHTWARD start instead of winning
+/// it. A plain drag recognizer claims both directions, so a rightward swipe
+/// that began on a row was swallowed by a tray that can only open leftward —
+/// and the pane swipe that should have taken it (the mobile PageView back to
+/// the agent) never saw it. Giving the pointer up hands it to the next
+/// competitor in the arena.
+class _LeftwardDragRecognizer extends HorizontalDragGestureRecognizer {
+  /// Whether a rightward drag is this row's — true only while its tray is open,
+  /// where rightward is how the tray is dismissed.
+  bool Function() claimsRightward = () => false;
+
+  final Map<int, double> _downX = {};
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _downX[event.pointer] = event.position.dx;
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent && !claimsRightward()) {
+      final startX = _downX[event.pointer];
+      // Under the touch slop, so the row gives way before it could ever accept.
+      if (startX != null && event.position.dx - startX > kTouchSlop / 2) {
+        _downX.remove(event.pointer);
+        resolvePointer(event.pointer, GestureDisposition.rejected);
+        return;
+      }
+    }
+    super.handleEvent(event);
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _downX.clear();
+    super.didStopTrackingLastPointer(pointer);
   }
 }
 

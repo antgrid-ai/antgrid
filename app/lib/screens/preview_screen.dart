@@ -12,11 +12,10 @@ import '../analytics/events.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
@@ -26,11 +25,11 @@ import '../demo/demo_identity.dart';
 import '../providers/analytics.dart';
 import '../providers/demo_mode.dart';
 import '../services/preview_service.dart';
-import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
+import '../util/ssl_error_host.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/preview_tab_bar.dart';
 import '../util/ab_log.dart';
@@ -66,17 +65,17 @@ class PreviewScreen extends ConsumerStatefulWidget {
 class _TabWebViewState {
   WebViewController? controller;
   // The webview ORIGIN (scheme://localhost:port, no path) for this tab. In
-  // relay mode this is the local proxy's http origin; in local mode it
-  // carries the target scheme (http/https). Used to re-anchor address-bar
+  // relay mode this is the loopback forwarder's origin; both modes carry the
+  // tab's scheme (http/https). Used to re-anchor address-bar
   // input and as the origin boundary [_toDisplayUrl] rewrites from — always
   // path-free, even though the tab's actual initial load (see
   // [lastAppliedUrl]) may land on a path a pasted link named.
   String origin = '';
   // What the address bar presents as this tab's origin: the logical target
-  // (`scheme://localhost:<port>`), not the plain-http proxy origin the
-  // webview actually loads — otherwise an https target reads as "http://…"
-  // and the real port is hidden behind the proxy's random one. Identical to
-  // [origin] in local mode.
+  // (`scheme://localhost:<port>`), not the forwarder origin the webview
+  // actually loads — otherwise the real port is hidden behind the forwarder's
+  // when the dev-server port was taken locally. Identical to [origin] in
+  // local mode.
   String displayOrigin = '';
   // The last `PreviewTab.currentUrl` (or its default) a controller was built
   // from — path included. Purely a rebuild guard: a same-port http↔https
@@ -116,7 +115,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ((_maxScreenshotBytes + 2) ~/ 3) * 4 + 64;
   static const _maxScreenshotChunks =
       (_maxScreenshotDataChars + _screenshotChunkChars - 1) ~/
-          _screenshotChunkChars;
+      _screenshotChunkChars;
 
   final Map<int, _TabWebViewState> _tabStates = {};
 
@@ -228,7 +227,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return '${parsed.scheme}://${parsed.host}:${parsed.port}';
   }
 
-  /// Maps a real webview URL onto its user-facing form by swapping the proxy
+  /// Maps a real webview URL onto its user-facing form by swapping the forwarder
   /// origin for the logical target origin. Identity when they already match
   /// (local mode) or the URL is foreign to the preview origin.
   String _toDisplayUrl(_TabWebViewState tabState, String url) {
@@ -279,7 +278,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (_) {
+          onPageStarted: (url) {
             final tabState = _tabStates[port];
             if (tabState != null && !tabState.loading && mounted) {
               setState(() => tabState.loading = true);
@@ -323,6 +322,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               }
             }
             _refreshHistoryFlags(port);
+          },
+          // Dev servers front themselves with self-signed certificates, so a
+          // certificate error is accepted when the failing request itself
+          // targets loopback; a third-party subresource, or a platform that
+          // does not name the host, stays a hard failure.
+          onSslAuthError: (error) {
+            if (isLoopbackCertificateHost(sslErrorHost(error.platform))) {
+              detached('PreviewScreen', 'ssl proceed', error.proceed);
+            } else {
+              detached('PreviewScreen', 'ssl cancel', error.cancel);
+            }
           },
           onWebResourceError: (error) {
             AbLog.error(
@@ -432,7 +442,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// a PATH on the CURRENT origin and requested `localhost:4000/4200` instead
   /// of ever reaching port 4200. A port/link target reuses the tab-per-port
   /// pipeline ([_openPort], same as the port list). A bare port only focuses
-  /// an existing tab; an explicit link navigates it through its actual proxy
+  /// an existing tab; an explicit link navigates it through its actual forwarder
   /// origin. Anything that ISN'T a port/link (an actual path, or a foreign
   /// absolute URL) still navigates the active tab in place: this previews
   /// your dev server, not the open web.
@@ -445,7 +455,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
       final target = parsePreviewTarget(trimmed);
       if (target == null) {
-        showAbSnackBar(
+        showAbToast(
           context,
           'Enter a port (e.g. 3000) or a link like localhost:3000/path',
         );
@@ -525,10 +535,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   /// Open an arbitrary port through the preview pipeline. Works in both local
-  /// (direct localhost) and relay (tunnel proxy) modes — [PreviewService.
+  /// (direct localhost) and relay (forwarded TCP) modes — [PreviewService.
   /// openTab] branches internally. Used by manual entry, recent-port
-  /// quick-picks, and the port list. On a relay-mode port conflict, confirms
-  /// before falling back to a different local port.
+  /// quick-picks, and the port list.
   Future<void> _openPort(
     int port,
     String scheme, {
@@ -542,14 +551,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // page inside the demo. Decline in the same words every other demo refusal
     // uses instead.
     if (ref.read(demoModeProvider)) {
-      showAbSnackBar(context, kDemoRefusalText);
+      showAbToast(context, kDemoRefusalText);
       return;
     }
-    // Pin the project this open belongs to. The provider re-reads below are
-    // always the currently-focused service (never disposed at the synchronous
-    // moment of read), but focus can move across the dialog await — so we
-    // re-check it before the fallback rather than acting on a stale service.
-    final projectId = ref.read(selectedRegistrationIdProvider);
     try {
       final svc = focusedCheckoutServiceOrNull(
         ref.container,
@@ -569,52 +573,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           return;
         }
       }
-      final result = await svc.openTab(port, scheme: scheme, path: path);
-      if (result != SelectPortResult.portInUse) {
-        ref
-            .read(analyticsServiceProvider)
-            ?.track(AnalyticsEvents.previewOpened);
-        return;
-      }
-      if (!mounted) return;
-
-      final confirmed = await AbConfirmDialog.show(
-        context: context,
-        title: 'Port $port unavailable',
-        body:
-            'Port $port could not be opened on this device (it may be in use '
-            'or reserved). Open the preview on a different local port instead? '
-            'Sites that pin assets to port $port may not fully load.',
-        confirmLabel: 'Open anyway',
-      );
-      if (!confirmed || !mounted) return;
-      // Focus may have moved to another project while the dialog was open (e.g.
-      // via the projects drawer). Binding the fallback on the now-focused —
-      // possibly LRU-evicted/disposed — service would leak its socket, so bail
-      // if the focus changed.
-      if (ref.read(selectedRegistrationIdProvider) != projectId) return;
-      // Re-resolve rather than reusing `svc`: the session can have been
-      // invalidated (and its service disposed) while the dialog was open even
-      // though focus never moved.
-      final fallbackSvc = focusedCheckoutServiceOrNull(
-        ref.container,
-        (s) => s.previewService,
-      );
-      if (fallbackSvc == null) return;
-      await fallbackSvc.selectPortWithFallback(
-        port,
-        scheme: scheme,
-        path: path,
-      );
-      // The fallback path opens a preview too — count it like the direct path.
+      await svc.openTab(port, scheme: scheme, path: path);
       ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.previewOpened);
     } on Object catch (e) {
-      // openTab/selectPortWithFallback run a real socket bind; a non-conflict
-      // failure (interface down, handles exhausted) throws here. These calls
-      // are fire-and-forget at the callers, so surface the error ourselves
-      // instead of letting it become an unobserved async error.
+      // openTab binds a real socket; a failure (interface down, handles
+      // exhausted) throws here. These calls are fire-and-forget at the
+      // callers, so surface the error ourselves instead of letting it become
+      // an unobserved async error.
       if (!mounted) return;
-      showAbSnackBar(context, 'Could not open preview on port $port: $e');
+      showAbToast(context, 'Could not open preview on port $port: $e');
     }
   }
 
@@ -622,10 +589,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
+    // Followed links are taken here rather than from a state listener; see
+    // PreviewService._pendingNav for why.
+    final previewService = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.previewService,
+    );
     for (final tab in state.tabs) {
       final initialUrl =
-          tab.currentUrl ?? 'http://localhost:${tab.localProxyPort}';
+          tab.currentUrl ?? 'http://localhost:${tab.localPort}';
       final tabState = _tabStates.putIfAbsent(tab.port, _TabWebViewState.new);
+      final linkTarget = previewService?.takeNavRequest(tab.port);
       // Rebuild only on an actual target change: webview_flutter builds the
       // controller eagerly (unlike inappwebview's onWebViewCreated), so a
       // fresh target means a fresh controller and the ValueKey below swaps
@@ -634,21 +608,33 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller, or every tab would reload on every state update. Keyed
       // on the full URL (path included), not [_TabWebViewState.origin] —
       // that's deliberately path-free (see its doc) so it can't serve this.
-      final appliedKey = '$initialUrl#${tab.navRevision}';
-      if (tabState.lastAppliedUrl == appliedKey) continue;
-      tabState.lastAppliedUrl = appliedKey;
+      if (tabState.lastAppliedUrl == initialUrl) {
+        final controller = tabState.controller;
+        if (linkTarget != null && controller != null) {
+          detached(
+            'PreviewScreen',
+            'navigate to link',
+            () => controller.loadRequest(linkTarget),
+          );
+        }
+        continue;
+      }
+      tabState.lastAppliedUrl = initialUrl;
       tabState.origin = _originOf(initialUrl);
-      // Present the logical target, not the proxy: in relay mode the webview
-      // loads http://localhost:<random proxy port>, but the tab targets
-      // scheme://localhost:<port>.
+      // Present the logical target, not the forwarder: in relay mode the webview
+      // may load a different localhost port when the dev server's was taken
+      // here, but the tab targets scheme://localhost:<port>.
       tabState.displayOrigin = '${tab.scheme}://localhost:${tab.port}';
-      tabState.currentUrl = initialUrl;
+      // A link waiting on a freshly built controller becomes its first load, so
+      // the tab never loads the page it was opened on just to leave it.
+      final loadUrl = linkTarget?.toString() ?? initialUrl;
+      tabState.currentUrl = loadUrl;
       if (tab.port == state.activeTabId) {
         _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
       }
       tabState.controller = _buildController(
         tab.port,
-        initialUrl,
+        loadUrl,
         context.antgrid.bgDeepest,
       );
     }
@@ -679,14 +665,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return _buildPreviewView(state);
   }
 
-  /// Content below the toolbar: the open tabs' webviews, a loading spinner
-  /// while the first tab's proxy binds, or the empty-state recent-ports
-  /// quick-pick once nothing's open.
+  /// Content below the toolbar: the open tabs' webviews, or the empty-state
+  /// recent-ports quick-pick once nothing's open.
   Widget _buildBody(PreviewState state) {
     if (state.tabs.isNotEmpty) {
       final active = state.activeTab ?? state.tabs.first;
-      // Tab open but proxy not ready yet.
-      if (active.localProxyPort == null) return const AbLoading();
       final activeIndex = state.activeTabId == null
           ? 0
           : state.tabs.indexWhere((t) => t.port == state.activeTabId);
@@ -719,7 +702,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     drawController,
                     onError: (reason) {
                       if (mounted) {
-                        showAbSnackBar(
+                        showAbToast(
                           context,
                           'Could not capture the preview: $reason',
                         );
@@ -833,11 +816,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   ) async {
     // The URL must be reachable from THIS device. In local mode that's the
     // logical target directly; in relay mode the real dev server is on a
-    // different machine — only the app's own in-process tunnel proxy is
-    // reachable here, which is what the webview itself already loads.
+    // different machine — only the app's own loopback forwarder is reachable
+    // here, and it passes TLS through, so the tab's scheme still applies.
     final url = preview.session.transport.isLocal
         ? '${tab.scheme}://localhost:${tab.port}'
-        : 'http://localhost:${tab.localProxyPort}';
+        : '${tab.scheme}://localhost:${tab.localPort}';
     await openExternalUrl(context, url);
   }
 
@@ -1171,7 +1154,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // surfacing here. Not gated on transport.isLocal: remote-controlling
     // another machine FROM a desktop still has a real system browser to open
     // into, and _openInSystemBrowser already resolves the right address for
-    // that case (the local tunnel proxy, not the address the user typed).
+    // that case (the local forwarder, not the address the user typed).
     final showOpenExternal = !isMobilePlatform;
 
     return Column(
@@ -1362,12 +1345,34 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   ) {
     _pullStartY = event.position.dy;
     _pullArmed = false;
+    // The window's scroll offset alone is not enough: pages that scroll inside
+    // an overflow container (custom scroll bars, app-shell layouts) keep
+    // window.scrollY at 0 forever, so every downward drag while reading such a
+    // page would look like a pull from the top and reload it. The native offset
+    // goes first so a touch on a page scrolled down, the common case, never
+    // pays for the script.
+    final x = event.localPosition.dx.round();
+    final y = event.localPosition.dy.round();
     unawaited(
       controller
           .getScrollPosition()
-          .then((pos) {
+          .then((pos) async {
+            if (pos.dy > 0) return false;
+            final result = await controller.runJavaScriptReturningResult('''
+(function(){
+  var el = document.elementFromPoint($x, $y);
+  while (el) {
+    if (el.scrollTop > 0) return false;
+    el = el.parentElement;
+  }
+  return true;
+})()
+''');
+            return result.toString() == 'true';
+          })
+          .then((atTop) {
             if (!mounted || _pullStartY == null) return;
-            if (pos.dy <= 0) _pullArmed = true;
+            if (atTop) _pullArmed = true;
           })
           .catchError((_) {}),
     );
@@ -1448,7 +1453,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
   Future<void> _copyToClipboard(String text, [String? confirm]) async {
     await Clipboard.setData(ClipboardData(text: text));
-    if (confirm != null && mounted) showAbSnackBar(context, confirm);
+    if (confirm != null && mounted) showAbToast(context, confirm);
   }
 
   /// Opens a link/image address found by the content script — routed through

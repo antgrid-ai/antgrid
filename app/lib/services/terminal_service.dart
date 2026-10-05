@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
@@ -19,13 +20,14 @@ class TerminalService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
   final Map<Object, String> _displayOwners = {};
   final Set<String> _freshScreens = {};
   final Set<String> _materialized = {};
+  final Map<String, String Function(String data)> _inputTransforms = {};
   final Map<String, TerminalFrameMessage> _visibleFrames = {};
   final Map<String, Stopwatch> _screenWaits = {};
   final Map<String, int> _lastViewed = {};
@@ -446,9 +448,14 @@ class TerminalService {
       StreamController<TerminalNotificationMessage>.broadcast();
   final StreamController<NotificationPushMessage> _pushController =
       StreamController<NotificationPushMessage>.broadcast();
+
+  /// Branch-list and checkout failures, one message each, with no replay —
+  /// `OperationalErrorToaster` says why they are not on [TerminalState].
+  final _gitErrorController = StreamController<String>.broadcast();
   TerminalState _state = const TerminalState();
 
   Stream<TerminalState> get stateStream => _stateController.stream;
+  Stream<String> get gitErrors => _gitErrorController.stream;
   Stream<TerminalNotificationMessage> get notificationStream =>
       _notificationController.stream;
   Stream<NotificationPushMessage> get pushNotificationStream =>
@@ -467,13 +474,11 @@ class TerminalService {
     this.prefetchTimeout = const Duration(seconds: 5),
     this.endedDrainTimeout = const Duration(seconds: 2),
   }) {
-    // Heavy tier — terminal:output (HEAVY tier messages).
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyFrame);
 
-    // Status tier — terminal:started, terminal:exited, agent:status,
-    // git:branches, git:checkout-result. Routed through the focus-gated
-    // router status stream so all dispatch goes through one path.
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    // Routed through the focus-gated router status stream so all dispatch goes
+    // through one path.
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
   }
 
   static const _frameHydratorKey = 'terminal:frames';
@@ -744,10 +749,9 @@ class TerminalService {
     });
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
+  void _onHeavyFrame(InboundFrame f) {
     if (_disposed) return;
-    final parsed = parseAbMessage(json);
-    if (parsed == null) return;
+    final parsed = f.parsed;
     if (parsed is TerminalFrameMessage) {
       _handleTerminalFrame(parsed);
       return;
@@ -940,7 +944,9 @@ class TerminalService {
     _attachmentHandles[terminalId] = handle;
     _attachmentMsgSubs[terminalId] = handle.messages.listen((json) {
       if (_disposed) return;
-      final parsed = parseAbMessage(json);
+      // Not router-delivered, so wrap it: a malformed frame is logged by
+      // InboundFrame instead of throwing out of this listener.
+      final parsed = InboundFrame(json).parsed;
       if (parsed == null) return;
       if (parsed is TerminalFrameMessage) {
         _handleTerminalFrame(parsed);
@@ -1319,17 +1325,17 @@ class TerminalService {
 
   // --- Message dispatch ---
 
-  void _onStatusJson(Map<String, dynamic> json) {
+  void _onStatusFrame(InboundFrame f) {
     if (_disposed) return;
-    final parsed = parseAbMessage(json);
+    final parsed = f.parsed;
     if (parsed == null) return;
     _handle(parsed);
   }
 
   void _handle(Object message) {
-    // terminal:output is heavy-tier and dispatched via _onHeavyJson; never
-    // reaches this status-tier handler. agent:hello is consumed by
-    // ProjectStatusNotifier, not here.
+    // terminal:frame and terminal:history:page are heavy-tier and dispatched
+    // via _onHeavyFrame; they never reach this status-tier handler. agent:hello
+    // is consumed by ProjectStatusNotifier, not here.
     if (message is TerminalStartedMessage) {
       _handleTerminalStarted(message);
     } else if (message is TerminalExitedMessage) {
@@ -1816,13 +1822,10 @@ class TerminalService {
         // keeping the previous counts beside a cleared branch is worse than 0.
         gitAhead: msg.git?.ahead ?? 0,
         gitBehind: msg.git?.behind ?? 0,
-        // Carried, not defaulted: a status frame says nothing about an
-        // in-flight branch list or a checkout error, and rebuilding without
-        // them empties an open branch picker and swallows the failure toast.
+        // Carried, not defaulted: a status frame says nothing about a pending
+        // branch list; dropping it empties an open picker.
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
-        gitBranchesError: _state.gitBranchesError,
-        gitCheckoutError: _state.gitCheckoutError,
         needsFirstRun: msg.needsFirstRun,
       ),
     );
@@ -1889,7 +1892,9 @@ class TerminalService {
         // becomes KeyEventResult.ignored, so the keystroke would escape into
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
-        sendInput(terminalId, utf8.decode(bytes, allowMalformed: true));
+        final data = utf8.decode(bytes, allowMalformed: true);
+        final transform = _inputTransforms[terminalId];
+        sendInput(terminalId, transform == null ? data : transform(data));
         return true;
       },
       onResize: null,
@@ -1910,6 +1915,23 @@ class TerminalService {
     // the focus coordinator overrides to focused only while the user is viewing.
     if (tab.isAgent) {
       tab.ghostty.setFocused(false);
+    }
+  }
+
+  /// Rewrites what the pane's own engine emits for [terminalId] before it is
+  /// sent — the touch key bar's sticky modifiers, which have to reach IME
+  /// keystrokes that never pass through the bar. Pass null to remove; a
+  /// remove only takes effect for the [transform] that is still installed, so
+  /// a remounted pane's dispose cannot strip its replacement's.
+  void setInputTransform(
+    String terminalId,
+    String Function(String data)? transform, {
+    String Function(String data)? replacing,
+  }) {
+    if (transform != null) {
+      _inputTransforms[terminalId] = transform;
+    } else if (identical(_inputTransforms[terminalId], replacing)) {
+      _inputTransforms.remove(terminalId);
     }
   }
 
@@ -2218,9 +2240,7 @@ class TerminalService {
   }
 
   void requestBranches() {
-    _setState(
-      _state.copyWith(gitBranchesLoading: true, clearGitBranchesError: true),
-    );
+    _setState(_state.copyWith(gitBranchesLoading: true));
     // Tier-2 one-shot: bound the wait on git:branches so a dropped send /
     // session-down clears the spinner instead of stranding it.
     _branchesLatch?.settle();
@@ -2237,21 +2257,16 @@ class TerminalService {
         // Surface the drop, symmetric with checkoutBranch's timeout: an empty
         // gitBranches with the spinner cleared is indistinguishable from a repo
         // that genuinely has no branches, so a lost reply would read as success.
-        _setState(
-          _state.copyWith(
-            gitBranchesLoading: false,
-            gitBranchesError:
-                'Loading branches timed out — no response from the agent',
-          ),
+        _setState(_state.copyWith(gitBranchesLoading: false));
+        _emitGitError(
+          'Loading branches timed out — no response from the agent',
         );
       }),
     );
   }
 
   void checkoutBranch(String branch) {
-    _setState(
-      _state.copyWith(gitBranchesLoading: true, clearGitCheckoutError: true),
-    );
+    _setState(_state.copyWith(gitBranchesLoading: true));
     _checkoutLatch?.settle();
     final latch = _checkoutLatch = ReplyLatch();
     _send(
@@ -2266,12 +2281,8 @@ class TerminalService {
       ) {
         if (_disposed || _checkoutLatch != latch) return;
         _checkoutLatch = null;
-        _setState(
-          _state.copyWith(
-            gitBranchesLoading: false,
-            gitCheckoutError: 'Checkout timed out — no response from the agent',
-          ),
-        );
+        _setState(_state.copyWith(gitBranchesLoading: false));
+        _emitGitError('Checkout timed out — no response from the agent');
       }),
     );
   }
@@ -2284,9 +2295,13 @@ class TerminalService {
         gitBranches: msg.branches,
         gitBranch: msg.current,
         gitBranchesLoading: false,
-        clearGitBranchesError: true,
       ),
     );
+  }
+
+  void _emitGitError(String message) {
+    if (_disposed) return;
+    _gitErrorController.add(message);
   }
 
   void _handleGitCheckoutResult(GitCheckoutResultMessage msg) {
@@ -2294,19 +2309,11 @@ class TerminalService {
     _checkoutLatch = null;
     if (msg.success) {
       _setState(
-        _state.copyWith(
-          gitBranch: msg.branch,
-          gitBranchesLoading: false,
-          clearGitCheckoutError: true,
-        ),
+        _state.copyWith(gitBranch: msg.branch, gitBranchesLoading: false),
       );
     } else {
-      _setState(
-        _state.copyWith(
-          gitBranchesLoading: false,
-          gitCheckoutError: msg.error ?? 'Checkout failed',
-        ),
-      );
+      _setState(_state.copyWith(gitBranchesLoading: false));
+      _emitGitError(msg.error ?? 'Checkout failed');
     }
   }
 
@@ -2396,5 +2403,6 @@ class TerminalService {
     await _stateController.close();
     await _notificationController.close();
     await _pushController.close();
+    await _gitErrorController.close();
   }
 }

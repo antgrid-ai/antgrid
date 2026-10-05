@@ -1,3 +1,6 @@
+# Normalize line endings in the repo regardless of each contributor's core.autocrlf.
+* text=auto
+
 # Files that are executed or consumed on Linux (CI runners, container images)
 # must keep LF line endings even when committed from Windows — a CRLF in a shell
 # script breaks the shebang, and CRLF in a Dockerfile is fragile.

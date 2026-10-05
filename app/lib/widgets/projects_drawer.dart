@@ -539,6 +539,17 @@ class _EntryWithSessions extends ConsumerWidget {
     // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
     // collapse in [collapsedDrawerIdsProvider].
     final entry = this.entry;
+    // A folded "This machine" keeps only its band (on the first local row);
+    // every other local row folds to nothing but keeps its keyed slot so the
+    // reorder indices stay valid.
+    final folded =
+        entry.kind == EntryKind.local &&
+        ref.watch(localMachineCollapsedProvider);
+    if (folded) {
+      return showLocalBand
+          ? LocalMachineBand(showRule: showRule)
+          : const SizedBox.shrink();
+    }
     final machineUuid = entry.machineUuid;
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)

@@ -9,13 +9,13 @@ import 'package:flutter_test/flutter_test.dart';
 const _tabA = PreviewTab(
   port: 3000,
   scheme: 'http',
-  localProxyPort: 3000,
+  localPort: 3000,
   currentUrl: 'http://localhost:3000',
 );
 const _tabB = PreviewTab(
   port: 4000,
   scheme: 'http',
-  localProxyPort: 4000,
+  localPort: 4000,
   currentUrl: 'http://localhost:4000',
 );
 // ProviderScope must wrap the whole [MaterialApp], not just this widget: the

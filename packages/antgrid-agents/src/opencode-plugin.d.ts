@@ -5,5 +5,6 @@
 declare module "@opencode-ai/plugin" {
   export type Plugin = (input?: unknown) => Promise<{
     event?: (input: { event: any }) => unknown | Promise<unknown>;
+    dispose?: () => Promise<void>;
   }>;
 }

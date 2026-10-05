@@ -11,6 +11,8 @@ import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
+import '../widgets/agent_notification_surfacer.dart';
+import '../widgets/operational_error_toaster.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
 
@@ -115,7 +117,9 @@ class _DemoHomeState extends ConsumerState<DemoHome> {
           exitDemoMode(ref.container);
           return true;
         },
-        child: body,
+        child: OperationalErrorToaster(
+          child: AgentNotificationSurfacer(child: body),
+        ),
       ),
     );
   }

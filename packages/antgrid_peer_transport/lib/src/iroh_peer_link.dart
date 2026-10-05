@@ -11,6 +11,25 @@ import 'connection_attempt.dart';
 
 const peerAlpn = 'antgrid/peer/2';
 
+/// Judges a connection [NativeEndpointOwner.dial] has just authenticated. An
+/// endpoint or ALPN other than the one dialed is an authentication fault no
+/// retry can fix, so it outranks a lease that merely lapsed meanwhile.
+PeerConnectionFailure? classifyDialedConnection({
+  required String expectedEndpointId,
+  required String remoteEndpointId,
+  required String alpn,
+  required bool authorized,
+}) {
+  if (remoteEndpointId != expectedEndpointId || alpn != peerAlpn) {
+    return const PeerConnectionFailure(
+      'AUTHENTICATED_ENDPOINT_MISMATCH',
+      terminal: true,
+    );
+  }
+  if (!authorized) return authorizationChangedDuringConnect;
+  return null;
+}
+
 /// Enrollment-scoped storage implemented by the platform secure credential store.
 abstract interface class EndpointKeyStore {
   Future<Uint8List?> read(String enrollmentId);
@@ -61,8 +80,9 @@ class NativeEndpointOwner {
     PeerLinkDiagnostic? diagnostic,
   }) async {
     final timer = Stopwatch()..start();
-    if (!authorized())
-      throw const PeerConnectionFailure('AUTHORIZATION_DENIED', terminal: true);
+    if (!authorized()) {
+      throw authorizationChangedDuringConnect;
+    }
     iroh.Connection connection;
     try {
       connection = await endpoint.connect(
@@ -81,22 +101,21 @@ class NativeEndpointOwner {
         terminal: false,
       );
     }
-    if (!authorized() ||
-        connection.remoteId.toHex() != endpointId ||
-        utf8.decode(connection.alpn, allowMalformed: true) != peerAlpn) {
+    final rejection = classifyDialedConnection(
+      expectedEndpointId: endpointId,
+      remoteEndpointId: connection.remoteId.toHex(),
+      alpn: utf8.decode(connection.alpn, allowMalformed: true),
+      authorized: authorized(),
+    );
+    if (rejection != null) {
       connection.close(errorCode: 1);
-      throw const PeerConnectionFailure(
-        'AUTHENTICATED_ENDPOINT_MISMATCH',
-        terminal: true,
-      );
+      throw rejection;
     }
     try {
       final (send, recv) = await connection.openBi();
-      if (!authorized())
-        throw const PeerConnectionFailure(
-          'AUTHORIZATION_DENIED',
-          terminal: true,
-        );
+      if (!authorized()) {
+        throw authorizationChangedDuringConnect;
+      }
       // The session stream carries the same open-frame prefix as every later
       // stream, but its I/O stays on this class's reader/writer: the session
       // stream IS the session, so its failures close the whole connection

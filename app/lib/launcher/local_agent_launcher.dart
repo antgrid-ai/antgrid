@@ -147,19 +147,13 @@ class LaunchResult {
   /// origin remote) or predates the verb returning it — never synthesized here.
   final String? repoKey;
 
-  /// Structured events emitted by the agent via stderr JSON lines.
-  /// Closed when the agent process exits.
-  /// Empty stream for orphan-attached agents (no process to listen to).
-  final Stream<AgentEvent> events;
-
   LaunchResult({
     required this.transport,
     required this.agentPid,
     required this.owned,
     required this.projectId,
     this.repoKey,
-    Stream<AgentEvent>? events,
-  }) : events = events ?? const Stream.empty();
+  });
 }
 
 void _log(String msg) {
@@ -343,7 +337,6 @@ class LocalAgentLauncher {
         owned: _host.ownedHostPid != null,
         projectId: projectId,
         repoKey: repoKey,
-        events: _host.hostEvents,
       );
     } catch (_) {
       // Any failure against the cached host — control error, data-plane

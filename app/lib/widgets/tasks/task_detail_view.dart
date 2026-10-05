@@ -20,7 +20,6 @@ import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_multiline_field.dart';
-import '../../models/ab_message.dart' show GitFileStatusEntry;
 import '../../models/task.dart';
 import '../../navigation/nav_controller.dart' show recordProjectFocus;
 import '../../providers/agent_transport.dart'
@@ -1736,8 +1735,8 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
         child: AbLoading(message: 'loading changes...'),
       );
     }
-    final entries = state.gitFileEntries;
-    if (entries.isEmpty) {
+    final gitStatus = state.gitStatus;
+    if (gitStatus.entries.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: AbTokens.space12,
@@ -1752,7 +1751,6 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
         ),
       );
     }
-    final (additions, deletions) = _changeTotals(entries);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1762,8 +1760,8 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
             vertical: AbTokens.space4,
           ),
           child: AbDiffStat(
-            additions: additions,
-            deletions: deletions,
+            additions: gitStatus.additions,
+            deletions: gitStatus.deletions,
             fontSize: AbTokens.fontXs,
           ),
         ),
@@ -1773,7 +1771,7 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
             root: state.root,
             expandedPaths: state.expandedPaths,
             selectedFilePath: state.git.diffPath,
-            gitFileEntries: entries,
+            gitStatus: gitStatus,
             changesOnly: true,
             collapsedPaths: state.git.collapsedPaths,
             onToggleExpanded: (path) => checkoutServiceOrNull(
@@ -1794,20 +1792,6 @@ class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
       ],
     );
   }
-}
-
-/// Line totals across every changed path, deduped: a partially-staged file
-/// carries one entry per stage and both hold the same combined-vs-HEAD
-/// counts, so summing every entry would double it.
-(int, int) _changeTotals(List<GitFileStatusEntry> entries) {
-  final perPath = <String, GitFileStatusEntry>{};
-  for (final e in entries) {
-    perPath.putIfAbsent(e.path, () => e);
-  }
-  return (
-    perPath.values.fold(0, (sum, e) => sum + e.additions),
-    perPath.values.fold(0, (sum, e) => sum + e.deletions),
-  );
 }
 
 /// Pushes the same diff (and, from there, the same file viewer) the Git tab

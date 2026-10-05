@@ -24,6 +24,7 @@ void main() {
     int rows = 1,
     bool destructiveFirst = false,
     double width = 800,
+    bool extraAction = false,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -36,7 +37,11 @@ void main() {
                   key: ValueKey(i),
                   actions: destructiveFirst
                       ? [action('Revert', destructive: true)]
-                      : [action('Stage'), action('Revert', destructive: true)],
+                      : [
+                          action('Stage'),
+                          if (extraAction) action('Resolve'),
+                          action('Revert', destructive: true),
+                        ],
                   child: SizedBox(height: 48, child: Text('row $i')),
                 ),
               // Tall filler so the list can actually scroll.
@@ -75,11 +80,28 @@ void main() {
   testWidgets('a leftward flick opens the tray without the distance', (
     tester,
   ) async {
+    // Three cells widen the tray, and with it the distance threshold, so a
+    // short flick stays well under it: only the velocity rule can open the
+    // tray from here.
+    await tester.pumpWidget(rowsUnderTest(extraAction: true));
+    await tester.fling(find.text('row 0'), const Offset(-60, 0), 2000);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stage'), findsOneWidget);
+    expect(invoked, isEmpty);
+  });
+
+  // What an unhurried thumb does on a phone: ~70dp over a third of a second,
+  // too slow to count as a flick. It used to snap back, which on a device read
+  // as the swipe not working at all.
+  testWidgets('a moderate, unhurried swipe opens the tray', (tester) async {
     await tester.pumpWidget(rowsUnderTest());
 
-    // Short of the distance threshold on purpose: only the velocity rule can
-    // open the tray from here.
-    await tester.fling(find.text('row 0'), const Offset(-60, 0), 2000);
+    await tester.timedDrag(
+      find.text('row 0'),
+      const Offset(-70, 0),
+      const Duration(milliseconds: 350),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('Stage'), findsOneWidget);
@@ -203,5 +225,65 @@ void main() {
 
     expect(find.text('Stage'), findsNothing);
     expect(tester.getRect(find.text('row 0')).top, lessThan(before));
+  });
+
+  // Rightward belongs to the surface (the mobile PageView back to the agent), so
+  // a row must not win a drag that starts that way.
+  testWidgets('a rightward swipe on a row reaches the enclosing page view', (
+    tester,
+  ) async {
+    final controller = PageController(initialPage: 1);
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PageView(
+          controller: controller,
+          children: [
+            const SizedBox.expand(),
+            ListView(
+              children: [
+                AbSwipeActions(
+                  actions: [action('Stage')],
+                  child: const SizedBox(height: 48, child: Text('row')),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await tester.drag(find.text('row'), const Offset(600, 0));
+    await tester.pumpAndSettle();
+
+    expect(controller.page, 0);
+    expect(find.text('Stage'), findsNothing);
+  });
+
+  testWidgets('a rightward swipe still closes an open tray', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AbSwipeActions(
+            actions: [action('Stage')],
+            // Full width, as a real list row is: the row body is what a
+            // rightward swipe is grabbed on once the tray has slid it left.
+            child: const SizedBox(
+              height: 48,
+              width: double.infinity,
+              child: Text('row'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.dragFrom(const Offset(400, 24), const Offset(-120, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('Stage'), findsOneWidget);
+
+    await tester.dragFrom(const Offset(300, 24), const Offset(250, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stage'), findsNothing);
   });
 }

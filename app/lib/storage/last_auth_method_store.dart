@@ -7,7 +7,7 @@ import '../config/storage_scope.dart';
 /// How an address signed in last. Mirrors `AUTH_METHODS` in
 /// `web/src/ui/auth-memory.ts` — the two surfaces answer the same question and
 /// must keep the same vocabulary.
-enum AuthMethod { password, link, github, google }
+enum AuthMethod { password, link, github, google, apple }
 
 /// Per-address memory of the last method used, so the sign-in screen can go
 /// straight to a password field for someone who has one.

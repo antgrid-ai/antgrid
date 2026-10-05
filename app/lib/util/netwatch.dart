@@ -62,7 +62,7 @@ class NetwatchEvent {
   final String? channel;
   String? streamId;
 
-  /// `session` | `project` | `terminal` | `tunnel-http` | `tunnel-ws` |
+  /// `session` | `project` | `terminal` | `tunnel-tcp` |
   /// `upload` — the purpose-specific stream kind, mirroring the bridge's
   /// `streamLabelOf`. Never part of the join key: [frameId] alone pairs the
   /// two sides' events.

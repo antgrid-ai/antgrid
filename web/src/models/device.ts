@@ -10,6 +10,18 @@ export const PlatformSchema = z.enum(["macos", "windows", "linux", "ios", "andro
 export type DeviceKind = z.infer<typeof DeviceKindSchema>;
 export type Platform = z.infer<typeof PlatformSchema>;
 
+/** The platforms that register as phones. The single source for the kind
+ *  derivation at registration and for every usage count, so a new mobile
+ *  platform cannot be filed as a desktop in one place and a phone in another. */
+const MOBILE_PLATFORMS = ["ios", "android"] as const satisfies readonly Platform[];
+
+export function isMobilePlatform(platform: string): boolean {
+  return (MOBILE_PLATFORMS as readonly string[]).includes(platform);
+}
+
+/** `platform IN (<mobile platforms>)` for raw SQL over a `devices` row source. */
+export const MOBILE_PLATFORM_SQL = Prisma.sql`platform IN (${Prisma.join([...MOBILE_PLATFORMS])})`;
+
 export type DeviceRow = Device;
 
 export async function countActiveDevices(db: Tx, userId: string): Promise<number> {

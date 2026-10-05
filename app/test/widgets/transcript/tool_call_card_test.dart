@@ -450,4 +450,70 @@ void main() {
       expect(toggled, isFalse);
     });
   });
+
+  // An expanded card is rebuilt on every emission of another row's stream, so
+  // its terminal split and JSON encode are cached per block and per value.
+  group('render caches', () {
+    testWidgets('a terminal block is re-read only when the block changes', (
+      tester,
+    ) async {
+      final block = _CountingTerminal('one');
+      final item = _item(status: 'completed', title: 'Run', content: [block]);
+      await _pump(tester, item: item, expanded: true);
+      final reads = block.reads;
+      await _pump(tester, item: item, expanded: true);
+      expect(block.reads, reads);
+
+      await _pump(
+        tester,
+        item: _item(
+          status: 'completed',
+          title: 'Run',
+          content: [ToolContent(type: 'terminal', data: 'one\ntwo')],
+        ),
+        expanded: true,
+      );
+      expect(find.textContaining('two'), findsOneWidget);
+    });
+
+    testWidgets('raw input is re-encoded only when its value changes', (
+      tester,
+    ) async {
+      AgentItem mcp(Object input) => _item(
+        status: 'completed',
+        toolKind: 'mcp',
+        title: 'call tool',
+        rawInput: input,
+      );
+      final raw = _CountingJson();
+      await _pump(tester, item: mcp(raw), expanded: true);
+      final encodes = raw.encodes;
+      await _pump(tester, item: mcp(raw), expanded: true);
+      expect(raw.encodes, encodes);
+
+      await _pump(tester, item: mcp({'a': 2}), expanded: true);
+      expect(find.textContaining('"a": 2'), findsOneWidget);
+    });
+  });
+}
+
+class _CountingTerminal extends ToolContent {
+  _CountingTerminal(this._output) : super(type: 'terminal');
+  final String _output;
+  int reads = 0;
+
+  @override
+  String? get data {
+    reads++;
+    return _output;
+  }
+}
+
+class _CountingJson {
+  int encodes = 0;
+
+  Map<String, Object?> toJson() {
+    encodes++;
+    return {'a': 1};
+  }
 }

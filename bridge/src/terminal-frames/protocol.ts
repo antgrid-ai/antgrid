@@ -65,11 +65,13 @@ export const TerminalHistorySpanSchema = z.object({
   sgr: z.string().regex(/^\x1b\[[0-9;:]*m$/),
   uri: z.string().max(8192).regex(/^[^\x00-\x1f\x7f-\x9f]*$/).optional(),
 });
+/** A row of up to 1000 columns can hold one span per cell at most. */
+export const MAX_SPANS_PER_ROW = 1000;
 export const TerminalHistoryRowSchema = z.object({
   rowId: counter,
   cols: z.number().int().min(2).max(1000),
   wrapped: z.boolean(),
-  spans: z.array(TerminalHistorySpanSchema).max(1000),
+  spans: z.array(TerminalHistorySpanSchema).max(MAX_SPANS_PER_ROW),
 });
 export const TerminalScreenFrameSchema = z.object({
   version: z.literal(TERMINAL_PROTOCOL_VERSION),

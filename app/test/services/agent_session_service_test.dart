@@ -1,3 +1,4 @@
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/agent_session_service.dart';
@@ -8,6 +9,10 @@ import '../helpers/prefs_test_mock.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(useInMemoryPrefs);
+
+  Future<void> pumpPastDeltaFlush() => Future<void>.delayed(
+    kAgentDeltaFlushInterval + const Duration(milliseconds: 20),
+  );
 
   Future<ProjectSession> newSession(FakeAgentTransport t) async {
     final cache = await CachedSessionsStore.open();
@@ -79,7 +84,7 @@ void main() {
       'itemId': 'i1',
       'textChunk': 'llo',
     });
-    await Future<void>.delayed(Duration.zero);
+    await pumpPastDeltaFlush();
 
     final turn = svc.stateFor('p').turns.single;
     expect(turn.turnId, 't1');
@@ -173,7 +178,7 @@ void main() {
         'itemId': 'c1',
         'textChunk': 'b.dart\n',
       });
-      await Future<void>.delayed(Duration.zero);
+      await pumpPastDeltaFlush();
 
       final item = svc.stateFor('p').turns.single.items.single;
       expect(item.text, isNull); // shell output never becomes the item's text
@@ -200,7 +205,7 @@ void main() {
       'itemId': 'r1',
       'textChunk': 'think',
     });
-    await Future<void>.delayed(Duration.zero);
+    await pumpPastDeltaFlush();
 
     expect(svc.stateFor('p').turns.single.items.single.text, 'think');
   });
@@ -1128,6 +1133,116 @@ void main() {
       expect(s.turns.map((t) => t.turnId), ['resumed:0', 'turn-0']);
       expect(s.openTurn?.turnId, 'turn-0');
     });
+
+    test('hydration never rewrites a turn list, item list or usage map it '
+        'already published', () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      final heldTurns = svc.stateFor('p').turns;
+      final heldTurn = heldTurns.single;
+      t.requestHandler = (method, params) => {
+        'frames': <dynamic>[],
+        'activeTurnId': null,
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(heldTurns, hasLength(1));
+      expect(identical(heldTurns.single, heldTurn), isTrue);
+      expect(heldTurn.stopReason, isNull);
+      expect(svc.stateFor('p').turns.single.stopReason, 'end_turn');
+
+      // The held open turn is re-appended inside the fold, and the live frames
+      // then upsert into it and the usage map within that same fold.
+      Map<String, dynamic> usage(String itemId) => {
+        'type': 'agent:usage',
+        'sessionId': 'p',
+        'itemId': itemId,
+        'total': <String, Object?>{},
+        'last': {'totalTokens': 1},
+      };
+      final t2 = FakeAgentTransport();
+      final svc2 = await midTurn(t2);
+      t2.emitJson(usage('x'));
+      await Future<void>.delayed(Duration.zero);
+      final heldItems = svc2.stateFor('p').turns.single.items;
+      final heldUsage = svc2.stateFor('p').usageByItem;
+      t2.requestHandler = (method, params) => {
+        ...snapshot('turn-0'),
+        'live': [
+          usage('y'),
+          {
+            'type': 'agent:item-added',
+            'sessionId': 'p',
+            'turnId': 'turn-0',
+            'itemId': 'a2',
+            'item': {
+              'itemId': 'a2',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'more',
+            },
+          },
+        ],
+      };
+
+      await svc2.hydrateIfNeeded('p');
+
+      expect(heldItems, hasLength(1));
+      expect(heldItems.single.text, 'the whole');
+      expect(heldUsage.keys, ['x']);
+      final s = svc2.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), ['resumed:0', 'turn-0']);
+      expect(s.turns.last.items.map((i) => i.text), ['the whole', 'more']);
+      expect(s.usageByItem.keys, unorderedEquals(['x', 'y']));
+    });
+
+    test('an item in the snapshot live set lands on the merged open turn',
+        () async {
+      final t = FakeAgentTransport();
+      final svc = await midTurn(t);
+      t.requestHandler = (method, params) => {
+        'frames': [
+          {'type': 'agent:turn-start', 'sessionId': 'p', 'turnId': 'turn-0'},
+          for (final id in ['a1', 'a2'])
+            {
+              'type': 'agent:item-added',
+              'sessionId': 'p',
+              'turnId': 'turn-0',
+              'itemId': id,
+              'item': {
+                'itemId': id,
+                'kind': 'message',
+                'role': 'assistant',
+                'text': 'disk $id',
+              },
+            },
+        ],
+        'activeTurnId': 'turn-0',
+        'live': [
+          {
+            'type': 'agent:item-added',
+            'sessionId': 'p',
+            'turnId': 'turn-0',
+            'itemId': 'a3',
+            'item': {
+              'itemId': 'a3',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'live a3',
+            },
+          },
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').openTurn!.items.map((i) => i.text), [
+        'the whole',
+        'disk a2',
+        'live a3',
+      ]);
+    });
   });
 
   group('a snapshot live set', () {
@@ -1347,5 +1462,466 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     // A rollback does not kill background processes — the list carries over.
     expect(svc.stateFor('p').backgroundTasks?.tasks, hasLength(1));
+  });
+
+  group('batch replay and streaming', () {
+    Map<String, dynamic> frame(
+      String type,
+      int ts, [
+      Map<String, dynamic> extra = const {},
+    ]) => {
+      'id': 'f$ts',
+      'timestamp': ts,
+      'type': type,
+      'sessionId': 'p',
+      ...extra,
+    };
+
+    Map<String, dynamic> itemAdded(
+      String turnId,
+      String itemId,
+      int ts, {
+      String kind = 'message',
+      String role = 'assistant',
+      String? text,
+      String? status,
+    }) => frame('agent:item-added', ts, {
+      'turnId': turnId,
+      'itemId': itemId,
+      'item': {
+        'itemId': itemId,
+        'kind': kind,
+        'role': role,
+        'text': ?text,
+        'status': ?status,
+      },
+    });
+
+    test('a transcript snapshot reaches listeners as one state, buffered text '
+        'included', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      final seen = <AgentSessionState>[];
+      svc.stateStreamFor('p').listen(seen.add);
+      t.requestHandler = (method, params) => {
+        'frames': [
+          for (var n = 0; n < 2; n++) ...[
+            frame('agent:turn-start', 1, {'turnId': 'r$n'}),
+            itemAdded('r$n', 'u$n', 1, role: 'user', text: 'q$n'),
+            itemAdded('r$n', 'a$n', 1, text: 'a$n'),
+            frame('agent:item-delta', 1, {
+              'turnId': 'r$n',
+              'itemId': 'a$n',
+              'textChunk': '!',
+            }),
+            frame('agent:turn-end', 1, {
+              'turnId': 'r$n',
+              'stopReason': 'end_turn',
+            }),
+          ],
+        ],
+      };
+
+      await svc.hydrateIfNeeded('p');
+      await Future<void>.delayed(Duration.zero);
+
+      final withTurns = seen.where((s) => s.turns.isNotEmpty).toList();
+      expect(withTurns, hasLength(1));
+      expect(
+        withTurns.single.turns.map((t) => t.items.map((i) => i.text).toList()),
+        [
+          ['q0', 'a0!'],
+          ['q1', 'a1!'],
+        ],
+      );
+      expect(withTurns.single.loading, isFalse);
+      expect(identical(seen.last, svc.stateFor('p')), isTrue);
+    });
+
+    test('a streamed delta copies only the turn it lands in', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      for (var n = 0; n < 2; n++) {
+        t.emitJson(frame('agent:turn-start', 1, {'turnId': 's$n'}));
+        t.emitJson(itemAdded('s$n', 'm$n', 1, text: 'x'));
+        t.emitJson(
+          frame('agent:turn-end', 1, {
+            'turnId': 's$n',
+            'stopReason': 'end_turn',
+          }),
+        );
+      }
+      t.emitJson(frame('agent:turn-start', 1, {'turnId': 'open'}));
+      t.emitJson(itemAdded('open', 'live', 1, text: 'He'));
+      await Future<void>.delayed(Duration.zero);
+      final before = svc.debugCollectionCopies;
+      final prior = svc.stateFor('p');
+
+      t.emitJson(
+        frame('agent:item-delta', 1, {
+          'turnId': 'open',
+          'itemId': 'live',
+          'textChunk': 'llo',
+        }),
+      );
+      await pumpPastDeltaFlush();
+
+      // One turn list in _flushDeltas plus one item list, the open turn's.
+      expect(svc.debugCollectionCopies - before, equals(2));
+      expect(svc.stateFor('p').turns.last.items.single.text, 'Hello');
+      for (var i = 0; i < 2; i++) {
+        expect(identical(svc.stateFor('p').turns[i], prior.turns[i]), isTrue);
+      }
+    });
+
+    test("hydrating a transcript copies each turn's items once", () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      const base = 1000000;
+      t.requestHandler = (method, params) => {
+        'frames': [
+          for (var n = 0; n < 2; n++) ...[
+            frame('agent:turn-start', base, {'turnId': 'r$n'}),
+            itemAdded('r$n', 'u$n', base, role: 'user', text: 'q$n'),
+            itemAdded('r$n', 'a$n', base, text: 'a$n'),
+            frame('agent:usage', base, {
+              'turnId': 'r$n',
+              'itemId': 'a$n',
+              'total': <String, Object?>{},
+              'last': {'totalTokens': n},
+            }),
+            itemAdded(
+              'r$n',
+              't$n',
+              base,
+              kind: 'tool_call',
+              status: 'running',
+            ),
+            frame('agent:item-updated', base + 60000, {
+              'turnId': 'r$n',
+              'itemId': 't$n',
+              'item': {
+                'itemId': 't$n',
+                'kind': 'tool_call',
+                'status': 'completed',
+              },
+            }),
+            frame('agent:turn-end', base, {
+              'turnId': 'r$n',
+              'stopReason': 'end_turn',
+            }),
+          ],
+        ],
+      };
+      final before = svc.debugCollectionCopies;
+
+      await svc.hydrateIfNeeded('p');
+
+      // 1 turn list on the first append after the reset to const [], plus one
+      // item list per turn (on its first item), plus 1 usageByItem map.
+      expect(svc.debugCollectionCopies - before, equals(4));
+      final s = svc.stateFor('p');
+      expect(s.turns.map((t) => t.turnId), ['r0', 'r1']);
+      expect(s.turns.every((t) => t.items.length == 3), isTrue);
+      expect(s.turns.every((t) => t.items.last.status == 'completed'), isTrue);
+      expect(s.usageByItem.keys, ['a0', 'a1']);
+    });
+
+    test('a replayed batch builds the same transcript as the same frames '
+        'streamed live', () async {
+      Map<String, dynamic> f(String type, Map<String, dynamic> extra) =>
+          frame(type, 0, extra);
+      final frames = [
+        f('agent:turn-start', {'turnId': 't1'}),
+        itemAdded('t1', 'u1', 0, role: 'user', text: 'q1'),
+        itemAdded('t1', 'c1', 0, kind: 'tool_call', status: 'running'),
+        f('agent:item-updated', {
+          'turnId': 't1',
+          'itemId': 'c1',
+          'item': {'itemId': 'c1', 'kind': 'tool_call', 'status': 'completed'},
+        }),
+        itemAdded('t1', 'm1', 0, text: 'a1'),
+        f('agent:usage', {
+          'turnId': 't1',
+          'itemId': 'm1',
+          'total': <String, Object?>{},
+          'last': {'totalTokens': 10},
+        }),
+        f('agent:snapshot', {
+          'turnId': 't1',
+          'items': [
+            {'itemId': 'u1', 'kind': 'message', 'role': 'user', 'text': 'q1'},
+            {
+              'itemId': 'm1',
+              'kind': 'message',
+              'role': 'assistant',
+              'text': 'a1 final',
+            },
+          ],
+        }),
+        f('agent:turn-end', {'turnId': 't1', 'stopReason': 'end_turn'}),
+        f('agent:turn-start', {'turnId': 't2'}),
+        itemAdded('t2', 'u2', 0, role: 'user', text: 'q2'),
+        f('agent:usage', {
+          'turnId': 't2',
+          'total': {'totalTokens': 50},
+          'last': {'totalTokens': 20},
+          'contextWindow': 1000,
+        }),
+        f('agent:permission-request', {
+          'permissionId': 'perm1',
+          'title': 'Run?',
+          'options': [
+            {'optionId': 'ok', 'label': 'Allow', 'kind': 'allow_once'},
+          ],
+        }),
+        itemAdded('t2', 'm2', 0, text: 'He'),
+        f('agent:item-delta', {
+          'turnId': 't2',
+          'itemId': 'm2',
+          'textChunk': 'llo',
+        }),
+      ];
+      for (var i = 0; i < frames.length; i++) {
+        frames[i]['timestamp'] = 1000000 + 1000 * i;
+      }
+
+      final ta = FakeAgentTransport();
+      final a = AgentSessionService.fromSession(await newSession(ta));
+      final tb = FakeAgentTransport();
+      final b = AgentSessionService.fromSession(await newSession(tb));
+      for (final fr in frames) {
+        ta.emit(fr['type'] as String, fr);
+      }
+      tb.emit('agent:transcript-replay', {'sessionId': 'p', 'frames': frames});
+      await pumpPastDeltaFlush();
+
+      String describe(AgentSessionState s) {
+        int? ms(DateTime? d) => d?.millisecondsSinceEpoch;
+        return [
+          for (final turn in s.turns)
+            '${turn.turnId}|${turn.stopReason}|${ms(turn.startedAt)}|'
+                '${ms(turn.endedAt)}|${[
+                  for (final i in turn.items)
+                    '${i.itemId}/${i.kind}/${i.role}/${i.text}/${i.status}/'
+                        '${ms(i.timestamp)}',
+                ]}',
+          'item usage ${[
+            for (final e in s.usageByItem.entries) '${e.key}=${e.value.totalTokens}',
+          ]}',
+          'turn usage ${[
+            for (final e in s.usageByTurn.entries) '${e.key}=${e.value.totalTokens}',
+          ]}',
+          'meter ${s.usage?.total.totalTokens}/${s.usage?.last?.totalTokens}/'
+              '${s.usage?.contextWindow}',
+          'perms ${s.pendingPermissions.map((p) => p.permissionId).toList()}',
+          'loading ${s.loading}',
+        ].join('\n');
+      }
+
+      expect(describe(b.stateFor('p')), describe(a.stateFor('p')));
+      expect(b.stateFor('p').turns, hasLength(2));
+    });
+
+    test('a live frame after hydration never rewrites the list hydration '
+        'published', () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+      t.requestHandler = (method, params) => {
+        'frames': [
+          frame('agent:turn-start', 1, {'turnId': 'live'}),
+          itemAdded('live', 'i1', 1, text: 'one'),
+          frame('agent:usage', 1, {
+            'turnId': 'live',
+            'itemId': 'i1',
+            'total': <String, Object?>{},
+            'last': {'totalTokens': 1},
+          }),
+        ],
+        'activeTurnId': 'live',
+      };
+      await svc.hydrateIfNeeded('p');
+      final published = svc.stateFor('p');
+      final heldTurns = published.turns;
+      final heldItems = published.turns.single.items;
+      final heldUsage = published.usageByItem;
+
+      t.emitJson(itemAdded('live', 'i2', 2, text: 'two'));
+      t.emitJson(
+        frame('agent:usage', 2, {
+          'turnId': 'live',
+          'itemId': 'i2',
+          'total': <String, Object?>{},
+          'last': {'totalTokens': 2},
+        }),
+      );
+      t.emitJson(frame('agent:turn-start', 2, {'turnId': 'next'}));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(heldTurns, hasLength(1));
+      expect(heldItems, hasLength(1));
+      expect(heldUsage, hasLength(1));
+      final s = svc.stateFor('p');
+      expect(s.turns, hasLength(2));
+      expect(s.turns.first.items, hasLength(2));
+      expect(s.usageByItem, hasLength(2));
+    });
+
+    test('a buffered delta follows its item into the turn that now holds it',
+        () async {
+      final t = FakeAgentTransport();
+      final svc = AgentSessionService.fromSession(await newSession(t));
+
+      t.emit('agent:transcript-replay', {
+        'sessionId': 'p',
+        'frames': [
+          frame('agent:turn-start', 1, {'turnId': 'a'}),
+          itemAdded('a', 'X', 1, text: 'He'),
+          frame('agent:item-delta', 1, {
+            'turnId': 'a',
+            'itemId': 'X',
+            'textChunk': 'llo',
+          }),
+          frame('agent:snapshot', 1, {
+            'turnId': 'a',
+            'items': [
+              {
+                'itemId': 'Y',
+                'kind': 'message',
+                'role': 'assistant',
+                'text': 'y',
+              },
+            ],
+          }),
+          itemAdded('b', 'X', 1, text: 'He'),
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final turns = svc.stateFor('p').turns;
+      expect(turns.firstWhere((t) => t.turnId == 'b').items.single.text,
+          'Hello');
+      expect(
+        turns.firstWhere((t) => t.turnId == 'a').items.map((i) => i.itemId),
+        ['Y'],
+      );
+    });
+  });
+
+  group('live delta coalescing', () {
+    void openItem(FakeAgentTransport t, String text) {
+      t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 't1'});
+      t.emit('agent:item-added', {
+        'sessionId': 'p',
+        'turnId': 't1',
+        'itemId': 'i1',
+        'item': {
+          'itemId': 'i1',
+          'kind': 'message',
+          'role': 'assistant',
+          'text': text,
+        },
+      });
+    }
+
+    // Runs [body] under fake time against a streaming item 'He'; [seen] holds
+    // every state published after that setup.
+    void streaming(
+      void Function(
+        FakeAsync async,
+        FakeAgentTransport t,
+        AgentSessionService svc,
+        List<AgentSessionState> seen,
+      )
+      body,
+    ) => fakeAsync((async) {
+      final t = FakeAgentTransport();
+      late final AgentSessionService svc;
+      newSession(t).then((s) => svc = AgentSessionService.fromSession(s));
+      async.flushMicrotasks();
+      openItem(t, 'He');
+      async.flushMicrotasks();
+      final seen = <AgentSessionState>[];
+      svc.stateStreamFor('p').listen(seen.add);
+      body(async, t, svc, seen);
+      svc.dispose();
+      async.flushMicrotasks();
+    });
+
+    void delta(FakeAgentTransport t, String chunk) {
+      t.emit('agent:item-delta', {
+        'sessionId': 'p',
+        'turnId': 't1',
+        'itemId': 'i1',
+        'textChunk': chunk,
+      });
+    }
+
+    String textOf(AgentSessionService svc) =>
+        svc.stateFor('p').turns.single.items.single.text ?? '';
+
+    test('deltas inside one interval publish a single state, non-agent frames '
+        'between them included', () {
+      streaming((async, t, svc, seen) {
+        delta(t, 'l');
+        t.emit('terminal:frame', {'terminalId': 'x'});
+        async.elapse(const Duration(milliseconds: 5));
+        delta(t, 'l');
+        t.emit('tree:update', {'changes': <Object?>[]});
+        async.elapse(const Duration(milliseconds: 5));
+        delta(t, 'o');
+        async.flushMicrotasks();
+        expect(seen, isEmpty);
+
+        async.elapse(kAgentDeltaFlushInterval);
+
+        expect(seen, hasLength(1));
+        expect(seen.single.turns.single.items.single.text, 'Hello');
+      });
+    });
+
+    test('a steady stream still publishes once per interval', () {
+      streaming((async, t, svc, seen) {
+        for (var i = 0; i < 20; i++) {
+          delta(t, 'x');
+          async.elapse(const Duration(milliseconds: 2));
+        }
+        // A timer each delta restarted would publish nothing until the stream
+        // went quiet.
+        expect(seen.length, greaterThanOrEqualTo(2));
+        async.elapse(kAgentDeltaFlushInterval);
+        expect(textOf(svc), 'He${'x' * 20}');
+      });
+    });
+
+    test('a non-delta agent frame publishes the text streamed before it', () {
+      streaming((async, t, svc, seen) {
+        delta(t, 'llo');
+        t.emit('agent:turn-end', {
+          'sessionId': 'p',
+          'turnId': 't1',
+          'stopReason': 'end_turn',
+        });
+        async.flushMicrotasks();
+
+        expect(seen.last.turns.single.stopReason, 'end_turn');
+        expect(seen.last.turns.single.items.single.text, 'Hello');
+      });
+    });
+
+    test('a session reset drops pending deltas for good', () {
+      streaming((async, t, svc, seen) {
+        delta(t, 'llo');
+        t.emit('agent:session-reset', {'sessionId': 'p'});
+        async.elapse(kAgentDeltaFlushInterval);
+        expect(svc.stateFor('p').turns, isEmpty);
+
+        // The same item id streaming again must not pick up the dropped text.
+        openItem(t, 'Hi');
+        delta(t, '!');
+        async.elapse(kAgentDeltaFlushInterval);
+        expect(textOf(svc), 'Hi!');
+      });
+    });
   });
 }

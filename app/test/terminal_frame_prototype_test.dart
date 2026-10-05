@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:antgrid/util/terminal_links.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
@@ -11,7 +12,7 @@ void main() {
       final result = await Process.run('bun', [
         'run',
         'scripts/terminal-frame-fixtures.ts',
-      ], workingDirectory: '../bridge');
+      ], workingDirectory: '../bridge', stdoutEncoding: utf8);
       expect(result.exitCode, 0, reason: '${result.stderr}');
       final fixtures = (jsonDecode(result.stdout as String) as List).where(
         (f) => (f['name'] as String).startsWith('alternating background'),
@@ -54,7 +55,7 @@ void main() {
       final result = await Process.run('bun', [
         'run',
         'scripts/terminal-frame-fixtures.ts',
-      ], workingDirectory: '../bridge');
+      ], workingDirectory: '../bridge', stdoutEncoding: utf8);
       expect(result.exitCode, 0, reason: '${result.stderr}');
       final fixtures = jsonDecode(result.stdout as String) as List<dynamic>;
       for (final raw in fixtures) {
@@ -118,4 +119,80 @@ void main() {
       }
     },
   );
+
+  test('bridge-detected links reach native Ghostty as quiet private-scheme '
+      'cells', () async {
+    GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+    // Windows decodes a child's stdout with the console code page unless told
+    // otherwise, which turns the fixtures' non-ASCII text into mojibake.
+    final result = await Process.run('bun', [
+      'run',
+      'scripts/terminal-frame-fixtures.ts',
+    ], workingDirectory: '../bridge', stdoutEncoding: utf8);
+    expect(result.exitCode, 0, reason: '${result.stderr}');
+    final fixtures = {
+      for (final f in jsonDecode(result.stdout as String) as List<dynamic>)
+        (f as Map<String, dynamic>)['name'] as String: f,
+    };
+
+    String? uriAt(GhosttyTerminalController c, int row, int col) =>
+        c.hyperlinkUriAt(GhosttyTerminalCellPosition(row: row, col: col));
+
+    GhosttyTerminalController load(Map<String, dynamic> fixture) {
+      final frame = fixture['frame'] as Map<String, dynamic>;
+      final controller = GhosttyTerminalController(
+        initialCols: frame['cols'] as int,
+        initialRows: frame['rows'] as int,
+      );
+      controller.appendOutputBytes(utf8.encode(frame['ansi'] as String));
+      return controller;
+    }
+
+    final path = load(fixtures['detected path link']!);
+    try {
+      // `edit src/a.ts:12 now`: the printed mention is cols 5..15, and the
+      // words around it carry no link.
+      final uri = uriAt(path, 0, 5)!;
+      expect(isDetectedTerminalLink(uri), isTrue);
+      expect(uriAt(path, 0, 15), uri);
+      expect(uriAt(path, 0, 4), isNull);
+      expect(uriAt(path, 0, 16), isNull);
+      final link = parsePrintedPathLink(uri)!;
+      expect(link.path, 'src/a.ts');
+      expect(link.base, 'r');
+      expect(link.kind, PrintedPathKind.file);
+      expect(link.line, 12);
+      expect(link.column, isNull);
+    } finally {
+      path.dispose();
+    }
+
+    final url = load(fixtures['detected url link']!);
+    try {
+      // The sentence's closing full stop is not part of the URL.
+      final uri = uriAt(url, 0, 4)!;
+      expect(isDetectedTerminalLink(uri), isTrue);
+      expect(detectedUrlTarget(uri), 'https://example.com/a?b=1#c');
+      expect(uriAt(url, 0, 3), isNull);
+      expect(uriAt(url, 0, 4 + 'https://example.com/a?b=1#c'.length - 1), uri);
+      expect(uriAt(url, 0, 4 + 'https://example.com/a?b=1#c'.length), isNull);
+    } finally {
+      url.dispose();
+    }
+
+    final longest = load(fixtures['longest accepted link uri']!);
+    try {
+      // The longest URI the bridge will mint must survive the engine's fixed
+      // OSC 8 buffer, and one soft-wrapped path carries it on every row.
+      final uri = uriAt(longest, 0, 0)!;
+      expect(utf8.encode(uri).length, lessThanOrEqualTo(2000));
+      final link = parsePrintedPathLink(uri)!;
+      expect(link.path, 'src/${'€' * 217}.ts');
+      for (var row = 0; row < 6; row++) {
+        expect(uriAt(longest, row, 0), uri, reason: 'row $row');
+      }
+    } finally {
+      longest.dispose();
+    }
+  });
 }

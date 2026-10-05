@@ -442,8 +442,7 @@ export class NativePeerSessions extends PeerSessionOwner {
       handlers: {
         project: this.projectStreams.handler,
         terminal: this.terminalStreams.handlerFor("terminal"),
-        "tunnel-http": this.tunnelStreams.handlerFor("tunnel-http"),
-        "tunnel-ws": this.tunnelStreams.handlerFor("tunnel-ws"),
+        "tunnel-tcp": this.tunnelStreams.handlerFor("tunnel-tcp"),
         upload: this.uploadStreams.handlerFor("upload"),
       },
       schedule: this.nativeOpts.lifecycle?.schedule,

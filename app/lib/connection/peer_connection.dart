@@ -172,7 +172,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
           // Only the native payload died, so the central relay's state stream
           // reports nothing and the ladder has to be woken from here.
           if (!failure.retryable) {
-            _emit(const PeerTerminalError());
+            _emit(PeerTerminalError(failure.code));
           } else {
             _emit(const PeerSessionDown());
           }
@@ -182,13 +182,13 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
         if (error.cancelled || generation != _dialGeneration) {
           throw ConnectionAttemptCancelled();
         }
-        if (error.terminal) _emit(const PeerTerminalError());
+        if (error.terminal) _emit(PeerTerminalError(error.code));
         rethrow;
       } on PeerAuthorizationDenied {
-        _emit(const PeerTerminalError());
+        _emit(const PeerTerminalError(kPeerAuthorizationDeniedCode));
         rethrow;
       } on FormatException {
-        _emit(const PeerTerminalError());
+        _emit(const PeerTerminalError(kPeerAuthorizationMalformedCode));
         rethrow;
       }
     }
@@ -344,6 +344,7 @@ class RelayCentralControlDialer implements CentralControlContract {
     required this.identity,
     required this.epoch,
     required this.mintToken,
+    this.rejectToken,
   });
 
   final RelayService relay;
@@ -351,6 +352,7 @@ class RelayCentralControlDialer implements CentralControlContract {
   final DeviceIdentity identity;
   final int epoch;
   final Future<String> Function() mintToken;
+  final void Function(String token)? rejectToken;
   final _authErrors = StreamController<String>.broadcast(sync: true);
   String? _connectedUrl;
 
@@ -371,13 +373,20 @@ class RelayCentralControlDialer implements CentralControlContract {
       rethrow;
     }
     _connectedUrl = coords.relayUrl;
-    await relay.connect(
-      coords.relayUrl,
-      identity,
-      licenseToken: token,
-      epoch: epoch,
-      machineDeviceId: machineDeviceId,
-    );
+    try {
+      await relay.connect(
+        coords.relayUrl,
+        identity,
+        licenseToken: token,
+        epoch: epoch,
+        machineDeviceId: machineDeviceId,
+      );
+    } on RelayConnectException catch (error) {
+      // The relay's expiry verdict outranks our local clock. Retrying must not
+      // keep presenting a cached token it has already refused.
+      if (error.code == 'LICENSE_EXPIRED') rejectToken?.call(token);
+      rethrow;
+    }
     if (_connectedUrl != coords.relayUrl) {
       throw ConnectionAttemptCancelled();
     }

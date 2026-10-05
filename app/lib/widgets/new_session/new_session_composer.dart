@@ -19,7 +19,7 @@ import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_prompt_field.dart';
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_switch.dart';
 import '../../design/widgets/ab_tooltip.dart';
@@ -48,7 +48,6 @@ typedef StartNewSessionCallback =
     Future<void> Function(
       ProviderContainer ref, {
       bool allowActiveSessions,
-      bool stashIfDirty,
     });
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
@@ -328,13 +327,11 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     _reportedAbort = null;
     try {
       var allowActiveSessions = false;
-      var stashIfDirty = false;
       while (true) {
         try {
           await widget.submit(
             ref.container,
             allowActiveSessions: allowActiveSessions,
-            stashIfDirty: stashIfDirty,
           );
           break;
         } on ActiveSessionsBranchSwitchException catch (e) {
@@ -370,35 +367,6 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
             return;
           }
           allowActiveSessions = true;
-        } on DirtyWorktreeBranchSwitchException catch (e) {
-          if (stashIfDirty) {
-            rethrow;
-          }
-          if (!mounted) return;
-          if (_endedByCancel) return;
-          final confirm = await AbConfirmDialog.show(
-            context: context,
-            title: 'Stash uncommitted changes?',
-            body:
-                'Switching to "${e.branch}" would overwrite uncommitted changes '
-                'in this folder. Antgrid can stash them first, then switch — '
-                'restore or discard the stash later from the Git tab.',
-            cancelLabel: 'Cancel',
-            confirmLabel: 'Stash & switch',
-            destructive: false,
-          );
-          if (confirm != true || !mounted) return;
-
-          final target = ref.read(selectedTargetProjectProvider);
-          final selection = ref.read(newSessionBranchSelectionProvider);
-          if (target == null ||
-              target.id != e.targetId ||
-              selection == null ||
-              selection.targetId != e.targetId ||
-              selection.branch != e.branch) {
-            return;
-          }
-          stashIfDirty = true;
         }
       }
     } on SessionOperationException catch (e) {
@@ -407,7 +375,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       // can't act on; either beats the raw exception the generic arm prints.
       // No navigation — the user stays here with the form intact.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(
             e.errorCode,
@@ -424,7 +392,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       // instead would print the exception's type and code as if they were
       // part of the sentence.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
@@ -433,7 +401,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     } on RpcException catch (e) {
       // Same refusal, over the remote control plane.
       if (mounted && !_endedByCancel) {
-        showAbSnackBar(
+        showAbToast(
           context,
           sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
@@ -448,7 +416,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           'session start failed',
           fields: {'error': '$e', 'stack': '$stack'},
         );
-        showAbSnackBar(
+        showAbToast(
           context,
           'Couldn’t start the session. Check the selected agent and try again.',
           duration: const Duration(seconds: 8),
@@ -479,7 +447,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         .takeAbort();
     if (abort == null) return;
     _reportedAbort = abort;
-    showAbSnackBar(
+    showAbToast(
       context,
       _abortCopy(abort),
       // A cancel the user asked for is a confirmation, not something to read —

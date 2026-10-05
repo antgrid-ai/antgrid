@@ -28,6 +28,7 @@ const log = logger.child({ component: "win32-process" });
 // Win32 constants, named here rather than pulled from a package to keep the
 // dependency surface at `bun:ffi`.
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+const JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800;
 const JobObjectExtendedLimitInformation = 9;
 const PROCESS_TERMINATE = 0x0001;
 const PROCESS_QUERY_INFORMATION = 0x0400;
@@ -116,6 +117,7 @@ const kernel32Symbols = {
   CreateToolhelp32Snapshot: { args: [FFIType.u32, FFIType.u32], returns: FFIType.ptr },
   Process32FirstW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   Process32NextW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  GetDriveTypeW: { args: [FFIType.ptr], returns: FFIType.u32 },
   // lpBaseAddress is a u64 rather than a ptr so a PEB address crosses as an
   // exact BigInt: bun:ffi's `ptr` argument type takes a JS number, which cannot
   // represent every address a 64-bit process may be mapped at.
@@ -185,6 +187,15 @@ function loadNtdll(): ReturnType<typeof dlopen<typeof ntdllSymbols>>["symbols"] 
  */
 export function win32ProcessApiAvailable(): boolean {
   return loadApi() !== null;
+}
+
+/** `GetDriveTypeW` for `X:\`, or null when the Win32 layer is unavailable.
+ *  Throws when the call itself fails. */
+export function driveType(letter: string): number | null {
+  const a = loadApi();
+  if (a === null) return null;
+  const root = new Uint16Array([letter.charCodeAt(0), 0x3a, 0x5c, 0]);
+  return a.kernel32.GetDriveTypeW(ptr(root));
 }
 
 /** The pid is gone, as opposed to the machine refusing us. */
@@ -263,12 +274,13 @@ export class Win32Job {
   }
 
   /**
-   * Put `pid` — and, by inheritance, everything it goes on to spawn — in this
+   * Put `pid` — and, by inheritance, its ordinary descendants — in this
    * job. Returns whether the process is now a member; false for a pid that has
    * already exited, which is ordinary rather than an error.
    *
-   * Only DIRECT `CreateProcess` descendants inherit the job. A child launched
-   * through `ShellExecute` (a `Start-Process -WindowStyle Hidden`, say) is
+   * Direct `CreateProcess` descendants inherit the job unless they explicitly
+   * request `CREATE_BREAKAWAY_FROM_JOB` for a shared background service.
+   * A child launched through `ShellExecute` (a `Start-Process -WindowStyle Hidden`, say) is
    * created by another process entirely and joins that one's job, not ours — so
    * this reaches most of a PTY's tree, never provably all of it.
    */
@@ -355,7 +367,9 @@ export function createKillOnCloseJob(): Win32Job | null {
     const info = new Uint8Array(JOB_EXTENDED_LIMIT_INFORMATION_SIZE);
     new DataView(info.buffer).setUint32(
       JOB_LIMIT_FLAGS_OFFSET,
-      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+      // Codex starts its shared daemon with CREATE_BREAKAWAY_FROM_JOB so it
+      // survives the terminal. Ordinary descendants still join this job.
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK,
       true,
     );
     const ok = a.kernel32.SetInformationJobObject(

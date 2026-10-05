@@ -1,77 +1,104 @@
-// Drives TunnelStreamRegistry directly with fakes — no PeerStreamAcceptor, no
-// real StreamMux, no real TunnelManager. Admission (authorization, the
-// open-frame read, refusal codes, caps, unauthorized mid-stream, oversize
-// records, projectDetached, dropPeer) is covered once for every kind by
-// stream-admission.test.ts; this file starts at the handler boundary and
-// covers tunnel's own body: the head-record protocol, request-body pumping,
-// and the HTTP/WS exchange lifecycle.
-import { describe, test, expect } from "bun:test";
-import {
-  TunnelStreamRegistry,
-  type TunnelStreamRegistryOptions,
-} from "../src/peer/tunnel-streams";
+// Drives TunnelStreamRegistry directly with a fake QUIC stream and a real
+// TunnelManager dialling real local sockets — no PeerStreamAcceptor, no real
+// StreamMux. Admission (authorization, the open-frame read, refusal codes,
+// caps, unauthorized mid-stream, oversize records, projectDetached, dropPeer)
+// is covered once for every kind by stream-admission.test.ts; this file starts
+// at the handler boundary and covers the tunnel-tcp body: the head-record
+// protocol, the probe, and the raw pipe in both directions.
+import { afterEach, describe, expect, test } from "bun:test";
+import net from "node:net";
+import tls from "node:tls";
+import { TunnelStreamRegistry, type TunnelStreamRegistryOptions } from "../src/peer/tunnel-streams";
 import { STREAM_RESET_SCOPED, STREAM_STOP_SCOPED } from "../src/peer/stream-dispatch";
-import { STREAM_RAW_READ_BYTES } from "../src/peer/stream-records";
-import {
-  encodeTunnelDataRecord,
-  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-  TUNNEL_RECORD_TAG_WS_BINARY,
-  type TunnelHttpStreamOpen,
-  type TunnelWsStreamOpen,
-} from "antgrid-wire";
+import { createConnState } from "../src/conn-state";
+import { TunnelManager, type TunnelAdmission } from "../src/tunnel-manager";
 import type { TunnelProjectBinding } from "../src/project-streams";
-import type {
-  TunnelAdmission,
-  TunnelHttpExchange,
-  TunnelManager,
-  TunnelWsPeer,
-  TunnelWsUpstreamSink,
-} from "../src/tunnel-manager";
-import type { TunnelHttpRequest, TunnelWsOpen } from "../src/tunnel-protocol";
-import type { TunnelRequestBody } from "../src/localhost-fetch";
-import { createFakeBiStream, createFakeProjectBinding, flush, manualSchedule, refusalOf, type FakeBiStream } from "./support/fake-bi-stream";
+import type { TunnelTcpStreamOpen } from "antgrid-wire";
+import { SELF_SIGNED_LOCALHOST_CERT, SELF_SIGNED_LOCALHOST_KEY } from "./support/self-signed-localhost";
+import {
+  createFakeBiStream,
+  createFakeProjectBinding,
+  flush,
+  manualSchedule,
+  refusalOf,
+  until,
+  type FakeBiStream,
+} from "./support/fake-bi-stream";
 
-/** Drains a `TunnelRequestBody`'s stream to completion, the way a real fetch
- *  call would — a raw body is pull-based, so nothing reads off the wire until
- *  something calls this (or the manager under test does its own draining). */
-async function readBody(body: TunnelRequestBody | null): Promise<Uint8Array> {
-  if (!body) return new Uint8Array(0);
-  const stream = body.stream();
-  if (!stream) return new Uint8Array(0);
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  return new Uint8Array(Buffer.concat(chunks.map((c) => Buffer.from(c))));
+const PROJECT = "proj1";
+const PEER = "peer1";
+
+const servers: net.Server[] = [];
+const upstreamSockets = new Set<net.Socket>();
+const managers: TunnelManager[] = [];
+
+afterEach(() => {
+  for (const manager of managers.splice(0)) manager.stop();
+  for (const socket of upstreamSockets) socket.destroy();
+  upstreamSockets.clear();
+  for (const server of servers.splice(0)) server.close();
+});
+
+async function listen(server: net.Server): Promise<number> {
+  servers.push(server);
+  server.on("connection", (socket) => {
+    upstreamSockets.add(socket);
+    socket.on("close", () => upstreamSockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  return (server.address() as net.AddressInfo).port;
 }
 
-function fakeManager() {
-  const httpCalls: Array<{ req: TunnelHttpRequest; body: TunnelRequestBody | null; exchange: TunnelHttpExchange }> = [];
-  const wsCalls: Array<{ open: TunnelWsOpen; peer: TunnelWsPeer; sink: TunnelWsUpstreamSink }> = [];
-  let nextSink: TunnelWsUpstreamSink | undefined;
-  const manager: Pick<TunnelManager, "serveHttp" | "serveWs"> = {
-    serveHttp: async (req, body, exchange) => { httpCalls.push({ req, body, exchange }); },
-    serveWs: (open, peer) => {
-      const sink: TunnelWsUpstreamSink = nextSink ?? { data() {}, closed() {} };
-      wsCalls.push({ open, peer, sink });
-      return sink;
-    },
-  };
-  return {
-    manager: manager as TunnelManager,
-    httpCalls,
-    wsCalls,
-    setNextSink: (sink: TunnelWsUpstreamSink) => { nextSink = sink; },
-  };
+async function deadPort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as net.AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
 }
 
-/** Fake `TunnelStreamServer`: what `binding.tunnels()` returns. */
+/** The first four bytes of any raw payload the tests push: the fake stream
+ *  parses everything the bridge writes as `[u32 len][body]` records, and a
+ *  maximal length prefix keeps it from ever mistaking raw bytes for one. */
+const RAW_MARK = Buffer.from([0xff, 0xff, 0xff, 0xff]);
+
+function rawPayload(text: string): Buffer {
+  return Buffer.concat([RAW_MARK, Buffer.from(text)]);
+}
+
+/** An upstream that records what it received, and how the app's side ended. */
+function recordingServer(onConnection?: (socket: net.Socket) => void) {
+  const state = {
+    received: [] as Buffer[],
+    ended: false,
+    errors: [] as unknown[],
+    closed: false,
+    connections: 0,
+    socket: undefined as net.Socket | undefined,
+  };
+  const server = net.createServer((socket) => {
+    state.connections++;
+    state.socket = socket;
+    socket.on("error", (e) => state.errors.push(e));
+    socket.on("data", (chunk) => state.received.push(Buffer.from(chunk)));
+    socket.on("end", () => { state.ended = true; });
+    socket.on("close", () => { state.closed = true; });
+    onConnection?.(socket);
+  });
+  return { server, state, receivedText: () => Buffer.concat(state.received).toString() };
+}
+
 function fakeTunnelServer() {
   let refusal: { code: "NOT_ALLOWED"; message: string } | null = null;
-  const { manager, httpCalls, wsCalls, setNextSink } = fakeManager();
+  const manager = new TunnelManager({
+    projectId: PROJECT,
+    portLabels: new Map(),
+    previewPorts: new Set(),
+    sendEncrypted: () => {},
+    relayHost: "",
+    connState: createConnState(),
+  });
+  managers.push(manager);
   const admitCalls: Array<{ peerId: string; checkoutId: string }> = [];
   const admit = (peerId: string, checkoutId: string): TunnelAdmission => {
     admitCalls.push({ peerId, checkoutId });
@@ -79,13 +106,11 @@ function fakeTunnelServer() {
     return { ok: true, manager };
   };
   return {
-    admit, httpCalls, wsCalls, admitCalls, setNextSink,
+    admit, admitCalls, manager,
     setRefusal: (r: { code: "NOT_ALLOWED"; message: string } | null) => { refusal = r; },
   };
 }
 
-/** A `TunnelProjectBinding` built on the shared fake, plus tunnel's own fake
- *  upstream server wired through `setTunnels`. */
 function fakeBinding() {
   const server = fakeTunnelServer();
   const binding = createFakeProjectBinding();
@@ -100,83 +125,71 @@ function fakeBinding() {
 }
 
 function makeRegistry(overrides: Partial<TunnelStreamRegistryOptions> = {}) {
-  const cataloged = new Set<string>();
+  const cataloged = new Set<string>([PROJECT]);
   const bindings = new Map<string, TunnelProjectBinding>();
   const retiredPeers: Array<{ peerId: string; reason: "unauthorized" | "protocol-violation" }> = [];
-  const diagnostics: Array<{ type: string; detail: Record<string, unknown>; stream?: { kind: string; id: string } }> = [];
+  const diagnostics: Array<{ type: string; detail: Record<string, unknown> }> = [];
   const opts: TunnelStreamRegistryOptions = {
     projectCataloged: (id) => cataloged.has(id),
     projectBinding: (id) => bindings.get(id) ?? null,
     retirePeer: (peerId, reason) => retiredPeers.push({ peerId, reason }),
-    diagnostic: (type, detail, stream) => diagnostics.push({ type, detail, stream }),
+    diagnostic: (type, detail) => diagnostics.push({ type, detail }),
     ...overrides,
   };
   const registry = new TunnelStreamRegistry(opts);
-  return { registry, cataloged, bindings, retiredPeers, diagnostics };
+  const bound = fakeBinding();
+  bindings.set(PROJECT, bound.binding);
+  return { registry, cataloged, bindings, retiredPeers, diagnostics, ...bound };
 }
 
-const PROJECT = "proj1";
-const PEER = "peer1";
-
-function admitHttp(
+function admitTcp(
   registry: TunnelStreamRegistry,
-  opts: { peerId?: string; projectId?: string; requestId?: string; authorized?: () => boolean } = {},
+  opts: { peerId?: string; projectId?: string; connId?: string; authorized?: () => boolean } = {},
 ) {
   const fake = createFakeBiStream();
-  const requestId = opts.requestId ?? crypto.randomUUID();
-  const open: TunnelHttpStreamOpen = { kind: "tunnel-http", projectId: opts.projectId ?? PROJECT, requestId };
+  const connId = opts.connId ?? crypto.randomUUID();
+  const open: TunnelTcpStreamOpen = { kind: "tunnel-tcp", projectId: opts.projectId ?? PROJECT, connId };
   const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  const result = registry.handlerFor("tunnel-http")(admission);
-  return { fake, requestId, admission, result };
+  const result = registry.handlerFor("tunnel-tcp")(admission);
+  return { fake, connId, admission, result };
 }
 
-function admitWs(
-  registry: TunnelStreamRegistry,
-  opts: { peerId?: string; projectId?: string; wsId?: string; authorized?: () => boolean } = {},
+function tcpOpen(connId: string, port: number, extra: Record<string, unknown> = {}) {
+  return { type: "tunnel:tcp-open", connId, port, ...extra };
+}
+
+/** Admits a stream, pushes its head and waits for the bridge's one reply. */
+async function openTunnel(
+  ctx: ReturnType<typeof makeRegistry>,
+  port: number,
+  extra: Record<string, unknown> = {},
+  admitOpts: Parameters<typeof admitTcp>[1] = {},
 ) {
-  const fake = createFakeBiStream();
-  const wsId = opts.wsId ?? crypto.randomUUID();
-  const open: TunnelWsStreamOpen = { kind: "tunnel-ws", projectId: opts.projectId ?? PROJECT, wsId };
-  const admission = { peerId: opts.peerId ?? PEER, open, stream: fake.stream, authorized: opts.authorized ?? (() => true) };
-  const result = registry.handlerFor("tunnel-ws")(admission);
-  return { fake, wsId, admission, result };
+  const admitted = admitTcp(ctx.registry, admitOpts);
+  admitted.fake.pushRecord(tcpOpen(admitted.connId, port, extra));
+  await until(() => admitted.fake.firstRecord() !== undefined);
+  return admitted;
 }
 
-function httpRequest(requestId: string, opts: Partial<TunnelHttpRequest> = {}): TunnelHttpRequest {
-  return {
-    type: "tunnel:http-request",
-    requestId,
-    port: 3000,
-    method: "GET",
-    path: "/",
-    bodyLength: 0,
-    checkoutId: "main",
-    ...opts,
-  };
+function replyOf(fake: FakeBiStream): Record<string, unknown> {
+  return JSON.parse(fake.firstRecord()!) as Record<string, unknown>;
 }
 
-function wsOpenRecord(wsId: string, opts: Partial<TunnelWsOpen> = {}): TunnelWsOpen {
-  return { type: "tunnel:ws-open", tunnelId: wsId, port: 3000, path: "/", checkoutId: "main", ...opts };
-}
-
-describe("TunnelStreamRegistry", () => {
+describe("TunnelStreamRegistry: head and admission", () => {
   test("a head that never arrives resets the writer and frees the slot immediately, stopping the receive half only once the pending read settles", async () => {
     const ctl = manualSchedule();
-    const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule });
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, admission } = admitHttp(registry, {});
-    expect(registry.streamCount(admission.peerId)).toBe(1);
+    const ctx = makeRegistry({ schedule: ctl.schedule });
+    const { fake, admission } = admitTcp(ctx.registry);
+    expect(ctx.registry.streamCount(admission.peerId)).toBe(1);
 
     ctl.fire();
     await flush();
     expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(admission.peerId)).toBe(0);
+    expect(ctx.registry.streamCount(admission.peerId)).toBe(0);
     expect(fake.stops).toEqual([]); // the read is still outstanding
 
     // The pending read settling with an ERROR (the app hung up first) means
-    // there is nothing left to stop — `stop()` only fires for a read that
-    // resolves late, so a fresh record isn't left to leak past the timeout.
+    // there is nothing left to stop.
     fake.endWith();
     await flush();
     expect(fake.stops).toEqual([]);
@@ -184,432 +197,370 @@ describe("TunnelStreamRegistry", () => {
 
   test("a head record that arrives AFTER the deadline still gets its receive half stopped, once that late read settles", async () => {
     const ctl = manualSchedule();
-    const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule });
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-    const { fake, requestId, admission } = admitHttp(registry, {});
+    const ctx = makeRegistry({ schedule: ctl.schedule });
+    const { fake, connId, admission } = admitTcp(ctx.registry);
 
     ctl.fire();
     await flush();
     expect(fake.stops).toEqual([]);
 
-    fake.pushRecord(httpRequest(requestId)); // arrives late, after the timeout fired
+    fake.pushRecord(tcpOpen(connId, 3000));
     await flush();
     expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
-    expect(registry.streamCount(admission.peerId)).toBe(0);
+    expect(ctx.registry.streamCount(admission.peerId)).toBe(0);
+    expect(ctx.server.admitCalls).toEqual([]);
   });
 
-  test("a head that fails validation is refused INVALID", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    bindings.set(PROJECT, fakeBinding().binding);
-
-    const cases: Array<{ name: string; build: (requestId: string) => unknown; messageContains?: string }> = [
-      { name: "not the JSON control kind", build: () => encodeTunnelDataRecord(TUNNEL_RECORD_TAG_WS_BINARY, new Uint8Array([1, 2, 3])) },
-      { name: "malformed JSON", build: () => new TextEncoder().encode("{not json}") },
-      { name: "id disagrees with the open frame", build: () => ({ type: "tunnel:http-request", requestId: "not-the-bound-id", port: 3000, method: "GET", path: "/" }) },
-      { name: "fails the schema", build: (requestId) => ({ type: "tunnel:http-request", requestId, port: -1, method: "GET", path: "/" }) },
-      { name: "bodyLength over the wire cap", build: (requestId) => httpRequest(requestId, { bodyLength: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES + 1 }), messageContains: "large" },
-      { name: "content-length disagrees with bodyLength", build: (requestId) => httpRequest(requestId, { bodyLength: 10, headers: { "Content-Length": "999" } }), messageContains: "content-length" },
-    ];
-
-    for (const c of cases) {
-      const { fake, requestId } = admitHttp(registry, {});
-      const record = c.build(requestId);
-      fake.pushRecord(record instanceof Uint8Array ? record : (record as never));
-      await flush();
-      expect(refusalOf(fake)).toMatchObject(
-        c.messageContains
-          ? { code: "INVALID", message: expect.stringContaining(c.messageContains) }
-          : { code: "INVALID" },
-      );
-    }
+  test("a head whose connId differs from the open frame's is refused INVALID, and nothing is dialled or admitted", async () => {
+    const { server, state } = recordingServer();
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = admitTcp(ctx.registry);
+    fake.pushRecord(tcpOpen("some-other-conn", port));
+    await flush(5);
+    expect(refusalOf(fake)).toMatchObject({ code: "INVALID" });
+    expect(fake.isFinished()).toBe(true);
+    expect(ctx.server.admitCalls).toEqual([]);
+    expect(state.connections).toBe(0);
+    expect(ctx.retiredPeers).toEqual([]);
   });
 
-  test("a head record whose project has no tunnel server is refused NOT_ALLOWED, whether that was true at admission or only by the time the head arrives", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fb.setAvailable(false); // becomes unavailable between admission and the head record
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
+  for (const [name, head] of [
+    ["not JSON", "this is not json"],
+    ["a JSON array", "[]"],
+    ["the wrong record type", JSON.stringify({ type: "tunnel:http-request", connId: "x", port: 3000 })],
+    ["a port of zero", JSON.stringify({ type: "tunnel:tcp-open", connId: "$id", port: 0 })],
+    ["a port above 65535", JSON.stringify({ type: "tunnel:tcp-open", connId: "$id", port: 65536 })],
+    ["a fractional port", JSON.stringify({ type: "tunnel:tcp-open", connId: "$id", port: 80.5 })],
+    ["a missing port", JSON.stringify({ type: "tunnel:tcp-open", connId: "$id" })],
+  ] as const) {
+    test(`a head that is ${name} is refused INVALID without admitting`, async () => {
+      const ctx = makeRegistry();
+      const { fake, connId, admission } = admitTcp(ctx.registry);
+      fake.pushRecord(head.replaceAll("$id", connId));
+      await flush(5);
+      expect(refusalOf(fake)).toMatchObject({ code: "INVALID" });
+      expect(fake.isFinished()).toBe(true);
+      expect(ctx.server.admitCalls).toEqual([]);
+      expect(ctx.registry.streamCount(admission.peerId)).toBe(0);
+    });
+  }
+
+  test("a head that is not valid UTF-8 is refused INVALID", async () => {
+    const ctx = makeRegistry();
+    const { fake } = admitTcp(ctx.registry);
+    fake.pushRecord(new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]));
+    await flush(5);
+    expect(refusalOf(fake)).toMatchObject({ code: "INVALID" });
+  });
+
+  test("a head longer than the record cap retires the connection as a protocol violation", async () => {
+    const ctx = makeRegistry();
+    const { fake } = admitTcp(ctx.registry);
+    fake.pushOverlongPrefix(4097);
+    await flush(5);
+    expect(ctx.retiredPeers).toEqual([{ peerId: PEER, reason: "protocol-violation" }]);
+    expect(ctx.server.admitCalls).toEqual([]);
+  });
+
+  test("the checkout named in the head is what admit() is asked about, and a refusal there is one stream:refused record then FIN", async () => {
+    const { server, state } = recordingServer();
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    ctx.server.setRefusal({ code: "NOT_ALLOWED", message: "unknown checkout" });
+    const { fake, admission } = admitTcp(ctx.registry);
+    fake.pushRecord(tcpOpen(admission.open.connId, port, { checkoutId: "wt-7" }));
+    await flush(5);
+    expect(ctx.server.admitCalls).toEqual([{ peerId: PEER, checkoutId: "wt-7" }]);
+    expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED", message: "unknown checkout" });
+    expect(fake.records()).toHaveLength(1);
+    expect(fake.isFinished()).toBe(true);
+    expect(state.connections).toBe(0);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+  });
+
+  test("checkoutId defaults to main", async () => {
+    const port = await deadPort();
+    const ctx = makeRegistry();
+    await openTunnel(ctx, port);
+    expect(ctx.server.admitCalls).toEqual([{ peerId: PEER, checkoutId: "main" }]);
+  });
+
+  test("tunnels becoming unavailable between admission and the head refuses NOT_ALLOWED", async () => {
+    const ctx = makeRegistry();
+    const { fake, connId } = admitTcp(ctx.registry);
+    ctx.setAvailable(false);
+    fake.pushRecord(tcpOpen(connId, 3000));
+    await flush(5);
+    expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED", message: "tunnels not available" });
+  });
+});
+
+describe("TunnelStreamRegistry: unreachable upstream", () => {
+  test("a refused port answers tunnel:tcp-error then FIN, frees the slot and never resets", async () => {
+    const port = await deadPort();
+    const ctx = makeRegistry();
+    const { fake, connId } = await openTunnel(ctx, port);
+    await until(() => fake.isFinished());
+    expect(replyOf(fake)).toMatchObject({ type: "tunnel:tcp-error", connId });
+    expect(String(replyOf(fake).message)).toMatch(/refused/i);
+    expect(fake.records()).toHaveLength(1);
+    expect(fake.resets).toEqual([]);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(ctx.diagnostics.some((d) => d.type === "tunnel-stream:tcp-unreachable")).toBe(true);
+  });
+});
+
+describe("TunnelStreamRegistry: probe", () => {
+  test("a plaintext server is reported tls:false, the reply is followed by FIN, and nothing is piped", async () => {
+    const { server, state } = recordingServer((socket) => {
+      socket.on("data", () => socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n"));
+    });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake, connId } = await openTunnel(ctx, port, { probe: true });
+    await until(() => fake.isFinished());
+    expect(replyOf(fake)).toEqual({ type: "tunnel:tcp-ready", connId, tls: false });
+    expect(fake.records()).toHaveLength(1);
+    expect(fake.rawWritten().length).toBe(0);
+    expect(state.received.length).toBeLessThanOrEqual(1);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
+  });
+
+  test("a self-signed TLS server is reported tls:true", async () => {
+    const server = tls.createServer({ cert: SELF_SIGNED_LOCALHOST_CERT, key: SELF_SIGNED_LOCALHOST_KEY }, (socket) => {
+      socket.on("error", () => {});
+    });
+    server.on("tlsClientError", () => {});
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake, connId } = await openTunnel(ctx, port, { probe: true });
+    await until(() => fake.isFinished());
+    expect(replyOf(fake)).toEqual({ type: "tunnel:tcp-ready", connId, tls: true });
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+  });
+
+  test("an unreachable port answers tunnel:tcp-error then FIN", async () => {
+    const port = await deadPort();
+    const ctx = makeRegistry();
+    const { fake, connId } = await openTunnel(ctx, port, { probe: true });
+    await until(() => fake.isFinished());
+    expect(replyOf(fake)).toMatchObject({ type: "tunnel:tcp-error", connId });
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+  });
+
+  test("a probe is still admitted through the checkout gate", async () => {
+    const ctx = makeRegistry();
+    ctx.server.setRefusal({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
+    const { fake, admission } = admitTcp(ctx.registry);
+    fake.pushRecord(tcpOpen(admission.open.connId, 3000, { probe: true }));
+    await flush(5);
     expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED" });
   });
 
-  test("admit() refusals are passed through in-band, by code, and never reach serveHttp", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    fb.server.setRefusal({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
-    expect(refusalOf(fake)).toMatchObject({ code: "NOT_ALLOWED", message: "mobile access is disabled" });
-    expect(fb.server.httpCalls).toEqual([]);
+  test("a peer dropped while probing gets no reply and the slot is already free", async () => {
+    // Silent, so the probe is still waiting when the peer goes.
+    const port = await listen(net.createServer((socket) => { socket.on("error", () => {}); }));
+    const ctx = makeRegistry();
+    const { fake, connId } = admitTcp(ctx.registry);
+    fake.pushRecord(tcpOpen(connId, port, { probe: true }));
+    await until(() => ctx.server.admitCalls.length === 1);
+    ctx.registry.dropPeer(PEER);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fake.records()).toEqual([]);
+    expect(ctx.retiredPeers).toEqual([]);
   });
+});
 
-  test("exchange.fail is a dropped diagnostic tagged with this request's own tunnel-http stream", async () => {
-    const { registry, cataloged, bindings, diagnostics } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 0 }));
-    await flush();
-    expect(fb.server.httpCalls).toHaveLength(1);
+describe("TunnelStreamRegistry: raw pipe", () => {
+  test("ready is the first record, and app bytes reach the upstream and come back byte for byte", async () => {
+    const { server, state, receivedText } = recordingServer((socket) => { socket.on("data", (chunk) => socket.write(chunk)); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake, connId } = await openTunnel(ctx, port);
+    expect(replyOf(fake)).toEqual({ type: "tunnel:tcp-ready", connId });
+    expect(fake.records()).toHaveLength(1);
 
-    fb.server.httpCalls[0]!.exchange.fail("upstream-error");
-    await flush();
-
-    const event = diagnostics.find((d) => d.type === "tunnel-stream:http-failed");
-    expect(event?.stream).toEqual({ kind: "tunnel-http", id: requestId });
-  });
-
-  test("a FIN or reset before the declared body fully arrives errors the body stream and resets the tunnel stream", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
-    await flush();
-    // The body is pull-based (highWaterMark 0): serveHttp is called right
-    // away, but nothing is read off the wire until the manager drains it.
-    expect(fb.server.httpCalls).toHaveLength(1);
-    const { body, exchange } = fb.server.httpCalls[0]!;
-
-    const drained = readBody(body);
-    await flush();
-    fake.endWith(); // the app hangs up mid-body
-    await expect(drained).rejects.toThrow();
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(PEER)).toBe(0);
-  });
-
-  test("a request body arriving across several raw reads is reassembled byte-exact, even split at odd boundaries", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    const payload = new TextEncoder().encode("the quick brown fox");
-    fake.pushRecord(httpRequest(requestId, { bodyLength: payload.byteLength }));
-    await flush();
-    const { body } = fb.server.httpCalls[0]!;
-
-    const drained = readBody(body);
-    await flush();
-    // Three uneven pieces, not aligned to any word or record boundary —
-    // flushed between each so every one lands on its own pending raw read.
-    fake.pushRaw(payload.subarray(0, 3));
-    await flush();
-    fake.pushRaw(payload.subarray(3, 4));
-    await flush();
-    fake.pushRaw(payload.subarray(4));
-    expect(await drained).toEqual(payload);
-  });
-
-  test("a response ends with a clean FIN and no end-of-body record: writer.finish() is the only 'done' signal", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
-    const exchange = fb.server.httpCalls[0]!.exchange;
-
-    await exchange.head({ status: 200, headers: {} });
-    const writesBeforeBody = fake.order.filter((o) => o === "writeAll").length;
-    await exchange.body(new TextEncoder().encode("hi"));
-    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBeforeBody + 1);
-    expect(fake.isFinished()).toBe(false);
-    await exchange.end();
-
-    // `finish()` alone is the "done" signal — no end-of-body record.
-    expect(fake.isFinished()).toBe(true);
-    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBeforeBody + 1);
-  });
-
-  test("more bytes than the declared body length is a stream breach: the upstream body errors and the stream resets", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 3 }));
-    await flush();
-    const { body, exchange } = fb.server.httpCalls[0]!;
-
-    const drained = readBody(body);
-    await flush();
-    fake.pushRaw(new TextEncoder().encode("hel")); // exactly the declared length
-    expect(await drained).toEqual(new TextEncoder().encode("hel"));
-    await flush(); // the body drains, handing the wire to the cancel watcher
-
-    // More bytes than declared arrive next — a stream breach the cancel
-    // watcher catches, not the already-closed body.
-    fake.pushRaw(new TextEncoder().encode("lo"));
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(PEER)).toBe(0);
-  });
-
-  test("a request body that stalls short of its declared length times out, erroring the body and resetting the stream", async () => {
-    const ctl = manualSchedule();
-    const { registry, cataloged, bindings } = makeRegistry({ schedule: ctl.schedule, requestBodyIdleMs: 5_000 });
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
-    await flush();
-    const { body, exchange } = fb.server.httpCalls[0]!;
-
-    const drained = readBody(body);
-    await flush();
-    fake.pushRaw(new TextEncoder().encode("abc")); // short of the declared 10
-    await flush();
-    ctl.fire(); // the idle clock fires before any more bytes arrive
-
-    await expect(drained).rejects.toThrow();
-    await flush();
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-  });
-
-  test("the app's FIN after end() is its own orderly close and is ignored, not treated as a cancel", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
-    const exchange = fb.server.httpCalls[0]!.exchange;
-
-    await exchange.head({ status: 200, headers: {} });
-    await exchange.end();
-    fake.endWith(); // the app's own FIN, arriving after our end()
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(false);
+    const payload = rawPayload("GET / HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    fake.pushRaw(payload);
+    await until(() => Buffer.concat(state.received).equals(payload));
+    await until(() => Buffer.from(fake.rawWritten()).equals(payload));
+    expect(receivedText()).toContain("GET / HTTP/1.1");
+    expect(ctx.registry.streamCount(PEER)).toBe(1);
     expect(fake.resets).toEqual([]);
   });
 
-  test("the app cancelling while a response is already in flight aborts the exchange and resets the stream", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
-    const exchange = fb.server.httpCalls[0]!.exchange;
-
-    await exchange.head({ status: 200, headers: {} });
-    await exchange.body(new TextEncoder().encode("partial"));
-    fake.endWith(); // the app hangs up before end() — a cancel, not its own FIN
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(PEER)).toBe(0);
+  test("bytes flow across many reads without loss or reordering", async () => {
+    const { server, state } = recordingServer();
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    const parts = Array.from({ length: 20 }, (_, i) => Buffer.alloc(1000, i));
+    for (const part of parts) fake.pushRaw(part);
+    const expected = Buffer.concat(parts);
+    await until(() => Buffer.concat(state.received).length === expected.length);
+    expect(Buffer.concat(state.received).equals(expected)).toBe(true);
   });
 
-  test("a reader rejection before end() is the app's cancel: aborts the exchange signal and the writer", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId));
-    await flush();
-    expect(fb.server.httpCalls).toHaveLength(1);
-    const exchange = fb.server.httpCalls[0]!.exchange;
-    expect(exchange.signal.aborted).toBe(false);
-
-    fake.endWith(); // the app cancels before the manager ever calls end()
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(PEER)).toBe(0);
-  });
-
-  test("an extra record after the declared body is a stream breach: reset, but no retirePeer", async () => {
-    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId)); // bodyLength 0: nothing more is allowed
-    await flush();
-    expect(fb.server.httpCalls).toHaveLength(1);
-    const exchange = fb.server.httpCalls[0]!.exchange;
-
-    // The watcher reads raw bytes, so any stray byte is a breach — not a
-    // specific record shape.
-    fake.pushRaw(new Uint8Array([1]));
-    await flush();
-
-    expect(exchange.signal.aborted).toBe(true);
-    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
+  test("the app's FIN ends the upstream gracefully (a FIN, never an error), then the bridge FINs and frees the slot", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    fake.pushRaw(rawPayload("bye"));
+    await until(() => state.received.length > 0);
+    fake.endWith();
+    await until(() => state.ended);
+    await until(() => fake.isFinished());
+    await until(() => ctx.registry.streamCount(PEER) === 0);
+    expect(state.errors).toEqual([]);
+    expect(fake.resets).toEqual([]);
     expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
-    expect(retiredPeers).toEqual([]);
   });
 
-  test("an upstream WS close after mayDeliverTo turns false writes no ws-close record: it resets and unbinds", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, wsId } = admitWs(registry, {});
-    fake.pushRecord(wsOpenRecord(wsId));
-    await flush();
-    const peer = fb.server.wsCalls[0]!.peer;
-    const writesBefore = fake.order.filter((o) => o === "writeAll").length;
+  test("the app's reset is treated like its FIN: the upstream ends gracefully and the slot is freed", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    fake.endWith(new Error("stream reset by peer"));
+    await until(() => state.ended);
+    await until(() => ctx.registry.streamCount(PEER) === 0);
+    expect(state.errors).toEqual([]);
+    expect(ctx.retiredPeers).toEqual([]);
+  });
 
-    fb.setMayDeliver(false);
-    peer.close(1000, "bye");
-    await flush();
+  test("the upstream closing sends its last bytes, then FIN, without a reset", async () => {
+    const { server } = recordingServer((socket) => { socket.on("data", () => socket.end("bye")); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    fake.pushRaw(rawPayload("go"));
+    await until(() => fake.isFinished());
+    expect(Buffer.from(fake.rawWritten()).toString()).toBe("bye");
+    expect(fake.resets).toEqual([]);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+  });
 
-    expect(fake.order.filter((o) => o === "writeAll").length).toBe(writesBefore);
-    expect(fake.isFinished()).toBe(false);
+  test("the upstream closing while the app's read is outstanding still frees the slot at once, and stops the receive half when the app's own end arrives", async () => {
+    const { server } = recordingServer((socket) => { socket.end(); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    await until(() => fake.isFinished());
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(fake.stops).toEqual([]);
+    fake.endWith();
+    await flush(5);
+    expect(fake.stops).toEqual([STREAM_STOP_SCOPED]);
+  });
+
+  test("a burst from the upstream never overflows the send queue: at most one chunk is in flight while the QUIC send window is full", async () => {
+    let upstream: net.Socket | undefined;
+    const { server } = recordingServer((socket) => { upstream = socket; });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    await until(() => upstream !== undefined);
+    const writesBefore = fake.writeAllLengths.length;
+    fake.holdWrites();
+    upstream!.write(Buffer.alloc(16 * 1024 * 1024, 0x61));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The parked write is the only one issued; the socket is paused behind it.
+    expect(fake.writeAllLengths.length - writesBefore).toBeLessThanOrEqual(1);
+    expect(fake.resets).toEqual([]);
+    expect(ctx.registry.streamCount(PEER)).toBe(1);
+
+    fake.releaseWrites();
+    await until(() => fake.writeAllLengths.length - writesBefore >= 3);
+    expect(fake.resets).toEqual([]);
+  });
+
+  test("an app that stops reading paces a fast app-side sender: the next read is not issued until the upstream took the previous bytes", async () => {
+    const { server, state } = recordingServer();
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    await until(() => fake.readSizes.length >= 1);
+    const outstanding = fake.readSizes.length;
+    fake.pushRaw(Buffer.alloc(1000, 1));
+    await until(() => state.received.length > 0);
+    await until(() => fake.readSizes.length > outstanding);
+    // Exactly one raw read is ever outstanding.
+    expect(fake.pendingReads()).toBe(1);
+  });
+});
+
+describe("TunnelStreamRegistry: teardown", () => {
+  test("dropPeer ends the upstream gracefully and frees the slot without retiring the connection", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    ctx.registry.dropPeer(PEER);
+    await until(() => state.ended);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(ctx.retiredPeers).toEqual([]);
+    expect(state.errors).toEqual([]);
     expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    expect(registry.streamCount(PEER)).toBe(0);
   });
 
-  test("false mayDeliverTo on a send reports dropped and aborts the writer: an HTTP exchange as well as a WS sink", async () => {
-    {
-      const { registry, cataloged, bindings } = makeRegistry();
-      cataloged.add(PROJECT);
-      const fb = fakeBinding();
-      bindings.set(PROJECT, fb.binding);
-      const { fake, requestId } = admitHttp(registry, {});
-      fake.pushRecord(httpRequest(requestId));
-      await flush();
-      const exchange = fb.server.httpCalls[0]!.exchange;
-
-      fb.setMayDeliver(false);
-      const outcome = await exchange.head({ status: 200, headers: {} });
-      expect(outcome).toBe("dropped");
-      expect(exchange.signal.aborted).toBe(true);
-      expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-      expect(registry.streamCount(PEER)).toBe(0);
-    }
-    {
-      const { registry, cataloged, bindings } = makeRegistry();
-      cataloged.add(PROJECT);
-      const fb = fakeBinding();
-      bindings.set(PROJECT, fb.binding);
-      const closedCalls: Array<[number?, string?]> = [];
-      fb.server.setNextSink({ data() {}, closed: (code, reason) => { closedCalls.push([code, reason]); } });
-      const { fake, wsId } = admitWs(registry, {});
-      fake.pushRecord(wsOpenRecord(wsId));
-      await flush();
-      const peer = fb.server.wsCalls[0]!.peer;
-
-      fb.setMayDeliver(false);
-      const outcome = await peer.send({ binary: false, bytes: new TextEncoder().encode("x") });
-      expect(outcome).toBe("dropped");
-      expect(closedCalls).toEqual([[undefined, undefined]]);
-      expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
-    }
+  test("projectDetached ends that project's tunnels' upstreams gracefully", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    await openTunnel(ctx, port);
+    ctx.registry.projectDetached(PROJECT);
+    await until(() => state.ended);
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(state.errors).toEqual([]);
   });
 
-  test("a request-body raw read never asks for more than the declared bytes still owed", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    const declared = STREAM_RAW_READ_BYTES + 7;
-    fake.pushRecord(httpRequest(requestId, { bodyLength: declared }));
-    await flush();
-    const drained = readBody(fb.server.httpCalls[0]!.body);
-    await flush();
-    fake.pushRaw(new Uint8Array(STREAM_RAW_READ_BYTES));
-    await flush();
-    fake.pushRaw(new Uint8Array(7));
-    expect((await drained).byteLength).toBe(declared);
-
-    // The second read is sized to the 7 bytes left, never a full raw read
-    // that could swallow whatever the app sends after its body.
-    expect(fake.readSizes.slice(0, 2)).toEqual([STREAM_RAW_READ_BYTES, 7]);
+  test("stopping the manager ends every live forward: the upstream gets a FIN and the stream a FIN", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    ctx.server.manager.stop();
+    await until(() => state.ended);
+    await until(() => fake.isFinished());
+    expect(ctx.registry.streamCount(PEER)).toBe(0);
+    expect(fake.resets).toEqual([]);
   });
 
-  test("authorized() turning false after a raw request-body read retires the peer and errors the body", async () => {
-    const { registry, cataloged, bindings, retiredPeers } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
+  test("a peer that may no longer receive ends the tunnel instead of being sent upstream bytes", async () => {
+    let upstream: net.Socket | undefined;
+    const { server, state } = recordingServer((socket) => {
+      upstream = socket;
+      socket.on("end", () => socket.end());
+    });
+    const port = await listen(server);
+    const ctx = makeRegistry();
+    const { fake } = await openTunnel(ctx, port);
+    await until(() => upstream !== undefined);
+    const writtenBefore = fake.rawWritten().length;
+    ctx.setMayDeliver(false);
+    upstream!.write("secret");
+    await until(() => ctx.registry.streamCount(PEER) === 0);
+    await until(() => state.ended);
+    expect(fake.rawWritten().length).toBe(writtenBefore);
+    expect(fake.resets).toEqual([STREAM_RESET_SCOPED]);
+  });
+
+  test("bytes from an app whose lease is gone retire the connection and never reach the upstream", async () => {
+    const { server, state } = recordingServer((socket) => { socket.on("end", () => socket.end()); });
+    const port = await listen(server);
+    const ctx = makeRegistry();
     let authorized = true;
-    const { fake, requestId } = admitHttp(registry, { authorized: () => authorized });
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 10 }));
-    await flush();
-    const drained = readBody(fb.server.httpCalls[0]!.body);
-    await flush();
-
+    const { fake } = await openTunnel(ctx, port, {}, { authorized: () => authorized });
+    await until(() => fake.readSizes.length >= 1);
     authorized = false;
-    fake.pushRaw(new TextEncoder().encode("abc"));
-
-    await expect(drained).rejects.toThrow();
-    expect(retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
-  });
-
-  test("a second body stream (the scheme retry) replays what the first pulled, then continues from the wire", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 6 }));
-    await flush();
-    const body = fb.server.httpCalls[0]!.body!;
-
-    const first = body.stream()!.getReader();
-    const firstRead = first.read();
-    fake.pushRaw(new TextEncoder().encode("abc"));
-    expect(new TextDecoder().decode((await firstRead).value)).toBe("abc");
-    void first.cancel();
-
-    const retry = readBody(body);
-    await flush();
-    fake.pushRaw(new TextEncoder().encode("def"));
-    expect(new TextDecoder().decode(await retry)).toBe("abcdef");
-  });
-
-  test("a retry started while the first attempt's read is still outstanding gets that read's bytes, in order", async () => {
-    const { registry, cataloged, bindings } = makeRegistry();
-    cataloged.add(PROJECT);
-    const fb = fakeBinding();
-    bindings.set(PROJECT, fb.binding);
-    const { fake, requestId } = admitHttp(registry, {});
-    fake.pushRecord(httpRequest(requestId, { bodyLength: 6 }));
-    await flush();
-    const body = fb.server.httpCalls[0]!.body!;
-
-    // The first attempt's fetch pulls once and fails before the app's bytes
-    // arrive, leaving that raw read outstanding on the stream.
-    const first = body.stream()!.getReader();
-    void first.read().catch(() => {});
-    await flush();
-    void first.cancel().catch(() => {});
-
-    const retry = readBody(body);
-    await flush();
-    fake.pushRaw(new TextEncoder().encode("abc"));
-    await flush();
-    fake.pushRaw(new TextEncoder().encode("def"));
-    expect(new TextDecoder().decode(await retry)).toBe("abcdef");
+    fake.pushRaw(rawPayload("late"));
+    await until(() => ctx.retiredPeers.length === 1);
+    expect(ctx.retiredPeers).toEqual([{ peerId: PEER, reason: "unauthorized" }]);
+    await until(() => state.ended);
+    expect(state.received).toEqual([]);
   });
 });

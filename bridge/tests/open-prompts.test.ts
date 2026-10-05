@@ -49,4 +49,17 @@ describe("OpenAgentPrompts", () => {
     open.clear("t1");
     expect(open.has("t1", "AskUserQuestion")).toBe(false);
   });
+
+  test("hasAny sees a held prompt whatever its tool, until the last one closes", () => {
+    const open = new OpenAgentPrompts();
+    expect(open.hasAny("t1")).toBe(false);
+    open.open("t1", "toolu_1", undefined);
+    open.open("t1", "toolu_2", "AskUserQuestion");
+    expect(open.hasAny("t1")).toBe(true);
+    expect(open.hasAny("t2")).toBe(false);
+    open.close("t1", "toolu_1");
+    expect(open.hasAny("t1")).toBe(true);
+    open.close("t1", "toolu_2");
+    expect(open.hasAny("t1")).toBe(false);
+  });
 });

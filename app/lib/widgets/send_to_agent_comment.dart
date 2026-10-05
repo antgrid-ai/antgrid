@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 
 import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
@@ -48,22 +48,22 @@ Future<String?> showSendToAgentComment({
   }
 }
 
-void showSentToAgentSnackBar(BuildContext context) {
-  showAbSnackBar(
+void showSentToAgentToast(BuildContext context) {
+  showAbToast(
     context,
     'Sent to agent',
     duration: const Duration(milliseconds: 1500),
   );
 }
 
-/// Counterpart to [showSentToAgentSnackBar] for a send the transport refused.
+/// Counterpart to [showSentToAgentToast] for a send the transport refused.
 ///
 /// Nothing was buffered, so this is the user's only notice that the text they
 /// captured is gone — every surface that hands text to the agent's terminal
 /// owes the same sentence, or the same failure reads differently depending on
 /// where it happened.
-void showSendRefusedSnackBar(BuildContext context) {
-  showAbSnackBar(context, "couldn't send — the session is reconnecting");
+void showSendRefusedToast(BuildContext context) {
+  showAbToast(context, "couldn't send — the session is reconnecting");
 }
 
 Future<String?> _showBottomSheet(

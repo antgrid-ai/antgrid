@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The preview WebView loads the on-device proxy at http://localhost:<port>
-     (PreviewProxyServer fronts the E2E tunnel over plain HTTP; TLS to the dev
-     server is applied bridge-side). Android 9+ blocks cleartext by default
+<!-- The preview WebView loads the on-device loopback forwarder at
+     http://localhost:<port> (PreviewPortForwarder), which carries raw TCP to
+     the dev server. A plaintext dev server is therefore reached over cleartext
+     http://localhost; a TLS dev server negotiates end to end with the WebView
+     over the same tunnel. Android 9+ blocks cleartext by default
      (net::ERR_CLEARTEXT_NOT_PERMITTED), so permit it for loopback ONLY —
      everything else stays HTTPS-enforced. -->
 <network-security-config>

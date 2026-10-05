@@ -11,6 +11,8 @@ const log = logger.child({ component: "agent-core" });
 // A machine's project streams share each physical viewer's terminal budget.
 const terminalConnectionBudgets = new Map<ClientKey, { bytes: number; users: number }>();
 import { TerminalManager } from "./terminal-manager";
+import { StatusShadowTracker } from "./status-shadow-tracker";
+import { shadowAgent } from "./status-shadow";
 import {
   TerminalFrameHub, TerminalViewerConnection,
   type TerminalAddress, type TerminalViewerTransport,
@@ -18,16 +20,21 @@ import {
 import { createKeyedLock } from "./keyed-lock";
 import {
   hasTypedContent,
-  isInterruptKeystroke,
+  isCtrlC,
+  isLoneEsc,
   isSubmitKeystroke,
   isTerminalReport,
   opensCommandLine,
   submittedLine,
 } from "./keystrokes";
+import { transcriptInterruptFor } from "antgrid-agents/builtins";
+import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
-import { FileWatcher } from "./file-watcher";
+import { FileWatcher, unresolvedResolvePathReply } from "./file-watcher";
+import { linkHistoryRows } from "./terminal-links/history-links";
+import type { LinkBases } from "./terminal-links/resolver";
 import { FileUploadManager, type UploadResultFields, type UploadStreamServer } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { FileFinder } from "./file-find";
@@ -86,7 +93,7 @@ import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { runGit } from "./git-spawn";
-import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import {
@@ -187,6 +194,32 @@ interface CheckoutRuntime {
 // Where each terminal stands with the /hook-alive probe. Only a respawn clears
 // an entry, which is what keeps the verdict — and the warning — one per spawn.
 const hookAliveState = new Map<string, "armed" | "pinged">();
+
+/**
+ * Whether a lone Esc/Ctrl+C keystroke on [sessionId] (agent [tool]) should arm
+ * the transcript-interrupt confirmation (`interrupt-confirm.ts`), given
+ * whether its turn is currently open and whether its transcript path is known.
+ *
+ * A bare key is ambiguous — it closes a picker, a dialog or a task view as
+ * readily as it aborts a turn — so this answers only "is there anything to
+ * confirm", never "did the key interrupt": [data] not being a lone Esc/Ctrl+C,
+ * an idle turn, an agent with no {@link transcriptInterruptFor} predicate
+ * (every agent but claude and codex), or an unknown transcript path each mean
+ * nothing happens and answer undefined here.
+ *
+ * Exported and pure so a test can drive it directly, without a real PTY, a
+ * real transcript file, or a running core.
+ */
+export function shouldArmInterruptConfirm(
+  tool: string | undefined,
+  data: string,
+  turnOpen: boolean,
+  transcriptPath: string | undefined,
+): ((record: unknown) => boolean) | undefined {
+  if (!turnOpen || !transcriptPath) return undefined;
+  if (!isLoneEsc(data) && !isCtrlC(data)) return undefined;
+  return transcriptInterruptFor(tool);
+}
 
 // How long an agent has to ping /hook-alive after a prompt is submitted into it.
 // Measured at 3s on a cold codex TUI; firing early is a false "hooks are dead".
@@ -289,14 +322,6 @@ export interface AgentCore {
    *  `attachTransport` runs for a `CHECKOUT_VARIABLE_MESSAGE_TYPES` frame —
    *  a stream open bypasses that bus-level machinery entirely. */
   readonly uploadStreams: UploadStreamServer;
-  /** Abort every in-flight tunneled HTTP response for one peer, on every
-   *  checkout runtime and on main. Driven only from `onPeerSessionGone`:
-   *  a body in flight across that peer's session loss is dead by construction,
-   *  and the relay client's queue clear only reaches a run that happens to be
-   *  parked on a send at that instant. A still-live sibling peer's runs are
-   *  untouched, so a second phone establishing does not abort a first phone's
-   *  in-flight preview load. WS tunnels are untouched. */
-  abortTunnelStreams(peerId: string): void;
   /** Wire a lookup from an app session's route id to what this core may know
    *  about it: the verified pubkey behind it (the push registry's key) and the
    *  capabilities it declared. A machine holds one session per attached device,
@@ -417,6 +442,13 @@ export interface BuildAgentCoreOptions {
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
    *  [sessionId] is the session the hook fired for, when it carried one. */
   onTurnStart?: (sessionId?: string) => void;
+  /** Fired when a per-tool-call hook pings the api-server (`POST /turn-activity`)
+   *  — a catch-all "the agent is still here" signal, not a turn boundary. Unlike
+   *  {@link onTurnStart} it must never clear a pending request or a
+   *  call-to-action notification (see {@link turnActivity} in work-status.ts).
+   *  Bridge-internal — never surfaces to the app. [sessionId] is the session the
+   *  hook fired for, when it carried one. */
+  onTurnActivity?: (sessionId?: string) => void;
   /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
    *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
    *  on its own: typing in an idle session is not work. `submitted` (the input
@@ -433,16 +465,18 @@ export interface BuildAgentCoreOptions {
    *  {@link onTurnStart}: it opens a turn only if something was actually
    *  pending. Bridge-internal — never surfaces to the app. */
   onAnswer?: (sessionId: string, requestId?: string) => void;
-  /** Fired when the user presses a bare Escape key into [sessionId]'s PTY (see
-   *  {@link isInterruptKeystroke}), so the owning ProjectCore can close the
+  /** Fired once [sessionId]'s own transcript confirms a keystroke actually
+   *  interrupted its turn (see `interrupt-confirm.ts` and
+   *  {@link shouldArmInterruptConfirm}), so the owning ProjectCore can close the
    *  turn the hook model has no other way to end. A hook-based session's only
-   *  turn-end signal is its own Stop/completion hook, which most agent CLIs
-   *  never fire on a manual interrupt — without this the working dot outlives
-   *  an Esc that genuinely aborted the turn. Bridge-internal — never surfaces
-   *  to the app, and purely a work-status close: the keystroke itself already
-   *  reached the CLI via the normal PTY write and is what actually interrupts
-   *  it. A later real turn-end/notification for the same turn is harmless
-   *  (closeTurn is idempotent on an already-closed turn). */
+   *  turn-end signal is its own Stop/completion hook, which neither Claude nor
+   *  Codex has been OBSERVED to fire on a manual interrupt — without this the
+   *  working dot outlives one that genuinely aborted the turn. Bridge-internal
+   *  — never surfaces to the app, and purely a work-status close: the
+   *  keystroke itself already reached the CLI via the normal PTY write and is
+   *  what actually interrupts it. A later real turn-end/notification for the
+   *  same turn is harmless (closeTurn is idempotent on an already-closed
+   *  turn). */
   onInterrupt?: (sessionId: string) => void;
   /** A hook reported [sessionId]'s turn ENDED on a channel filing no notification
    *  (codex's `notify` argv) — the second closer, so a turn opened by keystroke
@@ -479,6 +513,23 @@ export interface BuildAgentCoreOptions {
    *  nudge's phone push; an absent hook forwards, which is the direction a
    *  supervisor has to fail in. */
   isStaleIdleNudge?: (sessionId: string) => boolean;
+  /** Close [sessionId]'s turn if nothing on record waits on the user, and say
+   *  whether it did — see `AgentContext.absorbIdleNudge`. Absent forwards the
+   *  nudge as before. */
+  absorbIdleNudge?: (sessionId: string) => boolean;
+  /** True while [sessionId] has an open turn, per the owner's own work-status
+   *  reduction — the gate {@link shouldArmInterruptConfirm} asks before arming a
+   *  transcript-interrupt confirmation on a lone Esc/Ctrl+C: idle Ctrl+C is
+   *  reflexive on some CLIs (it exits Codex outright) and an idle double-Esc
+   *  opens Codex's transcript overlay, neither of which has anything for a
+   *  confirmation to watch for. Absent means never open, which only costs the
+   *  confirmation a keystroke it would have declined to arm anyway. */
+  isTurnOpenFor?: (sessionId: string) => boolean;
+  /** Test-only: replaces the transcript-interrupt confirmer's real clock, timer
+   *  and file I/O (`interrupt-confirm.ts`) so a test can drive a confirmation
+   *  window deterministically, with no real sleep and no real file on disk.
+   *  Never set outside a test. */
+  interruptConfirmDeps?: InterruptConfirmDeps;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -781,6 +832,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const frameHub = new TerminalFrameHub();
   // Each authenticated app owns its attachments and acknowledgment window.
   const viewerConnections = new Map<ClientKey, TerminalViewerConnection>();
+  /** Concurrent `file:resolve-path` stats per client: every one can hit the
+   *  disk, so a client that floods them is cut off at a small constant. */
+  const resolveInFlight = new Map<ClientKey, number>();
+  let resolveDroppedWarnAt = 0;
   // Authorization is rechecked for each viewer; one backgrounded app must not
   // pause a sibling, and loopback control remains exempt from remote access.
   function viewerTransportFor(source: ClientKey): TerminalViewerTransport {
@@ -959,6 +1014,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Zod `.max(64)` never runs on the live path — see git-log.ts's MAX_LOG_PAGE
   // comment. Clamped here instead.
   const MAX_CHILDREN_REQUEST_PATHS = 64;
+  const MAX_RESOLVE_IN_FLIGHT = 8;
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
@@ -976,6 +1032,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // owner row, and a restarted slot reuses the same namespaced id.
     terminalOwners.set(namespaced, { checkoutId: runtime.checkout.id, externalId: terminalId });
     return namespaced;
+  }
+
+  /** internalTerminalId's lookup without its writes: a client-supplied id must
+   *  not grow configuredTerminalIds or terminalOwners. */
+  function peekInternalTerminalId(runtime: CheckoutRuntime, externalId: string): string | undefined {
+    if (sessions?.get(externalId) || runtime.checkout.id === "main") return externalId;
+    return runtime.configuredTerminalIds.get(externalId);
   }
 
   /** Filesystem root a supervised slot actually runs in. Falls back to the
@@ -1015,6 +1078,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionTitle: session.name,
         projectId: project.id,
       }));
+      statusShadow?.observe(session.id, { kind: "notify", type: normalized.type });
       return;
     }
     const stamped = { ...msg, terminalId: externalId } as AbMessage;
@@ -1043,7 +1107,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     terminalStreamHooks = hooks;
   }
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted app may
+  // tunnel path, which bypasses the bus). An account-trusted app may
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
@@ -1394,8 +1458,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  lookup over what is already running. */
   const tunnelStreams: TunnelStreamServer = {
     admit(peerId, checkoutId) {
-      // Tunnel streams proxy arbitrary HTTP to localhost:<port> and return the
-      // body, so a phone could otherwise read a project's dev-server/preview
+      // Tunnel streams forward raw TCP to localhost:<port> and return what it
+      // answers, so a phone could otherwise read a project's dev-server/preview
       // data without ever touching the bus dispatch gate. Gate here too. Only
       // relay traffic reaches a native stream — the loopback owner speaks the
       // bus (and opens no such stream).
@@ -1761,8 +1825,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // they arrive, which gives the phone no way to time the gap itself.
         const id = internalTerminalId(runtime, msg.terminalId);
         const line = submittedLine(msg.data);
+        // Baseline the transcript-interrupt confirmation BEFORE the key reaches
+        // the PTY — Codex's own interrupt marker lands ~36ms after the key, so
+        // reading the transcript's size after the write below risks losing that
+        // race on a fast CLI. sessions?.get, not agentKeyFor: the latter falls
+        // back to the project's default tool for ANY terminal id, including a
+        // service PTY or a config `terminals:` slot — neither runs a turn a
+        // transcript could confirm interrupted. See shouldArmInterruptConfirm.
+        if (sessions?.get(msg.terminalId)) {
+          const transcriptPath = sessions.getAgentTranscriptPath(msg.terminalId);
+          const predicate = shouldArmInterruptConfirm(
+            agentKeyFor(msg.terminalId), msg.data,
+            opts.isTurnOpenFor?.(msg.terminalId) ?? false, transcriptPath,
+          );
+          if (predicate) {
+            interruptConfirmer.arm(msg.terminalId, transcriptPath!, predicate, () => opts.onInterrupt?.(msg.terminalId));
+          }
+        }
         if (line === null) manager.write(id, msg.data);
         else manager.submit(id, line);
+        statusShadow?.input(msg.terminalId, msg.data, "user");
         // Everything below reads the frame as "the user did something". A focus
         // or mouse report is the viewer's VT engine answering a mode the guest
         // turned on, so it goes to the PTY and stops there.
@@ -1795,7 +1877,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // codex runs SessionStart on its first THREAD. Internal id on purpose.
           armHookAliveProbe(id);
         }
-        if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       }
       case "handler:configure": {
@@ -2008,12 +2089,59 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:resolve-path": {
+        // A request this case will not resolve still gets an answer: the app
+        // waits on the requestId, and silence reads there as an unreachable
+        // machine after its timeout. `busy` marks a request turned away
+        // unexamined, which is not evidence that the path is absent.
+        const answerUnresolved = (busy: boolean): void => {
+          sendAbToItsChannel(createMessage("file:resolve-path-result", {
+            ...unresolvedResolvePathReply(msg.projectId, msg.requestId, busy),
+            checkoutId: runtime.checkout.id,
+          }), client);
+        };
         const fw = runtime.fileWatcher;
-        if (fw) {
-          fw.handleResolvePathRequest(msg.requestId, msg.path);
-        } else {
+        if (!fw) {
           log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+          answerUnresolved(false);
+          break;
         }
+        const pending = resolveInFlight.get(client) ?? 0;
+        if (pending >= MAX_RESOLVE_IN_FLIGHT) {
+          const now = Date.now();
+          if (now - resolveDroppedWarnAt > 5000) {
+            resolveDroppedWarnAt = now;
+            log.warn("file:resolve-path dropped: client already has %d in flight", pending);
+          }
+          answerUnresolved(true);
+          break;
+        }
+        // `parseMessageFast` checked the type and nothing else.
+        const raw = msg as { path?: unknown; terminalId?: unknown; base?: unknown };
+        const terminalId = typeof raw.terminalId === "string" && raw.terminalId.length <= 256
+          ? raw.terminalId : undefined;
+        const base = raw.base === "a" || raw.base === "l" || raw.base === "s" || raw.base === "r"
+          ? raw.base : undefined;
+        let extra: LinkBases | undefined;
+        if (terminalId !== undefined && manager) {
+          const internal = peekInternalTerminalId(runtime, terminalId);
+          // A terminal of another checkout would hand this request its cwd.
+          if (internal !== undefined && manager.has(internal)
+            && terminalOwner(internal).runtime.checkout.id === runtime.checkout.id) {
+            extra = manager.linkBases(internal);
+          }
+        }
+        resolveInFlight.set(client, pending + 1);
+        fw.resolvePath(raw.path, { base, liveCwd: extra?.liveCwd, spawnCwd: extra?.spawnCwd, requestId: msg.requestId })
+          // Targeted: `externalImagePath` is an absolute path, and only the
+          // requester asked for it.
+          .then((reply) => sendAbToItsChannel(
+            createMessage("file:resolve-path-result", { ...reply, checkoutId: runtime.checkout.id }), client))
+          .catch((error) => log.warn("file:resolve-path reply failed: %s", error))
+          .finally(() => {
+            const left = (resolveInFlight.get(client) ?? 1) - 1;
+            if (left <= 0) resolveInFlight.delete(client);
+            else resolveInFlight.set(client, left);
+          });
         break;
       }
       case "file:upload-local": {
@@ -2125,33 +2253,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:unstage": {
         handleGitUnstage(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:unstage handler failed: %s", err)
-        );
-        break;
-      }
-      case "git:stash-list": {
-        handleGitStashList(runtime, msg.projectId).catch((err) =>
-          log.error("git:stash-list handler failed: %s", err)
-        );
-        break;
-      }
-      case "git:stash-pop": {
-        // Tracked for the same reason `git:sync` below is, and more urgently:
-        // a pop rewrites the whole working tree, so it holds the checkout as
-        // its child's cwd for longer than a push does.
-        trackGitRefresh(
-          runtime,
-          handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-pop handler failed: %s", err)
-          ),
-        );
-        break;
-      }
-      case "git:stash-drop": {
-        trackGitRefresh(
-          runtime,
-          handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-drop handler failed: %s", err)
-          ),
         );
         break;
       }
@@ -2642,21 +2743,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
         if (!page) break;
+        // A dead run's rows resolve against the checkout alone: its own cwds
+        // went with it, and the live terminal's belong to a different run.
+        const liveRun = manager.runId(internalId) === msg.runId;
+        const bases: LinkBases = liveRun
+          ? { ...manager.linkBases(internalId), checkoutRoot: owner.checkout.path }
+          : { checkoutRoot: owner.checkout.path };
+        // The page is the only point where every archived row is reachable with
+        // its neighbours and there is time to await a stat; archived rows never
+        // carry detected links themselves.
+        //
         // Bulk row data, targeted rather than broadcast: a history page answers
         // one request's own `beforeRowId` cursor into scrollback the requester
         // may already partly hold, so the wire it did not arrive on has no use
         // for it and must not be charged for it, including sibling relay apps.
-        sendAbToItsChannel(createMessage("terminal:history:page", {
-          checkoutId,
-          terminalId: msg.terminalId,
-          runId: msg.runId,
-          attachmentId: msg.attachmentId,
-          requestId: msg.requestId,
-          history: page.history,
-          expired: page.expired,
-          beforeRowId: page.beforeRowId,
-          rows: page.rows,
-        }), client);
+        void linkHistoryRows(page.rows, bases, {
+          context: manager.historyContext(msg.runId, page, liveRun ? internalId : undefined),
+        })
+          .catch(() => page.rows)
+          .then((rows) => sendAbToItsChannel(createMessage("terminal:history:page", {
+            checkoutId,
+            terminalId: msg.terminalId,
+            runId: msg.runId,
+            attachmentId: msg.attachmentId,
+            requestId: msg.requestId,
+            history: page.history,
+            expired: page.expired,
+            beforeRowId: page.beforeRowId,
+            rows,
+          }), client))
+          .catch((error) => log.warn("terminal:history:page reply failed: %s", error));
         break;
       }
       case "preview:snapshot:request": {
@@ -2749,6 +2865,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
+    statusShadow?.reset();
     for (const observer of titleObservers) observer.stop();
     titleObservers = [];
     // Awaited with the rest, not voided: a chat runtime's dispose now waits out
@@ -2796,12 +2913,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let dropCheckoutReplay: (checkoutId: string) => void = (_c) => {};
   let isShuttingDown = false;
 
+  // Needs the injected work-status read to have anything to compare against, so
+  // a core built without it (most tests) tracks nothing.
+  const statusShadow = opts.sessionWorkStatusFor && process.env.ANTGRID_STATUS_SHADOW !== "0"
+    ? new StatusShadowTracker({ oldStatusFor: opts.sessionWorkStatusFor })
+    : null;
+
   // Kept as the single funnel for notification:push producers even though it now
   // only forwards: the work reduction folds these off the bus
   // (ProjectCore.observeWorkStatus), so a producer that bypassed sendAb entirely
   // is the one mistake that would still lose the signal.
   function sendNotifying(msg: AbMessage): void {
     sendAb(msg);
+    if (msg.type === "notification:push" && msg.origin === "agent" && msg.sessionId) {
+      statusShadow?.observe(msg.sessionId, { kind: "notify", type: msg.notificationType });
+    }
   }
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
@@ -2835,7 +2961,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // through this adapter is text a renderer produced, where a digest is a
       // diagnostic. The other way into `manager.submit` is `terminal:input`,
       // which is a human's own keystrokes and gets none.
-      submit: (terminalId, line) => manager?.submit(terminalId, line, lineKey(line).sha),
+      submit: (terminalId, line) => {
+        const r = manager?.submit(terminalId, line, lineKey(line).sha);
+        statusShadow?.observe(terminalId, { kind: "key", key: "submit", via: "bus" });
+        return r;
+      },
       getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
       getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
     }),
@@ -2927,6 +3057,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  of the CLI's second announcement of one block. See {@link OpenAgentPrompts}
    *  for why it is keyed by prompt and tool rather than by slot. */
   const openAgentPrompts = new OpenAgentPrompts();
+
+  /** Watches a session's transcript for its agent's own interrupt marker after
+   *  a lone Esc/Ctrl+C — see {@link shouldArmInterruptConfirm} and
+   *  `interrupt-confirm.ts`. Per-core rather than module-scoped: unlike
+   *  `hookAliveState` above, its deps are test-injected. */
+  const interruptConfirmer = createInterruptConfirmer(opts.interruptConfirmDeps);
 
   /** Slots with an ARMED Handler session, mirrored off the engine's own
    *  `handler:status` — a full replacement snapshot that every arm, disarm and
@@ -3520,55 +3656,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitStashList(runtime: CheckoutRuntime, projectId: string) {
-    try {
-      const stashes = await listStashes(runtime.checkout.path);
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", { projectId, stashes }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", {
-        projectId,
-        stashes: [],
-        error: err?.message || String(err),
-      }));
-    }
-  }
-
-  async function handleGitStashPop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashPop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", { projectId, ref, success: true }));
-      await refreshGitStatusAttended(runtime);
-      sendGitStatus(runtime);
-      sendStatus(runtime);
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    // Either outcome moves the stash LIST (removed on success, unchanged on
-    // failure) — the panel's banner needs the fresh read either way to know
-    // whether to keep showing this entry.
-    await handleGitStashList(runtime, projectId);
-  }
-
-  async function handleGitStashDrop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashDrop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", { projectId, ref, success: true }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    await handleGitStashList(runtime, projectId);
-  }
-
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
     try {
       // `git diff HEAD` emits nothing for untracked files (they're in neither
@@ -4128,11 +4215,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // banner's "View setup log" reads, exactly when the run has failed.
         // Released with the rest of the checkout in `teardownCheckoutRuntime`.
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        // Before noteExited: that fires session:updated synchronously and the
+        // status prune would otherwise resolve an open span as "unobservable".
+        statusShadow?.exited(id);
         // Whatever the agent was displaying died with its terminal, and a slot
         // is reused by a same-id restart — a stale entry would silence the new
         // run's every block.
         openAgentPrompts.clear(id);
         sessions?.noteExited(id, runId);
+        // A pending confirmation's timer is unref'd, so a leaked one costs
+        // nothing at process exit — but a same-id restart must not inherit a
+        // dead run's watch on a transcript the new run may never touch.
+        interruptConfirmer.cancel(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
         // mode flip is exempt for the same reason the handler's arming is: the
@@ -4155,6 +4249,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId });
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
+        statusShadow?.exited(id);
       },
       // Register/evict this terminal's run with the frame-delivery
       // hub. `terminalOwner` (not `runtimeFor`/`?? mainRuntime`) is the same
@@ -4163,6 +4258,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // disagree about which checkout owns this terminal.
       onRunStarted: (id, runId, source) => {
         const { runtime, externalId } = terminalOwner(id);
+        // Before register: a restored screen is captured by register's own tick,
+        // and that frame must already know where relative paths resolve. Links
+        // are optional; a root that cannot be set must not fail the run.
+        try { source.setLinkRoot(runtime.checkout.path); } catch { /* unlinked paths */ }
         frameHub.register({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, source, runId);
       },
       // The graceful close, available only where the emulator outlives the PTY
@@ -4507,6 +4606,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Clears the previous spawn's verdict; `armHookAliveProbe` starts the new
     // deadline. Unconditional, or a no-probe respawn leaves the id stale.
     manager.onSessionCreated((session) => hookAliveState.delete(session.terminalId));
+
+    // Same spec resolution the spawn used: checkoutRuntimes.prepare has cached
+    // the checkout's spec by now, and main reads the project config.
+    manager.onSessionCreated((session) => {
+      const entry = sessions?.get(session.terminalId);
+      if (!entry || !statusShadow) return;
+      const spec = entry.checkoutId && entry.checkoutId !== "main" ? checkoutRuntimes.agentSpec(entry.checkoutId) : undefined;
+      const agent = shadowAgent(entry.tool ?? (entry.command ? undefined : (spec ?? agentSpecFromConfig()).name));
+      if (!agent) return;
+      statusShadow.track(session.terminalId, agent, session);
+      session.onTitleObserved((t) => statusShadow.title(session.terminalId, session, t));
+    });
 
     // Forward URL detections to the app as port:detected messages.
     pd.onDetection((event) => {
@@ -4913,8 +5024,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // needed" it exists to drop.
       if (body.event === "question") {
         openAgentPrompts.open(body.terminalId, body.promptId, body.promptTool);
+        statusShadow?.observe(body.terminalId, { kind: "ask-open" });
       } else if (body.event === "prompt_answered") {
         openAgentPrompts.close(body.terminalId, body.promptId);
+        statusShadow?.observe(body.terminalId, { kind: "ask-answered" });
       } else if (body.event === "turn_end" || body.event === "turn_failed") {
         // A prompt cannot outlive its turn, which is the same rule work-status's
         // closeTurn already applies. This is the last resort, not the interrupt
@@ -4923,11 +5036,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Claude fires neither Stop nor StopFailure on a user interrupt, so
         // nothing here would ever run for it.
         openAgentPrompts.clear(body.terminalId);
+        statusShadow?.observe(body.terminalId, { kind: "turn-end" });
       }
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      // Backstop for the /session-title pipeline's setAgentSession, which
+      // withholds the path when it refuses the accompanying agent-session id
+      // (an ephemeral helper thread — see setAgentSession's doc): the
+      // transcript-interrupt confirmation only needs a file to read, not a
+      // matched conversation identity, so a session with no path yet takes
+      // whatever a hook reports here instead of never arming at all.
+      if (body.transcriptPath) sessions?.noteTranscriptPath(body.terminalId, body.transcriptPath);
       sessions?.confirmHookRun(body.terminalId, body.runId);
       // The work reduction's SECOND closer: codex fires this and its Stop hook
       // independently. `turn_end` alone, never `turn_failed` — that is claude
@@ -5044,7 +5165,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (terminalId) openAgentPrompts.clear(terminalId);
       opts.onTurnStart?.(terminalId);
     },
+    // Deliberately does not touch openAgentPrompts: a sibling tool completing
+    // must not clear a pending AskUserQuestion's open-prompt latch the way a
+    // real new turn does above.
+    onTurnActivity: (terminalId) => {
+      opts.onTurnActivity?.(terminalId);
+    },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    absorbIdleNudge: (terminalId) => {
+      // A keystroke through a held AskUserQuestion has already cleared the work
+      // reduction's record of that block.
+      if (openAgentPrompts.hasAny(terminalId)) return false;
+      const absorbed = opts.absorbIdleNudge?.(terminalId) ?? false;
+      if (absorbed) statusShadow?.observe(terminalId, { kind: "at-prompt" });
+      return absorbed;
+    },
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
@@ -5130,7 +5265,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
       // switch is on. See remoteFrameAllowed() for the local-mode skip
-      // rationale. The tunnel/HTTP-proxy path is gated separately, in
+      // rationale. The tunnel path is gated separately, in
       // `tunnelStreams.admit` (it carries no bus traffic at all — A3).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
@@ -5244,11 +5379,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
   }
 
-  function abortTunnelStreams(peerId: string): void {
-    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams(peerId);
-    tunnelManager?.abortHttpStreams(peerId);
-  }
-
   return {
     attachTransport,
     async shutdown() {
@@ -5312,6 +5442,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     injectBusLine,
     refreshSessionWork(): void {
       sessions?.refreshWorkStatus();
+      statusShadow?.reconcile();
     },
     async refreshGitState(): Promise<void> {
       await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatusAttended(mainRuntime)]);
@@ -5321,7 +5452,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     onHandshakeComplete,
     tunnelStreams,
     uploadStreams,
-    abortTunnelStreams,
     setPeerSessionProvider,
     setTerminalStreamHooks,
     connState,

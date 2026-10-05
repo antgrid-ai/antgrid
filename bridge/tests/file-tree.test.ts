@@ -8,7 +8,7 @@ import {
   allocateBudgets,
   MAX_BATCH_NODES,
 } from "../src/file-tree";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -477,6 +477,29 @@ describe("file-tree", () => {
       expect(result.error).toBe("File not found");
     });
 
+    // A .png is the one extension that may legitimately sit outside the root, so
+    // without the shape refusal these would reach lstat, which on Windows opens
+    // an SMB session to the named host.
+    it.skipIf(process.platform !== "win32")("refuses UNC paths before touching the filesystem", () => {
+      for (const path of ["//host/share/a.png", "\\\\host\\share\\a.png", "\\\\?\\C:\\x.png"]) {
+        const result = readFile(tempDir, path);
+        expect(result.content).toBeNull();
+        expect(result.error).toBe("Path traversal denied");
+      }
+    });
+
+    it("refuses a relative UNC-looking path under win32 rules", () => {
+      const result = readFile(tempDir, "//host/share/a.png", "win32");
+      expect(result.content).toBeNull();
+      expect(result.error).toBe("Path traversal denied");
+    });
+
+    it.skipIf(process.platform === "win32")("still reads an in-root file whose name contains a colon", () => {
+      writeFileSync(join(tempDir, "notes:2024.txt"), "dated");
+      const result = readFile(tempDir, "notes:2024.txt");
+      expect(result.content).toBe("dated");
+    });
+
     it("detects binary files", () => {
       const binary = Buffer.alloc(100);
       binary[50] = 0; // null byte
@@ -596,6 +619,60 @@ describe("file-tree", () => {
       expect(r.error).toBe("Path traversal denied");
     });
 
+    // A directory link inside the checkout leaves lstat of the file itself
+    // unremarkable, so only the real path shows the read leaves the checkout.
+    const dirLink = (target: string, at: string): void =>
+      symlinkSync(target, at, process.platform === "win32" ? "junction" : "dir");
+    const PNG = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+
+    it("denies a text file reached through a link that leaves the checkout", () => {
+      writeFileSync(join(externalDir, "secret.txt"), "shh");
+      dirLink(externalDir, join(tempDir, "out"));
+
+      const r = readFile(tempDir, "out/secret.txt");
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+
+    it("serves an image reached through a link out when both the printed and real path are images", () => {
+      writeFileSync(join(externalDir, "pic.png"), PNG);
+      dirLink(externalDir, join(tempDir, "out"));
+
+      const r = readFile(tempDir, "out/pic.png");
+      expect(r.error).toBeUndefined();
+      expect(r.mimeType).toBe("image/png");
+    });
+
+    it("denies a png-named link whose real path is not an image", () => {
+      writeFileSync(join(externalDir, "secret.txt"), "shh");
+      dirLink(externalDir, join(tempDir, "out.png"));
+
+      const r = readFile(tempDir, "out.png/secret.txt");
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+
+    it("still reads a file through a link that stays inside the checkout", () => {
+      mkdirSync(join(tempDir, "real"));
+      writeFileSync(join(tempDir, "real", "a.txt"), "ok");
+      dirLink(join(tempDir, "real"), join(tempDir, "alias"));
+
+      const r = readFile(tempDir, "alias/a.txt");
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("ok");
+    });
+
+    it.skipIf(process.platform !== "win32")("reads an absolute path that differs from the root only in case", () => {
+      writeFileSync(join(tempDir, "a.txt"), "ok");
+
+      const r = readFile(tempDir, join(tempDir.toUpperCase(), "a.txt"));
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("ok");
+    });
+
     it("still denies a PDF outside the checkout root (excluded on purpose)", () => {
       const outsidePath = join(externalDir, "generated.pdf");
       writeFileSync(outsidePath, "not a real pdf — the extension is what's under test");
@@ -621,5 +698,131 @@ describe("file-tree", () => {
       expect(externalSafeImageMime("a.pdf")).toBeUndefined();
       expect(externalSafeImageMime("a.ico")).toBeUndefined();
     });
+  });
+});
+
+// A checkout opened over a network share (a WSL distribution, a file server)
+// has a UNC root; the admin share of this machine is the one UNC path a test
+// can reach without any setup.
+function uncFormOf(dir: string): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(dir);
+  if (match === null) return undefined;
+  const unc = `\\\\localhost\\${match[1]}$\\${match[2]}`;
+  try {
+    return existsSync(unc) ? unc : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+describe("file-tree under a UNC checkout root", () => {
+  let tempDir: string;
+  let uncRoot: string | undefined;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "antgrid-tree-unc-"));
+    uncRoot = uncFormOf(tempDir);
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("reads a file under the root and an inside image", () => {
+    const root = uncRoot!;
+    writeFileSync(join(tempDir, "hello.txt"), "hi");
+    mkdirSync(join(tempDir, "sub"));
+    writeFileSync(join(tempDir, "sub", "a.png"), Buffer.from(PNG_1X1, "base64"));
+
+    expect(readFile(root, "hello.txt").content).toBe("hi");
+    expect(readFile(root, "sub/a.png").mimeType).toBe("image/png");
+    expect(readFile(root, "sub\\a.png").error).toBeUndefined();
+    // A caller-supplied UNC spelling is refused even when it names the root's own share; only the checkout-relative form is accepted.
+    expect(readFile(root, join(root, "hello.txt")).error).toBe("Path traversal denied");
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("still refuses a path that leaves the root", () => {
+    const root = uncRoot!;
+    writeFileSync(join(tempDir, "hello.txt"), "hi");
+
+    expect(readFile(root, "../hello.txt").error).toBe("Path traversal denied");
+    expect(readFile(root, "..\\..\\hello.txt").error).toBe("Path traversal denied");
+  });
+
+  it.skipIf(uncFormOf(tmpdir()) === undefined)("still refuses another share, even an image", () => {
+    const root = uncRoot!;
+    for (const path of ["\\\\other-host\\share\\a.png", "//other-host/share/a.png", "\\\\?\\C:\\x.png"]) {
+      const result = readFile(root, path);
+      expect(result.content).toBeNull();
+      expect(result.error).toBe("Path traversal denied");
+    }
+  });
+
+  it("refuses a relative path shaped like a UNC share against a UNC root under win32 rules", () => {
+    const result = readFile("\\\\srv\\share\\proj", "//host/share/a.png", "win32");
+    expect(result.content).toBeNull();
+    expect(result.error).toBe("Path traversal denied");
+  });
+});
+
+describe("file-tree case folding of the containment check", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "antgrid-tree-fold-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // NTFS compares names unit by unit through its own upper-case table, which
+  // leaves the Kelvin sign (U+212A) distinct from k. A plain toLowerCase() maps
+  // it onto k, so a link to the sibling directory of that name read as the root.
+  it.skipIf(process.platform !== "win32")("does not read a Kelvin-sign sibling as the root it differs from", () => {
+    const root = join(tempDir, "k");
+    const sibling = join(tempDir, "\u212a");
+    mkdirSync(root);
+    mkdirSync(join(sibling, "sub"), { recursive: true });
+    writeFileSync(join(sibling, "sub", "secret.txt"), "shh");
+    symlinkSync(sibling, join(root, "x"), "junction");
+
+    // The listed directory is a real one; only its ancestor is a link out.
+    const listing = listDirectory("x/sub", root, loadIgnoreRules(root, []));
+    expect(listing.missing).toBe(true);
+    expect(listing.children).toEqual([]);
+  });
+
+  // U+0131 and U+017F upper-case to ASCII I and S, but NTFS keeps them as names
+  // of their own, so a sibling spelled with one is not the checkout.
+  it.skipIf(process.platform !== "win32")("does not read a dotless-i or long-s sibling as the root", () => {
+    for (const [rootName, siblingName] of [
+      ["file", "fıle"],
+      ["ss", "ſſ"],
+    ] as const) {
+      const root = join(tempDir, rootName);
+      const sibling = join(tempDir, siblingName);
+      mkdirSync(root);
+      mkdirSync(join(sibling, "private"), { recursive: true });
+      writeFileSync(join(sibling, "private", "secret.env"), "TOKEN=1");
+      symlinkSync(sibling, join(root, "lnk"), "junction");
+
+      const listing = listDirectory("lnk/private", root, loadIgnoreRules(root, []));
+      expect(listing.missing).toBe(true);
+      expect(listing.children).toEqual([]);
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("still reads a directory whose root differs only in ASCII case", () => {
+    const root = join(tempDir, "Proj");
+    mkdirSync(join(root, "d"), { recursive: true });
+    writeFileSync(join(root, "d", "a.txt"), "");
+
+    const listing = listDirectory("d", root.toUpperCase(), loadIgnoreRules(root, []));
+    expect(listing.missing).toBeUndefined();
+    expect(listing.children.map((c) => c.name)).toEqual(["a.txt"]);
   });
 });

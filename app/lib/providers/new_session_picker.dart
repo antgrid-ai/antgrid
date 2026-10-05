@@ -26,6 +26,7 @@ import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
+import 'host_status.dart' show hostUpGenerationProvider;
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
@@ -356,6 +357,10 @@ final detectedToolsForProvider =
       }
 
       if (target.isLocal) {
+        // The catch below turns a failed spawn into `{}` and this family is
+        // never invalidated, so a pick made before the warm-up supplied a
+        // bootstrap would stay empty for the launch without this.
+        ref.watch(hostUpGenerationProvider);
         try {
           final host = await ref.watch(hostControllerProvider).ensureHost();
           final client = HostControlClient(

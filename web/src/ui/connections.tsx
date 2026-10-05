@@ -4,6 +4,7 @@
 import { Layout, type LayoutUser } from "./layout.js";
 import type { ConnectionSummary } from "../relay/push.js";
 import { fmtAge } from "./format.js";
+import { Notice, RelayUnreachable } from "./notice.js";
 
 export function ConnectionsPage(props: {
   user: LayoutUser;
@@ -23,19 +24,9 @@ export function ConnectionsPage(props: {
       </div>
 
       {connections === null ? (
-        <div class="card bg-panel border border-error/40">
-          <div class="card-body">
-            <p class="text-sm text-error">
-              Could not reach the relay. Check RELAY_INTERNAL_URL / secret.
-            </p>
-          </div>
-        </div>
+        <RelayUnreachable />
       ) : connections.length === 0 ? (
-        <div class="card bg-panel border border-edge">
-          <div class="card-body">
-            <p class="text-sm text-muted">No live connections.</p>
-          </div>
-        </div>
+        <Notice text="No live connections." />
       ) : (
         <div class="overflow-x-auto card bg-panel border border-edge">
           <table class="table table-sm font-mono text-xs">

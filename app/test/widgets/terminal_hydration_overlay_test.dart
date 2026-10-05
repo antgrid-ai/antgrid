@@ -341,7 +341,7 @@ void main() {
       );
       await tester.pump();
       final withoutStrip = tester.getSize(find.byType(GhosttyTerminalView));
-      final viewportWithoutStrip = tester.getRect(find.byType(FittedBox));
+      final viewportWithoutStrip = tester.getRect(_letterboxFit);
 
       // A distinct scope key so the second pump builds a fresh container and
       // a fresh grid freeze, rather than reconciling onto the first one and
@@ -380,7 +380,7 @@ void main() {
 
       expect(withStrip.width, withoutStrip.width);
       expect(withStrip.height, withoutStrip.height);
-      expect(tester.getRect(find.byType(FittedBox)), viewportWithoutStrip);
+      expect(tester.getRect(_letterboxFit), viewportWithoutStrip);
       expect(stripHeight, greaterThan(0));
     },
   );
@@ -410,9 +410,9 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_letterboxFit, findsOneWidget);
     expect(
-      find.descendant(of: find.byType(FittedBox), matching: _dimmedTerminal),
+      find.descendant(of: _letterboxFit, matching: _dimmedTerminal),
       findsOneWidget,
     );
   });
@@ -462,3 +462,8 @@ void main() {
     expect(identical(before, after), isTrue);
   });
 }
+
+// The reader letterbox specifically; SVG icons (e.g. the take-control strip) also build a FittedBox.
+Finder get _letterboxFit => find.byWidgetPredicate(
+  (w) => w is FittedBox && w.fit == BoxFit.scaleDown,
+);

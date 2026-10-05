@@ -1,5 +1,3 @@
-import 'dart:async';
-
 class PortInfo {
   final int port;
   final int? pid;
@@ -44,47 +42,38 @@ class PortInfo {
 class PreviewTab {
   final int port;
 
-  /// Scheme of the target dev server ('http' or 'https'). Drives the webview
-  /// origin in direct/local mode and is forwarded to the bridge in relay mode.
+  /// Scheme the dev server speaks ('http' or 'https'). In relay mode it comes
+  /// from the bridge's TLS probe rather than from the detected hint.
   final String scheme;
 
-  /// Null while a relay-mode proxy bind is in flight; equals [port] in local
-  /// mode (no proxy — the webview hits localhost directly).
-  final int? localProxyPort;
+  /// The localhost port the webview loads. Equals [port] in local mode and in
+  /// relay mode unless that port was already taken on this device.
+  final int? localPort;
 
-  /// Origin the webview should load: the proxy origin in relay mode, the
-  /// logical `scheme://localhost:port` origin in local mode.
+  /// URL the webview should load, on [localPort].
   final String? currentUrl;
-
-  /// Bumped by an explicit link navigation so the screen reloads the tab even
-  /// when [currentUrl] is unchanged — the webview may have followed in-page
-  /// links elsewhere since [currentUrl] was last set.
-  final int navRevision;
 
   const PreviewTab({
     required this.port,
     required this.scheme,
-    this.localProxyPort,
+    this.localPort,
     this.currentUrl,
-    this.navRevision = 0,
   });
 
   PreviewTab copyWith({
     String? scheme,
-    int? localProxyPort,
-    bool clearLocalProxyPort = false,
+    int? localPort,
+    bool clearLocalPort = false,
     String? currentUrl,
     bool clearCurrentUrl = false,
-    int? navRevision,
   }) {
     return PreviewTab(
       port: port,
       scheme: scheme ?? this.scheme,
-      localProxyPort: clearLocalProxyPort
+      localPort: clearLocalPort
           ? null
-          : (localProxyPort ?? this.localProxyPort),
+          : (localPort ?? this.localPort),
       currentUrl: clearCurrentUrl ? null : (currentUrl ?? this.currentUrl),
-      navRevision: navRevision ?? this.navRevision,
     );
   }
 }
@@ -137,89 +126,6 @@ class PreviewState {
       error: clearError ? null : (error ?? this.error),
     );
   }
-}
-
-class TunnelHttpRequest {
-  final String requestId;
-  final int port;
-
-  /// Target dev-server scheme ('http' or 'https'). The bridge fetches the
-  /// local dev server over this scheme; the local preview proxy that fronts
-  /// the webview is always plain HTTP regardless.
-  final String scheme;
-  final String method;
-  final String path;
-  final Map<String, String> headers;
-
-  /// Byte length of [body]; the transport stamps this onto the head as
-  /// `bodyLength`, which is the request body's only delimiter on the wire.
-  final int bodyLength;
-
-  /// Null iff [bodyLength] is 0.
-  final Stream<List<int>>? body;
-
-  const TunnelHttpRequest({
-    required this.requestId,
-    required this.port,
-    this.scheme = 'http',
-    required this.method,
-    required this.path,
-    required this.headers,
-    this.bodyLength = 0,
-    this.body,
-  });
-
-  /// The `tunnel:http-request` HEAD record — carries no body; the transport
-  /// sends [body] itself as raw stream writes (`AgentTransport.openTunnelHttp`).
-  Map<String, dynamic> toHeadJson() {
-    return {
-      'type': 'tunnel:http-request',
-      'requestId': requestId,
-      'port': port,
-      'scheme': scheme,
-      'method': method,
-      'path': path,
-      'headers': headers,
-    };
-  }
-}
-
-/// A tunneled body that cannot be completed. Delivered as the error of
-/// [TunnelHttpResponse.body], or as the failure of the head when no head ever
-/// arrived, so both halves of a response fail with the same type. Wraps a
-/// [TunnelExchangeFailure.code] from the underlying stream.
-class TunnelStreamException implements Exception {
-  final String requestId;
-  final String reason;
-
-  const TunnelStreamException(this.requestId, this.reason);
-
-  @override
-  String toString() => 'TunnelStreamException($requestId): $reason';
-}
-
-/// A tunneled response as the proxy consumes it — NOT a wire shape. The head
-/// is known once the tunnel stream's `tunnel:http-head` record lands; [body]
-/// yields DECODED bytes as the tunnel stream's data records arrive, and errors
-/// with a [TunnelStreamException] if the body cannot be completed.
-class TunnelHttpResponse {
-  final String requestId;
-  final int status;
-  final Map<String, String> headers;
-
-  /// Set-Cookie values carried out-of-band: a single response can set several,
-  /// and [headers] (a string map) can only hold one. Emitted as repeated
-  /// Set-Cookie headers by the proxy.
-  final List<String> setCookies;
-  final Stream<List<int>> body;
-
-  const TunnelHttpResponse({
-    required this.requestId,
-    required this.status,
-    required this.headers,
-    this.setCookies = const [],
-    required this.body,
-  });
 }
 
 class PortsUpdateMessage {

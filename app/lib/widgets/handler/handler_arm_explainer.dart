@@ -12,11 +12,13 @@ import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
-import '../../navigation/root_navigator.dart';
 import '../../providers/agent_catalog.dart';
+import '../../providers/agent_transport.dart';
+import '../../providers/app_toaster.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
+import '../../project/project_session_registry.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../billing/pricing_visibility.dart';
 import '../../services/handler_service.dart';
@@ -417,32 +419,8 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
   }
 }
 
-/// The single arm flow, shared by the header shield and the away-moment hint so
-/// the two can never drift: sheet → arm on confirm → latch
-/// [FirstRunState.handlerArmedOnce] on every successful arm.
-///
-/// Cancelling arms nothing. Takes a [ProviderContainer], not a WidgetRef: the
-/// caller's widget may be gone by the time the sheet resolves. [context] is
-/// re-checked with `context.mounted` past every await, because the refusal path
-/// below shows a second surface after one.
-///
-/// The goal comes from [sessionOpeningPromptsProvider] rather than from the
-/// caller: both arm surfaces sit over a session the user did not have to
-/// describe, and the sentence they started it with is the only statement of
-/// intent that exists. Null when nothing was remembered — a session adopted at
-/// launch, one started from an empty composer, or one already armed once — and
-/// an omitted goal leaves the bridge's stored one untouched, so a re-arm is
-/// still exactly the payload-free arm those sessions want.
-///
-/// The service is resolved AFTER the sheet, never captured before it: the sheet
-/// stays open for as long as the user reads it, and a transport reconnect in
-/// that window disposes the build-time instance, whose `arm` then returns having
-/// sent nothing. The user tapped "Arm Handler", the sheet closed, and they walk
-/// away believing the session is watched.
-///
-/// What the sheet sends is a DELTA: a control the user never touched sends
-/// nothing, so an arm cannot clear a judge, a lens or a brief the bridge holds
-/// and this app has not yet been told about.
+/// Shared arm flow. Pins the project at the start (focus can move during the
+/// sheet) but resolves its service after it, since a reconnect disposes it.
 Future<void> armWithSheet({
   required BuildContext context,
   required ProviderContainer container,
@@ -451,6 +429,7 @@ Future<void> armWithSheet({
   String? agentLabel,
   bool? judgeCapable,
 }) async {
+  final entryId = container.read(selectedRegistrationIdProvider);
   // Asked BEFORE the arm sheet, never after: a sheet that cannot commit is a
   // form the user fills in only to be told it was never going to send.
   final refusal = focusedServiceOrNull(
@@ -485,7 +464,21 @@ Future<void> armWithSheet({
     explain: !container.read(firstRunProvider).handlerArmedOnce,
   );
   if (decision == null) return;
-  focusedServiceOrNull(container, (s) => s.handlerService)?.arm(
+  final service = entryId == null
+      ? null
+      : container.read(projectSessionProvider(entryId)).value?.handlerService;
+  if (entryId == null || service == null) {
+    // Nothing took the arm, so no answer is coming to wait for.
+    _reportArmFailure(
+      container,
+      title: 'Handler not armed',
+      description:
+          "This project isn't connected yet, so nothing was sent. Try again "
+          'in a moment.',
+    );
+    return;
+  }
+  service.arm(
     terminalId: terminalId,
     goal: goal,
     judgeTool: decision.settings.judgeTool,
@@ -495,6 +488,7 @@ Future<void> armWithSheet({
   );
   latchHandlerArmedOnConfirmation(
     container,
+    entryId,
     terminalId,
     instruction: decision.instruction,
   );
@@ -634,6 +628,7 @@ final _armLatches = <String, VoidCallback>{};
 /// without the permission they imply.
 void latchHandlerArmedOnConfirmation(
   ProviderContainer container,
+  String entryId,
   String terminalId, {
   String? instruction,
 }) {
@@ -648,17 +643,19 @@ void latchHandlerArmedOnConfirmation(
   // dropping them silently — the replacement usually carries none, and this is
   // the only surface that ever held them.
   _armLatches.remove(terminalId)?.call();
-  ProviderSubscription<AsyncValue<HandlerState>>? sub;
+  ProviderSubscription<HandlerService?>? serviceSub;
+  StreamSubscription<HandlerState>? frameSub;
   Timer? timeout;
   void stop() {
     timeout?.cancel();
     timeout = null;
-    sub?.close();
-    sub = null;
+    serviceSub?.close();
+    serviceSub = null;
+    unawaited(frameSub?.cancel());
+    frameSub = null;
   }
 
-  bool confirmed(HandlerState? state) =>
-      state?.sessions.containsKey(terminalId) ?? false;
+  bool confirmed(HandlerState state) => state.sessions.containsKey(terminalId);
   /// The other way an arm ends: the bridge answered, and its answer was no.
   /// Ends the latch the same way a confirmation does — nothing is retired, and
   /// the send is reported rather than left to time out in silence.
@@ -668,12 +665,30 @@ void latchHandlerArmedOnConfirmation(
     _reportArmRefused(container, entitlement, instruction);
   }
 
-  void latch() {
+  void latch(HandlerService service) {
     _armLatches.remove(terminalId);
     stop();
     container.read(sessionOpeningPromptsProvider.notifier).forget(terminalId);
     container.read(firstRunProvider.notifier).markHandlerArmed();
-    _sendArmInstruction(container, terminalId, instruction);
+    _sendArmInstruction(container, service, terminalId, instruction);
+  }
+
+  void watch(HandlerService? service) {
+    if (service == null) return;
+    unawaited(frameSub?.cancel());
+    // Status FRAMES, not the state stream: held state carries the refusal of an
+    // earlier arm and would report one still in flight as dead.
+    frameSub = service.statusFrames.listen((frame) {
+      if (confirmed(frame)) {
+        latch(service);
+        return;
+      }
+      final entitlement = frame.entitlement;
+      if (entitlement != null) refuse(entitlement);
+    });
+    // The status may already list the session; check once so the latch
+    // doesn't wait on a change that never comes.
+    if (confirmed(service.currentState)) latch(service);
   }
 
   _armLatches[terminalId] = () {
@@ -686,54 +701,40 @@ void latchHandlerArmedOnConfirmation(
           'instruction you typed with it was not sent.',
     );
   };
-  sub = container.listen(handlerStateProvider, (_, next) {
-    if (confirmed(next.value)) {
-      latch();
-      return;
-    }
-    // A frame carrying a refusal is the bridge saying so as of that frame, and
-    // the refused arm raises one itself — so this answers within a round trip
-    // instead of after the confirmation window. Only frames that ARRIVE count,
-    // never the state already held: the refusal the user walked through to get
-    // here is still sitting there, and reading it would report an arm that is
-    // still in flight as dead.
-    final entitlement = next.value?.entitlement;
-    if (entitlement != null) refuse(entitlement);
-  });
+  // Bound to the ARMED project, not the focused one, so a confirmation landing
+  // while the user looks elsewhere isn't timed out.
+  serviceSub = container.listen(
+    _armedProjectHandlerProvider(entryId),
+    (_, next) => watch(next),
+  );
   timeout = Timer(kHandlerArmConfirmWindow, () {
     _armLatches.remove(terminalId);
     stop();
     _reportArmInstructionLost(container, instruction);
   });
-  // The status may already list the session (re-arm race after a disarm the
-  // bridge never processed) — check once so the latch doesn't wait on a
-  // change that never comes.
-  if (confirmed(container.read(handlerStateProvider).value)) latch();
+  watch(serviceSub!.read());
 }
 
-/// Sends the arm sheet's sentence, once the bridge has confirmed the arm.
-///
-/// The service is RE-RESOLVED here and never captured across the sheet or the
-/// latch window: this runs up to [kHandlerArmConfirmWindow] after the sheet
-/// closed, and a transport reconnect in that window disposes the build-time
-/// instance, whose `instruct` then sends nothing at all.
-///
-/// The three-valued result is honoured rather than discarded. `duplicate` is
-/// reachable (a re-arm carrying the same sentence as one still outstanding) and
-/// `empty` means no service resolved — on a screen the user is about to walk
-/// away from, an unsent instruction must not look like a sent one.
+/// The handler service of the project an arm latch waits on, followed across
+/// a redial. Warm-set gated so listening never re-warms an evicted project.
+final _armedProjectHandlerProvider = Provider.autoDispose
+    .family<HandlerService?, String>((ref, entryId) {
+      if (!ref.watch(projectSessionRegistryProvider).contains(entryId)) {
+        return null;
+      }
+      return ref.watch(projectSessionProvider(entryId)).value?.handlerService;
+    });
+
+/// Sends the arm sheet's sentence once the bridge has confirmed the arm.
+/// [service] is the confirming one; earlier captures may be disposed.
 void _sendArmInstruction(
   ProviderContainer container,
+  HandlerService service,
   String terminalId,
   String? text,
 ) {
   if (text == null || text.trim().isEmpty) return;
-  final result =
-      focusedServiceOrNull(
-        container,
-        (s) => s.handlerService,
-      )?.instruct(terminalId, text) ??
-      HandlerInstructResult.empty;
+  final result = service.instruct(terminalId, text);
   switch (result) {
     case HandlerInstructResult.sent:
       return;
@@ -806,28 +807,14 @@ void _reportArmRefused(
 }
 
 /// The one way this flow speaks once its widgets are gone.
-///
-/// The navigator's OVERLAY, not its context: `Overlay.maybeOf` reads an
-/// inherited marker planted inside each overlay entry, so it answers only from
-/// within a mounted route. The navigator's own element sits above every entry
-/// and resolves to null, which would make this whole path a silent no-op — and
-/// there is no widget of ours alive here to ask instead.
 void _reportArmFailure(
   ProviderContainer container, {
   required String title,
   required String description,
 }) {
-  final overlay = container
-      .read(rootNavigatorKeyProvider)
-      .currentState
-      ?.overlay;
-  if (overlay == null) return;
-  showAbToastOn(
-    overlay,
-    toast: AbToast(
-      icon: AbIcons.warning,
-      title: title,
-      description: description,
-    ),
-  );
+  container
+      .read(appToasterProvider)
+      .show(
+        AbToast(icon: AbIcons.warning, title: title, description: description),
+      );
 }

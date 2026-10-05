@@ -18,8 +18,8 @@ import 'config/environment.dart';
 import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
-import 'design/ab_tokens.dart';
 import 'design/theme_presets.dart';
+import 'design/widgets/ab_toast.dart';
 import 'launcher/host_teardown.dart';
 import 'project/limits.dart';
 import 'project/perf_recorder.dart';
@@ -27,6 +27,7 @@ import 'project/project_session.dart';
 import 'project/project_session_registry.dart';
 import 'providers/account_heartbeat.dart';
 import 'providers/analytics.dart';
+import 'providers/app_toaster.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
@@ -74,6 +75,7 @@ import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'util/detached.dart';
+import 'util/log_location.dart' show kPushLogFileName;
 import 'util/windows_paste_fix.dart';
 import 'widgets/auth_splash.dart';
 import 'widgets/demo_frame.dart';
@@ -93,10 +95,18 @@ bool get _pushSupported =>
 /// on every terminated-state push, inside that receiver's 30s budget.
 ///
 /// Registering the handler is also what releases the queued message — it
-/// triggers push's readiness handshake. Nothing else belongs here.
+/// triggers push's readiness handshake. The one other thing that belongs here
+/// is pointing AbLog at a log file, since this isolate never runs main().
 @pragma('vm:entry-point')
 void pushBackgroundMain() {
   WidgetsFlutterBinding.ensureInitialized();
+  // This isolate never runs main(), and the push handler logs: without this a
+  // phone's lines would sit in AbLog's pre-directory buffer forever. Its own
+  // file, because the main isolate's sink rotates app.log independently and two
+  // rotators on one file can delete each other's freshly rotated generation.
+  // The engine is destroyed as soon as the handler returns, which is why
+  // pushBackgroundHandler awaits this lookup and a flush before returning.
+  unawaited(AbLog.initLogDirectory(fileName: kPushLogFileName));
   Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
 }
 
@@ -111,6 +121,11 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // First thing after the binding exists: on a phone the log directory comes
+  // from a platform channel, and AbLog holds lines until it answers. Starting
+  // here keeps that window to milliseconds; not awaited so launch never waits
+  // on it. Desktop resolves synchronously and returns at once.
+  unawaited(AbLog.initLogDirectory());
   // Before any text field can take a keystroke: Windows' clipboard-history
   // paste (Win+V) types a bare "v" instead of pasting without this — see
   // WindowsPasteFix's doc.
@@ -266,6 +281,10 @@ Future<void> main() async {
   // Supervision of that host: re-bind open local projects after a respawn.
   // Must stay listened for the whole app lifetime, like the warm-up above.
   container.listen(hostRestartRebindProvider, (_, _) {});
+
+  // That host is often the first to see this machine's device revoked; see the
+  // provider for why it probes rather than acting on the event itself.
+  container.listen(hostRevocationWatchProvider, (_, _) {});
 
   // Register the push token on every warm RELAY session (Android + iOS).
   // requestPermission/token can throw on a device without Google Play Services;
@@ -560,17 +579,6 @@ class AbApp extends ConsumerWidget {
         // and platformBrightness are the accessibility inputs we compose with.
         final osMediaQuery = MediaQuery.of(context);
 
-        // The snackBarTheme (floating, styling) lives in buildAbTheme; only
-        // the width is dynamic — it can't live in the static theme because it
-        // needs MediaQuery. A floating SnackBar with `width` is centered at
-        // that width, so it doesn't span the full window on desktop/tablet
-        // and isn't edge-to-edge on mobile.
-        final windowWidth = osMediaQuery.size.width;
-        final snackBarWidth = (windowWidth - 2 * AbTokens.space16).clamp(
-          0.0,
-          480.0,
-        );
-
         // Resolved here (not in AbApp.build) so MediaQuery.platformBrightnessOf
         // re-runs the builder on every OS light/dark flip. MaterialApp's
         // `theme:` above is only the pre-follow chosen theme; everything
@@ -605,18 +613,22 @@ class AbApp extends ConsumerWidget {
                   osMediaQuery.disableAnimations || settings.reduceMotion,
             ),
             child: Theme(
-              data: effectiveTheme.copyWith(
-                snackBarTheme: effectiveTheme.snackBarTheme.copyWith(
-                  width: snackBarWidth,
-                ),
-              ),
+              data: effectiveTheme,
               // Mounted from the builder, not from a screen: the console has to
               // outlive every route and stay out of the shell's own layout,
               // which is also what lets it drive navigation from wherever the
               // app currently is. It renders nothing unless the driver entry
               // point enabled it.
               child: AbTextDensity(
-                child: NavConsole(child: DemoFrame(child: child!)),
+                child: NavConsole(
+                  // Inside the console so a card never covers its command
+                  // field, around the demo frame so its title bar shares the
+                  // app's one stack.
+                  child: AbToastHost(
+                    toaster: ref.watch(appToasterProvider),
+                    child: DemoFrame(child: child!),
+                  ),
+                ),
               ),
             ),
           ),

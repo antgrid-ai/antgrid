@@ -22,6 +22,8 @@ import {
   findActiveMembership,
 } from "../models/account-member.js";
 import { PLAN_SLUG_FREE } from "../models/plan.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
+import { revokeAppleAuthorizations } from "./apple-account.js";
 
 export type DeleteAccountResult = "deleted" | "blocked_subscription" | "blocked_team";
 
@@ -81,7 +83,12 @@ export async function deleteUserAccount(
   db: DB,
   relay: RelayPushConfig,
   auth: Auth,
-  args: { userId: string; headers: Headers }
+  args: {
+    userId: string;
+    headers: Headers;
+    /** Absent when this deployment does not offer Sign in with Apple. */
+    apple?: AppleTokenClient;
+  }
 ): Promise<DeleteAccountResult> {
   const { userId, headers } = args;
 
@@ -115,9 +122,13 @@ export async function deleteUserAccount(
   // Run in parallel: the revokes are independent (distinct device rows), so
   // wall-clock stays ~one relay-call timeout regardless of device count rather
   // than stacking per device and blowing the request's response budget.
+  //
+  // Apple's revocation rides the same fan-out for the same reasons, and must
+  // finish before the transaction deletes the account rows holding its tokens.
   const devices = await listActiveDevices(db, userId);
-  await Promise.all(
-    devices.map(async (d) => {
+  await Promise.all([
+    args.apple ? revokeAppleAuthorizations(db, auth, args.apple, userId) : undefined,
+    ...devices.map(async (d) => {
       try {
         await revokeUserDevice(db, relay, auth, { userId, deviceUuid: d.id, headers });
       } catch (err) {
@@ -127,8 +138,8 @@ export async function deleteUserAccount(
           error: err instanceof Error ? err.message : String(err),
         });
       }
-    })
-  );
+    }),
+  ]);
 
   const now = new Date();
   await db.$transaction(async (tx) => {

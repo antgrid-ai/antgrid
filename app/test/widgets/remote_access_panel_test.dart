@@ -61,6 +61,18 @@ class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
 
+/// Fails its first read — the host was not up yet — and answers every later
+/// one.
+class _FlakyPolicyNotifier extends RemoteAccessPolicyNotifier {
+  _FlakyPolicyNotifier(this._onBuild);
+  final int Function() _onBuild;
+  @override
+  Future<RemoteAccessPolicy> build() async {
+    if (_onBuild() == 1) throw StateError('no host yet');
+    return const RemoteAccessPolicy(enabled: false);
+  }
+}
+
 /// The subordinate bit. [unreadable] is the bridge that predates the verb —
 /// distinct from off, and the panel must not render it as a refusal the user
 /// chose.
@@ -257,11 +269,10 @@ void main() {
     expect(find.textContaining("Couldn't read"), findsWidgets);
   });
 
-  // Nothing in the app ever invalidates the remote-access read, so a host that
-  // was down when the panel first opened leaves it unknown for the rest of the
-  // run — and the machine default for agent reach is ON, which makes "nothing
-  // until remote access is on" a positive claim that the bit is inert while a
-  // peer agent may be reading this machine's session titles.
+  // A failed remote-access read stays unknown until a host comes up or the
+  // user retries — and the machine default for agent reach is ON, which makes
+  // "nothing until remote access is on" a positive claim that the bit is inert
+  // while a peer agent may be reading this machine's session titles.
   testWidgets('an unreadable remote access is not spoken as off', (
     tester,
   ) async {
@@ -274,6 +285,27 @@ void main() {
 
     expect(find.textContaining('Nothing until remote access is on'), findsNothing);
     expect(find.textContaining("Couldn't read remote access"), findsOne);
+  });
+
+  testWidgets('an unreadable switch offers Retry, and Retry re-reads it', (
+    tester,
+  ) async {
+    var builds = 0;
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FlakyPolicyNotifier(() => ++builds),
+    );
+
+    // Inert without a value, so Retry is the only way out short of a restart.
+    expect(tester.widget<AbSwitch>(_remoteSwitch).onChanged, isNull);
+    await tester.tap(find.byKey(const Key('remote-access-retry')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(builds, 2);
+    expect(find.byKey(const Key('remote-access-retry')), findsNothing);
+    expect(tester.widget<AbSwitch>(_remoteSwitch).onChanged, isNotNull);
   });
 
   // The gate refuses a peer OPENING an exchange here; an answer inside one an

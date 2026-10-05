@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
@@ -35,7 +35,8 @@ import { ForgotPasswordPage } from "../ui/forgot-password.js";
 import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
 import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
 import { SignUpPage } from "../ui/signup.js";
-import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
+import { appleSignInConfigured, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
 import {
   hasPasswordCredential,
   pruneDuplicatePasswordCredentials,
@@ -73,7 +74,9 @@ import {
 } from "../billing/cancel-subscription.js";
 import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
+import { StatsPage } from "../ui/stats.js";
 import { fetchConnections } from "../relay/push.js";
+import { loadUsageStats, summarizeLiveRelay } from "../usage/stats.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
 import { AccountPage, AccountDeletedPage } from "../ui/account.js";
 import {
@@ -147,7 +150,7 @@ import {
 import { SwitchAccountPage } from "../ui/integrations-switch-account.js";
 import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 
-// Internal relay-connections view is restricted to named operators. Gate on
+// Internal operator pages (/internal/*) are restricted to named operators. Gate on
 // email (lowercased) — Better-Auth verifies email ownership at sign-in, so it's
 // a safe identity anchor here. Non-operators get 404, not 403: don't reveal the
 // route exists.
@@ -202,6 +205,7 @@ export function uiRoutes(deps: {
   relay: RelayPushConfig;
   clientIp: ClientIpResolver;
   sendEmail: SendEmail;
+  apple?: AppleTokenClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
   const startLimiter = tokenBucket(5, 0.2); // 5 burst, 1 per 5s, per IP
@@ -396,7 +400,14 @@ export function uiRoutes(deps: {
     // Round-tripped by step 2's "change" link, so stepping back never costs the
     // user the address they already typed.
     const email = c.req.query("email") ?? null;
-    return c.html(<LoginPage error={error} notice={notice} email={email} />);
+    return c.html(
+      <LoginPage
+        error={error}
+        notice={notice}
+        email={email}
+        apple={appleSignInConfigured(deps.env)}
+      />,
+    );
   });
 
   /** Send a cross-device magic link and hand the browser its pending page.
@@ -484,13 +495,20 @@ export function uiRoutes(deps: {
     switch (method) {
       case "password":
         return redirectWith(c, "/login/password", { email });
-      // Switched on the two literals rather than forwarded: `method` is
+      // Switched on the literals rather than forwarded: `method` is
       // client-supplied, and a value it chose must never reach the `provider`
       // param.
       case "github":
         return c.redirect("/oauth/start?provider=github&callbackURL=/dashboard");
       case "google":
         return c.redirect("/oauth/start?provider=google&callbackURL=/dashboard");
+      // Only while this deployment offers Apple: a hint remembered before the
+      // keys were withdrawn would otherwise relaunch a provider that 400s.
+      case "apple":
+        if (appleSignInConfigured(deps.env)) {
+          return c.redirect("/oauth/start?provider=apple&callbackURL=/dashboard");
+        }
+        return sendLink();
       default:
         // Absent, unrecognised, or simply wrong about this address — one answer
         // for all three. The link is the only branch that needs no server-side
@@ -1549,37 +1567,53 @@ export function uiRoutes(deps: {
     );
   });
 
+  function requireOperator(page: string): MiddlewareHandler<{ Variables: AuthVars }> {
+    return async (c, next) => {
+      const email = c.get("userEmail")?.toLowerCase() ?? "";
+      const allowed = INTERNAL_OPERATOR_EMAILS.has(email);
+      // Audit every access and every denied probe: these pages read the
+      // live-connection map and account-wide usage, which the relay can't
+      // attribute (it only authenticates "web"), so operator attribution must
+      // be logged here, at the gate — and a non-operator fishing for the route
+      // is exactly what the trail should capture.
+      const line = JSON.stringify({
+        evt: `internal.${page}.${allowed ? "access" : "denied"}`,
+        userId: c.get("userId"),
+        email,
+        at: new Date().toISOString(),
+      });
+      if (!allowed) {
+        console.warn(line);
+        return c.notFound();
+      }
+      console.info(line);
+      await next();
+    };
+  }
+
+  r.get(
+    "/internal/stats",
+    requireUserOrRedirect({ auth: deps.auth }),
+    requireOperator("stats"),
+    async (c) => {
+      const [stats, live] = await Promise.all([
+        loadUsageStats(deps.db),
+        fetchConnections(deps.relay)
+          .catch((e) => {
+            console.warn("[internal.stats] relay fetch failed", e);
+            return null;
+          })
+          .then((connections) => connections && summarizeLiveRelay(deps.db, connections)),
+      ]);
+      return c.html(<StatsPage user={layoutUser(c)} stats={stats} live={live} />);
+    },
+  );
+
   r.get(
     "/internal/connections",
     requireUserOrRedirect({ auth: deps.auth }),
+    requireOperator("connections"),
     async (c) => {
-      const email = c.get("userEmail")?.toLowerCase() ?? "";
-      if (!INTERNAL_OPERATOR_EMAILS.has(email)) {
-        // Record denied probes too — for a surveillance endpoint, a non-operator
-        // fishing for the route is exactly what the audit trail should capture.
-        console.warn(
-          JSON.stringify({
-            evt: "internal.connections.denied",
-            userId: c.get("userId"),
-            email,
-            at: new Date().toISOString(),
-          }),
-        );
-        return c.notFound();
-      }
-
-      // Audit every access: a read of the live-connection map is a surveillance
-      // capability the relay can't attribute (it only authenticates "web"), so
-      // operator attribution must be logged here, at the gate.
-      console.info(
-        JSON.stringify({
-          evt: "internal.connections.access",
-          userId: c.get("userId"),
-          email,
-          at: new Date().toISOString(),
-        }),
-      );
-
       let connections: Awaited<ReturnType<typeof fetchConnections>> | null;
       try {
         connections = await fetchConnections(deps.relay);
@@ -2258,6 +2292,7 @@ export function uiRoutes(deps: {
     const result = await deleteUserAccount(deps.db, deps.relay, deps.auth, {
       userId,
       headers: c.req.raw.headers,
+      apple: deps.apple,
     });
     // Both blocked results land back on /account, which renders the reason.
     if (result === "blocked_subscription" || result === "blocked_team") {

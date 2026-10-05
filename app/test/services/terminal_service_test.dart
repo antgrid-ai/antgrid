@@ -227,6 +227,9 @@ void main() {
         gitActionTimeout: const Duration(milliseconds: 40),
       );
 
+      final errors = <String>[];
+      svc.gitErrors.listen(errors.add);
+
       svc.requestBranches();
       expect(svc.currentState.gitBranchesLoading, isTrue);
 
@@ -237,16 +240,7 @@ void main() {
       // success).
       await Future<void>.delayed(const Duration(milliseconds: 150));
       expect(svc.currentState.gitBranchesLoading, isFalse);
-      expect(svc.currentState.gitBranchesError, isNotNull);
-
-      // A late reply (or a fresh request) clears the surfaced error.
-      t.emit('git:branches', {
-        'projectId': 'p',
-        'current': 'main',
-        'branches': ['main'],
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.gitBranchesError, isNull);
+      expect(errors, hasLength(1));
 
       await svc.dispose();
       await session.close();
@@ -291,12 +285,15 @@ void main() {
         gitActionTimeout: const Duration(milliseconds: 40),
       );
 
+      final errors = <String>[];
+      svc.gitErrors.listen(errors.add);
+
       svc.checkoutBranch('feature');
       expect(svc.currentState.gitBranchesLoading, isTrue);
 
       await Future<void>.delayed(const Duration(milliseconds: 150));
       expect(svc.currentState.gitBranchesLoading, isFalse);
-      expect(svc.currentState.gitCheckoutError, isNotNull);
+      expect(errors, hasLength(1));
 
       await svc.dispose();
       await session.close();
@@ -312,6 +309,9 @@ void main() {
           gitActionTimeout: const Duration(milliseconds: 40),
         );
 
+        final errors = <String>[];
+        svc.gitErrors.listen(errors.add);
+
         svc.checkoutBranch('feature');
         t.emit('git:checkout-result', {
           'projectId': 'p',
@@ -323,12 +323,34 @@ void main() {
         expect(svc.currentState.gitBranch, 'feature');
 
         await Future<void>.delayed(const Duration(milliseconds: 100));
-        expect(svc.currentState.gitCheckoutError, isNull);
+        expect(errors, isEmpty);
 
         await svc.dispose();
         await session.close();
       },
     );
+
+    test('a refused checkout is announced', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+      final errors = <String>[];
+      svc.gitErrors.listen(errors.add);
+
+      svc.checkoutBranch('feature');
+      t.emit('git:checkout-result', {
+        'projectId': 'p',
+        'branch': 'feature',
+        'success': false,
+        'error': 'local changes would be overwritten',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(errors, ['local changes would be overwritten']);
+      expect(svc.currentState.gitBranchesLoading, isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
   });
 
   // A relay app builds its tabs from the replayed agent:status, never from the

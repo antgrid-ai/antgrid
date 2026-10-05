@@ -6,12 +6,18 @@ import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { taskRunObservations, type TaskRunObserver } from "./task-run";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeTurn, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, reduceWorkStatus, sessionFocus, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
 import { sealPush } from "./push/seal";
+
+/** How often {@link ProjectCore} checks for turns {@link expireTurns} should
+ *  close. Five minutes is coarse enough that the check never shows up as work,
+ *  and precise enough against a 30-minute idle bound that nobody watching the
+ *  dot would notice the difference from an exact deadline. */
+const EXPIRE_CHECK_INTERVAL_MS = 5 * 60_000;
 
 /** Host-level dependencies injected into a remote-mode ProjectCore. In local
  * mode these are unused. The host owns the machine's native peer sessions; a
@@ -102,6 +108,11 @@ export class ProjectCore {
    *  Owned here because the turn-open set it waits on is THIS reduction, and
    *  nothing below the core can see one. */
   private deliveries: SessionBusDeliveryQueue | null = null;
+  /** Periodic {@link expireTurns} sweep — the backstop for a turn nothing else
+   *  closes. Unref'd so it never keeps the process alive on its own; cleared in
+   *  {@link shutdown}. */
+  private expireInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly provisionalTimers = new Set<ReturnType<typeof setTimeout>>();
   private _onWorkStatusChange: (() => void) | null = null;
   private _onSessionsChange: (() => void) | null = null;
   /** Identity signature (id/name/archived, sorted) of the last `session:updated`
@@ -234,6 +245,12 @@ export class ProjectCore {
     // by the turn it opened, which is the only evidence this bridge gets that
     // the agent read it rather than left it sitting in its composer.
     const opened = openedTurns(this._work, next);
+    if (perSessionChanged) {
+      for (const [id, s] of next.sessionStatuses) {
+        const was = this._work.sessionStatuses.get(id);
+        if (was !== s) log.info("session %s status %s -> %s (notification %s)", id, was ?? "none", s, next.notifications.get(id) ?? "none");
+      }
+    }
     this._work = next;
     for (const sessionId of opened) this.deliveries?.confirm(sessionId);
     for (const sessionId of released) {
@@ -293,7 +310,21 @@ export class ProjectCore {
    *  bus frame — the app must not see it as a notification) and from the inbound
    *  permission/question resolves, via {@link AgentContext.onTurnStart}. */
   noteTurnStart(sessionId?: string): void {
-    this.commitWork(turnStart(this._work, sessionId));
+    this.commitWork(turnStart(this._work, sessionId, undefined, Date.now()));
+  }
+
+  /** A per-tool-call hook re-asserted that [sessionId] is still working. Unlike
+   *  {@link noteTurnStart}, never clears a pending request or a call-to-action
+   *  notification — see {@link turnActivity}. Routed here from the per-core
+   *  api-server via {@link AgentContext.onTurnActivity}. */
+  noteTurnActivity(sessionId?: string): void {
+    // A tool finishing while the session still reads "needs you" means the
+    // block ended without a keystroke — the case that leaves the dot stale.
+    if (sessionId !== undefined && this._work.sessionStatuses.get(sessionId) === "attention") {
+      log.info("session %s finished a tool while reading attention (notification %s)",
+        sessionId, this._work.notifications.get(sessionId) ?? "none");
+    }
+    this.commitWork(turnActivity(this._work, sessionId, Date.now()));
   }
 
   /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
@@ -303,14 +334,24 @@ export class ProjectCore {
     sessionId: string,
     opts: { submitted: boolean; typed: boolean; command?: boolean },
   ): void {
-    this.commitWork(userReply(this._work, sessionId, opts));
+    const now = Date.now();
+    const before = this._work.provisionalTurns.get(sessionId);
+    this.commitWork(userReply(this._work, sessionId, opts, now));
+    const openedAt = this._work.provisionalTurns.get(sessionId);
+    if (openedAt === undefined || openedAt === before) return;
+    const timer = setTimeout(() => {
+      this.provisionalTimers.delete(timer);
+      this.commitWork(retractProvisionalTurn(this._work, sessionId, openedAt));
+    }, PROVISIONAL_TURN_GRACE_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.provisionalTimers.add(timer);
   }
 
   /** The user answered the permission/question [requestId] on [sessionId].
    *  Clears that block and resumes the turn, but only if it was pending; see
    *  {@link answerRequest}. */
   noteAnswer(sessionId: string, requestId?: string): void {
-    this.commitWork(answerRequest(this._work, sessionId, requestId));
+    this.commitWork(answerRequest(this._work, sessionId, requestId, Date.now()));
   }
 
   /** [client] is looking at [sessionId] (`session:focus`) — clear its unread
@@ -339,11 +380,21 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
-  /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now
-   *  rather than wait on a Stop hook the CLI may never fire for a manual
-   *  interrupt. See {@link closeTurn}. */
+  /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
+   *  now rather than wait on a Stop hook the CLI may never fire for a manual
+   *  interrupt. See {@link closeInterruptedTurn}.
+   *
+   *  Gated on {@link turnOpenFor}: closeInterruptedTurn clears whatever the
+   *  session (or the project's unattributed slot) was blocked on
+   *  unconditionally, with no notion of whether a turn was actually open to
+   *  close. An idle session's Ctrl+C — reflexive after Claude/Codex added it
+   *  as an interrupt key, where Esc rarely fired outside a live turn — would
+   *  otherwise delete its own `task_complete` record and defeat
+   *  {@link isStaleIdleNudge}, or (via the unattributed fallback) another
+   *  session's live call-to-action. */
   noteInterrupt(sessionId: string): void {
-    this.commitWork(closeTurn(this._work, sessionId));
+    if (!turnOpenFor(this._work.activeTurns, sessionId)) return;
+    this.commitWork(closeInterruptedTurn(this._work, sessionId));
   }
 
   /** A hook reported [sessionId]'s turn over on a channel that files no
@@ -413,6 +464,7 @@ export class ProjectCore {
       agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
+      onTurnActivity: (sessionId) => this.noteTurnActivity(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
@@ -431,6 +483,14 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
+      absorbIdleNudge: (id) => {
+        if (!isIdleAtPrompt(this._work, id)) return false;
+        this.noteHookTurnEnd(id);
+        return true;
+      },
+      // Gates whether a lone Esc/Ctrl+C is even worth confirming against the
+      // transcript — see shouldArmInterruptConfirm in agent-core.ts.
+      isTurnOpenFor: (id) => turnOpenFor(this._work.activeTurns, id),
       sendToOwner: (msg) => this.sendToOwner(msg),
       sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
       // This machine's half of every session-bus address. The remote device id
@@ -495,6 +555,15 @@ export class ProjectCore {
     } else {
       await this.startRemote(core, bus);
     }
+    // Bounds a turn nothing else closes (a missed interrupt key, a lost loopback
+    // POST, a bridge restart mid-turn). Committed through the same path as every
+    // other reducer transition, so a real expiry still re-advertises and drains
+    // whatever the delivery queue was holding on it.
+    this.expireInterval = setInterval(
+      () => this.commitWork(expireTurns(this._work, Date.now(), DEFAULT_TURN_IDLE_MS)),
+      EXPIRE_CHECK_INTERVAL_MS,
+    );
+    if (typeof this.expireInterval.unref === "function") this.expireInterval.unref();
   }
 
   /** Binds the loopback listener, sets `_localConnectInfo`, and eagerly primes
@@ -624,15 +693,7 @@ export class ProjectCore {
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      // A peer's session, not the coarse online/offline flag, is what a
-      // tunneled body in flight is actually keyed to — the peer-session owner
-      // clears its queues at binding and at peer loss, but that clear only
-      // reaches a run parked on a send at that instant; a run between sends
-      // keeps streaming into a session that is already gone, competing for the
-      // preview window with the page reload the app is doing. Scoping the abort
-      // to THIS peerId keeps a still-live sibling peer's in-flight loads intact.
       onPeerSessionGone: (peerId) => {
-        core.abortTunnelStreams(peerId);
         this.noteClientGone(peerId);
       },
       // Fired when this peer's project-stream binding itself closes (unbind,
@@ -803,6 +864,9 @@ export class ProjectCore {
 
   /** Tear down transport + subsystems. */
   async shutdown(reason?: string): Promise<void> {
+    if (this.expireInterval) { clearInterval(this.expireInterval); this.expireInterval = null; }
+    for (const timer of this.provisionalTimers) clearTimeout(timer);
+    this.provisionalTimers.clear();
     try { this.core?.setPeerSessionProvider(null); } catch {}
     try { this.core?.setTerminalStreamHooks(null); } catch {}
     // Before detaching — deliver() would otherwise hand a frame to a torn-down

@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/toast_host.dart';
+
 class _FakeStrategy extends UpdateStrategy {
   _FakeStrategy(
     this.outcome, {
@@ -85,11 +87,14 @@ Future<({ProviderContainer container, _SpyController install})> _pumpGate(
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: UpdateGate(child: SizedBox.shrink())),
+      child: const MaterialApp(
+        builder: abToastHostBuilder,
+        home: UpdateGate(child: SizedBox.shrink()),
+      ),
     ),
   );
-  // First pump runs the post-frame check's future; second settles the
-  // overlay insert it may trigger.
+  // First pump runs the post-frame check's future; second builds the toast it
+  // may raise.
   await tester.pump();
   await tester.pump();
   return (container: container, install: spy);
@@ -298,7 +303,9 @@ void main() {
     await _pumpGate(tester, strategy);
     await tester.pump(const Duration(seconds: 11)); // expire the toast timer
 
-    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+    await tester.pumpWidget(
+      const MaterialApp(builder: abToastHostBuilder, home: SizedBox.shrink()),
+    );
     resume(tester);
     await tester.pump();
 

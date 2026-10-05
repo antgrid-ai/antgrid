@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:antgrid/connection/peer_runtime_owner.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/services/devices_api.dart';
@@ -7,6 +8,8 @@ import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid/services/license_token_minter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/test_peer_runtime.dart';
 
 DeviceRecord _record({int? endpointSeed}) => DeviceRecord(
   userId: 'owner',
@@ -53,6 +56,39 @@ void main() {
       await container.read(peerRuntimeProvider.future),
       isNot(same(runtime)),
     );
+  });
+
+  test('the runtime reuses and rejects tokens through the minter', () async {
+    final minter = LicenseTokenMinter(
+      licenseApiUrl: 'http://localhost:8787',
+      clientId: 'client',
+      clientSecret: 'secret',
+    );
+    PeerRuntimeRequest? request;
+    final owner = AppPeerRuntimeOwner(
+      create: (value) {
+        request = value;
+        return TestPeerRuntime();
+      },
+      dispose: (runtime) async {
+        await runtime.dispose();
+        return const PeerRuntimeCleanupResult.complete();
+      },
+    );
+    addTearDown(owner.clear);
+    final container = ProviderContainer(
+      overrides: [
+        connectionDeviceRecordProvider.overrideWith(
+          (_) async => _record(endpointSeed: 1),
+        ),
+        connectionTokenMinterProvider.overrideWith((_) async => minter),
+        peerRuntimeOwnerProvider.overrideWithValue(owner),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(peerRuntimeProvider.future);
+    expect(request?.mintToken, equals(minter.token));
+    expect(request?.rejectToken, equals(minter.discard));
   });
 
   test(

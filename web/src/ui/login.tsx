@@ -16,6 +16,9 @@ export type LoginPageProps = {
   /** Carried back by step 2's "change" link so returning to step 1 never costs
    *  the user the address they already typed. */
   email?: string | null;
+  /** Whether this deployment offers Sign in with Apple (it needs keys that
+   *  local and self-hosted setups do not have). */
+  apple?: boolean;
 };
 
 /** Step 1 of the email-first flow: one field, no sign-in/sign-up decision.
@@ -25,7 +28,7 @@ export type LoginPageProps = {
  *  address. Absent a hint the answer is the magic link, which is correct for
  *  every address: cross-device approve creates the user when there isn't one
  *  (auth/cross-device-plugin.ts), so the same button signs in and signs up. */
-export function LoginPage({ error, notice, email }: LoginPageProps) {
+export function LoginPage({ error, notice, email, apple = false }: LoginPageProps) {
   return (
     <Layout title="Sign in">
       <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
@@ -90,6 +93,15 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
           <div class="divider">or</div>
 
           <div class="space-y-2">
+            {apple && (
+              <a
+                href="/oauth/start?provider=apple&callbackURL=/dashboard"
+                class="btn btn-quiet w-full"
+                data-ab-remember="apple"
+              >
+                Continue with Apple
+              </a>
+            )}
             <a
               href="/oauth/start?provider=github&callbackURL=/dashboard"
               class="btn btn-quiet w-full"
@@ -112,7 +124,7 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
                 user a magic link forever.
 
                 It is also the way OUT of a hint that is wrong. A browser that
-                remembers this address as github/google relaunches that provider
+                remembers this address as a provider relaunches that provider
                 on every Continue; this button ignores the hint, and the step it
                 reaches carries "Email me a link instead" — which corrects the
                 hint on its way through.

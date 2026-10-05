@@ -87,13 +87,7 @@
       "maxMimeTypeLength": 127
     },
     "tunnelRecords": {
-      "maxDataBytes": 1048576,
-      "maxRecordBytes": 1048577,
-      "requestBodyMaxBytes": 33554432,
-      "tags": {
-        "wsText": 2,
-        "wsBinary": 3
-      }
+      "maxRecordBytes": 4096
     },
     "opens": [
       {
@@ -127,19 +121,11 @@
         }
       },
       {
-        "name": "tunnel-http",
+        "name": "tunnel-tcp",
         "json": {
-          "kind": "tunnel-http",
+          "kind": "tunnel-tcp",
           "projectId": "proj-1",
-          "requestId": "req-1"
-        }
-      },
-      {
-        "name": "tunnel-ws",
-        "json": {
-          "kind": "tunnel-ws",
-          "projectId": "proj-1",
-          "wsId": "ws-1"
+          "connId": "conn-1"
         }
       },
       {
@@ -281,26 +267,43 @@
         }
       },
       {
-        "name": "tunnel-http-missing-request",
+        "name": "retired-tunnel-http",
         "json": {
           "kind": "tunnel-http",
-          "projectId": "proj-1"
-        }
-      },
-      {
-        "name": "tunnel-ws-request-not-ws",
-        "json": {
-          "kind": "tunnel-ws",
           "projectId": "proj-1",
           "requestId": "req-1"
         }
       },
       {
-        "name": "tunnel-ws-overlong-id",
+        "name": "retired-tunnel-ws",
         "json": {
           "kind": "tunnel-ws",
           "projectId": "proj-1",
-          "wsId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          "wsId": "ws-1"
+        }
+      },
+      {
+        "name": "tunnel-tcp-overlong-id",
+        "json": {
+          "kind": "tunnel-tcp",
+          "projectId": "proj-1",
+          "connId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      {
+        "name": "tunnel-tcp-missing-conn",
+        "json": {
+          "kind": "tunnel-tcp",
+          "projectId": "proj-1"
+        }
+      },
+      {
+        "name": "tunnel-tcp-with-port",
+        "json": {
+          "kind": "tunnel-tcp",
+          "projectId": "proj-1",
+          "connId": "conn-1",
+          "port": 3000
         }
       },
       {
@@ -459,24 +462,14 @@
         "streamId": "req-1"
       },
       {
-        "name": "tunnel-http",
+        "name": "tunnel-tcp",
         "open": {
-          "kind": "tunnel-http",
+          "kind": "tunnel-tcp",
           "projectId": "proj-1",
-          "requestId": "req-1"
+          "connId": "conn-1"
         },
-        "streamKind": "tunnel-http",
-        "streamId": "req-1"
-      },
-      {
-        "name": "tunnel-ws",
-        "open": {
-          "kind": "tunnel-ws",
-          "projectId": "proj-1",
-          "wsId": "ws-1"
-        },
-        "streamKind": "tunnel-ws",
-        "streamId": "ws-1"
+        "streamKind": "tunnel-tcp",
+        "streamId": "conn-1"
       },
       {
         "name": "upload",

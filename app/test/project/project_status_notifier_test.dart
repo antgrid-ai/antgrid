@@ -2,13 +2,14 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/project/project_status.dart';
+import 'package:antgrid/project/inbound_frame.dart';
 
 void main() {
   group('ProjectStatusNotifier', () {
     test('agent:status updates services', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'agent:status',
@@ -42,7 +43,7 @@ void main() {
         'commands': [],
         'proxies': [],
         'ports': [],
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.services, hasLength(1));
       notifier.dispose();
@@ -50,9 +51,9 @@ void main() {
     });
 
     test('ports:update populates detectedPorts', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'ports:update',
@@ -61,7 +62,7 @@ void main() {
           {'port': 3000, 'pid': 1234, 'processName': 'node', 'label': 'web'},
           {'port': 5173},
         ],
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.detectedPorts, containsAll([3000, 5173]));
       notifier.dispose();
@@ -69,16 +70,16 @@ void main() {
     });
 
     test('agent:hello populates agentHello', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'agent:hello',
         'tool': 'claude',
         'version': '1.0.0',
         'flags': <String>[],
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.agentHello, isNotNull);
       expect(notifier.value.agentHello!.version, '1.0.0');
@@ -87,15 +88,15 @@ void main() {
     });
 
     test('config:changed with error sets configError', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'config:changed',
         'projectId': 'p',
         'error': 'YAML parse error at line 12',
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isTrue);
       expect(notifier.value.configErrorMessage, contains('YAML'));
@@ -104,24 +105,24 @@ void main() {
     });
 
     test('a clean config frame clears a prior config error', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'config:changed',
         'projectId': 'p',
         'error': 'bad yaml',
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isTrue);
 
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '1',
         'timestamp': 1,
         'type': 'config:changed',
         'projectId': 'p',
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isFalse);
       expect(notifier.value.configErrorMessage, isNull);
@@ -130,19 +131,19 @@ void main() {
     });
 
     test('agent:status does NOT clear a config error', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'config:read-result',
         'projectId': 'p',
         'error': 'cannot read antgrid.yaml',
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isTrue);
 
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '1',
         'timestamp': 1,
         'type': 'agent:status',
@@ -152,7 +153,7 @@ void main() {
         'commands': [],
         'proxies': [],
         'ports': [],
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isTrue);
       notifier.dispose();
@@ -160,16 +161,16 @@ void main() {
     });
 
     test('a non-config error frame does NOT set configError', () async {
-      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final ctrl = StreamController<InboundFrame>.broadcast();
       final notifier = ProjectStatusNotifier(ctrl.stream);
-      ctrl.add({
+      ctrl.add(InboundFrame({
         'id': '0',
         'timestamp': 0,
         'type': 'git:checkout-result',
         'projectId': 'p',
         'success': false,
         'error': 'checkout failed',
-      });
+      }));
       await Future<void>.delayed(Duration.zero);
       expect(notifier.value.configError, isFalse);
       notifier.dispose();

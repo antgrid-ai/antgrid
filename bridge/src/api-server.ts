@@ -59,6 +59,17 @@ export interface AgentContext {
    *  block that never reaches the Handler leaves a blocked agent unsupervised,
    *  with no further event able to raise it. */
   isStaleIdleNudge?: (terminalId: string) => boolean;
+  /** /notify only: when this slot has nothing on record waiting on the user,
+   *  close any turn still open on it and answer true — the nudge says the
+   *  agent is at its prompt and nothing more, so the route drops it rather than
+   *  light the session up as needing the user. Wired in buildAgentCore to the
+   *  owner's reduction ({@link isIdleAtPrompt}) AND the open agent prompts: the
+   *  nudge names no tool, so the open-prompt drop above it cannot catch a held
+   *  AskUserQuestion.
+   *
+   *  Deliberately not asked by /handler-event: that drop stays on
+   *  {@link isStaleIdleNudge}, so a supervisor still hears about the open turn. */
+  absorbIdleNudge?: (terminalId: string) => boolean;
   /** True when the AGENT is already displaying [promptTool]'s own prompt on this
    *  slot — an AskUserQuestion, reported by its pre/post tool hooks. Claude
    *  schedules a permission notification seconds after any prompt appears, so
@@ -86,6 +97,14 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
+  /** Called when a per-tool-call hook pings /turn-activity — a catch-all
+   *  "the agent is still here" signal, not a turn boundary. Re-opens the turn
+   *  if a Stop hook closed it early, but unlike {@link onTurnStart} it must
+   *  never clear a pending request or a call-to-action notification: a
+   *  sibling tool completing while the same turn is waiting on a question or
+   *  a permission prompt must not make that block disappear. Bridge-internal:
+   *  like onTurnStart, this never emits an app-facing frame. */
+  onTurnActivity?: (terminalId?: string) => void;
   /** The session bus, when this core built one. Every decision the
    *  `/session-bus/*` routes make is made in here, so the MCP tools above them
    *  stay a transport and cannot answer differently from the routes. Absent
@@ -129,6 +148,10 @@ export const NotifyBodySchema = z.object({
   // matches on, so a second, unrelated block on the same slot still lands.
   // Never on the wire: the app is shown the message, not the tool.
   promptTool: z.string().optional(),
+  // The agent's permission mode when it posted (Claude's `permission_mode`).
+  // Logged only: in auto mode a prompt the classifier later approves still
+  // announces itself, and nothing else tells the two apart after the fact.
+  permissionMode: z.string().optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -397,6 +420,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
         if (ctx.acceptsHookRun?.(parsed.data.terminalId, parsed.data.runId) === false) return json({ ok: true, stale: true });
+        // Logged before any drop below so a status the user disputes can be
+        // traced to the notification that set it, and the mode it arrived in.
+        log.info("notify %s for %s (tool %s, permission mode %s): %s", parsed.data.type,
+          parsed.data.terminalId ?? "unattributed", parsed.data.promptTool ?? "none",
+          parsed.data.permissionMode ?? "unknown", parsed.data.message ?? "");
         // `awaiting_input` IS the notification hook's verdict that this is the
         // post-completion idle nudge — a live block classifies as
         // `permission_request` — so the type already carries the reading
@@ -422,6 +450,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           && ctx.hasOpenAgentPrompt?.(parsed.data.terminalId, parsed.data.promptTool)) {
           log.debug("Dropped a re-announcing %s for %s", parsed.data.type, parsed.data.terminalId);
           return json({ ok: true, suppressed: true });
+        }
+        // A prompt on screen is a block whether or not its own notification has
+        // folded yet, and must keep its turn open.
+        if (parsed.data.type === "awaiting_input"
+          && parsed.data.terminalId
+          && ctx.absorbIdleNudge?.(parsed.data.terminalId)) {
+          log.info("Absorbed an idle nudge for %s: nothing on record waits on the user", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
         }
         const dedupKey = JSON.stringify(parsed.data);
         const now = Date.now();
@@ -476,6 +512,22 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         } catch { /* empty/invalid body is fine */ }
         if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
         ctx.onTurnStart?.(terminalId);
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && path === "/turn-activity") {
+        // Same shape as /turn-start: terminalId is accepted but not required,
+        // and the body is drained either way so the hook's POST doesn't block
+        // on an unread body.
+        let terminalId: string | undefined;
+        let runId: string | undefined;
+        try {
+          const body = await req.json() as { terminalId?: unknown; runId?: unknown } | null;
+          if (typeof body?.terminalId === "string") terminalId = body.terminalId;
+          if (typeof body?.runId === "string") runId = body.runId;
+        } catch { /* empty/invalid body is fine */ }
+        if (ctx.acceptsHookRun?.(terminalId, runId) === false) return json({ ok: true, stale: true });
+        ctx.onTurnActivity?.(terminalId);
         return json({ ok: true });
       }
 

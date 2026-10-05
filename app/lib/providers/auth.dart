@@ -1,12 +1,15 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../analytics/events.dart';
 import '../config/environment.dart';
+import '../models/subscription_info.dart';
 import '../services/account_api.dart';
 import '../services/auth_service.dart';
 import '../services/devices_api.dart' show DeviceCapInfo;
 import 'analytics.dart';
 import 'provider_retry.dart';
+import 'subscription.dart';
 import 'value_controller.dart';
 
 /// License/account API base URL. Precedence: a `LICENSE_API_URL` dart-define
@@ -99,11 +102,45 @@ bool requiresProForRemote(String? tier) =>
 /// cookie is its own and cannot be lent out (`/one-time-token/generate` refuses
 /// any request that arrives over HTTP) — so the user may have to sign in there;
 /// the magic link works cross-device for exactly this.
+///
+/// iOS opens it in an in-app Safari view: the page can ask the user to sign in,
+/// and App Review rejects sending sign-in out to Safari (guideline 4). The web
+/// sign-in offers Apple beside GitHub and Google only while the server has
+/// Apple configured, and guideline 4.8 needs it to.
 Future<void> openAccountInBrowser(ProviderContainer ref) async {
   final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
+  final onIos = defaultTargetPlatform == TargetPlatform.iOS;
+  // hidePricing strips every path to a web purchase from the sheet, which App
+  // Store guideline 3.1.1 would otherwise reject (web/src/ui/pricing-visibility.ts).
   await launchUrl(
-    Uri.parse('$base/account'),
-    mode: LaunchMode.externalApplication,
+    Uri.parse(onIos ? '$base/account?hidePricing=1' : '$base/account'),
+    mode: onIos ? LaunchMode.inAppBrowserView : LaunchMode.externalApplication,
+  );
+}
+
+/// Opens where the subscription blocking account deletion is cancelled. iOS
+/// keeps clear of the pricing page ([iosManageSubscriptionUrl]).
+Future<void> openManageSubscription(ProviderContainer ref) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) {
+    return openUpgradeInBrowser(ref);
+  }
+  String? provider;
+  try {
+    provider = (await ref.read(subscriptionProvider.future))?.provider;
+  } catch (_) {
+    // Unknown provider still has a safe destination: the web dashboard.
+  }
+  final api = ref.read(licenseApiUrlProvider);
+  final url = Uri.parse(
+    iosManageSubscriptionUrl(provider: provider, licenseApiUrl: api),
+  );
+  // Our own pages stay in the in-app sheet, like openAccountInBrowser; a store
+  // URL goes out so the App Store app handles it.
+  await launchUrl(
+    url,
+    mode: url.host == Uri.parse(api).host
+        ? LaunchMode.inAppBrowserView
+        : LaunchMode.externalApplication,
   );
 }
 

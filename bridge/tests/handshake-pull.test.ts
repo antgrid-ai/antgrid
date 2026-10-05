@@ -47,13 +47,13 @@ test("send() drops app messages when no session is established", () => {
   expect(client.sentTo(PHONE_ID)).toHaveLength(0);
 });
 
-test("a tunnel:http-request on the session stream after establishment reaches no handler", () => {
-  // Tunnel traffic rides its own QUIC stream now; a `tunnel:http-request`
+test("a tunnel:tcp-open on the session stream after establishment reaches no handler", () => {
+  // Tunnel traffic rides its own QUIC stream now; a `tunnel:tcp-open` head
   // that still arrives on the session stream parses as no known AbMessage and
   // falls through to the ordinary drop, with nothing left to observe it.
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
-  const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
+  const tunnelReq = { type: "tunnel:tcp-open", connId: "conn-1", port: 3000, checkoutId: "main" };
 
   expect(() => client.sendFromPeer(PHONE_ID, tunnelReq)).not.toThrow();
 });
@@ -116,12 +116,12 @@ test("a different device's session is admitted ALONGSIDE the live session, displ
   expect(client.establishedPeers().map((p) => p.peerId)).toEqual([PHONE_ID, PHONE_2_ID]);
 });
 
-test("a tunnel:http-request from either admitted device reaches no handler, on the session stream", () => {
+test("a tunnel:tcp-open from either admitted device reaches no handler, on the session stream", () => {
   const client = freshClient();
   client.establish(PHONE_ID, { attemptId: "attempt-a" });
   client.establish(PHONE_2_ID, { attemptId: "attempt-b" });
 
-  const req = (requestId: string) => ({ type: "tunnel:http-request", requestId, port: 3000, method: "GET", path: "/" });
+  const req = (connId: string) => ({ type: "tunnel:tcp-open", connId, port: 3000, checkoutId: "main" });
   expect(() => client.sendFromPeer(PHONE_ID, req("from-a"))).not.toThrow();
   expect(() => client.sendFromPeer(PHONE_2_ID, req("from-b"))).not.toThrow();
 });

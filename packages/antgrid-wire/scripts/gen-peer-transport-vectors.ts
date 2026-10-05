@@ -36,11 +36,7 @@ import {
   STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
   STREAM_UPLOAD_MAX_FILE_NAME_LENGTH,
   STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
-  STREAM_TUNNEL_DATA_MAX_BYTES,
-  STREAM_TUNNEL_RECORD_MAX_BYTES,
-  STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-  TUNNEL_RECORD_TAG_WS_TEXT,
-  TUNNEL_RECORD_TAG_WS_BINARY,
+  STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
   StreamOpen,
   StreamRefused,
 } from "../src/index";
@@ -53,8 +49,7 @@ function expectedLabel(open: StreamOpen): { kind: string; id: string } {
     case "session": return { kind: open.kind, id: "0" };
     case "project": return { kind: open.kind, id: open.projectId };
     case "terminal": return { kind: open.kind, id: open.requestId };
-    case "tunnel-http": return { kind: open.kind, id: open.requestId };
-    case "tunnel-ws": return { kind: open.kind, id: open.wsId };
+    case "tunnel-tcp": return { kind: open.kind, id: open.connId };
     case "upload": return { kind: open.kind, id: open.requestId };
   }
 }
@@ -162,12 +157,8 @@ function buildStreamOpenVectors() {
       },
     },
     {
-      name: "tunnel-http",
-      json: { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" },
-    },
-    {
-      name: "tunnel-ws",
-      json: { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" },
+      name: "tunnel-tcp",
+      json: { kind: "tunnel-tcp", projectId: "proj-1", connId: "conn-1" },
     },
     {
       name: "upload",
@@ -227,9 +218,11 @@ function buildStreamOpenVectors() {
     { name: "terminal-missing-request", json: { kind: "terminal", projectId: "proj-1" } },
     { name: "terminal-null-checkout", json: { kind: "terminal", projectId: "proj-1", checkoutId: null, requestId: "req-1" } },
     { name: "terminal-empty-checkout", json: { kind: "terminal", projectId: "proj-1", checkoutId: "", requestId: "req-1" } },
-    { name: "tunnel-http-missing-request", json: { kind: "tunnel-http", projectId: "proj-1" } },
-    { name: "tunnel-ws-request-not-ws", json: { kind: "tunnel-ws", projectId: "proj-1", requestId: "req-1" } },
-    { name: "tunnel-ws-overlong-id", json: { kind: "tunnel-ws", projectId: "proj-1", wsId: overlongId } },
+    { name: "retired-tunnel-http", json: { kind: "tunnel-http", projectId: "proj-1", requestId: "req-1" } },
+    { name: "retired-tunnel-ws", json: { kind: "tunnel-ws", projectId: "proj-1", wsId: "ws-1" } },
+    { name: "tunnel-tcp-overlong-id", json: { kind: "tunnel-tcp", projectId: "proj-1", connId: overlongId } },
+    { name: "tunnel-tcp-missing-conn", json: { kind: "tunnel-tcp", projectId: "proj-1" } },
+    { name: "tunnel-tcp-with-port", json: { kind: "tunnel-tcp", projectId: "proj-1", connId: "conn-1", port: 3000 } },
     { name: "upload-missing-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a" } },
     { name: "upload-negative-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: -1 } },
     { name: "upload-fractional-size", json: { kind: "upload", projectId: "proj-1", requestId: "req-1", fileName: "a", size: 1.5 } },
@@ -268,8 +261,7 @@ function buildStreamOpenVectors() {
     session: "session",
     project: "project",
     terminal: "terminal",
-    "tunnel-http": "tunnel-http",
-    "tunnel-ws": "tunnel-ws",
+    "tunnel-tcp": "tunnel-tcp",
     upload: "upload",
   };
   const labels = Object.entries(labelSampleByKind).map(([kind, sampleName]) => {
@@ -306,13 +298,7 @@ function buildStreamOpenVectors() {
       maxMimeTypeLength: STREAM_UPLOAD_MAX_MIME_TYPE_LENGTH,
     },
     tunnelRecords: {
-      maxDataBytes: STREAM_TUNNEL_DATA_MAX_BYTES,
-      maxRecordBytes: STREAM_TUNNEL_RECORD_MAX_BYTES,
-      requestBodyMaxBytes: STREAM_TUNNEL_REQUEST_BODY_MAX_BYTES,
-      tags: {
-        wsText: TUNNEL_RECORD_TAG_WS_TEXT,
-        wsBinary: TUNNEL_RECORD_TAG_WS_BINARY,
-      },
+      maxRecordBytes: STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
     },
     opens,
     refusals,

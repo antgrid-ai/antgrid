@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:iroh_flutter/iroh_flutter.dart' as iroh;
 import 'package:path/path.dart' as path;
 
+import '../services/bounded_http_request.dart';
 import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 
@@ -47,6 +48,14 @@ Future<void> _loadBundledIroh() {
   return iroh.Iroh.init();
 }
 
+/// Dials one authorized endpoint: [NativeEndpointOwner.dial] in production.
+typedef PeerDial =
+    Future<PeerLink> Function({
+      required String endpointId,
+      required bool Function() authorized,
+      PeerLinkDiagnostic? diagnostic,
+    });
+
 abstract interface class PeerConnector {
   void retain();
   void release();
@@ -66,9 +75,14 @@ class PeerRuntime implements PeerConnector {
     required this.record,
     required String licenseApiUrl,
     required Future<String> Function() mintToken,
+    required bool Function(String token) rejectToken,
     this.fenceOnResume = true,
     http.Client? httpClient,
+    /// A test seam: production passes nothing and dials through the
+    /// enrollment's native endpoint, which needs the bundled Iroh library.
+    Future<PeerDial> Function(List<String> relayUrls)? dialerFor,
   }) : _http = httpClient ?? http.Client(),
+       _dialerFor = dialerFor,
        _endpointSecret = base64Decode(record.endpointSecret!),
        _deviceSecret = base64Decode(record.ed25519Priv) {
     enrollment = EndpointEnrollmentClient(
@@ -77,32 +91,43 @@ class PeerRuntime implements PeerConnector {
       enrollmentId: record.clientId,
       request: (method, path, body) {
         var expired = false;
-        return (() async {
+        void checkCurrent() {
+          if (expired || _disposed) {
+            throw TimeoutException('Authorization request retired');
+          }
+        }
+
+        Future<http.Response> send({bool mayRetry = true}) async {
+          checkCurrent();
           final String token;
           try {
             token = await mintToken();
           } on DeviceRevokedException {
             throw const PeerAuthorizationDenied();
           }
-          if (expired || _disposed) {
-            throw TimeoutException('Authorization request retired');
-          }
-          final uri = Uri.parse(
-            '${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path',
+          checkCurrent();
+          final response = await boundedHttpRequest(
+            _http,
+            method,
+            Uri.parse('${licenseApiUrl.replaceAll(RegExp(r'/+$'), '')}$path'),
+            headers: {
+              'authorization': 'Bearer $token',
+              'content-type': 'application/json',
+            },
+            body: method == 'GET' ? null : jsonEncode(body),
           );
-          final headers = {
-            'authorization': 'Bearer $token',
-            'content-type': 'application/json',
-          };
-          final response =
-              await (method == 'GET'
-                      ? _http.get(uri, headers: headers)
-                      : _http.post(
-                          uri,
-                          headers: headers,
-                          body: jsonEncode(body),
-                        ))
-                  .timeout(const Duration(seconds: 15));
+          // Only a 401 is about the token; a 403 judges the request. A reused
+          // token can stop verifying while the device is still good (a
+          // rotated signing key, a clock step), so its refusal earns one
+          // retry with a fresh token.
+          if (response.statusCode == 401 && rejectToken(token) && mayRetry) {
+            return send(mayRetry: false);
+          }
+          return response;
+        }
+
+        return (() async {
+          final response = await send();
           if (response.statusCode == 401 || response.statusCode == 403) {
             throw const PeerAuthorizationDenied();
           }
@@ -141,12 +166,14 @@ class PeerRuntime implements PeerConnector {
     );
   }
   final DeviceRecord record;
+
   /// Whether a resume discards the current lease before asking again. A phone
   /// resumes from real backgrounding, where policy pushes may have been
   /// missed; a desktop "resumes" on every window focus, and fencing there
   /// closed every machine link on each alt-tab.
   final bool fenceOnResume;
   final http.Client _http;
+  final Future<PeerDial> Function(List<String> relayUrls)? _dialerFor;
   final Uint8List _endpointSecret, _deviceSecret;
   late final EndpointEnrollmentClient enrollment;
   late final AuthorizationLease lease;
@@ -179,10 +206,9 @@ class PeerRuntime implements PeerConnector {
   @override
   void invalidate() => lease.invalidate();
   @override
-  Future<bool> resume() => _resuming ??=
-      (fenceOnResume ? lease.refreshFresh() : lease.refresh()).whenComplete(
-        () => _resuming = null,
-      );
+  Future<bool> resume() =>
+      _resuming ??= (fenceOnResume ? lease.refreshFresh() : lease.refresh())
+          .whenComplete(() => _resuming = null);
 
   AuthorizationSnapshot _currentSnapshot() {
     final snapshot = lease.snapshot;
@@ -232,7 +258,14 @@ class PeerRuntime implements PeerConnector {
         );
       }
     }
-    if (_currentSnapshot().endpoint?.endpointId != id) {
+    final registered = _currentSnapshot().endpoint;
+    if (registered == null) {
+      // A refetch already in flight (a resume's) can be answered from before
+      // the registration committed. The next attempt reads it again, so this
+      // must not become a sticky peerRejected.
+      throw authorizationChangedDuringConnect;
+    }
+    if (registered.endpointId != id) {
       throw const PeerConnectionFailure(
         'LOCAL_ENDPOINT_ROTATED',
         terminal: true,
@@ -302,26 +335,35 @@ class PeerRuntime implements PeerConnector {
           );
     }
 
-    final native = await _nativeFor(_currentSnapshot().relayUrls);
+    final relayUrls = _currentSnapshot().relayUrls;
+    final dial = await (_dialerFor?.call(relayUrls) ?? _nativeDial(relayUrls));
     attempt.checkCurrent(generation);
-    final selected = await attempt.connect(
-      diagnostic: diagnostic,
-      iroh: () async {
-        return native.dial(
+    // Disposal is a one-way latch: no later attempt on this runtime can
+    // succeed, and prepare() refuses the next one as DISPOSED regardless. The
+    // dial reports a lapsed lease as retryable wherever disposal lands in it,
+    // so the classification is made here, once, for every path.
+    const disposedAfterConnect = PeerConnectionFailure(
+      'DISPOSED_AFTER_CONNECT',
+      terminal: true,
+    );
+    final PeerLink selected;
+    try {
+      selected = await attempt.connect(
+        diagnostic: diagnostic,
+        iroh: () => dial(
           endpointId: registration.endpointId,
           authorized: authorized,
           diagnostic: diagnostic,
-        );
-      },
-    );
+        ),
+      );
+    } on PeerConnectionFailure catch (error) {
+      if (_disposed && error.retryable) throw disposedAfterConnect;
+      rethrow;
+    }
     if (!authorized()) {
       await selected.close();
-      throw PeerConnectionFailure(
-        _disposed
-            ? 'DISPOSED_AFTER_CONNECT'
-            : 'AUTHORIZATION_CHANGED_DURING_CONNECT',
-        terminal: true,
-      );
+      if (_disposed) throw disposedAfterConnect;
+      throw authorizationChangedDuringConnect;
     }
     return LeasedPeerLink(
       selected,
@@ -331,6 +373,9 @@ class PeerRuntime implements PeerConnector {
       registrationGeneration: registration.generation,
     );
   }
+
+  Future<PeerDial> _nativeDial(List<String> relayUrls) async =>
+      (await _nativeFor(relayUrls)).dial;
 
   static String _relayPolicy(List<String> urls) =>
       (urls.toList()..sort()).join('\n');

@@ -13,7 +13,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
@@ -24,8 +24,11 @@ import '../providers/tasks.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
+import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
+import '../widgets/log_files_button.dart';
 import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
@@ -159,9 +162,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref.container);
+        if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
-        showAbSnackBar(
+        showAbToast(
           context,
           'Could not delete account. Check your connection and try again.',
           clearPrevious: true,
@@ -425,9 +428,25 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                   const SizedBox(height: AbTokens.space12),
                   _Section(
                     section: SettingsSection.help,
-                    body: const [
-                      SizedBox(height: AbTokens.space8),
-                      HelpAboutSection(),
+                    body: [
+                      const SizedBox(height: AbTokens.space8),
+                      const HelpAboutSection(),
+                      const SizedBox(height: AbTokens.space12),
+                      Text(
+                        isMobilePlatform
+                            ? 'Share this device\'s app log — attach it when '
+                                  'reporting a connection problem.'
+                            : 'app.log and host.log live in the log folder.',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXxs,
+                          color: antgrid.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: AbTokens.space8),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: LogFilesButton(uppercase: true),
+                      ),
                     ],
                   ),
                   const SizedBox(height: AbTokens.space12),
@@ -455,7 +474,11 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                               size: AbTokens.iconButtonGlyph,
                               color: antgrid.textSecondary,
                             ),
-                            onTap: () => openAccountInBrowser(ref.container),
+                            onTap: () => detached(
+                              'AppSettingsScreen',
+                              'open account page',
+                              () => openAccountInBrowser(ref.container),
+                            ),
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),
