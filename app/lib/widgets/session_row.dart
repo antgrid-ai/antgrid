@@ -21,6 +21,7 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../project/limits.dart';
 import '../project/project_session_registry.dart';
+import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/chat_composer_drafts.dart';
 import '../providers/open_checkout.dart';
@@ -80,6 +81,8 @@ class SessionRow extends ConsumerStatefulWidget {
 }
 
 class _SessionRowState extends ConsumerState<SessionRow> {
+  bool _wasSelected = false;
+
   // Mobile has no hover — keep the kebab visible.
   late bool _hovered = isMobilePlatform;
 
@@ -246,6 +249,19 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   Widget build(BuildContext context) {
     final activeId = ref.watch(activeSessionIdProvider);
     final selected = activeId == session.id;
+    // Only on the way in: a drawer that scrolled the row back under the user
+    // on every rebuild would fight their own scrolling.
+    if (selected && !_wasSelected) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Scrollable.ensureVisible(
+          context,
+          duration: const Duration(milliseconds: 200),
+          alignment: 0.3,
+        );
+      });
+    }
+    _wasSelected = selected;
     final work = ref.watch(
       sessionWorkStatusProvider((
         entryId: widget.entryId,
@@ -812,18 +828,30 @@ class _SessionMenu extends ConsumerWidget {
         case _SessionAction.stop:
           await svc.stopSession(session.id);
         case _SessionAction.fork:
-          final workspace = await promptSessionFork(
+          final catalog = ref.read(agentCatalogProvider);
+          final choice = await promptSessionFork(
             anchor,
             isolatedSource: sessionIsIsolated(session),
+            sourceTool: session.tool,
+            // A chat session can only run on an agent with a chat driver.
+            agents: [
+              for (final d in catalog.values)
+                if (session.mode != 'chat' || d.chatCapable)
+                  (tool: d.tool, label: d.label),
+            ],
           );
-          if (workspace == null || !anchor.mounted) return;
+          if (choice == null || !anchor.mounted) return;
           // Caught per-branch, per the contract above: every fork refusal the
           // bridge documents — no captured transcript yet, a conversation past
           // the handoff cap, a custom-command session, a missing checkout —
           // arrives as a typed exception carrying the bridge's own sentence,
           // and without this the menu item just appears to do nothing.
           try {
-            final fork = await svc.fork(session.id, workspace: workspace);
+            final fork = await svc.fork(
+              session.id,
+              workspace: choice.workspace,
+              tool: choice.tool,
+            );
             // An `ok` carrying no session: there is nothing to start and
             // nothing to land in, so say so rather than returning as though the
             // fork had happened. The same answer the New Session canvas treats

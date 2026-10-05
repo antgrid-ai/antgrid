@@ -44,6 +44,7 @@ import '../widgets/file_tree_view.dart';
 import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
 import '../widgets/send_capture_to_agent.dart';
+import '../util/settle_after.dart';
 
 /// Anchors the Changes section header's diff totals for tests — a file row's
 /// own diff-stat badge carries the same numbers, so a test reading the totals
@@ -449,7 +450,10 @@ class _BranchLine extends StatelessWidget {
         child: Text(
           '→ $remote',
           maxLines: 1,
-          style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
         ),
       );
     } else {
@@ -722,11 +726,7 @@ class _SplitCellState extends State<_SplitCell> {
           if (widget.running)
             const AbLoadingDot(size: AbTokens.fontXs)
           else
-            AbIcon(
-              widget.icon,
-              size: AbTokens.fontSm,
-              color: p.textSecondary,
-            ),
+            AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
           const SizedBox(width: AbTokens.space4),
           Flexible(
             child: Text(
@@ -984,9 +984,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         // current state — the tree itself already shows which folders are open.
         if (counts.changedFolders.isNotEmpty)
           AbIconButton(
-            icon: allFoldersCollapsed
-                ? AbIcons.expandAll
-                : AbIcons.collapseAll,
+            icon: allFoldersCollapsed ? AbIcons.expandAll : AbIcons.collapseAll,
             tooltip: allFoldersCollapsed
                 ? 'Expand All Folders'
                 : 'Collapse All Folders',
@@ -1004,9 +1002,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         AbIconButton(
           icon: AbIcons.gitStage,
           tooltip: 'Stage All Changes',
-          onTap: counts.unstagedPaths.isEmpty
-              ? null
-              : () => _stageAll(context),
+          onTap: counts.unstagedPaths.isEmpty ? null : () => _stageAll(context),
         ),
       ],
     );
@@ -1181,10 +1177,7 @@ class _GitPanelBody extends ConsumerWidget {
         if (showSideBySide) {
           return Row(
             children: [
-              SizedBox(
-                width: _columnWidth,
-                child: _buildColumn(context),
-              ),
+              SizedBox(width: _columnWidth, child: _buildColumn(context)),
               const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1244,10 +1237,7 @@ class _GitPanelBody extends ConsumerWidget {
             onToggle: panel.onToggleChanges,
           ),
           if (changesOpen)
-            Expanded(
-              flex: historyOpen ? 3 : 1,
-              child: _buildFileList(context),
-            ),
+            Expanded(flex: historyOpen ? 3 : 1, child: _buildFileList(context)),
           const AbSeparator.horizontal(),
         ],
         _GitHistorySectionHeader(
@@ -1276,8 +1266,7 @@ class _GitPanelBody extends ConsumerWidget {
   Widget _buildFileList(BuildContext context) {
     return RefreshIndicator(
       onRefresh: () async {
-        fileService.requestFullTree();
-        await Future.delayed(const Duration(milliseconds: 500));
+        await settleAfter(fileService.stateStream, fileService.requestFullTree);
       },
       child: FileTreeView(
         root: state.root,
@@ -1508,8 +1497,10 @@ class _HistoryListState extends State<_HistoryList> {
 
     return RefreshIndicator(
       onRefresh: () async {
-        widget.fileService.loadHistory();
-        await Future.delayed(const Duration(milliseconds: 500));
+        await settleAfter(
+          widget.fileService.stateStream,
+          widget.fileService.loadHistory,
+        );
       },
       child: ListView.builder(
         controller: _scrollController,

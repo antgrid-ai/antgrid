@@ -3,12 +3,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/widgets/session_fork_dialog.dart';
 
-String? _answer;
+ForkChoice? _answer;
 bool _answered = false;
 
 /// Opens the dialog from a button, the way the kebab menu does, and records
 /// what it answered into [_answer] / [_answered].
-Future<void> _open(WidgetTester tester, {required bool isolatedSource}) async {
+Future<void> _open(
+  WidgetTester tester, {
+  required bool isolatedSource,
+  List<ForkAgentOption> agents = const [],
+  String? sourceTool,
+}) async {
   _answer = null;
   _answered = false;
   await tester.pumpWidget(
@@ -23,6 +28,8 @@ Future<void> _open(WidgetTester tester, {required bool isolatedSource}) async {
               _answer = await promptSessionFork(
                 context,
                 isolatedSource: isolatedSource,
+                agents: agents,
+                sourceTool: sourceTool,
               );
               _answered = true;
             },
@@ -58,7 +65,7 @@ void main() {
     );
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
-    expect(_answer, forkWorkspaceCopy);
+    expect(_answer?.workspace, forkWorkspaceCopy);
   });
 
   testWidgets('picking this workspace names the concurrency it buys', (
@@ -73,7 +80,7 @@ void main() {
     );
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
-    expect(_answer, forkWorkspaceCurrent);
+    expect(_answer?.workspace, forkWorkspaceCurrent);
   });
 
   // "This workspace" means something different for a session on the main tree:
@@ -95,6 +102,37 @@ void main() {
       find.textContaining('alongside every other session there'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the fork stays on the source agent unless another is picked', (
+    tester,
+  ) async {
+    const agents = [
+      (tool: 'claude-code', label: 'Claude Code'),
+      (tool: 'codex', label: 'Codex'),
+    ];
+    await _open(
+      tester,
+      isolatedSource: false,
+      agents: agents,
+      sourceTool: 'claude-code',
+    );
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    expect(_answer?.tool, isNull);
+
+    await _open(
+      tester,
+      isolatedSource: false,
+      agents: agents,
+      sourceTool: 'claude-code',
+    );
+    await tester.tap(find.text('Codex'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('starts from a transcript'), findsOneWidget);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    expect(_answer?.tool, 'codex');
   });
 
   testWidgets('cancelling forks nothing', (tester) async {

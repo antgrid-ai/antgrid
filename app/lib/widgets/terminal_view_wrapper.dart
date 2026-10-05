@@ -152,7 +152,8 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
       _TerminalViewWrapperState();
 }
 
-class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
+class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
+    with WidgetsBindingObserver {
   TerminalService? _displayService;
   int _displayUpdate = 0;
 
@@ -640,6 +641,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _uploader = TerminalAttachmentUploader(
       // `existingServicesForCheckout`, not `servicesForCheckout` — the latter
       // creates and broadcasts a bundle as a side effect.
@@ -799,6 +801,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cancelTakeover();
     widget.terminalService.setInputTransform(
       widget.tab.terminalId,
@@ -868,6 +871,20 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       _invalidatedAnchors = anchors;
     });
     _selectionController.clear();
+  }
+
+  /// Copies [text], then drops the selection and says so: a highlight that
+  /// outlives the copy reads as "nothing happened" and, left armed, is what the
+  /// next Ctrl+C would copy again instead of reaching the agent.
+  Future<void> _copySelection(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    setState(() {
+      _selectedText = null;
+      _selectedAnchors = null;
+    });
+    _selectionController.clear();
+    showAbToast(context, 'Copied');
   }
 
   bool get _frameOwnsPane => widget.tab.mode == TerminalDisplayMode.frame;
@@ -1123,7 +1140,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         detached(
           'TerminalView',
           'clipboard copy failed',
-          () => Clipboard.setData(ClipboardData(text: selection)),
+          () => _copySelection(selection),
         );
         return KeyEventResult.handled;
       }
@@ -2114,9 +2131,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // Phone width publishes no menu control, and a tapped link is the only
     // affordance touch has, so the shell's own handover is what brings the tab
     // and its page forward.
-    ref
-        .read(pendingWorkspaceViewProvider.notifier)
-        .set((target: ref.read(selectedTargetProvider), value: view));
+    ref.read(pendingWorkspaceViewProvider.notifier).set((
+      target: ref.read(selectedTargetProvider),
+      value: view,
+    ));
   }
 
   /// Shows or hides the destination readout as the pointer enters and leaves
@@ -2314,7 +2332,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           ref.read(appSettingsServiceProvider.notifier).setTerminalZoom(1.0),
       modifiers: _modifiers,
       onToggleModifier: _modifiers.toggle,
-      composeOpen: _composeOpen,
+      composeOpen: _composeOpen && !_composeKeyboardHidden,
       onToggleCompose: _toggleCompose,
       onDirectInput: _toggleDirectInput,
     );
@@ -2346,14 +2364,53 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
   bool _composeOpen = false;
 
-  void _toggleCompose() => _composeOpen ? _closeCompose() : _openCompose();
+  /// The system keyboard went away while the box stayed up -- its own hide key
+  /// or the back gesture. The field keeps focus through that, so nothing here
+  /// would otherwise notice, and the toggle would keep offering to hide a
+  /// keyboard that is already gone.
+  bool _composeKeyboardHidden = false;
+  bool _imeWasUp = false;
+
+  @override
+  void didChangeMetrics() {
+    final up = (View.maybeOf(context)?.viewInsets.bottom ?? 0) > 0;
+    final wasUp = _imeWasUp;
+    _imeWasUp = up;
+    if (!mounted || !_composeOpen) return;
+    if (wasUp && !up && !_composeKeyboardHidden) {
+      setState(() => _composeKeyboardHidden = true);
+    } else if (up && _composeKeyboardHidden) {
+      setState(() => _composeKeyboardHidden = false);
+    }
+  }
+
+  void _toggleCompose() {
+    if (!_composeOpen) return _openCompose();
+    if (_composeKeyboardHidden) return _raiseComposeKeyboard();
+    _closeCompose();
+  }
+
+  /// Brings the keyboard back for a box that is still open. The focus is
+  /// dropped first: requesting focus on a node that already holds it does not
+  /// reopen an IME the user dismissed.
+  void _raiseComposeKeyboard() {
+    _composeFocus.unfocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_composeOpen) return;
+      _composeFocus.requestFocus();
+      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
+    });
+  }
 
   void _openCompose() {
     // The box's field takes the IME; the terminal's own connection would
     // otherwise sit under it and come back up when the box closes.
     _softKeyboardController.hide();
     if (_historyOpen) _closeHistory();
-    setState(() => _composeOpen = true);
+    setState(() {
+      _composeOpen = true;
+      _composeKeyboardHidden = false;
+    });
     // Explicit, not the field's `autofocus`: that only claims focus when its
     // scope holds none, and the terminal already does — the box opened with no
     // keyboard and needed a second tap.
@@ -2364,7 +2421,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   void _closeCompose() {
     _composeFocus.unfocus();
-    setState(() => _composeOpen = false);
+    setState(() {
+      _composeOpen = false;
+      _composeKeyboardHidden = false;
+    });
   }
 
   void _composeSend(String text) {

@@ -23,6 +23,7 @@ import '../project/project_session_registry.dart'
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
+import '../providers/agent_transport.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/drawer_entries.dart';
@@ -100,7 +101,21 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    // Provider writes are illegal mid-build, and initState runs inside one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final selected = ref.read(selectedRegistrationIdProvider);
+      if (selected != null) revealDrawerSelection(ref.container, selected);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(selectedRegistrationIdProvider, (_, next) {
+      if (next != null) revealDrawerSelection(ref.container, next);
+    });
     // Unfiltered by design. The session search lives in the window title bar
     // and aims at the Recent list, which is the complete flat view of sessions;
     // narrowing THIS list by its projects' sessions only hid rows the user was

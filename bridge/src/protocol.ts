@@ -1899,6 +1899,9 @@ const SessionForkMessage = BaseMessage.extend({
   requestId: z.string(),
   sourceSessionId: z.string(),
   workspace: z.enum(["copy", "current"]),
+  // Registry key of the agent the fork runs on; absent keeps the source's.
+  // Only a registry key: the command and argv stay bridge-owned.
+  tool: z.string().min(1).optional(),
 });
 
 const SessionStartMessage = BaseMessage.extend({

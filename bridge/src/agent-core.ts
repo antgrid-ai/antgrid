@@ -2496,7 +2496,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const s = sessions;
         // The manager resolves the source session, transcript, native tool and
         // checkout. This handler intentionally forwards no path or native id.
-        void s.fork(msg.sourceSessionId, msg.workspace).then(
+        void s.fork(msg.sourceSessionId, msg.workspace, msg.tool).then(
           (entry) => sendAb(createMessage("session:result", {
             requestId: msg.requestId, ok: true, session: entry, checkoutId: entry.checkoutId,
           })),

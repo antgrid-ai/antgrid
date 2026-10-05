@@ -4,6 +4,7 @@ import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_dialog.dart';
 import '../design/widgets/ab_segmented.dart';
 
@@ -13,9 +14,20 @@ import '../design/widgets/ab_segmented.dart';
 const String forkWorkspaceCopy = 'copy';
 const String forkWorkspaceCurrent = 'current';
 
+/// An agent a fork can run on: the bridge registry key and its display name.
+typedef ForkAgentOption = ({String tool, String label});
+
+/// What the fork dialog answered. [tool] is null when the fork stays on the
+/// source session's own agent, which is the only case that can continue the
+/// agent's native conversation rather than replay a transcript.
+typedef ForkChoice = ({String workspace, String? tool});
+
 /// Asks which workspace a fork of this session should run in. Returns
 /// [forkWorkspaceCopy] or [forkWorkspaceCurrent], or null if the user
 /// cancelled or dismissed.
+///
+/// [agents] are the agents the fork may run on and [sourceTool] the one the
+/// session already runs; with fewer than two options the picker is omitted.
 ///
 /// A segmented control rather than [AbConfirmDialog]'s opt-in toggle: that
 /// toggle is documented for "a second consequence the user may accept alongside
@@ -27,20 +39,32 @@ const String forkWorkspaceCurrent = 'current';
 /// rather than the wording: sharing an isolated session's checkout puts two
 /// agents somewhere only they can see, while sharing a main-tree session's puts
 /// the fork where every ordinary session already lives.
-Future<String?> promptSessionFork(
+Future<ForkChoice?> promptSessionFork(
   BuildContext context, {
   required bool isolatedSource,
+  List<ForkAgentOption> agents = const [],
+  String? sourceTool,
 }) {
-  return showDialog<String>(
+  return showDialog<ForkChoice>(
     context: context,
-    builder: (_) => _SessionForkDialog(isolatedSource: isolatedSource),
+    builder: (_) => _SessionForkDialog(
+      isolatedSource: isolatedSource,
+      agents: agents,
+      sourceTool: sourceTool,
+    ),
   );
 }
 
 class _SessionForkDialog extends StatefulWidget {
-  const _SessionForkDialog({required this.isolatedSource});
+  const _SessionForkDialog({
+    required this.isolatedSource,
+    required this.agents,
+    required this.sourceTool,
+  });
 
   final bool isolatedSource;
+  final List<ForkAgentOption> agents;
+  final String? sourceTool;
 
   @override
   State<_SessionForkDialog> createState() => _SessionForkDialogState();
@@ -52,7 +76,14 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   String _workspace = forkWorkspaceCopy;
 
   void _cancel() => Navigator.of(context).pop();
-  void _confirm() => Navigator.of(context).pop(_workspace);
+  late String? _tool = widget.sourceTool;
+
+  void _confirm() => Navigator.of(context).pop((
+    workspace: _workspace,
+    // Null for "same agent": the bridge keeps the source's tool and can fork
+    // natively instead of replaying a transcript.
+    tool: _tool == widget.sourceTool ? null : _tool,
+  ));
 
   /// The consequence of the CURRENT pick, stated as what happens to the user's
   /// work rather than as what Antgrid does. The uncommitted-changes clause is
@@ -103,10 +134,7 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
                 alignment: Alignment.centerLeft,
                 child: AbSegmented<String>(
                   segments: const [
-                    AbSegment(
-                      value: forkWorkspaceCopy,
-                      label: 'New workspace',
-                    ),
+                    AbSegment(value: forkWorkspaceCopy, label: 'New workspace'),
                     AbSegment(
                       value: forkWorkspaceCurrent,
                       label: 'This workspace',
@@ -124,6 +152,40 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
                   color: context.antgrid.textMuted,
                 ),
               ),
+              if (widget.agents.length > 1) ...[
+                const SizedBox(height: AbTokens.space16),
+                Text(
+                  'Agent',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: context.antgrid.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: AbTokens.space8),
+                Wrap(
+                  spacing: AbTokens.space6,
+                  runSpacing: AbTokens.space6,
+                  children: [
+                    for (final a in widget.agents)
+                      AbChip.choice(
+                        label: a.label,
+                        selected: a.tool == _tool,
+                        onTap: () => setState(() => _tool = a.tool),
+                      ),
+                  ],
+                ),
+                if (_tool != widget.sourceTool) ...[
+                  const SizedBox(height: AbTokens.space8),
+                  Text(
+                    'Another agent can’t resume the original '
+                    'conversation, so it starts from a transcript of it.',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: context.antgrid.textMuted,
+                    ),
+                  ),
+                ],
+              ],
               const SizedBox(height: AbTokens.space16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,

@@ -798,7 +798,7 @@ export class SessionManager {
   }
 
   /** Create a fresh registry-agent conversation from bridge-owned context. */
-  async fork(sourceSessionId: string, workspace: ForkWorkspace): Promise<SessionEntry> {
+  async fork(sourceSessionId: string, workspace: ForkWorkspace, targetTool?: string): Promise<SessionEntry> {
     const source = this.entries.get(sourceSessionId);
     if (!source) throw new Error(`session not found: ${sourceSessionId}`);
     if (source.command) throw new Error("Custom-command sessions cannot be forked.");
@@ -807,10 +807,16 @@ export class SessionManager {
     const sourceAgentSpec = source.checkoutId === "main"
       ? this.agentSpec
       : await this.opts.resolveAgentSpec?.(source.checkoutId) ?? this.agentSpec;
-    const tool = source.tool ?? sourceAgentSpec.name;
-    const adapter = (this.opts.agentRuntime ?? agentRuntime).get(tool);
+    const sourceTool = source.tool ?? sourceAgentSpec.name;
+    const tool = targetTool ?? sourceTool;
+    const crossAgent = tool !== sourceTool;
+    const runtime = this.opts.agentRuntime ?? agentRuntime;
+    const adapter = runtime.get(sourceTool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
-    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
+    if (crossAgent && !runtime.get(tool)) throw new Error(`unknown agent: ${tool}`);
+    // A native fork continues the source agent's own conversation id, which no
+    // other agent can read; a cross-agent fork always rides the transcript.
+    const nativeSource = !crossAgent && source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
       ? capturedSourceId : undefined;
     const transcript = nativeSource
       ? undefined
@@ -820,7 +826,10 @@ export class SessionManager {
     }
 
     // Never inherit raw command/args. A fork launches the registry default.
-    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy: source.approvalPolicy });
+    // The source's approval policy is in that agent's own vocabulary, so a
+    // different agent starts from its default.
+    const approvalPolicy = crossAgent ? "default" : source.approvalPolicy;
+    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
     // the user reads that. Assigned here instead of passed to buildEntry so
@@ -856,7 +865,7 @@ export class SessionManager {
 
     return this.createWorktree(
       undefined,
-      { tool, mode: source.mode, approvalPolicy: source.approvalPolicy, isolation: "worktree" },
+      { tool, mode: source.mode, approvalPolicy, isolation: "worktree" },
       entry,
       // A thunk, not a value: an argument expression is evaluated before the
       // call, so resolving HEAD eagerly here would answer "no committed HEAD"

@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
@@ -126,6 +127,34 @@ void main() {
 
       await tester.tap(find.text('lib'));
       expect(tappedPath, 'project/lib');
+    });
+
+    testWidgets('long-pressing a row offers Copy path', (tester) async {
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(buildTestWidget(root: makeTree()));
+      await tester.longPress(find.text('README.md'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy path'));
+      await tester.pumpAndSettle();
+
+      expect(copied, 'project/README.md');
+      await tester.pump(const Duration(seconds: 10));
     });
 
     testWidgets('tapping a file calls onFileSelected', (tester) async {

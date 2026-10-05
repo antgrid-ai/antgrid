@@ -79,3 +79,31 @@ describe("SessionManager.fork naming and provenance", () => {
     expect(row?.forkedFromSessionId).toBe(source.id);
   });
 });
+
+describe("SessionManager.fork onto another agent", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "antgrid-fork-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("refuses an agent the registry does not know", async () => {
+    const sm = makeManager(dir);
+    const source = sm.create("Auth refactor");
+    sm.setAgentSession(source.id, "native-1");
+    await expect(sm.fork(source.id, "current", "no-such-agent")).rejects.toThrow(/unknown agent/);
+  });
+
+  it("never hands the source's native conversation id to a different agent", async () => {
+    const term = { ...makeTerm(), getScrollback: () => ({ text: "user: fix the auth bug\nassistant: on it" }) };
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir,
+      terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const source = sm.create("Auth refactor");
+    sm.setAgentSession(source.id, "native-1");
+    const forked = await sm.fork(source.id, "current", "codex");
+    expect(forked.tool).toBe("codex");
+    expect(forked.forkedFromSessionId).toBe(source.id);
+  });
+});

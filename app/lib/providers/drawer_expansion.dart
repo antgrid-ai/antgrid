@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../util/device_id.dart';
+
 /// Ids the user has explicitly EXPANDED, for drawer rows whose default state is
 /// COLLAPSED — remote MACHINE entries (keyed by bare deviceUuid) and the
 /// advertised PROJECT sub-rows nested under them (keyed by the compound
@@ -42,6 +44,28 @@ class LocalMachineCollapsedNotifier extends Notifier<bool> {
   bool build() => false;
 
   void toggle() => state = !state;
+
+  void set(bool collapsed) {
+    if (state != collapsed) state = collapsed;
+  }
+}
+
+/// Opens the drawer rows that hold the project the user is looking at: the
+/// folded "This machine" band for a local project, or the remote machine and
+/// its advertised project row for a remote one. A project already open in the
+/// workspace is the one place the user is guaranteed to want its sessions in
+/// view, so a fold left behind from earlier must not hide it.
+///
+/// A remote registration id is the compound `<uuid>.<projectId>`; a local one
+/// never contains a dot.
+void revealDrawerSelection(ProviderContainer ref, String registrationId) {
+  if (registrationId.contains('.')) {
+    final expanded = ref.read(expandedDrawerIdsProvider.notifier);
+    expanded.expand(baseDeviceUuid(registrationId));
+    expanded.expand(registrationId);
+  } else {
+    ref.read(localMachineCollapsedProvider.notifier).set(false);
+  }
 }
 
 final localMachineCollapsedProvider =

@@ -403,6 +403,7 @@ class SessionsService {
   Future<SessionEntry?> fork(
     String sourceSessionId, {
     required String workspace,
+    String? tool,
   }) {
     final requestId = _newRequestId();
     final pending = _newPending<SessionEntry?>(
@@ -415,6 +416,7 @@ class SessionsService {
           'requestId': requestId,
           'sourceSessionId': sourceSessionId,
           'workspace': workspace,
+          'tool': ?tool,
         }),
       ),
     );

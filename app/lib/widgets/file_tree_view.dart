@@ -1,5 +1,5 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -11,8 +11,10 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
 import '../models/git_status_index.dart';
@@ -745,6 +747,41 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     widget.onTap!();
   }
 
+  /// Copies the path the tree reports for this node — project-relative, which
+  /// is what an agent prompt or a terminal in the project root wants.
+  Future<void> _copyPath() async {
+    try {
+      await Clipboard.setData(ClipboardData(text: widget.node.path));
+    } catch (_) {
+      if (mounted) showAbToast(context, 'Could not copy the path.');
+      return;
+    }
+    if (mounted) showAbToast(context, 'Path copied');
+  }
+
+  /// Opened by long press (touch) or secondary click (pointer). [at] pins the
+  /// menu to the click; without it the menu hangs off the row.
+  Future<void> _showMenu([Offset? at]) async {
+    var anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    if (at != null) {
+      final overlay =
+          Overlay.of(context).context.findRenderObject() as RenderBox;
+      anchor = overlay.globalToLocal(at) & const Size(1, 1);
+    }
+    AbSwipeActions.closeAny();
+    final copy = await showAbMenu<bool>(
+      context: context,
+      anchorRect: anchor,
+      width: 200,
+      bounds: MenuBoundsScope.maybeOf(context),
+      entries: const [
+        AbMenuItem(label: 'Copy path', icon: AbIcons.copy, value: true),
+      ],
+    );
+    if (copy == true && mounted) await _copyPath();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDirectory = widget.node.type == FileNodeType.directory;
@@ -817,91 +854,96 @@ class _FileTreeRowState extends State<_FileTreeRow> {
           : MouseCursor.defer,
       onEnter: _onEnter,
       onExit: _onExit,
-      child: AbListRow(
-        onTap: widget.onTap == null ? null : _handleTap,
-        hoverable: true,
-        selected: widget.isSelected,
-        selectionStyle: AbRowSelection.surface,
-        density: AbRowDensity.sm,
-        contentFloor: reservesButtons
-            ? AbRowContentFloor.iconButton
-            : AbRowContentFloor.none,
-        onFocusChange: (v) {
-          if (_focused != v && mounted) setState(() => _focused = v);
-        },
-        leading: Padding(
-          padding: EdgeInsets.only(left: widget.depth * AbTokens.space16),
-          // An icon, not a `▶` glyph: Android's font fallback draws U+25B6 as
-          // the colour emoji, so a collapsed folder's arrow turned yellow.
-          child: isDirectory
-              ? AbDisclosureChevron(expanded: widget.isExpanded)
-              : const SizedBox(width: AbTokens.drawerLeadingSlot),
-        ),
-        title: Text(
-          widget.node.name,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontSm,
-            fontWeight: isDirectory ? FontWeight.w500 : FontWeight.normal,
-            color: widget.isSelected
-                ? context.antgrid.accent
-                // Present only because includeIgnored asked for it — a
-                // still-selected ignored row keeps reading as selected above
-                // this, so the dim only applies once selection is ruled out.
-                : widget.node.ignored
-                ? context.antgrid.textMuted
-                : isDirectory
-                ? context.antgrid.textSecondary
-                : context.antgrid.textPrimary,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onSecondaryTapUp: (d) => _showMenu(d.globalPosition),
+        child: AbListRow(
+          onTap: widget.onTap == null ? null : _handleTap,
+          onLongPress: _showMenu,
+          hoverable: true,
+          selected: widget.isSelected,
+          selectionStyle: AbRowSelection.surface,
+          density: AbRowDensity.sm,
+          contentFloor: reservesButtons
+              ? AbRowContentFloor.iconButton
+              : AbRowContentFloor.none,
+          onFocusChange: (v) {
+            if (_focused != v && mounted) setState(() => _focused = v);
+          },
+          leading: Padding(
+            padding: EdgeInsets.only(left: widget.depth * AbTokens.space16),
+            // An icon, not a `▶` glyph: Android's font fallback draws U+25B6 as
+            // the colour emoji, so a collapsed folder's arrow turned yellow.
+            child: isDirectory
+                ? AbDisclosureChevron(expanded: widget.isExpanded)
+                : const SizedBox(width: AbTokens.drawerLeadingSlot),
           ),
-          overflow: TextOverflow.ellipsis,
+          title: Text(
+            widget.node.name,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontSm,
+              fontWeight: isDirectory ? FontWeight.w500 : FontWeight.normal,
+              color: widget.isSelected
+                  ? context.antgrid.accent
+                  // Present only because includeIgnored asked for it — a
+                  // still-selected ignored row keeps reading as selected above
+                  // this, so the dim only applies once selection is ruled out.
+                  : widget.node.ignored
+                  ? context.antgrid.textMuted
+                  : isDirectory
+                  ? context.antgrid.textSecondary
+                  : context.antgrid.textPrimary,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+          // Actions outermost, badge inboard: at rest the change count is the
+          // only tenant and sits flush at the gutter on every row, so the column
+          // it forms is what the eye scans. Only a revealed row's badge steps
+          // inboard, and only while the row is revealed.
+          trailing: (showActions || hasDecoration)
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (hasDecoration)
+                      widget.rollupEntries.isNotEmpty
+                          ? _FolderRollupBadge(entries: widget.rollupEntries)
+                          : _DiffStatBadge(entries: widget.changeEntries),
+                    if (showActions && hasDecoration)
+                      const SizedBox(width: AbTokens.space4),
+                    if (showActions)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (onStagePath != null)
+                            AbIconButton(
+                              icon: AbIcons.gitStage,
+                              onTap: onStagePath,
+                              tooltip: 'Stage Changes',
+                            ),
+                          if (onUnstagePath != null)
+                            AbIconButton(
+                              icon: AbIcons.gitUnstage,
+                              onTap: onUnstagePath,
+                              tooltip: 'Unstage Changes',
+                            ),
+                          if (onDiscardPath != null)
+                            AbIconButton(
+                              icon: AbIcons.revert,
+                              onTap: onDiscardPath,
+                              tooltip: 'Discard Changes',
+                            ),
+                          if (onResolvePath != null)
+                            AbIconButton(
+                              icon: AbIcons.check,
+                              onTap: onResolvePath,
+                              tooltip: 'Mark Resolved',
+                            ),
+                        ],
+                      ),
+                  ],
+                )
+              : null,
         ),
-        // Actions outermost, badge inboard: at rest the change count is the
-        // only tenant and sits flush at the gutter on every row, so the column
-        // it forms is what the eye scans. Only a revealed row's badge steps
-        // inboard, and only while the row is revealed.
-        trailing: (showActions || hasDecoration)
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (hasDecoration)
-                    widget.rollupEntries.isNotEmpty
-                        ? _FolderRollupBadge(entries: widget.rollupEntries)
-                        : _DiffStatBadge(entries: widget.changeEntries),
-                  if (showActions && hasDecoration)
-                    const SizedBox(width: AbTokens.space4),
-                  if (showActions)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (onStagePath != null)
-                          AbIconButton(
-                            icon: AbIcons.gitStage,
-                            onTap: onStagePath,
-                            tooltip: 'Stage Changes',
-                          ),
-                        if (onUnstagePath != null)
-                          AbIconButton(
-                            icon: AbIcons.gitUnstage,
-                            onTap: onUnstagePath,
-                            tooltip: 'Unstage Changes',
-                          ),
-                        if (onDiscardPath != null)
-                          AbIconButton(
-                            icon: AbIcons.revert,
-                            onTap: onDiscardPath,
-                            tooltip: 'Discard Changes',
-                          ),
-                        if (onResolvePath != null)
-                          AbIconButton(
-                            icon: AbIcons.check,
-                            onTap: onResolvePath,
-                            tooltip: 'Mark Resolved',
-                          ),
-                      ],
-                    ),
-                ],
-              )
-            : null,
       ),
     );
 
