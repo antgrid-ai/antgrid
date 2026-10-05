@@ -22,6 +22,9 @@ import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
+import '../navigation/nav_controller.dart';
+import '../navigation/nav_location.dart';
+import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
@@ -246,12 +249,41 @@ class _NavActions extends ConsumerWidget {
       ),
       child: SizedBox(
         width: double.infinity,
-        child: AbButton(
-          label: 'New Session',
-          color: context.antgrid.accent,
-          fontSize: AbTokens.fontBody,
-          leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-          onTap: () => enterNewSession(ref.container),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AbButton(
+              label: 'New Session',
+              color: context.antgrid.accent,
+              fontSize: AbTokens.fontBody,
+              leading: AbIcon(
+                AbIcons.add,
+                size: 12,
+                color: context.antgrid.accent,
+              ),
+              onTap: () => enterNewSession(ref.container),
+            ),
+            const SizedBox(height: AbTokens.space4),
+            AbButton(
+              label: 'Scheduler',
+              fontSize: AbTokens.fontBody,
+              onTap: ref.watch(demoModeProvider)
+                  ? null
+                  : () {
+                      ref
+                          .read(workbenchSurfaceProvider.notifier)
+                          .set(WorkbenchSurface.scheduler);
+                      ref
+                          .read(navControllerProvider.notifier)
+                          .commit(
+                            const NavLocation(
+                              surface: WorkbenchSurface.scheduler,
+                            ),
+                          );
+                      closeDrawerIfOverlay(context);
+                    },
+            ),
+          ],
         ),
       ),
     );

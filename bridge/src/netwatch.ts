@@ -250,6 +250,8 @@ export const BODY_REDACTED_MARKER = "[redacted]";
 export function captureBody(text: string, msgType?: string): string | undefined {
   if (!bodyCaptureEnabled) return undefined;
   if (msgType !== undefined && BODY_REDACTED_MESSAGE_TYPES.has(msgType)) return BODY_REDACTED_MARKER;
+  // Generic RPC envelopes can contain saved prompts in both requests and replies.
+  if (/"(?:prompt|scheduler[.:][^"]*)"\s*[:},]/.test(text)) return BODY_REDACTED_MARKER;
   if (text.length <= NETWATCH_BODY_MAX_CHARS) return text;
   const keep = NETWATCH_BODY_MAX_CHARS - truncationMarker(text.length).length;
   return text.slice(0, keep) + truncationMarker(text.length - keep);

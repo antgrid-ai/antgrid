@@ -71,6 +71,11 @@ import { CheckoutStore } from "./worktrees/checkout-store";
 import { isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
+import { SchedulerService, SchedulerLaunchError } from "./scheduler/service";
+import { ScheduleInputSchema, SchedulePatchSchema, type Schedule } from "./scheduler/models";
+import { schedulingModesForAgent } from "antgrid-agents/builtins";
+import { baseSlotDeviceId } from "./relay-slot";
+import { SchedulerRequestSchemas } from "./scheduler/requests";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -131,6 +136,7 @@ const GitCheckoutParams = z.object({
 export const kHostWarmCap = 10;
 
 export interface HostServerOptions {
+  desktopOwned?: boolean;
   /** Machine-level remote config (device auth + relay/license endpoints).
    *  Present whenever a device record exists; cores opened with mode "remote"
    *  use it. Absent → only local cores can be opened. */
@@ -661,6 +667,9 @@ export class HostServer {
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduler: SchedulerService | null = null;
+  private schedulerError: string | undefined;
+  private readonly schedulerObservers = new Map<string, () => void>();
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
@@ -801,10 +810,12 @@ export class HostServer {
       );
       this.fatalRevokeArmed = true;
     }
+    this.startScheduler();
     return { port: listener.port, token };
   }
 
   notePeerResume(): void {
+    try { this.scheduler?.resume(); } catch { this.schedulerError = "Scheduler storage is unavailable"; }
     if (this.controlPlaneRelay) {
       void this.controlPlaneRelay.noteResume().catch((error) =>
         log.warn("host: peer authorization refresh after resume failed: %s", String(error)));
@@ -1005,6 +1016,129 @@ export class HostServer {
     );
   }
 
+  private startScheduler(): void {
+    if (this.scheduler || this.schedulerError || !this.opts.desktopOwned) return;
+    try {
+      this.scheduler = new SchedulerService({
+        abDir: resolveAbDir(), desktopOwned: true,
+        supportedAgents: async () => (await this.buildToolsAdvertisement())
+          .map((tool) => ({ agentId: tool.tool, modes: schedulingModesForAgent(tool.tool) }))
+          .filter((agent) => agent.modes.length > 0),
+        authorize: (schedule) => this.authorizeSchedule(schedule),
+        prepare: async (schedule, _run, bind) => {
+          const seen = this.seenProjects.get(schedule.projectId);
+          if (!seen || !existsSync(seen.path)) throw new SchedulerLaunchError("PROJECT_UNAVAILABLE");
+          await this.open(schedule.projectId, seen.path, "local");
+          const core = this.cores.get(schedule.projectId)!.core;
+          if (!this.schedulerObservers.has(schedule.projectId)) {
+            this.schedulerObservers.set(schedule.projectId, core.observeScheduledSessions((event) => {
+              try { this.scheduler?.observe(event); } catch { this.schedulerError = "Scheduler storage is unavailable"; }
+            }));
+          }
+          const prepared = await core.prepareScheduledSession({
+            scheduleId: schedule.id, name: schedule.name, agentId: schedule.agentId,
+            mode: schedule.mode, approvalPolicy: schedule.approvalPolicy, workspace: schedule.workspace,
+            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId,
+          }, async (identity) => { bind(identity); });
+          return { ...prepared, deliverPrompt: () => prepared.deliverPrompt(schedule.prompt) };
+        },
+        stop: async (run) => {
+          if (run.sessionId) await this.cores.get(run.projectId)?.core.stopScheduledSession(run.sessionId);
+        },
+        releaseWorkspace: async (schedule) => {
+          const store = new CheckoutStore(resolveAbDir(), schedule.projectId);
+          const state = await store.read();
+          if (!state.healthy) throw new Error("Cannot release schedule workspace ownership while checkout metadata is unavailable");
+          for (const checkout of state.records.filter((c) => c.scheduleOwnerId === schedule.id)) {
+            const core = this.cores.get(schedule.projectId)?.core;
+            if (core) await core.releaseScheduleCheckout(schedule.id, checkout.id);
+            else await store.releaseScheduleOwner(schedule.id, checkout.id);
+          }
+        },
+      });
+      this.scheduler.start();
+    } catch {
+      this.schedulerError = "Scheduler storage is unavailable or another desktop host owns this state directory";
+    }
+  }
+
+  private async authorizeSchedule(schedule: Schedule): Promise<string | null> {
+    if (!isSafeProjectId(schedule.projectId) || !this.seenProjects.has(schedule.projectId)) {
+      return "Project is no longer in this machine's catalog; open it from the desktop first";
+    }
+    if (schedule.authorDeviceId === null) return null;
+    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
+    if (!await this.controlPlaneRelay?.authorizeDevice?.(schedule.authorDeviceId)) return "The authorizing device is unavailable or no longer authorized on this account";
+    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
+    return null;
+  }
+
+  private async schedulerProjects(): Promise<{ projectId: string; label: string; isGitRepository: boolean }[]> {
+    const projects = [];
+    for (const [projectId, seen] of this.seenProjects) {
+      if (!isSafeProjectId(projectId) || !existsSync(seen.path)) continue;
+      const resolved = await resolveProject(seen.path);
+      projects.push({ projectId, label: seen.label ?? basename(seen.path), isGitRepository: resolved.isGitRepository });
+    }
+    return projects;
+  }
+
+  async schedulerRequest(method: string, rawParams?: unknown, authorDeviceId: string | null = null): Promise<unknown> {
+    const schema = SchedulerRequestSchemas[method];
+    if (!schema) throw new Error("Unknown scheduler operation; upgrade the target bridge");
+    const params = schema.parse(rawParams ?? {}) as Record<string, unknown>;
+    if (method === "scheduler.capabilities") {
+      const capabilities = this.scheduler ? await this.scheduler.capabilities() : {
+        supported: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, agents: [],
+        error: this.schedulerError ?? "Scheduled execution requires the target desktop app to remain open",
+      };
+      return { ...capabilities, projects: await this.schedulerProjects() };
+    }
+    if (!this.scheduler) throw new Error(this.schedulerError ?? "Scheduling requires a desktop-owned host; upgrade and open the target desktop app");
+    switch (method) {
+      case "scheduler.list": return { schedules: this.scheduler.schedules(), projects: await this.schedulerProjects() };
+      case "scheduler.runs": return { runs: this.scheduler.runs(params.scheduleId as string | undefined) };
+      case "scheduler.preview": return { occurrences: this.scheduler.preview(params.cron as string, params.timezone as string) };
+      case "scheduler.create": {
+        const input = ScheduleInputSchema.parse(params.schedule);
+        await this.validateScheduleProject(input.projectId, input.workspace);
+        return { schedule: await this.scheduler.create(input, authorDeviceId) };
+      }
+      case "scheduler.update": {
+        const patch = SchedulePatchSchema.parse(params.patch);
+        const current = this.scheduler.schedules().find((schedule) => schedule.id === params.id);
+        if (!current) throw new Error("Schedule no longer exists");
+        await this.validateScheduleProject(patch.projectId ?? current.projectId, patch.workspace ?? current.workspace);
+        return { schedule: await this.scheduler.update(current.id, patch, authorDeviceId) };
+      }
+      case "scheduler.delete": await this.scheduler.delete(params.id as string); return {};
+      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string, authorDeviceId) };
+      case "scheduler.stop": await this.scheduler.stop(params.id as string); return {};
+      default: throw new Error("Unknown scheduler operation");
+    }
+  }
+
+  private async validateScheduleProject(projectId: string, workspace: string): Promise<void> {
+    const seen = this.seenProjects.get(projectId);
+    if (!isSafeProjectId(projectId) || !seen || !existsSync(seen.path)) throw new Error("Project is unavailable; open it from the desktop first");
+    const project = await resolveProject(seen.path);
+    if (workspace === "worktree" && (!project.isGitRepository || !WORKTREE_SESSIONS_SUPPORTED)) throw new Error("This project does not support isolated worktrees; choose the shared workspace");
+  }
+
+  async handleSchedulerRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
+    try {
+      if (!peerId || !this.controlPlaneRelay?.peerSession(peerId)) throw new Error("An authenticated native machine session is required");
+      if (!this.remoteAccessPolicy.isEnabled()) throw new Error("Remote access is disabled on this machine");
+      const deviceId = baseSlotDeviceId(peerId);
+      if (!await this.controlPlaneRelay.authorizeDevice?.(deviceId)) throw new Error("Device account authorization is unavailable");
+      if (!this.remoteAccessPolicy.isEnabled()) throw new Error("Remote access is disabled on this machine");
+      return createMessage("response", { requestId: req.requestId, ok: true, result: await this.schedulerRequest(req.method, req.params, deviceId) });
+    } catch (error) {
+      return createMessage("response", { requestId: req.requestId, ok: false,
+        error: { code: "SCHEDULER_ERROR", message: error instanceof Error ? error.message : "Scheduler request failed" } });
+    }
+  }
+
   /** Answer one control-plane RPC to the app session that ASKED, rather than to
    *  every established session on this machine.
    *
@@ -1051,6 +1185,11 @@ export class HostServer {
     // tools/projects until an unrelated re-advertise. It exposes no authority
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
+      if (msg.method.startsWith("scheduler.")) {
+        void this.handleSchedulerRpc(msg, peerId)
+          .then((res) => this.answerAsker(res, channel, bus, peerId));
+        return;
+      }
       // RECOMPUTE the adverts fresh before answering — the snapshot is the
       // phone's pull, and it fires only once the phone is fully connected,
       // which is STRICTLY later than the handshake push. If that push ran
@@ -1754,6 +1893,13 @@ export class HostServer {
 
   private async handleControl(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
+      case "scheduler:request": {
+        try {
+          return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
+        } catch (error) {
+          return { id: req.id, ok: false, error: { code: "SCHEDULER_ERROR", message: error instanceof Error ? error.message : "Scheduler request failed" } };
+        }
+      }
       case "project:list":
         return { id: req.id, ok: true, type: "project:list", projects: this.list() };
       case "project:resolve": {
@@ -2445,6 +2591,9 @@ export class HostServer {
   }
 
   async stop(projectId: string): Promise<void> {
+    this.scheduler?.interruptProject(projectId, "Project stopped by user");
+    this.schedulerObservers.get(projectId)?.();
+    this.schedulerObservers.delete(projectId);
     const entry = this.cores.get(projectId);
     if (!entry) return;
     this.noteColdSnapshot(entry);
@@ -2481,6 +2630,13 @@ export class HostServer {
    *  off (or on) for every other.
    *  Idempotent: forgetting an unknown/already-forgotten id is a no-op. */
   async forget(projectId: string): Promise<void> {
+    const checkouts = await new CheckoutStore(resolveAbDir(), projectId).read();
+    if (!checkouts.healthy || checkouts.records.some((checkout) => checkout.scheduleOwnerId)) {
+      throw new Error("Delete this project's schedules before forgetting its schedule-owned workspaces");
+    }
+    if (this.scheduler?.hasActiveProject(projectId)) {
+      throw new Error("Stop this project's scheduled runs before forgetting it");
+    }
     await this.stop(projectId);
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
@@ -2559,6 +2715,10 @@ export class HostServer {
   }
 
   async shutdown(reason?: string): Promise<void> {
+    await this.scheduler?.close();
+    this.scheduler = null;
+    for (const unsubscribe of this.schedulerObservers.values()) unsubscribe();
+    this.schedulerObservers.clear();
     // Persist the hint catalog up front so memory↔disk agree on a clean exit
     // (and so it survives even if a force-kill backstop fires before the slower
     // core teardown below finishes).
@@ -2693,7 +2853,14 @@ export class HostServer {
     // singular `sessionId` is informational (nothing reads it), so the row can
     // simply go.
     const members = persisted.filter((entry) => entry.checkoutId === session.checkoutId);
-    if (members.length > 1) {
+    const checkoutStore = new CheckoutStore(resolveAbDir(), projectId);
+    const checkoutState = await checkoutStore.read();
+    if (!checkoutState.healthy) throw new Error("Checkout storage could not be read completely");
+    const checkout = checkoutState.records.find((record) => record.id === session.checkoutId);
+    if (members.length > 1 || checkout?.scheduleOwnerId) {
+      await checkoutStore.update(session.checkoutId, (record) => record.sessionId === sessionId
+        ? { ...record, sessionId: members.find((member) => member.id !== sessionId)?.id ?? null }
+        : record);
       return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     if (options.removeCheckout === false) {
@@ -2763,6 +2930,8 @@ export class HostServer {
       const victim = this.selectEvictionVictim(justOpened);
       if (!victim) break;
       const entry = this.cores.get(victim);
+      this.schedulerObservers.get(victim)?.();
+      this.schedulerObservers.delete(victim);
       if (entry) this.noteColdSnapshot(entry);
       this.cores.delete(victim);
       try { entry?.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
@@ -2787,6 +2956,7 @@ export class HostServer {
     let oldest = Infinity;
     for (const [id, e] of this.cores) {
       if (id === protect) continue;
+      if (this.scheduler?.hasActiveProject(id)) continue;
       if (e.lastFocusedMs < oldest) { oldest = e.lastFocusedMs; victim = id; }
     }
     return victim;

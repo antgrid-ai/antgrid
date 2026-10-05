@@ -470,6 +470,15 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   invalidateAuthorization(): void { this.lease.invalidate("denied"); }
+
+  async authorizeDevice(deviceId: string): Promise<boolean> {
+    try {
+      if (!this.lease.current && !await this.lease.refresh()) return false;
+      return this.lease.allows(deviceId);
+    } catch {
+      return false;
+    }
+  }
   notePolicyGeneration(generation: string): void {
     this.lease.observePolicyGeneration(generation);
     void this.lease.refresh().catch(() => {});
@@ -675,6 +684,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   sendOnChannel(...args: Parameters<NativePeerSessions["sendOnChannel"]>) { return this.peers.sendOnChannel(...args); }
   noteResume(): Promise<boolean> { return this.peers.noteResume(); }
   recheckAuthorization(): void { this.peers.recheckAuthorization(); }
+  authorizeDevice(deviceId: string): Promise<boolean> { return this.peers.authorizeDevice(deviceId); }
 }
 
 async function deadline<T>(operation: Promise<T>, cancel: () => void,
