@@ -331,7 +331,7 @@ finishes itself** (`reclaimOwnedPath`, guarded on the path being under
 has its own code** — `WORKTREE_DELETE_HELD` must never gain a
 `friendlyErrorCopy` arm in the app or the clause goes silent; **eviction is
 wired only into the explicit delete**, never the reconcile sweep; **reconcile
-may only DELETE on a complete store read**, and **a row whose worktree is gone
+may only DELETE on a complete store read**, and **an unowned row whose worktree is gone
 must be pruned** (`isStranded` needs both signals). Gated by
 `worktree-shared-root`, `worktree-reclaim`, `worktree-reconcile` and
 `worktree-manager-failures`.
