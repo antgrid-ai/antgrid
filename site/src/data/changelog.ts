@@ -87,6 +87,71 @@ export type Note = {
  * typo'd tag would otherwise cost someone their writing with no error anywhere.
  */
 export const NOTES: Record<string, Note> = {
+  "v1.20731.1031": {
+    lines: [
+      ["new", "Help lives in the main menu now, with support, logs, version information and a way to check for updates yourself."],
+      ["changed", "The app does less work while you type, while an agent streams a reply and while files change. Long conversations, search results and terminal scrollback no longer make every small update reprocess everything already on screen."],
+      ["fixed", "Moving the mouse over an agent terminal no longer floods it with motion reports. We cap those reports at twenty a second."],
+      ["fixed", "A temporary connection failure no longer leaves your phone stuck on a permanent refusal. You can also share its log files from the app when something goes wrong."],
+      ["changed", "The web sign-in page remembers which method you last used, so coming back doesn't mean guessing which button got you in."],
+    ],
+  },
+  "v1.20729.1030": {
+    lines: [
+      ["new", "File paths and bare web addresses printed in the terminal are clickable. A file opens at the line the agent named, a folder is revealed in the tree, and relative paths resolve from that terminal's working directory. They keep the terminal's colours and underline on hover."],
+      ["changed", "The Git panel has an inline commit box, so writing a commit stays beside the changes you're reviewing."],
+      ["fixed", "Old git results and workspace notices no longer announce themselves again when you open a session or switch focus. Errors and agent notifications also reach you while the New Session screen is open."],
+      ["fixed", "Session status no longer gets stuck needing you after an abandoned prompt or a local slash command. OpenCode's permissions and questions reach Antgrid again, and a question still waiting for an answer keeps its status."],
+      ["fixed", "Windows packages declare the firewall rules the bridge needs for remote connections."],
+      ["fixed", "Android notifications use a monochrome Antgrid icon rather than a solid block."],
+    ],
+  },
+  "v1.20727.1029": {
+    title: "A steadier remote connection",
+    lines: [
+      ["changed", "Remote terminal, file and preview traffic now travels over native Iroh streams. The connection between your authorised devices provides the encryption; the central WebSocket carries account and connection control only. Update the app and bridge together for this change."],
+      ["changed", "The browser preview forwards the dev server's traffic without rewriting HTTP headers or cookies. It supports local HTTPS too, and keeps its address through a reconnect."],
+      ["new", "The phone terminal has a key bar with sticky Ctrl and Alt, a one-tap Ctrl+C and a prompt box for composing before you send. Long-press the keyboard key when you need to type directly into the terminal."],
+      ["new", "You can sign in with Apple on the web, on iOS and through the browser on macOS. Other iOS sign-in flows stay inside the app."],
+      ["fixed", "Returning to a session on your phone catches the conversation up with what happened while you were away."],
+      ["fixed", "Bringing the desktop window into focus no longer drops connected phones, and renewing account tokens no longer knocks an otherwise valid connection offline."],
+      ["security", "The remote-access switch is enforced across remote commands, agent exchanges and preview connections. Revoking a device from your account is also handled when no project is open."],
+      ["fixed", "Remote-access controls recover after the bridge starts, and launching the app no longer flashes a false request to restart the bridge while it's still warming up."],
+      ["fixed", "Session status follows the agent's work more reliably instead of staying busy after a turn has ended."],
+      ["changed", "App notices stack at the bottom of the window, with repeated notices replacing themselves. Following a local link opens the right preview tab even when the preview isn't on screen."],
+    ],
+  },
+  "v1.20719.1027": {
+    lines: [
+      ["fixed", "Signing in on macOS survives an app restart. The notarised app can now use the keychain where it stores your credentials."],
+      ["fixed", "Agent terminals consistently advertise colour support, including on Windows."],
+    ],
+  },
+  "v1.20719.1026": {
+    lines: [
+      ["new", "The site and your web account have a light theme. They follow your system setting, with a switch when you'd rather choose yourself."],
+      ["fixed", "An agent turn inferred from terminal activity no longer stays open forever when its end wasn't reported."],
+    ],
+  },
+  "v1.20717.1025": {
+    lines: [
+      ["fixed", "Remote connections recover more reliably after a redial, without losing frames during the handover, and detect a dead connection sooner."],
+      ["fixed", "A bridge that started in local mode can answer an exchange from another agent after it connects remotely."],
+    ],
+  },
+  "v1.20716.1024": {
+    lines: [
+      ["changed", "The file tree loads folders as you expand them instead of fetching the whole repository. Large projects have less to send before you can start browsing."],
+      ["new", "The tree shows git-ignored files too. Collapse and reopen a folder to refresh them; file search and agent mentions still leave ignored files out."],
+    ],
+  },
+  "v1.20715.1023": {
+    lines: [
+      ["fixed", "Exchanges between agents deliver their replies more reliably and report refusals instead of leaving the sender waiting."],
+      ["security", "Incoming agent exchanges respect the machine's remote-access switch."],
+      ["fixed", "Narrowing a terminal pane no longer leaves the agent's full-screen display at its old width."],
+    ],
+  },
   "v1.20714.1022": {
     lines: [
       ["changed", "Handler's backlog is much easier to read. Items are numbered rather than labelled with a status word most of them share, so a dependency can point at the one it's waiting on, and the sheet no longer says your sentence twice in two voices."],
