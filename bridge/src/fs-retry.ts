@@ -1,4 +1,13 @@
-import { rm } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Backoff for [removeWithRetries]. Each entry is the wait BEFORE that attempt,
  * so the first is free and the budget is ~2.3s over five tries. Sized for the
@@ -22,7 +31,11 @@ export async function removeWithRetries(path: string): Promise<void> {
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     try {
       await rm(path, { recursive: true, force: true });
-      return;
+      // A success is not proof the path is gone: a killed clone's child can still
+      // be writing into it, so `rm` empties the directory and the process
+      // recreates entries a moment later (seen on Linux CI). Only a path that
+      // no longer exists ends the retries.
+      if (!(await pathExists(path))) return;
     } catch {
       // Caller re-tests the directory and reports the failure — whatever holds
       // it open is worth surfacing rather than retrying blindly.
