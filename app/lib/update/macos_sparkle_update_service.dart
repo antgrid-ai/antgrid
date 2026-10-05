@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import '../util/ab_log.dart';
 import 'github_release_update_service.dart';
@@ -21,6 +22,8 @@ import 'github_release_update_service.dart';
 /// and install controllers, which decide how to surface them.
 class MacosSparkleUpdateService implements UpdaterListener {
   MacosSparkleUpdateService();
+
+  static const _cycleChannel = MethodChannel('antgrid/sparkle_update_cycle');
 
   /// Published as a release asset by build-desktop.yml; `releases/latest`
   /// makes this URL stable across versions (prereleases never move it).
@@ -61,6 +64,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
       _listening = true;
       try {
         autoUpdater.addListener(this);
+        _cycleChannel.setMethodCallHandler(_onUpdateCycle);
       } catch (e) {
         _listening = false;
         AbLog.warn(
@@ -110,6 +114,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
   void dispose() {
     if (_listening) {
       _listening = false;
+      _cycleChannel.setMethodCallHandler(null);
       try {
         autoUpdater.removeListener(this);
       } catch (e) {
@@ -129,6 +134,14 @@ class MacosSparkleUpdateService implements UpdaterListener {
     if (!_flowChanges.isClosed) _flowChanges.add(value);
   }
 
+  Future<void> _onUpdateCycle(MethodCall call) async {
+    if (call.method == 'finished') {
+      // Sparkle also completes normally when a version is dismissed or skipped;
+      // neither the launch reply nor an error event marks that boundary.
+      _setFlowRunning(false);
+    }
+  }
+
   // --- UpdaterListener -----------------------------------------------------
   //
   // Sparkle drives its own UI through SPUStandardUserDriver: it shows the
@@ -141,12 +154,10 @@ class MacosSparkleUpdateService implements UpdaterListener {
   void onUpdaterUpdateNotAvailable(UpdaterError? error) {
     AbLog.info('Update', 'Sparkle found nothing to install; clearing the row');
     if (!_noUpdateFound.isClosed) _noUpdateFound.add(null);
-    _setFlowRunning(false);
   }
 
   @override
   void onUpdaterError(UpdaterError? error) {
-    _setFlowRunning(false);
     // The plugin forwards only `localizedDescription` — no code, no domain —
     // and Sparkle routes a user cancellation through the same delegate as a
     // real failure. So this can be logged and never classified.

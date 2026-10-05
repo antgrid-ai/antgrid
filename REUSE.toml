@@ -16,6 +16,12 @@ SPDX-FileCopyrightText = "2026 Radha AI Products"
 SPDX-License-Identifier = "LicenseRef-Elastic-2.0"
 
 [[annotations]]
+path = ["packages/auto_updater_macos/**"]
+precedence = "override"
+SPDX-FileCopyrightText = ["2022-2024 LiJianying <lijy91@foxmail.com>", "2026 Radha AI Products"]
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = ["app/assets/icon/**", "app/assets/logo/**", "app/android/app/src/main/res/drawable*/android12splash.png", "app/android/app/src/main/res/drawable*/background.png", "app/android/app/src/main/res/drawable*/ic_launcher_foreground.png", "app/android/app/src/main/res/drawable*/launch_background.xml", "app/android/app/src/main/res/drawable*/splash.png", "app/android/app/src/main/res/mipmap-*/ic_launcher.png", "app/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", "app/ios/Runner/Assets.xcassets/AppIcon.appiconset/**", "app/ios/Runner/Assets.xcassets/LaunchBackground.imageset/**", "app/ios/Runner/Assets.xcassets/LaunchImage.imageset/**", "app/linux/packaging/antgrid.png", "app/macos/Runner/Assets.xcassets/AppIcon.appiconset/**", "app/web/favicon.png", "app/web/icons/**", "app/windows/runner/resources/app_icon.ico", "site/public/favicon.ico", "site/public/logo/*.ico", "site/public/logo/*.png", "site/public/logo/*.svg", "web/public/logo/*.ico", "web/public/logo/*.png", "web/public/logo/*.svg", "web/public/og/antgrid-card.png"]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Radha AI Products"
