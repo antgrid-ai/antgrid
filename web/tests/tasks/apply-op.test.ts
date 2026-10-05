@@ -629,9 +629,11 @@ describe("applyOp — echo suppression end to end", () => {
     // Not cleared on a match, so a second redelivery is suppressed too.
     expect(afterEcho.pushedHash).toBe(afterPush.pushedHash);
 
-    // A third party's edit, timestamped BEFORE our push. The whole reason the
-    // hash keys on content: an `updated_at` scheme drops this silently.
-    expect(await deliverIssue({ title: "Human edit", updated_at: "2026-08-18T09:00:00Z" }))
+    // A third party's edit landing right after our push. The reason the
+    // hash keys on content: an `updated_at` scheme would drop an edit our blind
+    // PATCH clobbered. (One older than our push is the monotonic floor's to
+    // drop as a reorder — see `stale_delivery`.)
+    expect(await deliverIssue({ title: "Human edit", updated_at: "2026-08-18T14:00:00Z" }))
       .toMatchObject({ applied: 1, dropped: 0, failed: 0 });
     const afterHuman = await taskRow(task.id);
     expect(afterHuman.title).toBe("Human edit");

@@ -2,6 +2,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -339,6 +340,8 @@ class _Footer extends ConsumerWidget {
   }
 }
 
+const double _drawerCacheExtent = 4000;
+
 class _Body extends ConsumerWidget {
   final List<DrawerEntry> entries;
 
@@ -439,6 +442,11 @@ class _Body extends ConsumerWidget {
     return ReorderableListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AbTokens.space4),
+      // Generous, so the focused session's row is built even while it is well
+      // off screen: a row can only scroll itself into view (SessionRow's
+      // reveal) once it exists, and the default extent leaves a far one
+      // unbuilt until the user scrolls to it by hand.
+      scrollCacheExtent: const ScrollCacheExtent.pixels(_drawerCacheExtent),
       buildDefaultDragHandles: false,
       itemCount: entries.length,
       proxyDecorator: (child, _, _) =>

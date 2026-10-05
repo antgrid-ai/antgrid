@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -31,6 +32,7 @@ import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
+import '../providers/value_controller.dart';
 import '../services/control_plane_client.dart';
 import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
@@ -60,6 +62,15 @@ const double _dotOpticalYBias = 0.45;
 const String _startNoAnswerMessage =
     "The agent didn't answer. If the session doesn't come up in a moment, try "
     'again.';
+
+/// The session the drawer last scrolled into view. A latch, so a row reveals
+/// itself once per activation: the drawer's list mounts rows lazily, and a row
+/// that revealed itself on EVERY mount would yank the list back each time the
+/// user scrolled it away and back.
+final drawerRevealedSessionIdProvider =
+    NotifierProvider<ValueController<String?>, String?>(
+      () => ValueController(null),
+    );
 
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
 /// session: if its parent project is not currently active, switches projects
@@ -102,6 +113,48 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   FocusNode? _editFocus;
 
   SessionEntry get session => widget.session;
+
+  @override
+  void initState() {
+    super.initState();
+    // fireImmediately: the row usually mounts BECAUSE its session was focused —
+    // focusing a project expands its machine and project rows, and this row is
+    // built by that expansion with the session already active.
+    ref.listenManual<String?>(activeSessionIdProvider, (_, next) {
+      if (next == session.id) _revealWhenLaidOut();
+    }, fireImmediately: true);
+  }
+
+  /// Scrolls the drawer so this row is on screen, if it is not already.
+  ///
+  /// Post-frame: the row has no size until the expansion that mounted it has
+  /// laid out, and the latch is a provider write, which is illegal mid-build.
+  void _revealWhenLaidOut() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (ref.read(activeSessionIdProvider) != session.id) return;
+      if (ref.read(drawerRevealedSessionIdProvider) == session.id) return;
+      ref.read(drawerRevealedSessionIdProvider.notifier).set(session.id);
+      final box = context.findRenderObject();
+      if (box is! RenderBox || !box.hasSize) return;
+      final viewport = RenderAbstractViewport.maybeOf(box);
+      final position = Scrollable.maybeOf(context)?.position;
+      if (viewport == null || position == null) return;
+      // Offsets that put the row's top at the viewport's top (0) and its
+      // bottom at the viewport's bottom (1); between them it is fully visible.
+      final atTop = viewport.getOffsetToReveal(box, 0).offset;
+      final atBottom = viewport.getOffsetToReveal(box, 1).offset;
+      if (position.pixels >= atBottom && position.pixels <= atTop) return;
+      unawaited(
+        Scrollable.ensureVisible(
+          context,
+          alignment: 0.5,
+          duration: AbTokens.motionPane,
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
 
   @override
   void dispose() {

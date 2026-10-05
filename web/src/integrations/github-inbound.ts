@@ -701,8 +701,8 @@ async function mergeImportedTask(
   // obvious `updated_at` scheme drops a human's edit that our blind PATCH
   // clobbered a second earlier, records no conflict, and cannot be recovered by
   // a later poll because remote and base then agree. So anything whose field set
-  // hashes differently is a third party's write and is merged **however old its
-  // timestamp** — see `github-echo.ts`.
+  // hashes differently is a third party's write and is merged **however close to our
+  // push it lands** — see `github-echo.ts`. Only a provably OLDER issue is refused, by the floor below.
   //
   // Not cleared on a match, so a GitHub redelivery of the same echo is dropped
   // too; cleared below by the next merge that actually applies a remote change,
