@@ -1,12 +1,16 @@
 import { test, expect } from "@playwright/test";
 
-test("roadmap renders planned work, stable anchors and release readiness", async ({ page }, testInfo) => {
+test("roadmap renders planned work, stable anchors and completed features", async ({ page }, testInfo) => {
   await page.goto("/roadmap");
   await expect(page).toHaveTitle("Roadmap — antgrid");
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", /\/roadmap$/);
-  await expect(page.locator("main h2")).toHaveText(["Now", "Next"]);
+  await expect(page.locator("main h2")).toHaveText(["Now", "Next", "Done"]);
   const now = page.getByRole("region", { name: "Now", exact: true });
-  await expect(now.locator("#public-roadmap")).toContainText("Awaiting release");
+  await expect(now.locator("#public-roadmap")).toHaveCount(0);
+  const completed = page.getByRole("region", { name: "Done", exact: true }).locator("#public-roadmap");
+  await expect(completed).toContainText("Completed:");
+  await expect(completed.getByRole("link", { name: "Discussion: Public roadmap" })).toHaveAttribute("href", "https://github.com/antgrid-ai/antgrid/pull/211");
+  await expect(page.locator("main")).not.toContainText("Awaiting release");
   await expect(page.getByRole("region", { name: "Next", exact: true })).toContainText("Cross-agent and cross-machine memory");
   await expect(page.locator('main a[href="/changelog"]')).toBeVisible();
   const anchor = page.getByRole("link", { name: "Native app preview", exact: true });

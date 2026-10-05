@@ -9,8 +9,8 @@ type RoadmapDetails = {
 };
 
 export type RoadmapEntry = RoadmapDetails & (
-  | { status: "now" | "next" | "exploring" | "awaiting-release"; releaseUrl?: never }
-  | { status: "shipped"; releaseUrl: string }
+  | { status: "now" | "next" | "exploring"; releaseUrl?: never }
+  | { status: "done"; releaseUrl?: string }
 );
 
 // Review dates record an editorial check, never a build timestamp.
@@ -20,11 +20,12 @@ export const ROADMAP: readonly RoadmapEntry[] = [
   {
     id: "public-roadmap",
     title: "Public roadmap",
-    description: "Follow what Antgrid is building and what has shipped.",
+    description: "Follow what Antgrid is building and what is done.",
     area: "Website",
-    status: "awaiting-release",
-    update: "Completed: the roadmap page and file-based maintenance workflow are ready for publication.",
+    status: "done",
+    update: "Completed: a public roadmap with a file-based maintenance workflow.",
     updatedAt: "2026-10-05",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/211",
   },
   {
     id: "tasks",
@@ -67,10 +68,10 @@ export const ROADMAP: readonly RoadmapEntry[] = [
 
 export function groupRoadmap(entries: readonly RoadmapEntry[]) {
   return [
-    { id: "now", title: "Now", description: "Work in progress, including completed work awaiting release.", entries: entries.filter((entry) => entry.status === "now" || entry.status === "awaiting-release") },
+    { id: "now", title: "Now", description: "Work in progress.", entries: entries.filter((entry) => entry.status === "now") },
     { id: "next", title: "Next", description: "Planned work.", entries: entries.filter((entry) => entry.status === "next") },
     { id: "exploring", title: "Exploring", description: "Ideas under consideration, not commitments.", entries: entries.filter((entry) => entry.status === "exploring") },
-    { id: "recently-shipped", title: "Recently shipped", description: "The latest features available in published releases.", entries: entries.filter((entry) => entry.status === "shipped").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5) },
+    { id: "done", title: "Done", description: "The latest completed features.", entries: entries.filter((entry) => entry.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5) },
   ].filter((group) => group.entries.length > 0);
 }
 

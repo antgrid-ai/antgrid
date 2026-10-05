@@ -140,9 +140,10 @@ Keep `site/src/data/roadmap.ts` aligned with user-facing work. After agreeing a
 new feature spec, offer a PR containing the spec and its roadmap entry; proceed
 without asking again when PR creation is already authorized. Follow existing
 spec conventions and reference agreed specifications rather than duplicating them.
-Update the corresponding entry in the implementation PR; completed work awaiting
-publication uses `awaiting-release`. During release follow-up, mark included
-features `shipped` and attach published release links: a merge alone is not shipment.
+Update the corresponding entry in the implementation PR. Set completed features
+to `done` in that PR so merging it records completion; link the implementation PR
+for context. Published release links can be added during release follow-up and
+are not required for completion.
 Internal changes and routine fixes need no new entry unless they materially affect
 an existing item. Refresh review dates only after checking the relevant plans;
 write public outcomes without speculative delivery promises.
