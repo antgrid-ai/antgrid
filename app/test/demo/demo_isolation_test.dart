@@ -19,6 +19,8 @@ import 'package:antgrid/providers/analytics.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/providers/relay_connection.dart'
+    show relayConnectionManagerProvider;
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/open_checkout.dart';
@@ -185,6 +187,20 @@ void main() {
 
     exitDemoMode(container);
     expect(telemetryAllowed(container), isTrue);
+  });
+
+  test('connection-block reports are off while the demo is on', () async {
+    final container = await demoContainer();
+    final allowed = container
+        .read(relayConnectionManagerProvider)
+        .telemetryAllowed!;
+    expect(allowed(), isTrue);
+
+    enterDemoMode(container);
+    expect(allowed(), isFalse);
+
+    exitDemoMode(container);
+    expect(allowed(), isTrue);
   });
 
   test('the drawer is the sample project and nothing else', () async {

@@ -33,6 +33,14 @@ void main() {
     expect(File('$p.old').readAsStringSync(), 'Y' * 2048);
   });
 
+  test('rotatedLogPath is the .old sibling rotateLogIfNeeded writes', () {
+    expect(rotatedLogPath('/a/app.log'), '/a/app.log.old');
+    final p = '${tmp.path}/a.log';
+    File(p).writeAsStringSync('X' * 2048);
+    rotateLogIfNeeded(p, maxBytes: 1024);
+    expect(File(rotatedLogPath(p)).existsSync(), isTrue);
+  });
+
   test('is a no-op when the file is missing', () {
     final p = '${tmp.path}/missing.log';
     rotateLogIfNeeded(p, maxBytes: 1024);

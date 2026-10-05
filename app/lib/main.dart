@@ -73,6 +73,7 @@ import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'util/detached.dart';
+import 'util/log_location.dart' show kPushLogFileName;
 import 'util/windows_paste_fix.dart';
 import 'widgets/auth_splash.dart';
 import 'widgets/demo_frame.dart';
@@ -92,10 +93,18 @@ bool get _pushSupported =>
 /// on every terminated-state push, inside that receiver's 30s budget.
 ///
 /// Registering the handler is also what releases the queued message — it
-/// triggers push's readiness handshake. Nothing else belongs here.
+/// triggers push's readiness handshake. The one other thing that belongs here
+/// is pointing AbLog at a log file, since this isolate never runs main().
 @pragma('vm:entry-point')
 void pushBackgroundMain() {
   WidgetsFlutterBinding.ensureInitialized();
+  // This isolate never runs main(), and the push handler logs: without this a
+  // phone's lines would sit in AbLog's pre-directory buffer forever. Its own
+  // file, because the main isolate's sink rotates app.log independently and two
+  // rotators on one file can delete each other's freshly rotated generation.
+  // The engine is destroyed as soon as the handler returns, which is why
+  // pushBackgroundHandler awaits this lookup and a flush before returning.
+  unawaited(AbLog.initLogDirectory(fileName: kPushLogFileName));
   Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
 }
 
@@ -110,6 +119,11 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // First thing after the binding exists: on a phone the log directory comes
+  // from a platform channel, and AbLog holds lines until it answers. Starting
+  // here keeps that window to milliseconds; not awaited so launch never waits
+  // on it. Desktop resolves synchronously and returns at once.
+  unawaited(AbLog.initLogDirectory());
   // Before any text field can take a keystroke: Windows' clipboard-history
   // paste (Win+V) types a bare "v" instead of pasting without this — see
   // WindowsPasteFix's doc.

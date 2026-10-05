@@ -115,9 +115,9 @@ SharedPreferencesOptions get desktopSharedPreferencesOptions {
       suiteName: 'ai.antgrid.prefs.$fragment',
     );
   }
-  // Android/iOS/web: each debug/release variant is already a distinct OS-level
-  // install (different application id / bundle id per build config, or an
-  // origin-scoped web storage), so there is no shared-file hazard to guard
-  // against here — the key prefix alone is sufficient, same as release.
+  // Android/iOS/web: debug and release share one application id / bundle id,
+  // so installing one replaces the other and two builds never run against the
+  // same sandbox at once (web storage is origin-scoped). There is no
+  // shared-file hazard to guard against; the key prefix alone is sufficient.
   return const SharedPreferencesOptions();
 }

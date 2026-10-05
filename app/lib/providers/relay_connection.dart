@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../analytics/crash_reporting.dart';
 import '../connection/connection_supervisor.dart';
 import '../connection/peer_connection.dart';
 import '../connection/supervisor_state.dart';
+import '../services/app_settings_service.dart' show telemetryEnabledProvider;
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import '../util/netwatch.dart';
+import 'demo_mode.dart';
 import 'seeded_stream.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
@@ -31,6 +34,8 @@ class MachineConnection {
     this.onDeviceRevoked,
     // Test seam: inject a fake RelayService. Production passes null.
     RelayService? relayOverride,
+    ConnectionBlockReporter? blockReporter,
+    bool Function()? telemetryAllowed,
   }) : relay =
            relayOverride ??
            RelayService(
@@ -42,7 +47,25 @@ class MachineConnection {
              // arm installs its own tap for this connection, and reading that
              // recorder here would make later connections born-tapped.
              netTap: netwatchEnabled ? ensureNetwatch().tap : null,
-           );
+           ),
+       _blockReporter = blockReporter ?? ConnectionBlockReporter.shared,
+       _telemetryAllowed = telemetryAllowed ?? _alwaysAllowed;
+
+  static bool _alwaysAllowed() => true;
+
+  // Test seam; production uses the process-wide reporter so its dedup spans
+  // every machine connection.
+  final ConnectionBlockReporter _blockReporter;
+
+  // Read per block, not at construction: Sentry itself is only switched on at
+  // launch, so the user's opt-out has to be honoured here to take effect
+  // mid-session.
+  final bool Function() _telemetryAllowed;
+
+  void _reportBlock(BlockReason reason, String? code) {
+    if (!_telemetryAllowed()) return;
+    _blockReporter.report(reason, code);
+  }
 
   /// Fires when the relay tells us this device has been revoked from the
   /// account. Distinct from the supervisor's `Blocked(deviceRevoked)`, which
@@ -144,6 +167,7 @@ class MachineConnection {
     final supervisor = _nativeSupervisor = NativeConnectionSupervisor(
       mechanisms,
       onCoordsResolved: centralSupervisor.noteCoords,
+      onBlocked: _reportBlock,
     );
     _subs.add(
       mechanisms.events.listen((event) {
@@ -151,8 +175,8 @@ class MachineConnection {
           case PeerTerminalAuthError(:final code):
             _noteAuthCode(code);
             supervisor.noteAuthError(code);
-          case PeerTerminalError():
-            supervisor.notePeerRejected();
+          case PeerTerminalError(:final code):
+            supervisor.notePeerRejected(code);
           case PeerSessionDown():
             supervisor.noteSessionDown();
           case PeerSessionReplaced():
@@ -341,12 +365,16 @@ class MachineConnectionManager {
   MachineConnectionManager({
     required CryptoService crypto,
     this.onDeviceRevoked,
+    this.telemetryAllowed,
   }) : _crypto = crypto;
 
   /// Handed to every connection this manager builds — see
   /// [MachineConnection.onDeviceRevoked]. Any machine's central control can carry the
   /// verdict, since it is our own device that was revoked, not theirs.
   final void Function()? onDeviceRevoked;
+
+  /// Live consent gate handed to every connection; null allows everything.
+  final bool Function()? telemetryAllowed;
 
   /// Fires whenever a connection is added to or removed from [_connections].
   ///
@@ -375,6 +403,7 @@ class MachineConnectionManager {
       machineDeviceId: key,
       crypto: _crypto,
       onDeviceRevoked: onDeviceRevoked,
+      telemetryAllowed: telemetryAllowed,
     );
     _connections[key] = conn;
     _notifyChanged();
@@ -473,6 +502,11 @@ final relayConnectionManagerProvider = Provider<MachineConnectionManager>((
     // `ref.container`, not `ref`: the sign-out teardown outlives this callback
     // and reads providers across several awaits.
     onDeviceRevoked: () => unawaited(handleDeviceRevoked(ref.container)),
+    // Same two conditions as `telemetryAllowed` in main.dart: the opt-out and
+    // the demo project, read live from the container.
+    telemetryAllowed: () =>
+        !ref.container.read(demoModeProvider) &&
+        ref.container.read(telemetryEnabledProvider),
   );
   ref.onDispose(() => unawaited(mgr.disposeAll().then<void>((_) {})));
   return mgr;
