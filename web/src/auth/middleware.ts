@@ -3,6 +3,8 @@
 
 import type { Context, MiddlewareHandler } from "hono";
 import type { Auth } from "./better-auth.js";
+import { getSignedCookie } from "hono/cookie";
+import type { DB } from "../db/index.js";
 
 export type AuthVars = {
   userId: string;
@@ -59,6 +61,26 @@ export function requireUserOrRedirect(deps: { auth: Auth }): MiddlewareHandler<{
     const s = await loadSession(deps.auth, c);
     if (!s) return c.redirect("/login");
     setAuthVars(c, s);
+    await next();
+  };
+}
+
+export function requireReadOnlyUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
+  return async (c, next) => {
+    // Better-Auth's getSession refreshes old sessions and deletes expired ones.
+    // Operator observations must not change the records they inspect.
+    const context = await deps.auth.$context;
+    const token = await getSignedCookie(c, context.secret, context.authCookies.sessionToken.name);
+    if (!token) return c.redirect("/login");
+    const row = await deps.db.session.findUnique({
+      where: { token },
+      select: {
+        id: true, expiresAt: true,
+        user: { select: { id: true, email: true, name: true } },
+      },
+    });
+    if (!row || row.expiresAt <= new Date()) return c.redirect("/login");
+    setAuthVars(c, { sessionId: row.id, userId: row.user.id, email: row.user.email, name: row.user.name });
     await next();
   };
 }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -7,6 +8,7 @@ import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import '../helpers/counting_file_node.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
@@ -1306,6 +1308,34 @@ void main() {
     expect(svc.currentState.gitFileStatuses['lib/main.dart'], 'M');
     expect(svc.currentState.gitFileStatuses['lib/new.dart'], 'A');
     expect(svc.currentState.gitFileEntries.length, 2);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a tree emission after git:status keeps the same status index', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'lib/main.dart', 'status': 'M'},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final index = svc.currentState.gitStatus;
+    expect(index.entries, hasLength(1));
+
+    _emitRootTree(t, {
+      'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+      'seq': 5,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.root, isNotNull);
+    expect(identical(svc.currentState.gitStatus, index), isTrue);
 
     await svc.dispose();
     await session.close();
@@ -2700,6 +2730,389 @@ void main() {
       await Future<void>.delayed(FileService.findDebounce);
       final sent = t.sent.singleWhere((m) => m['type'] == 'file:find');
       expect(sent['checkoutId'], 'wt-1');
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
+  group('tree:update frame application', () {
+    int nextSeq = 6;
+
+    void emitUpdate(
+      FakeAgentTransport t, {
+      List<Map<String, dynamic>> added = const [],
+      List<Map<String, dynamic>> modified = const [],
+      List<String> removed = const [],
+    }) {
+      t.emitJson({
+        'id': 'u$nextSeq',
+        'timestamp': 0,
+        'type': 'tree:update',
+        'projectId': 'p',
+        'seq': nextSeq++,
+        'added': added,
+        'modified': modified,
+        'removed': removed,
+      });
+    }
+
+    Map<String, dynamic> dir(
+      String path, {
+      List<Map<String, dynamic>>? children,
+      bool truncated = false,
+    }) => {
+      'name': path.substring(path.lastIndexOf('/') + 1),
+      'path': path,
+      'type': 'directory',
+      'children': ?children,
+      if (truncated) 'truncated': true,
+    };
+
+    List<Map<String, dynamic>> childRequests(
+      FakeAgentTransport t,
+      String path,
+    ) => t.sent
+        .where(
+          (m) =>
+              m['type'] == 'file:tree:children:request' &&
+              (m['paths'] as List).contains(path),
+        )
+        .toList();
+
+    String pad(int i) => i.toString().padLeft(3, '0');
+
+    TreeUpdateMessage frame(List<FileNode> added) => TreeUpdateMessage(
+      id: 'u',
+      timestamp: 0,
+      projectId: 'p',
+      added: added,
+      modified: const [],
+      removed: const [],
+    );
+
+    FileNode plainFile(String path, {int? size}) => FileNode(
+      name: path.substring(path.lastIndexOf('/') + 1),
+      path: path,
+      type: FileNodeType.file,
+      size: size,
+    );
+
+    test('a frame of additions to one directory sorts it once', () {
+      final children = [
+        for (var i = 0; i < 40; i++) CountingFileNode('f${pad(i)}.txt'),
+      ];
+      final root = FileNode(
+        name: '',
+        path: '',
+        type: FileNodeType.directory,
+        children: children,
+      );
+      final added = [
+        for (var i = 0; i < 5; i++) plainFile('f${pad(i * 8 + 3)}a.txt'),
+      ];
+      final result = FileService.applyTreeDelta(root, frame(added));
+      for (final c in children) {
+        expect(c.nameReads, lessThanOrEqualTo(1));
+      }
+      final expected = [
+        ...children.map((c) => c.path),
+        ...added.map((c) => c.path),
+      ]..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      expect(result.root.children.map((c) => c.path), expected);
+      expect(result.relist, isEmpty);
+    });
+
+    test('a frame of in-place rewrites reads no untouched sibling\'s name', () {
+      final srcChildren = [
+        for (var i = 0; i < 8; i++) CountingFileNode('src/f$i.ts'),
+      ];
+      final rootFiles = [
+        for (var i = 0; i < 4; i++) CountingFileNode('r$i.txt'),
+      ];
+      final root = FileNode(
+        name: '',
+        path: '',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'src',
+            path: 'src',
+            type: FileNodeType.directory,
+            children: srcChildren,
+          ),
+          ...rootFiles,
+        ],
+      );
+      const rewritten = {0, 4};
+      final result = FileService.applyTreeDelta(
+        root,
+        frame([
+          for (final i in rewritten) plainFile(srcChildren[i].path, size: 2),
+          const FileNode(name: 'src', path: 'src', type: FileNodeType.directory),
+        ]),
+      );
+      final src = result.root.children.first;
+      expect(src.children.map((c) => c.path), srcChildren.map((c) => c.path));
+      for (var i = 0; i < srcChildren.length; i++) {
+        if (rewritten.contains(i)) {
+          expect(src.children[i].size, 2);
+          continue;
+        }
+        expect(srcChildren[i].nameReads, 0);
+        expect(identical(src.children[i], srcChildren[i]), isTrue);
+      }
+      for (var i = 0; i < rootFiles.length; i++) {
+        expect(rootFiles[i].nameReads, 0);
+        expect(identical(result.root.children[i + 1], rootFiles[i]), isTrue);
+      }
+      expect(result.relist, isEmpty);
+    });
+
+    test('a directory removed in a frame is re-listed only if it comes back from a truncated listing', () async {
+      // Each row starts from a loaded `big` holding big/a.txt.
+      final rows = [
+        // Shallowest parent first: `big` is gone before its contents route.
+        (
+          truncated: true,
+          removed: ['big/a.txt', 'big'],
+          added: <Map<String, dynamic>>[],
+          big: 'absent',
+          relists: 0,
+        ),
+        // Recreated, whichever order its removals arrive in.
+        for (final removed in [
+          ['big/a.txt', 'big'],
+          ['big', 'big/a.txt'],
+        ])
+          (
+            truncated: true,
+            removed: removed,
+            added: [dir('big', children: [])],
+            big: 'directory loaded=false loading=true children=0',
+            relists: 1,
+          ),
+        // A complete listing owes no re-list, and nothing routed under the
+        // recreated directory lands in it.
+        (
+          truncated: false,
+          removed: ['big/a.txt', 'big'],
+          added: [dir('big', children: []), _file('x.txt', 'big/x.txt')],
+          big: 'directory loaded=false loading=false children=0',
+          relists: 0,
+        ),
+        (
+          truncated: false,
+          removed: ['big'],
+          added: [_file('big', 'big'), _file('x.txt', 'big/x.txt')],
+          big: 'file loaded=true loading=false children=0',
+          relists: 0,
+        ),
+      ];
+      for (final (i, row) in rows.indexed) {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        _emitRootTree(t, {
+          'tree': _rootNode(
+            children: [
+              dir(
+                'big',
+                children: [_file('a.txt', 'big/a.txt')],
+                truncated: row.truncated,
+              ),
+            ],
+          ),
+          'seq': 5,
+        });
+        await Future<void>.delayed(Duration.zero);
+        t.clearSent();
+        nextSeq = 6;
+
+        emitUpdate(t, added: row.added, removed: row.removed);
+        await Future<void>.delayed(Duration.zero);
+
+        final big = session.fileService.currentState.root!.children
+            .where((c) => c.path == 'big')
+            .firstOrNull;
+        expect(
+          big == null
+              ? 'absent'
+              : '${big.type.name} loaded=${big.childrenLoaded} '
+                    'loading=${big.childrenLoading} '
+                    'children=${big.children.length}',
+          row.big,
+          reason: 'row $i',
+        );
+        expect(childRequests(t, 'big'), hasLength(row.relists), reason: 'row $i');
+        await session.close();
+      }
+    });
+
+    test('random tree:update frames leave the root in explorer order', () async {
+      for (final seed in [1, 2, 3]) {
+        final rng = Random(seed);
+        nextSeq = 6;
+        final prefixes = ['n', 'N', '_n', '-n'];
+        final names = <String>[];
+        for (var i = 0; i < 60; i++) {
+          if (i.isOdd) {
+            // A case twin of the name before it.
+            final prev = names[i - 1];
+            names.add(
+              prev == prev.toLowerCase()
+                  ? prev.toUpperCase()
+                  : prev.toLowerCase(),
+            );
+          } else {
+            names.add(
+              '${prefixes[rng.nextInt(4)]}${pad(i)}${rng.nextBool() ? '.txt' : ''}',
+            );
+          }
+        }
+        final model = <String, ({bool isDir, bool loaded})>{};
+        final seedJson = <Map<String, dynamic>>[];
+        for (final name in names.take(40)) {
+          switch (rng.nextInt(3)) {
+            case 0:
+              model[name] = (isDir: false, loaded: true);
+              seedJson.add(_file(name, name));
+            case 1:
+              model[name] = (isDir: true, loaded: false);
+              seedJson.add({'name': name, 'path': name, 'type': 'directory'});
+            default:
+              model[name] = (isDir: true, loaded: true);
+              seedJson.add(dir(name, children: []));
+          }
+        }
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+        _emitRootTree(t, {'tree': _rootNode(children: seedJson), 'seq': 5});
+        await Future<void>.delayed(Duration.zero);
+
+        Map<String, dynamic> entry(String name, bool asDir) =>
+            asDir ? dir(name, children: []) : _file(name, name);
+
+        for (var f = 0; f < 30; f++) {
+          final existing = model.keys.toList();
+          final removed = <String>[
+            for (var k = rng.nextInt(4); k > 0 && existing.isNotEmpty; k--)
+              existing[rng.nextInt(existing.length)],
+          ];
+          final added = <({String name, bool isDir})>[
+            for (var k = rng.nextInt(5); k > 0; k--)
+              (name: names[rng.nextInt(names.length)], isDir: rng.nextBool()),
+          ];
+          final modified = <({String name, bool isDir})>[
+            for (var k = rng.nextInt(4); k > 0 && existing.isNotEmpty; k--)
+              (name: existing[rng.nextInt(existing.length)], isDir: false),
+          ];
+          if (removed.isNotEmpty && rng.nextInt(3) == 0) {
+            added.add((name: removed.first, isDir: rng.nextBool()));
+          }
+          if (added.isNotEmpty && rng.nextInt(3) == 0) {
+            modified.add((name: added.first.name, isDir: rng.nextBool()));
+          }
+
+          emitUpdate(
+            t,
+            removed: removed,
+            added: [for (final a in added) entry(a.name, a.isDir)],
+            modified: [for (final m in modified) entry(m.name, m.isDir)],
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          final removedSet = removed.toSet();
+          final frameNext = <String, ({bool isDir, bool loaded})>{};
+          for (final u in [...added, ...modified]) {
+            final prior = frameNext.containsKey(u.name)
+                ? frameNext[u.name]
+                : (removedSet.contains(u.name) ? null : model[u.name]);
+            frameNext[u.name] = u.isDir
+                ? (isDir: true, loaded: prior != null && prior.isDir && prior.loaded)
+                : (isDir: false, loaded: true);
+          }
+          for (final r in removedSet) {
+            model.remove(r);
+          }
+          model.addAll(frameNext);
+          final expected = model.entries.toList()
+            ..sort((a, b) {
+              if (a.value.isDir != b.value.isDir) return a.value.isDir ? -1 : 1;
+              final c = a.key.toLowerCase().compareTo(b.key.toLowerCase());
+              // Case twins: lowercase first.
+              return c != 0 ? c : b.key.compareTo(a.key);
+            });
+          expect(
+            svc.currentState.root!.children.map(
+              (c) => '${c.type.name}:${c.path}:${c.childrenLoaded}',
+            ),
+            [
+              for (final e in expected)
+                '${e.value.isDir ? 'directory' : 'file'}:${e.key}:${e.value.loaded}',
+            ],
+            reason: 'seed $seed frame $f',
+          );
+        }
+        await svc.dispose();
+        await session.close();
+      }
+    });
+
+    test('a subscription past the cap keeps expanded directories ahead of shallower collapsed ones', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.fileService;
+      final subs = [for (var i = 0; i < 4; i++) 'd${pad(i)}/sub'];
+      svc.applyPreferences(ProjectPreferences(expandedPaths: subs.toSet()));
+      _emitRootTree(t, {
+        'tree': _rootNode(
+          children: [
+            for (var i = 0; i < 520; i++)
+              dir(
+                'd${pad(i)}',
+                children: [
+                  if (i < subs.length) dir(subs[i], children: []),
+                ],
+              ),
+          ],
+        ),
+        'seq': 5,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      final paths = (t.sent.lastWhere((m) => m['type'] == 'file:tree:subscribe')['paths'] as List)
+          .cast<String>();
+      expect(paths, hasLength(512));
+      expect(paths.sublist(0, subs.length), unorderedEquals(subs));
+      for (final p in paths.sublist(subs.length)) {
+        expect(p.contains('/'), isFalse);
+      }
+      await session.close();
+    });
+
+    test('a chunked restore requests the shallowest directories first', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)
+        ..activate()
+        ..setTreeInterest('files-test', true);
+      await Future<void>.delayed(Duration.zero);
+      t.clearSent();
+
+      final shallow = [for (var i = 0; i < 64; i++) 'd${pad(i)}'];
+      final deep = [for (var i = 0; i < 6; i++) 'x/y$i'];
+      svc.applyPreferences(
+        ProjectPreferences(expandedPaths: <String>{...deep, ...shallow}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final requests = t.sent
+          .where((m) => m['type'] == 'file:tree:children:request')
+          .toList();
+      expect(requests, hasLength(2));
+      expect(requests[0]['paths'] as List, unorderedEquals(shallow));
+      expect(requests[1]['paths'] as List, unorderedEquals(deep));
 
       await svc.dispose();
       await session.close();

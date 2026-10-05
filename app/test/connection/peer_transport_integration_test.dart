@@ -370,7 +370,10 @@ void main() {
   test(
     'terminal native failure blocks; retryable failure wakes the ladder',
     () async {
-      Future<({bool blocked, bool woken})> run(bool retryable) async {
+      Future<({bool blocked, bool woken})> run(
+        bool retryable,
+        List<String> expectedCodes,
+      ) async {
         final relay = _Relay();
         final payload = _Payload();
         final runtime = _Runtime(payload);
@@ -394,6 +397,10 @@ void main() {
           blocked: events.any((event) => event is PeerTerminalError),
           woken: events.any((event) => event is PeerSessionDown),
         );
+        expect(
+          events.whereType<PeerTerminalError>().map((e) => e.code).toList(),
+          expectedCodes,
+        );
         await eventsSub.cancel();
         await mechanisms.release();
         relay.dispose();
@@ -401,8 +408,11 @@ void main() {
         return outcome;
       }
 
-      expect(await run(true), (blocked: false, woken: true));
-      expect(await run(false), (blocked: true, woken: false));
+      expect(await run(true, const []), (blocked: false, woken: true));
+      expect(await run(false, const ['NATIVE_CLOSE_UNCLASSIFIED']), (
+        blocked: true,
+        woken: false,
+      ));
     },
   );
 }

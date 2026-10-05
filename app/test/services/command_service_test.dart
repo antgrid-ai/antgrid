@@ -54,7 +54,7 @@ void main() {
     Duration pollInterval = const Duration(milliseconds: 5),
   }) async {
     final deadline = DateTime.now().add(timeout);
-    while (service.currentState.current?.output.value.isEmpty ?? true) {
+    while (service.currentState.current?.output.isEmpty ?? true) {
       if (DateTime.now().isAfter(deadline)) {
         fail('Command output was still empty after $timeout');
       }
@@ -110,7 +110,35 @@ void main() {
       });
       await waitForOutput(svc);
 
-      expect(svc.currentState.current!.output.value, 'hello');
+      expect(svc.currentState.current!.output.text, 'hello');
+
+      await heavySub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a long-running command keeps only the newest output within the cap',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = CommandService.fromSession(session);
+
+      svc.runCommand('build');
+      final heavySub = session.heavyStream.listen((_) {});
+
+      final overCap = '${'x' * 99}\n' * (kCommandOutputMaxChars ~/ 100 + 10);
+      t.emit('command:output', {
+        'projectId': 'p',
+        'commandName': 'build',
+        'data': '${overCap}END\n',
+      });
+      await waitFor(
+        () => svc.currentState.current!.output.text.endsWith('END\n'),
+      );
+
+      final output = svc.currentState.current!.output;
+      expect(output.length, lessThanOrEqualTo(kCommandOutputMaxChars));
+      expect(output.trimmed, isTrue);
 
       await heavySub.cancel();
       await svc.dispose();
@@ -170,7 +198,7 @@ void main() {
           'data': 'hello',
         });
         await waitForOutput(svc);
-        expect(svc.currentState.current!.output.value, 'hello');
+        expect(svc.currentState.current!.output.text, 'hello');
 
         t.emit('command:done', {
           'projectId': 'proj-c',

@@ -125,139 +125,234 @@ class UsageRowData extends TranscriptRow {
   String get rowKey => 'usage:$anchorKey';
 }
 
+bool _isExpanded(AgentTurn turn, Set<String> expandedTurnIds) =>
+    turn.stopReason == null || expandedTurnIds.contains(turn.turnId);
+
+/// One turn's rows plus exactly what they were derived from, so a later derive
+/// can tell whether they are still current.
+class _TurnRows {
+  final AgentTurn turn;
+  final bool expanded;
+
+  /// The turn's rows, including its trailing [ErrorRowData].
+  final List<TranscriptRow> rows;
+  final AgentTokenUsage? turnUsage;
+
+  final List<String> anchorIds;
+  final List<AgentTokenUsage?> anchorUsages;
+
+  const _TurnRows({
+    required this.turn,
+    required this.expanded,
+    required this.rows,
+    required this.turnUsage,
+    required this.anchorIds,
+    required this.anchorUsages,
+  });
+
+  // Usage is compared per value, not by map identity: every live agent:usage
+  // installs new maps, and a settled turn must not re-derive when only another
+  // turn's entry changed. The map itself is deliberately not retained, or each
+  // reused entry would pin the version it was derived from.
+  bool holdsFor(AgentTurn t, bool exp, AgentSessionState state) {
+    if (!identical(turn, t) || expanded != exp) return false;
+    if (t.stopReason == null) return true;
+    if (!identical(state.usageByTurn[t.turnId], turnUsage)) return false;
+    for (var i = 0; i < anchorIds.length; i++) {
+      if (!identical(state.usageByItem[anchorIds[i]], anchorUsages[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
 /// State → rows. Pure: all folding/marker/working policy lives here so it is
 /// testable without widgets. Ephemeral expansion state is passed in, never
 /// stored in the service.
 List<TranscriptRow> deriveRows(
   AgentSessionState state, {
   required Set<String> expandedTurnIds,
-}) {
-  final rows = <TranscriptRow>[];
-  final turns = state.turns;
+}) => TranscriptRowCache().derive(state, expandedTurnIds: expandedTurnIds);
 
-  for (final turn in turns) {
-    final settled = turn.stopReason != null;
-    final expanded = !settled || expandedTurnIds.contains(turn.turnId);
-    final turnRows = <TranscriptRow>[];
+/// The row derivation with per-turn reuse. A view re-derives on every state change;
+/// a turn whose object, fold state and attached usage are unchanged keeps the
+/// rows it was last given, so a streamed delta costs its own turn's rows plus
+/// one reference pass over the rest.
+///
+/// Sound only because AgentSessionService never mutates a turn, item list or
+/// usage map it has already published.
+class TranscriptRowCache {
+  Map<String, _TurnRows> _byTurnId = {};
 
-    if (expanded) {
-      for (final item in turn.items) {
-        if (!settled && item.kind == 'compaction') continue;
-        final streamingTail =
-            !settled &&
-            turn.items.isNotEmpty &&
-            identical(item, turn.items.last);
-        turnRows.add(
-          _rowFor(item, turnId: turn.turnId, streaming: streamingTail),
-        );
-      }
-    } else {
-      // Fold: keep the conversation (user prompt, trailing assistant answer)
-      // and compaction dividers; hide the work behind one fold header placed
-      // where the hidden run starts.
-      final kept = <String>{};
-      for (final item in turn.items) {
-        if (item.kind == 'compaction' ||
-            (item.kind == 'message' && item.role == 'user')) {
-          kept.add(item.itemId);
-        }
-      }
-      for (var i = turn.items.length - 1; i >= 0; i--) {
-        final item = turn.items[i];
-        if (item.kind == 'message' && item.role != 'user') {
-          kept.add(item.itemId);
-        } else {
-          break;
-        }
-      }
-      final hiddenCount = turn.items
-          .where((i) => !kept.contains(i.itemId))
-          .length;
-      var foldEmitted = false;
-      for (final item in turn.items) {
-        if (kept.contains(item.itemId)) {
-          turnRows.add(_rowFor(item, turnId: turn.turnId, streaming: false));
-        } else if (!foldEmitted) {
-          turnRows.add(
-            TurnFoldRowData(
-              turnId: turn.turnId,
-              hiddenCount: hiddenCount,
-              hasError: turn.items.any((i) => i.error != null),
-              cancelled: turn.stopReason == 'cancelled',
-              duration: _turnDuration(turn),
-            ),
-          );
-          foldEmitted = true;
+  List<TranscriptRow> derive(
+    AgentSessionState state, {
+    required Set<String> expandedTurnIds,
+    Set<String> dismissedErrorTurnIds = const {},
+  }) {
+    final rows = <TranscriptRow>[];
+    final next = <String, _TurnRows>{};
+    for (final turn in state.turns) {
+      final expanded = _isExpanded(turn, expandedTurnIds);
+      final prior = _byTurnId[turn.turnId];
+      final entry = prior != null && prior.holdsFor(turn, expanded, state)
+          ? prior
+          : _deriveTurn(turn, state, expanded: expanded);
+      next[turn.turnId] = entry;
+      // Filtered here rather than in the entry so cached rows never depend on
+      // which errors the user has dismissed.
+      if (dismissedErrorTurnIds.isEmpty) {
+        rows.addAll(entry.rows);
+      } else {
+        for (final r in entry.rows) {
+          if (r is ErrorRowData && dismissedErrorTurnIds.contains(r.turnId)) {
+            continue;
+          }
+          rows.add(r);
         }
       }
     }
+    _byTurnId = next;
+    _addPromptAndWorkingRows(rows, state);
+    return rows;
+  }
+}
 
-    // One timestamp per assistant run, not one per message: blank every
-    // assistant message footer except the last, which anchors the turn's time
-    // in the feed. User prompts keep their own send time — it marks when the
-    // user asked, a different moment from when the turn answered.
-    final lastMessageIndex = turnRows.lastIndexWhere(
-      (r) => r is MessageRowData,
-    );
+_TurnRows _deriveTurn(
+  AgentTurn turn,
+  AgentSessionState state, {
+  required bool expanded,
+}) {
+  final settled = turn.stopReason != null;
+  final turnRows = <TranscriptRow>[];
+
+  if (expanded) {
+    for (final item in turn.items) {
+      if (!settled && item.kind == 'compaction') continue;
+      final streamingTail =
+          !settled && turn.items.isNotEmpty && identical(item, turn.items.last);
+      turnRows.add(_rowFor(item, turnId: turn.turnId, streaming: streamingTail));
+    }
+  } else {
+    // Fold: keep the conversation (user prompt, trailing assistant answer)
+    // and compaction dividers; hide the work behind one fold header placed
+    // where the hidden run starts.
+    final kept = <String>{};
+    for (final item in turn.items) {
+      if (item.kind == 'compaction' ||
+          (item.kind == 'message' && item.role == 'user')) {
+        kept.add(item.itemId);
+      }
+    }
+    for (var i = turn.items.length - 1; i >= 0; i--) {
+      final item = turn.items[i];
+      if (item.kind == 'message' && item.role != 'user') {
+        kept.add(item.itemId);
+      } else {
+        break;
+      }
+    }
+    final hiddenCount = turn.items.where((i) => !kept.contains(i.itemId)).length;
+    var foldEmitted = false;
+    for (final item in turn.items) {
+      if (kept.contains(item.itemId)) {
+        turnRows.add(_rowFor(item, turnId: turn.turnId, streaming: false));
+      } else if (!foldEmitted) {
+        turnRows.add(
+          TurnFoldRowData(
+            turnId: turn.turnId,
+            hiddenCount: hiddenCount,
+            hasError: turn.items.any((i) => i.error != null),
+            cancelled: turn.stopReason == 'cancelled',
+            duration: _turnDuration(turn),
+          ),
+        );
+        foldEmitted = true;
+      }
+    }
+  }
+
+  // One timestamp per assistant run, not one per message: blank every
+  // assistant message footer except the last, which anchors the turn's time
+  // in the feed. User prompts keep their own send time — it marks when the
+  // user asked, a different moment from when the turn answered.
+  final lastMessageIndex = turnRows.lastIndexWhere((r) => r is MessageRowData);
+  for (var i = 0; i < turnRows.length; i++) {
+    final row = turnRows[i];
+    if (row is MessageRowData && !row.isUser && i != lastMessageIndex) {
+      turnRows[i] = MessageRowData(
+        row.item,
+        turnId: row.turnId,
+        isUser: row.isUser,
+      );
+    }
+  }
+
+  // A streaming turn's usage is provisional. Once settled, historical usage
+  // attaches to each visible assistant anchor. Live usage falls back to the
+  // last visible assistant when history did not provide finer detail. Keeping
+  // it on MessageRowData lets the timestamp and usage share one metadata row.
+  final anchorIds = <String>[];
+  final anchorUsages = <AgentTokenUsage?>[];
+  AgentTokenUsage? turnUsage;
+  if (settled) {
+    var hasItemUsage = false;
     for (var i = 0; i < turnRows.length; i++) {
       final row = turnRows[i];
-      if (row is MessageRowData && !row.isUser && i != lastMessageIndex) {
-        turnRows[i] = MessageRowData(
-          row.item,
-          turnId: row.turnId,
-          isUser: row.isUser,
-        );
-      }
-    }
-
-    // A streaming turn's usage is provisional. Once settled, historical usage
-    // attaches to each visible assistant anchor. Live usage falls back to the
-    // last visible assistant when history did not provide finer detail. Keeping
-    // it on MessageRowData lets the timestamp and usage share one metadata row.
-    if (settled) {
-      var hasItemUsage = false;
-      for (var i = 0; i < turnRows.length; i++) {
-        final row = turnRows[i];
-        if (row is MessageRowData && !row.isUser) {
-          final itemUsage = state.usageByItem[row.item.itemId];
-          if (itemUsage != null) {
-            hasItemUsage = true;
-            turnRows[i] = MessageRowData(
-              row.item,
-              turnId: row.turnId,
-              isUser: false,
-              timestamp: row.timestamp,
-              usage: itemUsage,
-            );
-          }
-        }
-      }
-      final turnUsage = state.usageByTurn[turn.turnId];
-      if (turnUsage != null && !hasItemUsage) {
-        final lastAssistantIndex = turnRows.lastIndexWhere(
-          (row) => row is MessageRowData && !row.isUser,
-        );
-        if (lastAssistantIndex >= 0) {
-          final row = turnRows[lastAssistantIndex] as MessageRowData;
-          turnRows[lastAssistantIndex] = MessageRowData(
+      if (row is MessageRowData && !row.isUser) {
+        final itemUsage = state.usageByItem[row.item.itemId];
+        anchorIds.add(row.item.itemId);
+        anchorUsages.add(itemUsage);
+        if (itemUsage != null) {
+          hasItemUsage = true;
+          turnRows[i] = MessageRowData(
             row.item,
             turnId: row.turnId,
             isUser: false,
             timestamp: row.timestamp,
-            usage: turnUsage,
+            usage: itemUsage,
           );
-        } else {
-          turnRows.add(UsageRowData(anchorKey: turn.turnId, usage: turnUsage));
         }
       }
     }
-    rows.addAll(turnRows);
-
-    if (turn.error != null) {
-      rows.add(ErrorRowData(turnId: turn.turnId, error: turn.error!));
+    turnUsage = state.usageByTurn[turn.turnId];
+    if (turnUsage != null && !hasItemUsage) {
+      final lastAssistantIndex = turnRows.lastIndexWhere(
+        (row) => row is MessageRowData && !row.isUser,
+      );
+      if (lastAssistantIndex >= 0) {
+        final row = turnRows[lastAssistantIndex] as MessageRowData;
+        turnRows[lastAssistantIndex] = MessageRowData(
+          row.item,
+          turnId: row.turnId,
+          isUser: false,
+          timestamp: row.timestamp,
+          usage: turnUsage,
+        );
+      } else {
+        turnRows.add(UsageRowData(anchorKey: turn.turnId, usage: turnUsage));
+      }
     }
   }
 
+  if (turn.error != null) {
+    turnRows.add(ErrorRowData(turnId: turn.turnId, error: turn.error!));
+  }
+
+  return _TurnRows(
+    turn: turn,
+    expanded: expanded,
+    rows: turnRows,
+    turnUsage: turnUsage,
+    anchorIds: anchorIds,
+    anchorUsages: anchorUsages,
+  );
+}
+
+void _addPromptAndWorkingRows(
+  List<TranscriptRow> rows,
+  AgentSessionState state,
+) {
   // Pending prompts render fully in the pinned panel; the transcript keeps
   // only a chronological marker stub.
   final waiting =
@@ -279,7 +374,6 @@ List<TranscriptRow> deriveRows(
       ),
     );
   }
-  return rows;
 }
 
 TranscriptRow _rowFor(

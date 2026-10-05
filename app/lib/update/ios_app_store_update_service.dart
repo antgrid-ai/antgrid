@@ -7,6 +7,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:pub_semver/pub_semver.dart';
 
 import '../util/ab_log.dart';
+import 'update_check_result.dart';
 import 'github_release_update_service.dart' show isNewerVersion;
 
 /// Pure interpretation of one iTunes lookup reply, isolated so it can be
@@ -98,8 +99,8 @@ Future<String?> _deviceSystemVersion() async {
 /// replies for up to ~a day — a fresh release can take that long to light
 /// the row, which is fine (the store itself rolls releases out gradually).
 ///
-/// Never throws — any failure (offline, malformed reply, unpublished app)
-/// resolves to `false`.
+/// Source failures and unpublished listings remain distinct from a successful
+/// check confirming the installed version is current.
 class IosAppStoreUpdateService {
   IosAppStoreUpdateService({
     http.Client? httpClient,
@@ -130,7 +131,7 @@ class IosAppStoreUpdateService {
   static const String lookupAuthority = 'itunes.apple.com';
   static const String lookupPath = '/lookup';
 
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     final client = _injected ?? http.Client();
     try {
       final info = _packageInfo ??= await PackageInfo.fromPlatform();
@@ -138,7 +139,7 @@ class IosAppStoreUpdateService {
       // version makes isNewerVersion resolve false on every check.
       if (info.version.isEmpty) {
         AbLog.warn('Update', 'PackageInfo.version is empty (check skipped)');
-        return false;
+        return UpdateCheckResult.failed;
       }
       final os = _osVersion ??= await _systemVersion();
       // Storefronts differ per country — a lookup without `country` queries
@@ -157,22 +158,59 @@ class IosAppStoreUpdateService {
           'App Store lookup got non-200 (ignored)',
           fields: {'status': '${res.statusCode}'},
         );
-        return false;
+        return UpdateCheckResult.failed;
       }
+      final json = jsonDecode(res.body);
+      if (json is! Map<String, Object?> || json['results'] is! List) {
+        return UpdateCheckResult.failed;
+      }
+      final results = json['results'] as List;
+      if (results.isEmpty) {
+        return const UpdateCheckResult(
+          UpdateCheckStatus.unsupported,
+          message: 'This app is not available in your App Store storefront.',
+        );
+      }
+      final first = results.first;
+      if (first is! Map<String, Object?> ||
+          first['version'] is! String ||
+          first['trackViewUrl'] is! String) {
+        return UpdateCheckResult.failed;
+      }
+      final version = first['version'] as String;
+      final url = Uri.tryParse(first['trackViewUrl'] as String);
+      if (url == null || url.scheme != 'https' || url.host.isEmpty) {
+        return UpdateCheckResult.failed;
+      }
+      Version.parse(info.version.trim());
+      Version.parse(version.trim());
       final decision = decideIosStoreUpdate(
-        lookupJson: jsonDecode(res.body),
+        lookupJson: json,
         installedVersion: info.version,
         deviceOsVersion: os,
       );
       if (decision.updateAvailable) _listingUrl = decision.listingUrl;
-      return decision.updateAvailable;
+      if (decision.updateAvailable) {
+        return UpdateCheckResult(
+          UpdateCheckStatus.available,
+          version: version,
+          candidateId: version,
+        );
+      }
+      if (isNewerVersion(current: info.version, latestTag: version)) {
+        return const UpdateCheckResult(
+          UpdateCheckStatus.unsupported,
+          message: 'The newer version requires a newer version of iOS.',
+        );
+      }
+      return UpdateCheckResult.upToDate;
     } catch (e) {
       AbLog.warn(
         'Update',
-        'IosAppStoreUpdateService.isUpdateAvailable failed (ignored)',
+        'IosAppStoreUpdateService.check failed',
         fields: {'error': '$e'},
       );
-      return false;
+      return UpdateCheckResult.failed;
     } finally {
       if (_injected == null) client.close();
     }

@@ -66,6 +66,9 @@ dependencies:
   re_editor: ^0.9.0
   re_highlight: ^0.0.3
   path_provider: ^2.1.5
+  # Share sheet for the phone's app.log; 12.x because 13 needs win32 6, which
+  # device_info_plus 11 forbids.
+  share_plus: ^12.0.2
   iconify_flutter: ^0.0.7
   flutter_svg: ^2.2.4
   file_selector: ^1.1.0
@@ -185,6 +188,10 @@ flutter_native_splash:
 # docs/dart-terminal-fork-release.md. `ref` is a commit SHA on purpose — the fork
 # cuts no VTE release, and a branch would make every `pub get` a moving target.
 dependency_overrides:
+  # Forward Sparkle cycle completion, including Remind Me Later / Skip This
+  # Version (see the vendored README).
+  auto_updater_macos:
+    path: ../packages/auto_updater_macos
   # The fork's packages need hooks 2.x, which needs meta ^1.19.0; the Flutter SDK
   # pins 1.18.0, so solving fails outright without this.
   meta: 1.19.0
@@ -192,17 +199,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

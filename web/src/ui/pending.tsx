@@ -51,6 +51,8 @@ export function PendingPage({ email, pendingId }: PendingPageProps) {
       <div
         class="max-w-md mx-auto mt-16 card bg-panel border border-edge"
         data-ab-wake={email}
+        data-ab-remember-now="link"
+        data-ab-email={email}
       >
         <div class="card-body items-center text-center">
           <h1 class="card-title">Check your email</h1>

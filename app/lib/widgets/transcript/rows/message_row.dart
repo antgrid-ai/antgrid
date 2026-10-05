@@ -39,6 +39,30 @@ class MessageRow extends StatefulWidget {
 
 class _MessageRowState extends State<MessageRow> {
   bool _expanded = false;
+  TranscriptMarkdown? _markdown;
+  int _markdownWeightOffset = 0;
+
+  // Handed back as the identical instance while neither the text nor
+  // AbTokens.activeWeightOffset moved. MarkdownBlock re-parses the whole
+  // message and highlights every fence line in its own build, and this row is
+  // rebuilt on every session-state emission while another message streams; the
+  // identical instance lets Element.updateChild skip it. A theme switch still
+  // restyles it, because TranscriptMarkdown reads the palette through its own
+  // context dependency. The weight offset is in the key because it is a static
+  // the config folds into every style and no dependency tracks it.
+  // TranscriptMarkdown.data is the widget's only argument; one added to it
+  // belongs in this comparison.
+  TranscriptMarkdown _markdownFor(String text) {
+    final cached = _markdown;
+    final weightOffset = AbTokens.activeWeightOffset;
+    if (cached != null &&
+        cached.data == text &&
+        _markdownWeightOffset == weightOffset) {
+      return cached;
+    }
+    _markdownWeightOffset = weightOffset;
+    return _markdown = TranscriptMarkdown(data: text);
+  }
 
   // Copy source = what's on screen. When collapsed, the widget clips to
   // _kUserCollapseLines (unrendered tail is unselectable), so a cross-block
@@ -73,7 +97,7 @@ class _MessageRowState extends State<MessageRow> {
             SelectableBlock(
               order: widget.rowIndex * 1000,
               sourceBuilder: () => assistantSource(text),
-              child: TranscriptMarkdown(data: text),
+              child: _markdownFor(text),
             ),
             _MessageMetaRow(
               when: widget.data.timestamp,

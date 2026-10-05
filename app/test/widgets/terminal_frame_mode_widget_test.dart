@@ -21,12 +21,14 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
+import 'package:antgrid/models/terminal_history_model.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
@@ -210,6 +212,16 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   return (service: service, transport: transport);
 }
 
+class _RecordingHistoryModel extends TerminalHistoryModel {
+  final seeks = <int>[];
+
+  @override
+  void seek(int beforeRowId, {bool newer = false}) {
+    seeks.add(beforeRowId);
+    super.seek(beforeRowId, newer: newer);
+  }
+}
+
 /// A frame-mode tab, built directly (not through TerminalService) so its
 /// TerminalDisplayMode.frame is explicit rather than reached by driving the
 /// subscribe handshake — the state machine that gets there is the service
@@ -220,6 +232,7 @@ TerminalTab _tab({
   TerminalDisplayMode mode = TerminalDisplayMode.frame,
   TerminalSessionState sessionState = TerminalSessionState.running,
   List<int>? pty,
+  TerminalHistoryModel? history,
 }) {
   final tab = TerminalTab(
     terminalId: id,
@@ -229,6 +242,7 @@ TerminalTab _tab({
     cols: 80,
     rows: 24,
     mode: mode,
+    history: history,
   );
   // [pty] stands in for the running program: everything the engine's transport
   // accepts is a byte the guest on the other end would have read.
@@ -858,6 +872,91 @@ void main() {
   // sending it directly ever was.
   group('(d): mouse tracking and DEC 1004 focus reporting read the frame\'s '
       'own mode state', () {
+    for (final boundary in ['suspend', 'refusal', 'rehydrate']) {
+      testWidgets('pending mouse motion is discarded on $boundary', (
+        tester,
+      ) async {
+        if (_skipWithoutNative()) return;
+        final h = await _makeService(addTearDown, inputReady: true);
+        h.service.activate();
+        await tester.pump();
+        final controller = h.service.currentState.tabs['t1']!.ghostty;
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (bytes) {
+            sent.addAll(bytes);
+            return true;
+          },
+        );
+        controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+        const size = VtMouseEncoderSize(
+          screenWidth: 800,
+          screenHeight: 600,
+          cellWidth: 10,
+          cellHeight: 20,
+        );
+        void move(double x) => controller.sendMouse(
+          action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+          position: VtMousePosition(x: x, y: 10),
+          size: size,
+        );
+        move(10);
+        expect(sent, isNotEmpty);
+        sent.clear();
+        move(30);
+        expect(sent, isEmpty);
+        switch (boundary) {
+          case 'suspend':
+            h.service.suspendDisplay();
+          case 'refusal':
+            h.transport.setEstablished(false);
+            expect(h.service.sendInput('t1', 'x'), isFalse);
+          case 'rehydrate':
+            h.transport.redriveHydrators();
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(sent, isEmpty);
+        await tester.runAsync(h.service.dispose);
+      });
+    }
+
+    testWidgets('direct terminal input flushes pending motion first', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown, inputReady: true);
+      final controller = h.service.currentState.tabs['t1']!.ghostty;
+      controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => controller.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      List<Map<String, dynamic>> inputs() => h.transport.sent
+          .where((message) => message['type'] == 'terminal:input')
+          .toList();
+      h.transport.clearSent();
+      move(10);
+      expect(inputs(), hasLength(1));
+      h.transport.clearSent();
+      move(30);
+      expect(inputs(), isEmpty);
+
+      expect(h.service.sendInput('t1', 'x'), isTrue);
+      expect(inputs(), hasLength(2));
+      expect(inputs().first['data'], startsWith('\x1b[<'));
+      expect(inputs().last['data'], 'x');
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(inputs(), hasLength(2));
+      await tester.runAsync(h.service.dispose);
+    });
+
     test('sendMouse reports nothing before a frame enables tracking, and a '
         'report after', () {
       if (_skipWithoutNative()) return;
@@ -1942,6 +2041,43 @@ void main() {
   });
 
   group('the affordance is the archive route an agent pane has', () {
+    testWidgets('opening history cancels pending live mouse motion', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      tab.ghostty.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => tab.ghostty.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      move(10);
+      expect(pty, isNotEmpty);
+      pty.clear();
+      move(30);
+      expect(pty, isEmpty);
+
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(pty, isEmpty);
+    });
+
     testWidgets(
       'a mouse-reporting guest swallows the wheel, and the control still '
       'reaches the archive',
@@ -2240,6 +2376,126 @@ void main() {
         h.transport.sent.where((m) => m['type'] == 'terminal:start'),
         hasLength(1),
       );
+    });
+  });
+
+  group('the open reader under scrollbar drags and pane resizes', () {
+    testWidgets('a scrollbar drag hands the reader one target per frame', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final history = _RecordingHistoryModel();
+      final tab = _tab(id: 't1', history: history);
+      _archive(tab, nextRowId: 100000);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+      history.seeks.clear();
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(_historyScrollbar),
+      );
+      for (var i = 0; i < 4; i++) {
+        await gesture.moveBy(const Offset(0, -30));
+      }
+      await tester.pump();
+
+      expect(history.seeks, isNotEmpty);
+      final position = tester
+          .widget<TerminalHistoryScrollbar>(_historyScrollbar)
+          .position;
+      expect(history.seeks.toSet(), {math.min(position + 100, 100000)});
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('the reader reporting its position rebuilds only the '
+        'scrollbar', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+
+      TerminalHistoryView reader() =>
+          tester.widget<TerminalHistoryView>(find.byType(TerminalHistoryView));
+      final before = reader();
+      final live = _liveView(tester);
+
+      await tester.pump();
+      expect(identical(reader(), before), isTrue);
+
+      before.onPosition!(123);
+      await tester.pump();
+
+      expect(identical(reader(), before), isTrue);
+      expect(identical(_liveView(tester), live), isTrue);
+      expect(
+        tester.widget<TerminalHistoryScrollbar>(_historyScrollbar).position,
+        123,
+      );
+    });
+
+    testWidgets('narrowing a driver pane re-wraps the open reader once, after '
+        'the drag settles', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+      final width = ValueNotifier<double>(300);
+      addTearDown(width.dispose);
+
+      await tester.pumpWidget(
+        _wrap(
+          ValueListenableBuilder<double>(
+            valueListenable: width,
+            builder: (context, w, child) => _pane(tab, h.service, width: w),
+          ),
+          terminalState: Stream.value(_stateWith()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settleWire(tester, h);
+      h.transport.sent.clear();
+
+      int readerCols() => tester
+          .widget<GhosttyTerminalView>(
+            find.descendant(
+              of: find.byType(TerminalHistoryView),
+              matching: find.byType(GhosttyTerminalView),
+            ),
+          )
+          .controller
+          .cols;
+      final cols = readerCols();
+      addTearDown(() => debugTerminalHistoryScratchEngines = 0);
+      debugTerminalHistoryScratchEngines = 0;
+
+      for (final w in [260.0, 220.0, 180.0]) {
+        width.value = w;
+        await tester.pump(const Duration(milliseconds: 16));
+        expect(readerCols(), cols);
+        expect(debugTerminalHistoryScratchEngines, 0);
+        expect(_resizes(h), isEmpty);
+      }
+
+      await _settle(tester);
+      expect(readerCols(), lessThan(cols));
+      expect(debugTerminalHistoryScratchEngines, 1);
     });
   });
 

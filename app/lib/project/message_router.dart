@@ -4,6 +4,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/ab_message.dart';
+import 'inbound_frame.dart';
 import 'project_message_classification.dart';
 
 /// Splits a transport's inbound control-channel stream into status and heavy
@@ -11,12 +12,15 @@ import 'project_message_classification.dart';
 /// the union of two inputs: no heavy subscriber, or [setLifecyclePaused] (the
 /// app backgrounded).
 ///
-/// Both output streams emit raw JSON envelopes. Downstream consumers parse
-/// via the existing `parseAbMessage` helper in `models/ab_message.dart`.
+/// Both output streams emit one [InboundFrame] per envelope. The frame parses
+/// lazily through `parseAbMessage` and memoises the result, so every consumer
+/// of a frame (including a durable replay) shares a single parse, and a frame
+/// nobody reads is never parsed.
 class MessageRouter {
   final AgentTransport transport;
-  late final StreamController<Map<String, dynamic>> _statusCtrl;
-  late final StreamController<Map<String, dynamic>> _heavyCtrl;
+  final FrameParser _parser;
+  late final StreamController<InboundFrame> _statusCtrl;
+  late final StreamController<InboundFrame> _heavyCtrl;
   final _resumedCtrl = StreamController<void>.broadcast();
   StreamSubscription<InboundMessage>? _sub;
 
@@ -34,7 +38,7 @@ class MessageRouter {
   /// no replay, so those frames used to be dropped for want of a subscriber and
   /// nothing ever re-sent them — stranding the session on "waiting for agent"
   /// until the app reconnected.
-  final Map<String, Map<String, Map<String, dynamic>>> _durable = {};
+  final Map<String, Map<String, InboundFrame>> _durable = {};
 
   bool _disposed = false;
   bool _heavyListened = false;
@@ -42,17 +46,20 @@ class MessageRouter {
   bool? _sentPaused;
   static const _uuid = Uuid();
 
-  MessageRouter({required this.transport}) {
-    _statusCtrl = StreamController<Map<String, dynamic>>.broadcast();
-    _heavyCtrl = StreamController<Map<String, dynamic>>.broadcast(
+  MessageRouter({
+    required this.transport,
+    FrameParser parser = parseAbMessage,
+  }) : _parser = parser {
+    _statusCtrl = StreamController<InboundFrame>.broadcast();
+    _heavyCtrl = StreamController<InboundFrame>.broadcast(
       onListen: _onHeavyListen,
       onCancel: _onHeavyCancel,
     );
     _sub = transport.messages.listen(_onInbound);
   }
 
-  Stream<Map<String, dynamic>> get status => _statusCtrl.stream;
-  Stream<Map<String, dynamic>> get heavy => _heavyCtrl.stream;
+  Stream<InboundFrame> get status => _statusCtrl.stream;
+  Stream<InboundFrame> get heavy => _heavyCtrl.stream;
 
   /// Fires on the paused → resumed edge of the declaration in
   /// [_syncFocusState], once `client:focus-state{paused: false}` is already on
@@ -68,7 +75,7 @@ class MessageRouter {
   /// The durable frames seen so far for [checkoutId] on [tier], oldest first.
   /// Callers seed a fresh per-checkout subscriber with these; re-applying one
   /// is idempotent (every type here is a latest-wins full snapshot).
-  Iterable<Map<String, dynamic>> replayFor(
+  Iterable<InboundFrame> replayFor(
     String checkoutId,
     MessageTier tier,
   ) {
@@ -105,14 +112,17 @@ class MessageRouter {
         !kPreviewChannelInboundTypes.contains(raw.json['type'])) {
       return;
     }
+    // Built here and never parsed here: the parse happens at the first
+    // consumer that reads `parsed`, and not at all for a frame no one reads.
+    final frame = InboundFrame(raw.json, parser: _parser);
     final tier = classifyAbMessage(raw.json);
-    _retainIfDurable(raw.json);
+    _retainIfDurable(frame);
     switch (tier) {
       case MessageTier.status:
-        _statusCtrl.add(raw.json);
+        _statusCtrl.add(frame);
         break;
       case MessageTier.heavy:
-        _heavyCtrl.add(raw.json);
+        _heavyCtrl.add(frame);
         break;
       case MessageTier.ignore:
         assert(
@@ -126,15 +136,16 @@ class MessageRouter {
     }
   }
 
-  void _retainIfDurable(Map<String, dynamic> json) {
-    final type = json['type'];
-    if (type is! String || !kCheckoutDurableReplayTypes.contains(type)) return;
+  void _retainIfDurable(InboundFrame frame) {
+    final json = frame.json;
+    final type = frame.type;
+    if (type == null || !kCheckoutDurableReplayTypes.contains(type)) return;
     // An error-bearing frame is a transient failure, not a latest-wins
     // snapshot. Retaining one would evict the good frame for its type AND —
     // because classifyAbMessage coerces any `error` to the status tier — replay
     // it forever on the tier the heavy subscriber that needs it never reads.
     if (json['error'] != null) return;
-    (_durable[checkoutIdForEnvelope(json)] ??= {})[type] = json;
+    (_durable[frame.checkoutId] ??= {})[type] = frame;
   }
 
   /// Debug-only backstop for the classification gate: a control-channel frame

@@ -1,3 +1,4 @@
+import 'package:antgrid/update/update_check_result.dart';
 import 'dart:convert';
 
 import 'package:antgrid/update/github_release_update_service.dart';
@@ -6,7 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
-// Exercises isUpdateAvailable's fetch/decode/error paths with an injected
+// Exercises the check's fetch/decode/error paths with an injected
 // MockClient and mocked PackageInfo; the pure version comparison is covered
 // separately in version_compare_test.dart.
 void main() {
@@ -32,41 +33,41 @@ void main() {
       expect(req.headers['Accept'], 'application/vnd.github+json');
       return http.Response(jsonEncode({'tag_name': 'v1.0.7'}), 200);
     });
-    expect(await service(client).isUpdateAvailable(), isTrue);
+    expect((await service(client).check()).status, UpdateCheckStatus.available);
   });
 
   test('same version → false', () async {
     final client = MockClient(
       (_) async => http.Response(jsonEncode({'tag_name': 'v1.0.6'}), 200),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.upToDate);
   });
 
   test('non-200 (rate-limited) → false', () async {
     final client = MockClient(
       (_) async => http.Response('rate limit exceeded', 403),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 
   test('malformed body → false', () async {
     final client = MockClient(
       (_) async => http.Response('<!doctype html>not json', 200),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 
   test('missing tag_name → false', () async {
     final client = MockClient(
       (_) async => http.Response(jsonEncode({'name': 'v1.0.7'}), 200),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 
   test('network failure → false', () async {
     final client = MockClient(
       (_) async => throw http.ClientException('connection refused'),
     );
-    expect(await service(client).isUpdateAvailable(), isFalse);
+    expect((await service(client).check()).status, UpdateCheckStatus.failed);
   });
 }

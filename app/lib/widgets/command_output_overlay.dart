@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/theme_presets.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../models/command_models.dart';
@@ -16,6 +18,13 @@ import '../util/detached.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+
+/// What "Send to Agent" hands over. A trimmed run says so up front: the dropped
+/// head is often where a failing build printed its first error, and an agent
+/// given a mid-run start would read it as the whole run.
+@visibleForTesting
+String commandOutputForAgent(CommandOutput output) =>
+    output.trimmed ? '[earlier output trimmed]\n${output.text}' : output.text;
 
 /// The running/last project command, pinned to the bottom of the terminal
 /// Stack.
@@ -148,8 +157,9 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   void _sendFullOutputToAgent() {
     final current = ref.read(commandStateProvider).value?.current;
     if (current == null) return;
-    final outputText = current.output.value;
-    if (outputText.isEmpty) return;
+    final output = current.output;
+    if (output.isEmpty) return;
+    final outputText = commandOutputForAgent(output);
     detached(
       'CommandOutputOverlay',
       'send to agent failed',
@@ -242,10 +252,18 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
                       ),
                     ),
                   ),
-                  child: ValueListenableBuilder<String>(
-                    valueListenable: current.output,
-                    builder: (context, text, _) {
+                  child: ListenableBuilder(
+                    listenable: current.output,
+                    builder: (context, _) {
                       _scheduleScroll();
+                      final output = current.output;
+                      // Built here, not hoisted: monoStyle reads the mutable
+                      // AbTokens.activeWeightOffset.
+                      final outputStyle = AbTokens.monoStyle(
+                        fontSize: AbTokens.fontMd,
+                        height: 1.4,
+                        color: const Color(0xFFD4D4D4),
+                      );
                       final showSendButton =
                           _hasOutputSelection && agentTab != null;
                       return Stack(
@@ -263,13 +281,38 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
                                   );
                                 }
                               },
-                              child: Text(
-                                text.isEmpty ? ' ' : text,
-                                style: AbTokens.monoStyle(
-                                  fontSize: AbTokens.fontMd,
-                                  height: 1.4,
-                                  color: const Color(0xFFD4D4D4),
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Output past the cap is gone, and a view
+                                  // that starts mid-run without saying so reads
+                                  // as the whole run. The fixed default palette
+                                  // tints it because this surface is the same
+                                  // dark under every theme; the light theme's
+                                  // textMuted is under AA on it.
+                                  if (output.trimmed)
+                                    SelectionContainer.disabled(
+                                      key: const ValueKey<String>('trimmed'),
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: AbTokens.space6,
+                                        ),
+                                        child: Text(
+                                          'Earlier output trimmed',
+                                          style: AbTokens.sansStyle(
+                                            fontSize: AbTokens.fontXs,
+                                            color: kDefaultPalette.textMuted,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  _OutputBlocks(
+                                    key: const ValueKey<String>('blocks'),
+                                    output: output,
+                                    style: outputStyle,
+                                  ),
+                                ],
                               ),
                             ),
                           ),
@@ -407,5 +450,97 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
         ),
       ),
     );
+  }
+}
+
+class _OutputBlocks extends StatefulWidget {
+  const _OutputBlocks({super.key, required this.output, required this.style});
+
+  final CommandOutput output;
+  final TextStyle style;
+
+  @override
+  State<_OutputBlocks> createState() => _OutputBlocksState();
+}
+
+class _OutputBlocksState extends State<_OutputBlocks> {
+  final _BlockLineJoiner _joiner = _BlockLineJoiner();
+  final List<Widget> _blockWidgets = [];
+  int _blockWidgetsFirstSeq = 0;
+
+  @override
+  void didUpdateWidget(covariant _OutputBlocks oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A new run's blocks reuse the same absolute numbers, so a stale cache
+    // would show the previous run.
+    if (oldWidget.output != widget.output || oldWidget.style != widget.style) {
+      _blockWidgets.clear();
+    }
+  }
+
+  @override
+  void dispose() {
+    // SelectionContainer never disposes the delegate it is handed.
+    _joiner.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final output = widget.output;
+    final blocks = output.blocks;
+    final first = output.firstBlockSeq;
+    // Sealed blocks never change, so each block's Text is built once and
+    // handed back as the identical instance. The element tree skips an
+    // identical widget outright, which keeps a flush's rebuild to the tail
+    // however many blocks are kept.
+    final stale = (first - _blockWidgetsFirstSeq).clamp(
+      0,
+      _blockWidgets.length,
+    );
+    _blockWidgets.removeRange(0, stale);
+    _blockWidgetsFirstSeq = first;
+    for (var i = _blockWidgets.length; i < blocks.length; i++) {
+      // Keyed by absolute number, so dropping the oldest blocks leaves every
+      // survivor's paragraph laid out. Matched by position, each survivor
+      // would be handed its neighbour's text.
+      _blockWidgets.add(
+        Text(blocks[i], key: ValueKey<int>(first + i), style: widget.style),
+      );
+    }
+    return SelectionContainer(
+      delegate: _joiner,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ..._blockWidgets,
+          Text(
+            output.isEmpty ? ' ' : output.tail,
+            key: const ValueKey<String>('tail'),
+            style: widget.style,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Flutter concatenates sibling paragraphs' selections with nothing between
+/// them (`MultiSelectableSelectionContainerDelegate.getSelectedContent`), so
+/// without this a copy spanning two blocks would run two lines together. Every
+/// block boundary used up exactly one line break. A boundary that used up
+/// '\r\n' copies as '\n', because the delegate knows a boundary is there, not
+/// which terminator it was.
+class _BlockLineJoiner extends StaticSelectionContainerDelegate {
+  @override
+  SelectedContent? getSelectedContent() {
+    final parts = <String>[
+      for (final selectable in selectables)
+        if (selectable.getSelectedContent() case final SelectedContent content)
+          content.plainText,
+    ];
+    if (parts.isEmpty) return null;
+    return SelectedContent(plainText: parts.join('\n'));
   }
 }

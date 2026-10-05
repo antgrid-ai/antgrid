@@ -128,12 +128,11 @@ packages:
     source: hosted
     version: "1.0.0"
   auto_updater_macos:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: auto_updater_macos
-      sha256: ef9de0daf38d782d2243fe131503a9404d62df762f5386e5360020e43c01867f
-      url: "https://pub.dev"
-    source: hosted
+      path: "../packages/auto_updater_macos"
+      relative: true
+    source: path
     version: "1.0.0"
   auto_updater_platform_interface:
     dependency: transitive
@@ -697,8 +696,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
-      resolved-ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
+      resolved-ref: b61a3033310564b054df9f80b141ed1de423ad59
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -706,8 +705,8 @@ packages:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
-      resolved-ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
+      resolved-ref: b61a3033310564b054df9f80b141ed1de423ad59
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -1235,8 +1234,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
-      resolved-ref: "2c140b129e86ddc089b6f7d98fd9fe0a88a8597e"
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
+      resolved-ref: b61a3033310564b054df9f80b141ed1de423ad59
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.0.6+antgrid.2"
@@ -1393,6 +1392,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "9.22.0"
+  share_plus:
+    dependency: "direct main"
+    description:
+      name: share_plus
+      sha256: "223873d106614442ea6f20db5a038685cc5b32a2fba81cdecaefbbae0523f7fa"
+      url: "https://pub.dev"
+    source: hosted
+    version: "12.0.2"
+  share_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: share_plus_platform_interface
+      sha256: "88023e53a13429bd65d8e85e11a9b484f49d4c190abbd96c7932b74d6927cc9a"
+      url: "https://pub.dev"
+    source: hosted
+    version: "6.1.0"
   shared_preferences:
     dependency: "direct main"
     description:

@@ -62,6 +62,29 @@ class TestPayloadLink implements PeerLink {
   );
 }
 
+/// Fails every dial with [error], for asserting how a failure is classified.
+class FailingPeerConnector implements PeerConnector {
+  FailingPeerConnector(this.error);
+  final Object error;
+  @override
+  void retain() {}
+  @override
+  void release() {}
+  @override
+  void invalidate() {}
+  @override
+  void notePolicyGeneration(BigInt generation) {}
+  @override
+  Future<bool> resume() async => true;
+  @override
+  Future<PeerLink> connect({
+    required PeerConnectionAttempt attempt,
+    PeerLinkDiagnostic? diagnostic,
+    required String machineDeviceId,
+    required String machinePublicKey,
+  }) async => throw error;
+}
+
 class _NoopPayloadLink implements PeerLink {
   @override
   bool get isDispatchAllowed => true;

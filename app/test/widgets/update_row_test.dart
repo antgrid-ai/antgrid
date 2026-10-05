@@ -2,6 +2,7 @@ import 'package:antgrid/design/widgets/ab_progress_rule.dart';
 import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
+import 'package:antgrid/update/update_check_result.dart';
 import 'package:antgrid/widgets/update_row.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,8 +15,7 @@ class _FakeStrategy extends UpdateStrategy {
   bool get active => true;
 
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async =>
-      UpdateCheckOutcome.none;
+  Future<UpdateCheckResult> detect() async => UpdateCheckResult.upToDate;
 
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {

@@ -12,6 +12,7 @@ import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/storage/update_handoff_store.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
+import 'package:antgrid/update/update_check_result.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -52,8 +53,7 @@ class _FakeStrategy extends UpdateStrategy {
   String? get pendingVersion => version;
 
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async =>
-      UpdateCheckOutcome.none;
+  Future<UpdateCheckResult> detect() async => UpdateCheckResult.upToDate;
 
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {

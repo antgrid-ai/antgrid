@@ -16,6 +16,7 @@ export const brandPatterns = [
 ];
 
 export const thirdPartyPatterns = [
+  /^packages\/auto_updater_macos\//,
   /^app\/assets\/fonts\//,
   /^app\/\.prebuilt\//,
   /^app\/android\/gradle\/wrapper\//,
@@ -28,7 +29,7 @@ export function licenseForPath(path: string): string {
     return "LicenseRef-Antgrid-Brand";
   }
   if (path.startsWith("app/assets/fonts/")) return "OFL-1.1";
-  if (path.startsWith("app/.prebuilt/")) return "MIT";
+  if (path.startsWith("app/.prebuilt/") || path.startsWith("packages/auto_updater_macos/")) return "MIT";
   if (/^app\/android\/(gradle\/wrapper\/|gradlew)/.test(path)) return "Apache-2.0";
   if (path.startsWith("site/src/icons/")) return "LicenseRef-Third-Party-Trademark";
   if (path.startsWith("relay/") || path.startsWith("web/")) {

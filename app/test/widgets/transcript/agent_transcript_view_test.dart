@@ -1,6 +1,8 @@
 // Integration-shaped test for the transcript shell: it renders the real
 // `deriveRows` pipeline over an `AgentSessionState` fixture (no transport) to
 // prove row widgets wire up end-to-end, plus the empty-state fallback.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -32,6 +34,12 @@ import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/widgets/transcript/file_mention_suggestions.dart';
 import 'package:flutter/services.dart';
 import '../../helpers/prefs_test_mock.dart';
+import 'package:markdown_widget/markdown_widget.dart' show MarkdownBlock;
+import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/models/capability_catalog.dart';
+import 'package:antgrid/providers/capability_catalog.dart';
+import 'package:antgrid/services/capability_catalog_cache.dart';
+import 'package:antgrid/services/sessions_service.dart';
 
 const _sessionId = 'sess-1';
 
@@ -187,19 +195,36 @@ Future<void> _disposeTree(WidgetTester tester) async {
   await _settleComposerHistory(tester);
 }
 
-Future<void> _pump(WidgetTester tester, AgentSessionState state) {
-  return tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        agentSessionStateProvider.overrideWith(
-          (ref, sessionId) => Stream.value(state),
-        ),
-      ],
-      child: const MaterialApp(
-        home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
-      ),
-    ),
-  );
+Widget _view(Stream<AgentSessionState> Function() states) => ProviderScope(
+  overrides: [
+    agentSessionStateProvider.overrideWith((ref, sessionId) => states()),
+  ],
+  child: const MaterialApp(
+    home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
+  ),
+);
+
+Future<void> _pump(WidgetTester tester, AgentSessionState state) =>
+    tester.pumpWidget(_view(() => Stream.value(state)));
+
+/// Mounts the view over a stream the test drives with [_emit].
+Future<StreamController<AgentSessionState>> _pumpLive(
+  WidgetTester tester,
+) async {
+  final states = StreamController<AgentSessionState>.broadcast();
+  addTearDown(states.close);
+  await tester.pumpWidget(_view(() => states.stream));
+  return states;
+}
+
+Future<void> _emit(
+  WidgetTester tester,
+  StreamController<AgentSessionState> states,
+  AgentSessionState state,
+) async {
+  states.add(state);
+  await tester.pump();
+  await tester.pump();
 }
 
 void main() {
@@ -796,4 +821,313 @@ void main() {
       await _disposeTree(tester);
     });
   });
+
+  group('composer edits leave the rows alone', () {
+    testWidgets(
+      'typing or moving the caret in the composer rebuilds neither the list nor its markdown',
+      (tester) async {
+        await _pump(tester, _settledReplyState());
+        await tester.pump();
+
+        // The view builds the ListView, so an identical one proves a keystroke
+        // never rebuilt the view; the row memo would hide that from the rows.
+        final listBefore = tester.widget<ListView>(find.byType(ListView));
+        final blockBefore = tester.widget<MarkdownBlock>(
+          find.byType(MarkdownBlock),
+        );
+
+        await _typeIntoComposer(tester, 'hello');
+        tester
+            .widget<RichComposer>(find.byType(RichComposer))
+            .controller
+            .fleather
+            .updateSelection(const TextSelection.collapsed(offset: 2));
+        await tester.pump();
+
+        expect(
+          identical(tester.widget<ListView>(find.byType(ListView)), listBefore),
+          isTrue,
+        );
+        expect(
+          identical(
+            tester.widget<MarkdownBlock>(find.byType(MarkdownBlock)),
+            blockBefore,
+          ),
+          isTrue,
+        );
+
+        await _disposeTree(tester);
+      },
+    );
+
+    testWidgets(
+      'an unchanged row keeps its widget while another row of the same turn streams',
+      (tester) async {
+        final states = await _pumpLive(tester);
+        final first = _item('a1', 'message', role: 'assistant', text: 'first');
+        AgentSessionState open(String partial) => AgentSessionState(
+          turns: [
+            AgentTurn(
+              turnId: 't1',
+              items: [
+                first,
+                _item('a2', 'message', role: 'assistant', text: partial),
+              ],
+            ),
+          ],
+        );
+        MessageRow firstRow() => tester.widget<MessageRow>(
+          find.descendant(
+            of: find.byKey(const ValueKey('msg:a1')),
+            matching: find.byType(MessageRow),
+          ),
+        );
+
+        await _emit(tester, states, open('one'));
+        final firstBefore = firstRow();
+        await _emit(tester, states, open('one two'));
+
+        expect(identical(firstRow(), firstBefore), isTrue);
+        expect(
+          find.textContaining('one two', findRichText: true),
+          findsOneWidget,
+        );
+
+        await _disposeTree(tester);
+      },
+    );
+
+    testWidgets(
+      'a draft growing while following just short of the bottom repins without a layout error',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(400, 600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await _pump(tester, _tallState());
+        await tester.pump();
+        await tester.pumpAndSettle();
+
+        final controller = tester
+            .widget<ListView>(find.byType(ListView))
+            .controller!;
+        // A programmatic move is not a user scroll, so following stays armed.
+        controller.jumpTo(controller.position.maxScrollExtent - 20);
+        await tester.pump();
+        final viewportBefore = controller.position.viewportDimension;
+
+        await _typeIntoComposer(tester, 'one\ntwo\nthree\nfour');
+
+        expect(controller.position.viewportDimension, lessThan(viewportBefore));
+        expect(tester.takeException(), isNull);
+        expect(controller.offset, controller.position.maxScrollExtent);
+
+        await _disposeTree(tester);
+      },
+    );
+
+    testWidgets('a theme switch restyles transcript rows', (tester) async {
+      var palette = kPresets[AbThemePreset.zinc]!;
+      late StateSetter setTheme;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            agentSessionStateProvider.overrideWith(
+              (ref, id) => Stream.value(_settledReplyState()),
+            ),
+          ],
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              setTheme = setState;
+              return MaterialApp(
+                builder: (context, child) => Theme(
+                  data: ThemeData(
+                    extensions: <ThemeExtension<dynamic>>[palette],
+                  ),
+                  child: child!,
+                ),
+                home: const Scaffold(
+                  body: AgentTranscriptView(sessionId: _sessionId),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final light = kPresets[AbThemePreset.light]!;
+      expect(palette.textPrimary, isNot(light.textPrimary));
+
+      setTheme(() => palette = light);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        tester.widget<Text>(find.text('question')).style!.color,
+        light.textPrimary,
+      );
+      expect(
+        tester
+            .widget<MarkdownBlock>(find.byType(MarkdownBlock))
+            .config!
+            .p
+            .textStyle
+            .color,
+        light.textPrimary,
+      );
+
+      await _disposeTree(tester);
+    });
+
+    testWidgets(
+      'persists a live capabilities catalog once per distinct catalog and cache key, not per keystroke',
+      (tester) async {
+        final states = StreamController<AgentSessionState>.broadcast();
+        addTearDown(states.close);
+        var tool = 'codex';
+        final cache = _CountingCatalogCache();
+        final container = ProviderContainer(
+          overrides: [
+            agentSessionStateProvider.overrideWith((ref, id) => states.stream),
+            capabilityCatalogCacheProvider.overrideWithValue(cache),
+            freshSessionsStateProvider.overrideWith(
+              (ref) => SessionsState(
+                projectId: 'p',
+                sessions: [
+                  SessionEntry(
+                    id: _sessionId,
+                    name: 'Chat',
+                    createdAt: 0,
+                    lastUsedAt: 0,
+                    archived: false,
+                    running: true,
+                    mode: 'chat',
+                    tool: tool,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(
+              home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
+            ),
+          ),
+        );
+
+        AgentSessionState caps({
+          List<AgentCapabilityModel> extraModels = const [],
+        }) => AgentSessionState(
+          capabilities: AgentCapabilities(
+            sessionId: _sessionId,
+            commands: _capsFixture.commands,
+            models: [..._capsFixture.models, ...extraModels],
+            currentModelId: 'gpt-5.2-mini',
+          ),
+        );
+
+        await _emit(
+          tester,
+          states,
+          const AgentSessionState(capabilities: _capsFixture),
+        );
+        expect(cache.writes, 1);
+
+        await _typeIntoComposer(tester, 'abc');
+        expect(cache.writes, 1);
+
+        // A new object with a new current model, but the same catalog.
+        await _emit(tester, states, caps());
+        expect(cache.writes, 1);
+
+        await _emit(
+          tester,
+          states,
+          caps(
+            extraModels: const [
+              AgentCapabilityModel(id: 'gpt-5.3', name: 'GPT-5.3'),
+            ],
+          ),
+        );
+        expect(cache.writes, 2);
+
+        tool = 'claude';
+        container.invalidate(freshSessionsStateProvider);
+        await tester.pump();
+        await tester.pump();
+        expect(cache.writes, 3);
+
+        await _disposeTree(tester);
+      },
+    );
+
+    testWidgets(
+      'a turn the user unfolded stays unfolded while the transcript streams',
+      (tester) async {
+        final states = await _pumpLive(tester);
+        final s1 = _twoTurnState();
+        await _emit(tester, states, s1);
+        expect(find.byType(ToolCallCard), findsOneWidget);
+
+        await tester.tap(find.byType(TurnFoldRow));
+        await tester.pump();
+        expect(find.byType(ToolCallCard), findsNWidgets(2));
+
+        await _emit(
+          tester,
+          states,
+          AgentSessionState(
+            turns: [
+              s1.turns[0],
+              AgentTurn(
+                turnId: 't2',
+                items: [
+                  ...s1.turns[1].items,
+                  _item('m2', 'message', role: 'assistant', text: 'streaming'),
+                ],
+                startedAt: s1.turns[1].startedAt,
+              ),
+            ],
+          ),
+        );
+
+        expect(
+          find.textContaining('streaming', findRichText: true),
+          findsOneWidget,
+        );
+        expect(find.byType(ToolCallCard), findsNWidgets(2));
+
+        await _disposeTree(tester);
+      },
+    );
+  });
+}
+
+AgentSessionState _settledReplyState() => AgentSessionState(
+  turns: [
+    AgentTurn(
+      turnId: 't1',
+      stopReason: 'end_turn',
+      items: [
+        _item('u1', 'message', role: 'user', text: 'question'),
+        _item('m1', 'message', role: 'assistant', text: 'reply with **bold**'),
+      ],
+    ),
+  ],
+);
+
+class _CountingCatalogCache implements CapabilityCatalogCache {
+  int writes = 0;
+
+  @override
+  Future<void> write(String key, CapabilityCatalog catalog) async => writes++;
+
+  @override
+  Future<CapabilityCatalog?> read(String key) async => null;
+
+  @override
+  Future<void> clear(String key) async {}
 }

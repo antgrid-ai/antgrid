@@ -698,6 +698,35 @@ void main() {
     );
   });
 
+  Finder changesHeader() => find.byWidgetPredicate(
+    (w) => w.runtimeType.toString() == '_ChangesSectionHeader',
+  );
+
+  testWidgets('a new git status re-derives the header', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+    expect(find.text('Commit'), findsOneWidget);
+
+    // a.dart is partially staged: two entries, one changed path.
+    transport.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'a.dart', 'status': 'M', 'staged': false},
+        {'path': 'b.dart', 'status': 'M', 'staged': false},
+      ],
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Commit (1)'), findsOneWidget);
+    expect(
+      find.descendant(of: changesHeader(), matching: find.text('2')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('a cancelled Mark Resolved stages nothing', (tester) async {
     await withRowButtons(tester, () async {
       await pumpWithStatus(tester, [

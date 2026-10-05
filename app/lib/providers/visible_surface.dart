@@ -1,6 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
 import 'providers.dart';
@@ -220,30 +219,14 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
 typedef GitDiffTotals = ({int additions, int deletions});
 
 /// The worktree's total +/-, for the workspace menu's Git row (the tab strip
-/// keeps its file count) and, recomputed from the same rule, the git panel's
-/// changes header.
-///
-/// Sums over DISTINCT paths: a file changed on both sides has a staged and an
-/// unstaged entry carrying the SAME combined-vs-HEAD counts (the bridge
-/// computes one diff per path), so summing entries doubles it.
+/// keeps its file count) and the git panel's changes header, both read off
+/// `GitStatusIndex`.
 final gitDiffTotalsProvider = Provider<GitDiffTotals>((ref) {
   return ref.watch(
     fileTreeStateProvider.select((s) {
-      final entries = s.value?.gitFileEntries;
-      if (entries == null || entries.isEmpty) {
-        return (additions: 0, deletions: 0);
-      }
-      final perPath = <String, GitFileStatusEntry>{};
-      for (final e in entries) {
-        perPath.putIfAbsent(e.path, () => e);
-      }
-      var additions = 0;
-      var deletions = 0;
-      for (final e in perPath.values) {
-        additions += e.additions;
-        deletions += e.deletions;
-      }
-      return (additions: additions, deletions: deletions);
+      final index = s.value?.gitStatus;
+      if (index == null) return (additions: 0, deletions: 0);
+      return (additions: index.additions, deletions: index.deletions);
     }),
   );
 });

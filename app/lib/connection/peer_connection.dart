@@ -172,7 +172,7 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
           // Only the native payload died, so the central relay's state stream
           // reports nothing and the ladder has to be woken from here.
           if (!failure.retryable) {
-            _emit(const PeerTerminalError());
+            _emit(PeerTerminalError(failure.code));
           } else {
             _emit(const PeerSessionDown());
           }
@@ -182,13 +182,13 @@ class PeerConnectionMechanisms implements PeerConnectionContract {
         if (error.cancelled || generation != _dialGeneration) {
           throw ConnectionAttemptCancelled();
         }
-        if (error.terminal) _emit(const PeerTerminalError());
+        if (error.terminal) _emit(PeerTerminalError(error.code));
         rethrow;
       } on PeerAuthorizationDenied {
-        _emit(const PeerTerminalError());
+        _emit(const PeerTerminalError(kPeerAuthorizationDeniedCode));
         rethrow;
       } on FormatException {
-        _emit(const PeerTerminalError());
+        _emit(const PeerTerminalError(kPeerAuthorizationMalformedCode));
         rethrow;
       }
     }

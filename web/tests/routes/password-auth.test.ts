@@ -557,10 +557,9 @@ describe("POST /ui/login/continue", () => {
     const off = buildTestApp(pg.db, pg.url).app;
     const offered = await (await on.request("/login")).text();
     const absent = await (await off.request("/login")).text();
-    expect(offered).toContain("Continue with Apple");
     expect(offered).toContain('href="/oauth/start?provider=apple&amp;callbackURL=/dashboard"');
-    expect(absent).not.toContain("Continue with Apple");
-    expect(absent).toContain("Continue with GitHub");
+    expect(absent).not.toContain('href="/oauth/start?provider=apple&amp;callbackURL=/dashboard"');
+    expect(absent).toContain('href="/oauth/start?provider=github&amp;callbackURL=/dashboard"');
   });
 
   test("an empty address never leaves step 1", async () => {

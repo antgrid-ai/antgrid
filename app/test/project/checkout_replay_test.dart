@@ -145,7 +145,7 @@ void main() {
       final seen = <String>[];
       final sub = session
           .checkoutHeavyStream('wt1')
-          .listen((json) => seen.add(json['type'] as String));
+          .listen((f) => seen.add(f.type!));
       await Future<void>.delayed(Duration.zero);
       await sub.cancel();
 
