@@ -54,6 +54,7 @@ class TerminalService {
       _displayOwners[owner] == id;
 
   void suspendDisplay() {
+    _cancelPendingMouseMotion();
     _finishPrefetch();
     for (final id in _resizeTimers.keys.toList()) {
       _cancelQueuedResize(id);
@@ -552,6 +553,7 @@ class TerminalService {
 
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
+    _cancelPendingMouseMotion();
     _finishPrefetch();
     _freshScreens.clear();
     // The re-establish edge, and the only one there is: nothing publishes a
@@ -730,7 +732,14 @@ class TerminalService {
     final paused = !session.transport.isEstablished;
     if (paused == _inputPaused) return;
     _inputPaused = paused;
+    if (paused) _cancelPendingMouseMotion();
     _publishHydration();
+  }
+
+  void _cancelPendingMouseMotion() {
+    for (final tab in _state.tabs.values) {
+      tab.ghostty.cancelPendingMouseMotion();
+    }
   }
 
   /// Re-emit the current state so a hydration-only transition reaches the UI.
@@ -1945,6 +1954,14 @@ class TerminalService {
   /// queued, and the pane says so instead. Callers that report success to the
   /// user must honour this.
   bool sendInput(String terminalId, String data) {
+    final ghostty = _state.tabs[terminalId]?.ghostty;
+    if (!_disposed &&
+        session.transport.isEstablished &&
+        canSendInput(terminalId)) {
+      ghostty?.flushPendingMouseMotion();
+    } else {
+      ghostty?.cancelPendingMouseMotion();
+    }
     return _sendTerminalInput(terminalId, data, requireFreshDisplay: true);
   }
 

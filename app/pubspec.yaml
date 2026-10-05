@@ -195,17 +195,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: 2c140b129e86ddc089b6f7d98fd9fe0a88a8597e
+      ref: b61a3033310564b054df9f80b141ed1de423ad59
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in
