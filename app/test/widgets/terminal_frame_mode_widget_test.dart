@@ -872,6 +872,91 @@ void main() {
   // sending it directly ever was.
   group('(d): mouse tracking and DEC 1004 focus reporting read the frame\'s '
       'own mode state', () {
+    for (final boundary in ['suspend', 'refusal', 'rehydrate']) {
+      testWidgets('pending mouse motion is discarded on $boundary', (
+        tester,
+      ) async {
+        if (_skipWithoutNative()) return;
+        final h = await _makeService(addTearDown, inputReady: true);
+        h.service.activate();
+        await tester.pump();
+        final controller = h.service.currentState.tabs['t1']!.ghostty;
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (bytes) {
+            sent.addAll(bytes);
+            return true;
+          },
+        );
+        controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+        const size = VtMouseEncoderSize(
+          screenWidth: 800,
+          screenHeight: 600,
+          cellWidth: 10,
+          cellHeight: 20,
+        );
+        void move(double x) => controller.sendMouse(
+          action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+          position: VtMousePosition(x: x, y: 10),
+          size: size,
+        );
+        move(10);
+        expect(sent, isNotEmpty);
+        sent.clear();
+        move(30);
+        expect(sent, isEmpty);
+        switch (boundary) {
+          case 'suspend':
+            h.service.suspendDisplay();
+          case 'refusal':
+            h.transport.setEstablished(false);
+            expect(h.service.sendInput('t1', 'x'), isFalse);
+          case 'rehydrate':
+            h.transport.redriveHydrators();
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(sent, isEmpty);
+        await tester.runAsync(h.service.dispose);
+      });
+    }
+
+    testWidgets('direct terminal input flushes pending motion first', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown, inputReady: true);
+      final controller = h.service.currentState.tabs['t1']!.ghostty;
+      controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => controller.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      List<Map<String, dynamic>> inputs() => h.transport.sent
+          .where((message) => message['type'] == 'terminal:input')
+          .toList();
+      h.transport.clearSent();
+      move(10);
+      expect(inputs(), hasLength(1));
+      h.transport.clearSent();
+      move(30);
+      expect(inputs(), isEmpty);
+
+      expect(h.service.sendInput('t1', 'x'), isTrue);
+      expect(inputs(), hasLength(2));
+      expect(inputs().first['data'], startsWith('\x1b[<'));
+      expect(inputs().last['data'], 'x');
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(inputs(), hasLength(2));
+      await tester.runAsync(h.service.dispose);
+    });
+
     test('sendMouse reports nothing before a frame enables tracking, and a '
         'report after', () {
       if (_skipWithoutNative()) return;
@@ -1956,6 +2041,43 @@ void main() {
   });
 
   group('the affordance is the archive route an agent pane has', () {
+    testWidgets('opening history cancels pending live mouse motion', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      tab.ghostty.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => tab.ghostty.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      move(10);
+      expect(pty, isNotEmpty);
+      pty.clear();
+      move(30);
+      expect(pty, isEmpty);
+
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(pty, isEmpty);
+    });
+
     testWidgets(
       'a mouse-reporting guest swallows the wheel, and the control still '
       'reaches the archive',
