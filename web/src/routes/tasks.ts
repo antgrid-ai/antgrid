@@ -1006,6 +1006,8 @@ function taskJson(task: TaskRecord) {
     externalUrl: task.externalUrl,
     syncState: task.syncState,
     pushLive: task.pushLive,
+    pushReason: task.pushReason,
+    push: task.push,
     conflict: conflictJson(task),
     pushBlocked: pushBlockedJson(task),
     otherAssignees: otherAssignees(task),

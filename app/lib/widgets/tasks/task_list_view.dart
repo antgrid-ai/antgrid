@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -31,7 +33,7 @@ import 'task_row_actions.dart';
 /// One list widget behind every entry point — the account-level surface and a
 /// project-scoped one are the same rows with a different filter, never two
 /// lists that can drift.
-class TaskListView extends ConsumerWidget {
+class TaskListView extends ConsumerStatefulWidget {
   const TaskListView({
     super.key,
     this.onOpen,
@@ -58,7 +60,52 @@ class TaskListView extends ConsumerWidget {
   final int? siblingDetailNumber;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<TaskListView> createState() => _TaskListViewState();
+}
+
+/// How often a visible list refetches. The list is a mirror of what teammates
+/// and GitHub change, with no push channel behind it, so a list that only
+/// refreshes on a button press reads as truth long after it stopped being.
+const _autoRefreshEvery = Duration(seconds: 60);
+
+class _TaskListViewState extends ConsumerState<TaskListView>
+    with WidgetsBindingObserver {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _timer = Timer.periodic(_autoRefreshEvery, (_) => _refresh());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  void _refresh() {
+    // A refetch under an unsent mutation would land the server's older copy
+    // over the optimistic one.
+    if (ref.read(taskMutationErrorProvider) != null) return;
+    detached(
+      'tasks',
+      'auto refresh',
+      ref.read(taskListProvider.notifier).refresh,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = widget.compact;
+    final siblingDetailNumber = widget.siblingDetailNumber;
     final filter = ref.watch(taskFilterProvider);
     final tasks = ref.watch(visibleTasksProvider);
     final selected = ref.watch(selectedTaskNumberProvider);
@@ -80,43 +127,91 @@ class TaskListView extends ConsumerWidget {
         if (showFailureHere) _MutationBanner(failure: failure),
         const AbSeparator.horizontal(),
         Expanded(
-          child: tasks.when(
-            skipLoadingOnReload: true,
-            // Never an empty state during a fetch: a cold app showing "no tasks
-            // yet" is the dead first impression the whole surface works to
-            // avoid.
-            loading: () => const AbLoading(message: 'Loading tasks…'),
-            error: (error, _) => _ListError(error: error),
-            data: (list) => list.isEmpty
-                ? _EmptyForScope(filter: filter)
-                : ListView.builder(
-                    itemCount: list.length,
-                    itemBuilder: (context, i) {
-                      final task = list[i];
-                      return TaskRow(
-                        task: task,
-                        selected: task.number == selected,
-                        showStatusLabel:
-                            !compact && filter.scope == TaskScope.allOpen,
-                        showProject: showProject,
-                        twoLine: compact,
-                        onTap: () => onOpen?.call(task.number),
-                        onLongPress: () => detached(
-                          'tasks',
-                          'row actions',
-                          () => showTaskRowActions(
-                            context,
-                            ref,
-                            task: task,
-                            neighbours: list,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ),
+          // A failed refresh keeps the list the user was reading and says so in
+          // a banner; only a list that never loaded gets the full error state.
+          child: tasks.hasError && tasks.value == null
+              ? _ListError(error: tasks.error!)
+              : tasks.value == null
+              ? const AbLoading(message: 'Loading tasks…')
+              : _buildList(
+                  context,
+                  tasks.value!,
+                  tasks.error,
+                  filter,
+                  selected,
+                ),
         ),
       ],
+    );
+  }
+
+  Widget _buildList(
+    BuildContext context,
+    List<Task> list,
+    Object? refreshError,
+    TaskFilter filter,
+    int? selected,
+  ) {
+    final onOpen = widget.onOpen;
+    final compact = widget.compact;
+    final showProject = widget.showProject;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (refreshError != null)
+          _RefreshFailedBanner(error: refreshError, onRetry: _refresh),
+        Expanded(
+          child: list.isEmpty
+              ? _EmptyForScope(filter: filter)
+              : ListView.builder(
+                  itemCount: list.length,
+                  itemBuilder: (context, i) {
+                    final task = list[i];
+                    return TaskRow(
+                      task: task,
+                      selected: task.number == selected,
+                      showStatusLabel:
+                          !compact && filter.scope == TaskScope.allOpen,
+                      showProject: showProject,
+                      twoLine: compact,
+                      onTap: () => onOpen?.call(task.number),
+                      onLabelTap: (label) => ref
+                          .read(taskFilterProvider.notifier)
+                          .toggleLabel(label.id),
+                      onLongPress: () => detached(
+                        'tasks',
+                        'row actions',
+                        () => showTaskRowActions(
+                          context,
+                          ref,
+                          task: task,
+                          neighbours: list,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RefreshFailedBanner extends StatelessWidget {
+  const _RefreshFailedBanner({required this.error, required this.onRetry});
+
+  final Object error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final api = error is TaskApiException ? error as TaskApiException : null;
+    return AbInlineBanner(
+      text: api?.error == TaskApiError.network
+          ? 'Offline — showing the last list you loaded.'
+          : 'Could not refresh — showing the last list you loaded.',
+      color: context.antgrid.warning,
+      trailing: AbButton(label: 'Retry', compact: true, onTap: onRetry),
     );
   }
 }
@@ -244,10 +339,7 @@ class _FilterBar extends ConsumerWidget {
                             onTap: () => controller.toggleStatus(status),
                           ),
                         ),
-                      // Only the labels already in the filter appear here;
-                      // the rest are reached from a row's chip or the
-                      // detail's editor, which is where the user is already
-                      // looking at them.
+                      _LabelFilterChip(labels: labels),
                       for (final label in activeLabels)
                         Padding(
                           padding: const EdgeInsets.only(
@@ -334,6 +426,69 @@ class _RepoFilterChip extends ConsumerWidget {
     ref
         .read(taskFilterProvider.notifier)
         .setProject(identical(picked, _kAllRepos) ? null : picked as String);
+  }
+}
+
+/// The way into the label filter when no label is active yet: the active ones
+/// render as chips beside it, but nothing else would offer the rest.
+class _LabelFilterChip extends ConsumerWidget {
+  const _LabelFilterChip({required this.labels});
+
+  final List<TaskLabel> labels;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (labels.isEmpty) return const SizedBox.shrink();
+    final active = ref.watch(taskFilterProvider.select((f) => f.labelIds));
+    return Padding(
+      padding: const EdgeInsets.only(right: AbTokens.space4),
+      child: AbChip.toggle(
+        label: active.isEmpty ? 'Label' : 'Label · ${active.length}',
+        selected: active.isNotEmpty,
+        onTap: () =>
+            detached('tasks', 'label filter', () => _pick(context, ref)),
+      ),
+    );
+  }
+
+  Future<void> _pick(BuildContext context, WidgetRef ref) async {
+    final anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    final picked = await showAbPanel<String?>(
+      context: context,
+      anchorRect: anchor,
+      builder: (_) => _LabelFilterPanel(
+        labels: labels,
+        selected: ref.read(taskFilterProvider).labelIds,
+      ),
+    );
+    if (picked == null) return;
+    ref.read(taskFilterProvider.notifier).toggleLabel(picked);
+  }
+}
+
+class _LabelFilterPanel extends StatelessWidget {
+  const _LabelFilterPanel({required this.labels, required this.selected});
+
+  final List<TaskLabel> labels;
+  final Set<String> selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const PanelSectionHeader('Label'),
+        for (final label in labels)
+          PanelRow(
+            icon: AbIcons.tag,
+            label: label.name,
+            selected: selected.contains(label.id),
+            onTap: () => Navigator.of(context).pop(label.id),
+          ),
+      ],
+    );
   }
 }
 

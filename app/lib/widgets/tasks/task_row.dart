@@ -25,6 +25,7 @@ class TaskRow extends ConsumerWidget {
     this.selected = false,
     this.onTap,
     this.onLongPress,
+    this.onLabelTap,
     this.showStatusLabel = false,
     this.showProject = true,
     this.twoLine = false,
@@ -34,6 +35,10 @@ class TaskRow extends ConsumerWidget {
   final bool selected;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
+
+  /// Tapping a label chip filters the list by it — the only route to the label
+  /// filter that doesn't first need the label to be active already.
+  final ValueChanged<TaskLabel>? onLabelTap;
 
   /// The labelled pill instead of the leading dot. Worth ~80px, so it belongs
   /// only where the status is actually carrying information — the unscoped list
@@ -120,7 +125,11 @@ class TaskRow extends ConsumerWidget {
         const SizedBox(width: AbTokens.space6),
         ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
-          child: AbLabelChip(label: label.name, colorHex: label.color),
+          child: AbLabelChip(
+            label: label.name,
+            colorHex: label.color,
+            onTap: onLabelTap == null ? null : () => onLabelTap!(label),
+          ),
         ),
       ],
       if (overflow > 0) ...[
@@ -191,7 +200,11 @@ class TaskRow extends ConsumerWidget {
           for (final label in shown) ...[
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
-              child: AbLabelChip(label: label.name, colorHex: label.color),
+              child: AbLabelChip(
+                label: label.name,
+                colorHex: label.color,
+                onTap: onLabelTap == null ? null : () => onLabelTap!(label),
+              ),
             ),
             const SizedBox(width: AbTokens.space4),
           ],
@@ -300,8 +313,7 @@ class TaskRow extends ConsumerWidget {
 
   /// Enough of a uuid to tell two projects apart without pretending it is a
   /// name. Mono, because it is an id.
-  static String _shortId(String id) =>
-      id.length <= 8 ? id : id.substring(0, 8);
+  static String _shortId(String id) => id.length <= 8 ? id : id.substring(0, 8);
 
   static const _avatarSize = 18.0;
   static const _assigneeMaxWidth = 140.0;

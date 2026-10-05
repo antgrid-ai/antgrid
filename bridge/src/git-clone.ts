@@ -49,6 +49,22 @@ export function defaultCloneDirName(url: string): string | null {
 }
 
 /**
+ * The line of git's stderr that says WHY, not simply the last one. A failed
+ * clone can end on a trailer like "and the repository exists." that means
+ * nothing without the "Permission denied" or `fatal:` line above it.
+ */
+export function cloneFailureReason(stderr: string): string {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const cause =
+    lines.find((line) => /permission denied|authentication failed|could not read username/i.test(line)) ??
+    lines.find((line) => /^fatal:/i.test(line));
+  return cause ?? lines.pop() ?? "";
+}
+
+/**
  * `git clone <url>` into `<parentDir>/<dirName>`; returns the new checkout path.
  *
  * Never overwrites: an existing target is refused rather than cloned into, so a
@@ -88,7 +104,7 @@ export async function cloneRepository(args: {
   // `--` ends option parsing so the URL can never be read as a flag.
   const r = await runGitRemote(parentDir, ["clone", "--", url, dirName], args.timeoutMs ?? CLONE_TIMEOUT_MS, cloneSshEnv());
   if (r.exitCode !== 0) {
-    const reason = r.stderr.trim().split("\n").pop() || `git clone exited ${r.exitCode}`;
+    const reason = cloneFailureReason(r.stderr) || `git clone exited ${r.exitCode}`;
     // The TARGET_EXISTS check above proved this path was empty when the clone
     // started, so anything left here after a failure is a partial clone THIS
     // call created — a kill on timeout (TerminateProcess on Windows) leaves it

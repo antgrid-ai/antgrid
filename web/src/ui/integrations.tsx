@@ -65,10 +65,18 @@ export type IntegrationsPageProps = {
   /** What the last action did, carried through a redirect so the callback's
    *  `code` never lands in history. */
   notice: IntegrationsNotice | null;
+  /** Only the account owner can connect GitHub or change what it syncs. A
+   *  member sees the page frozen with the reason, rather than toggles that snap
+   *  back. Defaults to true so a caller that never learned the answer does not
+   *  freeze the owner's own page. */
+  isOwner?: boolean;
 };
 
 const NOTICE: Record<IntegrationsNotice, { tone: "ok" | "warn" | "error"; text: string }> = {
-  connected: { tone: "ok", text: "GitHub is connected. Switch on the repositories you want imported." },
+  connected: {
+    tone: "ok",
+    text: "GitHub is connected. Switch on Import for the repositories you want brought in, and Push for the ones that should send edits back to GitHub — then return to the Antgrid app.",
+  },
   removed: { tone: "ok", text: "That connection is off this page. Tasks already imported through it are unaffected." },
   bad_state: {
     tone: "error",
@@ -80,7 +88,7 @@ const NOTICE: Record<IntegrationsNotice, { tone: "ok" | "warn" | "error"; text: 
   },
   installation_taken: {
     tone: "error",
-    text: "Another Antgrid account is already connected to that GitHub installation. Disconnect it there first.",
+    text: "Another Antgrid account is already connected to that GitHub installation. To connect it here, uninstall the Antgrid app from that GitHub account, then connect again.",
   },
   code_rejected: {
     tone: "error",
@@ -92,7 +100,7 @@ const NOTICE: Record<IntegrationsNotice, { tone: "ok" | "warn" | "error"; text: 
   },
   install_requested: {
     tone: "warn",
-    text: "Your request went to the people who own that GitHub organisation. It connects here once one of them approves it.",
+    text: "Your request went to the people who own that GitHub organisation. Once one of them approves it, the account owner needs to choose Connect GitHub here again to finish.",
   },
   not_configured: { tone: "error", text: "This server has no GitHub App set up." },
   not_owner: {
@@ -171,6 +179,7 @@ function repoRowId(repoId: string): string {
 
 export function IntegrationsPage(props: IntegrationsPageProps) {
   const manageUrl = props.githubApp.configured ? props.githubApp.connectUrl : "";
+  const isOwner = props.isOwner ?? true;
   return (
     <Layout title="Integrations" user={props.user}>
       {props.notice && (
@@ -190,16 +199,23 @@ export function IntegrationsPage(props: IntegrationsPageProps) {
         </p>
       </div>
 
+      {!isOwner && (
+        <div class="alert alert-warning font-mono text-sm mb-6" role="status">
+          <span>Only the account owner can change these.</span>
+        </div>
+      )}
+
       {!props.githubApp.configured ? (
         <NotConfiguredCard />
       ) : props.integrations.length === 0 ? (
-        <EmptyCard connectUrl={manageUrl} />
+        <EmptyCard connectUrl={manageUrl} isOwner={isOwner} />
       ) : (
         <>
           {props.integrations.map((integration) => (
             <IntegrationCard
               integration={integration}
               connectUrl={manageUrl}
+              isOwner={isOwner}
             />
           ))}
           <p class="text-sm text-muted mt-4">
@@ -227,7 +243,7 @@ function NotConfiguredCard() {
   );
 }
 
-function EmptyCard({ connectUrl }: { connectUrl: string }) {
+function EmptyCard({ connectUrl, isOwner }: { connectUrl: string; isOwner: boolean }) {
   return (
     <div class="card bg-panel border border-edge">
       <div class="card-body">
@@ -252,9 +268,15 @@ function EmptyCard({ connectUrl }: { connectUrl: string }) {
           </li>
         </ul>
         <div>
-          <a href={connectUrl} class="btn btn-primary mt-4">
-            Connect GitHub
-          </a>
+          {isOwner ? (
+            <a href={connectUrl} class="btn btn-primary mt-4">
+              Connect GitHub
+            </a>
+          ) : (
+            <p class="text-sm text-muted mt-4">
+              Ask the account owner to connect GitHub.
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -264,14 +286,16 @@ function EmptyCard({ connectUrl }: { connectUrl: string }) {
 function IntegrationCard({
   integration,
   connectUrl,
+  isOwner,
 }: {
   integration: IntegrationView;
   connectUrl: string;
+  isOwner: boolean;
 }) {
   const note = STATUS_NOTE[integration.status];
   // Frozen rather than merely pointless: a revoked connection routes nothing,
   // so a live toggle on it would promise an import that cannot happen.
-  const readOnly = integration.status === "revoked";
+  const readOnly = integration.status === "revoked" || !isOwner;
 
   return (
     <div class="card bg-panel border border-edge mt-6 overflow-hidden">
@@ -299,7 +323,7 @@ function IntegrationCard({
 
       {note && (
         <div class="p-4 border-b border-edge">
-          <div class={`alert ${readOnly ? "alert-error" : "alert-warning"} text-sm`} role="status">
+          <div class={`alert ${integration.status === "revoked" ? "alert-error" : "alert-warning"} text-sm`} role="status">
             <span>{note}</span>
           </div>
         </div>

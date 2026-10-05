@@ -2067,7 +2067,8 @@ export function uiRoutes(deps: {
   r.get("/integrations", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
-    const accountId = await resolveBillingAccountId(deps.db, userId);
+    const access = await resolveBillingAccountAccess(deps.db, userId);
+    const accountId = access.accountId;
     if (!accountId) return c.redirect("/login");
 
     const integrations = await listIntegrations(deps.db, accountId);
@@ -2093,6 +2094,7 @@ export function uiRoutes(deps: {
             : { configured: false }
         }
         integrations={views}
+        isOwner={access.isOwner}
       />
     );
   });

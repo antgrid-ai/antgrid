@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GitCloneError, cloneRepository, cloneSshEnv, defaultCloneDirName, isCloneableUrl } from "../src/git-clone";
+import { GitCloneError, cloneFailureReason, cloneRepository, cloneSshEnv, defaultCloneDirName, isCloneableUrl } from "../src/git-clone";
 import { ControlRequestSchema } from "../src/control-protocol";
 
 async function git(cwd: string, args: string[]) {
@@ -126,4 +126,18 @@ test("git:clone request schema", () => {
     ControlRequestSchema.safeParse({ id: "1", type: "git:clone", url: "https://h/o/r.git", parentDir: "/p" }).success,
   ).toBe(true);
   expect(ControlRequestSchema.safeParse({ id: "1", type: "git:clone", parentDir: "/p" }).success).toBe(false);
+});
+
+test("cloneFailureReason keeps the cause line rather than git's trailing hint", () => {
+  const stderr = [
+    "Cloning into 'x'...",
+    "git@github.com: Permission denied (publickey).",
+    "fatal: Could not read from remote repository.",
+    "",
+    "Please make sure you have the correct access rights",
+    "and the repository exists.",
+  ].join("\n");
+  expect(cloneFailureReason(stderr)).toBe("git@github.com: Permission denied (publickey).");
+  expect(cloneFailureReason("remote: boom\nfatal: unable to access")).toBe("fatal: unable to access");
+  expect(cloneFailureReason("just one line")).toBe("just one line");
 });

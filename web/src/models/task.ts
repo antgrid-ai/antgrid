@@ -13,6 +13,8 @@ import {
   cancelPendingOps,
   enqueueForTask,
   isRepoPushLive,
+  repoPushReason,
+  type PushReason,
   issueLabelsPayload,
   sameLabelSet,
   TaskSyncOpKindSchema,
@@ -82,6 +84,10 @@ const CLOSED_STATUSES = new Set<TaskStatus>([
 
 export const TaskTitleSchema = z.string().trim().min(1).max(500);
 
+/** The newest ops are enough to say where the outbox stands: every pending one
+ *  has a higher `seq` than anything that settled before it. */
+const PUSH_STATE_OP_WINDOW = 10;
+
 const TASK_SELECT = {
   id: true,
   accountId: true,
@@ -112,15 +118,55 @@ const TASK_SELECT = {
   labels: { select: { label: { select: { id: true, name: true, color: true } } } },
   // Read for `pushLive` alone — the same facts `isRepoPushLive`
   // (tasks/sync-op.ts) checks before `resolvePushTarget` will enqueue a write.
+  syncOps: {
+    where: { status: { in: ["pending", "given_up", "processed"] } },
+    orderBy: { seq: "desc" },
+    take: PUSH_STATE_OP_WINDOW,
+    select: { status: true, lastError: true, nextAttemptAt: true, attempts: true },
+  },
   integrationRepo: {
     select: {
       pushEnabled: true,
+      removedAt: true,
       integration: { select: { accountId: true, revokedAt: true } },
     },
   },
 } satisfies Prisma.TaskSelect;
 
 type TaskRow = Prisma.TaskGetPayload<{ select: typeof TASK_SELECT }>;
+
+export type TaskPushStatus = {
+  state: "queued" | "retrying" | "failed";
+  pending: number;
+  lastError: string | null;
+  nextAttemptAt: Date | null;
+};
+
+/**
+ * Read the outbox's position off a task's newest ops. A task whose newest op
+ * settled (`processed`) is in step, whatever older ops gave up before it — a
+ * later edit carries the state forward, so an old refusal is not still true.
+ */
+export function readPushStatus(
+  ops: { status: string; lastError: string | null; nextAttemptAt: Date; attempts: number }[]
+): TaskPushStatus | null {
+  const pending = ops.filter((op) => op.status === "pending");
+  if (pending.length > 0) {
+    const failing = pending.find((op) => op.attempts > 0 && op.lastError !== null);
+    const soonest = pending.reduce((a, b) => (a.nextAttemptAt <= b.nextAttemptAt ? a : b));
+    return {
+      state: failing ? "retrying" : "queued",
+      pending: pending.length,
+      lastError: failing?.lastError ?? null,
+      nextAttemptAt: soonest.nextAttemptAt,
+    };
+  }
+  const newest = ops[0];
+  if (newest?.status === "given_up") {
+    return { state: "failed", pending: 0, lastError: newest.lastError, nextAttemptAt: null };
+  }
+  return null;
+}
 
 export type TaskLabelSummary = { id: string; name: string; color: string };
 
@@ -164,6 +210,13 @@ export type TaskRecord = {
    *  answer false here the moment its integration is revoked, belongs to
    *  another account, or its repo's push switch is off. */
   pushLive: boolean | null;
+  /** Why `pushLive` is what it is, so the app can word a switched-off push, a
+   *  revoked installation and a removed repository differently. Null exactly
+   *  when `pushLive` is. */
+  pushReason: PushReason | null;
+  /** Where the outbox stands for this task: edits waiting, retrying after an
+   *  error, or stopped for good. Null when nothing is outstanding. */
+  push: TaskPushStatus | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -1254,6 +1307,10 @@ function toRecord(row: TaskRow): TaskRecord {
     pushLive: row.integrationRepo === null
       ? null
       : isRepoPushLive(row.integrationRepo, row.accountId),
+    pushReason: row.integrationRepo === null
+      ? null
+      : repoPushReason(row.integrationRepo, row.accountId),
+    push: readPushStatus(row.syncOps),
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

@@ -559,6 +559,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
                 const AbSectionHeader(label: 'GitHub'),
                 _publishedBlock(context),
               ],
+              if (_task.push != null) _pushStatusBlock(context),
               // Under Source, above the description: the description is one of
               // the things that may have been overwritten, and the block above
               // is what says whose words replaced whose.
@@ -1434,7 +1435,11 @@ class _LoadedState extends ConsumerState<_Loaded> {
                     : unlinked
                     ? 'No longer syncing'
                     : disconnected
-                    ? 'GitHub disconnected'
+                    ? (_task.pushReason == TaskPushReason.pushOff
+                          ? 'Not pushing to GitHub'
+                          : _task.pushReason == TaskPushReason.repoRemoved
+                          ? 'Repository removed'
+                          : 'GitHub disconnected')
                     : 'Published to GitHub',
                 style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontXs,
@@ -1483,9 +1488,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
                 ? 'Edits here no longer reach the issue, and it is untouched '
                       'where it is. Publishing again creates a second one.'
                 : disconnected
-                ? 'Edits here are saved but not reaching the issue — the '
-                      'GitHub connection behind this repo was disconnected. '
-                      'Reconnect on the web to resume syncing.'
+                ? taskPushReasonDetail(_task)
                 : 'Edits to the title, description, status and labels are sent '
                       'to this issue.',
             style: AbTokens.sansStyle(
@@ -1493,6 +1496,68 @@ class _LoadedState extends ConsumerState<_Loaded> {
               color: disconnected ? palette.warning : palette.textMuted,
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// Edits queued for the provider, retrying, or abandoned — the state a
+  /// "synced" task otherwise hides. A failed publish lands here with its error,
+  /// beside the Publish button that comes back for it.
+  Widget _pushStatusBlock(BuildContext context) {
+    final palette = context.antgrid;
+    final push = _task.push!;
+    final failed = push.state == TaskPushState.failed;
+    final provider = taskProviderLabel(_task);
+    final headline = switch (push.state) {
+      TaskPushState.queued =>
+        push.pending == 1
+            ? '1 edit waiting to reach $provider'
+            : '${push.pending} edits waiting to reach $provider',
+      TaskPushState.retrying => 'Retrying — $provider did not accept an edit',
+      TaskPushState.failed =>
+        _task.externalId == null
+            ? 'Publishing to $provider failed'
+            : 'An edit could not be sent to $provider',
+    };
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space12,
+        AbTokens.space6,
+        AbTokens.space12,
+        AbTokens.space6,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            headline,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: failed ? palette.error : palette.warning,
+            ),
+          ),
+          if (push.lastError != null) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              push.lastError!,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+          ],
+          if (push.nextAttemptAt != null &&
+              push.state == TaskPushState.retrying) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              'Next attempt ${_stamp(push.nextAttemptAt!)}',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.textMuted,
+              ),
+            ),
+          ],
         ],
       ),
     );

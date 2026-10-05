@@ -36,6 +36,11 @@ class _TaskCreateSheet extends ConsumerStatefulWidget {
 class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
   final _title = TextEditingController();
   final _body = TextEditingController();
+  final _bodyFocus = FocusNode();
+
+  /// The refusal from the last create. It renders here because the list
+  /// banner that normally carries it sits behind this sheet, unseen.
+  String? _submitError;
   var _labels = <TaskLabel>[];
   TaskAssignee? _assignee;
   var _submitting = false;
@@ -83,6 +88,7 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
   void dispose() {
     _title.dispose();
     _body.dispose();
+    _bodyFocus.dispose();
     super.dispose();
   }
 
@@ -244,7 +250,10 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
   Future<void> _submit(List<TaskPublishTarget> targets) async {
     final title = _title.text.trim();
     if (title.isEmpty || _submitting || _creatingProject) return;
-    setState(() => _submitting = true);
+    setState(() {
+      _submitting = true;
+      _submitError = null;
+    });
     final publish = _publishOn(targets);
     final task = await ref
         .read(taskListProvider.notifier)
@@ -261,9 +270,14 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
         );
     if (!mounted) return;
     if (task == null) {
-      // The refusal is already on `taskMutationErrorProvider`, which the list
-      // banner renders. Keep the form open with the text still in it.
-      setState(() => _submitting = false);
+      // Keep the form open with the text still in it. The refusal moves from
+      // the list banner to the sheet so it is shown once, where it can be seen.
+      final failure = ref.read(taskMutationErrorProvider);
+      ref.read(taskMutationErrorProvider.notifier).set(null);
+      setState(() {
+        _submitting = false;
+        _submitError = failure?.error.message ?? 'Could not create the task.';
+      });
       return;
     }
     Navigator.of(context).pop(task.number);
@@ -322,12 +336,15 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
                 controller: _title,
                 hintText: 'Title',
                 autofocus: true,
-                onSubmitted: (_) =>
-                    detached('tasks', 'create task', () => _submit(targets)),
+                // Enter moves on to the description: creating here would file a
+                // public issue from a half-written task when publish is on by
+                // default.
+                onSubmitted: (_) => _bodyFocus.requestFocus(),
               ),
               const SizedBox(height: AbTokens.space8),
               AbMultilineField(
                 controller: _body,
+                focusNode: _bodyFocus,
                 hintText: 'Describe the work. This becomes the agent’s brief.',
                 minLines: 3,
                 maxLines: 8,
@@ -378,6 +395,16 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
                   ],
                 ],
               ),
+              if (_submitError != null) ...[
+                const SizedBox(height: AbTokens.space8),
+                Text(
+                  _submitError!,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: palette.error,
+                  ),
+                ),
+              ],
               if (_projectError != null) ...[
                 const SizedBox(height: AbTokens.space8),
                 Text(

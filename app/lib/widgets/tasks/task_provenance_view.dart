@@ -51,6 +51,36 @@ String? taskSyncSentence(Task task) {
   };
 }
 
+/// The one-line reason edits are not reaching the provider. A push switched
+/// off on purpose and a connection that broke are different sentences with
+/// different ways out.
+String taskPushReasonTitle(Task task) => switch (task.pushReason) {
+  TaskPushReason.pushOff =>
+    'Pushing to ${taskProviderLabel(task)} is off for this repo · edits stay here',
+  TaskPushReason.repoRemoved =>
+    'Repository removed on ${taskProviderLabel(task)} · edits here are not reaching the issue',
+  _ =>
+    '${taskProviderLabel(task)} disconnected · edits here are not reaching the issue',
+};
+
+/// The sentence under the detail view's GitHub heading when pushes are down.
+String taskPushReasonDetail(Task task) {
+  final provider = taskProviderLabel(task);
+  return switch (task.pushReason) {
+    TaskPushReason.pushOff =>
+      'Edits here are saved but not sent: the account owner switched off '
+          'pushing to $provider for this repo. Turn it on in the web '
+          'integrations page to resume syncing.',
+    TaskPushReason.repoRemoved =>
+      'Edits here are saved but not reaching the issue — the repository was '
+          'removed from $provider or the app lost access to it.',
+    _ =>
+      'Edits here are saved but not reaching the issue — the $provider '
+          'connection behind this repo was disconnected. Reconnect on the web '
+          'to resume syncing.',
+  };
+}
+
 /// The row marker: one glyph, no label, no second line.
 ///
 /// A list is scanned, not read, so the state is carried by the glyph's
@@ -108,8 +138,7 @@ class TaskSyncBrokenMark extends StatelessWidget {
   Widget build(BuildContext context) {
     if (!task.isPushDisconnected) return const SizedBox.shrink();
     return AbTooltip(
-      message:
-          'GitHub disconnected · edits here are not reaching the issue',
+      message: taskPushReasonTitle(task),
       child: AbIcon(
         AbIcons.warning,
         size: AbTokens.iconButtonGlyph,

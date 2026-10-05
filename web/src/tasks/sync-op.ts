@@ -306,11 +306,34 @@ export type PushTarget = {
  * (`models/task.ts`, as `TaskRecord.pushLive`) both call, so the two cannot
  * drift apart the way a hand-copied second version could.
  */
-export function isRepoPushLive(
-  repo: { pushEnabled: boolean; integration: { accountId: string; revokedAt: Date | null } },
-  accountId: string
-): boolean {
-  return repo.pushEnabled && repo.integration.accountId === accountId && repo.integration.revokedAt === null;
+export function isRepoPushLive(repo: PushRepoFacts, accountId: string): boolean {
+  return repoPushReason(repo, accountId) === "live";
+}
+
+export type PushRepoFacts = {
+  pushEnabled: boolean;
+  removedAt: Date | null;
+  integration: { accountId: string; revokedAt: Date | null };
+};
+
+/**
+ * Why an edit does or does not reach the provider, as the word the app shows.
+ * A bare boolean made a repo the owner switched push off on read as a broken
+ * connection, and a repo deleted on GitHub read as healthy while every edit was
+ * dropped — the two are different sentences with different ways out.
+ *
+ * Ordered by what the user can act on first: an installation that is not this
+ * account's or is revoked needs reconnecting, a removed repo cannot be fixed
+ * from here, and a switched-off push is a choice.
+ */
+export type PushReason = "live" | "push_off" | "revoked" | "repo_removed" | "other_account";
+
+export function repoPushReason(repo: PushRepoFacts, accountId: string): PushReason {
+  if (repo.integration.accountId !== accountId) return "other_account";
+  if (repo.integration.revokedAt !== null) return "revoked";
+  if (repo.removedAt !== null) return "repo_removed";
+  if (!repo.pushEnabled) return "push_off";
+  return "live";
 }
 
 /**
@@ -353,6 +376,7 @@ export async function resolvePushTarget(
       integrationRepo: {
         select: {
           pushEnabled: true,
+          removedAt: true,
           integrationId: true,
           integration: { select: { accountId: true, provider: true, revokedAt: true } },
         },
@@ -579,7 +603,9 @@ export async function failOp(tx: Tx, id: string, error: string): Promise<FailOpR
 
   const row = rows[0];
   if (!row) throw new Error(`failOp: no op ${id}`);
-  return { attempts: row.attempts, gaveUp: row.status === TaskSyncOpStatusSchema.enum.given_up };
+  const gaveUp = row.status === TaskSyncOpStatusSchema.enum.given_up;
+  if (gaveUp) await releaseFailedCreate(tx, id);
+  return { attempts: row.attempts, gaveUp };
 }
 
 /**
@@ -608,6 +634,26 @@ export async function refuseOp(tx: Tx, id: string, error: string): Promise<void>
   await tx.taskSyncOp.update({
     where: { id },
     data: { status: TaskSyncOpStatusSchema.enum.given_up, lastError: truncate(error) },
+  });
+  await releaseFailedCreate(tx, id);
+}
+
+/**
+ * A publish that gave up leaves nothing that will ever finish it, so the task
+ * must stop reading as "creating the issue" and offer Publish again — the error
+ * itself stays on the given-up op, where the task's `push` status reads it.
+ * Only a create that never produced an issue: an op for a linked task has a
+ * link to keep.
+ */
+async function releaseFailedCreate(tx: Tx, opId: string): Promise<void> {
+  const op = await tx.taskSyncOp.findUnique({
+    where: { id: opId },
+    select: { kind: true, taskId: true },
+  });
+  if (op === null || op.kind !== TaskSyncOpKindSchema.enum["issue.create"]) return;
+  await tx.task.updateMany({
+    where: { id: op.taskId, externalId: null, syncState: TaskSyncStateSchema.enum.pending },
+    data: { syncState: null },
   });
 }
 

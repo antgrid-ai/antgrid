@@ -365,6 +365,8 @@ class Task {
     this.conflict,
     this.pushBlocked,
     this.pushLive,
+    this.pushReason,
+    this.push,
     this.closedAt,
     String? displayId,
   }) : _displayId = displayId;
@@ -422,6 +424,13 @@ class Task {
   /// after the connection behind it is revoked or its repo's push switch is
   /// turned off, because nothing about the task itself changed.
   final bool? pushLive;
+
+  /// Why [pushLive] is what it is. Null from an account service that predates
+  /// it, which reads as the old bare boolean.
+  final TaskPushReason? pushReason;
+
+  /// The outbox's position for this task; null when nothing is outstanding.
+  final TaskPushStatus? push;
 
   final String createdBy;
   final DateTime createdAt;
@@ -489,6 +498,8 @@ class Task {
       conflict: TaskConflict.fromJson(raw['conflict']),
       pushBlocked: TaskPushBlock.fromJson(raw['pushBlocked']),
       pushLive: raw['pushLive'] is bool ? raw['pushLive'] as bool : null,
+      pushReason: TaskPushReason.fromWire(raw['pushReason']),
+      push: TaskPushStatus.fromJson(raw['push']),
       createdBy: raw['createdBy'] is String ? raw['createdBy'] as String : '',
       createdAt:
           _date(raw['createdAt']) ?? DateTime.fromMillisecondsSinceEpoch(0),
@@ -538,6 +549,8 @@ class Task {
       externalUrl: externalUrl,
       syncState: syncState,
       pushLive: pushLive,
+      pushReason: pushReason,
+      push: push,
       conflict: identical(conflict, kUnset)
           ? this.conflict
           : conflict as TaskConflict?,
@@ -669,6 +682,68 @@ extension TaskLinkState on Task {
       pushLive == false &&
       syncState != TaskSyncState.unlinked &&
       !(syncState == TaskSyncState.pending && externalId == null);
+}
+
+/// Why an edit does or does not reach the provider, as the account service
+/// words it. A switched-off push is a choice the owner made, and must not read
+/// as a broken connection.
+enum TaskPushReason {
+  live,
+  pushOff,
+  revoked,
+  repoRemoved,
+  otherAccount;
+
+  static TaskPushReason? fromWire(Object? raw) => switch (raw) {
+    'live' => live,
+    'push_off' => pushOff,
+    'revoked' => revoked,
+    'repo_removed' => repoRemoved,
+    'other_account' => otherAccount,
+    _ => null,
+  };
+}
+
+enum TaskPushState {
+  queued,
+  retrying,
+  failed;
+
+  static TaskPushState? fromWire(Object? raw) => switch (raw) {
+    'queued' => queued,
+    'retrying' => retrying,
+    'failed' => failed,
+    _ => null,
+  };
+}
+
+/// Edits waiting to go out, retrying after an error, or stopped for good.
+class TaskPushStatus {
+  const TaskPushStatus({
+    required this.state,
+    required this.pending,
+    this.lastError,
+    this.nextAttemptAt,
+  });
+
+  final TaskPushState state;
+  final int pending;
+  final String? lastError;
+  final DateTime? nextAttemptAt;
+
+  static TaskPushStatus? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final state = TaskPushState.fromWire(raw['state']);
+    if (state == null) return null;
+    return TaskPushStatus(
+      state: state,
+      pending: raw['pending'] is int ? raw['pending'] as int : 0,
+      lastError: raw['lastError'] is String ? raw['lastError'] as String : null,
+      nextAttemptAt: raw['nextAttemptAt'] is String
+          ? DateTime.tryParse(raw['nextAttemptAt'] as String)
+          : null,
+    );
+  }
 }
 
 /// A project a task can be filed against.

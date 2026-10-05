@@ -121,12 +121,19 @@ class _StackedState extends ConsumerState<_Stacked> {
     if (preselected != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        detached(
-          'tasks',
-          'open pre-selected task',
-          () => showTaskDetail(context, preselected),
-        );
+        detached('tasks', 'open pre-selected task', () => _push(preselected));
       });
+    }
+  }
+
+  /// The selection has to drop when the route pops: left set, the next tap on
+  /// the same task is `next == prev` to the listener below and opens nothing,
+  /// and re-entering Tasks later would push the stale task over the list.
+  Future<void> _push(int number) async {
+    final container = ref.container;
+    await showTaskDetail(context, number);
+    if (container.read(selectedTaskNumberProvider) == number) {
+      container.read(selectedTaskNumberProvider.notifier).select(null);
     }
   }
 
@@ -137,7 +144,7 @@ class _StackedState extends ConsumerState<_Stacked> {
     // [initState] only catches the selection that existed at first mount.
     ref.listen<int?>(selectedTaskNumberProvider, (prev, next) {
       if (next == null || next == prev) return;
-      detached('tasks', 'open task', () => showTaskDetail(context, next));
+      detached('tasks', 'open task', () => _push(next));
     });
     return TaskListView(
       compact: true,
