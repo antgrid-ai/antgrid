@@ -24,6 +24,8 @@ final updateCheckTimeoutProvider = Provider<Duration>(
 /// automatic throttle, or release an outstanding native call for a second check.
 class UpdateCheckController extends Notifier<UpdateCheckState> {
   Future<UpdateCheckResult>? _inFlight;
+  Timer? _checkTimer;
+  Completer<UpdateCheckResult>? _boundedCheck;
   bool _prepared = false;
   bool _manualJoined = false;
   bool _dialogOpen = false;
@@ -52,6 +54,11 @@ class UpdateCheckController extends Notifier<UpdateCheckState> {
       if (ref.mounted) _publish(result);
     });
     ref.onDispose(() {
+      _checkTimer?.cancel();
+      final pending = _boundedCheck;
+      if (pending != null && !pending.isCompleted) {
+        pending.complete(UpdateCheckResult.failed);
+      }
       unawaited(retraction?.cancel());
       unawaited(changes?.cancel());
     });
@@ -119,20 +126,29 @@ class UpdateCheckController extends Notifier<UpdateCheckState> {
       return Future.value(result);
     }
     state = UpdateCheckState(checking: true, result: state.result);
-    final work = _detect(strategy).then((result) {
-      if (ref.mounted) _inFlight = null;
-      return result;
+    final completion = Completer<UpdateCheckResult>();
+    _boundedCheck = completion;
+    final timer = Timer(ref.read(updateCheckTimeoutProvider), () {
+      completion.complete(UpdateCheckResult.failed);
     });
-    final bounded = work.timeout(
-      ref.read(updateCheckTimeoutProvider),
-      onTimeout: () => UpdateCheckResult.failed,
-    );
-    _inFlight = bounded.then((result) {
+    _checkTimer = timer;
+    _inFlight = completion.future.then((result) {
       if (ref.mounted) _publish(result, manual: manual || _manualJoined);
       return result;
     });
+    unawaited(
+      _detect(strategy).then((result) {
+        timer.cancel();
+        if (!completion.isCompleted) completion.complete(result);
+        if (ref.mounted) {
+          _inFlight = null;
+          _checkTimer = null;
+          _boundedCheck = null;
+        }
+      }),
+    );
     // Keep the lease until the underlying call ends, even after a UI timeout.
-    // Future.timeout cannot cancel a Store/Play platform-channel operation.
+    // Cancel the UI deadline on disposal; the native operation cannot be cancelled.
     return _inFlight!;
   }
 

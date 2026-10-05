@@ -5,6 +5,7 @@ import 'package:antgrid/update/update_check_controller.dart';
 import 'package:antgrid/update/update_check_result.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -153,6 +154,40 @@ void main() {
     expect((await checker.checkManually()).status, UpdateCheckStatus.upToDate);
     expect(strategy.checks, 2);
   });
+
+  for (final automatic in [false, true]) {
+    test('disposal cancels an outstanding check deadline ($automatic)', () {
+      fakeAsync((async) {
+        final completion = Completer<UpdateCheckResult>();
+        final strategy = FakeUpdateStrategy()
+          ..onDetect = () => completion.future;
+        final c = setup(strategy);
+        final checker = c.read(updateCheckControllerProvider.notifier);
+        final request = automatic
+            ? checker.checkAutomatically()
+            : checker.checkManually();
+        Object? reply;
+        unawaited(request.then((value) => reply = value));
+        async.flushMicrotasks();
+        expect(strategy.checks, 1);
+        expect(async.nonPeriodicTimerCount, 1);
+
+        c.dispose();
+        async.flushMicrotasks();
+        expect(async.nonPeriodicTimerCount, 0);
+        expect(completion.isCompleted, isFalse);
+        expect(
+          reply,
+          automatic ? UpdateCheckOutcome.none : UpdateCheckResult.failed,
+        );
+        // A late native reply must neither publish nor revive the disposed owner.
+        completion.complete(available);
+        async.flushMicrotasks();
+        expect(async.nonPeriodicTimerCount, 0);
+        expect(strategy.installs, 0);
+      });
+    });
+  }
 
   for (final strategy in [null, FakeUpdateStrategy(activeBuild: false)]) {
     test(
