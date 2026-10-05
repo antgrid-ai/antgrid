@@ -134,6 +134,19 @@ here because they are easy to break from outside that tree:
 - **NEVER use raw Material widgets, `Icons.*`, or inline color/spacing literals.** Use `app/lib/design/` — `AbIcons.*`, `AbTokens`, and the existing `AbX` widgets.
 - **Sans for chrome, mono for code/data.** Not machine-checked — `npm run check:font-tokens` only bans raw `fontSize:` literals, so the family rule is on you.
 
+## Public roadmap maintenance
+
+Keep `site/src/data/roadmap.ts` aligned with user-facing work. After agreeing a
+new feature spec, offer a PR containing the spec and its roadmap entry; proceed
+without asking again when PR creation is already authorized. Follow existing
+spec conventions and reference agreed specifications rather than duplicating them.
+Update the corresponding entry in the implementation PR; completed work awaiting
+publication uses `awaiting-release`. During release follow-up, mark included
+features `shipped` and attach published release links: a merge alone is not shipment.
+Internal changes and routine fixes need no new entry unless they materially affect
+an existing item. Refresh review dates only after checking the relevant plans;
+write public outcomes without speculative delivery promises.
+
 ## Code Comments
 
 Comments are permanent docs for the next reader, not a log of this chat — write them as if the conversation that produced them never happened.

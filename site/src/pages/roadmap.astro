@@ -1,0 +1,45 @@
+---
+import Base from "../layouts/Base.astro";
+import Chip from "../components/ui/Chip.astro";
+import { links } from "../config";
+import { ROADMAP, LAST_REVIEWED, groupRoadmap, formatRoadmapDate } from "../data/roadmap";
+---
+<Base title="Roadmap — antgrid" description="Follow what Antgrid is building, what is planned, and what has shipped." path="/roadmap">
+  <main class="mx-auto max-w-3xl px-6 py-16">
+    <header class="mb-12">
+      <p class="mb-4 font-mono text-meta text-muted">Last reviewed <time datetime={LAST_REVIEWED}>{formatRoadmapDate(LAST_REVIEWED)}</time></p>
+      <h1 class="mb-5 font-display text-title font-semibold text-ink">Roadmap</h1>
+      <p class="text-lede text-muted">What we’re building and where we’re headed.</p>
+      <p class="mt-4 text-note text-muted">Priorities can change. Exploring items are ideas, not commitments. For published releases, see the <a href={links.changelog} class="text-signal hover:underline">changelog</a>.</p>
+    </header>
+    {groupRoadmap(ROADMAP).map((group) => (
+      <section aria-labelledby={`group-${group.id}`} class="mb-12">
+        <h2 id={`group-${group.id}`} class="text-kicker font-semibold text-ink">{group.title}</h2>
+        <p class="mb-5 mt-1 text-note text-muted">{group.description}</p>
+        <ul class="border-t border-edge-emph">
+          {group.entries.map((entry) => (
+            <li>
+              <article id={entry.id} class="roadmap-entry scroll-mt-28 border-b border-edge-inner py-6">
+                <div class="flex flex-wrap items-center gap-3">
+                  <h3 class="min-w-0 text-kicker font-semibold text-ink2"><a href={`#${entry.id}`} class="roadmap-title hover:text-signal">{entry.title}</a></h3>
+                  {entry.status === "awaiting-release" && <Chip>Awaiting release</Chip>}
+                </div>
+                <p class="mt-2 text-note text-ink2">{entry.description}</p>
+                <p class="mt-3 text-meta text-muted">{entry.area}</p>
+                <p class="mt-3 text-note text-muted">{entry.update}</p>
+                <div class="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-meta">
+                  <p class="font-mono text-muted">Updated <time datetime={entry.updatedAt}>{formatRoadmapDate(entry.updatedAt)}</time></p>
+                  {entry.discussionUrl && <a href={entry.discussionUrl} class="text-signal hover:underline" aria-label={`Discussion: ${entry.title}`}>Discussion</a>}
+                  {entry.status === "shipped" && <a href={entry.releaseUrl} class="text-signal hover:underline" aria-label={`Release: ${entry.title}`}>Release notes</a>}
+                </div>
+              </article>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </main>
+</Base>
+<style>
+  .roadmap-entry:target .roadmap-title { color: var(--color-signal); }
+</style>
