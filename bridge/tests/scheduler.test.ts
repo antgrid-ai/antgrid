@@ -65,6 +65,14 @@ describe("scheduler cron", () => {
 });
 
 describe("scheduler runtime", () => {
+  test("renaming preserves execution authorization while execution edits replace it", async () => {
+    const f = fixture();
+    const schedule = await f.service.create(input, "phone");
+    expect((await f.service.update(schedule.id, { name: "Renamed" }, null)).authorDeviceId).toBe("phone");
+    expect((await f.service.update(schedule.id, { prompt: "Locally reviewed instructions" }, null)).authorDeviceId).toBeNull();
+    expect((await f.service.update(schedule.id, { name: "Remote name" }, "other-phone")).authorDeviceId).toBeNull();
+    expect((await f.service.update(schedule.id, { enabled: false }, "other-phone")).authorDeviceId).toBe("other-phone");
+  });
   test("preview and dispatch agree and manual launch does not change timetable", async () => {
     const f = fixture(); const expected = f.service.preview(input.cron, input.timezone)[0]!;
     const schedule = await f.service.create(input);

@@ -142,7 +142,9 @@ export class SchedulerService {
       this.recordMissed(original, now);
       nextOccurrence = nextOccurrences(input.cron, input.timezone, now, 1)[0]!;
     }
-    const next = { ...original, ...input, authorDeviceId, updatedAt: now, nextOccurrence };
+    const executionChanged = (["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "cron", "timezone", "enabled"] as const)
+      .some((key) => input[key] !== original[key]);
+    const next = { ...original, ...input, authorDeviceId: executionChanged ? authorDeviceId : original.authorDeviceId, updatedAt: now, nextOccurrence };
     this.guarded(() => this.store.saveSchedule(next));
     return next;
   }
