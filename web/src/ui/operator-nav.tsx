@@ -11,10 +11,11 @@ export function OperatorNav({ section }: { section: OperatorSection }) {
     ["connections", "Connections"],
   ] as const;
   return (
-    <nav aria-label="Operator pages" class="mb-6 flex flex-wrap gap-2 border-b border-edge pb-3 text-sm">
+    <nav aria-label="Operator pages" class="mb-8 flex flex-wrap items-center gap-2 border-b border-edge pb-4 text-sm">
+      <span class="mr-3 text-xs font-semibold uppercase tracking-wide text-muted">Operator</span>
       {links.map(([key, label]) => (
         <a href={`/internal/${key}`} aria-current={section === key ? "page" : undefined}
-          class={section === key ? "rounded bg-chrome px-3 py-1.5 text-ink" : "rounded px-3 py-1.5 text-muted hover:bg-chrome hover:text-ink"}>
+          class={section === key ? "rounded-box bg-chrome px-4 py-2 font-semibold text-ink" : "rounded-box px-4 py-2 text-muted hover:bg-chrome hover:text-ink"}>
           {label}
         </a>
       ))}

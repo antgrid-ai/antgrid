@@ -19,24 +19,24 @@ const HISTORY_NOTE = "Only retained records are shown. Repeated joins and billin
 
 function Timestamp({ value }: { value: Date | string | null | undefined }) {
   const iso = typeof value === "string" ? value : value?.toISOString();
-  return iso ? <time datetime={iso} class="font-mono text-xs whitespace-nowrap">{iso}</time> : <span class="text-muted">Unknown</span>;
+  return iso ? <time datetime={iso} title={iso} class="operator-timestamp font-mono"><span>{iso.slice(0, 10)}</span><span>{iso.slice(11, -1)} UTC</span></time> : <span class="text-muted">Unknown</span>;
 }
 
 function Section({ title, note, children }: { title: string; note?: string; children: Child }) {
-  return <section class="mt-8"><h2 class="mb-2 text-sm font-semibold">{title}</h2>
-    {note && <p class="mb-3 text-xs leading-relaxed text-muted">{note}</p>}{children}</section>;
+  return <section class="mt-10"><h2 class="mb-3 text-lg font-semibold">{title}</h2>
+    {note && <details class="operator-definitions"><summary>How to read this section</summary><p>{note}</p></details>}{children}</section>;
 }
 
 function Table({ headers, rows, empty }: { headers: string[]; rows: Child[][]; empty: string }) {
   if (!rows.length) return <Notice text={empty} />;
-  return <div class="overflow-x-auto card bg-panel border border-edge"><table class="table table-sm text-xs">
+  return <div class="overflow-x-auto rounded-box bg-panel border border-edge"><table class="operator-table">
     <thead><tr class="text-muted2">{headers.map((header) => <th class="whitespace-nowrap">{header}</th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr>{row.map((cell) => <td class="align-top">{cell}</td>)}</tr>)}</tbody>
+    <tbody>{rows.map((row) => <tr>{row.map((cell) => <td class={typeof cell === "number" ? "font-mono tabular-nums" : undefined}>{cell}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
 function UserLink({ user }: { user: { id: string; name: string; email: string } }) {
-  return <a href={`/internal/users/${encodeURIComponent(user.id)}`} class="link"><span class="block font-medium">{user.name || user.email}</span><span class="font-mono text-xs text-muted">{user.email}</span></a>;
+  return <a href={`/internal/users/${encodeURIComponent(user.id)}`} class="link inline-block min-w-44"><span class="block font-semibold">{user.name || user.email}</span><span class="block text-xs text-muted">{user.email}</span></a>;
 }
 
 function AccountLink({ id }: { id: string | null | undefined }) {
@@ -44,7 +44,7 @@ function AccountLink({ id }: { id: string | null | undefined }) {
 }
 
 function Plan({ subscription }: { subscription: OperatorSubscription | null }) {
-  return subscription ? <div><span class="font-medium">{subscription.plan.label}</span><span class="block text-muted">{subscription.tier} · {subscription.status}</span></div> : <span class="text-muted">No active subscription</span>;
+  return subscription ? <div class="min-w-36"><span class="block font-semibold">{subscription.plan.label}</span><div class="mt-1 flex flex-wrap items-center gap-2"><span class="operator-badge">{subscription.status}</span><span class="text-xs text-muted">{subscription.tier}</span></div></div> : <div class="text-muted">No active subscription</div>;
 }
 
 function Source({ subscription }: { subscription: OperatorSubscription | null }) {
@@ -56,8 +56,28 @@ function Source({ subscription }: { subscription: OperatorSubscription | null })
 function Credentials({ credentials }: { credentials: OperatorUserRow["credentials"] }) {
   const providers = [...new Set(credentials.filter((c) => c.providerId !== "credential").map((c) => c.providerId))];
   const password = credentials.some((c) => c.providerId === "credential");
-  return <div class="space-y-1"><div>OAuth: {providers.length ? providers.join(", ") : "None linked"}</div>
-    <div>Password: {password ? "Credential linked" : "None linked"}</div><div class="text-muted">Email link available</div></div>;
+  return <div class="min-w-32 space-y-2"><div class="flex flex-wrap gap-1">{providers.map((provider) => <span class="operator-badge">OAuth: {provider}</span>)}{password && <span class="operator-badge">Password</span>}</div>
+    {!providers.length && !password && <div class="text-xs text-muted">No linked credentials</div>}<div class="text-xs text-muted">Email link available</div></div>;
+}
+
+function Badge({ children, warning = false }: { children: Child; warning?: boolean }) {
+  return <span class={`operator-badge${warning ? " operator-badge-warning" : ""}`}>{children}</span>;
+}
+
+function DefinitionNotes({ children }: { children: Child }) {
+  return <details class="operator-definitions"><summary>Definitions and limits</summary>{children}</details>;
+}
+
+function DeviceCounts({ row }: { row: OperatorUserRow }) {
+  return <dl class="grid grid-cols-[auto_auto] gap-x-5 gap-y-1 text-xs"><dt class="text-muted">Machines</dt><dd class="font-mono tabular-nums text-right">{row.machines}</dd><dt class="text-muted">Phones</dt><dd class="font-mono tabular-nums text-right">{row.phones}</dd><dt class="text-muted whitespace-nowrap">Desktop controllers</dt><dd class="font-mono tabular-nums text-right">{row.desktopControllers}</dd></dl>;
+}
+
+function Observations({ row }: { row: { activeSessions: number; lastObservedActivityIso: string | null } }) {
+  return <div class="space-y-2"><div><span class="font-mono font-semibold tabular-nums">{row.activeSessions}</span> <span class="text-xs text-muted">active sign-in sessions</span></div><div><span class="mb-1 block text-xs text-muted">Last observed activity</span><Timestamp value={row.lastObservedActivityIso} /></div></div>;
+}
+
+function SummaryMetric({ label, children }: { label: string; children: Child }) {
+  return <div class="rounded-box border border-edge bg-panel p-4"><div class="mb-2 text-xs font-medium text-muted">{label}</div><div class="font-mono text-2xl tabular-nums">{children}</div></div>;
 }
 
 function Deleted({ deletedAt }: { deletedAt: Date | null }) {
@@ -83,7 +103,7 @@ function Pagination({ path, query, total }: { path: string; query: UsersQuery | 
 }
 
 function Filters({ query, accounts = false }: { query: UsersQuery | AccountsQuery; accounts?: boolean }) {
-  return <form action={accounts ? "/internal/accounts" : "/internal/users"} method="get" class="mb-4 flex flex-wrap items-end gap-4">
+  return <form action={accounts ? "/internal/accounts" : "/internal/users"} method="get" class="mb-4 flex flex-wrap items-end gap-4 rounded-box border border-edge bg-panel p-4">
     <label class="flex flex-col gap-1 text-xs text-muted">Search name or email
       <input class="input input-sm input-bordered bg-panel text-ink" type="search" name="search" value={query.search} placeholder="Name or email" />
     </label>
@@ -100,13 +120,13 @@ function Filters({ query, accounts = false }: { query: UsersQuery | AccountsQuer
 export function OperatorUsersPage({ user, data, query }: {
   user: LayoutUser; data: { rows: OperatorUserRow[]; total: number }; query: UsersQuery;
 }) {
-  return <Layout title="Operator users" user={user} analytics={false}><OperatorNav section="users" />
-    <h1 class="mb-4 text-xl font-semibold">Users</h1><Filters query={query} />
-    <p class="mb-4 text-xs text-muted">{ACTIVITY_NOTE} Active sign-in sessions are unexpired Better-Auth sessions. Active devices are unrevoked registrations.</p>
-    <Table headers={["Identity", "Signup", "Sign-in methods", "Effective plan / billing account", "Machines", "Phones", "Desktop controllers", "Active sign-in sessions", "Last observed activity", "Flags"]}
-      rows={data.rows.map((row) => [<UserLink user={row} />, <Timestamp value={row.createdAt} />, <Credentials credentials={row.credentials} />,
-        <div><Plan subscription={row.subscription} /><div class="mt-1"><AccountLink id={row.billingAccountId} /></div></div>, row.machines, row.phones, row.desktopControllers, row.activeSessions,
-        <Timestamp value={row.lastObservedActivityIso} />, <div>{row.emailVerified ? "Email verified" : "Email unverified"}<br /><Deleted deletedAt={row.deletedAt} /></div>])}
+  return <Layout title="Operator users" user={user} analytics={false} contentWidth="wide"><OperatorNav section="users" />
+    <div class="mb-6 flex flex-wrap items-baseline justify-between gap-3"><h1 class="text-2xl font-semibold">Users</h1><p class="text-sm text-muted">{data.total.toLocaleString("en-US")} matching users</p></div><Filters query={query} />
+    <DefinitionNotes><p>{ACTIVITY_NOTE} Active sign-in sessions are unexpired Better-Auth sessions. Active devices are unrevoked registrations.</p></DefinitionNotes>
+    <Table headers={["User / signup", "Effective plan", "Active devices", "Sign-in methods", "Sessions / activity"]}
+      rows={data.rows.map((row) => [<div class="space-y-3"><UserLink user={row} /><div class="flex flex-wrap gap-1"><Badge warning={!row.emailVerified}>{row.emailVerified ? "Email verified" : "Email unverified"}</Badge>{row.deletedAt && <Badge warning>Retained deleted record</Badge>}</div><div><span class="mb-1 block text-xs text-muted">Signed up</span><Timestamp value={row.createdAt} /></div>{row.deletedAt && <div><span class="mb-1 block text-xs text-amber">Deleted</span><Timestamp value={row.deletedAt} /></div>}</div>,
+        <div class="space-y-3"><Plan subscription={row.subscription} />{row.billingAccountId && <a href={`/internal/accounts/${encodeURIComponent(row.billingAccountId)}`} class="link block text-xs text-muted">Billing account →</a>}</div>,
+        <DeviceCounts row={row} />, <Credentials credentials={row.credentials} />, <Observations row={row} />])}
       empty="No users match these filters on this page." />
     <Pagination path="/internal/users" query={query} total={data.total} />
   </Layout>;
@@ -115,14 +135,16 @@ export function OperatorUsersPage({ user, data, query }: {
 export function OperatorAccountsPage({ user, data, query }: {
   user: LayoutUser; data: { rows: OperatorAccountRow[]; total: number }; query: AccountsQuery;
 }) {
-  return <Layout title="Operator accounts" user={user} analytics={false}><OperatorNav section="accounts" />
-    <h1 class="mb-4 text-xl font-semibold">Accounts</h1><Filters query={query} accounts />
-    <p class="mb-4 text-xs leading-relaxed text-muted">Newest creation first. Teams have more than one purchased seat on their effective active subscription. Paid excludes free, trial, promotional and dev grants; provider must be Paddle, Razorpay or manual. Device totals are informational; worker and app-device limits apply per user. Activity totals include only users currently billing against each account.</p>
-    <p class="mb-4 text-xs text-muted">{ACTIVITY_NOTE}</p>
-    <Table headers={["Account / owner", "Plan / status", "Source", "Occupied / purchased seats", "Outstanding invites", "Active machines", "Worker limit per user", "Active sign-in sessions", "Last observed activity", "Country", "Billing provider", "Created", "Deletion"]}
-      rows={data.rows.map((row) => [<div><AccountLink id={row.id} /><UserLink user={row.owner} /></div>, <Plan subscription={row.subscription} />, <Source subscription={row.subscription} />,
-        `${row.occupiedSeats} / ${row.subscription?.seats ?? "Unknown"}`, row.pendingInvites, row.machines, row.subscription?.workerLimit ?? "No active subscription", row.activeSessions,
-        <Timestamp value={row.lastObservedActivityIso} />, row.country ?? "Unknown", row.billingProvider ?? "None", <Timestamp value={row.createdAt} />, <Deleted deletedAt={row.deletedAt} />])}
+  return <Layout title="Operator accounts" user={user} analytics={false} contentWidth="wide"><OperatorNav section="accounts" />
+    <div class="mb-6 flex flex-wrap items-baseline justify-between gap-3"><h1 class="text-2xl font-semibold">Accounts</h1><p class="text-sm text-muted">{data.total.toLocaleString("en-US")} matching accounts</p></div><Filters query={query} accounts />
+    <p class="text-sm text-muted">Device totals cover current billers. Limits apply per user.</p>
+    <DefinitionNotes><p>Newest creation first. Teams have more than one purchased seat on their effective active subscription. Paid excludes free, trial, promotional and dev grants; provider must be Paddle, Razorpay or manual. Device totals are informational; worker and app-device limits apply per user. Activity totals include only users currently billing against each account.</p><p class="mt-2">{ACTIVITY_NOTE}</p></DefinitionNotes>
+    <Table headers={["Account / owner", "Subscription / billing", "Account seats", "Active machines", "Sessions / activity", "Created"]}
+      rows={data.rows.map((row) => [<div class="min-w-44 space-y-2"><a href={`/internal/accounts/${encodeURIComponent(row.id)}`} class="link block font-semibold">{row.owner.name || row.owner.email}</a><a href={`/internal/users/${encodeURIComponent(row.owner.id)}`} class="link block text-xs text-muted">{row.owner.email}</a>{row.deletedAt && <Badge warning>Retained deleted record</Badge>}</div>,
+        <div class="space-y-2"><Plan subscription={row.subscription} /><div class="text-xs text-muted"><Source subscription={row.subscription} /></div><div class="text-xs text-muted">Country: <span class="text-ink">{row.country ?? "Unknown"}</span></div><div class="text-xs text-muted">Billing provider: <span class="text-ink">{row.billingProvider ?? "None"}</span></div></div>,
+        <div class="space-y-2"><div class="font-mono text-lg font-semibold tabular-nums">{row.occupiedSeats}<span class="text-muted font-normal"> / {row.subscription?.seats ?? "Unknown"}</span></div><div class="text-xs text-muted">Occupied / purchased seats</div><div class="text-xs"><span class="font-mono tabular-nums">{row.pendingInvites}</span> outstanding invites</div></div>,
+        <div class="space-y-2"><div class="font-mono text-lg font-semibold tabular-nums">{row.machines}</div><div class="text-xs text-muted">Informational total</div><div class="text-xs text-muted">Worker limit per user: <span class="text-ink font-mono">{row.subscription?.workerLimit ?? "No active subscription"}</span></div></div>,
+        <Observations row={row} />, <div class="space-y-2"><Timestamp value={row.createdAt} />{row.deletedAt && <div><span class="block text-xs text-amber">Deleted</span><Timestamp value={row.deletedAt} /></div>}</div>])}
       empty="No accounts match these filters on this page." />
     <Pagination path="/internal/accounts" query={query} total={data.total} />
   </Layout>;
@@ -160,9 +182,10 @@ export function OperatorUserPage({ user, data, connections, now = new Date() }: 
   user: LayoutUser; data: OperatorUserDetail; connections: ConnectionSummary[] | null; now?: Date;
 }) {
   const slots = connections === null ? null : connectedDevices(connections);
-  return <Layout title={`User · ${data.email}`} user={user} analytics={false}><OperatorNav section="users" />
-    <a class="link text-xs" href="/internal/users">All users</a><h1 class="mt-2 text-xl font-semibold">{data.name || data.email}</h1>
-    <p class="font-mono text-sm text-muted">{data.email}</p>
+  return <Layout title={`User · ${data.email}`} user={user} analytics={false} contentWidth="wide"><OperatorNav section="users" />
+    <a class="link text-sm text-muted" href="/internal/users">← All users</a><h1 class="mt-3 text-2xl font-semibold">{data.name || data.email}</h1>
+    <p class="mt-1 text-sm text-muted">{data.email}</p>
+    <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><SummaryMetric label="Active machines">{data.machines}</SummaryMetric><SummaryMetric label="Phones">{data.phones}</SummaryMetric><SummaryMetric label="Desktop controllers">{data.desktopControllers}</SummaryMetric><SummaryMetric label="Active sign-in sessions">{data.activeSessions}</SummaryMetric></div>
     <Section title="Identity"><Table headers={["User ID", "Signup", "Verification", "Deletion"]} rows={[[data.id, <Timestamp value={data.createdAt} />, data.emailVerified ? "Email verified" : "Email unverified", <Deleted deletedAt={data.deletedAt} />]]} empty="" /></Section>
     <Section title="Accounts"><Table headers={["Relationship", "Account", "Owner"]}
       rows={[["Owned personal account", <AccountLink id={data.ownedAccount?.id} />, data.ownedAccount ? <UserLink user={data.ownedAccount.user} /> : "None"], ["Current billing account", <AccountLink id={data.billingAccount?.id} />, data.billingAccount ? <UserLink user={data.billingAccount.user} /> : "None"]]} empty="" /></Section>
@@ -171,7 +194,7 @@ export function OperatorUserPage({ user, data, connections, now = new Date() }: 
     <Section title="Retained memberships" note={HISTORY_NOTE}><Table headers={["Account", "Owner", "Role", "Status", "Joined", "Ended"]}
       rows={data.memberships.map((m) => [<AccountLink id={m.accountId} />, <UserLink user={m.account.user} />, m.role, m.status, <Timestamp value={m.joinedAt} />, m.endedAt ? <Timestamp value={m.endedAt} /> : "—"])} empty="No retained memberships." /></Section>
     <Section title="Retained devices" note="Revoked rows are included. Phone access is a setting on each machine, not a phone permission."><DeviceTable devices={data.devices} connections={connections} /></Section>
-    <Section title="Sign-in sessions and observed activity" note={ACTIVITY_NOTE}><p class="mb-3 text-sm">Active sign-in sessions: <span class="font-mono">{data.activeSessions}</span> · Last observed activity: <Timestamp value={data.lastObservedActivityIso} /></p>
+    <Section title="Sign-in sessions and observed activity" note={ACTIVITY_NOTE}><div class="mb-4"><Observations row={data} /></div>
       <Table headers={["Session ID", "Created", "Last session update", "Expires", "Status"]} rows={data.sessions.map((s) => [s.id, <Timestamp value={s.createdAt} />, <Timestamp value={s.updatedAt} />, <Timestamp value={s.expiresAt} />, s.expiresAt.getTime() > now.getTime() ? "Active" : "Expired"])} empty="No retained sign-in sessions." /></Section>
     <Section title="Relay connections"><p class="mb-3 text-sm">{slots === null ? "Unavailable" : slots.length ? "Connected to relay" : "No relay connections"}</p>
       {slots && slots.length > 0 && <><p class="mb-3 text-xs text-muted">{slots.length} unique connected devices · {slots.filter((c) => c.deviceType === "agent").length} machines · {slots.filter((c) => c.deviceType === "app").length} app devices. Duplicate connection slots count once.</p><Table headers={["Device ID", "Type", "Connected", "Last relay observation"]} rows={slots.map((c) => [c.deviceId, c.deviceType, <Timestamp value={new Date(c.connectedAt)} />, <Timestamp value={new Date(c.lastSeen)} />])} empty="No relay connections" /></>}
@@ -192,25 +215,24 @@ function InviteTable({ invites, now }: { invites: OperatorAccountDetail["invites
 function Members({ members, former = false }: { members: OperatorAccountDetail["members"]; former?: boolean }) {
   if (!members.length) return <Notice text={former ? "No retained former members." : "No users currently billing against this account."} />;
   return <div class="space-y-4">{members.map((member) => <div class="rounded-box border border-edge bg-panel p-4">
-    <div class="flex flex-wrap items-start justify-between gap-3"><UserLink user={member.user} /><span class="text-xs text-muted">{member.role} · {member.status}</span></div>
-    <p class="mt-2 text-xs text-muted">{member.retainedMembership ? <>Joined <Timestamp value={member.joinedAt} />{member.endedAt && <> · Ended <Timestamp value={member.endedAt} /></>}</> : "No retained membership; bills through account ownership"} · Current billing account: <AccountLink id={member.user.billingAccountId} /></p>
-    <p class="mt-2 text-xs">Active sign-in sessions: {member.user.activeSessions} · Last observed activity: <Timestamp value={member.user.lastObservedActivityIso} /> · <Deleted deletedAt={member.user.deletedAt} /></p>
-    <div class="my-4"><Usage data={member.user} /></div><DeviceTable devices={member.user.devices} />
+    <div class="flex flex-wrap items-start justify-between gap-3"><UserLink user={member.user} /><div class="flex gap-2"><Badge>{member.role}</Badge><Badge>{member.status}</Badge>{member.user.deletedAt && <Badge warning>Retained deleted record</Badge>}</div></div>
+    <div class="mt-4 flex flex-wrap gap-x-8 gap-y-3 text-xs">{member.retainedMembership ? <><div><span class="mb-1 block text-muted">Joined</span><Timestamp value={member.joinedAt} /></div>{member.endedAt && <div><span class="mb-1 block text-muted">Ended</span><Timestamp value={member.endedAt} /></div>}</> : <p class="text-muted">No retained membership; bills through account ownership</p>}<div><span class="mb-1 block text-muted">Current billing account</span><AccountLink id={member.user.billingAccountId} /></div><Observations row={member.user} />{member.user.deletedAt && <div><span class="mb-1 block text-amber">Deleted</span><Timestamp value={member.user.deletedAt} /></div>}</div>
+    <div class="my-6"><Usage data={member.user} /></div><DeviceTable devices={member.user.devices} />
   </div>)}</div>;
 }
 
 export function OperatorAccountPage({ user, data, now = new Date() }: { user: LayoutUser; data: OperatorAccountDetail; now?: Date }) {
   const current = data.members.filter((m) => m.currentBilling);
   const former = data.members.filter((m) => m.retainedMembership && (!m.currentBilling || m.status !== "active"));
-  return <Layout title={`Account · ${data.id}`} user={user} analytics={false}><OperatorNav section="accounts" />
-    <a class="link text-xs" href="/internal/accounts">All accounts</a><h1 class="mt-2 text-xl font-semibold">Account</h1><p class="font-mono text-xs break-all text-muted">{data.id}</p>
+  return <Layout title={`Account · ${data.id}`} user={user} analytics={false} contentWidth="wide"><OperatorNav section="accounts" />
+    <a class="link text-sm text-muted" href="/internal/accounts">← All accounts</a><h1 class="mt-3 text-2xl font-semibold">{data.owner.name || data.owner.email}</h1><p class="mt-1 text-sm text-muted">Account · <span class="font-mono text-xs">{data.id}</span></p>
     <Section title="Account and owner"><Table headers={["Owner", "Created", "Country", "Country source", "Billing provider", "Deletion"]} rows={[[<UserLink user={data.owner} />, <Timestamp value={data.createdAt} />, data.country ?? "Unknown", data.countrySource ?? "Unknown", data.billingProvider ?? "None", <Deleted deletedAt={data.deletedAt} />]]} empty="" /></Section>
     <Section title="Current subscription and seat usage" note="Seats are account-wide. Occupied seats and outstanding unexpired invitations are shown separately. Worker and app-device limits apply to each user; account device totals are informational.">
       <Plan subscription={data.subscription} /><p class="mt-2 text-xs"><Source subscription={data.subscription} /></p>
       <div class="mt-4 grid gap-6 sm:grid-cols-3">{data.subscription ? <CellMeter label="Occupied seats" used={data.occupiedSeats} limit={data.subscription.seats} unit="seats" /> : <p class="text-sm">Occupied seats: {data.occupiedSeats} · Purchased seats: Unknown</p>}
         <div><div class="text-xs text-muted">Outstanding unexpired invitations</div><div class="mt-1 font-mono text-2xl">{data.pendingInvites}</div></div>
         <div><div class="text-xs text-muted">Active machines · informational total</div><div class="mt-1 font-mono text-2xl">{data.machines}</div></div></div>
-      <p class="mt-4 text-xs">Phones: {data.phones} · Desktop controllers: {data.desktopControllers} · Active sign-in sessions: {data.activeSessions} · Last observed activity: <Timestamp value={data.lastObservedActivityIso} /></p>
+      <div class="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><SummaryMetric label="Phones">{data.phones}</SummaryMetric><SummaryMetric label="Desktop controllers">{data.desktopControllers}</SummaryMetric><SummaryMetric label="Active sign-in sessions">{data.activeSessions}</SummaryMetric><SummaryMetric label="Last observed activity"><Timestamp value={data.lastObservedActivityIso} /></SummaryMetric></div>
     </Section>
     <Section title="Current billing members" note={`Only these users contribute to the account's device, session and activity totals. ${ACTIVITY_NOTE}`}><Members members={current} /></Section>
     <Section title="Retained former members" note={`Devices and activity below are current observations of these users, not activity attributable to their former membership. Only users also listed under current billing members contribute to current account totals. ${HISTORY_NOTE}`}><Members members={former} former /></Section>
