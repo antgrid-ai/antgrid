@@ -10,6 +10,7 @@ import '../providers/app_version.dart';
 import '../providers/support_chat.dart';
 import '../util/external_url.dart';
 import '../util/detached.dart';
+import '../update/update_status_dialog.dart';
 import 'log_files_button.dart';
 import 'settings/legal_notices_sheet.dart';
 
@@ -17,6 +18,7 @@ AbMenuSubmenu helpMenu({
   required BuildContext context,
   required WidgetRef ref,
   Rect? shareOrigin,
+  FocusNode? returnFocus,
   Future<void> Function(BuildContext, String) openUrl = openExternalUrl,
   Future<void> Function(BuildContext, WidgetRef) openChat = openSupportChat,
   Future<void> Function(BuildContext, Rect?)? openLogs,
@@ -26,6 +28,7 @@ AbMenuSubmenu helpMenu({
   }
 
   final logLabel = logFilesActionLabel();
+  final container = ref.container;
   return AbMenuSubmenu(
     label: 'Help',
     icon: AbIcons.info,
@@ -59,6 +62,16 @@ AbMenuSubmenu helpMenu({
       AbMenuItem(
         label: 'Licences & notices',
         onTap: () => run(() => showLegalNotices(context)),
+      ),
+      AbMenuItem(
+        label: 'Check for updates…',
+        onTap: () => run(
+          () => showUpdateStatusDialog(
+            context,
+            container,
+            returnFocus: returnFocus,
+          ),
+        ),
       ),
       const AbMenuInfo(label: 'Version', value: _HelpVersion()),
     ],

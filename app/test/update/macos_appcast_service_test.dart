@@ -1,3 +1,4 @@
+import 'package:antgrid/update/update_check_result.dart';
 import 'package:antgrid/update/macos_appcast_update_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -73,47 +74,47 @@ void main() {
       final s = _serviceReturning(
         _appcast(build: '41', shortVersion: '1.20662.41'),
       );
-      expect(await s.isUpdateAvailable(), isTrue);
+      expect((await s.check()).status, UpdateCheckStatus.available);
     });
 
     test('same build → false', () async {
       final s = _serviceReturning(
         _appcast(build: '40', shortVersion: '1.20662.40'),
       );
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.upToDate);
     });
 
     // The failure this whole service exists to prevent: no appcast published
     // must leave the row dark, not light it against a feed Sparkle can't read.
     test('404 (no appcast published) → false', () async {
       final s = _serviceReturning('Not Found', status: 404);
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.failed);
     });
 
     test('malformed XML → false', () async {
       final s = _serviceReturning('<rss><channel><item>');
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.failed);
     });
 
     test('no <item> → false', () async {
       final s = _serviceReturning(
         '<?xml version="1.0"?><rss><channel><title>Antgrid</title></channel></rss>',
       );
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.failed);
     });
 
     test('item without sparkle:version → false', () async {
       final s = _serviceReturning(
         '<?xml version="1.0"?><rss><channel><item><title>x</title></item></channel></rss>',
       );
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.failed);
     });
 
     test('network failure → false', () async {
       final s = MacosAppcastUpdateService(
         httpClient: MockClient((_) async => throw const SocketishError()),
       );
-      expect(await s.isUpdateAvailable(), isFalse);
+      expect((await s.check()).status, UpdateCheckStatus.failed);
     });
 
     // A feed carrying history must be read at its newest entry only; a
@@ -128,7 +129,10 @@ void main() {
 </channel>
 </rss>
 ''';
-      expect(await _serviceReturning(feed).isUpdateAvailable(), isTrue);
+      expect(
+        (await _serviceReturning(feed).check()).status,
+        UpdateCheckStatus.available,
+      );
     });
   });
 }

@@ -9,6 +9,8 @@ import '../design/widgets/ab_progress_rule.dart';
 import '../providers/update_available.dart';
 import '../update/update_install_controller.dart';
 import '../update/update_strategy.dart';
+import '../update/update_check_controller.dart';
+import '../update/update_check_result.dart';
 import '../util/detached.dart';
 
 /// Persistent "Update available" drawer row, shown directly above the account
@@ -40,7 +42,10 @@ class UpdateRow extends ConsumerWidget {
     if (strategy == null) return const SizedBox.shrink();
 
     final install = ref.watch(updateInstallControllerProvider);
-    final live = install.canStart;
+    final downloading =
+        ref.watch(updateCheckControllerProvider).result?.status ==
+        UpdateCheckStatus.downloading;
+    final live = install.canStart && !downloading;
     final title = switch (install) {
       // 0 is the pre-download plateau, not progress — the Store re-scans and
       // shows both consent dialogs before the first byte, so a hard "0%" would
@@ -48,7 +53,7 @@ class UpdateRow extends ConsumerWidget {
       UpdateInstallWorking(:final percent) when percent > 0 =>
         'Updating... $percent%',
       UpdateInstallWorking() || UpdateInstallDone() => 'Updating...',
-      _ => strategy.rowTitle,
+      _ => downloading ? 'Updating...' : strategy.rowTitle,
     };
 
     final p = context.antgrid;

@@ -17,9 +17,8 @@ import 'github_release_update_service.dart';
 /// Sparkle checks are disabled in Info.plist (`SUEnableAutomaticChecks`) so
 /// it never shows UI on its own.
 ///
-/// Every method is a safe no-op off macOS and swallows plugin errors — an
-/// unpackaged dev build has no Sparkle to talk to and the feature must
-/// degrade silently rather than block startup.
+/// Inactive builds skip native calls. Plugin errors reach the shared check
+/// and install controllers, which decide how to surface them.
 class MacosSparkleUpdateService implements UpdaterListener {
   MacosSparkleUpdateService();
 
@@ -30,6 +29,10 @@ class MacosSparkleUpdateService implements UpdaterListener {
       '${GithubReleaseUpdateService.latestDownloadPageUrl}/download/appcast-macos-arm64.xml';
 
   final _noUpdateFound = StreamController<void>.broadcast();
+  final _flowChanges = StreamController<bool>.broadcast();
+  bool _flowRunning = false;
+  bool get flowRunning => _flowRunning;
+  Stream<bool> get flowChanges => _flowChanges.stream;
   bool _listening = false;
 
   bool get _supported => defaultTargetPlatform == TargetPlatform.macOS;
@@ -47,7 +50,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
   Stream<void> get noUpdateFound => _noUpdateFound.stream;
 
   /// Points Sparkle at the appcast. Must have run once before [startUpdate];
-  /// `UpdateGate` calls it at startup on macOS. Never throws.
+  /// The shared check controller calls it before detection.
   Future<void> configureFeed() async {
     if (!_supported) return;
     // Registered here rather than in the constructor: the strategy is built on
@@ -72,24 +75,29 @@ class MacosSparkleUpdateService implements UpdaterListener {
     } catch (e) {
       AbLog.warn(
         'Update',
-        'MacosSparkleUpdateService.configureFeed failed (ignored)',
+        'MacosSparkleUpdateService.configureFeed failed',
         fields: {'error': '$e'},
       );
+      rethrow;
     }
   }
 
   /// Opens Sparkle's update flow (its own dialog: release notes → Install →
-  /// relaunch). A repeat call just re-opens it. Never throws.
+  /// relaunch). Calls while Sparkle already owns a flow are ignored.
   Future<void> startUpdate() async {
     if (!_supported) return;
+    if (_flowRunning) return;
+    _setFlowRunning(true);
     try {
       await autoUpdater.checkForUpdates();
     } catch (e) {
       AbLog.warn(
         'Update',
-        'MacosSparkleUpdateService.startUpdate failed (ignored)',
+        'MacosSparkleUpdateService.startUpdate failed',
         fields: {'error': '$e'},
       );
+      _setFlowRunning(false);
+      rethrow;
     }
   }
 
@@ -113,6 +121,12 @@ class MacosSparkleUpdateService implements UpdaterListener {
       }
     }
     unawaited(_noUpdateFound.close());
+    unawaited(_flowChanges.close());
+  }
+
+  void _setFlowRunning(bool value) {
+    _flowRunning = value;
+    if (!_flowChanges.isClosed) _flowChanges.add(value);
   }
 
   // --- UpdaterListener -----------------------------------------------------
@@ -127,10 +141,12 @@ class MacosSparkleUpdateService implements UpdaterListener {
   void onUpdaterUpdateNotAvailable(UpdaterError? error) {
     AbLog.info('Update', 'Sparkle found nothing to install; clearing the row');
     if (!_noUpdateFound.isClosed) _noUpdateFound.add(null);
+    _setFlowRunning(false);
   }
 
   @override
   void onUpdaterError(UpdaterError? error) {
+    _setFlowRunning(false);
     // The plugin forwards only `localizedDescription` — no code, no domain —
     // and Sparkle routes a user cancellation through the same delegate as a
     // real failure. So this can be logged and never classified.

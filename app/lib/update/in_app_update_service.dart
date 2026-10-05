@@ -1,7 +1,4 @@
-import 'package:flutter/foundation.dart';
 import 'package:in_app_update/in_app_update.dart';
-
-import '../util/ab_log.dart';
 
 /// Immediate (blocking) update kicks in only for important or very-stale
 /// releases; everything else takes the flexible (background-download) path.
@@ -24,11 +21,6 @@ enum UpdateAction {
   resumeImmediate,
   completeFlexible,
 }
-
-/// Outcome of [InAppUpdateService.checkAndStart], for the caller's UI decision.
-/// [flexibleReady] means a flexible update finished downloading and the app
-/// should prompt the user to restart-to-install.
-enum UpdateDecision { none, immediate, flexibleReady }
 
 /// Pure decision core — the priority-based hybrid rule, isolated so it can be
 /// unit-tested without the plugin's platform channel (which is inert under
@@ -65,81 +57,18 @@ UpdateAction decideUpdateAction({
   return UpdateAction.none;
 }
 
-/// Thin, Android-only wrapper over the `in_app_update` plugin.
-///
-/// Every method is a safe no-op off Android and swallows plugin errors —
-/// `InAppUpdate.checkForUpdate()` throws for builds not installed from Google
-/// Play (sideloaded, `flutter run`, other stores), so the whole feature must
-/// degrade silently rather than surface an error or block startup.
+/// Detection never starts a Play flow. The install controller owns every action.
 class InAppUpdateService {
   const InAppUpdateService();
 
-  bool get _supported => defaultTargetPlatform == TargetPlatform.android;
+  Future<AppUpdateInfo> check() => InAppUpdate.checkForUpdate();
 
-  /// Checks Play for an update and, if one applies, starts the appropriate
-  /// flow. Immediate updates are driven entirely by Play's own full-screen UI;
-  /// for flexible updates this awaits the background download and returns
-  /// [UpdateDecision.flexibleReady] once it's ready to install.
-  ///
-  /// Never throws — any failure resolves to [UpdateDecision.none].
-  Future<UpdateDecision> checkAndStart() async {
-    if (!_supported) return UpdateDecision.none;
-    try {
-      final info = await InAppUpdate.checkForUpdate();
-      final action = decideUpdateAction(
-        available:
-            info.updateAvailability == UpdateAvailability.updateAvailable,
-        updateInProgress:
-            info.updateAvailability ==
-            UpdateAvailability.developerTriggeredUpdateInProgress,
-        downloaded: info.installStatus == InstallStatus.downloaded,
-        updatePriority: info.updatePriority,
-        stalenessDays: info.clientVersionStalenessDays ?? 0,
-        immediateAllowed: info.immediateUpdateAllowed,
-        flexibleAllowed: info.flexibleUpdateAllowed,
-      );
-      switch (action) {
-        case UpdateAction.none:
-          return UpdateDecision.none;
-        case UpdateAction.immediate:
-        case UpdateAction.resumeImmediate:
-          // Play owns the blocking UI. A user-denied/failed result needs no
-          // in-app follow-up — the next eligible check may re-offer.
-          await InAppUpdate.performImmediateUpdate();
-          return UpdateDecision.immediate;
-        case UpdateAction.flexible:
-          // Resolves when the background download completes. Only prompt the
-          // restart when it actually succeeded.
-          final result = await InAppUpdate.startFlexibleUpdate();
-          return result == AppUpdateResult.success
-              ? UpdateDecision.flexibleReady
-              : UpdateDecision.none;
-        case UpdateAction.completeFlexible:
-          // Already downloaded on a prior run — don't re-download; just surface
-          // the restart prompt so the user can install it now.
-          return UpdateDecision.flexibleReady;
-      }
-    } catch (e) {
-      AbLog.warn(
-        'InAppUpdate',
-        'InAppUpdateService.checkAndStart failed (ignored)',
-        fields: {'error': '$e'},
-      );
-      return UpdateDecision.none;
-    }
-  }
+  Future<AppUpdateResult> start(UpdateAction action) => switch (action) {
+    UpdateAction.immediate ||
+    UpdateAction.resumeImmediate => InAppUpdate.performImmediateUpdate(),
+    UpdateAction.flexible => InAppUpdate.startFlexibleUpdate(),
+    _ => Future.value(AppUpdateResult.inAppUpdateFailed),
+  };
 
-  /// Installs a flexible update that finished downloading — restarts the app.
-  Future<void> completeFlexibleUpdate() async {
-    if (!_supported) return;
-    try {
-      await InAppUpdate.completeFlexibleUpdate();
-    } catch (e) {
-      AbLog.warn(
-        'InAppUpdate',
-        'InAppUpdateService.completeFlexibleUpdate failed (ignored)',
-        fields: {'error': '$e'},
-      );
-    }
-  }
+  Future<void> completeFlexibleUpdate() => InAppUpdate.completeFlexibleUpdate();
 }

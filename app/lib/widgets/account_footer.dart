@@ -203,6 +203,7 @@ class _AccountFooterState extends ConsumerState<AccountFooter> {
           context: context,
           ref: ref,
           shareOrigin: box.localToGlobal(Offset.zero) & box.size,
+          returnFocus: _menuFocus,
         ),
         if (showUpgrade)
           const AbMenuItem(
