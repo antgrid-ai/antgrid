@@ -14,6 +14,29 @@ String logFilesActionLabel({TargetPlatform? platform}) =>
     ? 'share logs'
     : 'open log folder';
 
+Future<void> runLogFilesAction(
+  BuildContext context, {
+  Rect? origin,
+  Future<LogShareOutcome> Function(Rect? origin)? share,
+  Future<bool> Function()? openFolder,
+}) async {
+  final toaster = AbToaster.maybeOf(context);
+  if (logsLiveInAppSupport(defaultTargetPlatform)) {
+    final outcome = await (share ?? (o) => shareAppLogs(origin: o))(origin);
+    switch (outcome) {
+      case LogShareOutcome.noLogFiles:
+        toaster?.showMessage('No log file on this device yet.');
+      case LogShareOutcome.failed:
+        toaster?.showMessage('Could not open the share sheet for the logs.');
+      case LogShareOutcome.presented:
+        break;
+    }
+  } else {
+    final ok = await (openFolder ?? openLogFolder)();
+    if (!ok) toaster?.showMessage('Could not open the log folder.');
+  }
+}
+
 class LogFilesButton extends StatelessWidget {
   const LogFilesButton({
     super.key,
@@ -34,35 +57,23 @@ class LogFilesButton extends StatelessWidget {
     return AbButton(
       label: uppercase ? label.toUpperCase() : label,
       compact: compact,
-      onTap: () => detached(
-        'LogFilesButton',
-        'log files action',
-        () => _run(context),
-      ),
+      onTap: () =>
+          detached('LogFilesButton', 'log files action', () => _run(context)),
     );
   }
 
   Future<void> _run(BuildContext context) async {
     // Everything that needs the context is read before the first await.
-    final toaster = AbToaster.maybeOf(context);
     final box = context.findRenderObject() as RenderBox?;
     final origin = box == null || !box.hasSize
         ? null
         : box.localToGlobal(Offset.zero) & box.size;
 
-    if (logsLiveInAppSupport(defaultTargetPlatform)) {
-      final outcome = await (share ?? (o) => shareAppLogs(origin: o))(origin);
-      switch (outcome) {
-        case LogShareOutcome.noLogFiles:
-          toaster?.showMessage('No log file on this device yet.');
-        case LogShareOutcome.failed:
-          toaster?.showMessage('Could not open the share sheet for the logs.');
-        case LogShareOutcome.presented:
-          break;
-      }
-    } else {
-      final ok = await (openFolder ?? openLogFolder)();
-      if (!ok) toaster?.showMessage('Could not open the log folder.');
-    }
+    await runLogFilesAction(
+      context,
+      origin: origin,
+      share: share,
+      openFolder: openFolder,
+    );
   }
 }

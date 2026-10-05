@@ -32,16 +32,23 @@ Future<void> _pumpSignedIn(WidgetTester tester) async {
 
 void main() {
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
-    testWidgets('phones get SHARE LOGS', (tester) async {
+    testWidgets('Settings does not contain help or logs on phones', (
+      tester,
+    ) async {
       await _pumpSignedIn(tester);
-      expect(find.text('SHARE LOGS'), findsOneWidget);
+      expect(find.text('SHARE LOGS'), findsNothing);
+      expect(find.text('HELP'), findsNothing);
+      expect(find.text('Chat with support'), findsNothing);
       expect(find.text('OPEN LOG FOLDER'), findsNothing);
     }, variant: TargetPlatformVariant.only(platform));
   }
 
-  testWidgets('desktop gets OPEN LOG FOLDER', (tester) async {
+  testWidgets('Settings does not contain help or logs on desktop', (
+    tester,
+  ) async {
     await _pumpSignedIn(tester);
-    expect(find.text('OPEN LOG FOLDER'), findsOneWidget);
+    expect(find.text('OPEN LOG FOLDER'), findsNothing);
+    expect(find.text('HELP'), findsNothing);
     expect(find.text('SHARE LOGS'), findsNothing);
   }, variant: TargetPlatformVariant.desktop());
 }
