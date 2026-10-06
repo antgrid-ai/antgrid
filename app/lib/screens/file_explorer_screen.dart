@@ -500,6 +500,7 @@ class _FileExplorerBody extends ConsumerWidget {
               root: state.root,
               expandedPaths: state.expandedPaths,
               selectedFilePath: state.files.selectedFilePath,
+              revealedDirectoryPath: state.files.revealedDirectoryPath,
               onToggleExpanded: (path) => detached(
                 'FileExplorerScreen',
                 'expand folder',

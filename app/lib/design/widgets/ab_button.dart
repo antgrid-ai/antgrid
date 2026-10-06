@@ -32,6 +32,7 @@ class AbButton extends StatefulWidget {
     this.fontSize,
     this.fontWeight,
     this.wrapLabel = false,
+    this.expand = false,
   });
 
   final String label;
@@ -61,6 +62,11 @@ class AbButton extends StatefulWidget {
   /// setting this owes the button a bounded width, which a [Column] gives and a
   /// [Row] does not.
   final bool wrapLabel;
+
+  /// Fills whatever width the parent hands it (an [Expanded] slot in a button
+  /// row) with the label centred, instead of hugging the label at the start of
+  /// that slot. Needs a bounded width, like [wrapLabel].
+  final bool expand;
 
   @override
   State<AbButton> createState() => _AbButtonState();
@@ -104,7 +110,10 @@ class _AbButtonState extends State<AbButton> {
         borderRadius: AbTokens.borderRadius5,
       ),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisSize: widget.expand ? MainAxisSize.max : MainAxisSize.min,
+        mainAxisAlignment: widget.expand
+            ? MainAxisAlignment.center
+            : MainAxisAlignment.start,
         children: [
           if (widget.leading != null) ...[
             widget.leading!,

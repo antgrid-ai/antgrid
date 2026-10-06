@@ -1,9 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Directory, Platform, Process;
 
-import 'package:push/push.dart';
-import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/gestures.dart'
     show PointerDownEvent, PointerMoveEvent, PointerUpEvent, VelocityTracker;
 import 'package:flutter/material.dart';
@@ -19,16 +15,12 @@ import '../connection/supervisor_state.dart'
 import '../constants/breakpoints.dart';
 import '../keyboard/app_command_registry.dart';
 import '../keyboard/app_shortcuts.dart';
-import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_toast.dart';
 import '../launcher/host_control_client.dart' show HostControlException;
-import '../launcher/host_discovery.dart' show hostDir;
-import '../models/ab_message.dart';
-import '../models/handler_state.dart' show HandlerEscalation;
 import '../models/preferences_models.dart';
 import '../models/session_entry.dart';
 import '../project/checkout_readiness.dart' show CheckoutReadiness;
@@ -37,13 +29,10 @@ import '../providers/agent_transport.dart';
 import '../providers/checkout_readiness.dart'
     show checkoutReadinessProvider, focusedWaitStartedAtProvider;
 import '../providers/demo_mode.dart';
-import '../providers/device_provisioning.dart' show localDeviceUuidProvider;
 import '../providers/local_transport_fault.dart';
 import '../providers/new_session_picker.dart'
     show newSessionStartInFlightProvider;
-import '../providers/notification_route_apply.dart';
 import '../providers/providers.dart';
-import '../providers/recent_sessions.dart' show recentSessionsProvider;
 import '../providers/relay_error_banner.dart';
 import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
@@ -52,23 +41,17 @@ import '../providers/supervisor_status.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
-import '../services/local_notification_service.dart';
 import '../services/pending_reply.dart' show SessionDownException;
-import '../services/push_background_handler.dart'
-    show decodePush, pushDataOf, pushDedupKey, routeOfPush;
-import '../services/push_identity.dart';
 import '../services/sessions_service.dart'
     show SessionListing, SessionOperationException, SessionsService;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
-import '../utils/notification_routing.dart';
 import '../widgets/ab_status_helpers.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
-import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
+import '../widgets/log_files_button.dart';
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/pane_swipe_exclusion.dart';
-import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
@@ -81,7 +64,6 @@ import '../widgets/workspace_panel.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
-import '../navigation/notification_route.dart';
 import 'app_settings_screen.dart';
 
 /// Mobile page order. The drawer is NOT a page — it stays a `Scaffold.drawer`
@@ -118,40 +100,6 @@ const double _kContextPanelMinWidth = 320.0;
 /// drops that stored preference back to unchosen (see `PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
 
-/// The title an escalation is surfaced under — the in-app toast and the OS
-/// notification this app raises for itself.
-///
-/// HAND-MIRRORED in `composePush`'s `handler:escalation` branch
-/// (`bridge/src/push/compose.ts`), which titles the SAME escalation for a phone
-/// that is asleep or detached while this titles it for an attached app. Nothing
-/// in CI couples them, so a string changed on one side alone describes one
-/// event two different ways depending only on whether the device was awake —
-/// which is why `handler_escalation_title_test.dart` reads the bridge's own
-/// literals back out of that file. A shared golden fixture the bridge test
-/// writes and the Dart test reads is the real fix and is not built here; until
-/// it is, these three strings live in four places.
-///
-/// Pulled out of [WorkspaceShellState] so the branch can be pinned against
-/// literal escalations without pumping the whole shell — same reasoning as
-/// [workspaceBlockingError].
-@visibleForTesting
-String handlerEscalationTitle(HandlerEscalation esc) {
-  if (esc.urgency == 'high') return 'Handler — urgent';
-  // A question Handler raised on a pass that had already replied to the agent:
-  // the work went on, so the word must not be the one that means the session
-  // stopped. Safe to read straight off the row here because every escalation
-  // reaching this point has been through `HandlerService`'s capability gate —
-  // an ask a bridge cannot be told the answer to arrives with `nonBlocking`
-  // already cleared, so the app never offers a word it cannot honour.
-  //
-  // The split is also the whole of what reaches a locked phone: the push
-  // payload carries no channel, priority or interruption level (see
-  // `composePush`), so both titles buzz and light the screen identically.
-  // Everything else that separates a question from a stop is visible only once
-  // the user has been interrupted and has opened the Handler tab.
-  return esc.nonBlocking ? 'Handler has a question' : 'Handler needs you';
-}
-
 /// Root layout orchestrator.
 ///
 /// Mobile (< kCompactBreakpoint): two-page [PageView] — agent page | workspace
@@ -173,8 +121,7 @@ class WorkspaceShell extends ConsumerStatefulWidget {
   ConsumerState<WorkspaceShell> createState() => WorkspaceShellState();
 }
 
-class WorkspaceShellState extends ConsumerState<WorkspaceShell>
-    with WidgetsBindingObserver {
+class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   late PageController _pageController;
   WorkspaceView _selectedView = WorkspaceView.files;
 
@@ -297,102 +244,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   final _agentPanelKey = GlobalKey();
   final _contextPanelKey = GlobalKey();
 
-  /// OS-level notifications, used only while the app is backgrounded. Self
-  /// degrading: `init`/`show` swallow platform errors.
-  final LocalNotificationService _osNotifications = LocalNotificationService();
-  AppLifecycleState _lifecycle = AppLifecycleState.resumed;
-
-  /// Logical notification ids already surfaced (toast or OS notification), so
-  /// each event is shown at most once REGARDLESS of arrival surface. The same
-  /// event can reach this screen twice — once via a live provider stream
-  /// (foreground) and once via an FCM push (the bridge seals
-  /// `sourceMessageId === escalationId` for escalations and `=== msg.id` for
-  /// agent notifications, see push-dispatcher.ts) — so a single shared set keyed
-  /// on the stable id is what prevents the double toast/notification.
-  /// handlerEscalationsProvider re-seeds pending escalations on every rebuild to
-  /// close the broadcast-subscribe race; this set is what makes that re-seed
-  /// idempotent. NOT shared across isolates, so a background push followed by a
-  /// foreground replay of the same id on reopen is a known v1 gap (see
-  /// push_background_handler.dart). Insertion-ordered and capped
-  /// ([_kMaxNotifiedIds]) via [_markNotified] so a long-lived foreground session
-  /// receiving many pushes can't grow it without bound.
-  final Set<String> _notifiedIds = <String>{};
   StreamSubscription<SessionListing>? _sessionListingSub;
   // The project ID alone cannot distinguish an obsolete run after A → B → A.
   int _sessionBootstrapGeneration = 0;
 
-  /// Cap on [_notifiedIds]. Dedup only needs recent ids; re-seeing one evicted
-  /// long ago risks at most one duplicate — fine for best-effort notifications.
-  static const _kMaxNotifiedIds = 512;
-
-  /// Record [id] as surfaced. Returns false if it was already present (a
-  /// duplicate to suppress), true if newly recorded. Evicts the oldest id once
-  /// past the cap ([_notifiedIds] is a `LinkedHashSet`, so `.first` is oldest).
-  bool _markNotified(String id) {
-    if (!_notifiedIds.add(id)) return false;
-    if (_notifiedIds.length > _kMaxNotifiedIds) {
-      _notifiedIds.remove(_notifiedIds.first);
-    }
-    return true;
-  }
-
-  /// `push` hands back an unsubscribe callback rather than a StreamSubscription.
-  VoidCallback? _unsubscribeForegroundPush;
-
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    // The demo has no agent that can notify anyone, and both calls below have a
-    // visible cost on iOS: `DarwinInitializationSettings` defaults to
-    // requesting alert permission, so `init()` raises the OS prompt — asked, in
-    // the demo's case, on behalf of nothing. A reviewer meeting an unexplained
-    // permission dialog inside a sample project is exactly the reading we are
-    // trying not to invite.
-    final demo = ref.read(demoModeProvider);
-    // Fire-and-forget: async + self-degrading.
-    if (!demo) _osNotifications.init();
-    if (!demo &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS)) {
-      _unsubscribeForegroundPush = Push.instance.addOnMessage((m) async {
-        try {
-          final decoded = await decodePush(
-            pushDataOf(m),
-            pushIdentity: PushIdentity.secure(),
-          );
-          // The widget can be disposed while decodePush awaits; `context` (used
-          // by _onAgentNotification's toast path) is dead after that.
-          if (!mounted || decoded == null) return;
-          // Unified dedup: the key is shared with the live handler stream below,
-          // so a push and its live message surface once between them. A null key
-          // means show it — never dedup an unidentifiable push away.
-          final key = pushDedupKey(decoded);
-          if (key != null && !_markNotified(key)) {
-            return; // already surfaced (this surface or the live stream)
-          }
-          // The only caller whose route is built from the wire rather than
-          // from a drawer entry: a push arrives from a machine this install has
-          // to name for itself, so [routeOfPush] addresses it by machine +
-          // project (or by session id) and answers null for a payload sealed by
-          // a bridge that carried neither — a projectId alone is unroutable by
-          // design, since `computeProjectId` hashes the folder path and can
-          // name the wrong machine with confidence.
-          _onAgentNotification(
-            title: decoded.title,
-            body: decoded.body,
-            route: routeOfPush(decoded),
-          );
-        } catch (e) {
-          // Async listener: an uncaught throw here is an unhandled rejection.
-          AbLog.error(
-            'WorkspaceShell',
-            'foreground push failed',
-            fields: {'error': '$e'},
-          );
-        }
-      });
-    }
     _pageController = PageController(initialPage: _MobilePage.agent);
     // Register switch callback + run the initial session bootstrap after the
     // first frame so provider writes don't happen during build (which would
@@ -494,220 +352,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    _lifecycle = state;
-    ref.read(appLifecycleStateProvider.notifier).set(state);
-    super.didChangeAppLifecycleState(state);
-  }
-
-  @override
   void dispose() {
     _sessionBootstrapGeneration++;
     unawaited(_sessionListingSub?.cancel());
-    WidgetsBinding.instance.removeObserver(this);
-    _unsubscribeForegroundPush?.call();
-    _unsubscribeForegroundPush = null;
     _pageController.dispose();
     super.dispose();
-  }
-
-  // ── Terminal notifications ───────────────────────────────────────────
-
-  void _onNotification(TerminalNotificationMessage msg, String entryId) {
-    // A session terminal's id IS the session id (service PTYs use their own,
-    // which never matches an active session).
-    if (_isViewingSession(msg.terminalId)) return;
-    final body = (msg.body != null && msg.body!.isNotEmpty)
-        ? msg.body!
-        : 'Notification';
-    final title = (msg.title != null && msg.title!.isNotEmpty)
-        ? msg.title!
-        : 'Agent';
-    _onAgentNotification(
-      title: title,
-      body: body,
-      route: NotificationRoute(
-        registrationId: entryId,
-        terminalId: msg.terminalId,
-        kind: 'agent',
-        sourceMessageId: msg.id,
-      ),
-    );
-  }
-
-  /// Reads the live focus state into [isViewingSession] — every surfacer below
-  /// checks it first, so nothing is announced about the chat already on screen.
-  bool _isViewingSession(String? sessionId) => isViewingSession(
-    sessionId: sessionId,
-    activeSessionId: ref.read(activeSessionIdProvider),
-    onWorkspaceSurface:
-        ref.read(workbenchSurfaceProvider) == WorkbenchSurface.workspace,
-    // On mobile the workspace surface is a PageView, so being on it does not
-    // mean the transcript is showing — a user reading files must still be told.
-    agentSurfaceVisible: ref.read(agentSurfaceVisibleProvider),
-    lifecycle: _lifecycle,
-  );
-
-  /// Whether [entryId]'s Handler holds an armed slot for [sessionId] — the
-  /// app-side reading of the bridge's `isHandlerArmed`, which is what
-  /// `handler:status` lists. Read off the notification's OWN project session
-  /// rather than the focused one: this surfacer spans every warm project (see
-  /// [agentPushNotificationsProvider]), and the focused project's armed set
-  /// cannot answer for a background one.
-  bool _handlerArmed(String entryId, String? sessionId) {
-    if (sessionId == null) return false;
-    final session = ref.read(projectSessionProvider(entryId)).value;
-    return session?.handlerService.currentState.sessions[sessionId] != null;
-  }
-
-  void _onAgentNotificationPush(NotificationPushMessage msg, String entryId) {
-    if (_isViewingSession(msg.sessionId)) return;
-    // The Handler's escalation for this same block is surfaced by
-    // [_onHandlerEscalation] a beat away, carrying the same sentence and the id
-    // that answers it. Two buzzes for one question is what the bridge's push
-    // lane already refuses; this is the in-band half of that rule.
-    if (handlerAnnouncesAgentNotification(
-      notificationType: msg.notificationType,
-      sessionId: msg.sessionId,
-      handlerArmed: _handlerArmed(entryId, msg.sessionId),
-    )) {
-      return;
-    }
-    const labels = {
-      'permission_request': 'Permission needed',
-      'awaiting_input': 'Needs your input',
-      'question': 'Agent asks',
-      'task_complete': 'Task complete',
-      'idle': 'Waiting for you',
-      'error': 'Agent error',
-    };
-    final label = labels[msg.notificationType] ?? 'Agent';
-    // Keep in lockstep with bridge/src/push/compose.ts: the same message reaches
-    // this path in-band and that one via push, and they must not disagree. body
-    // deliberately does not fall back to sessionTitle, or title == body.
-    final title = (msg.sessionTitle != null && msg.sessionTitle!.isNotEmpty)
-        ? msg.sessionTitle!
-        : label;
-    final body = (msg.message != null && msg.message!.isNotEmpty)
-        ? msg.message!
-        : label;
-    _onAgentNotification(
-      title: title,
-      body: body,
-      route: NotificationRoute(
-        registrationId: entryId,
-        terminalId: msg.sessionId,
-        kind: 'agent',
-        sourceMessageId: msg.id,
-      ),
-    );
-  }
-
-  void _onHandlerEscalation(HandlerEscalation esc, String entryId) {
-    // Handler escalations name their session in `terminalId`.
-    if (_isViewingSession(esc.terminalId)) return;
-    // Route through the shared surfacer (foreground toast / background OS
-    // notification), identical to the agent-notification paths, so an
-    // escalation from ANY warm project is surfaced — not just the focused one.
-    final title = handlerEscalationTitle(esc);
-    final body = esc.question.isNotEmpty
-        ? esc.question
-        : handlerFallbackQuestion;
-    _onAgentNotification(
-      title: title,
-      body: body,
-      route: NotificationRoute(
-        registrationId: entryId,
-        terminalId: esc.terminalId,
-        kind: 'handler',
-        sourceMessageId: esc.escalationId,
-      ),
-    );
-  }
-
-  /// [route] is what tapping this notification should open, or null when the
-  /// producer could name nothing addressable — which is the foreground-push
-  /// path against a bridge that sealed no machine, since a projectId alone is
-  /// not a machine (`computeProjectId` hashes the folder path) and must never
-  /// be used to pick an entry.
-  void _onAgentNotification({
-    required String title,
-    required String body,
-    NotificationRoute? route,
-  }) {
-    if (shouldShowInAppToast(_lifecycle)) {
-      // Gated on the route actually RESOLVING, not on one having been built: an
-      // offer that opens nothing is worse than none, and the two conditions part
-      // company on any id that names no place (a blank one among them). Resolved
-      // synchronously against what is already loaded, which is exact for the
-      // in-app producers — they carry a registrationId, and neither that rule
-      // nor the terminalId one consults the device uuid.
-      //
-      // Inside this branch, because it gates the CHIP and nothing else: the OS
-      // notification below carries `route` verbatim and never reads this
-      // answer, so resolving it there would scan the whole cached-session
-      // universe — on the backgrounded path, which is the common one — to
-      // discard the result. A chip lives 8s, so "resolves now" is as good as
-      // "resolves when pressed", while an OS notification sits in the shade
-      // indefinitely and the applier re-resolves at tap time against freshly
-      // awaited state; gating the payload here would bake a cold-cache miss
-      // into a notification that would have resolved fine an hour later.
-      final destination = route == null
-          ? null
-          : resolveNotificationRoute(
-              route,
-              known: ref.read(recentSessionsProvider),
-              localDeviceUuid: ref.read(localDeviceUuidProvider).value,
-            );
-      if (destination == null) {
-        showAbToastOverlay(
-          context,
-          toast: AbToast(icon: AbIcons.bell, title: title, description: body),
-        );
-        return;
-      }
-      // Both captured before the tap: applying the route switches projects,
-      // which unmounts this shell out from under the toast still holding the
-      // callback. `context` read through the State getter at tap time would
-      // throw on the defunct element; the captured element answers `mounted`
-      // false instead, which is what the applier tests.
-      final container = ref.container;
-      final toastContext = context;
-      showAbToastOverlay(
-        context,
-        toast: AbToast(
-          icon: AbIcons.bell,
-          title: title,
-          description: body,
-          actionLabel: 'Open',
-          onAction: () => detached(
-            'WorkspaceShell',
-            'notification route failed',
-            () => applyNotificationRoute(toastContext, container, route!),
-          ),
-        ),
-        // 8s, not the 4s default: give the user a real window to notice and
-        // tap this before it goes.
-        duration: const Duration(seconds: 8),
-      );
-      return;
-    }
-    // App is not focused (occluded or minimized): only the OS notification can
-    // surface above the foreground app — an in-app toast would be painted
-    // behind it. Fire-and-forget; `show` logs delivery failures internally.
-    //
-    // The payload is the whole tap: `main` decodes it back into this same route
-    // and applies it. Carried whenever the producer named one — `route`, not the
-    // chip's `tappable` — because resolution is redone at tap time and this
-    // notification outlives the state it would have been judged against here.
-    // Null rather than an empty route when there is nothing to name at all: on
-    // Windows the payload is what makes a body tap arrive as
-    // `selectedNotificationAction`, and an empty one lands nowhere.
-    _osNotifications.show(
-      title: title,
-      body: body,
-      payload: route == null ? null : encodeNotificationRoute(route),
-    );
   }
 
   // ── Preferences ──────────────────────────────────────────────────────
@@ -919,6 +568,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       ref.read(relayErrorBannerProvider.notifier).set(null);
     }
 
+    // Spent by whichever landing this is, so a later remount is never read as
+    // the open; see [SessionsService.takeLandingAutoStart].
+    final opening = svc.takeLandingAutoStart();
+
     // 1. Pending session-id (from a cross-project session-row click).
     final pendingId = ref.read(pendingActiveSessionIdProvider);
     // Honoured only for the id it names: every other site that queues a pending
@@ -1018,7 +671,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // starting `active.first` would spend tokens on an agent the tap never
       // named — the exact cost the suppressor exists to prevent, arrived at by
       // the one path where the user's intent is furthest from a resume.
-      if (!startSuppressed &&
+      if (opening &&
+          !startSuppressed &&
           !session.running &&
           !sessionStartQueued(session.setup)) {
         await _startBestEffort(svc, session.id);
@@ -1176,54 +830,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         reconcileActiveSession(ref, ref.read(selectableSessionsProvider));
       });
     });
-
-    // Surface agent terminal notifications: in-app toast while foreground,
-    // OS notification while backgrounded (gated in _onNotification). The
-    // provider reloads on project switch and replays a carried-over value;
-    // guard against re-handling the same emission.
-    ref.listen<AsyncValue<ProjectScoped<TerminalNotificationMessage>>>(
-      terminalNotificationsProvider,
-      (prev, next) {
-        final scoped = next.value;
-        if (scoped == null) return;
-        if (prev?.value == scoped) return; // carried-over value on reload
-        _onNotification(scoped.message, scoped.entryId);
-      },
-    );
-
-    ref.listen<AsyncValue<ProjectScoped<NotificationPushMessage>>>(
-      agentPushNotificationsProvider,
-      (prev, next) {
-        final scoped = next.value;
-        if (scoped == null) return;
-        if (prev?.value == scoped) return; // carried-over value on reload
-        final msg = scoped.message;
-        // Shared dedup key with the FCM path: the bridge seals
-        // `sourceMessageId === msg.id` for agent notifications, so this id
-        // guards both surfaces — a connected-but-backgrounded phone that gets
-        // the same event live AND via push surfaces it only once (matches the
-        // handler-escalation path below).
-        if (!_markNotified(msg.id)) return; // once/id
-        _onAgentNotificationPush(msg, scoped.entryId);
-      },
-    );
-
-    ref.listen<AsyncValue<ProjectScoped<HandlerEscalation>>>(
-      handlerEscalationsProvider,
-      (prev, next) {
-        final scoped = next.value;
-        if (scoped == null) return;
-        final esc = scoped.message;
-        // Shared dedup key with the FCM path: the bridge seals
-        // `sourceMessageId === escalationId` for handler pushes, so this same
-        // id guards both surfaces and a single escalation is surfaced only once
-        // whether it arrives live or via push. Keying on the escalationId alone
-        // — not the project-scoped record — is also what keeps the provider's
-        // per-rebuild re-seed idempotent.
-        if (!_markNotified(esc.escalationId)) return; // once/id
-        _onHandlerEscalation(esc, scoped.entryId);
-      },
-    );
 
     // Surface launcher/transport errors inline (local-mode spawn
     // failures, a relay stream transport that errors) instead of leaving the
@@ -1497,7 +1103,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       child: SafeArea(
         child: Column(
           children: [
-            const OperationalErrorToaster(),
             const AbBanner(),
             const AbHostBanner(),
             Expanded(
@@ -3248,6 +2853,11 @@ Object? workspaceBlockingError({
 bool _takesOverMidSession(BlockReason reason) =>
     blockReasonPresentation(reason).interruptsWorkspace;
 
+/// A phone has no host.log and no log folder; its logs leave through the
+/// share sheet.
+const String _shareLogsTip =
+    'If it keeps failing, share logs and attach them to a report.';
+
 /// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
 /// sources — a reader who checks only the first will conclude this screen
 /// cannot be the one on the user's display:
@@ -3260,7 +2870,8 @@ bool _takesOverMidSession(BlockReason reason) =>
 ///    over mid-use, a license verdict, a revoked device.
 ///
 /// Every path leaves the user with at least one button that changes the
-/// state: Retry re-runs the launch; Open log opens the host log directory;
+/// state: Retry re-runs the launch; the log action opens the host log directory
+/// on desktop and shares app.log on a phone;
 /// Back returns to the home screen.
 class _LocalLaunchErrorScreen extends StatelessWidget {
   final Object error;
@@ -3403,51 +3014,35 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
     if (msg.contains('no live control plane')) {
       return (
         headline: 'host control plane did not answer',
-        tip:
-            'The host process started but its control plane was not reachable '
-            'within 30s. Check host.log in the log directory for the '
-            'startup error, then Retry.',
+        tip: isMobilePlatform
+            ? 'The host process started but its control plane was not '
+                  'reachable within 30s. Retry; $_shareLogsTip'
+            : 'The host process started but its control plane was not '
+                  'reachable within 30s. Check host.log in the log directory '
+                  'for the startup error, then Retry.',
         retryLabel: 'retry',
       );
     }
     if (msg.contains('no connect info')) {
       return (
         headline: 'host did not return connection info',
-        tip:
-            'The host control plane answered but returned no socket address for '
-            'this project. Retry; if it persists, check host.log for an error '
-            'near the project:open call.',
+        tip: isMobilePlatform
+            ? 'The host control plane answered but returned no socket address '
+                  'for this project. Retry; $_shareLogsTip'
+            : 'The host control plane answered but returned no socket address '
+                  'for this project. Retry; if it persists, check host.log for '
+                  'an error near the project:open call.',
         retryLabel: 'retry',
       );
     }
     return (
       headline: 'agent failed to start',
-      tip:
-          'Retry runs the launcher again. If it keeps failing, open the log '
-          'directory and check host.log for the underlying stderr trace.',
+      tip: isMobilePlatform
+          ? 'Retry runs the launcher again. $_shareLogsTip'
+          : 'Retry runs the launcher again. If it keeps failing, open the log '
+                'directory and check host.log for the underlying stderr trace.',
       retryLabel: 'retry',
     );
-  }
-
-  Future<void> _openLogFolder() async {
-    final dir = hostDir(); // host.log lives here now (one host per machine)
-    try {
-      await Directory(dir).create(recursive: true);
-      if (Platform.isWindows) {
-        // hostDir() yields a mixed-separator path (e.g. C:\Users\me/.antgrid).
-        // explorer.exe treats '/' as a switch prefix and silently opens the
-        // default Documents view, so hand it pure backslashes.
-        await Process.start('explorer.exe', [
-          dir.replaceAll('/', r'\'),
-        ], runInShell: false);
-      } else if (Platform.isMacOS) {
-        await Process.start('open', [dir]);
-      } else {
-        await Process.start('xdg-open', [dir]);
-      }
-    } catch (_) {
-      /* best effort */
-    }
   }
 
   @override
@@ -3511,12 +3106,8 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
                       onTap: onRetry,
                       compact: true,
                     ),
-                  if (projectId != null)
-                    AbButton(
-                      label: 'open log folder',
-                      onTap: _openLogFolder,
-                      compact: true,
-                    ),
+                  if (projectId != null || isMobilePlatform)
+                    const LogFilesButton(compact: true),
                   AbButton(label: 'back', onTap: onBack, compact: true),
                 ],
               ),

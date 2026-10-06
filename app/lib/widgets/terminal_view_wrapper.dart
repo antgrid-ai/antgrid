@@ -15,6 +15,7 @@ import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_empty_state.dart';
@@ -22,7 +23,9 @@ import '../keyboard/app_command_registry.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../models/workspace_view.dart';
 import '../project/project_session.dart';
+import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
@@ -31,6 +34,7 @@ import '../services/terminal_service.dart';
 import '../util/detached.dart';
 import '../util/wrapped_url.dart';
 import '../util/external_url.dart';
+import '../util/terminal_links.dart';
 import 'clipboard_image.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
@@ -237,9 +241,21 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   bool _historyOpen = false;
   bool _shiftScroll = false;
   final _historyKey = GlobalKey<TerminalHistoryViewState>();
-  int? _historyRow;
   int? _historyEndRow;
   List<TerminalHistoryRow> _historyScreen = const [];
+
+  /// A notifier so position reports and drag updates rebuild only the
+  /// scrollbar. Written from event and callback paths only, never from build.
+  final ValueNotifier<int?> _historyRow = ValueNotifier<int?>(null);
+  int? _queuedSeekRow;
+  int? _seekFrameCallbackId;
+
+  void _dropQueuedSeek() {
+    final id = _seekFrameCallbackId;
+    if (id != null) WidgetsBinding.instance.cancelFrameCallbackWithId(id);
+    _seekFrameCallbackId = null;
+    _queuedSeekRow = null;
+  }
 
   void _seekHistory(int row) {
     final boundary = widget.tab.history.boundary;
@@ -253,11 +269,20 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     }
     if (!_historyOpen) {
       _openHistory();
-      _historyRow = row;
-    } else {
-      _historyKey.currentState?.seekRow(row);
+      _historyRow.value = row;
+      return;
     }
-    setState(() => _historyRow = row);
+    // A drag delivers several updates per frame and an in-window seek can
+    // re-ingest the reader, so only a frame's last target is applied.
+    _queuedSeekRow = row;
+    _historyRow.value = row;
+    _seekFrameCallbackId ??= WidgetsBinding.instance.scheduleFrameCallback((_) {
+      _seekFrameCallbackId = null;
+      final target = _queuedSeekRow;
+      _queuedSeekRow = null;
+      if (!mounted || !_historyOpen || target == null) return;
+      _historyKey.currentState?.seekRow(target);
+    });
   }
 
   /// Mirror of `widget.tab.history.boundary`'s epoch.
@@ -440,6 +465,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           if (!mounted) return;
           if (!widget.terminalService.session.transport.isEstablished) {
             _cancelTakeover();
+            widget.tab.ghostty.cancelPendingMouseMotion();
           }
           setState(() {});
         });
@@ -741,6 +767,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // this callback is already inside.
     if (_historyOpen && (!_frameOwnsPane || !_hasArchivedRows)) {
       _historyOpen = false;
+      _dropQueuedSeek();
     }
     // The booking below is per-PTY, but this State is not: only
     // `terminal_screen` keys the wrapper by terminalId — the pinned pane
@@ -755,6 +782,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // The reader was opened over ONE terminal's archive. The slot now holds
     // another, and its own archive is not what the user asked to read.
     _historyOpen = false;
+    _dropQueuedSeek();
     _lastSentCols = null;
     _lastSentRows = null;
     _observedSizeEpoch = null;
@@ -806,6 +834,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _liveFocusNode.dispose();
     _uploader.dispose();
     _hoveredLink.dispose();
+    _dropQueuedSeek();
+    _historyRow.dispose();
     super.dispose();
   }
 
@@ -866,6 +896,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final epoch = widget.tab.history.boundary?.epoch;
     final close = _historyOpen && (!has || epoch != _archiveEpoch);
     if (has == _hasArchivedRows && epoch == _archiveEpoch && !close) return;
+    if (close) _dropQueuedSeek();
     setState(() {
       _hasArchivedRows = has;
       _archiveEpoch = epoch;
@@ -880,6 +911,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// every one of them.
   void _openHistory() {
     if (_historyOpen || !_frameOwnsPane || !_hasArchivedRows) return;
+    widget.tab.ghostty.cancelPendingMouseMotion();
     // The card names a link in the live pane and is laid out against a
     // position in it. The reader is about to cover both.
     _pendingHoverUri = null;
@@ -895,7 +927,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       widget.tab.ghostty,
       boundary.nextRowId,
     );
-    _historyRow = math.max(boundary.firstRowId, boundary.nextRowId - 3);
+    _historyRow.value = math.max(boundary.firstRowId, boundary.nextRowId - 3);
     setState(() => _historyOpen = true);
   }
 
@@ -913,9 +945,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final restoreKeyboard = _historySoftKeyboardController.isVisible;
     _pendingHoverUri = null;
     _hoveredLink.value = null;
+    _dropQueuedSeek();
+    _historyRow.value = null;
     setState(() {
       _historyOpen = false;
-      _historyRow = null;
       _historyScreen = const [];
     });
     if (restoreKeyboard) {
@@ -1613,6 +1646,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       hyperlinkColor: context.antgrid.accent,
       onOpenHyperlink: _openHyperlink,
       onHyperlinkHover: _onHyperlinkHover,
+      isQuietHyperlink: isDetectedTerminalLink,
       showHeader: false,
       showFocusRing: false,
       // In frame mode the agent's VT is authoritative and the engine holds
@@ -1872,16 +1906,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                           cell: cell,
                           child: TerminalHistoryView(
                             key: _historyKey,
-                            initialRowId: _historyRow,
+                            initialRowId: _historyRow.value,
                             screenRows: _historyScreen,
                             historyEndRow: _historyEndRow,
                             onInput: _typeIntoTerminal,
                             softKeyboardController: !_hasPhysicalKeyboard
                                 ? _historySoftKeyboardController
                                 : null,
+                            // Position reports arrive on every scroll step and
+                            // only the scrollbar reads them.
                             onPosition: (row) {
                               if (mounted && _historyOpen) {
-                                setState(() => _historyRow = row);
+                                _historyRow.value = row;
                               }
                             },
                             model: tab.history,
@@ -1897,6 +1933,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                             minimumContrastRatio: _minContrastRatio,
                             onOpenHyperlink: _openHyperlink,
                             onHyperlinkHover: _onHyperlinkHover,
+                            isQuietHyperlink: isDetectedTerminalLink,
                           ),
                         ),
                       ),
@@ -1948,12 +1985,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         final end = _historyOpen
                             ? (_historyEndRow ?? boundary.nextRowId)
                             : boundary.nextRowId;
-                        return TerminalHistoryScrollbar(
-                          firstRow: boundary.firstRowId,
-                          liveRow: end,
-                          position: _historyOpen ? (_historyRow ?? end) : end,
-                          viewportRows: widget.tab.rows,
-                          onSeek: _seekHistory,
+                        return ValueListenableBuilder<int?>(
+                          valueListenable: _historyRow,
+                          builder: (context, historyRow, _) =>
+                              TerminalHistoryScrollbar(
+                                firstRow: boundary.firstRowId,
+                                liveRow: end,
+                                position: _historyOpen
+                                    ? (historyRow ?? end)
+                                    : end,
+                                viewportRows: widget.tab.rows,
+                                onSeek: _seekHistory,
+                              ),
                         );
                       },
                     ),
@@ -1995,7 +2038,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     required ({double charWidth, double linePixels}) cell,
     required Widget child,
   }) {
-    if (amDriver) return child;
+    if (amDriver) {
+      // Only a column change re-ingests the reader, so only width waits for a
+      // drag to settle; height stays live. No onMoving/onSettled: the reader
+      // must never size the PTY. The ColoredBox paints and absorbs presses on
+      // the strip a widening drag leaves uncovered.
+      return ColoredBox(
+        color: context.antgrid.bgDeepest,
+        child: _TerminalGridFreeze(pinHeight: false, child: child),
+      );
+    }
     return ColoredBox(
       color: context.antgrid.bgDeepest,
       child: FittedBox(
@@ -2034,26 +2086,47 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// with nothing shown, and all of them get the sheet — which a
   /// `defaultTargetPlatform` test silently exempted the first of.
   Future<void> _openHyperlink(String detected) {
-    final uri = extendWrappedUrl(
-      detected,
-      widget.tab.ghostty.lines,
-      widget.tab.ghostty.cols,
-    );
+    // The bridge already joined a detected link's wrapped text, and its
+    // wrapper URI never matches a screen row, so extending it could only
+    // corrupt it.
+    final uri = isDetectedTerminalLink(detected)
+        ? detected
+        : extendWrappedUrl(
+            detected,
+            widget.tab.ghostty.lines,
+            widget.tab.ghostty.cols,
+          );
     return _openContentLink(uri);
   }
 
   Future<void> _openContentLink(String uri) => openContentLink(
     context,
     uri,
+    terminalId: widget.tab.terminalId,
     fileService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.fileService,
     previewService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.previewService,
-    revealView: (view) => ref.read(workspaceMenuControlProvider)?.reveal(view),
+    revealView: _revealWorkspaceView,
     disclosed: _hoveredLink.value?.uri == uri,
+    focusedTarget: () => ref.read(selectedTargetProvider),
   );
+
+  void _revealWorkspaceView(WorkspaceView view) {
+    final menu = ref.read(workspaceMenuControlProvider);
+    if (menu != null) {
+      menu.reveal(view);
+      return;
+    }
+    // Phone width publishes no menu control, and a tapped link is the only
+    // affordance touch has, so the shell's own handover is what brings the tab
+    // and its page forward.
+    ref
+        .read(pendingWorkspaceViewProvider.notifier)
+        .set((target: ref.read(selectedTargetProvider), value: view));
+  }
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.
@@ -2336,6 +2409,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 draft: _composeDraft,
                 focusNode: _composeFocus,
                 onSend: _composeSend,
+                onDirectInput: _toggleDirectInput,
                 maxLines: maxLines,
               ),
             ),
@@ -2347,48 +2421,78 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 }
 
 /// The fixed row under a terminal another device is sizing: says so, and holds
-/// the one action that changes it.
+/// the one action that changes it. The pane is letterboxed to the other
+/// device's grid, so on a roomy surface the strip also says why it looks that
+/// way; a phone-width pane keeps just the title.
 class _TakeControlStrip extends StatelessWidget {
   const _TakeControlStrip({required this.busy, required this.onTap});
 
   final bool busy;
   final VoidCallback? onTap;
 
+  static const double _roomyWidth = 480;
+
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    return Container(
-      decoration: BoxDecoration(
-        color: p.bgElevated,
-        border: Border(top: BorderSide(color: p.borderSubtle)),
-      ),
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space8,
-        vertical: AbTokens.space4,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'Sized by another device',
-              overflow: TextOverflow.ellipsis,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: p.textMuted,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final roomy = constraints.maxWidth >= _roomyWidth;
+        return Container(
+          decoration: BoxDecoration(
+            color: p.bgElevated,
+            border: Border(top: BorderSide(color: p.borderDefault)),
+          ),
+          padding: EdgeInsets.symmetric(
+            horizontal: roomy ? AbTokens.space12 : AbTokens.space8,
+            vertical: roomy ? AbTokens.space8 : AbTokens.space4,
+          ),
+          child: Row(
+            children: [
+              AbIcon(AbIcons.deviceMobile, size: 14, color: p.accent),
+              const SizedBox(width: AbTokens.space8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sized by another device',
+                      overflow: TextOverflow.ellipsis,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        fontWeight: FontWeight.w600,
+                        color: p.textSecondary,
+                      ),
+                    ),
+                    if (roomy)
+                      Text(
+                        'The terminal is fitted to that screen. Take control '
+                        'to resize it to this window.',
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
+              const SizedBox(width: AbTokens.space8),
+              AbTooltip(
+                message:
+                    'Fit the shared terminal to this device. Other viewers will follow this size.',
+                child: AbButton(
+                  compact: !roomy,
+                  variant: AbButtonVariant.primary,
+                  label: busy ? 'Taking control…' : 'Take control',
+                  onTap: onTap,
+                ),
+              ),
+            ],
           ),
-          AbTooltip(
-            message:
-                'Fit the shared terminal to this device. Other viewers will follow this size.',
-            child: AbButton(
-              compact: true,
-              label: busy ? 'Taking control…' : 'Take control',
-              onTap: onTap,
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -2399,7 +2503,8 @@ class _TakeControlStrip extends StatelessWidget {
 /// is stable for [_settleDelay], the pinned size snaps to the new value and
 /// the child relayouts once.
 ///
-/// Both axes are pinned. Width is what soft-wrap and Ink-style redraws depend
+/// Both axes are pinned by default (`pinHeight: false` passes height through).
+/// Width is what soft-wrap and Ink-style redraws depend
 /// on, but a fullscreen TUI addresses rows absolutely, so a height that passes
 /// through live moves the local grid under a frame the guest composed against
 /// the old row count. The grid-centering concern (floor-rounded cell remainder
@@ -2422,10 +2527,15 @@ class _TerminalGridFreeze extends StatefulWidget {
   /// re-triggers it.
   final ValueChanged<Size>? onSettled;
 
+  /// Whether height is pinned along with width. False passes the live height
+  /// through, for a child that only re-wraps on a column change.
+  final bool pinHeight;
+
   const _TerminalGridFreeze({
     required this.child,
     this.onMoving,
     this.onSettled,
+    this.pinHeight = true,
   });
 
   @override
@@ -2458,10 +2568,10 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   /// movement. The guards below would then re-arm on every rebuild and restore
   /// the never-settles behaviour they exist to remove, with nothing visible to
   /// say why.
-  static bool _sameSize(Size? a, Size b) =>
+  bool _sameSize(Size? a, Size b) =>
       a != null &&
       (a.width - b.width).abs() < 0.5 &&
-      (a.height - b.height).abs() < 0.5;
+      (!widget.pinHeight || (a.height - b.height).abs() < 0.5);
 
   /// Notify the parent of the rendered size without mutating state during
   /// layout (the immediate pin happens inside `build`): defer to post-frame.
@@ -2538,8 +2648,8 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
           child: OverflowBox(
             minWidth: inner.width,
             maxWidth: inner.width,
-            minHeight: inner.height,
-            maxHeight: inner.height,
+            minHeight: widget.pinHeight ? inner.height : null,
+            maxHeight: widget.pinHeight ? inner.height : null,
             alignment: Alignment.topLeft,
             child: widget.child,
           ),

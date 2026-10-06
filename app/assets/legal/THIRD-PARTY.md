@@ -121,6 +121,15 @@ MIT, BSD, Apache-2.0, OFL and CC BY — are what the rest of this file discharge
 These matter most: what builds is not the upstream release, so the modified work
 and its licence and copyright notices have to be named explicitly.
 
+### macOS updater — vendored completion patch
+
+`packages/auto_updater_macos` vendors the macOS native implementation from
+`auto_updater_macos` 1.0.0 ([leanflutter/auto_updater](https://github.com/leanflutter/auto_updater)),
+copyright © 2022–2024 LiJianying, under MIT. Its upstream licence is retained
+in `packages/auto_updater_macos/LICENSE`. The local patch forwards Sparkle cycle
+completion through an app-owned method channel; see the package's `README.md`.
+The app selects it through `app/pubspec.yaml`'s dependency override.
+
 ### Terminal engine and PTY — forks resolved from git
 
 Three Dart packages from the `kingwill101/dart_terminal` monorepo are not taken

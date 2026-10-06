@@ -20,6 +20,7 @@ import '../screens/sign_in_screen.dart';
 import '../screens/upgrade_screen.dart';
 import '../billing/pricing_visibility.dart';
 import 'auth_status_pill.dart';
+import 'help_menu.dart';
 import 'sign_out_action.dart';
 
 /// Drawer-footer account affordance.
@@ -27,11 +28,24 @@ import 'sign_out_action.dart';
 /// Three render states:
 ///   - Loading or not signed in → "Sign in" CTA.
 ///   - `currentUserProvider` returns a user, email, tier pill, and account menu.
-class AccountFooter extends ConsumerWidget {
+class AccountFooter extends ConsumerStatefulWidget {
   const AccountFooter({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AccountFooter> createState() => _AccountFooterState();
+}
+
+class _AccountFooterState extends ConsumerState<AccountFooter> {
+  final _menuFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _menuFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final userAsync = ref.watch(currentUserProvider);
     final subscription = ref.watch(subscriptionProvider).value;
     ref.watch(pricingCatalogProvider);
@@ -47,6 +61,7 @@ class AccountFooter extends ConsumerWidget {
       ),
       child: Builder(
         builder: (rowCtx) => InkWell(
+          focusNode: _menuFocus,
           hoverColor: context.antgrid.bgElevated,
           onTap: () => _showMenu(
             rowCtx,
@@ -160,6 +175,7 @@ class AccountFooter extends ConsumerWidget {
           )
         : gearTopLeft & box.size;
     final menuWidth = useBounds ? bounds.width - 2 * pad : 200.0;
+    _menuFocus.requestFocus();
     final selected = await showAbMenu<_AccountMenu>(
       context: anchor,
       anchorRect: anchorRect,
@@ -173,6 +189,12 @@ class AccountFooter extends ConsumerWidget {
           value: _AccountMenu.settings,
           icon: AbIcons.settings,
           shortcut: shortcutLabel(AppCommand.openSettings),
+        ),
+        helpMenu(
+          context: context,
+          ref: ref,
+          shareOrigin: box.localToGlobal(Offset.zero) & box.size,
+          returnFocus: _menuFocus,
         ),
         if (showUpgrade)
           const AbMenuItem(

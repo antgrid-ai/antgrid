@@ -58,6 +58,13 @@ class _ToolCallCardState extends State<ToolCallCard> {
   // computeLineDiff is O(n·m) and the list rebuilds on every state emission;
   // cache per content object so an expanded card never re-diffs per frame.
   final _diffCache = <ToolContent, List<DiffLine>>{};
+  // Same lifetime and pruning as [_diffCache]. A settled block keeps its
+  // identity across state emissions, so an expanded card re-rendered by another
+  // item's stream reuses its split and its encode instead of redoing them every
+  // frame. JSON is keyed by label and hits only on the identical value.
+  final _terminalCache =
+      <ToolContent, ({bool showAll, int lineCount, bool truncated, String visible})>{};
+  final _jsonCache = <String, ({Object value, String pretty})>{};
 
   @override
   Widget build(BuildContext context) {
@@ -130,6 +137,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
     // that aren't in the current content list to bound the cache to live blocks.
     final live = item.content ?? const <ToolContent>[];
     _diffCache.removeWhere((block, _) => !live.contains(block));
+    _terminalCache.removeWhere((block, _) => !live.contains(block));
 
     var blockIndex = 0;
     SelectableBlock wrap(BlockSource Function() src, Widget child) =>
@@ -160,11 +168,13 @@ class _ToolCallCardState extends State<ToolCallCard> {
     for (final block in item.content ?? const <ToolContent>[]) {
       switch (block.type) {
         case 'terminal':
-          final data = block.data ?? '';
           // Source = the visible tail (recomputed at copy time, so expanding
           // "Show all" widens the copy too); the widget renders that same tail.
           children.add(
-            wrap(() => codeSource(_terminalVisible(data)), _terminal(data, c)),
+            wrap(
+              () => codeSource(_terminalTail(block).visible),
+              _terminal(block, c),
+            ),
           );
         case 'diff':
           children.add(
@@ -239,18 +249,27 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
   // Visible tail = exactly what the widget renders; drives both the on-screen
   // Text and the copy source so selection copy and the screen stay in lockstep.
-  String _terminalVisible(String data) {
+  ({bool showAll, int lineCount, bool truncated, String visible}) _terminalTail(
+    ToolContent block,
+  ) {
+    final hit = _terminalCache[block];
+    if (hit != null && hit.showAll == _showAllOutput) return hit;
+    final data = block.data ?? '';
     final lines = data.split('\n');
     final truncated = !_showAllOutput && lines.length > _kTerminalTailLines;
-    return (truncated
-            ? lines.sublist(lines.length - _kTerminalTailLines)
-            : lines)
-        .join('\n');
+    return _terminalCache[block] = (
+      showAll: _showAllOutput,
+      lineCount: lines.length,
+      truncated: truncated,
+      visible: truncated
+          ? lines.sublist(lines.length - _kTerminalTailLines).join('\n')
+          : data,
+    );
   }
 
-  Widget _terminal(String data, AbColors c) {
-    final lines = data.split('\n');
-    final truncated = !_showAllOutput && lines.length > _kTerminalTailLines;
+  Widget _terminal(ToolContent block, AbColors c) {
+    final tail = _terminalTail(block);
+    final truncated = tail.truncated;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -259,7 +278,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
             child: GestureDetector(
               onTap: () => setState(() => _showAllOutput = true),
               child: Text(
-                'Show all (${lines.length} lines)',
+                'Show all (${tail.lineCount} lines)',
                 style: AbTokens.monoStyle(
                   fontSize: AbTokens.fontXs,
                   color: c.accent,
@@ -270,7 +289,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Text(
-            _terminalVisible(data),
+            tail.visible,
             style: AbTokens.monoStyle(
               fontSize: AbTokens.fontSm,
               color: c.textSecondary,
@@ -339,19 +358,24 @@ class _ToolCallCardState extends State<ToolCallCard> {
     );
   }
 
-  String _prettyJson(Object value) {
+  String _prettyJson(String label, Object value) {
+    final hit = _jsonCache[label];
+    if (hit != null && identical(hit.value, value)) return hit.pretty;
+    String pretty;
     try {
-      return const JsonEncoder.withIndent('  ').convert(value);
+      pretty = const JsonEncoder.withIndent('  ').convert(value);
     } catch (_) {
-      return value.toString();
+      pretty = value.toString();
     }
+    _jsonCache[label] = (value: value, pretty: pretty);
+    return pretty;
   }
 
   // Visible (possibly clipped) JSON = what the widget renders; drives the copy
   // source so selection copy matches the screen. Reads _expandedJson so a
   // "Show all" expansion widens the copy at copy time.
   String _jsonVisible(String label, Object value) =>
-      _clipJson(label, _prettyJson(value));
+      _clipJson(label, _prettyJson(label, value));
 
   String _clipJson(String label, String pretty) {
     final clipped =
@@ -360,7 +384,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
   }
 
   Widget _json(String label, Object value, AbColors c) {
-    final pretty = _prettyJson(value);
+    final pretty = _prettyJson(label, value);
     final visible = _clipJson(label, pretty);
     final clipped = visible.length < pretty.length;
     return Column(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter, lerpDouble;
 
@@ -5,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ab_colors.dart';
+import '../ab_icons.dart';
 import '../ab_tokens.dart';
+import '../../utils/platform_utils.dart';
 import '../widgets/ab_chip.dart';
 import '../widgets/ab_icon.dart';
 import '../widgets/ab_toast.dart';
@@ -70,12 +73,61 @@ class AbMenuDivider extends AbMenuEntry {
   const AbMenuDivider();
 }
 
+/// A child menu opened within the same [showAbMenu] route.
+class AbMenuSubmenu extends AbMenuEntry {
+  const AbMenuSubmenu({
+    required this.label,
+    required this.entries,
+    this.icon,
+    this.width = 260,
+  });
+
+  final String label;
+  final String? icon;
+  final List<AbMenuEntry> entries;
+  final double width;
+}
+
+/// Metadata is readable without becoming a disabled keyboard stop.
+class AbMenuInfo extends AbMenuEntry {
+  const AbMenuInfo({required this.label, required this.value});
+
+  final String label;
+  final Widget value;
+}
+
+typedef _OpenSubmenu =
+    void Function(
+      AbMenuSubmenu entry,
+      BuildContext rowContext,
+      FocusNode focusNode,
+      bool focusChild,
+    );
+
 class AbMenu extends StatelessWidget {
-  const AbMenu({super.key, required this.items, this.header, this.width = 240});
+  const AbMenu({super.key, required this.items, this.header, this.width = 240})
+    : _openSubmenu = null,
+      _activeSubmenu = null,
+      _submenuFocus = null;
+
+  const AbMenu._branch({
+    super.key,
+    required this.items,
+    required this.width,
+    required _OpenSubmenu openSubmenu,
+    required Map<AbMenuSubmenu, FocusNode> submenuFocus,
+    AbMenuSubmenu? activeSubmenu,
+    this.header,
+  }) : _openSubmenu = openSubmenu,
+       _submenuFocus = submenuFocus,
+       _activeSubmenu = activeSubmenu;
 
   final String? header;
   final List<AbMenuEntry> items;
   final double width;
+  final _OpenSubmenu? _openSubmenu;
+  final AbMenuSubmenu? _activeSubmenu;
+  final Map<AbMenuSubmenu, FocusNode>? _submenuFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -118,6 +170,41 @@ class AbMenu extends StatelessWidget {
                         ),
                         height: 1,
                         color: p.borderSubtle,
+                      )
+                    else if (entry is AbMenuInfo)
+                      Padding(
+                        padding: _menuRowPadding,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                entry.label,
+                                style: AbTokens.sansStyle(
+                                  fontSize: AbTokens.fontSm,
+                                  color: p.textMuted,
+                                ),
+                              ),
+                            ),
+                            Flexible(child: entry.value),
+                          ],
+                        ),
+                      )
+                    else if (entry is AbMenuSubmenu)
+                      Builder(
+                        builder: (_) {
+                          final autofocus = !didAutofocus;
+                          didAutofocus = true;
+                          return _SubmenuTile(
+                            entry: entry,
+                            focusNode: _submenuFocus?.putIfAbsent(
+                              entry,
+                              FocusNode.new,
+                            ),
+                            open: _openSubmenu,
+                            expanded: identical(entry, _activeSubmenu),
+                            autofocus: autofocus,
+                          );
+                        },
                       )
                     else if (entry is AbMenuItem)
                       Builder(
@@ -432,7 +519,7 @@ enum AbMenuPlacement { below, above }
 ///
 /// Returns the [AbMenuItem.value] of the picked entry, or `null` if
 /// the user dismissed (tap-outside / Esc). Items may also carry an
-/// [AbMenuItem.onTap] which runs before the route pops; use `value`
+/// [AbMenuItem.onTap] which runs after the route pops; use `value`
 /// for return-style menus and `onTap` for fire-and-forget.
 ///
 /// Replacement for Material's `showMenu` — keeps the Antgrid chrome
@@ -707,14 +794,32 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
   final double width;
   final Rect? bounds;
 
-  // Wrapped lazily once per route so that animation rebuilds don't
-  // reallocate closures or lists. We can't wrap in the constructor
-  // because the wrapped onTap needs a navigator context that only
-  // exists once the route is installed — we resolve that via the
-  // route's own `navigator` getter.
+  @override
+  Widget buildModalBarrier() {
+    if (!entries.any((entry) => entry is AbMenuSubmenu)) {
+      return super.buildModalBarrier();
+    }
+    return ModalBarrier(
+      dismissible: true,
+      semanticsLabel: barrierLabel,
+      onDismiss: () => navigator?.pop<T?>(null),
+    );
+  }
+
+  // Wrapping waits for installation because the actions use the route's navigator.
   List<AbMenuEntry>? _cachedWrapped;
-  List<AbMenuEntry> get _wrappedEntries => _cachedWrapped ??= entries
+  List<AbMenuEntry> get _wrappedEntries => _cachedWrapped ??= _wrap(entries);
+
+  List<AbMenuEntry> _wrap(List<AbMenuEntry> source) => source
       .map<AbMenuEntry>((e) {
+        if (e is AbMenuSubmenu) {
+          return AbMenuSubmenu(
+            label: e.label,
+            icon: e.icon,
+            width: e.width,
+            entries: _wrap(e.entries),
+          );
+        }
         if (e is! AbMenuItem) return e;
         return AbMenuItem(
           key: e.key,
@@ -757,6 +862,23 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
+    if (entries.any((entry) => entry is AbMenuSubmenu)) {
+      return capturedThemes.wrap(
+        FadeTransition(
+          opacity: animation,
+          child: _AbSubmenuPopup(
+            entries: _wrappedEntries,
+            header: header,
+            width: width,
+            anchorRect: anchorRect,
+            preferred: preferred,
+            gap: gap,
+            bounds: bounds,
+            dismiss: () => navigator?.pop<T?>(null),
+          ),
+        ),
+      );
+    }
     final menu = AbMenu(header: header, width: width, items: _wrappedEntries);
     // Keyboard wiring on the route, not the menu widget:
     //   - Esc dismisses (DismissIntent → pop).
@@ -797,6 +919,374 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
       ),
     );
   }
+}
+
+class _SubmenuTile extends StatefulWidget {
+  const _SubmenuTile({
+    required this.entry,
+    required this.open,
+    required this.expanded,
+    required this.autofocus,
+    this.focusNode,
+  });
+
+  final AbMenuSubmenu entry;
+  final _OpenSubmenu? open;
+  final bool expanded;
+  final bool autofocus;
+  final FocusNode? focusNode;
+
+  @override
+  State<_SubmenuTile> createState() => _SubmenuTileState();
+}
+
+class _SubmenuTileState extends State<_SubmenuTile> {
+  final _fallbackFocus = FocusNode();
+  FocusNode get _focusNode => widget.focusNode ?? _fallbackFocus;
+  Timer? _hoverTimer;
+
+  void _open(bool focusChild) {
+    _hoverTimer?.cancel();
+    widget.open?.call(widget.entry, context, _focusNode, focusChild);
+  }
+
+  @override
+  void dispose() {
+    _hoverTimer?.cancel();
+    _fallbackFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      expanded: widget.expanded,
+      child: MouseRegion(
+        onEnter: (_) {
+          if (!isMobilePlatform) {
+            _hoverTimer = Timer(AbTokens.menuHoverOpen, () => _open(false));
+          }
+        },
+        onExit: (_) => _hoverTimer?.cancel(),
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+                _open(true),
+          },
+          child: _MenuItemTile(
+            focusNode: _focusNode,
+            autofocus: widget.autofocus,
+            item: AbMenuItem(
+              label: widget.entry.label,
+              icon: widget.entry.icon,
+              onTap: () => _open(true),
+            ),
+            trailing: AbIcon(
+              AbIcons.chevronRight,
+              size: _menuRowIconSize,
+              color: context.antgrid.textMuted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OpenMenu {
+  _OpenMenu({
+    required this.entry,
+    required this.rowRect,
+    required this.parentRect,
+    required this.parentFocus,
+  });
+
+  final AbMenuSubmenu entry;
+  final Rect rowRect;
+  final Rect parentRect;
+  final FocusNode parentFocus;
+  final key = GlobalKey();
+  final focusScope = FocusScopeNode();
+
+  void dispose() => focusScope.dispose();
+}
+
+class _AbSubmenuPopup extends StatefulWidget {
+  const _AbSubmenuPopup({
+    required this.entries,
+    required this.header,
+    required this.width,
+    required this.anchorRect,
+    required this.preferred,
+    required this.gap,
+    required this.bounds,
+    required this.dismiss,
+  });
+
+  final List<AbMenuEntry> entries;
+  final String? header;
+  final double width;
+  final Rect anchorRect;
+  final AbMenuPlacement preferred;
+  final double gap;
+  final Rect? bounds;
+  final VoidCallback dismiss;
+
+  @override
+  State<_AbSubmenuPopup> createState() => _AbSubmenuPopupState();
+}
+
+class _AbSubmenuPopupState extends State<_AbSubmenuPopup> {
+  final _rootKey = GlobalKey();
+  final _rootFocus = FocusScopeNode();
+  final _levels = <_OpenMenu>[];
+  final _submenuFocus = <AbMenuSubmenu, FocusNode>{};
+  Timer? _closeTimer;
+  bool _replacement = false;
+
+  Rect _rect(BuildContext context) {
+    final box = context.findRenderObject()! as RenderBox;
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    return box.localToGlobal(Offset.zero, ancestor: overlay) & box.size;
+  }
+
+  void _open(
+    int depth,
+    AbMenuSubmenu entry,
+    BuildContext row,
+    FocusNode focus,
+    bool focusChild,
+  ) {
+    _closeTimer?.cancel();
+    if (_levels.length > depth && identical(_levels[depth].entry, entry)) {
+      if (focusChild) _levels[depth].focusScope.requestFocus();
+      return;
+    }
+    final rowRect = _rect(row);
+    final panelContext =
+        (depth == 0 ? _rootKey : _levels[depth - 1].key).currentContext;
+    if (panelContext == null) return;
+    final parentRect = _rect(panelContext);
+    final safe = safeMenuBounds(context).deflate(AbTokens.space8);
+    final fitsRight = safe.right - parentRect.right >= entry.width + widget.gap;
+    final fitsLeft = parentRect.left - safe.left >= entry.width + widget.gap;
+    final level = _OpenMenu(
+      entry: entry,
+      rowRect: rowRect,
+      parentRect: parentRect,
+      parentFocus: focus,
+    );
+    setState(() {
+      while (_levels.length > depth) {
+        _levels.removeLast().dispose();
+      }
+      _replacement =
+          isMobilePlatform || _replacement || (!fitsRight && !fitsLeft);
+      _levels.add(level);
+    });
+    if (focusChild) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _levels.contains(level)) level.focusScope.requestFocus();
+      });
+    }
+  }
+
+  void _back() {
+    _closeTimer?.cancel();
+    if (_levels.isEmpty) {
+      widget.dismiss();
+      return;
+    }
+    final closed = _levels.last;
+    setState(() {
+      _levels.removeLast();
+      if (_levels.isEmpty) _replacement = false;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      closed.dispose();
+      if (!mounted) return;
+      closed.parentFocus.requestFocus();
+    });
+  }
+
+  void _scheduleClose() {
+    _closeTimer?.cancel();
+    if (isMobilePlatform || _replacement || _levels.isEmpty) return;
+    _closeTimer = Timer(AbTokens.menuHoverClose, () {
+      if (mounted && _levels.isNotEmpty) _back();
+    });
+  }
+
+  Widget _branch(
+    int depth,
+    List<AbMenuEntry> entries,
+    double width,
+    Key key,
+    FocusScopeNode scope, {
+    String? header,
+    bool back = false,
+  }) {
+    return MouseRegion(
+      onEnter: (_) => _closeTimer?.cancel(),
+      onExit: (_) => _scheduleClose(),
+      child: FocusScope(
+        node: scope,
+        child: SizedBox(
+          key: key,
+          width: width,
+          child: SingleChildScrollView(
+            child: AbMenu._branch(
+              key: ValueKey(depth),
+              header: header,
+              width: width,
+              items: [
+                if (back)
+                  AbMenuItem(label: 'Back', icon: AbIcons.back, onTap: _back),
+                ...entries,
+              ],
+              activeSubmenu: _levels.length > depth
+                  ? _levels[depth].entry
+                  : null,
+              openSubmenu: (entry, row, focus, focusChild) =>
+                  _open(depth, entry, row, focus, focusChild),
+              submenuFocus: _submenuFocus,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _closeTimer?.cancel();
+    for (final level in _levels) {
+      level.dispose();
+    }
+    _rootFocus.dispose();
+    for (final focus in _submenuFocus.values) {
+      focus.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final replacement = _replacement && _levels.isNotEmpty;
+    final last = replacement ? _levels.last : null;
+    return PopScope(
+      canPop: _levels.isEmpty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _back();
+      },
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _back,
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            if (_levels.isNotEmpty) _back();
+          },
+        },
+        child: Shortcuts(
+          shortcuts: const {
+            SingleActivator(LogicalKeyboardKey.arrowDown):
+                DirectionalFocusIntent(TraversalDirection.down),
+            SingleActivator(LogicalKeyboardKey.arrowUp): DirectionalFocusIntent(
+              TraversalDirection.up,
+            ),
+          },
+          child: Stack(
+            children: [
+              CustomSingleChildLayout(
+                delegate: _AbMenuLayoutDelegate(
+                  anchorRect: widget.anchorRect,
+                  preferred: widget.preferred,
+                  gap: widget.gap,
+                  bounds: _resolveMenuBounds(context, widget.bounds),
+                ),
+                child: _branch(
+                  replacement ? _levels.length : 0,
+                  last?.entry.entries ?? widget.entries,
+                  widget.width,
+                  last?.key ?? _rootKey,
+                  last?.focusScope ?? _rootFocus,
+                  header: last?.entry.label ?? widget.header,
+                  back: replacement,
+                ),
+              ),
+              if (!replacement)
+                for (var index = 0; index < _levels.length; index++)
+                  CustomSingleChildLayout(
+                    delegate: _AbFlyoutLayoutDelegate(
+                      parentRect: _levels[index].parentRect,
+                      rowRect: _levels[index].rowRect,
+                      width: _levels[index].entry.width,
+                      gap: widget.gap,
+                      bounds: safeMenuBounds(context),
+                    ),
+                    child: _branch(
+                      index + 1,
+                      _levels[index].entry.entries,
+                      _levels[index].entry.width,
+                      _levels[index].key,
+                      _levels[index].focusScope,
+                    ),
+                  ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AbFlyoutLayoutDelegate extends SingleChildLayoutDelegate {
+  const _AbFlyoutLayoutDelegate({
+    required this.parentRect,
+    required this.rowRect,
+    required this.width,
+    required this.gap,
+    required this.bounds,
+  });
+
+  final Rect parentRect;
+  final Rect rowRect;
+  final double width;
+  final double gap;
+  final Rect bounds;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints.loose(
+        Size(
+          math.min(width, bounds.width - AbTokens.space16),
+          math.max(0, bounds.height - AbTokens.space16),
+        ),
+      );
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final safe = bounds.deflate(AbTokens.space8);
+    final right = parentRect.right + gap;
+    final x = right + childSize.width <= safe.right
+        ? right
+        : parentRect.left - gap - childSize.width;
+    return Offset(
+      x.clamp(safe.left, math.max(safe.left, safe.right - childSize.width)),
+      rowRect.top.clamp(
+        safe.top,
+        math.max(safe.top, safe.bottom - childSize.height),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_AbFlyoutLayoutDelegate oldDelegate) =>
+      parentRect != oldDelegate.parentRect ||
+      rowRect != oldDelegate.rowRect ||
+      width != oldDelegate.width ||
+      gap != oldDelegate.gap ||
+      bounds != oldDelegate.bounds;
 }
 
 class _AbMenuLayoutDelegate extends SingleChildLayoutDelegate {
@@ -877,9 +1367,17 @@ class _AbMenuLayoutDelegate extends SingleChildLayoutDelegate {
 }
 
 class _MenuItemTile extends StatefulWidget {
-  const _MenuItemTile({super.key, required this.item, this.autofocus = false});
+  const _MenuItemTile({
+    super.key,
+    required this.item,
+    this.autofocus = false,
+    this.focusNode,
+    this.trailing,
+  });
   final AbMenuItem item;
   final bool autofocus;
+  final FocusNode? focusNode;
+  final Widget? trailing;
 
   @override
   State<_MenuItemTile> createState() => _MenuItemTileState();
@@ -920,6 +1418,7 @@ class _MenuItemTileState extends State<_MenuItemTile> {
         : (active ? p.textPrimary : p.textMuted);
     final tile = FocusableActionDetector(
       autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
       // Disabled rows keep hit-testing (so the reason can surface) but must not
       // promise a pick with the cursor — same split as AbSegmented's cells.
       mouseCursor: i.enabled
@@ -984,6 +1483,7 @@ class _MenuItemTileState extends State<_MenuItemTile> {
                     color: p.textMuted,
                   ),
                 ),
+              if (widget.trailing != null) widget.trailing!,
             ],
           ),
         ),

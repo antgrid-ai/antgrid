@@ -47,7 +47,8 @@ class _ProjectSessionBusChannel implements SessionBusChannel {
   final ProjectSession _session;
 
   @override
-  Stream<Map<String, dynamic>> get frames => _session.statusStream;
+  Stream<Map<String, dynamic>> get frames =>
+      _session.statusStream.map((f) => f.json);
 
   @override
   Future<void> send(Map<String, dynamic> message) => _session.send(message);

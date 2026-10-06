@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:in_app_update/in_app_update.dart';
 
 import '../util/external_url.dart';
 import 'github_release_update_service.dart';
@@ -10,230 +12,257 @@ import 'in_app_update_service.dart';
 import 'ios_app_store_update_service.dart';
 import 'macos_appcast_update_service.dart';
 import 'macos_sparkle_update_service.dart';
+import 'update_check_result.dart';
 import 'windows_store_update_service.dart';
 
-/// What one throttled update check concluded.
+// Policy outcomes are distinct from detection: manual checks never apply them.
 enum UpdateCheckOutcome {
-  /// Nothing to surface.
   none,
-
-  /// A newer version is waiting — light the drawer row
-  /// (`updateAvailableProvider`) and announce the first light-up.
   updateAvailable,
-
-  /// Like [updateAvailable], but the platform has ALREADY put its own
-  /// install UI on screen (Windows' auto-launched mandatory Store flow) —
-  /// light the row (the re-launch affordance after a cancel) without an
-  /// announcement toast stacking on top of the system dialog.
   updateAvailableQuiet,
-
-  /// Android only: a flexible Play update finished downloading — prompt for
-  /// a restart-to-install. The gate also lights the drawer row, whose tap
-  /// routes to the same [UpdateStrategy.install], so a missed prompt still
-  /// leaves a durable affordance.
+  startDownloadQuiet,
   restartReady,
 }
 
-/// What one accepted install attempt did.
-///
-/// Only Windows can report anything but [handedOff]: every other platform
-/// passes the update to a browser, to Sparkle, or to Play and learns nothing
-/// more about it.
 enum UpdateInstallResult {
-  /// The platform owns the update now — the Store is installing (and is about
-  /// to end this process), Sparkle's dialog is up, the releases page is open.
   handedOff,
-
-  /// Nothing was installed and the update is still pending. On Windows this is
-  /// the Store's entire "not completed" bucket — a declined consent dialog, a
-  /// low-battery or Wi-Fi refusal, a download still in flight — so it means
-  /// "offer it again", never "the user said no".
   notInstalled,
-
-  /// The pending set had already cleared when the install started.
   nothingPending,
-
-  /// The install route itself could not be reached — a Windows build with no
-  /// MSIX package identity, or a detected update with no link to open.
   unavailable,
 }
 
-/// One platform's complete update wiring: whether checks run in this build,
-/// how a check detects, and what accepting the update does.
-///
-/// This is THE per-platform table. `UpdateGate` (check cadence + outcome
-/// routing) and `UpdateRow` (the tap) both resolve [updateStrategyProvider],
-/// so a platform cannot light the row without also carrying an install
-/// route — detection, row copy, and install can only move in lockstep
-/// because they live on one object.
 abstract class UpdateStrategy {
-  /// Whether checks run at all in this build. Release-only wherever a dev
-  /// build can't be updated by its own store/feed — each subclass documents
-  /// its platform's reason.
   bool get active;
-
-  /// One-time startup hook, called before any check. Default: nothing.
   Future<void> prepare() async {}
+  Future<UpdateCheckResult> detect();
 
-  /// One update check. [rowAlreadyLit] lets a strategy skip network/IPC work
-  /// once the latched row can't change anything further. Never throws.
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit});
+  UpdateCheckOutcome automaticOutcome(UpdateCheckResult result) =>
+      switch (result.status) {
+        UpdateCheckStatus.available => UpdateCheckOutcome.updateAvailable,
+        UpdateCheckStatus.restartReady => UpdateCheckOutcome.restartReady,
+        _ => UpdateCheckOutcome.none,
+      };
 
-  /// The user accepted the affordance — the drawer row's tap, or Android's
-  /// restart-toast action. Never throws, surfaces its own UI, and tolerates
-  /// a repeat invocation by re-opening the flow.
+  bool get skipAutomaticWhenPending => true;
+  bool get skipAutomaticChecks => false;
+
+  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
+    if (skipAutomaticChecks || rowAlreadyLit && skipAutomaticWhenPending) {
+      return UpdateCheckOutcome.none;
+    }
+    return automaticOutcome(await detect());
+  }
+
   Future<UpdateInstallResult> install(BuildContext context);
-
-  /// Whether [install] ends this process: the app quits, everything it was
-  /// running quits with it, and coming back is the platform's business.
-  ///
-  /// Only the Windows Store hand-off does — an MSIX is replaced over a dead
-  /// app. Everywhere else [install] opens something (Sparkle's dialog, a
-  /// releases page, a store listing) or restarts in place with nothing of ours
-  /// to unwind first, so nothing there is worth a confirmation click.
   bool get installEndsSession => false;
-
-  /// Install progress in whole percent (0-100) while [install] runs, or null
-  /// where the platform reports none.
-  ///
-  /// Where it exists it is broadcast and unbuffered, and carries no terminal
-  /// emission — completion is [install]'s answer alone.
   Stream<int>? get installProgress => null;
-
-  /// The version [install] would move to, as last seen by [check], or null
-  /// when the source didn't name one. Null is common and means only
-  /// "unknown", so copy that names it needs a nameless fallback.
   String? get pendingVersion => null;
-
-  /// Emits when the platform's own flow proves nothing is installable after
-  /// all, so a row this strategy latched can go dark again. Null where the
-  /// platform never tells us.
-  ///
-  /// Detection and installation can be two different opinions: macOS reads the
-  /// appcast itself but Sparkle applies filters that reading doesn't (a
-  /// `minimumSystemVersion` above the running OS, a channel), and a row lit by
-  /// the first and refused by the second is an Update button that can never do
-  /// anything. Broadcast and unbuffered, like [installProgress].
   Stream<void>? get updateRetracted => null;
-
-  /// What an install on this platform cost the user, appended to the
-  /// post-update announcement. Null where it cost nothing worth reporting.
-  ///
-  /// Per-platform because the answer is: Windows and macOS both quit the app
-  /// to install, taking the local bridge and every agent with it. Linux only
-  /// opens a download page — whatever stopped the user's sessions there was
-  /// their own quit, possibly days earlier, and a launch that opens by
-  /// announcing it would be describing something that never happened.
+  Stream<UpdateCheckResult>? get statusChanges => null;
   String? get updatedNote => null;
-
-  /// Copy for the drawer row this strategy's outcomes light. The default
-  /// promises a download/store hand-off; a strategy whose [install] does
-  /// something stronger must say so (Play's restarts the app in place).
   String get rowTitle => 'Update available';
   String get rowActionLabel => 'Update';
-
-  /// Releases anything [prepare] attached to a process-global. Default:
-  /// nothing. Called when the container holding [updateStrategyProvider] goes.
+  String actionLabel(UpdateCheckResult result) => rowActionLabel;
   void dispose() {}
 }
 
-/// The cost line shared by every platform whose install quits the app.
 const kUpdateStoppedSessionsNote = 'Open project sessions were stopped.';
 
-/// Android: Google Play owns download and install; the app's only UI duty is
-/// the restart prompt for a flexible update that finished downloading.
-/// Active in every build mode — the Play path already degrades silently when
-/// the build didn't come from Play.
 class PlayUpdateStrategy extends UpdateStrategy {
   PlayUpdateStrategy({InAppUpdateService service = const InAppUpdateService()})
     : _service = service;
-
   final InAppUpdateService _service;
+  AppUpdateInfo? _info;
+  UpdateAction _action = UpdateAction.none;
+  UpdateAction _automaticAction = UpdateAction.none;
+  bool _flowRunning = false;
+  bool _downloaded = false;
+  final _changes = StreamController<UpdateCheckResult>.broadcast();
 
   @override
   bool get active => true;
+  @override
+  bool get skipAutomaticWhenPending => false;
+  @override
+  Stream<UpdateCheckResult> get statusChanges => _changes.stream;
+
+  UpdateCheckResult _result(UpdateCheckStatus status) => UpdateCheckResult(
+    status,
+    candidateId: _info?.availableVersionCode?.toString(),
+  );
 
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    final decision = await _service.checkAndStart();
-    return decision == UpdateDecision.flexibleReady
-        ? UpdateCheckOutcome.restartReady
-        : UpdateCheckOutcome.none;
+  Future<UpdateCheckResult> detect() async {
+    if (_flowRunning) return _result(UpdateCheckStatus.downloading);
+    try {
+      final info = await _service.check();
+      if (_flowRunning) return _result(UpdateCheckStatus.downloading);
+      _info = info;
+      _downloaded =
+          _downloaded || info.installStatus == InstallStatus.downloaded;
+      _automaticAction = decideUpdateAction(
+        available:
+            info.updateAvailability == UpdateAvailability.updateAvailable,
+        updateInProgress:
+            info.updateAvailability ==
+            UpdateAvailability.developerTriggeredUpdateInProgress,
+        downloaded: _downloaded,
+        updatePriority: info.updatePriority,
+        stalenessDays: info.clientVersionStalenessDays ?? 0,
+        immediateAllowed: info.immediateUpdateAllowed,
+        flexibleAllowed: info.flexibleUpdateAllowed,
+      );
+      _action = _automaticAction;
+      // An explicit update can use the only permitted flow even when the
+      // automatic priority policy would wait for a flexible flow.
+      if (_action == UpdateAction.none &&
+          info.updateAvailability == UpdateAvailability.updateAvailable &&
+          info.immediateUpdateAllowed) {
+        _action = UpdateAction.immediate;
+      }
+      if (_downloaded) return _result(UpdateCheckStatus.restartReady);
+      if (info.installStatus == InstallStatus.pending ||
+          info.installStatus == InstallStatus.downloading ||
+          info.installStatus == InstallStatus.installing) {
+        // Play requires resuming interrupted immediate flows; a flexible
+        // download already owned by Play must not be started a second time.
+        if (_action != UpdateAction.resumeImmediate) {
+          return _result(UpdateCheckStatus.downloading);
+        }
+      }
+      if (_action != UpdateAction.none) {
+        return _result(UpdateCheckStatus.available);
+      }
+      if (info.updateAvailability == UpdateAvailability.updateNotAvailable) {
+        return UpdateCheckResult.upToDate;
+      }
+      if (info.updateAvailability == UpdateAvailability.unknown) {
+        return UpdateCheckResult.failed;
+      }
+      return const UpdateCheckResult(
+        UpdateCheckStatus.unsupported,
+        message:
+            'Google Play cannot offer an update flow for this build or device.',
+      );
+    } on MissingPluginException {
+      return UpdateCheckResult.unsupported;
+    } on PlatformException catch (e) {
+      // Play install error -10 is APP_NOT_OWNED (sideloaded/dev builds).
+      if (e.message?.contains('(-10)') ?? false) {
+        return UpdateCheckResult.unsupported;
+      }
+      return UpdateCheckResult.failed;
+    } catch (_) {
+      return UpdateCheckResult.failed;
+    }
   }
+
+  @override
+  UpdateCheckOutcome automaticOutcome(UpdateCheckResult result) =>
+      result.status == UpdateCheckStatus.available
+      ? _automaticAction == UpdateAction.none
+            ? UpdateCheckOutcome.none
+            : UpdateCheckOutcome.startDownloadQuiet
+      : super.automaticOutcome(result);
 
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {
-    await _service.completeFlexibleUpdate();
-    return UpdateInstallResult.handedOff;
+    if (_flowRunning) return UpdateInstallResult.notInstalled;
+    if (_downloaded) {
+      await _service.completeFlexibleUpdate();
+      return UpdateInstallResult.handedOff;
+    }
+    final action = _action;
+    if (action == UpdateAction.none ||
+        action == UpdateAction.completeFlexible) {
+      return UpdateInstallResult.unavailable;
+    }
+    _flowRunning = true;
+    _changes.add(_result(UpdateCheckStatus.downloading));
+    try {
+      final result = await _service.start(action);
+      if (result != AppUpdateResult.success) {
+        _changes.add(_result(UpdateCheckStatus.available));
+        return UpdateInstallResult.notInstalled;
+      }
+      if (action == UpdateAction.flexible) {
+        _downloaded = true;
+        _action = UpdateAction.completeFlexible;
+        _changes.add(_result(UpdateCheckStatus.restartReady));
+      }
+      return UpdateInstallResult.handedOff;
+    } catch (_) {
+      _changes.add(_result(UpdateCheckStatus.available));
+      return UpdateInstallResult.unavailable;
+    } finally {
+      _flowRunning = false;
+    }
   }
 
-  // The only outcome that lights the row here is a DOWNLOADED update, and
-  // completeFlexibleUpdate restarts the app immediately — 'Update' would
-  // promise less than the tap performs mid-session.
   @override
-  String get rowTitle => 'Update ready';
+  String get rowTitle => _downloaded ? 'Update ready' : 'Update available';
   @override
-  String get rowActionLabel => 'Restart';
+  String get rowActionLabel => _downloaded ? 'Restart' : 'Update';
+  @override
+  String actionLabel(UpdateCheckResult result) =>
+      result.status == UpdateCheckStatus.restartReady ? 'Restart' : 'Update';
+  @override
+  void dispose() => unawaited(_changes.close());
 }
 
-/// Windows: the Microsoft Store detects and installs. Release-only — a build
-/// without MSIX package identity just churns store_unavailable errors on
-/// every check.
 class WindowsStoreStrategy extends UpdateStrategy {
   WindowsStoreStrategy({
     WindowsStoreUpdateService service = const WindowsStoreUpdateService(),
   }) : _service = service;
-
   final WindowsStoreUpdateService _service;
-
-  /// At most one auto-launched mandatory flow per process: the update stays
-  /// mandatory until installed, so without the latch every ≥30-min refocus
-  /// would re-pop the system dialog the user just cancelled. Lives here —
-  /// provider-held, outliving any widget — so a gate remount can't reset it.
   bool _mandatoryAutoLaunched = false;
-
+  bool _mandatory = false;
   String? _pendingVersion;
-
   @override
   bool get active => kReleaseMode;
-
+  @override
+  bool get skipAutomaticWhenPending => _mandatoryAutoLaunched;
+  @override
+  bool get skipAutomaticChecks => _mandatoryAutoLaunched;
   @override
   bool get installEndsSession => true;
-
   @override
   Stream<int> get installProgress => _service.downloadProgress;
-
   @override
   String? get pendingVersion => _pendingVersion;
 
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    // Once the mandatory flow has auto-launched, the row is lit and the
-    // latch is spent — nothing a further check finds can change anything, so
-    // skip the Store round-trip (an out-of-process licensing-service call).
-    // While only an OPTIONAL update is pending we keep checking: a later
-    // check may see it escalate to mandatory and auto-launch.
-    if (_mandatoryAutoLaunched) return UpdateCheckOutcome.none;
+  Future<UpdateCheckResult> detect() async {
     final status = await _service.checkForUpdates();
-    final check = status.check;
-    if (check == StoreUpdateCheck.none) {
-      // Nothing pending any more, so the name of what WAS pending is a lie the
-      // confirm dialog would otherwise still render.
-      _pendingVersion = null;
-      return UpdateCheckOutcome.none;
+    switch (status.check) {
+      case StoreUpdateCheck.failed:
+        return UpdateCheckResult.failed;
+      case StoreUpdateCheck.unsupported:
+        return UpdateCheckResult.unsupported;
+      case StoreUpdateCheck.none:
+        _pendingVersion = null;
+        _mandatory = false;
+        return UpdateCheckResult.upToDate;
+      case StoreUpdateCheck.optional:
+      case StoreUpdateCheck.mandatory:
+        _pendingVersion = status.version;
+        _mandatory = status.check == StoreUpdateCheck.mandatory;
+        return UpdateCheckResult(
+          UpdateCheckStatus.available,
+          version: status.version,
+          candidateId: status.version,
+        );
     }
-    _pendingVersion = status.version;
-    if (check == StoreUpdateCheck.mandatory) {
-      // Partner Center marked the release mandatory — hand straight off
-      // instead of waiting for a click. The hand-off is the GATE's to make,
-      // not ours: an install started from here would skip the drain, and
-      // killing the bridge by MSIX replacement rather than shutting it down
-      // is the exact failure this whole sequence exists to prevent. Quiet
-      // means "install without asking", not "install behind the controller".
+  }
+
+  @override
+  UpdateCheckOutcome automaticOutcome(UpdateCheckResult result) {
+    if (_mandatoryAutoLaunched) return UpdateCheckOutcome.none;
+    if (result.status == UpdateCheckStatus.available && _mandatory) {
       _mandatoryAutoLaunched = true;
       return UpdateCheckOutcome.updateAvailableQuiet;
     }
-    return UpdateCheckOutcome.updateAvailable;
+    return super.automaticOutcome(result);
   }
 
   @override
@@ -244,105 +273,121 @@ class WindowsStoreStrategy extends UpdateStrategy {
         StoreInstallOutcome.none => UpdateInstallResult.nothingPending,
         StoreInstallOutcome.unavailable => UpdateInstallResult.unavailable,
       };
-
-  // The tap here CLOSES the app — an MSIX is replaced over a dead process, and
-  // we drain the bridge before handing off. 'Update' hides the one part of it
-  // the user cannot take back.
   @override
   String get rowActionLabel => 'Install & restart';
-
   @override
   String? get updatedNote => kUpdateStoppedSessionsNote;
 }
 
-/// macOS: detection and install read the SAME appcast, but not with the same
-/// rules — Sparkle applies filters our own read does not, so a lit row is a
-/// claim Sparkle can still refuse, and [updateRetracted] is how it takes it
-/// back. Install is Sparkle's own dialog (download, verify, install,
-/// relaunch).
-///
-/// Release-only: neither Sparkle nor a GitHub release can update an
-/// unpackaged `flutter run` bundle.
 class MacosSparkleStrategy extends UpdateStrategy {
   MacosSparkleStrategy({
     MacosSparkleUpdateService? sparkle,
     MacosAppcastUpdateService? appcast,
   }) : _sparkle = sparkle ?? MacosSparkleUpdateService(),
        _appcast = appcast ?? MacosAppcastUpdateService();
-
   final MacosSparkleUpdateService _sparkle;
   final MacosAppcastUpdateService _appcast;
-
+  UpdateCheckResult? _candidate;
+  String? _installingCandidate;
+  final _rejected = <String>{};
+  StreamSubscription<void>? _retraction;
+  @override
+  Stream<UpdateCheckResult> get statusChanges =>
+      _sparkle.flowChanges.map((running) {
+        if (running) {
+          return UpdateCheckResult(
+            UpdateCheckStatus.downloading,
+            version: _candidate?.version,
+            candidateId: _installingCandidate,
+          );
+        }
+        if (_rejected.contains(_installingCandidate)) {
+          return const UpdateCheckResult(
+            UpdateCheckStatus.unsupported,
+            message: 'Sparkle cannot install this update on this Mac.',
+          );
+        }
+        return _candidate ?? UpdateCheckResult.failed;
+      });
   @override
   bool get active => kReleaseMode;
-
-  /// Sparkle needs the feed URL before [install] can start; this local call
-  /// completes long before the first check's network round-trip can light
-  /// the row.
   @override
-  Future<void> prepare() => _sparkle.configureFeed();
+  Future<void> prepare() async {
+    _retraction ??= _sparkle.noUpdateFound.listen((_) {
+      final id = _installingCandidate;
+      if (id != null) _rejected.add(id);
+    });
+    await _sparkle.configureFeed();
+  }
 
-  /// Sparkle quits the app to install and relaunches it — the same cost as the
-  /// Windows Store, reached without a confirm dialog because Sparkle runs its
-  /// own and `didRequestAppExit` drains the host on the way out.
+  @override
+  String? get pendingVersion => _candidate?.version;
   @override
   String? get updatedNote => kUpdateStoppedSessionsNote;
-
   @override
   Stream<void> get updateRetracted => _sparkle.noUpdateFound;
-
-  /// `prepare()` registers this strategy's service with the process-global
-  /// `autoUpdater`, which never releases a listener on its own.
   @override
-  void dispose() => _sparkle.dispose();
-
-  @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    // The row latches for the process lifetime — once lit a further check
-    // can't change anything, so skip the fetch.
-    if (rowAlreadyLit) return UpdateCheckOutcome.none;
-    return await _appcast.isUpdateAvailable()
-        ? UpdateCheckOutcome.updateAvailable
-        : UpdateCheckOutcome.none;
+  Future<UpdateCheckResult> detect() async {
+    if (_sparkle.flowRunning) {
+      return UpdateCheckResult(
+        UpdateCheckStatus.downloading,
+        version: _candidate?.version,
+        candidateId: _installingCandidate,
+      );
+    }
+    final result = await _appcast.check();
+    if (_sparkle.flowRunning) {
+      return UpdateCheckResult(
+        UpdateCheckStatus.downloading,
+        version: _candidate?.version,
+        candidateId: _installingCandidate,
+      );
+    }
+    if (result.actionable && _rejected.contains(result.candidateId)) {
+      return UpdateCheckResult(
+        UpdateCheckStatus.unsupported,
+        candidateId: result.candidateId,
+        message: 'Sparkle cannot install this update on this Mac.',
+      );
+    }
+    if (result.actionable) _candidate = result;
+    return result;
   }
 
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {
-    // Re-assert the feed first: prepare() is fire-and-forget at startup and
-    // swallows failures, and a feed-less Sparkle errors (silently) on every
-    // startUpdate — this idempotent local call un-deadens the row's tap.
+    if (_sparkle.flowRunning) return UpdateInstallResult.notInstalled;
+    _installingCandidate = _candidate?.candidateId;
     await _sparkle.configureFeed();
     await _sparkle.startUpdate();
     return UpdateInstallResult.handedOff;
   }
+
+  @override
+  void dispose() {
+    unawaited(_retraction?.cancel());
+    _sparkle.dispose();
+  }
 }
 
-/// Linux: GitHub-release detection; install opens the releases page in the
-/// browser — replacing an AppImage is a manual step, and the page carries
-/// the per-asset install notes. Unlike macOS there is no second document to
-/// drift from: the row points at the very page it detected.
-///
-/// Release-only: a dev build always trails the released tag, so the row
-/// would light forever.
 class LinuxBrowserStrategy extends UpdateStrategy {
   LinuxBrowserStrategy({GithubReleaseUpdateService? releases})
     : _releases = releases ?? GithubReleaseUpdateService();
-
   final GithubReleaseUpdateService _releases;
-
+  String? _version;
   @override
   bool get active => kReleaseMode;
-
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    // Skipping a lit row's re-check also stops burning the shared anonymous
-    // GitHub API quota (60 req/hr per source IP).
-    if (rowAlreadyLit) return UpdateCheckOutcome.none;
-    return await _releases.isUpdateAvailable()
-        ? UpdateCheckOutcome.updateAvailable
-        : UpdateCheckOutcome.none;
+  String? get pendingVersion => _version;
+  @override
+  Future<UpdateCheckResult> detect() async {
+    final result = await _releases.check();
+    if (result.actionable) _version = result.version;
+    return result;
   }
 
+  @override
+  String actionLabel(UpdateCheckResult result) => 'Open download page';
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {
     await openExternalUrl(
@@ -353,49 +398,35 @@ class LinuxBrowserStrategy extends UpdateStrategy {
   }
 }
 
-/// iOS: iTunes-lookup detection; install opens the App Store listing (iOS
-/// apps cannot self-update). Release-only — only an App Store install can be
-/// updated by the store, so a dev build would light the row against a
-/// published listing it didn't come from.
 class IosAppStoreStrategy extends UpdateStrategy {
   IosAppStoreStrategy({IosAppStoreUpdateService? service})
     : _service = service ?? IosAppStoreUpdateService();
-
   final IosAppStoreUpdateService _service;
-
+  String? _version;
   @override
   bool get active => kReleaseMode;
-
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    // Same latch skip as the GitHub strategies — once the row is lit the
-    // lookup round-trip can't change anything.
-    if (rowAlreadyLit) return UpdateCheckOutcome.none;
-    return await _service.isUpdateAvailable()
-        ? UpdateCheckOutcome.updateAvailable
-        : UpdateCheckOutcome.none;
+  String? get pendingVersion => _version;
+  @override
+  Future<UpdateCheckResult> detect() async {
+    final result = await _service.check();
+    if (result.actionable) _version = result.version;
+    return result;
   }
 
   @override
+  String actionLabel(UpdateCheckResult result) => 'Open App Store';
+  @override
   Future<UpdateInstallResult> install(BuildContext context) async {
-    // Cached by this same instance's check that lit the row, so it's
-    // non-null on every reachable path here.
     final url = _service.listingUrl;
-    assert(url != null, 'iOS update row lit without a store listing URL');
     if (url == null) return UpdateInstallResult.unavailable;
     await openExternalUrl(context, url);
     return UpdateInstallResult.handedOff;
   }
 }
 
-/// The running platform's update wiring, or null where none exists. One
-/// instance per app: strategies carry cross-call state (Windows' mandatory
-/// launch latch, iOS' cached listing URL), so `UpdateGate`'s check and
-/// `UpdateRow`'s tap must land on the same object.
-///
-/// The switch is exhaustive over [TargetPlatform] on purpose — a new
-/// platform is a compile error here, not a silently dead update path.
 final updateStrategyProvider = Provider<UpdateStrategy?>((ref) {
+  if (kIsWeb) return null;
   final strategy = switch (defaultTargetPlatform) {
     TargetPlatform.android => PlayUpdateStrategy(),
     TargetPlatform.windows => WindowsStoreStrategy(),

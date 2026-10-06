@@ -1,15 +1,19 @@
+import 'dart:async' show TimeoutException;
 import 'dart:io' show InternetAddress;
 
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../design/widgets/ab_toast.dart';
+import '../models/file_tree_models.dart' show FileResolvePathResultMessage;
 import '../models/workspace_view.dart';
 import '../services/file_service.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/preview_service.dart';
 import '../widgets/attachment_preview_dialog.dart';
 import '../widgets/terminal_hyperlink_sheet.dart';
 import 'ab_log.dart';
+import 'terminal_links.dart';
 
 /// Longest URL echoed back to the user or written to `app.log`.
 ///
@@ -95,8 +99,7 @@ Uri? openableTerminalHyperlink(String uri) {
 /// make, and a caller that has no readout must not inherit one by omission.
 ///
 /// [open] and [confirm] are injectable so tests can assert what would be
-/// launched instead of handing a URL to the real browser, matching
-/// `HelpAboutSection.openUrl`.
+/// launched instead of handing a URL to the real browser.
 Future<void> openTerminalHyperlink(
   BuildContext context,
   String uri, {
@@ -178,7 +181,7 @@ bool isLocalDevHost(String host) {
 /// Opens a link found in ANY app surface that renders untrusted content —
 /// terminal OSC 8 hyperlinks, a markdown-previewed file, or markdown inside
 /// an agent chat message. Every surface routes through this one function so
-/// the three destinations agree everywhere the app shows a link:
+/// the destinations agree everywhere the app shows a link:
 ///
 ///  * `file://...` → the Files tab, resolved via [fileService] against
 ///    whichever checkout the caller means (never assumed here).
@@ -189,6 +192,21 @@ bool isLocalDevHost(String host) {
 ///  * anything else (a search result, a docs site, a GitHub PR) → the
 ///    system browser, through [openTerminalHyperlink]'s existing scheme and
 ///    deceptive-link checks.
+///
+/// [terminalId] is the terminal the link was activated in, and only a terminal
+/// surface passes one. It unlocks the bridge-minted `antgrid-path:` and
+/// `antgrid-url:` links (see `terminal_links.dart`): a path link resolves
+/// against that terminal's working directories, and a detected URL takes the
+/// `http(s)` routes above with its wrapper removed. Every other caller leaves
+/// it null, so those schemes fall through to [openTerminalHyperlink]'s refusal
+/// — markdown and web content must not reach routes meant for the terminal.
+///
+/// [focusedTarget] reports which session the user is looking at, for surfaces
+/// whose [fileService] is bound to something other than focus (a terminal's
+/// own checkout). A path lookup that completes after the user moved on is
+/// dropped when either this or [fileService] has changed since the tap:
+/// selecting the file in the old checkout while revealing the new session's
+/// Files tab would show the wrong session an unrelated selection.
 ///
 /// [fileService] and [previewService] are resolved LAZILY, and re-invoked on
 /// every retry rather than captured once: this awaits user dialogs, and the
@@ -204,10 +222,33 @@ Future<void> openContentLink(
   required PreviewService? Function() previewService,
   required void Function(WorkspaceView) revealView,
   bool disclosed = false,
+  String? terminalId,
+  Object? Function()? focusedTarget,
 }) async {
-  final parsed = Uri.tryParse(uri.trim());
-  if (parsed?.scheme == 'file') {
-    await _openFileLink(context, uri, fileService, revealView);
+  if (terminalId != null && uri.startsWith(kPrintedPathLinkScheme)) {
+    final link = parsePrintedPathLink(uri);
+    if (link == null) {
+      if (context.mounted) showAbToast(context, 'Could not open that link.');
+      return;
+    }
+    await _openPrintedPathLink(
+      context,
+      link,
+      terminalId,
+      fileService,
+      revealView,
+      focusedTarget,
+    );
+    return;
+  }
+  final inner = terminalId == null ? null : detectedUrlTarget(uri);
+  final target = inner ?? uri;
+  final parsed = Uri.tryParse(target.trim());
+  // Only a link that arrived as itself may take the `file:` route: a detected
+  // URL is http(s) by construction, so anything else inside the wrapper goes
+  // to the scheme refusal below instead.
+  if (inner == null && parsed?.scheme == 'file') {
+    await _openFileLink(context, uri, fileService, revealView, focusedTarget);
     return;
   }
   if (parsed != null &&
@@ -216,8 +257,76 @@ Future<void> openContentLink(
     await _openPreviewLink(context, parsed, previewService, revealView);
     return;
   }
-  await openTerminalHyperlink(context, uri, disclosed: disclosed);
+  await openTerminalHyperlink(context, target, disclosed: disclosed);
 }
+
+/// Opens a path a bridge-detected terminal link named. The bridge resolves it
+/// against the one base it matched at detection, so the file opened is the one
+/// the link was minted for.
+Future<void> _openPrintedPathLink(
+  BuildContext context,
+  PrintedPathLink link,
+  String terminalId,
+  FileService? Function() fileService,
+  void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
+) => _resolveAndShow(
+  context,
+  fileService,
+  revealView,
+  focusedTarget,
+  link.line,
+  'open path link failed',
+  (service) => service.resolveTerminalPath(
+    link.path,
+    terminalId: terminalId,
+    base: link.base,
+  ),
+);
+
+/// The tap-to-open flow both link kinds share: look the service up, resolve,
+/// drop the answer if the screen moved on, then act on it.
+Future<void> _resolveAndShow(
+  BuildContext context,
+  FileService? Function() fileService,
+  void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
+  int? line,
+  String logMessage,
+  Future<FileResolvePathResultMessage> Function(FileService) resolve,
+) async {
+  try {
+    final service = fileService();
+    if (service == null) {
+      if (context.mounted) {
+        showAbToast(context, "Can't open that path right now.");
+      }
+      return;
+    }
+    final target = focusedTarget?.call();
+    final result = await resolve(service);
+    if (!context.mounted ||
+        !_stillWanted(service, fileService, target, focusedTarget)) {
+      return;
+    }
+    await _showResolvedPath(context, service, result, line, revealView);
+  } on TimeoutException {
+    if (context.mounted) showAbToast(context, _unreachableMessage);
+  } on SessionDownException {
+    // The terminal keeps its last frame while the session is down, so detected
+    // links stay clickable exactly when this fires.
+    if (context.mounted) showAbToast(context, _unreachableMessage);
+  } catch (error, stack) {
+    AbLog.error(
+      'ContentLink',
+      logMessage,
+      fields: {'error': '$error', 'stack': '$stack'},
+    );
+  }
+}
+
+const String _unreachableMessage =
+    "Couldn't reach the machine to open that path.";
 
 /// Opens a path a `file://` link named in the Files tab. See
 /// [FileService.resolveTerminalPath] for why only the bridge can relativize
@@ -234,45 +343,97 @@ Future<void> _openFileLink(
   String rawUri,
   FileService? Function() fileService,
   void Function(WorkspaceView) revealView,
+  Object? Function()? focusedTarget,
 ) async {
+  final String? path;
   try {
-    final path = terminalFilePath(rawUri);
-    if (path == null) {
-      if (context.mounted) showAbToast(context, 'Could not open that link.');
-      return;
-    }
-    final service = fileService();
-    if (service == null) return;
-    final result = await service.resolveTerminalPath(path);
-    if (!context.mounted) return;
-    final relPath = result.relPath;
-    if (relPath == null) {
-      final externalImagePath = result.externalImagePath;
-      if (externalImagePath == null) {
-        showAbToast(context, 'That path is outside this workspace.');
-        return;
-      }
-      await showFilePreviewDialog(
-        context,
-        service,
-        path: externalImagePath,
-        displayName: _fileNameOf(externalImagePath),
-      );
-      return;
-    }
-    revealView(WorkspaceView.files);
-    if (result.isDirectory) {
-      await service.revealDirectory(relPath);
-    } else {
-      service.selectFile(relPath);
-    }
+    path = terminalFilePath(rawUri);
   } catch (error, stack) {
     AbLog.error(
       'ContentLink',
       'open file link failed',
       fields: {'error': '$error', 'stack': '$stack'},
     );
+    return;
   }
+  if (path == null) {
+    if (context.mounted) showAbToast(context, 'Could not open that link.');
+    return;
+  }
+  final filePath = path;
+  await _resolveAndShow(
+    context,
+    fileService,
+    revealView,
+    focusedTarget,
+    null,
+    'open file link failed',
+    (service) => service.resolveTerminalPath(filePath),
+  );
+}
+
+/// Whether a path lookup that just completed still belongs to what is on
+/// screen. [service] and [target] are what the tap started from. Callers
+/// check `context.mounted` first, so [focusedTarget] never reads a dead ref.
+bool _stillWanted(
+  FileService service,
+  FileService? Function() fileService,
+  Object? target,
+  Object? Function()? focusedTarget,
+) {
+  if (!identical(fileService(), service)) return false;
+  return focusedTarget == null || focusedTarget() == target;
+}
+
+/// Acts on the bridge's answer to a path lookup. The order tells apart four
+/// failures a user needs told apart: a path inside the workspace that has
+/// since gone, one the bridge could not find or refused, one that exists but
+/// lies outside the workspace, and one the bridge ran out of time checking.
+///
+/// [FileResolvePathResultMessage.exists] is null from an older bridge, which
+/// reads as present so such a bridge behaves as it always did. A timed-out
+/// answer's `exists:false` is not a verdict, so an inside path still opens and
+/// the file view reports a real absence.
+Future<void> _showResolvedPath(
+  BuildContext context,
+  FileService service,
+  FileResolvePathResultMessage result,
+  int? line,
+  void Function(WorkspaceView) revealView,
+) async {
+  final relPath = result.relPath;
+  if (relPath != null) {
+    if (result.exists == false && !result.timedOut) {
+      showAbToast(context, 'That path no longer exists.');
+      return;
+    }
+    revealView(WorkspaceView.files);
+    if (result.isDirectory) {
+      await service.revealDirectory(relPath);
+    } else {
+      service.selectFile(relPath, searchLine: line);
+    }
+    return;
+  }
+  final externalImagePath = result.externalImagePath;
+  if (externalImagePath != null) {
+    await showFilePreviewDialog(
+      context,
+      service,
+      path: externalImagePath,
+      displayName: _fileNameOf(externalImagePath),
+    );
+    return;
+  }
+  if (result.timedOut) {
+    showAbToast(context, "Couldn't check that path in time. Try again.");
+    return;
+  }
+  if (result.exists == false) {
+    showAbToast(context, "Couldn't find that path.");
+    return;
+  }
+  showAbToast(context, 'That path is outside this workspace.');
 }
 
 /// The last path segment of [path], tolerating either separator convention.

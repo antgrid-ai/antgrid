@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
+import '../connection/supervisor_state.dart';
 import '../util/ab_log.dart';
 
 final _pathLike = RegExp(r'([a-zA-Z]:)?[\\/][^\s"]+');
@@ -101,9 +102,10 @@ SentryStackTrace _scrubStackTrace(SentryStackTrace st) =>
 /// carry user source/project paths: structured `contexts` and `debugMeta` are
 /// device/OS/binary metadata; `user` and `request.response` are not
 /// auto-populated because `sendDefaultPii = false`; `tags`/`release`/
-/// `environment` are app constants we control. Revisit this list if the SDK
-/// adds a new content field, or if we start populating tags/contexts with
-/// project data.
+/// `environment` are app constants we control (connection-block tags are enum
+/// names and identifier-shaped failure codes, see [reportableFailureCode]).
+/// Revisit this list if the SDK adds a new content field, or if we start
+/// populating tags/contexts with project data.
 SentryEvent? scrubCrashEvent(SentryEvent event) {
   final message = event.message;
   if (message != null) {
@@ -239,4 +241,121 @@ Future<void> initCrashReporting({
       return breadcrumb;
     };
   }, appRunner: runApp);
+}
+
+// Identifier-shaped only. Most codes are transport literals, but auth codes
+// arrive off the relay wire, so the shape — not the call site — is what
+// guarantees nothing but a fixed constant leaves the device.
+final _failureCodeShape = RegExp(r'^[A-Z][A-Z0-9_]{0,63}$');
+
+@visibleForTesting
+String reportableFailureCode(String? code) {
+  if (code == null) return 'NONE';
+  return _failureCodeShape.hasMatch(code) ? code : 'UNRECOGNIZED';
+}
+
+/// Whether a block strands the user badly enough to warrant an event, not just
+/// a breadcrumb. Exhaustive on purpose: a new [BlockReason] must decide.
+@visibleForTesting
+bool capturesConnectionBlock(BlockReason reason) => switch (reason) {
+  // Clear only on an explicit retry(); nothing heals them on its own.
+  BlockReason.peerRejected ||
+  BlockReason.handshakeFailing ||
+  BlockReason.deviceRevoked => true,
+  // Heals on the next token mint, and is a subscription state, not a defect.
+  BlockReason.licenseExpired => false,
+};
+
+/// Where connection-block telemetry goes. A seam so tests can see exactly what
+/// would be sent without a live Sentry.
+abstract interface class ConnectionBlockSink {
+  void addBreadcrumb(Breadcrumb breadcrumb);
+  void captureWarning(
+    String message, {
+    required Map<String, String> tags,
+    required List<String> fingerprint,
+  });
+}
+
+class _SentryConnectionBlockSink implements ConnectionBlockSink {
+  const _SentryConnectionBlockSink();
+
+  // Through Sentry.addBreadcrumb, never a native API: beforeBreadcrumb runs
+  // there, before NativeScopeObserver mirrors the crumb into sentry-native.
+  @override
+  void addBreadcrumb(Breadcrumb breadcrumb) {
+    if (!Sentry.isEnabled) return;
+    Sentry.addBreadcrumb(breadcrumb).ignore();
+  }
+
+  @override
+  void captureWarning(
+    String message, {
+    required Map<String, String> tags,
+    required List<String> fingerprint,
+  }) {
+    if (!Sentry.isEnabled) return;
+    Sentry.captureMessage(
+      message,
+      level: SentryLevel.warning,
+      withScope: (scope) async {
+        scope.fingerprint = fingerprint;
+        for (final tag in tags.entries) {
+          await scope.setTag(tag.key, tag.value);
+        }
+      },
+    ).ignore();
+  }
+}
+
+/// Reports machine-connection blocks: a breadcrumb for every one, and one
+/// warning event per (reason, code) per process for the blocks that strand the
+/// user, so a ladder that keeps re-blocking after Retry cannot flood the
+/// tracker.
+///
+/// Only the reason's enum name and a shape-gated failure code may leave the
+/// device. [scrubCrashEvent] does not scrub tags, so that guarantee rests
+/// entirely on [reportableFailureCode]; a caller that routes anything else
+/// into the sink bypasses it.
+class ConnectionBlockReporter {
+  ConnectionBlockReporter({ConnectionBlockSink? sink})
+    : _sink = sink ?? const _SentryConnectionBlockSink();
+
+  /// Process-wide, so the dedup spans every machine connection.
+  static final ConnectionBlockReporter shared = ConnectionBlockReporter();
+
+  final ConnectionBlockSink _sink;
+  final Set<(BlockReason, String)> _captured = {};
+
+  void report(BlockReason reason, String? code) {
+    try {
+      final safeCode = reportableFailureCode(code);
+      _sink.addBreadcrumb(
+        Breadcrumb(
+          category: 'connection',
+          message: 'connection blocked',
+          level: SentryLevel.warning,
+          data: <String, String>{'reason': reason.name, 'code': safeCode},
+        ),
+      );
+      if (!capturesConnectionBlock(reason)) return;
+      // Marked before sending: a sink that throws is not retried, so a failing
+      // send cannot turn a flapping ladder into a loop.
+      if (!_captured.add((reason, safeCode))) return;
+      _sink.captureWarning(
+        'Connection blocked: ${reason.name} ($safeCode)',
+        tags: {
+          'connection.block_reason': reason.name,
+          'connection.failure_code': safeCode,
+        },
+        fingerprint: ['connection-blocked', reason.name, safeCode],
+      );
+    } catch (error) {
+      AbLog.warn(
+        'crashReporting',
+        'connection block report failed',
+        fields: {'error': error.runtimeType.toString()},
+      );
+    }
+  }
 }

@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -462,6 +462,11 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
+      absorbIdleNudge: (id) => {
+        if (!isIdleAtPrompt(this._work, id)) return false;
+        this.noteHookTurnEnd(id);
+        return true;
+      },
       // Gates whether a lone Esc/Ctrl+C is even worth confirming against the
       // transcript — see shouldArmInterruptConfirm in agent-core.ts.
       isTurnOpenFor: (id) => turnOpenFor(this._work.activeTurns, id),

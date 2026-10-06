@@ -5,6 +5,7 @@
 // the suppressor NAMES the queued id it speaks for. Five other sites queue an id
 // without knowing it exists, and the bootstrap can return early past the point
 // one is set, so a bare flag would eventually answer for one of theirs.
+import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/relay_error_banner.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -198,5 +199,83 @@ void main() {
     expect(container.read(pendingSessionStartSuppressedIdProvider), isNull);
 
     await tester.pump(const Duration(seconds: 20));
+  });
+
+  // Only a project's first landing is an open; a session found stopped on a
+  // later remount was stopped since, and starting it would undo that.
+  group('the default pick', () {
+    Future<void> landOn(
+      WidgetTester tester, {
+      required bool landedBefore,
+    }) async {
+      final transport = FakeAgentTransport();
+      final container = await pumpWorkspaceShell(
+        tester,
+        transport: (_) => transport,
+      );
+      await tester.pump();
+      await tester.pump();
+      if (landedBefore) {
+        container
+            .read(projectSessionProvider(testAgentDeviceId))
+            .requireValue
+            .sessionsService
+            .takeLandingAutoStart();
+      }
+
+      _answerList(transport, 'session-1');
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), 'session-1');
+      expect(
+        transport.sent.where((m) => m['type'] == 'session:start'),
+        landedBefore ? isEmpty : isNotEmpty,
+      );
+      // Past the service's 15s bound on the unanswered requests.
+      await tester.pump(const Duration(seconds: 20));
+    }
+
+    testWidgets('starts a stopped session when the project opens', (
+      tester,
+    ) async {
+      await landOn(tester, landedBefore: false);
+    });
+
+    testWidgets('does not start one on a later landing', (tester) async {
+      await landOn(tester, landedBefore: true);
+    });
+
+    // The New Session hand-off must spend the open, or a later remount would
+    // restart a session the user has since stopped.
+    testWidgets('a landing on a named session spends the open too', (
+      tester,
+    ) async {
+      final transport = FakeAgentTransport();
+      final container = await pumpWorkspaceShell(
+        tester,
+        transport: (_) => transport,
+        extraOverrides: [
+          pendingActiveSessionIdProvider.overrideWith(
+            () => ValueController('session-1'),
+          ),
+        ],
+      );
+      await tester.pump();
+      await tester.pump();
+
+      _answerList(transport, 'session-1');
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), 'session-1');
+      expect(
+        container
+            .read(projectSessionProvider(testAgentDeviceId))
+            .requireValue
+            .sessionsService
+            .takeLandingAutoStart(),
+        isFalse,
+      );
+      await tester.pump(const Duration(seconds: 20));
+    });
   });
 }

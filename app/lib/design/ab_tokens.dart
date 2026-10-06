@@ -347,6 +347,8 @@ abstract final class AbTokens {
 
   // ── Motion ──
   static const motionSnap = Duration(milliseconds: 80);
+  static const menuHoverOpen = Duration(milliseconds: 150);
+  static const menuHoverClose = Duration(milliseconds: 250);
   static const motionDefault = Duration(milliseconds: 160);
   static const motionSettle = Duration(milliseconds: 320);
 

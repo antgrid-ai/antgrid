@@ -27,7 +27,6 @@ import '../services/app_settings_service.dart';
 import '../util/detached.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
-import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'keyboard_shortcuts_page.dart';
 import 'upgrade_screen.dart';
@@ -131,9 +130,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
   }
 
   void _scrollTo(SettingsSection section) {
-    // Silently does nothing for a section this build omits — BILLING and
-    // DESIGN are both conditional — which is the codec's degrade-rather-than-
-    // reject contract carried through to the destination.
+    // Absent sections retain the codec's degrade-rather-than-reject contract,
+    // including the old Help address now served by the account menu.
     final ctx = settingsSectionKey(section).currentContext;
     if (ctx == null) return;
     unawaited(
@@ -444,14 +442,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                           !settings.telemetryEnabled,
                         ),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.help,
-                    body: const [
-                      SizedBox(height: AbTokens.space8),
-                      HelpAboutSection(),
                     ],
                   ),
                   const SizedBox(height: AbTokens.space12),

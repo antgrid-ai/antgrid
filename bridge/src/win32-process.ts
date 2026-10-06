@@ -117,6 +117,7 @@ const kernel32Symbols = {
   CreateToolhelp32Snapshot: { args: [FFIType.u32, FFIType.u32], returns: FFIType.ptr },
   Process32FirstW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   Process32NextW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  GetDriveTypeW: { args: [FFIType.ptr], returns: FFIType.u32 },
   // lpBaseAddress is a u64 rather than a ptr so a PEB address crosses as an
   // exact BigInt: bun:ffi's `ptr` argument type takes a JS number, which cannot
   // represent every address a 64-bit process may be mapped at.
@@ -186,6 +187,15 @@ function loadNtdll(): ReturnType<typeof dlopen<typeof ntdllSymbols>>["symbols"] 
  */
 export function win32ProcessApiAvailable(): boolean {
   return loadApi() !== null;
+}
+
+/** `GetDriveTypeW` for `X:\`, or null when the Win32 layer is unavailable.
+ *  Throws when the call itself fails. */
+export function driveType(letter: string): number | null {
+  const a = loadApi();
+  if (a === null) return null;
+  const root = new Uint16Array([letter.charCodeAt(0), 0x3a, 0x5c, 0]);
+  return a.kernel32.GetDriveTypeW(ptr(root));
 }
 
 /** The pid is gone, as opposed to the machine refusing us. */

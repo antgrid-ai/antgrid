@@ -233,6 +233,7 @@ model Device {
   // partial indexes, and it is blind to them on introspection — so declaring a
   // plain `@@index` here makes every `migrate dev` try to CREATE a conflicting
   // plain index (→ "already exists"). Leave it out; the raw-SQL index stands.
+  // `devices_device_id_active_idx` (usage migration) is partial for the same reason.
   @@index([userId, mobileAccessEnabled], map: "device_user_mobile_idx")
   @@map("devices")
 }
@@ -413,7 +414,46 @@ model AnalyticEvent {
 
   @@index([name, ts], map: "analytic_event_name_ts_idx")
   @@index([installId, ts], map: "analytic_event_install_ts_idx")
+  @@index([createdAt], map: "analytic_event_created_at_idx")
   @@map("analytic_event")
+}
+
+// ---------- Operator usage history ----------
+// Written by src/usage/sampler.ts; the migration explains the GREATEST-only
+// write rule and why usage_relay_seen and usage_heartbeat_seen are pruned.
+
+model UsageDaily {
+  day               DateTime @id @db.Date
+  activeUsers       Int      @default(0) @map("active_users")
+  activeMobileApps  Int      @default(0) @map("active_mobile_apps")
+  activeDesktopApps Int      @default(0) @map("active_desktop_apps")
+  activeAgents      Int      @default(0) @map("active_agents")
+  relayPeakApps     Int      @default(0) @map("relay_peak_apps")
+  relayPeakAgents   Int      @default(0) @map("relay_peak_agents")
+  relayPeakTotal    Int      @default(0) @map("relay_peak_total")
+  relaySeenApps     Int      @default(0) @map("relay_seen_apps")
+  relaySeenAgents   Int      @default(0) @map("relay_seen_agents")
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("usage_daily")
+}
+
+model UsageRelaySeen {
+  day        DateTime @db.Date
+  deviceId   String   @map("device_id")
+  deviceType String   @map("device_type")
+
+  @@id([day, deviceId])
+  @@map("usage_relay_seen")
+}
+
+model UsageHeartbeatSeen {
+  day      DateTime @db.Date
+  userId   String   @map("user_id")
+  deviceId String   @map("device_id")
+
+  @@id([day, userId, deviceId])
+  @@map("usage_heartbeat_seen")
 }
 
 // ---------- Marketing waitlist ----------

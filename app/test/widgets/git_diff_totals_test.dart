@@ -4,6 +4,7 @@
 // on BOTH sides arrives twice and must still be counted once.
 import 'package:antgrid/models/ab_message.dart' show GitFileStatusEntry;
 import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,7 +27,7 @@ ProviderContainer _containerWith(List<GitFileStatusEntry> entries) {
   final c = ProviderContainer(
     overrides: [
       fileTreeStateProvider.overrideWith(
-        (ref) => Stream.value(FileTreeState(gitFileEntries: entries)),
+        (ref) => Stream.value(FileTreeState(gitStatus: GitStatusIndex(entries))),
       ),
     ],
   );

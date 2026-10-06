@@ -283,6 +283,24 @@ export function isStaleIdleNudge(state: WorkStatusState, sessionId: string): boo
   return state.notifications.get(sessionId) === "task_complete";
 }
 
+/** Can [sessionId]'s hook-reported idle nudge mean only that the agent is
+ *  sitting at its prompt? True when nothing on record is waiting on the user: a
+ *  live block reaches the host as its own `permission_request`/`question`
+ *  before any nudge does, so a nudge on a session with neither is the agent
+ *  idle — even with a turn still open, which is a turn whose end was never
+ *  reported (a typed prompt abandoned for a local `/compact` fires a turn start
+ *  and no Stop). A superset of {@link isStaleIdleNudge}.
+ *
+ *  Own key only, and only for a listed running session, for the reason
+ *  {@link isStaleIdleNudge} gives: an id that fell back to the unattributed key
+ *  cannot prove whose block it would be dismissing. */
+export function isIdleAtPrompt(state: WorkStatusState, sessionId: string): boolean {
+  if (!state.runningSessions.has(sessionId)) return false;
+  const own = state.notifications.get(sessionId);
+  if (own !== undefined && isCallToAction(own)) return false;
+  return (state.pendingRequests.get(sessionId)?.size ?? 0) === 0;
+}
+
 /** Rollup order for the project row. `unread` outranks `done` and nothing else:
  *  it is a "come and look" nudge, never a claim that the agent is still busy. */
 const RANK: Record<WorkStatus, number> = {

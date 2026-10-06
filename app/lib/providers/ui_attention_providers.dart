@@ -8,7 +8,7 @@ import 'providers.dart';
 import 'value_controller.dart';
 import 'terminal_demand.dart';
 
-/// Current app lifecycle, mirrored from `workspace_shell`'s
+/// Current app lifecycle, mirrored from `AgentNotificationSurfacer`'s
 /// `didChangeAppLifecycleState`. Defaults to resumed.
 final appLifecycleStateProvider =
     NotifierProvider<ValueController<AppLifecycleState>, AppLifecycleState>(

@@ -46,6 +46,17 @@ class PeerConnectionFailure implements Exception {
   String toString() => 'PeerConnectionFailure($code, terminal: $terminal)';
 }
 
+/// The authorization a dial was started under lapsed or changed before it
+/// finished. Retryable on purpose: a phone drops its lease routinely (every
+/// resume refetches it, a background network lets it expire, a pushed policy
+/// change fences it), and the supervisor turns any terminal failure into a
+/// sticky peerRejected. A real revocation is still refused terminally by the
+/// next attempt, whose own authorization step re-reads the lease.
+const authorizationChangedDuringConnect = PeerConnectionFailure(
+  'AUTHORIZATION_CHANGED_DURING_CONNECT',
+  terminal: false,
+);
+
 /// One native connection attempt; retries belong to ConnectionSupervisor.
 class PeerConnectionAttempt {
   int _generation = 0;

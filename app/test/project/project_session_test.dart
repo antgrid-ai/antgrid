@@ -7,6 +7,7 @@ import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
+import 'package:antgrid/project/inbound_frame.dart';
 
 void main() {
   group('ProjectSession', () {
@@ -79,7 +80,7 @@ void main() {
         },
       );
 
-      final received = <Map<String, dynamic>>[];
+      final received = <InboundFrame>[];
       final sub = session.statusStream.listen(received.add);
 
       // 'agent:status' is status-tier per project_message_classification.dart
@@ -87,7 +88,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(received, hasLength(1));
-      expect(received.first['type'], 'agent:status');
+      expect(received.first.type, 'agent:status');
 
       await sub.cancel();
       await session.close();
@@ -165,8 +166,8 @@ void main() {
           cachedSessionsStore: cache,
           onClose: t.dispose,
         );
-        final main = <Map<String, dynamic>>[];
-        final isolated = <Map<String, dynamic>>[];
+        final main = <InboundFrame>[];
+        final isolated = <InboundFrame>[];
         final mainSub = session.checkoutHeavyStream('main').listen(main.add);
         final isolatedSub = session
             .checkoutHeavyStream('checkout-1')
@@ -189,7 +190,7 @@ void main() {
 
         expect(main, hasLength(1));
         expect(isolated, hasLength(1));
-        expect(isolated.single['checkoutId'], 'checkout-1');
+        expect(isolated.single.checkoutId, 'checkout-1');
         await mainSub.cancel();
         await isolatedSub.cancel();
         await session.close();

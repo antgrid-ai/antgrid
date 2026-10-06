@@ -10,7 +10,7 @@ import '../util/ab_log.dart';
 /// [mandatory] means at least one pending package update was marked mandatory
 /// in Partner Center — the Store's install flow should be launched directly
 /// instead of offering an optional prompt.
-enum StoreUpdateCheck { none, optional, mandatory }
+enum StoreUpdateCheck { none, optional, mandatory, unsupported, failed }
 
 /// What came of handing off to the Store's download-and-install flow.
 ///
@@ -99,12 +99,9 @@ StoreInstallOutcome? decodeStoreInstallOutcome(Object? reply) =>
 /// method channel (WinRT `StoreContext`, see
 /// `windows/runner/store_update_channel.cpp`).
 ///
-/// Every method is a safe no-op off Windows and swallows channel errors —
-/// `StoreContext` requires MSIX package identity, so builds not installed
-/// from the Microsoft Store (`flutter run`, sideloaded exe) fail the native
-/// call and the whole feature must degrade silently rather than surface an
-/// error or block startup. Failure arrives as a value, never a throw: callers
-/// run from tap handlers and startup paths that discard the future.
+/// `StoreContext` requires MSIX identity. Missing identity is unsupported;
+/// other channel failures are failed checks. Both arrive as values so startup
+/// remains silent and a manual check can explain the failure.
 class WindowsStoreUpdateService {
   const WindowsStoreUpdateService();
 
@@ -134,13 +131,21 @@ class WindowsStoreUpdateService {
 
   /// Asks the Store for pending package updates.
   ///
-  /// Never throws — any failure resolves to [StoreUpdateStatus.none].
+  /// A failure cannot prove the pending set is empty.
   Future<StoreUpdateStatus> checkForUpdates() async {
-    if (!_supported) return StoreUpdateStatus.none;
+    if (!_supported) {
+      return const StoreUpdateStatus(check: StoreUpdateCheck.unsupported);
+    }
     try {
       final reply = await _channel.invokeMapMethod<Object?, Object?>(
         'checkForUpdates',
       );
+      final count = reply?['updateCount'];
+      if (count is! int ||
+          count < 0 ||
+          (count > 0 && reply?['mandatory'] is! bool)) {
+        return const StoreUpdateStatus(check: StoreUpdateCheck.failed);
+      }
       final check = decideStoreUpdate(reply);
       if (check == StoreUpdateCheck.none) return StoreUpdateStatus.none;
       return StoreUpdateStatus(
@@ -153,7 +158,13 @@ class WindowsStoreUpdateService {
         'WindowsStoreUpdateService.checkForUpdates failed (ignored)',
         fields: {'error': '$e'},
       );
-      return StoreUpdateStatus.none;
+      return StoreUpdateStatus(
+        check:
+            e is PlatformException && e.message == 'no package identity' ||
+                e is MissingPluginException
+            ? StoreUpdateCheck.unsupported
+            : StoreUpdateCheck.failed,
+      );
     }
   }
 

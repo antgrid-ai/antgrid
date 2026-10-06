@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
@@ -16,6 +16,7 @@ import { ApprovedPage } from "../ui/approved.js";
 import {
   requireUser,
   requireUserOrRedirect,
+  requireReadOnlyUserOrRedirect,
   type AuthVars,
 } from "../auth/middleware.js";
 import { listActiveDevices } from "../models/device.js";
@@ -73,7 +74,11 @@ import {
 } from "../billing/cancel-subscription.js";
 import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
-import { fetchConnections } from "../relay/push.js";
+import { StatsPage } from "../ui/stats.js";
+import { OperatorUsersPage, OperatorUserPage, OperatorAccountsPage, OperatorAccountPage } from "../ui/operator.js";
+import { OperatorUsersQuerySchema, OperatorAccountsQuerySchema, loadOperatorUsers, loadOperatorUser, loadOperatorAccounts, loadOperatorAccount } from "../models/operator.js";
+import { fetchConnections, fetchUserConnections } from "../relay/push.js";
+import { loadUsageStats, summarizeLiveRelay } from "../usage/stats.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
 import { AccountPage, AccountDeletedPage } from "../ui/account.js";
 import {
@@ -115,7 +120,7 @@ import {
 import { TeamPage } from "../ui/team.js";
 import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 
-// Internal relay-connections view is restricted to named operators. Gate on
+// Internal operator pages (/internal/*) are restricted to named operators. Gate on
 // email (lowercased) — Better-Auth verifies email ownership at sign-in, so it's
 // a safe identity anchor here. Non-operators get 404, not 403: don't reveal the
 // route exists.
@@ -1506,37 +1511,103 @@ export function uiRoutes(deps: {
     );
   });
 
-  r.get(
-    "/internal/connections",
-    requireUserOrRedirect({ auth: deps.auth }),
-    async (c) => {
+  function requireOperator(page: string): MiddlewareHandler<{ Variables: AuthVars }> {
+    return async (c, next) => {
       const email = c.get("userEmail")?.toLowerCase() ?? "";
-      if (!INTERNAL_OPERATOR_EMAILS.has(email)) {
-        // Record denied probes too — for a surveillance endpoint, a non-operator
-        // fishing for the route is exactly what the audit trail should capture.
-        console.warn(
-          JSON.stringify({
-            evt: "internal.connections.denied",
-            userId: c.get("userId"),
-            email,
-            at: new Date().toISOString(),
-          }),
-        );
+      const allowed = INTERNAL_OPERATOR_EMAILS.has(email);
+      // Audit every access and every denied probe: these pages read the
+      // live-connection map and account-wide usage, which the relay can't
+      // attribute (it only authenticates "web"), so operator attribution must
+      // be logged here, at the gate — and a non-operator fishing for the route
+      // is exactly what the trail should capture.
+      const line = JSON.stringify({
+        evt: `internal.${page}.${allowed ? "access" : "denied"}`,
+        userId: c.get("userId"),
+        actorId: c.get("userId"),
+        ...(page === "users.detail" ? { targetUserId: c.req.param("id") } : {}),
+        ...(page === "accounts.detail" ? { targetAccountId: c.req.param("id") } : {}),
+        email,
+        at: new Date().toISOString(),
+      });
+      if (!allowed) {
+        console.warn(line);
         return c.notFound();
       }
+      console.info(line);
+      await next();
+    };
+  }
 
-      // Audit every access: a read of the live-connection map is a surveillance
-      // capability the relay can't attribute (it only authenticates "web"), so
-      // operator attribution must be logged here, at the gate.
-      console.info(
-        JSON.stringify({
-          evt: "internal.connections.access",
-          userId: c.get("userId"),
-          email,
-          at: new Date().toISOString(),
-        }),
-      );
+  r.use("/internal/*", async (c, next) => {
+    c.header("Cache-Control", "private, no-store");
+    await next();
+  });
 
+  function operatorQuery(c: UiContext) {
+    const params = c.req.queries();
+    if (Object.values(params).some((values) => values.length !== 1)) return null;
+    return Object.fromEntries(Object.entries(params).map(([key, values]) => [key, values[0]]));
+  }
+
+  r.get("/internal/users", requireReadOnlyUserOrRedirect(deps), requireOperator("users"), async (c) => {
+    const query = OperatorUsersQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorUsers(deps.db, query.data);
+    return c.html(<OperatorUsersPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/users/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("users.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.string().min(1).max(256).safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorUser(deps.db, id, now);
+    if (!data) return c.notFound();
+    const connections = await fetchUserConnections(deps.relay, id).catch((error) => {
+      console.warn("[internal.users.detail] relay fetch failed", error);
+      return null;
+    });
+    return c.html(<OperatorUserPage user={layoutUser(c)} data={data} connections={connections} now={now} />);
+  });
+
+  r.get("/internal/accounts", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts"), async (c) => {
+    const query = OperatorAccountsQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorAccounts(deps.db, query.data);
+    return c.html(<OperatorAccountsPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/accounts/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.uuid().safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorAccount(deps.db, id, now);
+    if (!data) return c.notFound();
+    return c.html(<OperatorAccountPage user={layoutUser(c)} data={data} now={now} />);
+  });
+
+  r.get(
+    "/internal/stats",
+    requireReadOnlyUserOrRedirect(deps),
+    requireOperator("stats"),
+    async (c) => {
+      const [stats, live] = await Promise.all([
+        loadUsageStats(deps.db),
+        fetchConnections(deps.relay)
+          .catch((e) => {
+            console.warn("[internal.stats] relay fetch failed", e);
+            return null;
+          })
+          .then((connections) => connections && summarizeLiveRelay(deps.db, connections)),
+      ]);
+      return c.html(<StatsPage user={layoutUser(c)} stats={stats} live={live} />);
+    },
+  );
+
+  r.get(
+    "/internal/connections",
+    requireReadOnlyUserOrRedirect(deps),
+    requireOperator("connections"),
+    async (c) => {
       let connections: Awaited<ReturnType<typeof fetchConnections>> | null;
       try {
         connections = await fetchConnections(deps.relay);

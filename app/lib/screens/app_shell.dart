@@ -35,6 +35,8 @@ import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../design/widgets/ab_window_controls.dart';
+import '../widgets/agent_notification_surfacer.dart';
+import '../widgets/operational_error_toaster.dart';
 import '../widgets/window_title_bar.dart';
 import '../window/window_capabilities.dart';
 import 'new_session_screen.dart';
@@ -205,7 +207,13 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    return AppBackScope(child: AppShortcutScope(child: _buildShell(context)));
+    return AppBackScope(
+      child: AppShortcutScope(
+        child: OperationalErrorToaster(
+          child: AgentNotificationSurfacer(child: _buildShell(context)),
+        ),
+      ),
+    );
   }
 
   Widget _buildShell(BuildContext context) {

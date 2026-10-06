@@ -85,7 +85,7 @@ export function isActiveSubscription(sub: SubscriptionRow, now = new Date()): bo
   return true;
 }
 
-function activeSubscriptionWhere(accountId: string, now = new Date()) {
+export function activeSubscriptionWhere(accountId: string | { in: string[] }, now = new Date()) {
   return {
     accountId,
     status: "active" as const,
@@ -95,6 +95,10 @@ function activeSubscriptionWhere(accountId: string, now = new Date()) {
       { OR: [{ currentPeriodEnd: null }, { currentPeriodEnd: { gt: now } }] },
     ],
   };
+}
+
+export function effectiveActiveSubscription<T extends { plan: { slug: string } }>(subs: T[]): T | null {
+  return subs.find((sub) => sub.plan.slug !== PLAN_SLUG_FREE) ?? subs[0] ?? null;
 }
 
 export async function activeSubscriptionForUser(db: Tx, userId: string): Promise<SubscriptionRow | null> {
@@ -109,11 +113,10 @@ export async function activeSubscriptionForAccount(
 ): Promise<SubscriptionRow | null> {
   const subs = await db.subscription.findMany({
     where: activeSubscriptionWhere(accountId),
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }],
     include: { plan: true },
   });
-  const paid = subs.find((s) => s.plan.slug !== PLAN_SLUG_FREE);
-  return paid ?? subs[0] ?? null;
+  return effectiveActiveSubscription(subs);
 }
 
 export async function findSubscriptionById(db: Tx, id: string): Promise<SubscriptionRow | null> {

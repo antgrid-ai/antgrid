@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../analytics/events.dart';
 import '../models/search_models.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import 'idle_action_guard.dart';
 
@@ -19,7 +20,7 @@ class SearchService {
   final ProjectSession session;
   final String checkoutId;
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
+  StreamSubscription<InboundFrame>? _heavySub;
   bool _disposed = false;
 
   /// Idle-timeout for the in-flight search. A search that neither yields a
@@ -44,7 +45,7 @@ class SearchService {
     this.checkoutId = 'main',
     this.searchIdleTimeout = const Duration(seconds: 12),
   }) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavy);
   }
 
   void _setState(SearchState state) {
@@ -53,13 +54,12 @@ class SearchService {
     _stateController.add(state);
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final abMsg = parseAbMessage(json);
-    if (abMsg == null) return;
-    if (abMsg is FileSearchResultMessage) {
-      _handleSearchResult(abMsg);
-    } else if (abMsg is FileSearchDoneMessage) {
-      _handleSearchDone(abMsg);
+  void _onHeavy(InboundFrame f) {
+    switch (f.parsed) {
+      case final FileSearchResultMessage msg:
+        _handleSearchResult(msg);
+      case final FileSearchDoneMessage msg:
+        _handleSearchDone(msg);
     }
   }
 
@@ -147,25 +147,32 @@ class SearchService {
 
     final resultsCopy = [..._state.results];
 
+    // Group by path first: addMatches copies the file's whole accumulated list,
+    // so it runs once per path per batch rather than once per match.
+    final batchByPath = <String, List<SearchMatch>>{};
     for (final match in msg.matches) {
-      final searchMatch = SearchMatch(
-        line: match.line,
-        column: match.column,
-        lineContent: match.lineContent,
-        contextBefore: match.contextBefore,
-        contextAfter: match.contextAfter,
-      );
+      batchByPath
+          .putIfAbsent(match.path, () => <SearchMatch>[])
+          .add(
+            SearchMatch(
+              line: match.line,
+              column: match.column,
+              lineContent: match.lineContent,
+              contextBefore: match.contextBefore,
+              contextAfter: match.contextAfter,
+            ),
+          );
+    }
 
-      final existingIndex = _resultIndex[match.path];
+    for (final MapEntry(key: path, value: matches) in batchByPath.entries) {
+      final existingIndex = _resultIndex[path];
       if (existingIndex != null) {
-        resultsCopy[existingIndex] = resultsCopy[existingIndex].addMatches([
-          searchMatch,
-        ]);
-      } else {
-        _resultIndex[match.path] = resultsCopy.length;
-        resultsCopy.add(
-          SearchFileGroup(path: match.path, matches: [searchMatch]),
+        resultsCopy[existingIndex] = resultsCopy[existingIndex].addMatches(
+          matches,
         );
+      } else {
+        _resultIndex[path] = resultsCopy.length;
+        resultsCopy.add(SearchFileGroup(path: path, matches: matches));
       }
     }
 

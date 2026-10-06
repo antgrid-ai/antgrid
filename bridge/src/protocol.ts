@@ -422,60 +422,6 @@ const GitUnstageResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-const GitStashEntrySchema = z.object({
-  ref: z.string(),
-  /** "" when unparseable — see `parseStashSubject` in git-branches.ts. */
-  branch: z.string(),
-  message: z.string(),
-  createdAt: z.number(),
-});
-
-const GitStashListRequestMessage = BaseMessage.extend({
-  type: z.literal("git:stash-list"),
-  projectId: z.string(),
-  ...CheckoutScoped,
-});
-
-const GitStashListResultMessage = BaseMessage.extend({
-  type: z.literal("git:stash-list-result"),
-  projectId: z.string(),
-  stashes: z.array(GitStashEntrySchema),
-  error: z.string().optional(),
-  ...CheckoutScoped,
-});
-
-const GitStashPopMessage = BaseMessage.extend({
-  type: z.literal("git:stash-pop"),
-  projectId: z.string(),
-  ref: z.string(),
-  ...CheckoutScoped,
-});
-
-const GitStashPopResultMessage = BaseMessage.extend({
-  type: z.literal("git:stash-pop-result"),
-  projectId: z.string(),
-  ref: z.string(),
-  success: z.boolean(),
-  error: z.string().optional(),
-  ...CheckoutScoped,
-});
-
-const GitStashDropMessage = BaseMessage.extend({
-  type: z.literal("git:stash-drop"),
-  projectId: z.string(),
-  ref: z.string(),
-  ...CheckoutScoped,
-});
-
-const GitStashDropResultMessage = BaseMessage.extend({
-  type: z.literal("git:stash-drop-result"),
-  projectId: z.string(),
-  ref: z.string(),
-  success: z.boolean(),
-  error: z.string().optional(),
-  ...CheckoutScoped,
-});
-
 const GitLogEntrySchema = z.object({
   sha: z.string(),
   shortSha: z.string(),
@@ -831,8 +777,17 @@ const FileResolvePathMessage = BaseMessage.extend({
   projectId: z.string(),
   requestId: z.string(),
   // Raw path as it appeared in terminal output (an OSC 8 `file://` hyperlink
-  // target) — absolute on the bridge machine, or already checkout-relative.
-  path: z.string(),
+  // target, or a printed path the bridge linked) — absolute on the bridge
+  // machine, or relative to one of the bases below. `parseMessageFast` never
+  // runs this schema, so the handler re-checks the length and the two optional
+  // fields by hand.
+  path: z.string().max(4096),
+  /** Wire id of the terminal the link was printed in; supplies its spawn and
+   *  live cwd as bases. */
+  terminalId: z.string().max(256).optional(),
+  /** The base the detector matched. Present: resolve against that base ONLY.
+   *  Absent: the checkout root only (file:// links, older apps). */
+  base: z.enum(["a", "l", "s", "r"]).optional(),
   ...CheckoutScoped,
 });
 
@@ -852,6 +807,13 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   // (which applies the same extension gate again) instead of refusing the
   // link outright.
   externalImagePath: z.string().nullable(),
+  /** Whether the resolved path exists as a file or directory right now. */
+  exists: z.boolean(),
+  /** True when the answer is unknown rather than negative: the bridge's stat
+   *  outlived its deadline, or it was too busy to start one. `exists:false`
+   *  then means "not found out", and a retry may succeed. Absent from older
+   *  bridges, which answered `exists:false` in both cases. */
+  timedOut: z.boolean().optional(),
   ...CheckoutScoped,
 });
 
@@ -2744,12 +2706,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitStageResultMessage,
   GitUnstageMessage,
   GitUnstageResultMessage,
-  GitStashListRequestMessage,
-  GitStashListResultMessage,
-  GitStashPopMessage,
-  GitStashPopResultMessage,
-  GitStashDropMessage,
-  GitStashDropResultMessage,
   GitLogRequestMessage,
   GitLogResultMessage,
   GitCommitFilesRequestMessage,
@@ -2913,13 +2869,6 @@ export type GitStage = z.infer<typeof GitStageMessage>;
 export type GitStageResult = z.infer<typeof GitStageResultMessage>;
 export type GitUnstage = z.infer<typeof GitUnstageMessage>;
 export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
-export type GitStashEntryWire = z.infer<typeof GitStashEntrySchema>;
-export type GitStashListRequest = z.infer<typeof GitStashListRequestMessage>;
-export type GitStashListResult = z.infer<typeof GitStashListResultMessage>;
-export type GitStashPop = z.infer<typeof GitStashPopMessage>;
-export type GitStashPopResult = z.infer<typeof GitStashPopResultMessage>;
-export type GitStashDrop = z.infer<typeof GitStashDropMessage>;
-export type GitStashDropResult = z.infer<typeof GitStashDropResultMessage>;
 export type GitLogEntryWire = z.infer<typeof GitLogEntrySchema>;
 export type GitLogRequest = z.infer<typeof GitLogRequestMessage>;
 export type GitLogResult = z.infer<typeof GitLogResultMessage>;
@@ -3081,8 +3030,6 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
-  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
-  "git:stash-drop", "git:stash-drop-result",
   "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
@@ -3204,8 +3151,6 @@ const KNOWN_TYPES = new Set<string>([
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
-  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
-  "git:stash-drop", "git:stash-drop-result",
   "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",

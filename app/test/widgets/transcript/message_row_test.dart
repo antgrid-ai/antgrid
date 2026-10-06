@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/models/agent_event.dart';
 import 'package:antgrid/providers/now_ticker.dart';
 import 'package:antgrid/providers/session_bus_inbox.dart';
@@ -316,5 +317,31 @@ void main() {
       expect(find.text('Sent'), findsNothing);
       expect(find.textContaining('Delivered'), findsNothing);
     });
+  });
+
+  // MessageRow hands back its TranscriptMarkdown so MarkdownBlock skips the
+  // re-parse; the weight offset is a static no dependency tracks, so it has to
+  // be part of that key.
+  testWidgets('a rebuild reuses the markdown until the weight offset moves', (
+    tester,
+  ) async {
+    Future<TranscriptMarkdown> pumpRow() async {
+      await _pump(
+        tester,
+        MessageRow(
+          data: MessageRowData(_item(text: 'hi **bold**'), isUser: false),
+          rowIndex: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+      return tester.widget<TranscriptMarkdown>(find.byType(TranscriptMarkdown));
+    }
+
+    final first = await pumpRow();
+    expect(identical(await pumpRow(), first), isTrue);
+
+    AbTokens.activeWeightOffset = 1;
+    addTearDown(() => AbTokens.activeWeightOffset = 0);
+    expect(identical(await pumpRow(), first), isFalse);
   });
 }

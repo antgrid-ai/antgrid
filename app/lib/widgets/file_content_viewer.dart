@@ -67,6 +67,14 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   String? _loadedContent;
   bool _hasSelection = false;
   int? _lastScrolledLine;
+
+  /// The line a jump landed on, tinted so the eye finds it after the scroll;
+  /// the next pointer press in the editor clears it.
+  int? _markedLine;
+
+  /// The gutter's feed of where each visible line is drawn, captured from
+  /// `indicatorBuilder` — the only place re_editor hands it out.
+  CodeIndicatorValueNotifier? _lineLayout;
   bool _editorReady = false;
   bool _editorReadyScheduled = false;
   int _syncGeneration = 0;
@@ -138,6 +146,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     _scrollController = text != null ? CodeScrollController() : null;
     _hasSelection = false;
     _lastScrolledLine = null;
+    _markedLine = null;
     // Keep editor hidden until the highlight isolate finishes (detected via
     // _onSpanBuild). For files without a known language, show immediately.
     // Fallback timeout ensures the editor is always revealed even if the
@@ -185,6 +194,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   }
 
   void _scrollToSearchLine(int line) {
+    _markedLine = line;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final sc = _scrollController?.verticalScroller;
       if (sc == null || !sc.hasClients) return;
@@ -326,6 +336,24 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
 
   void _onPointerDown(PointerDownEvent event) {
     _dragStartSelection = _controller?.selection;
+    if (_markedLine != null) setState(() => _markedLine = null);
+  }
+
+  /// A band over [_markedLine], placed from re_editor's own record of where
+  /// that line is drawn, so it sits exactly on the text and follows scrolling
+  /// with no line-height arithmetic of its own to drift.
+  Widget _buildLineMark(int line, CodeIndicatorValueNotifier layout) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: CustomPaint(
+          painter: _LineMarkPainter(
+            layout: layout,
+            lineIndex: line - 1,
+            color: context.antgrid.accent.withValues(alpha: 0.18),
+          ),
+        ),
+      ),
+    );
   }
 
   void _onPointerMove(PointerMoveEvent event) {
@@ -519,6 +547,14 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                               chunkController,
                               notifier,
                             ) {
+                              if (!identical(notifier, _lineLayout)) {
+                                _lineLayout = notifier;
+                                WidgetsBinding.instance.addPostFrameCallback((
+                                  _,
+                                ) {
+                                  if (mounted) setState(() {});
+                                });
+                              }
                               // The gutter is built inside the editor's
                               // VERTICAL scrollable but outside its
                               // horizontal one, so a sideways scroll landing
@@ -539,6 +575,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                       ),
                     ),
                   ),
+                  if (_editorReady &&
+                      _markedLine != null &&
+                      _lineLayout != null)
+                    _buildLineMark(_markedLine!, _lineLayout!),
                   if (!_editorReady)
                     Container(
                       color: context.antgrid.bgDeepest,
@@ -713,4 +753,35 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       ),
     );
   }
+}
+
+/// Paints rather than rebuilds on a layout change: re_editor publishes line
+/// positions from inside its own layout pass, where scheduling a build is an
+/// error, while a repaint is not.
+class _LineMarkPainter extends CustomPainter {
+  _LineMarkPainter({
+    required this.layout,
+    required this.lineIndex,
+    required this.color,
+  }) : super(repaint: layout);
+
+  final CodeIndicatorValueNotifier layout;
+  final int lineIndex;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paragraph = layout.value?.paragraphs
+        .where((p) => p.index == lineIndex)
+        .firstOrNull;
+    if (paragraph == null) return;
+    canvas.drawRect(
+      Rect.fromLTWH(0, paragraph.top, size.width, paragraph.height),
+      Paint()..color = color,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_LineMarkPainter old) =>
+      old.layout != layout || old.lineIndex != lineIndex || old.color != color;
 }

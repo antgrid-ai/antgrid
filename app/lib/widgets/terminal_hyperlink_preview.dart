@@ -7,6 +7,7 @@ import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
+import '../util/terminal_links.dart';
 
 /// Gap between the pointer and the card, in logical pixels.
 ///
@@ -120,12 +121,16 @@ class TerminalHyperlinkPreview extends StatelessWidget {
     required this.anchor,
   });
 
-  /// The raw OSC 8 payload, as the program wrote it apart from a masked
-  /// password and spelled-out control characters.
+  /// The raw OSC 8 payload: either written by the program, or minted by the
+  /// bridge's detector (see `terminal_links.dart`).
   ///
-  /// Not a parsed [Uri]: this reports what the link SAYS, including a payload
-  /// no launcher would accept, and normalizing it would show the user a string
-  /// the terminal does not contain.
+  /// A program's payload is shown as it wrote it, apart from a masked password
+  /// and spelled-out control characters. Not a parsed [Uri]: that reports what
+  /// the link SAYS, including a payload no launcher would accept, and
+  /// normalizing it would show the user a string the terminal does not
+  /// contain. A bridge-minted payload is shown as the printed path or the inner
+  /// URL instead, because its wrapper scheme marks how the link was found, not
+  /// where it goes.
   final String uri;
 
   /// Where the pointer was when this URI became the hovered one, in the
@@ -151,6 +156,11 @@ class TerminalHyperlinkPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    final isPathLink = uri.startsWith(kPrintedPathLinkScheme);
+    final path = parsePrintedPathLink(uri);
+    // The wrapper scheme marks a link the bridge detected, not what the link
+    // says, so the card shows the URL a click would actually open.
+    final shownUrl = detectedUrlTarget(uri) ?? uri;
     return IgnorePointer(
       child: CustomSingleChildLayout(
         delegate: _AnchoredNearPointer(anchor: anchor),
@@ -169,15 +179,121 @@ class TerminalHyperlinkPreview extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              AbIcon(AbIcons.link, size: 12, color: p.accent),
+              AbIcon(
+                isPathLink ? _pathIcon(path?.kind) : AbIcons.link,
+                size: 12,
+                color: p.accent,
+              ),
               const SizedBox(width: AbTokens.space6),
-              Flexible(child: _HyperlinkText(uri: uri)),
+              Flexible(
+                child: !isPathLink
+                    ? _HyperlinkText(uri: shownUrl)
+                    // A path link the parser rejects must not fall through to
+                    // the URL readout, which would print the wrapper scheme and
+                    // its percent-encoding verbatim.
+                    : path == null
+                    ? const _PathText(label: _unreadablePathLabel)
+                    : _PathText(label: printedPathLabel(path)),
+              ),
             ],
           ),
         ),
       ),
     );
   }
+}
+
+const String _unreadablePathLabel = 'Unreadable path link';
+
+String _pathIcon(PrintedPathKind? kind) => switch (kind) {
+  PrintedPathKind.directory => AbIcons.folder,
+  PrintedPathKind.image => AbIcons.fileMedia,
+  PrintedPathKind.file || null => AbIcons.file,
+};
+
+/// A printed path, as the terminal showed it.
+///
+/// Spelled out through [_display] for the same reason a URI is: a path is
+/// program-printed text, so a bidi override in it must not reorder the readout.
+///
+/// When it does not fit it keeps its END: the file name and the `:line[:col]`
+/// suffix are what identify the target, and a trailing ellipsis would cut
+/// exactly those. Flutter has no start-elision, so the fit is measured here.
+class _PathText extends StatelessWidget {
+  const _PathText({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXs,
+      color: context.antgrid.textSecondary,
+    );
+    final shown = _display(_cap(label, keepTail: true));
+    // What [Text] will actually lay out: a bare TextPainter does not inherit
+    // the ambient style, so measuring with [style] alone can fit a string that
+    // then wraps.
+    final measured = DefaultTextStyle.of(context).style.merge(style);
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) => Text(
+        _fitTail(shown, measured, constraints.maxWidth, scaler, direction),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      ),
+    );
+  }
+}
+
+/// [text] cut from the front to the longest tail that fits [maxWidth] on one
+/// line, behind a leading ellipsis.
+String _fitTail(
+  String text,
+  TextStyle style,
+  double maxWidth,
+  TextScaler scaler,
+  TextDirection direction,
+) {
+  if (!maxWidth.isFinite) return text;
+  bool fits(String candidate) {
+    final painter = TextPainter(
+      text: TextSpan(text: candidate, style: style),
+      textDirection: direction,
+      textScaler: scaler,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width <= maxWidth;
+  }
+
+  if (fits(text)) return text;
+  final body = text.startsWith('…') ? text.substring(1) : text;
+  String tail(int keep) {
+    var start = body.length - keep;
+    // Same stranded-half guard as [_cap]: the cut must not split a pair.
+    if (start > 0 &&
+        start < body.length &&
+        _isLowSurrogate(body.codeUnitAt(start))) {
+      start += 1;
+    }
+    return '…${body.substring(start)}';
+  }
+
+  var low = 0;
+  var high = body.length;
+  while (low < high) {
+    final mid = (low + high + 1) ~/ 2;
+    if (fits(tail(mid))) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return tail(low);
 }
 
 /// The URI itself, split so the HOST is both the part that reads brightest and
