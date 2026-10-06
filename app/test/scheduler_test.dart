@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/scheduler.dart';
@@ -234,13 +235,22 @@ void main() {
     );
     await tester.pump();
     final newSession = find.widgetWithText(AbButton, 'New Session');
-    final scheduler = find.widgetWithText(AbButton, 'Scheduler');
+    final scheduler = find.widgetWithText(AbListRow, 'Scheduler');
     expect(newSession, findsOneWidget);
     expect(scheduler, findsOneWidget);
+    expect(find.widgetWithText(AbButton, 'Scheduler'), findsNothing);
+    final schedulerRow = tester.widget<AbListRow>(scheduler);
+    expect(schedulerRow.enabled, isFalse);
+    expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
     expect(
       tester.getBottomLeft(newSession).dy,
       lessThan(tester.getTopLeft(scheduler).dy),
     );
+    container
+        .read(workbenchSurfaceProvider.notifier)
+        .set(WorkbenchSurface.scheduler);
+    await tester.pump();
+    expect(tester.widget<AbListRow>(scheduler).selected, isTrue);
   });
 
   Future<void> pumpScreen(

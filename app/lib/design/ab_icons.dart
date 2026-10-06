@@ -35,6 +35,7 @@ abstract final class AbIcons {
   static const chevronDown = Codicon.chevron_down;
   static const chevronUp = Codicon.chevron_up;
   static const refresh = Codicon.refresh;
+  static const calendar = Codicon.calendar;
   static const revert = Codicon.discard;
   static const pin = Codicon.pin;
   static const unpin = Codicon.pinned;

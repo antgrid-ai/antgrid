@@ -240,6 +240,40 @@ class _NavActions extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final schedulerSelected =
+        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.scheduler;
+    final schedulerEnabled = !ref.watch(demoModeProvider);
+    void openScheduler() {
+      ref
+          .read(workbenchSurfaceProvider.notifier)
+          .set(WorkbenchSurface.scheduler);
+      ref
+          .read(navControllerProvider.notifier)
+          .commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+      closeDrawerIfOverlay(context);
+    }
+
+    Widget scheduler = AbListRow(
+      title: Text('Scheduler', style: AbTokens.sansStyle()),
+      leading: AbIcon(
+        AbIcons.calendar,
+        size: AbTokens.iconButtonGlyph,
+        color: context.antgrid.textSecondary,
+      ),
+      density: AbRowDensity.sm,
+      horizontalPadding: AbTokens.space8,
+      selected: schedulerSelected,
+      selectionStyle: AbRowSelection.surface,
+      hoverable: true,
+      enabled: schedulerEnabled,
+      onTap: schedulerEnabled ? openScheduler : null,
+    );
+    if (isMobilePlatform) {
+      scheduler = ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: AbTokens.touchControlMin),
+        child: scheduler,
+      );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
@@ -264,24 +298,10 @@ class _NavActions extends ConsumerWidget {
               onTap: () => enterNewSession(ref.container),
             ),
             const SizedBox(height: AbTokens.space4),
-            AbButton(
-              label: 'Scheduler',
-              fontSize: AbTokens.fontBody,
-              onTap: ref.watch(demoModeProvider)
-                  ? null
-                  : () {
-                      ref
-                          .read(workbenchSurfaceProvider.notifier)
-                          .set(WorkbenchSurface.scheduler);
-                      ref
-                          .read(navControllerProvider.notifier)
-                          .commit(
-                            const NavLocation(
-                              surface: WorkbenchSurface.scheduler,
-                            ),
-                          );
-                      closeDrawerIfOverlay(context);
-                    },
+            Semantics(
+              selected: schedulerSelected,
+              enabled: schedulerEnabled,
+              child: scheduler,
             ),
           ],
         ),
