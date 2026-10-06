@@ -12,4 +12,5 @@ export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void;
   noteResume(): Promise<boolean>;
   recheckAuthorization(): void;
+  authorizeDevice?(deviceId: string): Promise<boolean>;
 }

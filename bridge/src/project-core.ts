@@ -4,7 +4,7 @@ import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
-import type { DeleteSessionOptions } from "./session-manager";
+import type { DeleteSessionOptions, ScheduledSessionSpec, ScheduledSessionIdentity, ScheduledSessionObservation, PreparedScheduledSession } from "./session-manager";
 import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
@@ -412,6 +412,25 @@ export class ProjectCore {
    *  the host only calls this for a project it already found warm. */
   startSession(id: string): void {
     this.core?.startSession(id);
+  }
+
+  async prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession> {
+    if (!this.core) throw new Error("Project is not open");
+    return this.core.prepareScheduledSession(spec, bind);
+  }
+
+  observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void {
+    if (!this.core) throw new Error("Project is not open");
+    return this.core.observeScheduledSessions(callback);
+  }
+
+  async stopScheduledSession(sessionId: string): Promise<void> {
+    await this.core?.stopScheduledSession(sessionId);
+  }
+
+  async releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void> {
+    if (!this.core) throw new Error("Project is not open");
+    await this.core.releaseScheduleCheckout(scheduleId, checkoutId);
   }
 
   /** Forward the live session list (with true per-session `running`) to the

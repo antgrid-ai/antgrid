@@ -2004,6 +2004,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     }
 
     return switch (surface) {
+      WorkbenchSurface.scheduler => null,
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
       // No longer a surface of its own: the device roster lives in the title
       // bar's RemoteAccessPanel. Kept only so a lingering `devices` deep link

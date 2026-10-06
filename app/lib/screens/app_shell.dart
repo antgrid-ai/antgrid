@@ -287,7 +287,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     final id = ref.watch(selectedRegistrationIdProvider);
     final surface = ref.watch(workbenchSurfaceProvider);
     final Widget body;
-    if (id == null || surface == WorkbenchSurface.newSession) {
+    if (id == null ||
+        surface == WorkbenchSurface.newSession ||
+        surface == WorkbenchSurface.scheduler) {
       body = const NewSessionScreen();
       // Landing trap: with no focused project the New Session screen renders
       // while the surface may still read `workspace` (its default, or a stale

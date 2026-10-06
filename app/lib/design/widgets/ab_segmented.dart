@@ -6,6 +6,7 @@ import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
 import 'ab_toast.dart';
 import 'ab_tooltip.dart';
+import 'ab_touch_sizing.dart';
 
 /// One cell of an [AbSegmented] control.
 class AbSegment<T> {
@@ -185,6 +186,10 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         : p.textMuted;
 
     Widget cell = AnimatedContainer(
+      constraints: BoxConstraints(
+        minWidth: AbTouchSizing.extentOf(context),
+        minHeight: AbTouchSizing.extentOf(context),
+      ),
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,
       padding: EdgeInsets.symmetric(

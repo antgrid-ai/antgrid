@@ -90,6 +90,22 @@ function sessionsFilePath(dir: string): string {
   return join(dir, "agents", "p", "sessions.json");
 }
 
+async function waitForDeleting(sm: SessionManager): Promise<void> {
+  if (sm.isCheckoutDeleting(CHECKOUT_ID)) return;
+  await new Promise<void>((resolve, reject) => {
+    const unsubscribe = sm.onChange(() => {
+      if (!sm.isCheckoutDeleting(CHECKOUT_ID)) return;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    });
+    const timer = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("The checkout deletion did not begin"));
+    }, 2_000);
+  });
+}
+
 describe("delete-in-flight flag", () => {
   it("a dirty preflight refusal never flags the session", async () => {
     await withDir(async (dir) => {
@@ -129,7 +145,7 @@ describe("delete-in-flight flag", () => {
       const deletion = sm.delete(isolated.id) as Promise<boolean>;
       // The whole point of the flag: an app learns the delete started long
       // before the row disappears at the end of it.
-      await Bun.sleep(0);
+      await waitForDeleting(sm);
       expect(emits[0]?.[0]).toMatchObject({ id: isolated.id, deleting: true });
       expect(sm.isCheckoutDeleting(CHECKOUT_ID)).toBe(true);
 
@@ -191,7 +207,7 @@ describe("delete-in-flight flag", () => {
       const isolated = await sm.create("Isolated", { isolation: "worktree" });
 
       const deletion = sm.delete(isolated.id) as Promise<boolean>;
-      await Bun.sleep(0);
+      await waitForDeleting(sm);
       expect(sm.isCheckoutDeleting(CHECKOUT_ID)).toBe(true);
 
       sm.noteExited(isolated.id);
@@ -214,7 +230,7 @@ describe("delete-in-flight flag", () => {
       const isolated = await sm.create("Isolated", { isolation: "worktree" });
 
       const deletion = sm.delete(isolated.id) as Promise<boolean>;
-      await Bun.sleep(0);
+      await waitForDeleting(sm);
       // The PTY has reported its exit and taskkill is still walking the rest of
       // the tree. Sweeping the directory here is the sharing violation that
       // strands the session undeletable, so nothing may have run yet.
@@ -300,7 +316,7 @@ describe("delete-in-flight flag", () => {
       const isolated = await sm.create("Isolated", { isolation: "worktree" });
 
       const first = sm.delete(isolated.id) as Promise<boolean>;
-      await Bun.sleep(0);
+      await waitForDeleting(sm);
       await expect(sm.delete(isolated.id)).rejects.toMatchObject({ code: "WORKTREE_DELETE_IN_PROGRESS" });
       // The refusal must not clear the flag the first delete is still relying on.
       expect(sm.isCheckoutDeleting(CHECKOUT_ID)).toBe(true);
@@ -323,7 +339,7 @@ describe("delete-in-flight flag", () => {
       const preparesAfterCreate = prepares;
 
       const deletion = sm.delete(isolated.id) as Promise<boolean>;
-      await Bun.sleep(0);
+      await waitForDeleting(sm);
       await expect(sm.start(isolated.id)).rejects.toMatchObject({ code: "WORKTREE_DELETE_IN_PROGRESS" });
       // The other door into a dying checkout's runtime: a start would rebuild it
       // and spawn a PTY inside the directory the delete is about to remove.

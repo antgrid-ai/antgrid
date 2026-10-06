@@ -575,6 +575,25 @@ class HostControlClient {
     await _post({'type': 'project:stop', 'projectId': projectId});
   }
 
+  Future<Map<String, dynamic>> schedulerRequest(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) async {
+    final result = await _post({
+      'type': 'scheduler:request',
+      'method': method,
+      'params': params,
+    }, timeout: const Duration(seconds: 20));
+    final payload = result['result'];
+    if (payload is! Map) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'Malformed scheduler response',
+      );
+    }
+    return payload.cast<String, dynamic>();
+  }
+
   /// Erase every machine-side trace of [projectId]. Called on project delete so
   /// reopening the same folder doesn't reload the old sessions — `sessions.json`
   /// on the bridge is authoritative; the app only caches it.
