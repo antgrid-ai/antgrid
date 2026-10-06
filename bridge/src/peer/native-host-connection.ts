@@ -494,16 +494,16 @@ export class NativePeerSessions extends PeerSessionOwner {
     const store = this.nativeOpts.pairedPhones;
     if (!store) return;
     const named = new Set(snapshot.peers.map((peer) => `${peer.deviceId}|${peer.ed25519Pub}`));
-    for (const phone of store.list()) {
-      if (named.has(`${phone.phoneDeviceId}|${phone.phonePubkey}`)) continue;
-      // A failed write must not abort the lease refresh this runs inside; the
-      // next snapshot retries, and push targeting skips the row meanwhile.
-      try {
+    // A failure here must not fail the lease refresh this runs inside; the next
+    // snapshot retries, and push targeting skips the row meanwhile.
+    try {
+      for (const phone of store.list()) {
+        if (named.has(`${phone.phoneDeviceId}|${phone.phonePubkey}`)) continue;
         store.remove(phone.phonePubkey);
         this.diagnostics.info("Removed phone %s: the account no longer names it", phone.phoneDeviceId);
-      } catch (error) {
-        this.diagnostics.warn("Could not remove disowned phone %s: %s", phone.phoneDeviceId, error);
       }
+    } catch (error) {
+      this.diagnostics.warn("Could not prune disowned phones: %s", error);
     }
   }
 
