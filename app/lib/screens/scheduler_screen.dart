@@ -306,6 +306,14 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
                     ),
                     AbButton(
                       label: 'Create schedule',
+                      variant: AbButtonVariant.primary,
+                      fontSize: AbTokens.fontBody,
+                      fontWeight: FontWeight.w600,
+                      leading: AbIcon(
+                        AbIcons.add,
+                        size: AbTokens.iconButtonGlyph,
+                        color: context.antgrid.accentForeground,
+                      ),
                       onTap:
                           _writable &&
                               ((snapshot!.projects.isNotEmpty &&
@@ -348,11 +356,6 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
                 ),
               ),
               const SizedBox(height: AbTokens.space8),
-              AbInlineBanner(
-                text:
-                    'The target desktop app must remain open. Each run starts a fresh conversation; schedule worktrees are reused. Completed means the prompt turn ended.',
-                color: context.antgrid.textSecondary,
-              ),
             ],
             if (_error != null)
               AbInlineBanner(text: _error!, color: context.antgrid.error),
