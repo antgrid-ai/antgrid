@@ -11,6 +11,10 @@ import {
 import { MessageBus } from "../src/message-bus";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 import { lengthPrefix, until } from "./support/fake-bi-stream";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadPairedPhones, type PairedPhonesStore } from "../src/paired-phones";
 
 // Every native bidi stream, the session stream included, opens with one
 // `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
@@ -51,7 +55,7 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
     .toThrow("INVALID_EVAL_BIND_ADDR");
 });
 function fixture(now?: () => number, schedule?: (callback: () => void, ms: number) => () => void,
-  projectCataloged?: (projectId: string) => boolean) {
+  projectCataloged?: (projectId: string) => boolean, pairedPhones?: PairedPhonesStore) {
   let allowed = true;
   const lifecycle: { now?: () => number; schedule?: (callback: () => void, ms: number) => () => void } = {};
   if (now) lifecycle.now = now;
@@ -69,6 +73,7 @@ function fixture(now?: () => number, schedule?: (callback: () => void, ms: numbe
       getLicenseToken: () => "test-only",
       remoteAccessEnabled: () => allowed,
       ...(projectCataloged ? { projectCataloged } : {}),
+      ...(pairedPhones ? { pairedPhones } : {}),
       ...(Object.keys(lifecycle).length ? { lifecycle } : {}),
     },
   });
@@ -417,6 +422,44 @@ test("a resume whose refresh is denied retires admitted peers", async () => {
     expect(peer.closes()).toBe(1);
     expect(f.access.nativePeers.size).toBe(0);
   } finally { f.client.close(); }
+});
+
+test("push revocation follows the lease: a revoked device or a stale key is disowned, no lease disowns nobody", async () => {
+  const f = fixture();
+  try {
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(await f.client.authorizeDevice(f.peerId)).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(f.client.accountDisowns(f.peerId, "a-key-the-account-never-named")).toBe(true);
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(true);
+  } finally { f.client.close(); }
+});
+
+test("an accepted lease prunes the phone rows it no longer names, and only those", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "antgrid-prune-phones-"));
+  const store = loadPairedPhones(dir);
+  const f = fixture(undefined, undefined, undefined, store);
+  const signedOut = "22222222-2222-4222-8222-222222222222";
+  const reSignedIn = "33333333-3333-4333-8333-333333333333";
+  const row = (phoneDeviceId: string, phonePubkey: string) => ({ phoneDeviceId, phonePubkey, pairedAt: "", lastSeenAt: "" });
+  try {
+    store.upsert(row(f.peerId, vector.devicePublic));
+    store.upsert(row(signedOut, `${"A".repeat(43)}=`));
+    store.upsert(row(reSignedIn, `${"B".repeat(43)}=`));
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [
+      ...f.snapshot.peers,
+      { deviceId: reSignedIn, ed25519Pub: `${"C".repeat(43)}=`, endpoint: null },
+    ] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(store.list().map((p) => p.phoneDeviceId)).toEqual([f.peerId]);
+
+    // A denied lease is not an account that names nobody.
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, allowed: false, peers: [] });
+    await f.client.noteResume();
+    expect(store.list().map((p) => p.phoneDeviceId)).toEqual([f.peerId]);
+  } finally { f.client.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("resume does not churn the central control connection", async () => {

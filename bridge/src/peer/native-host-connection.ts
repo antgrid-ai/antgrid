@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION } from "antgrid-wire";
+import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, type PeerAuthorizationSnapshot } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -138,9 +138,10 @@ export class NativePeerSessions extends PeerSessionOwner {
         throw error;
       }
     },
-      (reason) => this.invalidatePeerConnections(reason), () => {
+      (reason) => this.invalidatePeerConnections(reason), (snapshot) => {
         this.recheckAuthorization();
         this.reconcileRelays();
+        this.pruneDisownedPhones(snapshot);
       }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
     // Shared by every project-scoped registry: the lookup never opens or
     // promotes a core, and `retirePeer` is guarded the same way
@@ -471,6 +472,41 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   invalidateAuthorization(): void { this.lease.invalidate("denied"); }
 
+  /** Synchronous: push targeting asks this from inside a bus deliver. With no
+   *  lease (startup, a policy change in flight, an outage) nobody is disowned:
+   *  a push to a signed-out phone is sealed to a key it already discarded,
+   *  where a dropped one is a lost notification. An expired lease is re-armed
+   *  only by a dialing phone, a resume or a policy push, so asking also kicks
+   *  the refresh that closes the gap. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean {
+    if (!this.lease.current) {
+      if (!this.stopped && this.lifecycle.state === "ready") void this.lease.refresh().catch(() => {});
+      return false;
+    }
+    return !this.lease.names(deviceId, ed25519Pub);
+  }
+
+  /** A signed-out phone's row survives on every machine it could not reach to
+   *  clear itself, and a re-signed-in phone keeps its old-key row here until it
+   *  reconnects. Only an accepted snapshot prunes: the lease never delivers one
+   *  that is denied, so a lapsed subscription or an outage removes nothing. */
+  private pruneDisownedPhones(snapshot: PeerAuthorizationSnapshot): void {
+    const store = this.nativeOpts.pairedPhones;
+    if (!store) return;
+    const named = new Set(snapshot.peers.map((peer) => `${peer.deviceId}|${peer.ed25519Pub}`));
+    // A failure here must not fail the lease refresh this runs inside; the next
+    // snapshot retries, and push targeting skips the row meanwhile.
+    try {
+      for (const phone of store.list()) {
+        if (named.has(`${phone.phoneDeviceId}|${phone.phonePubkey}`)) continue;
+        store.remove(phone.phonePubkey);
+        this.diagnostics.info("Removed phone %s: the account no longer names it", phone.phoneDeviceId);
+      }
+    } catch (error) {
+      this.diagnostics.warn("Could not prune disowned phones: %s", error);
+    }
+  }
+
   async authorizeDevice(deviceId: string): Promise<boolean> {
     try {
       if (!this.lease.current && !await this.lease.refresh()) return false;
@@ -675,6 +711,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   }
   redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean { return this.peers.accountDisowns(deviceId, ed25519Pub); }
   setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
   attachStream(...args: Parameters<NativePeerSessions["attachStream"]>) { return this.peers.attachStream(...args); }
   establishedPeers() { return this.peers.establishedPeers(); }

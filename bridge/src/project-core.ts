@@ -40,6 +40,12 @@ export interface ProjectCoreRemoteDeps {
   machineDeviceId(): string;
   /** Blind FCM/APNs push forward over the central control socket. */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
+  /** Whether the account's current authorization lease leaves out this device
+   *  or this identity key. Sign-out revokes the device and wipes its keys, but
+   *  the push row it registered survives on every machine it could not reach in
+   *  that moment; this, not the row, is what stops a signed-out phone being
+   *  pushed to. False when there is no lease to ask. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean;
 }
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
@@ -753,7 +759,10 @@ export class ProjectCore {
             .map((p) => p.peerPubkey),
         );
         const paired = core.pairedPhones.list();
-        const candidates = paired.filter((p) => !inBand.has(p.phonePubkey));
+        // Key too: a re-sign-in keeps the device id but mints a fresh key.
+        const candidates = paired.filter(
+          (p) => !inBand.has(p.phonePubkey) && !remote.accountDisowns(p.phoneDeviceId, p.phonePubkey),
+        );
         const targets = candidates.flatMap((p) =>
           p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
@@ -764,10 +773,11 @@ export class ProjectCore {
           // pruned token and no phone at all are indistinguishable in host.log
           // without this.
           log.warn(
-            "push: no eligible phone for project %s (in band: %d, paired: %d) — need a registered phone with a push token",
+            "push: no eligible phone for project %s (in band: %d, paired: %d, away and not revoked: %d) — need a registered phone with a push token",
             core.projectId,
             inBand.size,
             paired.length,
+            candidates.length,
           );
         }
         return targets;

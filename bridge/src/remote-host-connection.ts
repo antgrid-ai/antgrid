@@ -10,6 +10,7 @@ export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   close(): Promise<void>;
   redialWithFreshToken(): void;
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void;
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean;
   noteResume(): Promise<boolean>;
   recheckAuthorization(): void;
   authorizeDevice?(deviceId: string): Promise<boolean>;
