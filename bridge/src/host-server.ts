@@ -2785,6 +2785,7 @@ export class HostServer {
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
+      accountDisowns: (deviceId, ed25519Pub) => client.accountDisowns(deviceId, ed25519Pub),
     };
   }
 

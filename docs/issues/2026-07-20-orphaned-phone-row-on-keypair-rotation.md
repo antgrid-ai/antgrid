@@ -95,5 +95,7 @@ which a rekey never touches.
 
 ## Related
 
-- `docs/issues/2026-07-20-signout-push-clear-is-best-effort.md` — the sign-out
-  clear that would otherwise have emptied the orphaned row.
+- Push targeting (`resolveTargets` in `bridge/src/project-core.ts`) skips any
+  row whose device and identity key the account's authorization lease no longer
+  names (`accountDisowns`), so an orphaned row is no longer pushed to even
+  though it is not removed.

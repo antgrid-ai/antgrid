@@ -93,6 +93,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -201,6 +202,7 @@ async function startAfterDesktopLeft() {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -275,6 +277,7 @@ async function startAfterPhoneLeft() {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });

@@ -419,6 +419,19 @@ test("a resume whose refresh is denied retires admitted peers", async () => {
   } finally { f.client.close(); }
 });
 
+test("push revocation follows the lease: a revoked device or a stale key is disowned, no lease disowns nobody", async () => {
+  const f = fixture();
+  try {
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(await f.client.authorizeDevice(f.peerId)).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(f.client.accountDisowns(f.peerId, "a-key-the-account-never-named")).toBe(true);
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(true);
+  } finally { f.client.close(); }
+});
+
 test("resume does not churn the central control connection", async () => {
   const f = fixture();
   let centralCloses = 0;

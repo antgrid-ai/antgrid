@@ -471,6 +471,20 @@ export class NativePeerSessions extends PeerSessionOwner {
 
   invalidateAuthorization(): void { this.lease.invalidate("denied"); }
 
+  /** Synchronous: push targeting asks this from inside a bus deliver. With no
+   *  lease (startup, a policy change in flight, an outage) nobody is disowned:
+   *  a push to a signed-out phone is sealed to a key it already discarded,
+   *  where a dropped one is a lost notification. An expired lease is re-armed
+   *  only by a dialing phone, a resume or a policy push, so asking also kicks
+   *  the refresh that closes the gap. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean {
+    if (!this.lease.current) {
+      if (!this.stopped && this.lifecycle.state === "ready") void this.lease.refresh().catch(() => {});
+      return false;
+    }
+    return !this.lease.names(deviceId, ed25519Pub);
+  }
+
   async authorizeDevice(deviceId: string): Promise<boolean> {
     try {
       if (!this.lease.current && !await this.lease.refresh()) return false;
@@ -675,6 +689,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   }
   redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean { return this.peers.accountDisowns(deviceId, ed25519Pub); }
   setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
   attachStream(...args: Parameters<NativePeerSessions["attachStream"]>) { return this.peers.attachStream(...args); }
   establishedPeers() { return this.peers.establishedPeers(); }
