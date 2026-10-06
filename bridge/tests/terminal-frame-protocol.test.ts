@@ -127,7 +127,7 @@ describe("terminal frame wire contract", () => {
       test("is wired at every registration point in protocol.ts", () => {
         // Miss one and the type fails silently in a different way each time: it
         // parses but createMessage cannot build it, or it builds but every real
-        // socket drops it. The fifth point in CLAUDE.md's checklist — the
+        // socket drops it. The fifth point in AGENTS.md's checklist — the
         // dispatch `case` in agent-core.ts — applies only to the four inbound
         // types and is gated by the handler suite, so it is deliberately not
         // asserted here; this file gates the wire, not the handling.

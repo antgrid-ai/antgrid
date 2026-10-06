@@ -330,7 +330,7 @@ export const AGENT_GRACE_MS = 4000;
  * anything added here whose VALUE depends on completing before `process.exit`
  * has to be bounded at its own site. Raising this without raising that poll
  * buys nothing: the extra time is spent inside a window the caller has already
- * given up on. It also stays inside the up-to-5s drain root CLAUDE.md sizes the
+ * given up on. It also stays inside the up-to-5s drain root AGENTS.md sizes the
  * MSIX destage risk against, so the documented figure there still holds.
  *
  * POSIX keeps the caller's own budget: shutdown there already polled for the

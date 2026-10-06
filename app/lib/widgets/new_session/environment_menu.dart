@@ -503,7 +503,7 @@ class PanelSectionHeader extends StatelessWidget {
 
   /// False for a panel of navigational chrome (e.g. the workspace menu's
   /// "Workspace" header) rather than a picker over identifiers — sans is the
-  /// font-token rule for chrome, mono for data (see app/CLAUDE.md's Design
+  /// font-token rule for chrome, mono for data (see app/AGENTS.md's Design
   /// Rules). Defaults true: every existing caller here is an
   /// environment/branch/project picker, where the rows below ARE identifiers.
   final bool mono;

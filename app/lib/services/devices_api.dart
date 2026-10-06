@@ -111,7 +111,7 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
         // controllers that pricing never mentions, so the only remedy is to
         // remove an app device — upgrading can never clear it. The
         // APP_DEVICE_CAP body is built in web/src/routes/devices.ts; the
-        // two-axis model is web/CLAUDE.md (the security-invariants paragraph).
+        // two-axis model is web/AGENTS.md (the security-invariants paragraph).
         final cap = _deviceCapFromBody(res.body, kind: DeviceCapKind.appDevice);
         throw ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap);
       }

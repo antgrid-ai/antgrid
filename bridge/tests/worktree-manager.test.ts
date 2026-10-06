@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
@@ -20,8 +20,9 @@ describe("WorktreeManager", () => {
   let serial: number;
 
   beforeEach(async () => {
-    repo = mkdtempSync(join(tmpdir(), "antgrid-worktree-repo-"));
-    abDir = mkdtempSync(join(tmpdir(), "antgrid-worktree-home-"));
+    // Canonical: checkout paths come back realpath'd and are measured against abDir.
+    repo = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-worktree-repo-")));
+    abDir = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-worktree-home-")));
     projectId = "project-test";
     serial = 0;
     await git(repo, ["init"]);
