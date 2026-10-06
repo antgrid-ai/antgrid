@@ -2,13 +2,10 @@ import 'package:intl/intl.dart';
 import 'package:timezone/data/latest.dart' as data;
 import 'package:timezone/timezone.dart' as tz;
 
-bool _initialized = false;
-
 String schedulerTime(DateTime? instant, [String zone = 'UTC']) {
   if (instant == null) return '—';
-  if (!_initialized) {
+  if (tz.timeZoneDatabase.locations.isEmpty) {
     data.initializeTimeZones();
-    _initialized = true;
   }
   try {
     final local = tz.TZDateTime.from(
@@ -19,6 +16,13 @@ String schedulerTime(DateTime? instant, [String zone = 'UTC']) {
   } on tz.LocationNotFoundException {
     return '${DateFormat('d MMM y, HH:mm').format(instant.toUtc())} · UTC (unknown zone: $zone)';
   }
+}
+
+String schedulerLocalTime(DateTime? instant, String? zone) {
+  if (zone != null) return schedulerTime(instant, zone);
+  if (instant == null) return '—';
+  final local = instant.toLocal();
+  return '${DateFormat('d MMM y, HH:mm').format(local)} · Local time (${local.timeZoneName})';
 }
 
 String schedulerFrequency(String cron) {

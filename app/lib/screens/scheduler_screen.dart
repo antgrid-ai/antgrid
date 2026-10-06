@@ -27,6 +27,7 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/scheduler.dart';
 import '../providers/scheduler_drafts.dart';
+import '../providers/scheduler_timezone.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../util/detached.dart';
@@ -43,7 +44,8 @@ class SchedulerScreen extends ConsumerStatefulWidget {
   ConsumerState<SchedulerScreen> createState() => _SchedulerScreenState();
 }
 
-class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
+class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
+    with WidgetsBindingObserver {
   SchedulerSnapshot? _snapshot;
   String? _error;
   String? _actionError;
@@ -62,6 +64,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    ref.invalidate(schedulerLocalTimezoneProvider);
     _poll = Timer.periodic(const Duration(seconds: 5), (_) {
       detached('Scheduler', 'scheduler refresh failed', _refresh);
     });
@@ -72,8 +76,16 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.invalidate(schedulerLocalTimezoneProvider);
+    }
   }
 
   Future<void> _refresh() async {
@@ -234,6 +246,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
     final connected = ref.watch(schedulerConnectedProvider);
     final machine = ref.watch(schedulerTargetProvider);
     final machines = ref.watch(schedulerMachinesProvider);
+    final localTimezone = ref.watch(schedulerLocalTimezoneProvider);
     ref.listen(schedulerTargetProvider, (_, _) {
       _generation++;
       _refreshToken = null;
@@ -316,6 +329,13 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
                       ),
                       onTap:
                           _writable &&
+                              (!localTimezone.isLoading ||
+                                  ref.read(schedulerDraftsProvider).containsKey(
+                                    (
+                                      machine: machine ?? 'local',
+                                      scheduleId: null,
+                                    ),
+                                  )) &&
                               ((snapshot!.projects.isNotEmpty &&
                                       snapshot
                                           .capabilities
@@ -557,7 +577,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
       children: [
         _text(schedulerCadence(schedule.cron, schedule.timezone)),
         _text(
-          'Next: ${schedule.enabled ? schedulerTime(schedule.nextOccurrence, schedule.timezone) : 'Paused'}',
+          'Next: ${schedule.enabled ? schedulerLocalTime(schedule.nextOccurrence, ref.read(schedulerLocalTimezoneProvider).value ?? _snapshot?.capabilities.timezone) : 'Paused'}',
         ),
       ],
     );
@@ -775,11 +795,16 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen> {
         'Deleted schedule (${run.scheduleId})';
     final zone =
         run.timezone ?? schedule?.timezone ?? snapshot.capabilities.timezone;
+    final localZone =
+        ref.read(schedulerLocalTimezoneProvider).value ??
+        snapshot.capabilities.timezone;
     return _card(
       [
         _text(name, strong: true),
         _runStatus(run),
-        _text(schedulerTime(run.occurrenceAt, zone)),
+        _text(schedulerLocalTime(run.occurrenceAt, localZone)),
+        if (zone != localZone)
+          _text('Schedule time: ${schedulerTime(run.occurrenceAt, zone)}'),
         _text('UTC: ${schedulerTime(run.occurrenceAt)}'),
         _text('${run.trigger} · Duration: ${schedulerDuration(run.duration)}'),
         if (run.status == 'completed') _text('The prompt turn ended.'),

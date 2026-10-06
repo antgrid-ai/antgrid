@@ -11,9 +11,11 @@ import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
+import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
+import 'package:antgrid/providers/scheduler_timezone.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/services/auth_service.dart';
@@ -65,6 +67,10 @@ Map<String, dynamic> runRecord(
 final connectedProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(true),
 );
+final deviceTimezoneProvider =
+    NotifierProvider<ValueController<String?>, String?>(
+      () => ValueController('Asia/Kolkata'),
+    );
 final userProvider =
     NotifierProvider<ValueController<CurrentUser?>, CurrentUser?>(
       () => ValueController(
@@ -77,6 +83,7 @@ class Host {
   List<Map<String, dynamic>> runs = [];
   bool clearSupported = true;
   bool agentAvailable = true;
+  String timezone = 'Asia/Kolkata';
   Object? previewError;
   Future<Map<String, dynamic>> Function(Map<String, dynamic>)? preview;
   Completer<Map<String, dynamic>>? history;
@@ -91,7 +98,7 @@ class Host {
       case 'scheduler.capabilities':
         return {
           'supported': true,
-          'timezone': 'Asia/Kolkata',
+          'timezone': timezone,
           'supportsBaseBranchClear': clearSupported,
           'agents': [
             if (agentAvailable)
@@ -151,6 +158,9 @@ ProviderContainer containerFor(Host host, {Host? remote}) {
   final container = ProviderContainer(
     overrides: [
       currentUserProvider.overrideWith((ref) async => ref.watch(userProvider)),
+      schedulerLocalTimezoneProvider.overrideWith(
+        (ref) async => ref.watch(deviceTimezoneProvider),
+      ),
       schedulerMachinesProvider.overrideWithValue(const {
         'local': 'Local machine',
         'remote': 'Laptop',
@@ -304,6 +314,172 @@ void main() {
   );
 
   schedulerTestWidgets(
+    'creation uses device-local time even when the host is UTC and retains its zone after a device change',
+    (tester) async {
+      sizeView(tester);
+      final host = Host()..timezone = 'UTC';
+      final container = containerFor(host);
+      container.read(deviceTimezoneProvider.notifier).set('America/New_York');
+      await pumpScreen(tester, container);
+      await tester.tap(find.text('Create schedule'));
+      await tester.pumpAndSettle();
+      expect(field('Asia/Kolkata'), findsNothing);
+      expect(find.textContaining('Use local timezone'), findsNothing);
+      expect(
+        host.calls.lastWhere((c) => c.method == 'scheduler.preview').params,
+        {'cron': '0 9 * * *', 'timezone': 'America/New_York'},
+      );
+      expect(find.text('Time (HH:mm) · America/New_York'), findsOneWidget);
+      await tester.enterText(field('Schedule name'), 'Daily local review');
+      await tester.enterText(find.byType(AbPromptField), 'Review open changes');
+
+      container.read(deviceTimezoneProvider.notifier).set('Europe/London');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('RUNS'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('SCHEDULES'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Create schedule'));
+      await tester.pumpAndSettle();
+      expect(find.text('Time (HH:mm) · America/New_York'), findsOneWidget);
+      await tester.tap(find.text('Save schedule'));
+      await tester.pumpAndSettle();
+      final saved =
+          host.calls
+                  .lastWhere((c) => c.method == 'scheduler.create')
+                  .params['schedule']
+              as Map;
+      expect(saved['timezone'], 'America/New_York');
+      expect(saved['cron'], '0 9 * * *');
+    },
+  );
+
+  schedulerTestWidgets(
+    'existing UTC rules keep their timezone while next occurrences display locally',
+    (tester) async {
+      sizeView(tester);
+      final instant = DateTime.utc(2026, 1, 2, 9);
+      final host = Host()
+        ..timezone = 'UTC'
+        ..schedules = [
+          {
+            ...settings,
+            'cron': '0 9 * * *',
+            'timezone': 'UTC',
+            'nextOccurrence': instant.millisecondsSinceEpoch,
+          },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      expect(
+        find.text('Next: 2 Jan 2026, 14:30 · Asia/Kolkata (IST)'),
+        findsOneWidget,
+      );
+      await editSchedule(tester);
+      expect(field('Asia/Kolkata'), findsNothing);
+      expect(find.text('Time (HH:mm) · UTC'), findsOneWidget);
+      await tester.tap(find.text('Save schedule'));
+      await tester.pumpAndSettle();
+      final patch =
+          host.calls
+                  .lastWhere((c) => c.method == 'scheduler.update')
+                  .params['patch']
+              as Map;
+      expect(patch['timezone'], 'UTC');
+      expect(patch['cron'], '0 9 * * *');
+    },
+  );
+
+  for (final hostZone in ['UTC', 'Asia/Kolkata']) {
+    schedulerTestWidgets(
+      'unavailable local detection automatically uses host timezone $hostZone',
+      (tester) async {
+        sizeView(tester);
+        final host = Host()..timezone = hostZone;
+        final container = containerFor(host);
+        container.read(deviceTimezoneProvider.notifier).set(null);
+        await pumpScreen(tester, container);
+        await tester.tap(find.text('Create schedule'));
+        await tester.pumpAndSettle();
+        expect(field('Asia/Kolkata'), findsNothing);
+        expect(find.textContaining('Use local timezone'), findsNothing);
+        expect(find.text('Time (HH:mm) · $hostZone'), findsOneWidget);
+        expect(
+          find.textContaining('Could not detect your local timezone'),
+          findsNothing,
+        );
+        expect(find.textContaining('Invalid cron or timezone'), findsNothing);
+        expect(
+          host.calls.lastWhere((c) => c.method == 'scheduler.preview').params,
+          {'cron': '0 9 * * *', 'timezone': hostZone},
+        );
+        expect(
+          find.text('Next five occurrences · machine time'),
+          findsOneWidget,
+        );
+        expect(saveButton(tester).onTap, isNotNull);
+        await tester.enterText(field('Schedule name'), 'Machine time review');
+        await tester.enterText(
+          find.byType(AbPromptField),
+          'Review open changes',
+        );
+        await tester.tap(find.text('Save schedule'));
+        await tester.pumpAndSettle();
+        final saved =
+            host.calls
+                    .lastWhere((c) => c.method == 'scheduler.create')
+                    .params['schedule']
+                as Map;
+        expect(saved['timezone'], hostZone);
+      },
+    );
+  }
+
+  schedulerTestWidgets(
+    'a retained draft with an empty timezone recovers automatically without losing its prompt',
+    (tester) async {
+      sizeView(tester);
+      final host = Host()..timezone = 'Europe/London';
+      final container = containerFor(host);
+      container.read(deviceTimezoneProvider.notifier).set(null);
+      final draft = SchedulerDraft.start(
+        await host.snapshot(),
+        null,
+        localTimezone: '',
+      );
+      container.read(schedulerDraftsProvider.notifier).put(
+        (machine: 'local', scheduleId: null),
+        draft.edit(
+          {
+            ...draft.values,
+            'name': 'Retained draft',
+            'prompt': 'Keep this prompt',
+          },
+          'Daily',
+          '09:00',
+        ),
+      );
+      await pumpScreen(tester, container);
+      await tester.tap(find.text('Create schedule'));
+      await tester.pumpAndSettle();
+      expect(find.text('Time (HH:mm) · Europe/London'), findsOneWidget);
+      expect(
+        tester
+            .widget<AbPromptField>(find.byType(AbPromptField))
+            .controller
+            .text,
+        'Keep this prompt',
+      );
+      expect(saveButton(tester).onTap, isNotNull);
+      expect(
+        host.calls
+            .lastWhere((c) => c.method == 'scheduler.preview')
+            .params['timezone'],
+        'Europe/London',
+      );
+    },
+  );
+
+  schedulerTestWidgets(
     'Run now feedback precedes history refresh and View run highlights the returned occurrence',
     (tester) async {
       sizeView(tester);
@@ -384,7 +560,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('The prompt turn ended.'), findsOneWidget);
       expect(find.textContaining('America/New_York'), findsOneWidget);
-      expect(find.textContaining('Asia/Kolkata'), findsOneWidget);
+      expect(find.textContaining('Asia/Kolkata'), findsNWidgets(2));
       expect(find.text('manual · Duration: 2m 5s'), findsOneWidget);
       await tester.tap(find.text('Stop run'));
       await tester.pumpAndSettle();
@@ -735,16 +911,22 @@ void main() {
     },
   );
 
-  for (final invalid in [false, true]) {
+  for (final failure in ['operational', 'validation', 'local validation']) {
+    final invalid = failure != 'operational';
     schedulerTestWidgets(
-      'preview ${invalid ? 'validation' : 'operational'} failures classify and recover on retry',
+      'preview $failure failures classify and recover on retry',
       (tester) async {
         sizeView(tester);
         final host = Host()
-          ..previewError = RpcException(
-            invalid ? 'SCHEDULER_INVALID_CRON' : 'SCHEDULER_ERROR',
-            'Preview failed',
-          );
+          ..previewError = failure == 'local validation'
+              ? HostControlException(
+                  'SCHEDULER_INVALID_CRON',
+                  'Choose an IANA timezone, such as Europe/London',
+                )
+              : RpcException(
+                  invalid ? 'SCHEDULER_INVALID_CRON' : 'SCHEDULER_ERROR',
+                  'Preview failed',
+                );
         await pumpScreen(tester, containerFor(host));
         await editSchedule(tester);
         expect(
@@ -756,6 +938,14 @@ void main() {
           findsOneWidget,
         );
         expect(saveButton(tester).onTap, isNull);
+        expect(find.textContaining('HostControlException'), findsNothing);
+        expect(find.textContaining('SCHEDULER_INVALID_CRON'), findsNothing);
+        if (failure == 'local validation') {
+          expect(
+            find.textContaining('Choose an IANA timezone'),
+            findsOneWidget,
+          );
+        }
         host.previewError = null;
         await tester.ensureVisible(find.text('Retry validation'));
         await tester.tap(find.text('Retry validation'));
@@ -774,15 +964,15 @@ void main() {
       await pumpScreen(tester, container);
       await editSchedule(tester);
       final old = Completer<Map<String, dynamic>>();
-      host.preview = (params) => params['timezone'] == 'Europe/London'
+      host.preview = (params) => params['cron'] == '0 7 * * 1-5'
           ? old.future
           : Future.value({
               'occurrences': [1800000000000],
             });
-      await tester.enterText(field('Asia/Kolkata'), 'Europe/London');
+      await tester.enterText(field('09:00'), '07:00');
       await tester.pump(const Duration(milliseconds: 400));
       expect(saveButton(tester).onTap, isNull);
-      await tester.enterText(field('Asia/Kolkata'), 'UTC');
+      await tester.enterText(field('09:00'), '08:00');
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       old.completeError(RpcException('SCHEDULER_INVALID_CRON', 'Stale'));
@@ -794,7 +984,8 @@ void main() {
       expect(saveButton(tester).onTap, isNull);
       container.read(connectedProvider.notifier).set(true);
       await tester.pumpAndSettle();
-      expect(host.calls.last.params['timezone'], 'UTC');
+      expect(host.calls.last.params['timezone'], 'Asia/Kolkata');
+      expect(host.calls.last.params['cron'], '0 8 * * 1-5');
       expect(saveButton(tester).onTap, isNotNull);
     },
   );
@@ -901,6 +1092,13 @@ void main() {
               ...settings,
               'workspaceCreated': true,
               'checkoutId': 'schedule-review-workspace',
+              'nextOccurrence': DateTime.utc(
+                2027,
+                1,
+                15,
+                3,
+                30,
+              ).millisecondsSinceEpoch,
             },
           ]
           ..runs = [
@@ -916,6 +1114,12 @@ void main() {
               'finishedAt': 1799913735000,
             },
           ];
+        host.preview = (_) async => {
+          'occurrences': [
+            for (final day in [15, 18, 19, 20, 21])
+              DateTime.utc(2027, 1, day, 3, 30).millisecondsSinceEpoch,
+          ],
+        };
         final key = GlobalKey();
         await pumpScreen(tester, containerFor(host), captureKey: key);
         Future<void> capture(String surface) async {
@@ -945,6 +1149,11 @@ void main() {
         await tester.pumpAndSettle();
         await editSchedule(tester);
         await capture('editor');
+        if (mobile) {
+          await tester.ensureVisible(find.text('Time (HH:mm) · Asia/Kolkata'));
+          await tester.pumpAndSettle();
+          await capture('editor-timing');
+        }
         expect(tester.takeException(), isNull);
       },
     );

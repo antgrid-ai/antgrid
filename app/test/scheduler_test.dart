@@ -13,6 +13,7 @@ import 'package:antgrid/navigation/nav_serialization.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
+import 'package:antgrid/providers/scheduler_timezone.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/control_plane_client.dart';
@@ -219,39 +220,56 @@ void main() {
     expect(transport.requests.single.params, {'id': 'daily'});
   });
 
-  testWidgets('drawer places Scheduler directly below New Session', (
-    tester,
-  ) async {
-    final container = await demoContainer();
-    container.read(demoModeProvider.notifier).set(true);
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: MaterialApp(
-          theme: buildAbTheme(),
-          home: const Scaffold(body: ProjectsDrawer()),
+  testWidgets(
+    'drawer navigation rows share styling and reflect their surface',
+    (tester) async {
+      final container = await demoContainer();
+      container.read(demoModeProvider.notifier).set(true);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: const Scaffold(body: ProjectsDrawer()),
+          ),
         ),
-      ),
-    );
-    await tester.pump();
-    final newSession = find.widgetWithText(AbButton, 'New Session');
-    final scheduler = find.widgetWithText(AbListRow, 'Scheduler');
-    expect(newSession, findsOneWidget);
-    expect(scheduler, findsOneWidget);
-    expect(find.widgetWithText(AbButton, 'Scheduler'), findsNothing);
-    final schedulerRow = tester.widget<AbListRow>(scheduler);
-    expect(schedulerRow.enabled, isFalse);
-    expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
-    expect(
-      tester.getBottomLeft(newSession).dy,
-      lessThan(tester.getTopLeft(scheduler).dy),
-    );
-    container
-        .read(workbenchSurfaceProvider.notifier)
-        .set(WorkbenchSurface.scheduler);
-    await tester.pump();
-    expect(tester.widget<AbListRow>(scheduler).selected, isTrue);
-  });
+      );
+      await tester.pump();
+      final newSession = find.widgetWithText(AbListRow, 'New Session');
+      final scheduler = find.widgetWithText(AbListRow, 'Scheduler');
+      expect(newSession, findsOneWidget);
+      expect(scheduler, findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'New Session'), findsNothing);
+      expect(find.widgetWithText(AbButton, 'Scheduler'), findsNothing);
+      final newSessionRow = tester.widget<AbListRow>(newSession);
+      final schedulerRow = tester.widget<AbListRow>(scheduler);
+      expect(newSessionRow.density, schedulerRow.density);
+      expect(newSessionRow.horizontalPadding, schedulerRow.horizontalPadding);
+      expect(newSessionRow.selectionStyle, AbRowSelection.surface);
+      expect(newSessionRow.hoverable, isTrue);
+      expect(schedulerRow.enabled, isFalse);
+      expect(tester.getSize(newSession).height, greaterThanOrEqualTo(48));
+      expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
+      expect(
+        tester.getBottomLeft(newSession).dy,
+        lessThan(tester.getTopLeft(scheduler).dy),
+      );
+      container
+          .read(workbenchSurfaceProvider.notifier)
+          .set(WorkbenchSurface.scheduler);
+      await tester.pump();
+      expect(tester.widget<AbListRow>(scheduler).selected, isTrue);
+      expect(tester.widget<AbListRow>(newSession).selected, isFalse);
+      await tester.tap(newSession);
+      await tester.pump();
+      expect(
+        container.read(workbenchSurfaceProvider),
+        WorkbenchSurface.newSession,
+      );
+      expect(tester.widget<AbListRow>(newSession).selected, isTrue);
+      expect(tester.widget<AbListRow>(scheduler).selected, isFalse);
+    },
+  );
 
   Future<void> pumpScreen(
     WidgetTester tester,
@@ -265,6 +283,9 @@ void main() {
       ProviderScope(
         overrides: [
           currentUserProvider.overrideWith((ref) async => null),
+          schedulerLocalTimezoneProvider.overrideWith(
+            (ref) async => 'Asia/Kolkata',
+          ),
           schedulerMachinesProvider.overrideWithValue(const {
             'local': 'Local machine',
             'remote': 'Laptop',

@@ -58,8 +58,9 @@ class SchedulerDraft {
 
   factory SchedulerDraft.start(
     SchedulerSnapshot snapshot,
-    AgentSchedule? schedule,
-  ) {
+    AgentSchedule? schedule, {
+    String? localTimezone,
+  }) {
     final values =
         schedule?.settings() ??
         {
@@ -74,7 +75,7 @@ class SchedulerDraft {
           'approvalPolicy': 'default',
           'enabled': true,
           'cron': '0 9 * * *',
-          'timezone': snapshot.capabilities.timezone,
+          'timezone': localTimezone ?? snapshot.capabilities.timezone,
         };
     return SchedulerDraft(
       values: values,

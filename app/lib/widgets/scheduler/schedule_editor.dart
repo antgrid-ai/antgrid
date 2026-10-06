@@ -20,6 +20,7 @@ import '../../launcher/host_control_client.dart';
 import '../../models/scheduler.dart';
 import '../../providers/scheduler.dart';
 import '../../providers/scheduler_drafts.dart';
+import '../../providers/scheduler_timezone.dart';
 import '../../util/detached.dart';
 import '../../utils/platform_utils.dart';
 import 'scheduler_format.dart';
@@ -52,16 +53,17 @@ class ScheduleEditor extends ConsumerStatefulWidget {
 }
 
 class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
-  late final TextEditingController _name,
-      _prompt,
-      _branch,
-      _cron,
-      _timezone,
-      _time;
+  late final TextEditingController _name, _prompt, _branch, _cron, _time;
   final _promptFocus = FocusNode();
   final _cronFocus = FocusNode();
   late SchedulerDraft _draft;
-  late String _project, _agent, _mode, _workspace, _approvals, _frequency;
+  late String _project,
+      _agent,
+      _mode,
+      _workspace,
+      _approvals,
+      _frequency,
+      _timezone;
   late bool _enabled;
   bool _saving = false, _restoring = false, _invalidPreview = false;
   bool _closed = false;
@@ -91,7 +93,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                   _workspace != _current!.workspace ||
                   _branch.text.trim() != (_current!.baseBranch ?? ''))));
   bool get _editable => widget.writable && !_saving;
-  String get _previewKey => '${_cron.text.trim()}\n${_timezone.text.trim()}';
+  String get _previewKey => '${_cron.text.trim()}\n${_timezone.trim()}';
+  bool get _previewInputsReady =>
+      _cron.text.trim().isNotEmpty && _timezone.trim().isNotEmpty;
   bool get _invalidTime =>
       (_frequency == 'Daily' || _frequency == 'Weekdays') &&
       schedulerPresetCron(_frequency, _time.text) == null;
@@ -107,6 +111,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       !_conflict &&
       !_unsupportedClear &&
       !_invalidTime &&
+      _timezone.trim().isNotEmpty &&
       _executionError == null &&
       _validated == _previewKey;
   String? get _executionError {
@@ -133,7 +138,11 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     super.initState();
     _draft =
         ref.read(schedulerDraftsProvider)[_key] ??
-        SchedulerDraft.start(widget.snapshot, widget.schedule);
+        SchedulerDraft.start(
+          widget.snapshot,
+          widget.schedule,
+          localTimezone: ref.read(schedulerLocalTimezoneProvider).value,
+        );
     final values = _draft.values;
     _name = TextEditingController(text: values['name'] as String);
     _prompt = TextEditingController(text: values['prompt'] as String);
@@ -141,7 +150,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       text: values['baseBranch'] as String? ?? '',
     );
     _cron = TextEditingController(text: values['cron'] as String);
-    _timezone = TextEditingController(text: values['timezone'] as String);
+    _timezone = values['timezone'] as String;
+    if (_timezone.trim().isEmpty) {
+      _timezone =
+          ref.read(schedulerLocalTimezoneProvider).value ??
+          widget.snapshot.capabilities.timezone;
+    }
     _time = TextEditingController(text: _draft.time);
     _restoreChoices();
     _lastPreviewKey = _previewKey;
@@ -149,7 +163,6 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       c.addListener(_changed);
     }
     _cron.addListener(_schedulePreview);
-    _timezone.addListener(_schedulePreview);
     _time.addListener(_timeChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -180,7 +193,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     'enabled': _enabled,
     if (_branch.text.trim().isNotEmpty) 'baseBranch': _branch.text.trim(),
     'cron': _cron.text,
-    'timezone': _timezone.text,
+    'timezone': _timezone,
   };
   void _persist() {
     if (_closed) return;
@@ -217,7 +230,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
   @override
   void dispose() {
     _debounce?.cancel();
-    for (final c in [_name, _prompt, _branch, _cron, _timezone, _time]) {
+    for (final c in [_name, _prompt, _branch, _cron, _time]) {
       c.dispose();
     }
     _promptFocus.dispose();
@@ -268,11 +281,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     setState(() {
       _validated = null;
       _previewError = null;
+      _invalidPreview = false;
+      _occurrences = const [];
     });
+    if (!_previewInputsReady) return;
     try {
       final result = await widget.request('scheduler.preview', {
         'cron': _cron.text.trim(),
-        'timezone': _timezone.text.trim(),
+        'timezone': _timezone.trim(),
       });
       final occurrences = (result['occurrences'] as List)
           .map(
@@ -299,11 +315,16 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
           : error is HostControlException
           ? error.code
           : '';
+      final message = error is RpcException
+          ? error.message
+          : error is HostControlException
+          ? error.message
+          : '';
       setState(() {
         _validated = null;
         _invalidPreview = code == 'SCHEDULER_INVALID_CRON';
         _previewError = _invalidPreview
-            ? 'Invalid cron or timezone: $error'
+            ? 'Invalid cron or timezone. ${message.trim().isEmpty ? 'Check the cron expression and schedule timezone.' : message}'
             : 'Could not validate on this machine. Retry when it is available.';
       });
     }
@@ -318,7 +339,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     _prompt.text = v['prompt'] as String;
     _branch.text = v['baseBranch'] as String? ?? '';
     _cron.text = v['cron'] as String;
-    _timezone.text = v['timezone'] as String;
+    _timezone = v['timezone'] as String;
     _time.text = _draft.time;
     _restoreChoices();
     _restoring = false;
@@ -386,7 +407,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       ..._values,
       'name': _name.text.trim(),
       'cron': _cron.text.trim(),
-      'timezone': _timezone.text.trim(),
+      'timezone': _timezone.trim(),
       if (_clearingBranch) 'baseBranch': null,
     };
     if (_locked) {
@@ -490,6 +511,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
 
   @override
   Widget build(BuildContext context) {
+    final localTimezone = ref.watch(schedulerLocalTimezoneProvider);
+    final localZone =
+        localTimezone.value ?? widget.snapshot.capabilities.timezone;
     final agents = widget.snapshot.capabilities.agents;
     final modes =
         agents.where((a) => a.agentId == _agent).firstOrNull?.modes ??
@@ -647,7 +671,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       ),
       if (_frequency == 'Daily' || _frequency == 'Weekdays')
         _field(
-          'Time (HH:mm)',
+          'Time (HH:mm) · $_timezone',
           AbTextField(
             controller: _time,
             enabled: _editable,
@@ -675,15 +699,11 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                 ),
               ),
       ),
-      _field(
-        'IANA timezone on target machine',
-        AbTextField(
-          controller: _timezone,
-          enabled: _editable,
-          autocorrect: false,
-          hintText: 'Asia/Kolkata',
+      if (_frequency == 'Hourly' || _frequency == 'Custom')
+        Text(
+          'Timezone: $_timezone',
+          style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
         ),
-      ),
       if (_previewError != null) ...[
         _notice(_previewError!, error: _invalidPreview),
         AbButton(
@@ -693,14 +713,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
               : null,
         ),
       ],
-      if (_validated == null && _previewError == null)
+      if (_previewInputsReady && _validated == null && _previewError == null)
         Text(
           'Validating on target machine…',
           style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
         ),
       if (_validated == _previewKey && _occurrences.isNotEmpty)
         _field(
-          'Next five occurrences',
+          'Next five occurrences · ${localTimezone.value == null ? 'machine time' : 'local time'}',
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             spacing: AbTokens.space6,
@@ -710,11 +730,11 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      schedulerTime(time, _timezone.text.trim()),
+                      schedulerLocalTime(time, localZone),
                       style: AbTokens.sansStyle(fontSize: AbTokens.fontSm),
                     ),
                     Text(
-                      schedulerTime(time),
+                      'UTC: ${schedulerTime(time)}',
                       style: AbTokens.sansStyle(
                         fontSize: AbTokens.fontXs,
                         color: context.antgrid.textSecondary,

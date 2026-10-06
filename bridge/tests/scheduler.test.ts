@@ -65,6 +65,40 @@ describe("scheduler cron", () => {
 });
 
 describe("scheduler runtime", () => {
+  for (const [transition, expectedDates] of [
+    ["spring forward", ["2026-03-07T14:00:00Z", "2026-03-08T13:00:00Z", "2026-03-09T13:00:00Z"]],
+    ["fall back", ["2026-10-31T13:00:00Z", "2026-11-01T14:00:00Z", "2026-11-02T14:00:00Z"]],
+  ] as const) {
+    test(`retains local 09:00 across ${transition} while persisting UTC instants`, async () => {
+      const dir = fresh();
+      const f = fixture({}, dir);
+      const expected = expectedDates.map((date) => Date.parse(date));
+      f.setTime(expected[0]! - 60_000);
+      const schedule = await f.service.create({ ...input, cron: CRON_PRESETS.daily, timezone: "America/New_York" });
+      expect(f.service.preview(schedule.cron, schedule.timezone).slice(0, 3)).toEqual(expected);
+      for (const occurrenceAt of expected) {
+        expect(f.service.schedules()[0]!.nextOccurrence).toBe(occurrenceAt);
+        f.setTime(occurrenceAt);
+        await f.service.tick(); await settle();
+        const run = f.service.runs().find((candidate) => candidate.occurrenceAt === occurrenceAt)!;
+        expect(run).toMatchObject({ trigger: "cron", status: "running", occurrenceAt,
+          startedAt: occurrenceAt, timezone: "America/New_York" });
+        f.service.observe({ projectId: run.projectId, sessionId: run.sessionId!,
+          runtimeGeneration: run.runtimeGeneration!, status: "completed" });
+      }
+      const db = new Database(join(dir, "scheduler", "scheduler.db"), { readonly: true });
+      try {
+        const saved = JSON.parse((db.query("SELECT record FROM schedules WHERE id=?").get(schedule.id) as { record: string }).record);
+        expect(saved).toMatchObject({ cron: "0 9 * * *", timezone: "America/New_York",
+          nextOccurrence: expected[2]! + 24 * 60 * 60_000 });
+        const runs = (db.query("SELECT record FROM runs ORDER BY startedAt").all() as { record: string }[])
+          .map((row) => JSON.parse(row.record));
+        expect(runs.map((run) => run.occurrenceAt)).toEqual(expected);
+        expect(runs.map((run) => run.startedAt)).toEqual(expected);
+        expect(runs.map((run) => run.finishedAt)).toEqual(expected);
+      } finally { db.close(); }
+    });
+  }
   test("branch clearing is an update-only operation and respects retained workspace locks", async () => {
     const f = fixture();
     expect((await f.service.capabilities()).supportsBaseBranchClear).toBe(true);
