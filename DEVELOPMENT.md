@@ -381,9 +381,8 @@ prebuilt binaries, so alignment is a property of the artifact and nothing in thi
 repo re-applies it.
 
 **Fix.** Identify the offending library, then fix it in the release that
-produced it (for the terminal libraries, see
-[docs/dart-terminal-fork-release.md](docs/dart-terminal-fork-release.md)) — not
-in the app:
+produced it (for the terminal libraries, the `dart_terminal` fork pinned in
+`app/pubspec.yaml`) — not in the app:
 
 ```bash
 llvm-readelf -lW <lib>   # every LOAD Align must be >= 0x4000

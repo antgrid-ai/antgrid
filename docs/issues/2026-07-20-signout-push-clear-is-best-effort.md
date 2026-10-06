@@ -14,7 +14,7 @@ Signing out left the agent's stored `pushToken` and `pushPubkey` intact.
 
 ## Root cause
 
-`PushMessagingService.clearToken` (`app/lib/services/push_messaging_service.dart:246`)
+`PushMessagingService.clearToken` (`app/lib/services/push_messaging_service.dart`)
 iterates the currently warm sessions and skips anything that isn't a relay
 project session:
 
@@ -73,8 +73,3 @@ laptop-hosted agent, is most of the time.
 4. No `Cleared push token for phone …` line appears; the `pushToken` in
    `~/.antgrid/agents/paired-phones.json` is unchanged.
 
-## Related
-
-- `docs/issues/2026-07-20-orphaned-phone-row-on-keypair-rotation.md` — because
-  sign-out also rotates the phone keypair, even a successful clear would land on
-  a row that is about to be orphaned. Fix that one first; the two interact.
