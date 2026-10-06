@@ -81,6 +81,58 @@ void main() {
     },
   );
 
+  test(
+    'every agent handshake is told the token again, a status update is not, and sign-out stops it',
+    () async {
+      // The agent re-sends agent:hello on each connect. One that dropped this
+      // phone's row while it was away recreates it on readmission without a
+      // token, so a reconnect must re-register even for an unchanged token.
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.status.hydrate(_connected);
+      final svc = PushMessagingService();
+      await svc.registerToken(
+        token: 'fcm-tok',
+        pushIdentity: PushIdentity.inMemory(),
+        sessions: [session],
+      );
+      Iterable<Map<String, dynamic>> registers() =>
+          t.sent.where((m) => m['type'] == 'push:register');
+      // A new instance, as each inbound agent:hello parses to; the timestamp
+      // is what makes the status notify, as the real frame handler stamps it.
+      ProjectStatus reconnected() => ProjectStatus(
+        // ignore: prefer_const_constructors
+        agentHello: AgentHello(version: '0'),
+        lastUpdatedAt: DateTime.now(),
+      );
+      expect(registers(), hasLength(1));
+
+      // Same handshake, other status: nothing new to tell.
+      session.status.hydrate(_connected.copyWith(detectedPorts: const [3000]));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(1));
+
+      // A reconnect: a fresh agent:hello, equal in content.
+      session.status.hydrate(reconnected());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(2));
+      expect(registers().last['pushToken'], 'fcm-tok');
+
+      await svc.clearToken(sessions: const []);
+      session.status.hydrate(reconnected());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(2));
+      await session.close();
+    },
+  );
+
   test('registerToken skips local sessions', () async {
     final t = FakeAgentTransport();
     final cache = await CachedSessionsStore.open();
