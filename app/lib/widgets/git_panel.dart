@@ -19,6 +19,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
@@ -39,7 +40,6 @@ import '../util/detached.dart';
 import '../util/relative_time.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
-import '../widgets/file_viewer_router.dart';
 import '../widgets/file_tree_view.dart';
 import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
@@ -53,12 +53,12 @@ const gitChangesHeaderTitleKey = Key('gitChangesHeaderTitle');
 
 /// Standalone git-changes panel extracted from FileExplorerScreen.
 ///
-/// One column at every width: the branch bar (branch, inline commit box,
-/// Commit beside the remote action), then the Changes tree and the commit
-/// History as two foldable sections. Wide enough, the column docks beside the
-/// diff/file viewer; narrower, the viewer replaces it while a file is open.
-/// The column is the same widget in both layouts, so no button moves when the
-/// pane is resized across the breakpoint.
+/// The branch bar (branch, inline commit box, Commit beside the remote action)
+/// tops the column at every width, so no commit control moves across the
+/// breakpoint. Wide enough, the Changes tree and commit History follow as two
+/// foldable sections and the column docks beside the diff/file viewer;
+/// narrower, they become a Changes ⇄ History switch and the viewer replaces
+/// the column while a file is open.
 class GitPanel extends ConsumerStatefulWidget {
   const GitPanel({super.key});
 
@@ -124,7 +124,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // it knows the active layout (see _GitPanelBody).
     return BackHandler(
       priority: BackPriority.gitViewer,
-      active: onScreen && (git?.viewingPath != null || git?.diffPath != null),
+      active: onScreen && git?.diffPath != null,
       onBack: _backFromViewer,
       child: treeStateAsync.when(
         loading: () => _GitPanelScaffold(
@@ -178,9 +178,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     );
   }
 
-  /// Steps out ONE level: the file opened from a diff, then the diff itself.
-  /// Deliberately unlike the compact viewer bar's back button, which clears
-  /// both at once because it means "return to the changes list".
+  /// Closes the open diff, back to the changes list.
   bool _backFromViewer() {
     if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.git) {
       return false;
@@ -189,23 +187,16 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     if (git == null) return false;
     // Runs outside build(): the façade throws while the session is unresolved.
     // Checkout-scoped to match the service this panel was BUILT with — the
-    // main-checkout façade would clear the git viewing state of a tree that is
-    // not the one on screen in an isolated session, so the press would report
-    // itself handled while nothing moved.
+    // main-checkout façade would close the diff of a tree that is not the one
+    // on screen in an isolated session, so the press would report itself
+    // handled while nothing moved.
     final service = focusedCheckoutServiceOrNull(
       ref.container,
       (s) => s.fileService,
     );
-    if (service == null) return false;
-    if (git.viewingPath != null) {
-      service.clearGitViewing();
-      return true;
-    }
-    if (git.diffPath != null) {
-      service.clearDiff();
-      return true;
-    }
-    return false;
+    if (service == null || git.diffPath == null) return false;
+    service.clearDiff();
+    return true;
   }
 }
 
@@ -792,7 +783,7 @@ class _SectionToggle extends StatelessWidget {
     final count = this.count;
     return Semantics(
       button: onTap != null,
-      expanded: expanded,
+      expanded: onTap != null ? expanded : null,
       child: MouseRegion(
         cursor: onTap != null ? SystemMouseCursors.click : MouseCursor.defer,
         child: GestureDetector(
@@ -801,8 +792,10 @@ class _SectionToggle extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              AbDisclosureChevron(expanded: expanded),
-              const SizedBox(width: AbTokens.space6),
+              if (onTap != null) ...[
+                AbDisclosureChevron(expanded: expanded),
+                const SizedBox(width: AbTokens.space6),
+              ],
               Text(
                 label.toUpperCase(),
                 maxLines: 1,
@@ -888,7 +881,10 @@ class _ChangesSectionHeader extends StatelessWidget {
   /// collapse rather than to expand.
   final Set<String> collapsedPaths;
   final bool expanded;
-  final VoidCallback onToggle;
+
+  /// Null in the compact layout's Changes tab, which the switcher above
+  /// already names and which has nothing to fold into.
+  final VoidCallback? onToggle;
 
   // Collapse All hands this very set to FileService, so until a folder is
   // reopened the answer is identity rather than a walk over every folder.
@@ -951,13 +947,15 @@ class _ChangesSectionHeader extends StatelessWidget {
     final allFoldersCollapsed = _allFoldersCollapsed;
     return _SectionHeaderBand(
       children: [
-        _SectionToggle(
-          label: 'Changes',
-          count: '${counts.changedCount}',
-          expanded: expanded,
-          onTap: onToggle,
-        ),
-        const SizedBox(width: AbTokens.space6),
+        if (onToggle != null) ...[
+          _SectionToggle(
+            label: 'Changes',
+            count: '${counts.changedCount}',
+            expanded: expanded,
+            onTap: onToggle,
+          ),
+          const SizedBox(width: AbTokens.space6),
+        ],
         // The one part of the band that may give way: the totals are also on
         // the workspace menu, while every control here is the only way to do
         // what it does. Clipped by a non-scrolling view rather than overflowing.
@@ -1033,16 +1031,18 @@ class _GitHistorySectionHeader extends StatelessWidget {
   /// [GitHistoryState.expandedShas], which folds individual commits within an
   /// already-visible list — "Collapse All" below acts on that, not on this.
   final bool collapsed;
-  final VoidCallback onToggleCollapsed;
+
+  /// Null where History already has the whole column to itself (the compact
+  /// tab, or no working-tree changes there): folding it would hand the space
+  /// to nothing.
+  final VoidCallback? onToggleCollapsed;
 
   @override
   Widget build(BuildContext context) {
-    final loaded = history.commits.length;
     return _SectionHeaderBand(
       children: [
         _SectionToggle(
           label: 'History',
-          count: loaded == 0 ? null : '$loaded${history.hasMore ? '+' : ''}',
           expanded: !collapsed,
           onTap: onToggleCollapsed,
         ),
@@ -1107,17 +1107,16 @@ class _SyncFailureStrip extends ConsumerWidget {
   }
 }
 
-/// The compact layout's bar while a diff or file replaces the column: the way
-/// back, and which file this is.
+/// The compact layout's bar while a diff replaces the column: the way back,
+/// and which file this is.
 class _CompactViewerBar extends StatelessWidget {
   const _CompactViewerBar({required this.path, required this.onBack});
 
-  final String? path;
+  final String path;
   final VoidCallback onBack;
 
   @override
   Widget build(BuildContext context) {
-    final path = this.path;
     return SizedBox(
       height: AbTokens.rowHeightSm,
       child: Padding(
@@ -1131,18 +1130,17 @@ class _CompactViewerBar extends StatelessWidget {
                 tooltip: 'Back to changed files',
               ),
               const SizedBox(width: AbTokens.space6),
-              if (path != null)
-                Expanded(
-                  child: Text(
-                    path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: context.antgrid.textMuted,
-                    ),
+              Expanded(
+                child: Text(
+                  path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textMuted,
                   ),
                 ),
+              ),
             ],
           ),
         ),
@@ -1176,7 +1174,6 @@ class _GitPanelBody extends ConsumerWidget {
       builder: (context, constraints) {
         final showSideBySide = constraints.maxWidth >= kCompactBreakpoint;
         final git = state.git;
-        final isViewing = git.diffPath != null || git.viewingPath != null;
 
         if (showSideBySide) {
           return Row(
@@ -1191,25 +1188,78 @@ class _GitPanelBody extends ConsumerWidget {
           );
         }
 
-        // Compact: the viewer replaces the column while a diff or file is open.
-        if (isViewing) {
+        // Compact: the viewer replaces the column while a diff is open.
+        if (git.diffPath case final diffPath?) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _CompactViewerBar(
-                path: git.diffPath ?? git.viewingPath,
-                onBack: () {
-                  fileService.clearDiff();
-                  fileService.clearGitViewing();
-                },
+                path: diffPath,
+                onBack: fileService.clearDiff,
               ),
               const AbSeparator.horizontal(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
           );
         }
-        return _buildColumn(context);
+        return _buildCompactColumn(context);
       },
+    );
+  }
+
+  /// The phone-width counterpart to [_buildColumn]: the same branch bar, then
+  /// a Changes ⇄ History switch with each tab getting the full height. A
+  /// phone's short column left the 3:2 stack showing a commit or two in a
+  /// scroll region nested under the tree's own, fighting it for the gesture.
+  Widget _buildCompactColumn(BuildContext context) {
+    final git = state.git;
+    final history = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _GitHistorySectionHeader(
+          fileService: fileService,
+          history: git.history,
+          collapsed: false,
+          onToggleCollapsed: null,
+        ),
+        const AbSeparator.horizontal(),
+        Expanded(
+          child: _HistoryList(git: git, fileService: fileService),
+        ),
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _GitBranchBar(panel: panel, counts: counts, git: git),
+        if (git.lastSyncFailure case final failure?)
+          _SyncFailureStrip(failure: failure, git: git),
+        const AbSeparator.horizontal(),
+        Expanded(
+          // Nothing to switch to without changes: History takes the column.
+          child: counts.hasChanges
+              ? _ChangesHistorySwitcher(
+                  changedCount: counts.changedCount,
+                  changes: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _ChangesSectionHeader(
+                        counts: counts,
+                        fileService: fileService,
+                        collapsedPaths: git.collapsedPaths,
+                        expanded: true,
+                        onToggle: null,
+                      ),
+                      const AbSeparator.horizontal(),
+                      Expanded(child: _buildFileList(context)),
+                    ],
+                  ),
+                  history: history,
+                )
+              : history,
+        ),
+      ],
     );
   }
 
@@ -1282,7 +1332,7 @@ class _GitPanelBody extends ConsumerWidget {
       child: FileTreeView(
         root: state.root,
         expandedPaths: state.expandedPaths,
-        selectedFilePath: state.git.diffPath ?? state.git.viewingPath,
+        selectedFilePath: state.git.diffPath,
         gitStatus: state.gitStatus,
         changesOnly: true,
         collapsedPaths: state.git.collapsedPaths,
@@ -1397,7 +1447,12 @@ class _GitPanelBody extends ConsumerWidget {
           diff: git.diffContent!,
           additions: git.diffAdditions ?? 0,
           deletions: git.diffDeletions ?? 0,
-          onViewFile: () => fileService.gitViewFile(git.diffPath!),
+          // The file opens where files live, and that tab comes forward with
+          // it; the diff stays put for the way back to Git.
+          onViewFile: () {
+            revealWorkspaceView(ref, WorkspaceView.files);
+            fileService.selectFile(git.diffPath!);
+          },
           onClose: () => fileService.clearDiff(),
           onSendToAgent: (context, message) => sendCaptureToAgent(
             context: context,
@@ -1414,23 +1469,78 @@ class _GitPanelBody extends ConsumerWidget {
       );
     }
 
-    if (git.viewingPath != null) {
-      return FileViewerRouter(
-        fileContent: git.viewingFile,
-        isLoading: git.viewingLoading,
-        selectedFilePath: git.viewingPath,
-        fileWasModified: false,
-        onRefreshContent: () =>
-            fileService.requestFileContent(git.viewingPath!),
-        onClose: () => fileService.clearGitViewing(),
-      );
-    }
-
     return Center(
       child: Text(
         'Select a file to view',
         style: TextStyle(color: context.antgrid.textMuted),
       ),
+    );
+  }
+}
+
+enum _GitCompactTab { changes, history }
+
+/// An [IndexedStack], not a rebuild-on-switch: both tabs stay mounted so
+/// flipping back keeps each list's scroll position and expanded commits.
+class _ChangesHistorySwitcher extends StatefulWidget {
+  const _ChangesHistorySwitcher({
+    required this.changedCount,
+    required this.changes,
+    required this.history,
+  });
+
+  final int changedCount;
+  final Widget changes;
+  final Widget history;
+
+  @override
+  State<_ChangesHistorySwitcher> createState() =>
+      _ChangesHistorySwitcherState();
+}
+
+class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
+  // Changes is what there is to act on, so it is where the tab lands.
+  _GitCompactTab _tab = _GitCompactTab.changes;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: AbTokens.space8,
+          ),
+          // AbSegmented hugs its content rather than sharing the row, so on
+          // the narrowest phones double-digit counts can outgrow it; scrolling
+          // absorbs that instead of a RenderFlex overflow.
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: AbSegmented<_GitCompactTab>(
+              segments: [
+                AbSegment(
+                  value: _GitCompactTab.changes,
+                  label: 'Changes · ${widget.changedCount}',
+                ),
+                AbSegment(
+                  value: _GitCompactTab.history,
+                  label: 'History',
+                ),
+              ],
+              selected: _tab,
+              onSelect: (value) => setState(() => _tab = value),
+            ),
+          ),
+        ),
+        const AbSeparator.horizontal(),
+        Expanded(
+          child: IndexedStack(
+            index: _tab.index,
+            children: [widget.changes, widget.history],
+          ),
+        ),
+      ],
     );
   }
 }

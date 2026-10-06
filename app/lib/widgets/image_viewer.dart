@@ -5,8 +5,10 @@ import '../design/ab_colors.dart';
 import '../models/file_tree_models.dart';
 import 'viewer_header.dart';
 import 'viewer_support.dart';
+import 'zoomable_image.dart';
 
-/// Renders a raster image decoded from base64 content.
+/// Renders a raster image decoded from base64 content. Pinch or double-tap to
+/// zoom; see [ZoomableImage] for how that coexists with the phone's page swipe.
 class ImageViewer extends StatelessWidget {
   final FileContent content;
   final VoidCallback? onClose;
@@ -32,7 +34,7 @@ class ImageViewer extends StatelessWidget {
               content: content,
               builder: (context, bytes) => bytes == null
                   ? _failure(c)
-                  : InteractiveViewer(
+                  : ZoomableImage(
                       child: Image.memory(
                         bytes,
                         fit: BoxFit.contain,

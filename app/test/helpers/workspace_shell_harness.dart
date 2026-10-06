@@ -43,10 +43,11 @@ const _unset = Object();
 ///
 /// Pass [transport] to drive the wire from the test (inspect `sent`, `emit`
 /// replies), [terminalStates] to drive CheckoutReadiness through a specific
-/// attach-status sequence, and [target] for a [SessionTarget] other than the
+/// attach-status sequence, [fileTreeStates] to feed the Files and Git tabs,
+/// and [target] for a [SessionTarget] other than the
 /// default local project (e.g. a remote one, to exercise the ladder, or
 /// `null` for the "route mounted, nothing focused yet" window with
-/// `withProject: true`) — all three must come through these parameters rather
+/// `withProject: true`) — all four must come through these parameters rather
 /// than [extraOverrides]: Riverpod 3 asserts on ANY provider overridden twice
 /// in one container, not only a family one.
 ///
@@ -57,6 +58,7 @@ Future<ProviderContainer> pumpWorkspaceShell(
   bool followSelectedTarget = false,
   AgentTransport Function(String projectId)? transport,
   Stream<TerminalState>? terminalStates,
+  Stream<FileTreeState>? fileTreeStates,
   Object? target = _unset,
   List<Override> extraOverrides = const [],
 }) async {
@@ -112,7 +114,7 @@ Future<ProviderContainer> pumpWorkspaceShell(
               ),
         ),
         fileTreeStateProvider.overrideWith(
-          (ref) => Stream.value(const FileTreeState()),
+          (ref) => fileTreeStates ?? Stream.value(const FileTreeState()),
         ),
         previewStateProvider.overrideWith(
           (ref) => Stream.value(const PreviewState()),

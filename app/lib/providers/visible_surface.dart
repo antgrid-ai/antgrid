@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
+import 'agent_transport.dart' show selectedTargetProvider;
 import 'providers.dart';
 import 'session_bus_inbox.dart';
 import 'sessions.dart' show activeSessionIdProvider;
@@ -256,6 +257,37 @@ final workspaceMenuControlProvider =
       ValueController<WorkspaceMenuControl?>,
       WorkspaceMenuControl?
     >(() => ValueController(null));
+
+/// The mounted shell's own "show this tab" — selects it, opens whatever pane
+/// holds it, and on a phone swipes the workspace page forward. Published by
+/// WorkspaceShell in every layout and retracted when it deactivates, the same
+/// lifetime as `revealHandlerTabProvider`.
+final revealWorkspaceViewControlProvider =
+    NotifierProvider<
+      ValueController<void Function(WorkspaceView)?>,
+      void Function(WorkspaceView)?
+    >(() => ValueController(null));
+
+/// Brings [view] forward from inside the workspace, for a tap the user just
+/// made. Straight through the shell when one is mounted: the pending handover
+/// below exists for navigations that land before a shell can act, and it holds
+/// a request back while a queued session id resolves, which a tap on an open
+/// workspace has no reason to wait on.
+void revealWorkspaceView(WidgetRef ref, WorkspaceView view) {
+  final reveal = ref.read(revealWorkspaceViewControlProvider);
+  if (reveal != null) {
+    reveal(view);
+    return;
+  }
+  final menu = ref.read(workspaceMenuControlProvider);
+  if (menu != null) {
+    menu.reveal(view);
+    return;
+  }
+  ref
+      .read(pendingWorkspaceViewProvider.notifier)
+      .set((target: ref.read(selectedTargetProvider), value: view));
+}
 
 /// Whether the agent bar's workspace rail is up. Shared by a mouse desktop and
 /// a touch tablet, whose context panel is a docked pane beside the agent

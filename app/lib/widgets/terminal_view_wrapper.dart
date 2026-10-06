@@ -27,6 +27,7 @@ import '../project/project_session.dart';
 import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
+import '../providers/terminal_compose_drafts.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
@@ -51,6 +52,7 @@ import '../providers/ui_attention_providers.dart';
 import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
+import 'terminal_scroll_physics.dart';
 import 'terminal_upload_button.dart';
 import 'terminal_upload_strip.dart';
 
@@ -692,6 +694,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // Pinned: dispose can run after the ProviderScope is gone, and reading
     // through `ref` then throws.
     _container = ref.container;
+    _restoreComposeDraft();
     if (!widget.isAgentSurface) return;
     // Post-frame because publishing writes a provider. Retracted in dispose,
     // not deactivate: this sits inside the GlobalKey-reparented AgentPanel, so
@@ -807,6 +810,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       replacing: _modifierTransform,
     );
     _modifiers.dispose();
+    _composeDraft.removeListener(_saveComposeDraft);
     _composeDraft.dispose();
     _composeFocus.dispose();
     _connectionSub?.cancel();
@@ -1711,6 +1715,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // holds the frame-mode and has-an-archive conditions, and is idempotent
       // because this fires once per clamped step while the user keeps pushing.
       onScrollPastTop: _openHistory,
+      scrollPhysics: terminalScrollPhysics,
       onZoomUpdate: _onZoomUpdate,
       onZoomEnd: _onZoomEnd,
     );
@@ -2107,19 +2112,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     focusedTarget: () => ref.read(selectedTargetProvider),
   );
 
-  void _revealWorkspaceView(WorkspaceView view) {
-    final menu = ref.read(workspaceMenuControlProvider);
-    if (menu != null) {
-      menu.reveal(view);
-      return;
-    }
-    // Phone width publishes no menu control, and a tapped link is the only
-    // affordance touch has, so the shell's own handover is what brings the tab
-    // and its page forward.
-    ref
-        .read(pendingWorkspaceViewProvider.notifier)
-        .set((target: ref.read(selectedTargetProvider), value: view));
-  }
+  void _revealWorkspaceView(WorkspaceView view) =>
+      revealWorkspaceView(ref, view);
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.
@@ -2343,10 +2337,33 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     });
   }
 
-  /// Held across openings so a closed box keeps what was typed.
+  /// Held across openings so a closed box keeps what was typed, and mirrored
+  /// into [terminalComposeDraftsProvider] so a remount keeps it too.
   final TextEditingController _composeDraft = TextEditingController();
   final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
   bool _composeOpen = false;
+  late final TerminalComposeDrafts _composeDrafts;
+  late final String _composeDraftKey;
+
+  /// Reopens the box as it was left, but unfocused: raising the keyboard is
+  /// the user's call, and a remount is not one.
+  void _restoreComposeDraft() {
+    _composeDrafts = ref.read(terminalComposeDraftsProvider);
+    _composeDraftKey = TerminalComposeDrafts.keyFor(
+      projectId: widget.terminalService.projectId,
+      checkoutId: widget.terminalService.checkoutId,
+      terminalId: widget.tab.terminalId,
+    );
+    _composeDraft.text = _composeDrafts.textFor(_composeDraftKey);
+    _composeOpen = _composeDrafts.isOpen(_composeDraftKey);
+    _composeDraft.addListener(_saveComposeDraft);
+  }
+
+  void _saveComposeDraft() => _composeDrafts.save(
+    _composeDraftKey,
+    text: _composeDraft.text,
+    open: _composeOpen,
+  );
 
   void _toggleCompose() => _composeOpen ? _closeCompose() : _openCompose();
 
@@ -2356,6 +2373,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _softKeyboardController.hide();
     if (_historyOpen) _closeHistory();
     setState(() => _composeOpen = true);
+    _saveComposeDraft();
     // Explicit, not the field's `autofocus`: that only claims focus when its
     // scope holds none, and the terminal already does — the box opened with no
     // keyboard and needed a second tap.
@@ -2367,6 +2385,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   void _closeCompose() {
     _composeFocus.unfocus();
     setState(() => _composeOpen = false);
+    _saveComposeDraft();
   }
 
   void _composeSend(String text) {

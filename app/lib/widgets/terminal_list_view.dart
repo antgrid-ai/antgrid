@@ -10,28 +10,26 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/session_entry.dart';
 import '../models/terminal_models.dart';
-import '../navigation/back_intent.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/session_workspace_state.dart';
-import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
 import '../util/detached.dart';
-import 'terminal_detail_view.dart';
 import 'terminal_view_wrapper.dart';
-import 'workspace_tab_bar.dart';
 import 'ab_status_helpers.dart';
 
-/// List-first terminal view for non-agent terminals with pin support.
+/// List-first terminal view for non-agent terminals.
 ///
-/// Three view states:
+/// Two view states:
 /// 1. **List only** (default) — all non-agent terminals with status/actions.
-/// 2. **Pinned** — pinned terminal output on top, remaining list on bottom.
-/// 3. **Push navigation** — fullscreen terminal output with back button.
+/// 2. **Selected** — the selected terminal's output on top and the rest of
+///    the list below, so switching terminals is one tap on a row rather than a
+///    trip back out through a separate screen.
 class TerminalListView extends ConsumerStatefulWidget {
   const TerminalListView({super.key});
 
@@ -51,16 +49,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         : ref.read(sessionWorkspaceStateProvider(key));
   }
 
-  String? get _pinnedTerminalId => _uiState.pinnedTerminalId;
-  String? get _pushedTerminalId => _uiState.pushedTerminalId;
-
-  void _updateTerminalUi(
-    SessionWorkspaceState Function(SessionWorkspaceState) change,
-  ) {
-    final key = _uiKey;
-    if (key == null) return;
-    _updateTerminalUiFor(key, change);
-  }
+  String? get _selectedTerminalId => _uiState.selectedTerminalId;
 
   void _updateTerminalUiFor(
     SessionUiKey key,
@@ -69,13 +58,17 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     ref.read(sessionWorkspaceStateProvider(key).notifier).update(change);
   }
 
-  void _setPinnedTerminal(String? id) => _updateTerminalUi(
-    (s) => s.copyWith(pinnedTerminalId: id, clearPinnedTerminalId: id == null),
-  );
-
-  void _setPushedTerminal(String? id) => _updateTerminalUi(
-    (s) => s.copyWith(pushedTerminalId: id, clearPushedTerminalId: id == null),
-  );
+  void _setSelectedTerminal(String? id) {
+    final key = _uiKey;
+    if (key == null) return;
+    _updateTerminalUiFor(
+      key,
+      (s) => s.copyWith(
+        selectedTerminalId: id,
+        clearSelectedTerminalId: id == null,
+      ),
+    );
+  }
 
   /// The PTYs carrying a checkout's `worktree.setup` transcript.
   ///
@@ -118,13 +111,15 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   String _terminalName(String id) => 'Terminal ${id.split('-').last}';
 
-  bool _backFromPushed() {
-    if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.terminals) {
-      return false;
-    }
-    if (_pushedTerminalId == null) return false;
-    _setPushedTerminal(null);
-    return true;
+  void _createTerminal(TerminalService service, List<TerminalTab> tabs) {
+    final id = _nextAdHocTerminalId(tabs.map((t) => t.terminalId).toSet());
+    service.createAdHocTerminal(id, name: _terminalName(id));
+    _setSelectedTerminal(id);
+  }
+
+  void _deleteTerminal(TerminalService service, String id) {
+    if (_selectedTerminalId == id) _setSelectedTerminal(null);
+    service.deleteTerminal(id);
   }
 
   @override
@@ -135,20 +130,6 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     if (terminalService == null) {
       return const AbLoading(message: 'loading terminals...');
     }
-    // watch, not the `ref.read` in [_backFromPushed]: the `active` flag has to
-    // be recomputed when this tab goes on or off screen.
-    final onScreen =
-        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.terminals;
-
-    return BackHandler(
-      priority: BackPriority.pushedTerminal,
-      active: onScreen && _pushedTerminalId != null,
-      onBack: _backFromPushed,
-      child: _buildBody(terminalService, key),
-    );
-  }
-
-  Widget _buildBody(TerminalService terminalService, SessionUiKey? key) {
     final tabs = _adHocTerminals;
     // `select` so the list is not rebuilt by per-terminal hydration churn on
     // the same state object.
@@ -158,56 +139,26 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       ),
     );
 
-    // Push navigation — fullscreen terminal output.
-    if (_pushedTerminalId != null) {
-      final tab = tabs
-          .where((t) => t.terminalId == _pushedTerminalId)
+    final selectedId = _selectedTerminalId;
+    if (selectedId != null) {
+      final selected = tabs
+          .where((t) => t.terminalId == selectedId)
           .firstOrNull;
-      if (tab == null) {
-        final terminalState = ref.watch(terminalStateProvider);
-        final allTabs = terminalState.value?.tabs.values.toList() ?? [];
-        final fullTab = allTabs
-            .where((t) => t.terminalId == _pushedTerminalId)
-            .firstOrNull;
-        if (fullTab != null) {
-          return _buildPushedView(fullTab, terminalService);
-        }
-        if (key != null) {
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _updateTerminalUiFor(
-              key,
-              (s) => s.copyWith(clearPushedTerminalId: true),
-            ),
-          );
-        }
-        return const SizedBox.shrink();
+      if (selected != null) {
+        return _buildSelectedView(selected, tabs, terminalService, attach);
       }
-      return _buildPushedView(tab, terminalService);
+      // Deleted or gone from the bridge: forget it after this frame, and show
+      // the plain list meanwhile.
+      if (key != null) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _updateTerminalUiFor(
+            key,
+            (s) => s.copyWith(clearSelectedTerminalId: true),
+          ),
+        );
+      }
     }
 
-    // Pinned — split view.
-    if (_pinnedTerminalId != null) {
-      final pinnedTab = tabs
-          .where((t) => t.terminalId == _pinnedTerminalId)
-          .firstOrNull;
-      if (pinnedTab == null) {
-        if (key != null) {
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _updateTerminalUiFor(
-              key,
-              (s) => s.copyWith(clearPinnedTerminalId: true),
-            ),
-          );
-        }
-        return const SizedBox.shrink();
-      }
-      final remaining = tabs
-          .where((t) => t.terminalId != _pinnedTerminalId)
-          .toList();
-      return _buildPinnedView(pinnedTab, remaining, terminalService, attach);
-    }
-
-    // List with header.
     return Column(
       children: [
         _buildHeader(terminalService, tabs),
@@ -245,8 +196,8 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           title: "Couldn't load terminals",
           subtitle: 'the agent has not answered yet',
           // Wrapped, not a Row: the empty state centres its action inside the
-          // pane's own padding, and two buttons do not fit a pinned split at
-          // its narrowest.
+          // pane's own padding, and two buttons do not fit a split view at its
+          // narrowest.
           action: Wrap(
             spacing: AbTokens.space8,
             alignment: WrapAlignment.center,
@@ -283,37 +234,22 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
   }
 
   Widget _newTerminalButton(TerminalService service, List<TerminalTab> tabs) {
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
     return AbButton(
       label: 'New Terminal',
       leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-      onTap: () {
-        final id = _nextAdHocTerminalId(existingIds);
-        final name = _terminalName(id);
-        service.createAdHocTerminal(id, name: name);
-        _setPushedTerminal(id);
-      },
+      onTap: () => _createTerminal(service, tabs),
     );
   }
 
   Widget _buildHeader(TerminalService service, List<TerminalTab> tabs) {
-    final adHocCount = tabs.length;
-    final atLimit = adHocCount >= _maxAdHocTerminals;
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
+    final atLimit = tabs.length >= _maxAdHocTerminals;
     return AbToolbar.panel(
       title: 'TERMINALS',
       actions: [
         AbIconButton(
           icon: AbIcons.add,
           tooltip: atLimit ? 'Max terminals reached' : 'New terminal',
-          onTap: atLimit
-              ? null
-              : () {
-                  final id = _nextAdHocTerminalId(existingIds);
-                  final name = _terminalName(id);
-                  service.createAdHocTerminal(id, name: name);
-                  _setPushedTerminal(id);
-                },
+          onTap: atLimit ? null : () => _createTerminal(service, tabs),
         ),
       ],
     );
@@ -358,19 +294,10 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       subtitle: Text(stateText),
       actions: [
         AbRowAction(
-          icon: AbIcons.pin,
-          tooltip: 'Pin',
-          onTap: () => _setPinnedTerminal(tab.terminalId),
-        ),
-        AbRowAction(
           icon: AbIcons.trash,
           tooltip: 'Delete',
           tone: AbIconButtonTone.danger,
-          onTap: () {
-            if (_pinnedTerminalId == tab.terminalId) _setPinnedTerminal(null);
-            if (_pushedTerminalId == tab.terminalId) _setPushedTerminal(null);
-            service.deleteTerminal(tab.terminalId);
-          },
+          onTap: () => _deleteTerminal(service, tab.terminalId),
         ),
       ],
       divider: true,
@@ -378,44 +305,30 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       onTap: () {
         // Focusing the terminal clears its unread badge.
         service.setActiveTerminal(tab.terminalId);
-        _setPushedTerminal(tab.terminalId);
+        _setSelectedTerminal(tab.terminalId);
       },
     );
   }
 
-  // ── Push navigation ──────────────────────────────────────────────────────
+  // ── Selected view ────────────────────────────────────────────────────────
 
-  Widget _buildPushedView(TerminalTab tab, TerminalService service) {
-    return TerminalDetailView(
-      tab: tab,
-      terminalService: service,
-      onBack: () => _setPushedTerminal(null),
-      onDelete: () {
-        final id = tab.terminalId;
-        _setPushedTerminal(null);
-        service.deleteTerminal(id);
-      },
-    );
-  }
-
-  // ── Pinned view ──────────────────────────────────────────────────────────
-
-  Widget _buildPinnedView(
-    TerminalTab pinnedTab,
-    List<TerminalTab> remaining,
+  Widget _buildSelectedView(
+    TerminalTab selected,
+    List<TerminalTab> all,
     TerminalService service,
     CheckoutAttachStatus attach,
   ) {
+    final remaining = all
+        .where((t) => t.terminalId != selected.terminalId)
+        .toList();
     return ColoredBox(
       color: context.antgrid.bgDeepest,
       child: Column(
         children: [
-          // Top: pinned terminal (flex 3).
           Expanded(
             flex: 3,
             child: Column(
               children: [
-                // Header.
                 SizedBox(
                   height: AbTokens.statusHeaderHeight,
                   child: Padding(
@@ -426,25 +339,22 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                       children: [
                         Expanded(
                           child: Text(
-                            pinnedTab.name,
+                            selected.name,
                             style: AbTokens.monoStyle(),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         AbIconButton(
-                          icon: AbIcons.unpin,
-                          tooltip: 'Unpin',
-                          onTap: () => _setPinnedTerminal(null),
-                        ),
-                        AbIconButton(
                           icon: AbIcons.trash,
                           tooltip: 'Delete',
                           tone: AbIconButtonTone.danger,
-                          onTap: () {
-                            final id = pinnedTab.terminalId;
-                            _setPinnedTerminal(null);
-                            service.deleteTerminal(id);
-                          },
+                          onTap: () =>
+                              _deleteTerminal(service, selected.terminalId),
+                        ),
+                        AbIconButton(
+                          icon: AbIcons.close,
+                          tooltip: 'Close terminal',
+                          onTap: () => _setSelectedTerminal(null),
                         ),
                       ],
                     ),
@@ -452,23 +362,31 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                 ),
                 Expanded(
                   child: TerminalViewWrapper(
-                    tab: pinnedTab,
+                    // Switching rows mounts the next terminal's own view
+                    // rather than retargeting this one's state at it.
+                    key: ValueKey(selected.terminalId),
+                    tab: selected,
                     terminalService: service,
                   ),
                 ),
               ],
             ),
           ),
-
-          // Divider.
-          Container(height: 3, color: context.antgrid.borderDefault),
-
-          // Bottom: remaining list (flex 2).
+          const AbSeparator.horizontal(),
           Expanded(
             flex: 2,
-            child: remaining.isEmpty
-                ? _buildEmptyOrAttaching(service, remaining, attach)
-                : _buildList(remaining, service),
+            child: Column(
+              children: [
+                // The whole list is the budget: the selected terminal counts
+                // toward the cap too.
+                _buildHeader(service, all),
+                Expanded(
+                  child: remaining.isEmpty
+                      ? _buildEmptyOrAttaching(service, remaining, attach)
+                      : _buildList(remaining, service),
+                ),
+              ],
+            ),
           ),
         ],
       ),

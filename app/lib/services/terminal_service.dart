@@ -12,9 +12,11 @@ import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
 import 'terminal_screen_cache.dart';
+import 'touch_wheel_limiter.dart';
 
 class TerminalService {
   final ProjectSession session;
@@ -28,6 +30,7 @@ class TerminalService {
   final Set<String> _freshScreens = {};
   final Set<String> _materialized = {};
   final Map<String, String Function(String data)> _inputTransforms = {};
+  final Map<String, TouchWheelLimiter> _touchWheel = {};
   final Map<String, TerminalFrameMessage> _visibleFrames = {};
   final Map<String, Stopwatch> _screenWaits = {};
   final Map<String, int> _lastViewed = {};
@@ -1901,7 +1904,14 @@ class TerminalService {
         // becomes KeyEventResult.ignored, so the keystroke would escape into
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
-        final data = utf8.decode(bytes, allowMalformed: true);
+        var data = utf8.decode(bytes, allowMalformed: true);
+        if (isMobilePlatform) {
+          final kept = _touchWheel
+              .putIfAbsent(terminalId, TouchWheelLimiter.new)
+              .filter(data);
+          if (kept == null) return true;
+          data = kept;
+        }
         final transform = _inputTransforms[terminalId];
         sendInput(terminalId, transform == null ? data : transform(data));
         return true;

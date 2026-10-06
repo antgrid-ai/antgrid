@@ -263,6 +263,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
       if (!mounted) return;
       ref.read(switchToAgentProvider.notifier).set(switchToAgentPage);
       ref.read(revealHandlerTabProvider.notifier).set(revealHandlerTab);
+      ref.read(revealWorkspaceViewControlProvider.notifier).set(revealView);
       ref.read(openDrawerProvider.notifier).set(_publishedToggleDrawer);
       if (ref.read(selectedRegistrationIdProvider) != null) {
         detached(
@@ -296,6 +297,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // so leaving it published would let the session kebab's attention row call
     // into a disposed shell after a project switch.
     final revealNotifier = ref.read(revealHandlerTabProvider.notifier);
+    final revealViewNotifier = ref.read(
+      revealWorkspaceViewControlProvider.notifier,
+    );
     // Same lifetime again: a stale tab left published here would let a back
     // press dispatch into handlers this route no longer has.
     final visibleViewNotifier = ref.read(visibleWorkspaceViewProvider.notifier);
@@ -333,6 +337,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
         }
         agentBarNotifier.set(false);
         revealNotifier.set(null);
+        revealViewNotifier.set(null);
         visibleViewNotifier.set(null);
         menuNotifier.set(null);
         agentSurfaceNotifier.set(false);
@@ -730,9 +735,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   /// first if the user had it closed — a row that selected a tab nobody can
   /// see would answer a call to action with nothing at all. Mobile: also swipes
   /// to the workspace page.
-  void revealHandlerTab() {
+  void revealHandlerTab() => revealView(WorkspaceView.handler);
+
+  /// Published as [revealWorkspaceViewControlProvider].
+  void revealView(WorkspaceView view) {
     _openContextPanel();
-    _selectView(WorkspaceView.handler);
+    _selectView(view);
     _goToPage(_MobilePage.workspace);
   }
 
