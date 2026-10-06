@@ -5,6 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:push/push.dart';
 
 import '../models/ab_message.dart';
+import '../models/agent_hello.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import 'push_identity.dart';
@@ -32,10 +33,13 @@ class PushMessagingService {
       ? 'apns'
       : 'fcm';
 
-  /// projectIds already registered with the current [_token]. Reset whenever
-  /// the token changes so a token refresh re-registers every session. Lets
-  /// [registerNewSessions] skip sessions already told about this token.
-  final Set<String> _registered = <String>{};
+  /// projectId → the agent handshake its registration went out on. Keyed on
+  /// the handshake, not just the project: the agent re-sends `agent:hello` on
+  /// every connect, and one that has since dropped this phone's row (the
+  /// account left it out of a lease) recreates it on readmission without a
+  /// token, so each new handshake must be told again. Reset whenever the token
+  /// changes so a token refresh re-registers every session.
+  final Map<String, AgentHello> _registered = <String, AgentHello>{};
 
   /// pubkey of the identity [_registered] was populated under. Sign-out
   /// regenerates the push keypair but reuses the same long-lived service and
@@ -43,12 +47,15 @@ class PushMessagingService {
   /// too, or a re-signed-in user's agents keep the stale pubkey and can't push.
   String? _registeredPubkey;
 
-  /// projectIds with a pending "register once connected" status listener. A
-  /// session can enter the warm set before its transport finishes handshaking;
-  /// a `push:register` sent then is silently dropped and the registry trigger
-  /// never re-fires on connect. We defer via a one-shot listener and guard here
-  /// so repeated passes over a still-connecting session don't stack listeners.
-  final Set<String> _awaitingReady = <String>{};
+  /// Sessions with a handshake listener attached, so repeated registration
+  /// passes over one session don't stack listeners. An [Expando] so a closed
+  /// session is not kept alive by this set.
+  Expando<bool> _watched = Expando<bool>();
+
+  /// The identity the last [registerToken] ran under, read by handshake
+  /// listeners at fire time so a reconnect after an identity change registers
+  /// the current key.
+  PushIdentity? _identity;
 
   /// `push` hands back an unsubscribe callback rather than a StreamSubscription.
   VoidCallback? _unsubscribeToken;
@@ -182,6 +189,7 @@ class PushMessagingService {
     // (_setTokenAndRegister / registerNewSessions) already keep this in lockstep.
     _token = token;
     _provider = provider;
+    _identity = pushIdentity;
     final kp = await pushIdentity.ensureKeypair();
     if (kp.pubkeyB64 != _registeredPubkey) {
       _registered.clear();
@@ -191,27 +199,29 @@ class PushMessagingService {
       // Push is a relay-only concern: a local agent shares the machine, so
       // there is nothing to relay a blob through. Only register relay sessions.
       if (s.mode != ProjectSessionMode.relay) continue;
-      // Already told this token about the project.
-      if (_registered.contains(s.projectId)) continue;
+      _watchHandshakes(s);
       // A send() on a transport that hasn't finished its session handshake is
-      // silently dropped, and the registry-membership trigger never re-fires
-      // for a session that merely transitions from handshaking to connected —
-      // registering now would strand the token. Defer until the agent
-      // handshakes (agentHello lands), then register exactly once.
-      if (s.status.value.agentHello == null) {
-        _registerWhenReady(s, pushIdentity);
-        continue;
-      }
-      await _sendRegister(s, token: token, pushPubkeyB64: kp.pubkeyB64);
+      // silently dropped; the listener above registers once agentHello lands.
+      final hello = s.status.value.agentHello;
+      if (hello == null) continue;
+      await _sendRegister(
+        s,
+        hello: hello,
+        token: token,
+        pushPubkeyB64: kp.pubkeyB64,
+      );
     }
   }
 
   Future<void> _sendRegister(
     ProjectSession s, {
+    required AgentHello hello,
     required String token,
     required String pushPubkeyB64,
   }) async {
-    if (!_registered.add(s.projectId)) return; // already told this token
+    // Already told this handshake about this token.
+    if (identical(_registered[s.projectId], hello)) return;
+    _registered[s.projectId] = hello;
     try {
       await s.send(
         createAbMessage('push:register', {
@@ -223,7 +233,9 @@ class PushMessagingService {
     } catch (e) {
       // One closed/failing transport must not abort the rest of the sessions.
       // Un-mark so a later registerNewSessions pass retries this one.
-      _registered.remove(s.projectId);
+      if (identical(_registered[s.projectId], hello)) {
+        _registered.remove(s.projectId);
+      }
       AbLog.error(
         'PushMessagingService',
         'push:register failed',
@@ -232,22 +244,33 @@ class PushMessagingService {
     }
   }
 
-  /// Register [s] once its transport finishes handshaking (agentHello lands).
-  /// One-shot: the listener removes itself on fire. Reads [_token] at fire time
-  /// so a token refresh between scheduling and readiness still sends the current
-  /// token; a sign-out clears [_awaitingReady] (and disposes the session), so a
-  /// stale listener can't re-register after the user signs out.
-  void _registerWhenReady(ProjectSession s, PushIdentity pushIdentity) {
-    if (!_awaitingReady.add(s.projectId)) return; // listener already pending
+  /// Registers [s] on each agent handshake (every `agent:hello`) for the
+  /// session's lifetime: the warm-set trigger never re-fires for a session that
+  /// merely connects or reconnects. Reads [_token] and [_identity] at fire time
+  /// so a refresh between handshakes sends the current pair; a sign-out swaps
+  /// [_watched], which retires every listener attached before it.
+  void _watchHandshakes(ProjectSession s) {
+    if (_watched[s] == true) return;
+    final watched = _watched;
+    watched[s] = true;
     void onStatus() {
-      if (s.status.value.agentHello == null) return; // not connected yet
-      s.status.removeListener(onStatus);
-      _awaitingReady.remove(s.projectId);
+      if (!identical(watched, _watched)) {
+        s.status.removeListener(onStatus);
+        return;
+      }
+      final hello = s.status.value.agentHello;
       final token = _token;
-      if (token == null || s.mode != ProjectSessionMode.relay) return;
+      final identity = _identity;
+      if (hello == null || token == null || identity == null) return;
+      if (identical(_registered[s.projectId], hello)) return;
       unawaited(() async {
-        final kp = await pushIdentity.ensureKeypair();
-        await _sendRegister(s, token: token, pushPubkeyB64: kp.pubkeyB64);
+        final kp = await identity.ensureKeypair();
+        await _sendRegister(
+          s,
+          hello: hello,
+          token: token,
+          pushPubkeyB64: kp.pubkeyB64,
+        );
       }());
     }
 
@@ -259,9 +282,10 @@ class PushMessagingService {
   Future<void> clearToken({required Iterable<ProjectSession> sessions}) async {
     _registered.clear();
     _registeredPubkey = null;
-    // Drop pending "register when ready" listeners too: their sessions are torn
-    // down on sign-out, but clearing the guard lets a re-sign-in re-schedule.
-    _awaitingReady.clear();
+    // Retire every handshake listener: a session that outlives sign-out must
+    // not re-register, and a re-sign-in attaches fresh ones.
+    _watched = Expando<bool>();
+    _identity = null;
     for (final s in sessions) {
       if (s.mode != ProjectSessionMode.relay) continue;
       try {
