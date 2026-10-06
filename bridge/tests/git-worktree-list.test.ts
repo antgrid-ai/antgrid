@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseWorktreeList } from "../src/worktrees/git-worktree-list";
 
 describe("parseWorktreeList", () => {
   test("parses porcelain records with spaces, Unicode, and all flags", () => {
-    const main = mkdtempSync(join(tmpdir(), "antgrid worktree "));
-    const linked = mkdtempSync(join(tmpdir(), "antgrid-工作树-"));
+    // Canonical: the parser realpath's every path that exists.
+    const main = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid worktree ")));
+    const linked = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-工作树-")));
     const raw = [
       `worktree ${main}`, "HEAD abc123", "branch refs/heads/main", "",
       `worktree ${linked}`, "HEAD def456", "detached", "locked maintenance", "prunable stale", "",
