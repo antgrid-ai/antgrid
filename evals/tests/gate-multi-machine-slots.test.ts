@@ -82,7 +82,7 @@ test("one account device holds two machines at once — neither supersedes the o
     expect((await b.waitForStateSnapshot()).ok).toBe(true);
 
     // Each bridge registered the ACCOUNT device, not the slot it was reached
-    // on (bridge/CLAUDE.md's relay-slot.ts note: everything account-keyed
+    // on (bridge/AGENTS.md's relay-slot.ts note: everything account-keyed
     // base-strips the slot).
     expect(envA.agent.pairedPhones().map((p) => p.phoneDeviceId)).toContain(account);
     expect(envB.agent.pairedPhones().map((p) => p.phoneDeviceId)).toContain(account);

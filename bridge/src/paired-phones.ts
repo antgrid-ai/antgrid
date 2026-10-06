@@ -83,19 +83,23 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
   // the file before our touch landed — can't roll `last seen` backwards.
   const pendingTouches = new Map<string, string>();
   let touchTimer: ReturnType<typeof setTimeout> | null = null;
-  // Exact bytes of our last touch-only write, for the watcher's silence check.
-  let touchWriteRaw: string | null = null;
+  // Exact bytes memory already reflects AND no one still needs to hear about:
+  // our own touch-only write, or what the watcher last reloaded. A watcher fire
+  // on them is silent — a touch must not re-advertise, and macOS delivers one
+  // burst of writes as batches ~50ms apart, so a straggler can fire after the
+  // debounce on bytes already handled.
+  let knownRaw: string | null = null;
 
   function flush(silent = false) {
     const data: FileShape = { version: 1, phones };
     const raw = JSON.stringify(data, null, 2);
-    // Cleared BEFORE the write, armed only after one lands. Any write carrying
-    // more than touches MUST still notify, and a snapshot left armed by a write
-    // that threw would silence a later external edit that happens to match it.
+    // Cleared BEFORE the write, set only after one lands. Any write carrying
+    // more than touches MUST still notify, and bytes left known by a write
+    // that threw would silence a later external edit that happens to match them.
     // Re-notifying costs a re-advertise; under-notifying costs correctness.
-    touchWriteRaw = null;
+    knownRaw = null;
     atomicWriteFile(path, raw, { fileMode: 0o600 });
-    if (silent) touchWriteRaw = raw;
+    if (silent) knownRaw = raw;
   }
 
   function flushLastSeen() {
@@ -195,21 +199,16 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
           const raw = readRaw(path);
-          // Resolve the touch-write snapshot on EVERY fire, not only a matching
-          // one: an external write landing inside the debounce makes our own
-          // event read someone else's bytes, and a snapshot left armed past
-          // that would silence a LATER external edit that happens to restore it
-          // byte-for-byte, stranding the running host on rows it no longer has.
-          // Re-notifying costs a re-advertise; under-notifying costs correctness.
-          const armed = touchWriteRaw;
-          touchWriteRaw = null;
-          // Our own touch flush: memory already holds it, and re-advertising on
-          // it would put every reconnect back on the wire indirectly.
-          if (armed !== null && raw === armed) return;
+          if (raw !== null && raw === knownRaw) return;
           // A failed read is a write in flight, not an emptied store — keep
           // memory and wait for the completing write's own event.
-          const next = readFile(path);
+          const next = parsePhones(raw);
           if (!next) return;
+          // Replacing the known bytes on every reload is what keeps a touch
+          // snapshot from outliving an external write that landed inside the
+          // debounce: left in place, it would silence a LATER edit restoring
+          // those bytes, stranding the host on rows it no longer has.
+          knownRaw = raw;
           phones = next;
           for (const [pk, at] of pendingTouches) {
             const phone = phones.find((p) => p.phonePubkey === pk);
@@ -242,9 +241,12 @@ function readRaw(path: string): string | null {
  * store and flushing it back wipes every phone's label and push routing.
  */
 function readFile(path: string): PairedPhone[] | null {
-  if (!existsSync(path)) return null;
+  return parsePhones(readRaw(path));
+}
+
+function parsePhones(raw: string | null): PairedPhone[] | null {
+  if (raw === null) return null;
   try {
-    const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as FileShape;
     if (parsed.version !== 1 || !Array.isArray(parsed.phones)) return null;
     // Destructure off the stale keys older builds left on disk — `admission`

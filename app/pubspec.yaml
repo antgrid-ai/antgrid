@@ -187,9 +187,8 @@ flutter_native_splash:
 # The terminal engine and PTY layer come from a fork of kingwill101/dart_terminal
 # carrying fixes upstream has not taken: an FFI colour bug, the host hooks the
 # terminal view needs, and Android PTY binaries linked to pass Play's 16 KB
-# page-alignment gate. What diverges and what it would take to go back:
-# docs/dart-terminal-fork-release.md. `ref` is a commit SHA on purpose — the fork
-# cuts no VTE release, and a branch would make every `pub get` a moving target.
+# page-alignment gate. `ref` is a commit SHA on purpose — the fork cuts no VTE
+# release, and a branch would make every `pub get` a moving target.
 dependency_overrides:
   # Forward Sparkle cycle completion, including Remind Me Later / Skip This
   # Version (see the vendored README).

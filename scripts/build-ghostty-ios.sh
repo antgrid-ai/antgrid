@@ -22,7 +22,7 @@
 #   fixups, LC_ENCRYPTION_INFO_64 present) and made all of that unnecessary.
 #   The pre-flight checks below assert that upstream has not regressed to the Zig
 #   linker — if they fire, the relink approach is needed again and lives in git
-#   history (see docs/ios-ghostty-vt-appstore-rejection.md).
+#   history (this script before dce57cd5).
 #
 # WHERE IT RUNS
 #   Any macOS with the Xcode command line tools. No Zig, no pinned runner image.

@@ -310,7 +310,7 @@ export class PeerStreamAcceptor {
 
 // ---------------------------------------------------------------------------
 // Generic admission for every project-scoped kind (terminal, tunnel-tcp,
-// upload). See `bridge/CLAUDE.md`'s project-streams.ts entry for
+// upload). See `bridge/AGENTS.md`'s project-streams.ts entry for
 // what a "project's binding" means; this is the consumer side of it.
 // ---------------------------------------------------------------------------
 
@@ -401,7 +401,7 @@ export function openScopedWriter(
  *
  * `handlerFor`'s admission order (every step before any read from the
  * stream): the per-peer cap; the kind's own open-frame validation; the safe-id
- * and catalog checks (root CLAUDE.md's "seenProjects + isSafeProjectId are the
+ * and catalog checks (root AGENTS.md's "seenProjects + isSafeProjectId are the
  * only bound" invariant); the project's binding (`NOT_READY` while it has no
  * live entry — a lookup only, never opening or promoting a core); an open
  * project stream for this peer (the single per-peer admission point for a
