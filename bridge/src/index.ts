@@ -144,6 +144,7 @@ program
     }
 
     const host = new HostServer({
+      desktopOwned: payload.ownerPid !== undefined,
       ...(payload.machine
         ? {
             remote: {

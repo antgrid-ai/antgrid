@@ -585,6 +585,16 @@ export function agentSpec(tool: string): AgentSpec | undefined {
   return registry.get(tool);
 }
 
+/** Scheduling needs explicit completion and blocking signals for its opening turn. */
+export function schedulingModesForAgent(tool: string): ("terminal" | "chat")[] {
+  const spec = agentSpec(tool);
+  if (!spec) return [];
+  const modes: ("terminal" | "chat")[] = [];
+  if (spec.cli?.initialPrompt?.("scheduler-capability-probe").length && spec.observation?.turnEnd && spec.observation.handler) modes.push("terminal");
+  if (spec.driver) modes.push("chat");
+  return modes;
+}
+
 /**
  * Whether this tool can drive a headless judge — the only legal values for the
  * Handler's judge-tool override. Named rather than inlined because the callers

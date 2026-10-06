@@ -13,6 +13,7 @@ import '../widgets/ab_chip.dart';
 import '../widgets/ab_icon.dart';
 import '../widgets/ab_toast.dart';
 import '../widgets/ab_tooltip.dart';
+import 'ab_touch_sizing.dart';
 
 abstract class AbMenuEntry {
   const AbMenuEntry();
@@ -1437,6 +1438,9 @@ class _MenuItemTileState extends State<_MenuItemTile> {
         onTap: _activate,
         child: Container(
           padding: _menuRowPadding,
+          constraints: BoxConstraints(
+            minHeight: AbTouchSizing.extentOf(context),
+          ),
           decoration: BoxDecoration(
             color: active ? p.bgHover : Colors.transparent,
             borderRadius: AbTokens.borderRadius3,

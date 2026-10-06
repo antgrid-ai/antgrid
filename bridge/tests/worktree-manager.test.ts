@@ -53,6 +53,24 @@ describe("WorktreeManager", () => {
     expect((await new CheckoutStore(abDir, projectId).get(result.id))?.path).toBe(result.path);
   });
 
+  test("schedule ownership prevents force removal and survives reconciliation without members", async () => {
+    const worktrees = manager();
+    const checkout = await worktrees.prepareForSession({ projectId, repoPath: repo, sessionId: "first", scheduleOwnerId: "daily" });
+    const store = new CheckoutStore(abDir, projectId);
+    await store.update(checkout.id, (record) => ({ ...record, sessionId: null }));
+    expect((await worktrees.inspect(checkout.id)).exists).toBe(true);
+    await expect(worktrees.remove({ checkoutId: checkout.id, force: true, deleteBranch: true })).rejects.toThrow("belongs to a schedule");
+    await worktrees.reconcile(projectId, repo);
+    expect(existsSync(checkout.path)).toBe(true);
+    expect((await store.get(checkout.id))?.scheduleOwnerId).toBe("daily");
+    await store.releaseScheduleOwner("someone-else", checkout.id);
+    expect((await store.get(checkout.id))?.scheduleOwnerId).toBe("daily");
+    await store.releaseScheduleOwner("daily", checkout.id);
+    await worktrees.remove({ checkoutId: checkout.id, force: true, deleteBranch: false });
+    expect(existsSync(checkout.path)).toBe(false);
+    expect(await git(repo, ["show-ref", "--verify", `refs/heads/${checkout.branch}`])).toContain(checkout.branch!);
+  });
+
   test("spends few enough path characters to leave a Windows repo room", async () => {
     // The default id generator, not the injected one: a managed checkout's path
     // is a PREFIX to every file the agent will ever touch inside it, and
