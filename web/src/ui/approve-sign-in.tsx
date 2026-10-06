@@ -10,6 +10,7 @@ export type ApproveSignInProps = {
   requestedAt: Date;
   pendingId: string;
   token: string;
+  csrf?: string;
   error?: string | null;
 };
 
@@ -25,7 +26,7 @@ function shortUa(ua: string | null): string {
 
 export function ApproveSignInPage(p: ApproveSignInProps) {
   return (
-    <Layout title="Approve sign-in">
+    <Layout title="Review sign-in request" analytics={false}>
       <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body">
           <h1 class="card-title">Approve sign-in</h1>
@@ -55,6 +56,7 @@ export function ApproveSignInPage(p: ApproveSignInProps) {
             class="mt-4"
             onsubmit="this.querySelector('button[type=submit]').disabled=true;this.querySelector('button[type=submit]').textContent='Approving…';"
           >
+            <input type="hidden" name="csrf" value={p.csrf} />
             <input type="hidden" name="id" value={p.pendingId} />
             <input type="hidden" name="token" value={p.token} />
             <button type="submit" class="btn btn-primary w-full">

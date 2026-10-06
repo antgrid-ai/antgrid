@@ -29,7 +29,7 @@ const accountSelect = {
   createdAt: true, updatedAt: true, deletedAt: true, user: { select: identitySelect },
 } as const;
 const userSelect = {
-  ...identitySelect, emailVerified: true, createdAt: true,
+  ...identitySelect, emailVerified: true, createdAt: true, registrationOrigin: true, activationOrigin: true,
   ownedProductAccount: { select: { id: true, deletedAt: true } },
   accounts: { select: { id: true, providerId: true, createdAt: true, updatedAt: true } },
 } as const;

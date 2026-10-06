@@ -32,6 +32,7 @@ async function signUpVerified(
   const res = await auth.api.signUpEmail({ body: { email, password: PASSWORD, name: email } });
   const userId = res.user.id;
   await pg.db.user.update({ where: { id: userId }, data: { emailVerified: true } });
+  await signIn(auth, email);
   return userId;
 }
 

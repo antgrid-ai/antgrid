@@ -33,11 +33,11 @@ export const AUTH_WAKE_SCRIPT = `(function(){
   if(!el||!window.BroadcastChannel)return;
   var mine=String(el.getAttribute("data-ab-wake")||"").trim().toLowerCase();
   if(!mine)return;
-  var ch=new BroadcastChannel(${JSON.stringify(AUTH_CHANNEL)});
+  try { var ch=new BroadcastChannel(${JSON.stringify(AUTH_CHANNEL)});
   ch.addEventListener("message",function(e){
     var d=e.data;
     if(!d||d.t!==${JSON.stringify(SIGNED_IN_EVENT)})return;
     if(String(d.email||"").trim().toLowerCase()!==mine)return;
-    location.replace("/dashboard");
-  });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }); } catch(e) {}
 })();`;

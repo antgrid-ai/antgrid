@@ -110,7 +110,7 @@ export function InvitePage(p: InvitePageProps) {
                     confirms an address on its own.
                   </span>
                 </div>
-                <a href="/login" class="btn btn-primary mt-4 w-fit">
+                <a href={`/login?returnPath=${encodeURIComponent(`/invite?id=${p.inviteId}&t=${p.token}`)}`} class="btn btn-primary mt-4 w-fit">
                   Sign in
                 </a>
               </>
