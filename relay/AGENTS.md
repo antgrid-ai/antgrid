@@ -1,10 +1,10 @@
 # Relay (`relay/src/`)
 
-Deep reference for the relay. Root `CLAUDE.md` holds the repo-wide gotchas,
+Deep reference for the relay. Root `AGENTS.md` holds the repo-wide gotchas,
 commands, and conventions — this file loads only when working under `relay/`.
 
-What may be written in any `CLAUDE.md`, this one included, is governed by
-*Maintaining these files* in the root `CLAUDE.md`.
+What may be written in any `AGENTS.md`, this one included, is governed by
+*Maintaining these files* in the root `AGENTS.md`.
 
 The central relay is a control plane. Remote payloads use the native Iroh
 transport and never transit this WebSocket. The socket carries signed admission,

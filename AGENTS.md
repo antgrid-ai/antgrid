@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 This file provides guidance to Coding Agents (like Claude, Codex, etc) when working with code in this repository.
 
@@ -8,7 +8,7 @@ This file provides guidance to Coding Agents (like Claude, Codex, etc) when work
 > manages for users.
 
 > **Maintaining these files.** Governs the root file and every scoped
-> `CLAUDE.md` (`bridge/`, `app/`, `relay/`, `web/`,
+> `AGENTS.md` (`bridge/`, `app/`, `relay/`, `web/`,
 > `packages/antgrid_relay_client/`); update one in the same commit that
 > invalidates a fact. Two questions gate what may be written in one.
 >
@@ -127,7 +127,7 @@ analyzer is per-session and retained, where `flutter analyze` is transient.
 
 ## Design Rules (app UI)
 
-Full rules live in `app/CLAUDE.md`, which auto-loads whenever you work under
+Full rules live in `app/AGENTS.md`, which auto-loads whenever you work under
 `app/` — all Flutter UI is there. The two that must never be violated, restated
 here because they are easy to break from outside that tree:
 
@@ -172,8 +172,8 @@ Comments are permanent docs for the next reader, not a log of this chat — writ
 ### Per-component deep reference
 Each file below loads only when you work under its directory — read it before
 editing that component; the repo-wide rules stay in this file.
-- `bridge/CLAUDE.md` — PTY/terminals, relay-client v3 auth, native streams, host server, OAuth bootstrap, isolated checkouts.
-- `relay/CLAUDE.md` — hello verification order, epochs, routing, streams, license gate, error contract.
-- `app/CLAUDE.md` — providers, ConnectionSupervisor, per-project services/registry, account auth.
-- `packages/antgrid_relay_client/CLAUDE.md` — relay service + MachineSession (NOT under `app/`, so it loads separately).
-- `web/CLAUDE.md` — Prisma/Better-Auth, device + JWT routes, the two pricing axes.
+- `bridge/AGENTS.md` — PTY/terminals, relay-client v3 auth, native streams, host server, OAuth bootstrap, isolated checkouts.
+- `relay/AGENTS.md` — hello verification order, epochs, routing, streams, license gate, error contract.
+- `app/AGENTS.md` — providers, ConnectionSupervisor, per-project services/registry, account auth.
+- `packages/antgrid_relay_client/AGENTS.md` — relay service + MachineSession (NOT under `app/`, so it loads separately).
+- `web/AGENTS.md` — Prisma/Better-Auth, device + JWT routes, the two pricing axes.

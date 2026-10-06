@@ -1,7 +1,7 @@
 # Commands reference
 
 On-demand commands. The everyday ones (setup, launchers, the test/analyze
-gates) live in the root `CLAUDE.md`; this file holds the rest so they cost no
+gates) live in the root `AGENTS.md`; this file holds the rest so they cost no
 context until you need them.
 
 ## Occasional dev commands
@@ -17,7 +17,7 @@ cd web && bun run generate:key   # Ed25519 signing seed
 
 ## Worktrees
 
-Only when asked — see the note at the top of the root `CLAUDE.md`.
+Only when asked — see the note at the top of the root `AGENTS.md`.
 
 `scripts/worktree.ts` provisions the gitignored artifacts a bare `git worktree
 add` leaves missing (`node_modules`, prisma client, per-service `.env`, Flutter

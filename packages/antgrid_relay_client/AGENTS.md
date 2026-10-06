@@ -1,13 +1,13 @@
 # `antgrid_relay_client` (the app's relay layer)
 
 Pure Dart relay/crypto client, no Flutter. Deep reference for this package;
-the consuming app is documented in `app/CLAUDE.md`, and the peer session
+the consuming app is documented in `app/AGENTS.md`, and the peer session
 invariants (shared with the bridge) are written up there under "Session hello,
 no app-layer crypto", with the full protocol spec at
 `docs/protocol/peer-session.md`.
 
-What may be written in any `CLAUDE.md`, this one included, is governed by
-*Maintaining these files* in the root `CLAUDE.md`.
+What may be written in any `AGENTS.md`, this one included, is governed by
+*Maintaining these files* in the root `AGENTS.md`.
 
 - `relay_slot.dart`: the app's `hello.deviceId` is a per-machine SLOT, `<accountDeviceUuid>#<machineDeviceUuid>` (`relaySlotId`). The relay arbitrates per `hello.deviceId` and supersedes an equal epoch, so one slot shared across machines lets the second machine dialled kill the first. A slot is a CENTRAL transport address only: every bridge-side identity lookup and relay revocation use `baseSlotDeviceId`; peer frames carry no address because an authenticated native connection already identifies its peer. Hand-mirrored by `packages/antgrid-wire/src/relay-slot.ts`; keep the two implementations in lockstep. The separator must remain legal in `antgrid-wire`'s `DEVICE_ID` regex, which gates `hello.deviceId` before the signature is checked.
 - `relay_service.dart`: v3 signed `hello` (mandatory `licenseToken` + `epoch`; deviceId = the slot above), `welcome` = authenticated. It is control-only: authentication, account-scoped presence, policy changes, heartbeat, and push control stay central; payloads never traverse this socket. ONE attempt per `connect`, never a retry - redial timing, backoff and conflict handling belong to the app's connection supervisor. Typed `errorStream` (required `retryable`) is the sole control failure channel. Clock-skew correction remains `error{AUTH_FAILED, serverTime}` -> `ts` offset on the next hello, once per offset.
