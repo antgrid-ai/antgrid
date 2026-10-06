@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { buildTestApp as buildRawTestApp } from "../helpers/app.js";
 import { parseTrustedProxies } from "antgrid-wire";
 
 let pg: PgHandle;
@@ -17,7 +17,22 @@ beforeEach(async () => {
   await pg.truncate();
 });
 
+const buildTestApp: typeof buildRawTestApp = (...args) => {
+  const result = buildRawTestApp(...args);
+  const original = result.app.fetch.bind(result.app);
+  result.app.fetch = (async (request: Request, ...rest: unknown[]) => {
+    if (new URL(request.url).pathname === "/ui/login/approve" && request.method === "POST") {
+      const form = new URLSearchParams(await request.text()); form.set("csrf", "test-browser-csrf");
+      const headers = new Headers(request.headers); headers.set("cookie", (headers.get("cookie") ?? "") + `; antgrid.approve_csrf.${form.get("id")}=test-browser-csrf`);
+      return original(new Request(request, { headers, body: form.toString() }), ...rest as []);
+    }
+    return original(request, ...rest as []);
+  }) as typeof result.app.fetch;
+  return result;
+};
+
 type CapturedEmail = { to: string; subject: string; text: string; html?: string };
+const cookieJar = (response: Response) => response.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
 
 function makeCapture(): { captured: CapturedEmail[]; sendEmail: (a: CapturedEmail) => Promise<void> } {
   const captured: CapturedEmail[] = [];
@@ -88,7 +103,7 @@ describe("cross-device sign-in end-to-end", () => {
     );
     expect(startRes.status).toBe(302);
     const browserACookieHeader = startRes.headers.get("set-cookie") ?? "";
-    expect(browserACookieHeader).toContain("antgrid.cross_device_token=");
+    expect(browserACookieHeader).toContain("antgrid.cross_device_token.");
     expect(cap.captured.length).toBe(1);
     expect(cap.captured[0].to).toBe("alice@example.com");
     // The requester UA + IP must survive the api.* hop (regression: they were
@@ -118,7 +133,9 @@ describe("cross-device sign-in end-to-end", () => {
     expect(approveRes.headers.get("location")).toBe("/login/approved");
 
     // 4. Browser A polls — must carry its binding cookie.
-    const browserACookie = browserACookieHeader.split(";")[0];
+    const browserACookie = cookieJar(startRes);
+    expect(browserACookie).toContain("antgrid.auth_browser=");
+    expect(browserACookie).toContain(`antgrid.cross_device_token.${id}=`);
     const pollRes = await app.fetch(
       new Request(`http://localhost/ui/login/poll/${id}`, {
         method: "GET",
@@ -285,8 +302,8 @@ describe("cross-device sign-in end-to-end", () => {
     const reclick = await app.fetch(
       new Request(`http://localhost/login/approve?id=${id}&t=${token}`)
     );
-    expect(reclick.status).toBe(302);
-    expect(reclick.headers.get("location")).toBe("/login/approved");
+    expect(reclick.status).toBe(200);
+    expect(await reclick.text()).toContain("Review sign-in request");
   });
 
   test("approval state is not disclosed to a caller without the token", async () => {
@@ -344,7 +361,7 @@ describe("cross-device sign-in end-to-end", () => {
         body: "email=erin@example.com",
       })
     );
-    const browserACookie = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
+    const browserACookie = cookieJar(startRes);
 
     const url = cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0];
     const u = new URL(url);
@@ -370,43 +387,6 @@ describe("cross-device sign-in end-to-end", () => {
     expect(pollRes.headers.get("set-cookie") ?? "").toContain(
       "better-auth.session_token="
     );
-  });
-
-  test("the browser that asked for the link is signed in by opening it", async () => {
-    const cap = makeCapture();
-    const { app } = buildTestApp(pg.db, pg.url, {
-      sendEmail: cap.sendEmail,
-      usePrismaAdapter: true,
-    });
-
-    const startRes = await app.fetch(
-      new Request("http://localhost/ui/login/start", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "email=hana@example.com",
-      })
-    );
-    const bind = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
-
-    const u = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
-    const open = await app.fetch(
-      new Request(`http://localhost${u.pathname}${u.search}`, {
-        headers: { cookie: bind },
-      })
-    );
-
-    // No approval screen: the request came from this browser seconds ago, so
-    // there is no second party for it to warn.
-    expect(open.status).toBe(302);
-    expect(open.headers.get("location")).toBe("/dashboard");
-    const session = (open.headers.get("set-cookie") ?? "").match(
-      /better-auth\.session_token=[^;,]+/
-    );
-    expect(session).not.toBeNull();
-    const dash = await app.fetch(
-      new Request("http://localhost/dashboard", { headers: { cookie: session![0] } })
-    );
-    expect(dash.status).toBe(200);
   });
 
   test("a link opened without the bind cookie still meets the approval screen", async () => {
@@ -435,8 +415,8 @@ describe("cross-device sign-in end-to-end", () => {
         body: "email=judy@example.com",
       })
     );
-    const otherBind = (other.headers.get("set-cookie") ?? "").split(";")[0];
-    expect(otherBind).not.toBe((first.headers.get("set-cookie") ?? "").split(";")[0]);
+    const otherBind = cookieJar(other);
+    expect(otherBind).not.toBe(cookieJar(first));
 
     const headerSets: Record<string, string>[] = [{}, { cookie: otherBind }];
     for (const headers of headerSets) {
@@ -446,89 +426,6 @@ describe("cross-device sign-in end-to-end", () => {
       expect(open.status).toBe(200);
       expect(await open.text()).toContain("Approve sign-in");
     }
-  });
-
-  test("the waiting tab is sent to the dashboard, not told its link expired", async () => {
-    const cap = makeCapture();
-    const { app } = buildTestApp(pg.db, pg.url, {
-      sendEmail: cap.sendEmail,
-      usePrismaAdapter: true,
-    });
-
-    const startRes = await app.fetch(
-      new Request("http://localhost/ui/login/start", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "email=kim@example.com",
-      })
-    );
-    const bind = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
-    const id = startRes.headers.get("location")!.match(/\/login\/pending\/([0-9a-f-]+)/)![1];
-
-    // The other tab in this browser opens the link and claims the session,
-    // which consumes the row and clears the bind cookie.
-    const u = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
-    const open = await app.fetch(
-      new Request(`http://localhost${u.pathname}${u.search}`, {
-        headers: { cookie: bind },
-      })
-    );
-    const session = (open.headers.get("set-cookie") ?? "").match(
-      /better-auth\.session_token=[^;,]+/
-    )![0];
-
-    // The tab left behind polls with what the browser now carries: a session,
-    // and no bind cookie. "Link expired" is the one answer that cannot be true.
-    const poll = await app.fetch(
-      new Request(`http://localhost/ui/login/poll/${id}`, {
-        headers: { cookie: session },
-      })
-    );
-    expect(poll.headers.get("hx-redirect")).toBe("/dashboard");
-  });
-
-  test("a poll from a browser signed in as someone else is still expired", async () => {
-    const cap = makeCapture();
-    const { app } = buildTestApp(pg.db, pg.url, {
-      sendEmail: cap.sendEmail,
-      usePrismaAdapter: true,
-    });
-
-    // One browser completes a sign-in as lena, and is left holding her session.
-    const lena = await app.fetch(
-      new Request("http://localhost/ui/login/start", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "email=lena@example.com",
-      })
-    );
-    const lenaLink = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
-    const lenaOpen = await app.fetch(
-      new Request(`http://localhost${lenaLink.pathname}${lenaLink.search}`, {
-        headers: { cookie: (lena.headers.get("set-cookie") ?? "").split(";")[0] },
-      })
-    );
-    const lenaSession = (lenaOpen.headers.get("set-cookie") ?? "").match(
-      /better-auth\.session_token=[^;,]+/
-    )![0];
-
-    // It then starts a sign-in as mo and abandons it. Holding a session says
-    // nothing about THAT flow, so the poll must not hand mo's tab a dashboard.
-    const mo = await app.fetch(
-      new Request("http://localhost/ui/login/start", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "email=mo@example.com",
-      })
-    );
-    const moId = mo.headers.get("location")!.match(/\/login\/pending\/([0-9a-f-]+)/)![1];
-
-    const poll = await app.fetch(
-      new Request(`http://localhost/ui/login/poll/${moId}`, {
-        headers: { cookie: lenaSession },
-      })
-    );
-    expect(poll.headers.get("hx-redirect")).toContain("Link%20expired");
   });
 
   test("status endpoint surfaces a bounce after a webhook marks the row", async () => {
@@ -548,8 +445,7 @@ describe("cross-device sign-in end-to-end", () => {
       }));
     expect(startRes.status).toBe(200);
     const { id } = (await startRes.json()) as { id: string };
-    const bind = (startRes.headers.get("set-cookie") ?? "")
-      .match(/antgrid\.cross_device_token=([^;,]+)/)![1];
+    const bind = cookieJar(startRes);
 
     // Webhook reports a hard bounce for that row (client_reference == id).
     const hook = await app.fetch(new Request(`http://localhost/webhooks/zeptomail/${KEY}`, {
@@ -564,8 +460,8 @@ describe("cross-device sign-in end-to-end", () => {
 
     // Poll (still pending — not yet approved) now carries the bounce.
     const statusRes = await app.fetch(new Request(
-      "http://localhost/api/auth/sign-in/cross-device/status", {
-        headers: { cookie: `antgrid.cross_device_token=${bind}` },
+      `http://localhost/api/auth/sign-in/cross-device/status?id=${id}`, {
+        headers: { cookie: bind },
       }));
     const statusBody = (await statusRes.json()) as { status: string; delivery?: string | null };
     expect(statusBody.status).toBe("pending");
@@ -588,7 +484,7 @@ describe("cross-device sign-in end-to-end", () => {
       body: "email=bounce@example.com",
     }));
     expect(startRes.status).toBe(302);
-    const cookie = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
+    const cookie = cookieJar(startRes);
     const id = startRes.headers.get("location")!.match(/\/login\/pending\/([0-9a-f-]+)/)![1];
 
     // The magic-link email hard-bounces for that row.

@@ -110,7 +110,7 @@ describe("GET /account", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const res = await app.request("/account", { redirect: "manual" });
     expect([302, 307]).toContain(res.status);
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Faccount");
   });
 
   function deleteReq(
