@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer } from "../src/host-server";
+import { SchedulerService } from "../src/scheduler";
 import { ProjectCore } from "../src/project-core";
 import { computeProjectId } from "../src/project-id";
 import { createMessage } from "../src/protocol";
@@ -43,13 +44,26 @@ test("project-free loopback scheduler uses host validation for CRUD and preview"
   };
   const capability = await request("scheduler.capabilities");
   expect(capability.result.supported).toBe(true);
+  expect(capability.result.supportsBaseBranchClear).toBe(true);
   expect(capability.result.projects[0]).toMatchObject({ projectId, isGitRepository: false });
   expect((await request("scheduler.preview", { cron: "0 9 * * 1-5", timezone: "UTC" })).result.occurrences).toHaveLength(5);
-  expect((await request("scheduler.preview", { cron: "@daily", timezone: "UTC" })).ok).toBe(false);
+  for (const params of [{ cron: "@daily", timezone: "UTC" }, { cron: "", timezone: "UTC" },
+    { cron: "0 9 * * *", timezone: "Moon/Base" }, { cron: "60 * * * *", timezone: "UTC" }]) {
+    expect((await request("scheduler.preview", params)).error.code).toBe("SCHEDULER_INVALID_CRON");
+  }
   expect((await request("scheduler.create", { schedule: settings("../escape") })).ok).toBe(false);
   expect((await request("scheduler.create", { schedule: { ...settings(projectId), workspace: "worktree" } })).ok).toBe(false);
   const created = (await request("scheduler.create", { schedule: settings(projectId) })).result.schedule;
   expect(created.authorDeviceId).toBeNull();
+  await request("scheduler.update", { id: created.id, patch: { baseBranch: "main" } });
+  expect((await request("scheduler.update", { id: created.id, patch: { name: "Renamed" } })).result.schedule.baseBranch).toBe("main");
+  expect((await request("scheduler.update", { id: created.id, patch: { baseBranch: null } })).result.schedule.baseBranch).toBeUndefined();
+  const scheduler = (host as unknown as { scheduler: SchedulerService }).scheduler;
+  const saved = scheduler.schedules().find((s) => s.id === created.id)!;
+  scheduler.store.saveSchedule({ ...saved, baseBranch: "main", workspaceCreated: true });
+  expect((await request("scheduler.update", { id: created.id, patch: { baseBranch: null } })).error.code).toBe("SCHEDULER_ERROR");
+  expect((await request("scheduler.update", { id: created.id, patch: { name: "Locked" } })).result.schedule.baseBranch).toBe("main");
+  expect((await request("scheduler.update", { id: "missing", patch: { name: "Unknown" } })).error.code).toBe("SCHEDULER_ERROR");
   expect((await request("scheduler.update", { id: created.id, patch: { enabled: false } })).result.schedule.enabled).toBe(false);
   expect((await request("scheduler.list")).result.schedules).toHaveLength(1);
   await request("scheduler.delete", { id: created.id });
@@ -71,6 +85,19 @@ test("remote scheduler gates account, switch, safe IDs and targets the requester
   authorized = false;
   expect((await host.handleSchedulerRpc(rpc("scheduler.list"), "phone#machine") as any).ok).toBe(false);
   authorized = true;
+  for (const params of [{ cron: "@daily", timezone: "UTC" }, { cron: "0 9 * * *", timezone: "Moon/Base" }]) {
+    expect((await host.handleSchedulerRpc(rpc("scheduler.preview", params), "phone#machine") as any).error.code).toBe("SCHEDULER_INVALID_CRON");
+  }
+  const project = join(root, "native-project"); mkdirSync(project);
+  const projectId = computeProjectId(project);
+  await host.open(projectId, project, "local");
+  const created = (await host.handleSchedulerRpc(rpc("scheduler.create", { schedule: { ...settings(projectId), baseBranch: "main" } }), "phone#machine") as any).result.schedule;
+  expect((await host.handleSchedulerRpc(rpc("scheduler.update", { id: created.id, patch: { name: "Changed" } }), "phone#machine") as any).result.schedule.baseBranch).toBe("main");
+  expect((await host.handleSchedulerRpc(rpc("scheduler.update", { id: created.id, patch: { baseBranch: null } }), "phone#machine") as any).result.schedule.baseBranch).toBeUndefined();
+  const scheduler = (host as unknown as { scheduler: SchedulerService }).scheduler;
+  const saved = scheduler.schedules().find((s) => s.id === created.id)!;
+  scheduler.store.saveSchedule({ ...saved, baseBranch: "main", workspaceCreated: true });
+  expect((await host.handleSchedulerRpc(rpc("scheduler.update", { id: created.id, patch: { baseBranch: null } }), "phone#machine") as any).error.code).toBe("SCHEDULER_ERROR");
   expect((await host.handleSchedulerRpc(rpc("scheduler.create", { schedule: settings("unknown") }), "phone#machine") as any).ok).toBe(false);
   const bus = new MessageBus();
   host.dispatchControlPlaneInbound(rpc("scheduler.list"), "control", bus, "phone#machine");

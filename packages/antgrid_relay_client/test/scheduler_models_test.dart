@@ -62,6 +62,21 @@ void main() {
         expect(run.duration, const Duration(seconds: 1));
         expect(run.sessionId, 'session');
         expect(run.reason, 'Recorded reason');
+        expect(run.timezone, isNull);
+        expect(
+          ScheduleRun.fromJson({
+            ...{
+              'id': 'old',
+              'scheduleId': 's',
+              'projectId': 'p',
+              'status': 'completed',
+              'trigger': 'cron',
+              'occurrenceAt': 1000,
+            },
+            'timezone': 'America/New_York',
+          }).timezone,
+          'America/New_York',
+        );
       }
     },
   );
@@ -82,6 +97,13 @@ void main() {
       });
       expect(capability.agents.single.modes, ['terminal', 'chat']);
       expect(capability.error, 'Scheduler database unavailable');
+      expect(capability.supportsBaseBranchClear, isFalse);
+      expect(
+        SchedulerCapabilities.fromJson({
+          'supportsBaseBranchClear': true,
+        }).supportsBaseBranchClear,
+        isTrue,
+      );
       expect(
         SchedulerCapabilities.fromJson({'supported': false}).supported,
         isFalse,

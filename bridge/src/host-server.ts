@@ -76,6 +76,7 @@ import { ScheduleInputSchema, SchedulePatchSchema, type Schedule } from "./sched
 import { schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
+import { schedulerErrorCode } from "./scheduler/cron";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -1135,7 +1136,7 @@ export class HostServer {
       return createMessage("response", { requestId: req.requestId, ok: true, result: await this.schedulerRequest(req.method, req.params, deviceId) });
     } catch (error) {
       return createMessage("response", { requestId: req.requestId, ok: false,
-        error: { code: "SCHEDULER_ERROR", message: error instanceof Error ? error.message : "Scheduler request failed" } });
+        error: { code: schedulerErrorCode(error), message: error instanceof Error ? error.message : "Scheduler request failed" } });
     }
   }
 
@@ -1897,7 +1898,7 @@ export class HostServer {
         try {
           return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
         } catch (error) {
-          return { id: req.id, ok: false, error: { code: "SCHEDULER_ERROR", message: error instanceof Error ? error.message : "Scheduler request failed" } };
+          return { id: req.id, ok: false, error: { code: schedulerErrorCode(error), message: error instanceof Error ? error.message : "Scheduler request failed" } };
         }
       }
       case "project:list":

@@ -6,24 +6,33 @@ export const CRON_PRESETS = {
   weekdays: "0 9 * * 1-5",
 } as const;
 
+export class SchedulerInvalidCronError extends Error {
+  readonly code = "SCHEDULER_INVALID_CRON";
+}
+
+export function schedulerErrorCode(error: unknown): string {
+  return error instanceof SchedulerInvalidCronError ? error.code : "SCHEDULER_ERROR";
+}
+
 export function validateTimezone(timezone: string): string {
-  if (!timezone || /^[+-]/.test(timezone)) throw new Error("Choose an IANA timezone, such as Europe/London");
+  if (!timezone || /^[+-]/.test(timezone)) throw new SchedulerInvalidCronError("Choose an IANA timezone, such as Europe/London");
   try { new Intl.DateTimeFormat("en", { timeZone: timezone }).format(0); }
-  catch { throw new Error("Choose a valid IANA timezone"); }
+  catch { throw new SchedulerInvalidCronError("Choose a valid IANA timezone"); }
   return timezone;
 }
 
 export function validateCron(expression: string, timezone: string): string {
   const fields = expression.trim().split(/\s+/);
-  if (fields.length !== 5) throw new Error("Cron must contain five fields (minute, hour, day, month, weekday)");
+  if (fields.length !== 5) throw new SchedulerInvalidCronError("Cron must contain five fields (minute, hour, day, month, weekday)");
   const item = /^(?:\*|\d+(?:-\d+)?)(?:\/[1-9]\d*)?$/;
   if (!fields.every((field) => field.split(",").every((part) => item.test(part)))) {
-    throw new Error("Use numeric cron fields, wildcards, lists, ranges, and steps only");
+    throw new SchedulerInvalidCronError("Use numeric cron fields, wildcards, lists, ranges, and steps only");
   }
   validateTimezone(timezone);
   const normalized = fields.join(" ");
   // Parser strict mode rejects the standard DOM/DOW union and five-field form.
-  CronExpressionParser.parse(normalized, { tz: timezone }).next();
+  try { CronExpressionParser.parse(normalized, { tz: timezone }).next(); }
+  catch (error) { throw new SchedulerInvalidCronError(error instanceof Error ? error.message : "Invalid cron expression"); }
   return normalized;
 }
 

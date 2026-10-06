@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
+import 'ab_touch_sizing.dart';
 
 /// Visual emphasis for [AbButton].
 enum AbButtonVariant {
@@ -103,6 +104,10 @@ class _AbButtonState extends State<AbButton> {
     if (widget.wrapLabel) label = Flexible(child: label);
 
     Widget visual = Container(
+      constraints: BoxConstraints(
+        minWidth: AbTouchSizing.extentOf(context),
+        minHeight: AbTouchSizing.extentOf(context),
+      ),
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
         color: fillColor,
@@ -128,28 +133,31 @@ class _AbButtonState extends State<AbButton> {
       return Opacity(opacity: AbTokens.opacityDisabled, child: visual);
     }
 
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      onShowHoverHighlight: (v) {
-        if (_hovered != v) setState(() => _hovered = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AbFocusRing(
-          focused: _focused,
-          borderRadius: AbTokens.borderRadius5,
-          child: visual,
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onTap?.call();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AbFocusRing(
+            focused: _focused,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
+          ),
         ),
       ),
     );

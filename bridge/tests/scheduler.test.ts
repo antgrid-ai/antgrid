@@ -65,6 +65,29 @@ describe("scheduler cron", () => {
 });
 
 describe("scheduler runtime", () => {
+  test("branch clearing is an update-only operation and respects retained workspace locks", async () => {
+    const f = fixture();
+    expect((await f.service.capabilities()).supportsBaseBranchClear).toBe(true);
+    await expect(f.service.create({ ...input, baseBranch: null })).rejects.toThrow();
+    const schedule = await f.service.create({ ...input, baseBranch: "main" });
+    expect((await f.service.update(schedule.id, { name: "Renamed" })).baseBranch).toBe("main");
+    expect((await f.service.update(schedule.id, { baseBranch: null })).baseBranch).toBeUndefined();
+    expect(f.service.schedules()[0]!.baseBranch).toBeUndefined();
+    await f.service.update(schedule.id, { baseBranch: "main" });
+    await f.service.runNow(schedule.id); await settle();
+    await expect(f.service.update(schedule.id, { baseBranch: null })).rejects.toThrow("cannot change");
+    const run = f.service.runs().find((r) => r.status === "running")!;
+    f.service.observe({ projectId: run.projectId, sessionId: run.sessionId!, runtimeGeneration: run.runtimeGeneration!, status: "completed" });
+    await expect(f.service.update(schedule.id, { baseBranch: null })).rejects.toThrow("cannot change");
+  });
+  test("history retains the occurrence timezone after editing the timetable", async () => {
+    const f = fixture();
+    const schedule = await f.service.create({ ...input, timezone: "America/New_York" });
+    await f.service.runNow(schedule.id); await settle();
+    await f.service.update(schedule.id, { timezone: "Asia/Kolkata" });
+    expect(f.service.runs()[0]!.timezone).toBe("America/New_York");
+    expect((await f.service.runNow(schedule.id)).timezone).toBe("Asia/Kolkata");
+  });
   test("renaming preserves execution authorization while execution edits replace it", async () => {
     const f = fixture();
     const schedule = await f.service.create(input, "phone");

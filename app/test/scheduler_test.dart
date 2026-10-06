@@ -2,14 +2,15 @@ import 'dart:convert';
 
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/navigation/nav_serialization.dart';
 import 'package:antgrid/providers/demo_mode.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -66,6 +67,7 @@ class _Host {
   final calls = <({String method, Map<String, dynamic> params})>[];
   bool offline = false;
   String? warning;
+  bool activeRun = true;
   Future<Map<String, dynamic>> request(
     String method, [
     Map<String, dynamic> params = const {},
@@ -86,17 +88,18 @@ class _Host {
       },
       'scheduler.runs' => {
         'runs': [
-          {
-            'id': 'run',
-            'scheduleId': 'daily',
-            'projectId': 'repo',
-            'status': 'needs-input',
-            'trigger': 'cron',
-            'occurrenceAt': 1800000000000,
-            'startedAt': 1800000000100,
-            'sessionId': 'conversation',
-            'reason': 'Permission required',
-          },
+          if (activeRun)
+            {
+              'id': 'run',
+              'scheduleId': 'daily',
+              'projectId': 'repo',
+              'status': 'needs-input',
+              'trigger': 'cron',
+              'occurrenceAt': 1800000000000,
+              'startedAt': 1800000000100,
+              'sessionId': 'conversation',
+              'reason': 'Permission required',
+            },
         ],
       },
       _ => {},
@@ -251,6 +254,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          currentUserProvider.overrideWith((ref) async => null),
           schedulerMachinesProvider.overrideWithValue(const {
             'local': 'Local machine',
             'remote': 'Laptop',
@@ -277,7 +281,13 @@ void main() {
     final host = _Host();
     await pumpScreen(tester, host.request);
     expect(find.text('Daily review'), findsOneWidget);
-    expect(find.text('Run now'), findsOneWidget);
+    expect(find.text('Open session'), findsOneWidget);
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
+      ),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Pause'));
     await tester.pumpAndSettle();
     expect(
@@ -305,7 +315,7 @@ void main() {
   testWidgets(
     'five-second polling disables writes when the machine disappears',
     (tester) async {
-      final host = _Host();
+      final host = _Host()..activeRun = false;
       await pumpScreen(tester, host.request, size: const Size(400, 800));
       host.offline = true;
       await tester.pump(const Duration(seconds: 5));
@@ -322,7 +332,7 @@ void main() {
   testWidgets('connection lifecycle disables writes before the next poll', (
     tester,
   ) async {
-    final host = _Host();
+    final host = _Host()..activeRun = false;
     await pumpScreen(tester, host.request);
     final container = ProviderScope.containerOf(
       tester.element(find.byType(SchedulerScreen)),
@@ -342,7 +352,9 @@ void main() {
   testWidgets(
     'ownership cleanup warning keeps supported schedules manageable',
     (tester) async {
-      final host = _Host()..warning = 'Workspace ownership cleanup pending';
+      final host = _Host()
+        ..activeRun = false
+        ..warning = 'Workspace ownership cleanup pending';
       await pumpScreen(tester, host.request);
       expect(find.text('Workspace ownership cleanup pending'), findsOneWidget);
       expect(find.text('Daily review'), findsOneWidget);
@@ -366,36 +378,42 @@ void main() {
     'editor uses host previews and retains schedule workspace ownership',
     (tester) async {
       final host = _Host();
-      final snapshot = await SchedulerSnapshot.load(host.request);
+      final loaded = await SchedulerSnapshot.load(host.request);
+      final locked = AgentSchedule.fromJson({
+        ..._settings,
+        'workspaceCreated': true,
+      });
+      final snapshot = SchedulerSnapshot(
+        capabilities: loaded.capabilities,
+        projects: loaded.projects,
+        schedules: [locked],
+        runs: loaded.runs,
+      );
       tester.view.physicalSize = const Size(1000, 1700);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       var saved = false;
       await tester.pumpWidget(
-        MaterialApp(
-          theme: buildAbTheme(),
-          home: Scaffold(
-            body: ScheduleEditor(
-              snapshot: snapshot,
-              request: host.request,
-              writable: true,
-              schedule: AgentSchedule.fromJson({
-                ..._settings,
-                'workspaceCreated': true,
-              }),
-              onClose: () {},
-              onSaved: () => saved = true,
+        ProviderScope(
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: Scaffold(
+              body: ScheduleEditor(
+                snapshot: snapshot,
+                request: host.request,
+                writable: true,
+                schedule: locked,
+                onClose: () {},
+                onSaved: () => saved = true,
+              ),
             ),
           ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining('already owns a workspace'), findsOneWidget);
+      expect(find.text('Workspace settings locked'), findsOneWidget);
       expect(find.byType(AbPromptField), findsOneWidget);
-      expect(
-        tester.widget<AbTextField>(find.byType(AbTextField).at(1)).enabled,
-        isFalse,
-      );
+      expect(find.text('main'), findsOneWidget);
       await tester.tap(find.text('Weekdays'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();

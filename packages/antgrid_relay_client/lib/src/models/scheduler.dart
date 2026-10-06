@@ -15,11 +15,13 @@ class SchedulerCapabilities {
   final String timezone;
   final List<SchedulerAgent> agents;
   final String? error;
+  final bool supportsBaseBranchClear;
   const SchedulerCapabilities({
     required this.supported,
     required this.timezone,
     required this.agents,
     this.error,
+    this.supportsBaseBranchClear = false,
   });
   factory SchedulerCapabilities.fromJson(Map<String, dynamic> json) =>
       SchedulerCapabilities(
@@ -29,6 +31,7 @@ class SchedulerCapabilities {
           json['agents'],
         ).map(SchedulerAgent.fromJson).toList(),
         error: json['error'] as String?,
+        supportsBaseBranchClear: json['supportsBaseBranchClear'] == true,
       );
 }
 
@@ -133,6 +136,7 @@ class AgentSchedule {
 }
 
 class ScheduleRun {
+  final String? timezone;
   final String id;
   final String scheduleId;
   final String? scheduleName;
@@ -148,6 +152,7 @@ class ScheduleRun {
   final String? checkoutId;
   final DateTime? missedUntil;
   const ScheduleRun({
+    this.timezone,
     required this.id,
     required this.scheduleId,
     this.scheduleName,
@@ -169,6 +174,7 @@ class ScheduleRun {
       ? null
       : (finishedAt ?? DateTime.now()).difference(startedAt!);
   factory ScheduleRun.fromJson(Map<String, dynamic> json) => ScheduleRun(
+    timezone: json['timezone'] as String?,
     id: json['id'] as String,
     scheduleId: json['scheduleId'] as String,
     scheduleName: json['scheduleName'] as String?,

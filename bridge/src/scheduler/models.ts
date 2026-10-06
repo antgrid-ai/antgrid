@@ -13,7 +13,9 @@ export const ScheduleInputSchema = z.object({
   timezone: z.string().min(1),
   enabled: z.boolean().default(true),
 }).strict();
-export const SchedulePatchSchema = ScheduleInputSchema.partial();
+export const SchedulePatchSchema = ScheduleInputSchema.partial().extend({
+  baseBranch: z.string().min(1).nullable().optional(),
+});
 export const ScheduleSchema = ScheduleInputSchema.extend({
   id: z.string(),
   authorDeviceId: z.string().nullable(),
@@ -32,6 +34,7 @@ export const RunStatusSchema = z.enum(["preparing", "running", "needs-input", "c
 export const SchedulerRunSchema = z.object({
   id: z.string(), scheduleId: z.string(), scheduleName: z.string(), projectId: z.string(),
   occurrenceAt: z.number(), trigger: z.enum(["cron", "manual", "missed"]),
+  timezone: z.string().optional(),
   status: RunStatusSchema, startedAt: z.number(), finishedAt: z.number().optional(),
   reason: z.string().optional(), missedUntil: z.number().optional(),
   sessionId: z.string().optional(), runtimeGeneration: z.string().optional(), checkoutId: z.string().optional(),
@@ -43,6 +46,7 @@ export function isActiveRun(run: SchedulerRun): boolean { return ACTIVE_RUN_STAT
 
 export const SchedulerCapabilitiesSchema = z.object({
   supported: z.boolean(), timezone: z.string(),
+  supportsBaseBranchClear: z.boolean().optional(),
   agents: z.array(z.object({ agentId: z.string(), modes: z.array(z.enum(["terminal", "chat"])) })),
   error: z.string().optional(),
 });

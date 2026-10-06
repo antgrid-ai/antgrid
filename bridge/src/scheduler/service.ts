@@ -91,7 +91,7 @@ export class SchedulerService {
   }
   async capabilities(): Promise<SchedulerCapabilities> {
     const error = this.fault ?? (this.cleanupFailures.size ? OWNERSHIP_CLEANUP_ERROR : undefined);
-    return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone,
+    return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone, supportsBaseBranchClear: true,
       agents: await this.options.supportedAgents(), ...(error ? { error } : {}) };
   }
   schedules(): Schedule[] { return this.guarded(() => this.store.schedules()); }
@@ -122,7 +122,8 @@ export class SchedulerService {
   }
   async update(id: string, patch: unknown, authorDeviceId: string | null = null): Promise<Schedule> {
     this.executable();
-    const changes: SchedulePatch = SchedulePatchSchema.parse(patch);
+    const parsed: SchedulePatch = SchedulePatchSchema.parse(patch);
+    const changes = { ...parsed, ...(parsed.baseBranch === null ? { baseBranch: undefined } : {}) };
     const agents = await this.options.supportedAgents();
     const original = this.find(id);
     if ((original.workspaceCreated || this.runs(id).some(isActiveRun)) && (["projectId", "workspace", "baseBranch"] as const)
@@ -173,7 +174,7 @@ export class SchedulerService {
   }
   private newRun(schedule: Schedule, occurrenceAt: number, trigger: SchedulerRun["trigger"]): SchedulerRun {
     return { id: randomUUID(), scheduleId: schedule.id, scheduleName: schedule.name, projectId: schedule.projectId,
-      occurrenceAt, trigger, status: "preparing", startedAt: this.now() };
+      occurrenceAt, timezone: schedule.timezone, trigger, status: "preparing", startedAt: this.now() };
   }
   private recordMissed(schedule: Schedule, now: number): void {
     const run = { ...this.newRun(schedule, schedule.nextOccurrence, "missed"), status: "skipped" as const,

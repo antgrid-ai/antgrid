@@ -148,16 +148,24 @@ test("real backend enrollment authorizes native host projects and scheduler mana
       };
       const capabilities = await schedulerRpc("scheduler.capabilities");
       assert.equal(capabilities.supported, true);
+      assert.equal(capabilities.supportsBaseBranchClear, true);
+      const invalidRequestId = randomUUID();
+      await sendMessage(createMessage("request", { requestId: invalidRequestId, method: "scheduler.preview", params: { cron: "@daily", timezone: "UTC" } }));
+      const invalid = await read((value) => value.type === "response" && value.requestId === invalidRequestId);
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.error.code, "SCHEDULER_INVALID_CRON");
       const preview = await schedulerRpc("scheduler.preview", { cron: "0 9 * * 1-5", timezone: "UTC" });
       assert.equal(preview.occurrences.length, 5);
       const scheduled = await schedulerRpc("scheduler.create", { schedule: {
         name: "Native schedule", projectId: projects[0]!.id, agentId: "claude-code", mode: "chat",
         prompt: "Review changes", approvalPolicy: "default", workspace: "shared", cron: "0 9 * * 1-5",
-        timezone: "UTC", enabled: true,
+        timezone: "UTC", enabled: true, baseBranch: "main",
       } });
       assert.equal(scheduled.schedule.authorDeviceId, phone.id);
       assert.equal((await schedulerRpc("scheduler.list")).schedules.length, 1);
       assert.equal((await schedulerRpc("scheduler.update", { id: scheduled.schedule.id, patch: { enabled: false } })).schedule.enabled, false);
+      assert.equal((await schedulerRpc("scheduler.list")).schedules[0].baseBranch, "main");
+      assert.equal((await schedulerRpc("scheduler.update", { id: scheduled.schedule.id, patch: { baseBranch: null } })).schedule.baseBranch, undefined);
       assert.equal((await schedulerRpc("scheduler.runs")).runs.length, 0);
       await schedulerRpc("scheduler.delete", { id: scheduled.schedule.id });
       assert.equal((await schedulerRpc("scheduler.list")).schedules.length, 0);

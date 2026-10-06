@@ -23,7 +23,7 @@ export const ROADMAP: readonly RoadmapEntry[] = [
     description: "Run recurring prompts on your desktop and manage schedules from connected devices.",
     area: "Agent sessions",
     status: "done",
-    update: "Completed: local and remote schedule management, run history, and recurring prompts that reuse a workspace owned by each schedule.",
+    update: "Completed: local and remote schedule management, retained editing drafts, actionable run history, and recurring prompts that reuse a workspace owned by each schedule.",
     updatedAt: "2026-10-05",
     discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/213",
   },
