@@ -102,7 +102,7 @@ You choose which installed agent CLI does the judging. When the working agent pa
 
 Handler can ask both sides. It asks the agent for missing facts, evidence or options. It notifies you when it needs information only you can provide, a decision or permission. You can also set checkpoints of your own, such as "ask me before starting the security review". Instructions like that can only make Handler stricter, never looser. Work that depends on your answer waits; Handler can keep the agent working on other listed steps that don't depend on it.
 
-With the companion phone app, you can respond away from the desk. Terminal output, prompts and file contents sent through the relay are end-to-end encrypted between your machine and connected devices. The relay forwards them without the keys to read them.
+With the companion phone app, you can respond away from the desk. Terminal output, prompts and file contents are end-to-end encrypted between your machine and your connected devices; nothing in between can read them.
 
 When a phase closes, Handler tells the same running agent what's needed next. When every item is resolved and no question is waiting on you, it records a wrap-up and disarms.
 
