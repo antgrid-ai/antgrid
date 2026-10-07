@@ -24,6 +24,9 @@ Do NOT invoke for: unit tests, static analysis, code-only changes with no visual
 - Prefer `ByValueKey` > `ByText` > `ByType` for finding widgets (most stable to least)
 </HARD-RULES>
 
+Tool calls below are written with Claude Code's names, `mcp__dart__<tool>`. Other agents
+(Codex and the rest) call the same `<tool>` on the `dart` MCP server, with the same arguments.
+
 ## Startup Sequence
 
 Execute steps sequentially. Each step depends on the previous.

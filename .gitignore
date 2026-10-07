@@ -87,7 +87,10 @@ app.*.map.json
 # Worktrees and superpowers
 .worktrees/
 .superpowers/
-.agents/
+# .agents/skills is the cross-agent skills path, a symlink to .claude/skills, so Codex, Cursor,
+# OpenCode and Gemini load the same project skills Claude Code does. Everything else stays local.
+.agents/*
+!.agents/skills
 
 # Working plan/spec docs — author-local, not version-controlled
 # (previously-committed plans under these paths stay tracked as-is)
