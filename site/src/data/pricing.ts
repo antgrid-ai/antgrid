@@ -77,7 +77,7 @@ export const free: PlanCardData = {
     "Encrypted remote control from your phone",
     "Unlimited projects, terminals & sessions",
     "File explorer, git & browser preview",
-    "End-to-end encrypted, between your devices",
+    "End-to-end encrypted · zero-knowledge relay",
   ],
   cta: "Start free",
   ctaFooter: "No card required · Windows, macOS & Linux",
@@ -120,7 +120,7 @@ export const proYearly: PlanCardData = {
     "Invite your team — every seat brings its own machines",
     `Up to ${PRO_MAX_SEATS} seats · add or remove them any time`,
     "Shared fleet view across the team",
-    "End-to-end encrypted · priority support",
+    "End-to-end encrypted · zero-knowledge relay · priority support",
   ],
   cta: "Get Pro",
   // No figure on this line while the CTA is a capture: the reader is agreeing to
@@ -164,6 +164,6 @@ export const faq: { q: string; a: string }[] = [
   },
   {
     q: "Does antgrid see my code?",
-    a: "No. Everything between your agent and your devices travels inside a connection that is encrypted end to end between them, and no relay holds a key to it. When your devices can't reach each other directly, our relay forwards the encrypted packets as they are. That is true on every plan, including Free.",
+    a: "No. Everything between your agent and your devices is encrypted end to end between them. When they can't reach each other directly, our relay forwards the encrypted packets as they are. Our servers never see your code, prompts or terminal output, on every plan, including Free.",
   },
 ];

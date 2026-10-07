@@ -15,8 +15,8 @@ in real terminals on your own hardware, and puts one screen over all of them: ev
 session on every machine you have signed in, grouped by the machine it is on. Around each
 agent it puts the context you need to check the work yourself — multi-session terminals, a
 file tree, git review with diffs, and a live browser preview. The same workspace opens on
-a phone, over a connection that is end-to-end encrypted between your devices. No relay
-holds a key to it.
+a phone, over a connection that is end-to-end encrypted between your devices. Our servers
+never see your code, prompts or terminal output.
 
 Antgrid's Handler feature takes on the follow-ups for long-running coding tasks.
 Start with your agent and do as much as you want together. When you're ready to
