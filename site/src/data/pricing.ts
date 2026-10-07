@@ -119,7 +119,6 @@ export const proYearly: PlanCardData = {
     `Up to ${PRO_WORKERS} worker machines per person`,
     "Invite your team — every seat brings its own machines",
     `Up to ${PRO_MAX_SEATS} seats · add or remove them any time`,
-    "Shared fleet view across the team",
     "End-to-end encrypted · zero-knowledge relay · priority support",
   ],
   cta: "Get Pro",
@@ -138,7 +137,7 @@ export const proYearly: PlanCardData = {
 export const faq: { q: string; a: string }[] = [
   {
     q: "What counts as a seat?",
-    a: `One person on your account. Each seat signs in as themselves, gets their own worker machines, and sees the team's fleet. Pro covers up to ${PRO_MAX_SEATS} seats; past that, talk to us about Enterprise.`,
+    a: `One person on your account. Each seat signs in as themselves and gets their own worker machines, billed on the team's account. Pro covers up to ${PRO_MAX_SEATS} seats; past that, talk to us about Enterprise.`,
   },
   {
     q: "What counts as a worker machine?",
