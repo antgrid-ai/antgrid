@@ -20,6 +20,12 @@ export interface PairedPhone {
   pushToken?: string;
   pushProvider?: "fcm" | "apns";
   pushUpdatedAt?: string;
+  /** When an accepted authorization snapshot first left this row out; cleared
+   *  by the next one that names it again, and the row is collected once it is
+   *  old enough. Persisted, not held in memory, so a restart neither resets
+   *  that clock nor reopens pushes to a phone the account revoked before its
+   *  first snapshot lands (see `accountDisowns`). */
+  disownedAt?: string;
 }
 
 export interface PairedPhonesStore {
@@ -28,6 +34,15 @@ export interface PairedPhonesStore {
   get(phonePubkey: string): PairedPhone | undefined;
   upsert(phone: PairedPhone): void;
   remove(phonePubkey: string): void;
+  /** Rewrite every row through `next` in ONE file write: return the row to
+   *  keep it (a changed copy to update it), `null` to remove it. Returns the
+   *  removed rows. No write at all when nothing changes, so a caller sweeping
+   *  on a timer never trips the watcher's re-advertise for a no-op. `next`
+   *  judges the rows on disk with this process's coalesced `touchLastSeen`
+   *  stamps applied, so a phone admitted moments ago is never judged on the
+   *  `last seen` its file row still carries. `next` must be pure: it may run
+   *  more than once per row. */
+  reconcile(next: (phone: PairedPhone) => PairedPhone | null): PairedPhone[];
   /** Record a fresh admission for `phonePubkey` WITHOUT writing to disk.
    *  Every session establishment re-runs admission, so a phone that
    *  reconnects often would, with a straight `upsert` here, rewrite (and
@@ -102,33 +117,42 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     if (silent) knownRaw = raw;
   }
 
+  // For a write that runs off a background timer rather than a store caller:
+  // merge onto the on-disk rows instead of writing our in-memory array. Such a
+  // write can land in the window between a CLI `phones remove` writing the
+  // file and our watcher debounce reloading it, putting the removed row
+  // straight back — and the reload then reads our bytes, not the CLI's, so
+  // nothing ever corrects it. Disk is authoritative here because
+  // all other mutators flush synchronously; pending touches are the only state
+  // memory legitimately holds ahead of it.
+  //
+  // Adopt only a SUCCESSFUL read. A row-count guard would take `phones remove
+  // <last phone>` for a failure and write the removed row straight back; an
+  // existence guard has the mirror failure, adopting the zero rows a torn
+  // concurrent write or malformed JSON yields and flushing the whole store
+  // away. `readFile` separates the two: null = could not read, [] = a
+  // well-formed empty file.
+  function adoptDisk() {
+    const disk = readFile(path);
+    if (disk) phones = disk;
+    applyPendingTouches();
+  }
+
+  function applyPendingTouches() {
+    for (const [pk, at] of pendingTouches) {
+      const phone = phones.find((p) => p.phonePubkey === pk);
+      if (phone) phone.lastSeenAt = at;
+    }
+  }
+
   function flushLastSeen() {
     if (touchTimer) {
       clearTimeout(touchTimer);
       touchTimer = null;
     }
     if (pendingTouches.size === 0) return;
-    // Merge onto the on-disk rows rather than writing our in-memory array.
-    // Unlike every other flush this one fires on a background timer, so it can
-    // land in the window between a CLI `phones remove` writing the file and our
-    // watcher debounce reloading it — and the self-write check below would then
-    // hide the resurrected row entirely. Disk is authoritative here because all
-    // other mutators flush synchronously; pending touches are the only state
-    // memory legitimately holds ahead of it.
-    //
-    // Adopt only a SUCCESSFUL read. A row-count guard would take `phones remove
-    // <last phone>` for a failure and write the removed row straight back; an
-    // existence guard has the mirror failure, adopting the zero rows a torn
-    // concurrent write or malformed JSON yields and flushing the whole store
-    // away. `readFile` separates the two: null = could not read, [] = a
-    // well-formed empty file.
     const before = JSON.stringify(phones);
-    const disk = readFile(path);
-    if (disk) phones = disk;
-    for (const [pk, at] of pendingTouches) {
-      const phone = phones.find((p) => p.phonePubkey === pk);
-      if (phone) phone.lastSeenAt = at;
-    }
+    adoptDisk();
     // Silent only when the write carries nothing but our own touches. When we
     // absorbed a concurrent external edit, the watcher event our write triggers
     // is the ONLY notification that edit will ever get — suppressing it strands
@@ -159,6 +183,37 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     remove: (pk) => {
       phones = phones.filter((p) => p.phonePubkey !== pk);
       flush();
+    },
+    reconcile: (next) => {
+      const judge = () => {
+        let changed = false;
+        const removed: PairedPhone[] = [];
+        const kept: PairedPhone[] = [];
+        for (const phone of phones) {
+          const row = next({ ...phone });
+          if (row === null) {
+            removed.push(phone);
+            changed = true;
+            continue;
+          }
+          if (!changed && JSON.stringify(row) !== JSON.stringify(phone)) changed = true;
+          kept.push({ ...row });
+        }
+        return changed ? { removed, kept } : null;
+      };
+      // Memory already carries every touch, so it answers "anything to do?"
+      // without the file read a sweep on every lease refresh would cost.
+      if (!judge()) return [];
+      adoptDisk();
+      const verdict = judge();
+      if (!verdict) return [];
+      const { removed, kept } = verdict;
+      phones = kept;
+      // A stamp left pending for a removed key would land on the row a later
+      // re-admission of that key creates, rolling its fresh `last seen` back.
+      for (const p of removed) pendingTouches.delete(p.phonePubkey);
+      flush();
+      return removed.map((p) => ({ ...p }));
     },
     touchLastSeen: (pk, at) => {
       const phone = phones.find((p) => p.phonePubkey === pk);
@@ -210,10 +265,7 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
           // those bytes, stranding the host on rows it no longer has.
           knownRaw = raw;
           phones = next;
-          for (const [pk, at] of pendingTouches) {
-            const phone = phones.find((p) => p.phonePubkey === pk);
-            if (phone) phone.lastSeenAt = at;
-          }
+          applyPendingTouches();
           onChange();
         }, 50);
       });

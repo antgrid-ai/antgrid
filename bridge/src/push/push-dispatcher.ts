@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { AbMessage } from "../protocol";
 import { logger } from "../logger";
 const log = logger.child({ component: "push-dispatcher" });
@@ -41,7 +42,38 @@ export interface PushDispatcherDeps {
    *  the agent's per-turn `task_complete` is noise. Absent keeps the push. */
   handlerOwnsCompletion?: (terminalId: string) => boolean;
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
-  deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
+  deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }, collapseKey: string) => void;
+}
+
+/**
+ * The opaque per-thread key APNs collapses on, so a newer push for a session
+ * (or for the project, when no session is named) replaces the older one on the
+ * device instead of stacking. The relay forwards it to APNs only; FCM's cap of
+ * four collapse keys per device would drop whole threads (relay fcm.ts).
+ *
+ * An escalation is its own thread, keyed by its `escalationId`: it is the one
+ * push the user must answer, and the session it names keeps pushing after it,
+ * so sharing the session's key would let a later "idle" erase the question.
+ *
+ * Keyed by the phone's push pubkey because the relay never sees that key — it
+ * travels only over the peer stream in push:register — so the relay, which
+ * forwards this in the clear, cannot recompute it or dictionary-attack it back
+ * to a project or session; it learns only "same thread as an earlier push".
+ * Must stay inside the wire's collapseKey charset and length (antgrid-wire
+ * push-protocol.ts).
+ */
+export function pushCollapseKey(
+  pushPubkey: string,
+  machineUuid: string,
+  projectId: string,
+  terminalId: string | undefined,
+  escalationId?: string,
+): string {
+  const thread = `${machineUuid}\n${projectId}\n${terminalId ?? ""}`;
+  return createHmac("sha256", Buffer.from(pushPubkey, "utf8"))
+    .update(escalationId === undefined ? thread : `${thread}\n${escalationId}`)
+    .digest("base64url")
+    .slice(0, 32);
 }
 
 /**
@@ -113,6 +145,7 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         log.warn("push: %s DROPPED — no push target for project %s", composed.kind, deps.projectId);
         return;
       }
+      const machineUuid = deps.machineUuid();
       const payload = JSON.stringify({
         title: composed.title.slice(0, MAX_TITLE_LEN),
         body: composed.body.slice(0, MAX_BODY_LEN),
@@ -120,15 +153,26 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         projectId: deps.projectId,
         // projectId is sha256(realpath(folder)) with no machine input, so two
         // machines holding the same repo at the same path mint the identical id.
-        machineUuid: deps.machineUuid(),
+        machineUuid,
         ...(composed.terminalId ? { terminalId: composed.terminalId } : {}),
         sourceMessageId: composed.sourceMessageId,
+        // The phone drops a push older than its own max age: FCM/APNs expiry
+        // bounds how long the provider holds it, not how late the OS hands it
+        // over once delivered.
+        sentAt: Date.now(),
       });
       // Seal per target: each phone has its own push key, so the ciphertext can't
       // be shared even though the plaintext is identical.
       for (const target of targets) {
         const blob = deps.seal(payload, target.pushPubkey);
-        deps.deliver(target.pushToken, target.provider, blob);
+        const collapseKey = pushCollapseKey(
+          target.pushPubkey,
+          machineUuid,
+          deps.projectId,
+          composed.terminalId,
+          composed.kind === "handler" ? composed.sourceMessageId : undefined,
+        );
+        deps.deliver(target.pushToken, target.provider, blob, collapseKey);
       }
       log.info(
         "push: %s sealed and handed to relay (providers=%s)",
