@@ -12,11 +12,12 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/git_panel.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -202,12 +203,17 @@ void main() {
     expect(find.text('Commit (1)'), findsOneWidget);
   });
 
-  testWidgets('a clean tree shows neither bulk action', (tester) async {
+  testWidgets('a clean tree drops the commit box and the Changes section', (
+    tester,
+  ) async {
     await pumpWithStatus(tester, const []);
 
     expect(find.byTooltip('Stage All Changes'), findsNothing);
     expect(find.byTooltip('Revert All Changes'), findsNothing);
-    expect(find.text('Commit'), findsOneWidget);
+    expect(find.text('Commit'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('CHANGES'), findsNothing);
+    expect(find.text('HISTORY'), findsOneWidget);
   });
 
   testWidgets('the header totals each changed path once', (tester) async {
@@ -265,39 +271,77 @@ void main() {
     );
   });
 
-  // A touch tablet's context pane is a quarter of the window, and there the
-  // one line could not hold both halves: the title ellipsised away and the
-  // header showed counts for something it no longer named. Narrow panes stack
-  // instead, actions right-aligned under the title. A phone is full-width and
-  // keeps its one line, which is why this is measured on the PANE.
-  testWidgets('a narrow pane stacks the actions under the title', (
+  // The commit box is inline, above the button that sends it — no dialog sits
+  // between the message and the commit any more.
+  testWidgets('Commit sends the inline message and clears the box', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': true},
-    ], width: 300);
+    ]);
 
-    final titleRow = tester.getRect(find.byKey(gitChangesHeaderTitleKey));
-    final commit = tester.getRect(find.byType(AbButton).last);
-    expect(
-      commit.top,
-      greaterThanOrEqualTo(titleRow.bottom),
-      reason: 'the actions belong on their own row, below the title',
-    );
+    final field = tester.getRect(find.byType(TextField));
+    final commit = tester.getRect(find.widgetWithText(AbButton, 'Commit (1)'));
+    expect(commit.top, greaterThanOrEqualTo(field.bottom));
 
-    // The title row spans the header (it sits in an Expanded), so its
-    // trailing edge is where a right-aligned action has to end.
-    expect(commit.right, closeTo(titleRow.right, 8));
+    await tester.enterText(find.byType(TextField), '  fix: the thing  ');
+    await tester.tap(find.text('Commit (1)'));
+    await tester.pump();
+
+    expect(sentOfType('git:commit')?['message'], 'fix: the thing');
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        isEmpty);
   });
 
-  testWidgets('a pane with room keeps the header on one line', (tester) async {
+  testWidgets('Commit with an empty message sends nothing', (tester) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': true},
     ]);
 
-    final titleRow = tester.getRect(find.byKey(gitChangesHeaderTitleKey));
-    final commit = tester.getRect(find.byType(AbButton).last);
-    expect(commit.top, lessThan(titleRow.bottom));
+    await tester.tap(find.text('Commit (1)'));
+    await tester.pump();
+
+    expect(sentOfType('git:commit'), isNull);
+  });
+
+  testWidgets('Ctrl+Enter in the commit box commits', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+    ]);
+
+    await tester.enterText(find.byType(TextField), 'feat: shortcut');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pump();
+
+    expect(sentOfType('git:commit')?['message'], 'feat: shortcut');
+  });
+
+  testWidgets('nothing staged leaves Commit dead', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+
+    await tester.enterText(find.byType(TextField), 'msg');
+    await tester.tap(find.text('Commit'), warnIfMissed: false);
+    await tester.pump();
+
+    expect(sentOfType('git:commit'), isNull);
+  });
+
+  testWidgets('folding Changes hides the tree but keeps its actions', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+
+    await tester.tap(find.text('CHANGES'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('a.dart'), findsNothing);
+    expect(find.byTooltip('Stage All Changes'), findsOneWidget);
   });
 
   // The state the panel used to render as an anonymous red dot on one row: git
@@ -351,9 +395,10 @@ void main() {
     ]);
 
     expect(find.textContaining('CONFLICT'), findsNothing);
+    await tester.enterText(find.byType(TextField), 'merge');
     await tester.tap(find.text('Commit (1)'));
-    await tester.pumpAndSettle();
-    expect(find.byType(TextField), findsWidgets);
+    await tester.pump();
+    expect(sentOfType('git:commit')?['message'], 'merge');
   });
 
   // Staging IS how git resolves a conflict, so Stage All has to reach one —
@@ -507,12 +552,11 @@ void main() {
     });
   });
 
-  // The narrowest header there is: a touch tablet's quarter-width context pane,
-  // stacked, with the diff viewer's back button taking part of the one line the
-  // title shares with its totals and the conflict chip. Everything after the
-  // title is fixed-width, so this is where a merge overflows the row — and a
-  // RenderFlex overflow fails this test on its own.
-  testWidgets('a narrow header survives a merge with the back button up', (
+  // The narrowest column there is: a touch tablet's quarter-width context pane
+  // during a merge, where the conflict notice, the diff totals and every
+  // fixed-width control compete for one row. A RenderFlex overflow fails this
+  // test on its own, both before and after the viewer replaces the column.
+  testWidgets('a narrow column survives a merge, then offers the way back', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
@@ -527,12 +571,13 @@ void main() {
         {'path': 'c$i.dart', 'status': '!', 'staged': false},
     ], width: 260);
 
-    // Opening a diff is what brings the back button into this same row.
-    await tester.tap(find.text('a.dart'));
+    expect(find.text('12 CONFLICTS'), findsOneWidget);
+
+    // Conflicts lead the tree, so a.dart is below the fold of this short list.
+    await tester.tap(find.text('c0.dart'));
     await tester.pumpAndSettle();
 
     expect(find.byTooltip('Back to changed files'), findsOneWidget);
-    expect(find.text('12 CONFLICTS'), findsOneWidget);
   });
 
   testWidgets('Collapse All folds every folder the changes nest under', (
@@ -650,6 +695,35 @@ void main() {
     expect(
       session.fileService.currentState.git.collapsedPaths,
       contains('app/lib'),
+    );
+  });
+
+  Finder changesHeader() => find.byWidgetPredicate(
+    (w) => w.runtimeType.toString() == '_ChangesSectionHeader',
+  );
+
+  testWidgets('a new git status re-derives the header', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+    expect(find.text('Commit'), findsOneWidget);
+
+    // a.dart is partially staged: two entries, one changed path.
+    transport.emit('git:status', {
+      'projectId': 'p',
+      'files': [
+        {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'a.dart', 'status': 'M', 'staged': false},
+        {'path': 'b.dart', 'status': 'M', 'staged': false},
+      ],
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Commit (1)'), findsOneWidget);
+    expect(
+      find.descendant(of: changesHeader(), matching: find.text('2')),
+      findsOneWidget,
     );
   });
 

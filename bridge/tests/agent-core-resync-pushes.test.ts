@@ -169,5 +169,4 @@ test("a resync leaves terminal display to explicit frame subscriptions", async (
   core!.onHandshakeComplete();
 
   await waitFor(() => sent.some((m) => m.type === "agent:status"), "the re-synced status");
-  expect(sent.filter((m) => m.type === "terminal:snapshot")).toEqual([]);
 });

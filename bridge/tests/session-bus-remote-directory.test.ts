@@ -1,3 +1,5 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
+import { TestRemoteHostConnection } from "./test-peer-session-owner";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -483,7 +485,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1", userId: "user-1", endpointSecret: Buffer.alloc(32, 1).toString("base64") },
     onAuthRevoked: () => {},
   };
 }
@@ -505,7 +507,10 @@ async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
 // closes it; opening a real remote control plane needs a live relay this
 // suite has none of.
 function giveMachineIdentity(h: HostServer, machineId: string): void {
-  (h as any).controlPlaneRelay = { deviceId: machineId, close: () => {} };
+  const remote = new TestRemoteHostConnection({
+    identity: { deviceId: machineId, deviceName: "test", createdAt: "" },
+  });
+  (h as any).controlPlaneRelay = remote;
 }
 
 function pushRequest(machines: RemoteDirectoryMachinePush[], notConnected = 0) {
@@ -528,7 +533,7 @@ beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-remote-directory-"));
   process.env.ANTGRID_DIR = abDir;
-  host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
+  host = createHostPolicyFixture({ remote: fakeRemoteConfig(), remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()) });
 });
 
 afterEach(async () => {

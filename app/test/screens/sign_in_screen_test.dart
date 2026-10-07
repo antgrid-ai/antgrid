@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart'
+    show AppleLogoPainter;
 
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_password_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -87,9 +91,23 @@ const _statusPath = '/api/auth/sign-in/cross-device/status';
 Future<http.Response> _magicLinkServer(http.Request req) async {
   if (req.url.path == _startPath) {
     return http.Response(
-      jsonEncode({'id': 'row-1'}),
+      jsonEncode({
+        'id': 'row-1',
+        'journeyId': 'journey-1',
+        'serverTime': DateTime.now().toUtc().toIso8601String(),
+        'expiresAt': DateTime.now()
+            .toUtc()
+            .add(kMagicLinkWindow)
+            .toIso8601String(),
+        'retryAt': DateTime.now()
+            .toUtc()
+            .add(const Duration(seconds: 45))
+            .toIso8601String(),
+      }),
       200,
-      headers: {'set-cookie': 'antgrid.cross_device_token=bind-1; Path=/'},
+      headers: {
+        'set-cookie': 'antgrid.cross_device_token.row-1=bind-1; Path=/',
+      },
     );
   }
   return http.Response(jsonEncode({'status': 'pending'}), 200);
@@ -100,10 +118,27 @@ AuthService _authFor(
   Future<http.Response> Function(http.Request)? respond,
   List<String>? paths,
   Future<bool> Function(Uri url)? launchUrl,
+  AppleCredentialRequest? requestAppleCredential,
+  InAppWebAuth? authenticateInApp,
 }) => AuthService(
   licenseApiUrl: 'https://lic.test',
   storage: storage,
   httpClient: MockClient((req) async {
+    if (req.url.path == '/api/auth/sign-in/native/start') {
+      return http.Response(
+        jsonEncode({
+          'id': 'oauth-1',
+          'serverTime': DateTime.now().toUtc().toIso8601String(),
+          'expiresAt': DateTime.now()
+              .toUtc()
+              .add(kMagicLinkWindow)
+              .toIso8601String(),
+          'url':
+              'https://lic.test/oauth/start?provider=${jsonDecode(req.body)['provider']}&flow=oauth-1&launch=launch',
+        }),
+        200,
+      );
+    }
     paths?.add(req.url.path);
     // Any poll a restore kicks off parks on pending — those tests are about
     // what the screen does with the ticket, not the round-trip.
@@ -114,11 +149,20 @@ AuthService _authFor(
   // Refusing doubles as the only signal that OAuth (and not the link) is what
   // a tap reached for; pass a launcher that opens to exercise the other side.
   launchUrl: launchUrl ?? (_) async => false,
+  // The real sheet is a platform channel no widget test answers; a dismissed
+  // sheet is the inert default.
+  requestAppleCredential: requestAppleCredential ?? (_) async => null,
+  // iOS's in-app OAuth sheet is a platform channel too; closed by default.
+  authenticateInApp: authenticateInApp ?? (_, _) async => null,
 );
 
 Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
 
-Widget _wrapService(AuthService auth, {LastAuthMethodStore? store}) {
+Widget _wrapService(
+  AuthService auth, {
+  LastAuthMethodStore? store,
+  AbColors palette = kDefaultPalette,
+}) {
   return ProviderScope(
     overrides: [
       authServiceProvider.overrideWithValue(auth),
@@ -128,12 +172,21 @@ Widget _wrapService(AuthService auth, {LastAuthMethodStore? store}) {
     ],
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
-        extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+        extensions: <ThemeExtension<dynamic>>[palette],
       ),
       home: const SignInScreen(),
     ),
   );
 }
+
+/// A browser launcher that records each URL it is handed, and answers [opens].
+Future<bool> Function(Uri url) _recordLaunches(
+  List<Uri> into, {
+  bool opens = true,
+}) => (url) async {
+  into.add(url);
+  return opens;
+};
 
 /// Mounts the screen on step 1 with no pending ticket, and returns the paths
 /// every request hits — so a test can assert what the screen asked the server
@@ -145,13 +198,24 @@ Future<List<String>> _pumpScreen(
   LastAuthMethodStore? store,
   _GatedStorage? storage,
   Future<bool> Function(Uri url)? launchUrl,
+  AppleCredentialRequest? requestAppleCredential,
+  InAppWebAuth? authenticateInApp,
+  AbColors palette = kDefaultPalette,
 }) async {
   final paths = <String>[];
   final tickets = storage ?? (_GatedStorage(null)..gate.complete());
   await tester.pumpWidget(
     _wrapService(
-      _authFor(tickets, respond: respond, paths: paths, launchUrl: launchUrl),
+      _authFor(
+        tickets,
+        respond: respond,
+        paths: paths,
+        launchUrl: launchUrl,
+        requestAppleCredential: requestAppleCredential,
+        authenticateInApp: authenticateInApp,
+      ),
       store: store,
+      palette: palette,
     ),
   );
   // Let the (empty) restore resolve so it cannot land mid-test.
@@ -192,6 +256,42 @@ Future<List<String>> _openPasswordStep(
 }
 
 void main() {
+  testWidgets(
+    'keyboard and large text remain scrollable with explicit button semantics',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+        tester.view.resetViewInsets();
+        tester.platformDispatcher.clearTextScaleFactorTestValue();
+      });
+      final semantics = tester.ensureSemantics();
+      await _pumpScreen(tester);
+      await tester.enterText(find.byType(TextField), 'owner@example.com');
+      await tester.pump();
+      final continueButton = find.text('Continue');
+      await tester.ensureVisible(continueButton);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getSemantics(continueButton),
+        matchesSemantics(
+          isButton: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          label: 'Continue',
+          isFocusable: true,
+        ),
+      );
+      semantics.dispose();
+    },
+  );
   testWidgets('a restored ticket does not clobber an email being typed', (
     tester,
   ) async {
@@ -246,9 +346,7 @@ void main() {
     expect(find.text('Could not open the browser'), findsOneWidget);
   });
 
-  testWidgets('a deep-link OAuth error bounce surfaces on the form', (
-    tester,
-  ) async {
+  testWidgets('an unsolicited OAuth error bounce is ignored', (tester) async {
     final storage = _GatedStorage(null)..gate.complete();
     final auth = _authFor(storage);
     await tester.pumpWidget(_wrapService(auth));
@@ -256,11 +354,11 @@ void main() {
     // The web handoff bounces failures back as ?error= — the screen learns of
     // them only through the service's failure stream.
     await auth.handleDeepLink(
-      Uri.parse('antgrid://auth/callback?error=no_session'),
+      Uri.parse('antgrid://auth/callback?flow=oauth-1&error=no_session'),
     );
     await tester.pump();
 
-    expect(find.text("Sign-in didn't complete. Try again."), findsOneWidget);
+    expect(find.text("Sign-in didn't complete. Try again."), findsNothing);
   });
 
   group('step one', () {
@@ -366,6 +464,329 @@ void main() {
       expect(find.text('Could not open the browser'), findsOneWidget);
       expect(paths, isEmpty);
     });
+
+    testWidgets('on iOS GitHub signs in without leaving the app', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final sheets = <Uri>[];
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        respond: (req) async => http.Response(
+          '{}',
+          200,
+          headers: {
+            'set-cookie': 'better-auth.session_token=signed.gh; Path=/',
+          },
+        ),
+        launchUrl: _recordLaunches(launched),
+        authenticateInApp: (url, scheme) async {
+          sheets.add(url);
+          expect(scheme, 'antgrid');
+          return Uri.parse('antgrid://auth/callback?flow=oauth-1&code=ott-1');
+        },
+      );
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(launched, isEmpty, reason: 'Safari is never opened');
+      expect(sheets.single.queryParameters['provider'], 'github');
+      expect(paths, ['/api/auth/sign-in/native/redeem']);
+      expect(store.memory['user@example.com'], AuthMethod.github);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS the form stays busy until the round trip ends', (
+      tester,
+    ) async {
+      final sheet = Completer<Uri?>();
+      var sheets = 0;
+      await _pumpScreen(
+        tester,
+        authenticateInApp: (_, _) {
+          sheets++;
+          return sheet.future;
+        },
+      );
+
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.tap(find.text('Google'), warnIfMissed: false);
+      await tester.pump();
+      expect(sheets, 1, reason: 'a second tap must not start another sign-in');
+
+      sheet.complete(null);
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Google'));
+      await tester.pump();
+      expect(sheets, 2, reason: 'a closed sheet hands the form back');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a failure inside the round trip reaches the form', (
+      tester,
+    ) async {
+      await _pumpScreen(
+        tester,
+        authenticateInApp: (_, _) async =>
+            Uri.parse('antgrid://auth/callback?flow=oauth-1&error=no_session'),
+      );
+
+      await tester.tap(find.text('GitHub'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text("GitHub sign-in didn't complete. Try again."),
+        findsOneWidget,
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a closed OAuth sheet records no hint', (tester) async {
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(tester, store: store);
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Google'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(paths, isEmpty);
+      expect(store.memory, isEmpty);
+      expect(find.text('Continue'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('Apple is offered on iOS and macOS only', (tester) async {
+      await _pumpScreen(tester);
+
+      expect(
+        find.text('Continue with Apple'),
+        defaultTargetPlatform == TargetPlatform.iOS ||
+                defaultTargetPlatform == TargetPlatform.macOS
+            ? findsOneWidget
+            : findsNothing,
+      );
+    }, variant: TargetPlatformVariant.all());
+
+    testWidgets('on macOS the Apple button opens the browser, not the sheet', (
+      tester,
+    ) async {
+      var presented = 0;
+      final launched = <Uri>[];
+      final store = _FakeAuthMethodStore();
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        launchUrl: _recordLaunches(launched),
+        requestAppleCredential: (_) async {
+          presented++;
+          return null;
+        },
+      );
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(presented, 0);
+      expect(launched.single.path, '/oauth/start');
+      expect(launched.single.queryParameters['provider'], 'apple');
+      expect(paths, isEmpty);
+      expect(store.memory['user@example.com'], AuthMethod.apple);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    for (final MapEntry(key: preset, value: palette) in kPresets.entries) {
+      testWidgets('the Apple button is pure black or white on ${preset.name}', (
+        tester,
+      ) async {
+        await _pumpScreen(tester, palette: palette);
+
+        final ink = palette.bgSurface.computeLuminance() > 0.5
+            ? const Color(0xFF000000)
+            : const Color(0xFFFFFFFF);
+        final title = tester.widget<Text>(find.text('Continue with Apple'));
+        expect(title.style?.color, ink);
+        final logo = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .map((p) => p.painter)
+            .whereType<AppleLogoPainter>()
+            .single;
+        expect(logo.color, ink);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
+
+    testWidgets('the Apple button signs in and records the hint', (
+      tester,
+    ) async {
+      final store = _FakeAuthMethodStore();
+      final nonces = <String>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: store,
+        respond: (req) async => http.Response(
+          '{}',
+          200,
+          headers: {
+            'set-cookie': 'better-auth.session_token=signed.apple; Path=/',
+          },
+        ),
+        requestAppleCredential: (nonce) async {
+          nonces.add(nonce);
+          return const AppleCredential(
+            identityToken: 'id-token',
+            authorizationCode: 'auth-code',
+          );
+        },
+      );
+
+      await tester.enterText(find.byType(TextField), 'user@example.com');
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(nonces, hasLength(1));
+      expect(paths, [
+        '/api/auth/sign-in/social',
+        '/account/apple/authorization-code',
+      ]);
+      expect(store.memory['user@example.com'], AuthMethod.apple);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a dismissed Apple sheet returns to the form quietly', (
+      tester,
+    ) async {
+      final paths = await _pumpScreen(tester);
+
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(paths, isEmpty);
+      expect(find.text('Continue with Apple'), findsOneWidget);
+      expect(find.text('Continue'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a failed Apple sheet surfaces on the form', (tester) async {
+      await _pumpScreen(
+        tester,
+        requestAppleCredential: (_) async =>
+            throw AuthException('Apple sign-in failed. Try again.'),
+      );
+
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Apple sign-in failed. Try again.'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on iOS a remembered Apple hint presents the sheet', (
+      tester,
+    ) async {
+      var presented = 0;
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.apple}),
+        requestAppleCredential: (_) async {
+          presented++;
+          return null;
+        },
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(presented, 1);
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('on macOS a remembered Apple hint opens the browser', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.apple}),
+        launchUrl: _recordLaunches(launched),
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(launched.single.queryParameters['provider'], 'apple');
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets(
+      'where Apple is not offered its hint falls through to the link',
+      (tester) async {
+        var presented = 0;
+        final store = _FakeAuthMethodStore({
+          'user@example.com': AuthMethod.apple,
+        });
+        final paths = await _pumpScreen(
+          tester,
+          store: store,
+          requestAppleCredential: (_) async {
+            presented++;
+            return null;
+          },
+        );
+
+        await _continueWith(tester, 'user@example.com');
+
+        expect(presented, 0);
+        expect(paths, contains(_startPath));
+        expect(store.memory['user@example.com'], AuthMethod.link);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.windows,
+      }),
+    );
+
+    for (final hint in [AuthMethod.github, AuthMethod.google]) {
+      testWidgets('on iOS a remembered ${hint.name} hint opens the in-app '
+          'sheet', (tester) async {
+        final sheets = <Uri>[];
+        final paths = await _pumpScreen(
+          tester,
+          store: _FakeAuthMethodStore({'user@example.com': hint}),
+          authenticateInApp: (url, _) async {
+            sheets.add(url);
+            return null;
+          },
+        );
+
+        await _continueWith(tester, 'user@example.com');
+
+        expect(sheets.single.queryParameters['provider'], hint.name);
+        expect(paths, isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
+
+    testWidgets('off iOS a remembered Google hint starts Google', (
+      tester,
+    ) async {
+      final launched = <Uri>[];
+      final paths = await _pumpScreen(
+        tester,
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.google}),
+        launchUrl: _recordLaunches(launched, opens: false),
+      );
+
+      await _continueWith(tester, 'user@example.com');
+
+      expect(find.text('Could not open the browser'), findsOneWidget);
+      expect(launched.single.queryParameters['provider'], 'google');
+      expect(paths, isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets('a remembered provider can still be escaped for the link', (
       tester,
@@ -567,6 +988,166 @@ void main() {
   });
 
   group('pending', () {
+    testWidgets(
+      'a slow successful resend survives an outstanding expired poll',
+      (tester) async {
+        final oldPoll = Completer<http.Response>();
+        final resend = Completer<http.Response>();
+        final storage = _GatedStorage(null)..gate.complete();
+        var starts = 0;
+        var polls = 0;
+        var holdPoll = false;
+        await _pumpScreen(
+          tester,
+          storage: storage,
+          respond: (req) async {
+            if (req.url.path == _startPath && ++starts > 1) {
+              return resend.future;
+            }
+            if (req.url.path == _statusPath) {
+              polls++;
+              if (holdPoll) return oldPoll.future;
+            }
+            return _magicLinkServer(req);
+          },
+        );
+        await _continueWith(tester, 'user@example.com');
+        await tester.pump(const Duration(seconds: 45));
+        await tester.pump();
+        final before = polls;
+        holdPoll = true;
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+        expect(polls, before + 1);
+        await tester.tap(find.text('Resend the link'));
+        await tester.pump();
+        oldPoll.complete(http.Response('{"status":"expired"}', 200));
+        holdPoll = false;
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Check your email'), findsOneWidget);
+        final now = DateTime.now().toUtc();
+        resend.complete(
+          http.Response(
+            jsonEncode({
+              'id': 'row-2',
+              'journeyId': 'journey-1',
+              'serverTime': now.toIso8601String(),
+              'expiresAt': now.add(kMagicLinkWindow).toIso8601String(),
+              'retryAt': now.add(const Duration(seconds: 45)).toIso8601String(),
+            }),
+            200,
+            headers: {'set-cookie': 'antgrid.cross_device_token.row-2=bind-2'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(jsonDecode(storage.pending!)['id'], 'row-2');
+        expect(find.text('Check your email'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+        expect(polls, before + 2);
+      },
+    );
+
+    testWidgets(
+      'a slow failed resend pauses polls and resumes the original flow',
+      (tester) async {
+        final resend = Completer<http.Response>();
+        var starts = 0;
+        var polls = 0;
+        await _pumpScreen(
+          tester,
+          respond: (req) async {
+            if (req.url.path == _startPath && ++starts > 1) {
+              return resend.future;
+            }
+            if (req.url.path == _statusPath) polls++;
+            return _magicLinkServer(req);
+          },
+        );
+        await _continueWith(tester, 'user@example.com');
+        await tester.pump(const Duration(seconds: 45));
+        await tester.pump();
+        final before = polls;
+        await tester.tap(find.text('Resend the link'));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 12));
+        await tester.pump();
+        expect(polls, before);
+        resend.complete(http.Response('{}', 503));
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+        expect(polls, before + 1);
+        expect(find.text('Check your email'), findsOneWidget);
+      },
+    );
+
+    testWidgets('polling waits for Retry-After after a throttled response', (
+      tester,
+    ) async {
+      var polls = 0;
+      await _pumpScreen(
+        tester,
+        respond: (req) async {
+          if (req.url.path != _statusPath) return _magicLinkServer(req);
+          polls++;
+          return http.Response('{}', 429, headers: {'retry-after': '93'});
+        },
+      );
+      await _continueWith(tester, 'user@example.com');
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(polls, 1);
+      await tester.pump(const Duration(seconds: 45));
+      await tester.pump();
+      expect(polls, 1);
+      await tester.pump(const Duration(seconds: 48));
+      await tester.pump();
+      expect(polls, 2);
+    });
+
+    testWidgets(
+      'resend preserves its bound journey and the server retry time',
+      (tester) async {
+        final requests = <http.Request>[];
+        await _pumpScreen(
+          tester,
+          respond: (req) async {
+            requests.add(req);
+            final response = await _magicLinkServer(req);
+            if (req.url.path != _startPath) return response;
+            final body = jsonDecode(response.body) as Map<String, dynamic>;
+            body['retryAt'] = DateTime.parse(
+              body['serverTime'] as String,
+            ).add(const Duration(seconds: 93)).toIso8601String();
+            return http.Response(
+              jsonEncode(body),
+              response.statusCode,
+              headers: response.headers,
+            );
+          },
+        );
+        await _continueWith(tester, 'user@example.com');
+        expect(find.text('Resend the link (93s)'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 93));
+        await tester.tap(find.text('Resend the link'));
+        await tester.pump();
+        await tester.pump();
+        final starts = requests
+            .where((req) => req.url.path == _startPath)
+            .toList();
+        expect(starts, hasLength(2));
+        expect(jsonDecode(starts.last.body)['previousId'], 'row-1');
+        expect(
+          starts.last.headers['cookie'],
+          'antgrid.cross_device_token.row-1=bind-1',
+        );
+      },
+    );
+
     testWidgets('the resend is disabled for the length of its cooldown', (
       tester,
     ) async {

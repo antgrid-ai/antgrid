@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/session_entry.dart';
 import '../models/ab_message.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../storage/cached_sessions_store.dart';
 import 'pending_reply.dart';
@@ -61,33 +62,26 @@ class SessionsState {
   final String projectId;
   final List<SessionEntry> sessions;
   final bool loading;
-  final String? error;
 
   const SessionsState({
     required this.projectId,
     this.sessions = const [],
     this.loading = false,
-    this.error,
   });
 
-  SessionsState copyWith({
-    List<SessionEntry>? sessions,
-    bool? loading,
-    String? error,
-    bool clearError = false,
-  }) => SessionsState(
-    projectId: projectId,
-    sessions: sessions ?? this.sessions,
-    loading: loading ?? this.loading,
-    error: clearError ? null : (error ?? this.error),
-  );
+  SessionsState copyWith({List<SessionEntry>? sessions, bool? loading}) =>
+      SessionsState(
+        projectId: projectId,
+        sessions: sessions ?? this.sessions,
+        loading: loading ?? this.loading,
+      );
 
   @override
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     if (other is! SessionsState) return false;
     if (projectId != other.projectId) return false;
-    if (loading != other.loading || error != other.error) return false;
+    if (loading != other.loading) return false;
     if (sessions.length != other.sessions.length) return false;
     for (var i = 0; i < sessions.length; i++) {
       if (sessions[i] != other.sessions[i]) return false;
@@ -97,7 +91,7 @@ class SessionsState {
 
   @override
   int get hashCode =>
-      Object.hash(projectId, loading, error, Object.hashAll(sessions));
+      Object.hash(projectId, loading, Object.hashAll(sessions));
 }
 
 typedef SessionListing = ({
@@ -112,9 +106,13 @@ class SessionsService {
   final ProjectSession session;
   final CachedSessionsStore cache;
 
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _statusSub;
   final _stateController = StreamController<SessionsState>.broadcast();
   final _listingsController = StreamController<SessionListing>.broadcast();
+
+  /// Refusals no caller was handed, one message each, with no replay — see
+  /// [_handleResult] for which those are.
+  final _errorController = StreamController<String>.broadcast();
   SessionsState _state;
   bool _disposed = false;
 
@@ -135,12 +133,13 @@ class SessionsService {
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   Stream<SessionListing> get listings => _listingsController.stream;
+  Stream<String> get errors => _errorController.stream;
   SessionsState get currentState => _state;
   String get projectId => session.projectId;
 
   SessionsService.fromSession(this.session, {required this.cache})
     : _state = SessionsState(projectId: session.projectId, sessions: const []) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
+    _statusSub = session.statusStream.listen((f) => _onStatusJson(f.json));
     final cached = cache.get(session.projectId);
     if (cached.isNotEmpty) {
       _setState(_state.copyWith(sessions: cached));
@@ -213,7 +212,6 @@ class SessionsService {
       _state.copyWith(
         sessions: sessions,
         loading: _pendingList.isNotEmpty,
-        clearError: true,
       ),
     );
     _writeThrough(sessions);
@@ -235,10 +233,6 @@ class SessionsService {
     final entry = sessionJson is Map<String, dynamic>
         ? SessionEntry.fromJson(sessionJson)
         : null;
-
-    if (!ok && error != null) {
-      _setState(_state.copyWith(error: error));
-    }
 
     final createPending = _pendingCreates.remove(requestId);
     if (createPending != null) {
@@ -281,6 +275,9 @@ class SessionsService {
       return;
     }
 
+    // Only replies no typed caller holds reach here. Announced before the
+    // completion so a caller resuming on the null finds the reason delivered.
+    if (!ok && error != null && !_disposed) _errorController.add(error);
     _pendingMutations.remove(requestId)?.complete(ok ? entry : null);
   }
 
@@ -295,8 +292,8 @@ class SessionsService {
     // (sync `changed()` and async PTY-exit `noteExited`). The two frames are
     // structurally identical for non-`running` fields; skip the second so
     // every Riverpod consumer doesn't rebuild for a no-op.
-    if (_listsEqual(sessions, _state.sessions) && _state.error == null) return;
-    _setState(_state.copyWith(sessions: sessions, clearError: true));
+    if (_listsEqual(sessions, _state.sessions)) return;
+    _setState(_state.copyWith(sessions: sessions));
     _writeThrough(sessions);
   }
 
@@ -356,7 +353,7 @@ class SessionsService {
       }
     });
     _pendingList[requestId] = pending;
-    _setState(_state.copyWith(loading: true, clearError: true));
+    _setState(_state.copyWith(loading: true));
     unawaited(
       _send(
         createAbMessage('session:list', {
@@ -444,6 +441,15 @@ class SessionsService {
     }, raiseRefusal: raiseRefusal);
   }
 
+  bool _landingAutoStartTaken = false;
+
+  /// True once per service (once per open of this project). Only the first
+  /// landing is the open; restarting one found stopped later undoes a stop.
+  bool takeLandingAutoStart() {
+    if (_landingAutoStartTaken) return false;
+    return _landingAutoStartTaken = true;
+  }
+
   Future<SessionEntry?> stopSession(String id) {
     return _mutate('session:stop', {'sessionId': id});
   }
@@ -497,21 +503,8 @@ class SessionsService {
     return pending.future;
   }
 
-  /// Delete [id]. Three-way, and none of the three is "failed":
-  /// a bridge refusal raises [SessionOperationException] (the confirm ladder's
-  /// input), an `ok` reply completes [SessionDeleteAck.deleted], and no reply
-  /// at all completes [SessionDeleteAck.accepted] — see
-  /// [kSessionDeleteAckTimeout] for why silence cannot mean failure here.
-  ///
-  /// The lapse is converted at this call site rather than by teaching
-  /// [PendingReply] a second completion mode, so a disposal `StateError` from
-  /// [_failPending] still propagates: that transport is genuinely gone.
-  ///
-  /// [PendingReply.onAbandon] still de-registers the entry, and deliberately so
-  /// — a late `ok:false` is not lost by it. [_handleResult] writes the reason
-  /// onto [SessionsState.error] BEFORE it looks the pending entry up, and
-  /// `OperationalErrorToaster` toasts that for the focused project. What
-  /// de-registering drops is only the dead future.
+  /// Delete [id]. A bridge refusal raises [SessionOperationException]; no reply
+  /// completes [SessionDeleteAck.outcomeUnknown]; silence cannot mean failure.
   Future<SessionDeleteAck> delete(
     String id, {
     bool? force,
@@ -536,7 +529,7 @@ class SessionsService {
       ),
     );
     return pending.future.catchError(
-      (_) => SessionDeleteAck.accepted,
+      (_) => SessionDeleteAck.outcomeUnknown,
       // StateError alongside the lapse: `dispose()` fails everything pending,
       // and a project switch mid-delete would otherwise surface as a generic
       // "couldn't delete" toast for a removal the bridge is still running.
@@ -596,6 +589,7 @@ class SessionsService {
     _statusSub = null;
     await _stateController.close();
     await _listingsController.close();
+    await _errorController.close();
     _listRequests.clear();
   }
 

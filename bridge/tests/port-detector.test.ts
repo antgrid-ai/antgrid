@@ -106,7 +106,7 @@ describe("PortDetector", () => {
     // "host", "local", "serv" all pass SERVING_HINT — the `<name>.<ext>:<line>`
     // shape itself must be rejected.
     pd.feed("t1", "  at handleHello (host-server.ts:1091)\n");
-    pd.feed("t1", "  at fetchLocalhost (localhost-fetch.ts:2345)\n");
+    pd.feed("t1", "  at LocalListener.start (local-listener.ts:2345)\n");
     pd.feed("t1", "error in http-client.js:4242\n");
 
     expect(detected.length).toBe(0);

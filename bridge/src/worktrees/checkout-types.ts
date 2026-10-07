@@ -39,17 +39,15 @@ export interface CheckoutSetupProgress {
   message?: string;
 }
 
-/** Antgrid created this checkout's directory and is the only thing that may
- *  remove it — so a session that owns one must reclaim it on delete. */
+/** Antgrid created this directory, so removal must use its ownership-aware lifecycle. */
 export function isManagedCheckoutKind(kind: CheckoutKind): boolean {
   return kind === "managed-worktree";
 }
 
 /** This session's workspace is not the project's primary working tree, so every
- *  checkout-variable message must route to it and an app without the
- *  `checkoutRouting` capability must be refused the project. Deliberately NOT
- *  the same question as ownership: `main` is neither, and an external worktree
- *  would be isolated without ever being ours to delete. */
+ *  checkout-variable message must route to it. Deliberately NOT the same
+ *  question as ownership: `main` is neither, and an external worktree would be
+ *  isolated without ever being ours to delete. */
 export function isIsolatedCheckoutKind(kind: CheckoutKind): boolean {
   return kind !== "main";
 }
@@ -70,6 +68,8 @@ export interface CheckoutRecord {
   baseRef: string | null;
   managed: boolean;
   sessionId: string | null;
+  /** A schedule retains its workspace even when every conversation is deleted. */
+  scheduleOwnerId?: string;
   createdAt: number;
   /** How `worktree.setup` last ENDED for this checkout, absent until it has.
    *  A managed checkout with no marker and no live runner is `interrupted`, not

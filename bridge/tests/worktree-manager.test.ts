@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
@@ -20,8 +20,9 @@ describe("WorktreeManager", () => {
   let serial: number;
 
   beforeEach(async () => {
-    repo = mkdtempSync(join(tmpdir(), "antgrid-worktree-repo-"));
-    abDir = mkdtempSync(join(tmpdir(), "antgrid-worktree-home-"));
+    // Canonical: checkout paths come back realpath'd and are measured against abDir.
+    repo = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-worktree-repo-")));
+    abDir = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-worktree-home-")));
     projectId = "project-test";
     serial = 0;
     await git(repo, ["init"]);
@@ -51,6 +52,24 @@ describe("WorktreeManager", () => {
     expect(existsSync(result.path)).toBe(true);
     expect(await git(result.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(result.branch!);
     expect((await new CheckoutStore(abDir, projectId).get(result.id))?.path).toBe(result.path);
+  });
+
+  test("schedule ownership prevents force removal and survives reconciliation without members", async () => {
+    const worktrees = manager();
+    const checkout = await worktrees.prepareForSession({ projectId, repoPath: repo, sessionId: "first", scheduleOwnerId: "daily" });
+    const store = new CheckoutStore(abDir, projectId);
+    await store.update(checkout.id, (record) => ({ ...record, sessionId: null }));
+    expect((await worktrees.inspect(checkout.id)).exists).toBe(true);
+    await expect(worktrees.remove({ checkoutId: checkout.id, force: true, deleteBranch: true })).rejects.toThrow("belongs to a schedule");
+    await worktrees.reconcile(projectId, repo);
+    expect(existsSync(checkout.path)).toBe(true);
+    expect((await store.get(checkout.id))?.scheduleOwnerId).toBe("daily");
+    await store.releaseScheduleOwner("someone-else", checkout.id);
+    expect((await store.get(checkout.id))?.scheduleOwnerId).toBe("daily");
+    await store.releaseScheduleOwner("daily", checkout.id);
+    await worktrees.remove({ checkoutId: checkout.id, force: true, deleteBranch: false });
+    expect(existsSync(checkout.path)).toBe(false);
+    expect(await git(repo, ["show-ref", "--verify", `refs/heads/${checkout.branch}`])).toContain(checkout.branch!);
   });
 
   test("spends few enough path characters to leave a Windows repo room", async () => {

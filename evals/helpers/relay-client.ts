@@ -1,35 +1,38 @@
 import { randomBytes } from "node:crypto";
-import { generateEphemeralKeypair, deriveSharedSecret } from "../../bridge/src/key-exchange";
-import {
-  buildTranscript,
-  deriveSessionKeys,
-  agentConfirmTag,
-  phoneConfirmTag,
-  verifyConfirmTag,
-  E2eTransport,
-  verifyTranscriptSig,
-  rawSeedToPkcs8,
-} from "../../bridge/src/e2e";
-import { sign as nodeSign } from "node:crypto";
+import { Endpoint, EndpointAddr, EndpointId, type Connection } from "@number0/iroh/index.js";
+import { EndpointEnrollment } from "../../bridge/src/peer/enrollment";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
+import { CONTROL_HANDLE } from "../support/stream";
 import {
-  encodeRouteFrame,
-  decodeRouteFrame,
-  FrameKind,
-  CONTROL_STREAM_ID,
+  encodeStreamOpen,
+  PEER_ALPN,
+  PEER_MAX_BRIDGE_RECORD_BYTES,
+  type PeerAuthorizationSnapshot,
+  isSessionFrameType,
   buildHelloSigBody,
   normalizeRelayHost,
-  TRANSFER_TIMEOUT_MS,
-  GLOBAL_REASSEMBLY_BUDGET,
-  CREDIT_BATCH_BYTES,
+  STREAM_PROJECT_APP_RECORD_MAX_BYTES,
+  STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES,
+  STREAM_TUNNEL_TCP_RECORD_MAX_BYTES,
+  STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES,
 } from "antgrid-wire";
-import { FragReassembler } from "../../bridge/src/frag-reassembler";
-import { TUNNEL_GZIP_ENCODING } from "../../bridge/src/tunnel-protocol";
+import { StreamRecordReader, StreamRecordWriter, STREAM_RECORD_SLICE_BYTES } from "../../bridge/src/peer/stream-records";
+
+/** Fits two max-size control-plane records on the session stream — the same
+ *  per-stream bound as `SESSION_STREAM_MAX_QUEUED_BYTES` in
+ *  `native-host-connection.ts`, which this eval client does not import. */
+const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
  *  requires it for BOTH device types, so an app now sends it too.
  *  Duplicated (not imported from harness.ts) to avoid a helper import cycle. */
 const TEST_LICENSE_TOKEN = "eval-license-token";
+
+/** Mirrors the bridge's own `STREAM_RAW_READ_BYTES` (`bridge/src/peer/stream-records.ts`)
+ *  — kept in lockstep by hand, since this client reads the raw upload and
+ *  tunnel-tcp bytes directly off the wire rather than through that module. */
+const RAW_READ_BYTES = 65_536;
 
 /** Monotonic per-launch epoch source. A client (re)started within
  *  one test presents a strictly higher epoch than its predecessor, so the newer
@@ -67,36 +70,207 @@ export interface HelloForgeOpts {
   licenseToken?: string;
 }
 
-/** One tunneled HTTP response, reassembled from the frames the bridge streamed
- *  for it. `frames` counts every frame consumed (start + chunks + end), so a
- *  single-frame body reads `frames === 1`; `chunks` is how many
- *  `tunnel:http-chunk` frames carried body after the head's own slice. */
-export interface TunnelHttpResult {
-  status: number;
-  headers: Record<string, string>;
-  setCookies: string[];
-  body: Buffer;
-  frames: number;
-  chunks: number;
+/** How a `tunnel-tcp` stream's bridge half ended. `upstream-error` is the
+ *  bridge's own `tunnel:tcp-error` (connect failed); `refused` is the in-band
+ *  `stream:refused`. A raw read can tell a clean `fin` from a `reset`. */
+export type TunnelTcpEnded = "fin" | "reset" | "refused" | "upstream-error" | "reset-before-ready";
+
+/** A `tunnel-tcp` stream driven directly, mirroring the app's forwarder:
+ *  one reply record, then raw bytes both ways. */
+export interface TunnelTcpStreamClient {
+  readonly connId: string;
+  /** The bridge's `tunnel:tcp-ready` (`tls` present only for a probe), or
+   *  rejects with an Error carrying `.refusal` (a `stream:refused`) or
+   *  `.tcpError` (a `tunnel:tcp-error`). */
+  ready(timeoutMs?: number): Promise<{ tls?: boolean }>;
+  /** Raw bytes toward the upstream. Only valid after `ready`. */
+  send(bytes: Uint8Array): Promise<void>;
+  /** Every raw byte received after the ready record, so far. */
+  received(): Buffer;
+  bytesSoFar(): number;
+  /** Resolves once `predicate` holds over the bytes received so far; rejects if
+   *  the stream ends first or on timeout. */
+  waitFor(predicate: (bytes: Buffer) => boolean, timeoutMs?: number): Promise<Buffer>;
+  /** Stops/restarts issuing reads, so QUIC flow control pushes back on the
+   *  bridge's writer instead of this client draining as fast as it can. */
+  pauseReading(): void;
+  resumeReading(): void;
+  /** FIN on the send half. */
+  finish(): Promise<void>;
+  /** Resets the send half only, the way the app cancels. */
+  reset(): void;
+  readonly ended: Promise<TunnelTcpEnded>;
 }
 
-/** Undo one body slice's encoding. Each gzip slice is an independent member, so
- *  nothing carries over between slices. */
-function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): Buffer {
-  const data = typeof frame.data === "string" ? frame.data : "";
-  if (data === "") return Buffer.alloc(0);
-  const raw = Buffer.from(data, "base64");
-  return frame.bodyEncoding === TUNNEL_GZIP_ENCODING ? Buffer.from(Bun.gunzipSync(raw)) : raw;
+/** An `upload` stream driven directly: the open frame, then the file's raw
+ *  bytes with no framing, then (by default) FIN — mirroring
+ *  `StreamTransport.openUpload` without its slot semaphore or progress
+ *  callback, the same relationship `openTerminalStream` has to the Dart
+ *  client. */
+export interface UploadStreamClient {
+  readonly requestId: string;
+  /** Bytes handed to the native `writeAll` calls so far, across the initial
+   *  write and any `writeMore`. */
+  bytesWritten(): number;
+  /** The bridge's `file:upload-result`, or rejects with an Error carrying
+   *  `.refusal` (a `stream:refused`) or a plain message when the stream ended
+   *  with no result at all. */
+  result(timeoutMs?: number): Promise<Record<string, any>>;
+  /** `"reset"` and `"fin-without-result"` are both "no result arrived", kept
+   *  distinct because a raw read (unlike `readExact`) can tell a clean FIN
+   *  from a reset apart — useful for pinning which one a given row produced. */
+  readonly ended: Promise<"result" | "refused" | "reset" | "fin-without-result">;
+  readonly refusal: Record<string, any> | null;
+  /** Writes more raw bytes on the still-open send half — only meaningful when
+   *  the stream was opened with `finish: false`. */
+  writeMore(bytes: Uint8Array): Promise<void>;
+  /** Resets the send half only, mirroring the app's own cancel. */
+  cancel(): void;
 }
 
-/** The current E2E receive/send context (confirmed session or a rekey candidate). */
-interface E2eContext {
-  attemptId: string;
-  transport: E2eTransport;
-  confirmKey: Buffer;
+/** A terminal-kind native stream driven directly, without the app's own
+ *  subscribe/re-sync logic — the test sends `terminal:subscribe` itself so it
+ *  can assert on the raw record sequence. `records` and `next` see every record (AbMessage bodies AND a
+ *  `stream:refused`) as plain parsed JSON; the caller narrows by `type`. */
+export interface TerminalStreamClient {
+  readonly records: Array<Record<string, any>>;
+  next(predicate: (record: Record<string, any>) => boolean, timeoutMs?: number): Promise<Record<string, any>>;
+  send(msg: AbMessage | Record<string, unknown>): Promise<void>;
+  finish(): Promise<void>;
+  reset(): void;
+  readonly ended: Promise<void>;
+}
+
+/** One project's admitted QUIC stream (project streams replace the old mux).
+ *  `open` is true only between the bound `stream-ready` and
+ *  this half's end. `closingLocally` distinguishes a clean local close from a
+ *  bridge-initiated FIN/reset for `ended`'s classification — the two are
+ *  otherwise wire-indistinguishable: `stopped()`/`receivedReset()` are
+ *  never awaited, mirroring the binding-constraint hard rule bridge-src and
+ *  Dart both follow. */
+interface ProjectStreamState {
+  readonly projectId: string;
+  readonly stream: Awaited<ReturnType<Connection["openBi"]>>;
+  open: boolean;
+  closingLocally: boolean;
+  refusal?: { code: string; message: string };
+  readonly ended: Promise<"fin" | "error">;
+  /** Writes are chained through this so `sendOnStream` calls land on the wire
+   *  in call order even though each write is itself async. */
+  writeChain: Promise<void>;
+}
+
+export class NativeAuthorizationNotReadyError extends Error {
+  constructor(readonly machineDeviceId: string, cause: unknown) {
+    super(`Native authorization for ${machineDeviceId} is not ready: ${String(cause)}`);
+    this.name = "NativeAuthorizationNotReadyError";
+  }
+}
+
+/** Races `promise` against `timeoutMs` without cancelling it — `promise`
+ *  itself still settles exactly once, so a caller that times out and a later
+ *  caller awaiting the same promise both see its real outcome. */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label} (${timeoutMs}ms)`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** `[u32 BE len][bytes]`, the framing every stream-open and refusal record uses. */
+function prefixWithLength(bytes: Uint8Array): Uint8Array {
+  const out = Buffer.alloc(4 + bytes.length);
+  out.writeUInt32BE(bytes.length, 0);
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.length).copy(out, 4);
+  return out;
+}
+
+/** Opens a fresh bi-stream on `connection` and writes `open`'s length-prefixed
+ *  encoding as the first record — the shape every kind's stream-open shares. */
+async function openStreamWithFrame(
+  connection: Connection,
+  open: Parameters<typeof encodeStreamOpen>[0],
+): Promise<Awaited<ReturnType<Connection["openBi"]>>> {
+  const stream = await connection.openBi();
+  await stream.send.writeAll(Array.from(prefixWithLength(encodeStreamOpen(open))));
+  return stream;
+}
+
+/** Splits a byte stream into `[u32 BE len][body]` records, stopping at the
+ *  first short or truncated prefix (the tail of a raw readToEnd is never a
+ *  partial record in a well-formed reply, but a probe's hand-built input can
+ *  be anything). */
+function splitLengthPrefixedRecords(buf: Buffer): Uint8Array[] {
+  const records: Uint8Array[] = [];
+  let offset = 0;
+  while (offset + 4 <= buf.length) {
+    const len = buf.readUInt32BE(offset);
+    offset += 4;
+    if (offset + len > buf.length) break;
+    records.push(new Uint8Array(buf.subarray(offset, offset + len)));
+    offset += len;
+  }
+  return records;
+}
+
+/** One outcome of `readOneRawRecord`: a well-formed `[u32 BE len][JSON]`
+ *  record, a clean FIN before any byte of it arrived, or anything else
+ *  (a reset mid-record, a reset before the length prefix, or a malformed
+ *  length) — the last two are collapsed together because neither is a state
+ *  a caller needs to tell apart from a genuine reset. */
+type RawRecordOutcome =
+  | { kind: "record"; bytes: Uint8Array }
+  | { kind: "fin" }
+  | { kind: "reset" };
+
+/** Reads exactly one length-prefixed JSON record off a RAW receive half
+ *  (`recv.read`, not `StreamRecordReader`'s `readExact`): the upload and
+ *  tunnel-tcp admission replies are each a single such record, and only a
+ *  raw read can tell a clean FIN apart from a reset (`readExact` rejects on
+ *  both, so it collapses the two the caller here wants distinguished). */
+async function readOneRawRecord(
+  recv: { read(maxLen: number): Promise<number[]> },
+  maxBytes: number,
+): Promise<RawRecordOutcome> {
+  let buf = Buffer.alloc(0);
+  // Resolves once `buf` holds at least `n` bytes, or false on a clean FIN
+  // strictly short of it.
+  const need = async (n: number): Promise<boolean> => {
+    while (buf.length < n) {
+      const piece = await recv.read(n - buf.length);
+      if (piece.length === 0) return false;
+      buf = Buffer.concat([buf, Buffer.from(piece)]);
+    }
+    return true;
+  };
+  try {
+    if (!(await need(4))) return buf.length === 0 ? { kind: "fin" } : { kind: "reset" };
+    const length = buf.readUInt32BE(0);
+    if (length === 0 || length > maxBytes) return { kind: "reset" };
+    if (!(await need(4 + length))) return { kind: "reset" };
+    return { kind: "record", bytes: new Uint8Array(buf.subarray(4, 4 + length)) };
+  } catch {
+    return { kind: "reset" };
+  }
 }
 
 export class RelayClient {
+  private nativeEndpoint: Endpoint | null = null;
+  private nativeConnection: Connection | null = null;
+  private sessionWriter: StreamRecordWriter | null = null;
+  private nativeTarget: { endpointId: string; addresses: string[] } | null = null;
+  private nativePeerId: string | null = null;
+  private nativeGeneration = 0;
+  private e2eGeneration = 0;
   private ws: WebSocket | null = null;
   private messageQueue: any[] = [];
   private waiters: Array<{
@@ -120,17 +294,26 @@ export class RelayClient {
    *  clobber the fresh connection's `wsClosed`/`lastCloseCode`. */
   private wsGeneration = 0;
 
+  /** Every inbound session frame's `type`, in arrival order — lets a test
+   *  assert a negative (e.g. "no session:ping arrived" across an idle window)
+   *  without the frame having anywhere else to land, since the bridge never
+   *  pings and `session:established`/`session:pong` are otherwise consumed
+   *  internally. */
+  private sessionFrameLog: string[] = [];
+  /** FIFO: `ping()` calls answer in the order their `pong` arrives, matching
+   *  the bridge's own single in-order session-frame writer. */
+  private pongWaiters: Array<{ sentAt: number; resolve: (rtMs: number) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
   readonly deviceId: string;
-  /** The ACCOUNT device the E2E transcript binds — `deviceId` may be a
-   *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`), but the
-   *  transcript (the HKDF salt) always binds the bare account device on both
-   *  sides. Defaults to `deviceId`, so an unscoped connection is unaffected. */
+  /** The ACCOUNT device the peer enrollment binds — `deviceId` may be a
+   *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`). Defaults to
+   *  `deviceId`, so an unscoped connection is unaffected. */
   readonly transcriptDeviceId: string;
   readonly deviceType: "agent" | "app";
   readonly name: string;
   private publicKeyBase64: string;
   private privateKey: CryptoKey;
-  /** Raw 32-byte Ed25519 seed — used for E2E transcript signing (node:crypto). */
+  /** Raw 32-byte Ed25519 seed — used for the native endpoint's enrollment identity. */
   private privateKeySeed: Buffer;
   /** Tap for every outbound text-JSON frame (hello + raw control messages) —
    *  lets a caller assert a negative on the wire (e.g. "never sent pair-request"). */
@@ -141,52 +324,23 @@ export class RelayClient {
   /** The nonce sent in the most recent hello — reuse it via `reuseNonce`. */
   lastHelloNonce = "";
 
-  // --- E2E session state ---
-  /** The confirmed session (or, mid-initial-handshake, the derived candidate the
-   *  phone confirms last). Make-before-break rekey keeps it live for RECEIVING
-   *  until the pending attempt establishes. */
-  private established: E2eContext | null = null;
-  /** An in-flight rekey attempt whose keys receive-only until it establishes. */
-  private pending: E2eContext | null = null;
-  private e2eMode = false;
-  /** True once the initial handshake's confirm is sent + established. */
+  // --- Native session state ---
+  // After the flip, QUIC/TLS between the lease-authorized endpoints is the
+  // confidentiality layer, so this only tracks whether a `session:hello` has
+  // established — no key material lives here.
+  private established: { attemptId: string } | null = null;
+  /** True once the hello resolves `established`. */
   private sessionConfirmed = false;
-  /** Sealed frames that failed to decrypt under all live contexts during a
-   *  handshake/rekey (a candidate agent-ready racing ahead of key derivation).
-   *  Replayed once the relevant transport is installed. */
-  private pendingEncrypted: Uint8Array[] = [];
 
-  // --- Multiplexed project streams ---
-  /** projectId → streamId, learned from control-plane `stream-ready`/`agent:projects`. */
-  private streamByProject = new Map<string, string>();
-
-  // --- Phone-side liveness (from the phone's perspective) ---
-  private livenessTimer: ReturnType<typeof setInterval> | null = null;
-  private lastSealedRecvAt = 0;
-  private missedPongs = 0;
-  private pingSilenceMs = 20_000;
-  private maxMissedPongs = 2;
-  /** Test lever: drop inbound sealed `pong`s so this client's liveness starves
-   *  and it rekeys. The relay is zero-knowledge and cannot single
-   *  out sealed pongs, so the "swallow pongs" lever lives at the endpoint. */
-  private swallowPongs = false;
-  private rekeyInFlight = false;
-
-  // --- Per-channel flow control (receiver half; see docs/protocol/e2e-handshake.md §8.8) ---
-  // Cumulative sealed payload bytes taken off each channel since this session
-  // was established, and how much of that the agent has been told about. An
-  // eval client that never credits wedges the agent's window after one
-  // CHANNEL_WINDOW_BYTES, with liveness still green.
-  private rxConsumed: Record<"control" | "preview", number> = { control: 0, preview: 0 };
-  private rxCredited: Record<"control" | "preview", number> = { control: 0, preview: 0 };
-  private creditsPaused = false;
-
-  private fragReassembler = new FragReassembler({
-    timeoutMs: TRANSFER_TIMEOUT_MS,
-    globalBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
-    onComplete: (json) => this.routeReassembledEnvelope(json),
-    onAbort: () => {},
-  });
+  // --- Project streams (project streams replace the old mux) ---
+  /** projectId → the project's admitted QUIC stream, once bound. Absent for a
+   *  project that was never opened, or whose stream has ended. */
+  private projectStreams = new Map<string, ProjectStreamState>();
+  /** Projects with a live ready notice (session-stream `stream-ready`, or an
+   *  `agent:projects` entry with `running:true`) since the last establishment
+   *  or this project's last stream end — mirrors `MachineSession`'s
+   *  `_readyProjects` so `openProjectStream` skips a redundant `project:start`. */
+  private readyProjects = new Set<string>();
 
   private constructor(
     deviceId: string,
@@ -218,9 +372,9 @@ export class RelayClient {
       name?: string;
       identity?: PhoneIdentity;
       deviceId?: string;
-      /** ACCOUNT device the E2E transcript binds. Defaults to `deviceId` — only
-       *  a slotted `deviceId` (`<transcriptDeviceId>#<machineDeviceId>`) needs
-       *  this set separately. */
+      /** ACCOUNT device the peer enrollment binds. Defaults to `deviceId` —
+       *  only a slotted `deviceId` (`<transcriptDeviceId>#<machineDeviceId>`)
+       *  needs this set separately. */
       transcriptDeviceId?: string;
       /** Tap for every outbound text-JSON frame this client sends. */
       onOutbound?: (raw: string) => void;
@@ -301,7 +455,6 @@ export class RelayClient {
 
       ws.addEventListener("message", (event) => {
         if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-          if (authDone) this.handleBinaryFrame(event.data);
           return;
         }
         const data = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
@@ -384,6 +537,565 @@ export class RelayClient {
     this.ws?.send(raw);
   }
 
+  /** Enroll this app endpoint and dial the machine over a real Iroh connection.
+   *  The central socket remains control-only; all peer frames use this link. */
+  async connectNative(options: {
+    licenseApiUrl: string;
+    accountId: string;
+    enrollmentId: string;
+    clientSecret: string;
+    endpointSecret: string;
+    machineDeviceId: string;
+    addresses: string[];
+  }): Promise<void> {
+    const token = async (): Promise<string> => {
+      const response = await fetch(`${options.licenseApiUrl.replace(/\/$/, "")}/api/auth/oauth2/token`, {
+        method: "POST",
+        headers: { authorization: `Basic ${Buffer.from(`${options.enrollmentId}:${options.clientSecret}`).toString("base64")}` },
+      });
+      if (!response.ok) throw new Error(`Eval endpoint token failed: ${response.status}`);
+      const body = await response.json() as { access_token?: string };
+      if (!body.access_token) throw new Error("Eval endpoint token response omitted access_token");
+      return body.access_token;
+    };
+    const enrollment = new EndpointEnrollment({
+      accountId: options.accountId,
+      deviceId: this.transcriptDeviceId,
+      enrollmentId: options.enrollmentId,
+    }, options.endpointSecret, this.privateKeySeed.toString("base64"), options.licenseApiUrl, token);
+    try {
+      await enrollment.register();
+      let target: { endpointId: string; generation: string } | null = null;
+      for (let attempt = 0; attempt < 100 && !target; attempt++) {
+        const snapshot = await enrollment.authorization() as PeerAuthorizationSnapshot;
+        target = snapshot.peers.find((peer) => peer.deviceId === options.machineDeviceId)?.endpoint ?? null;
+        if (!target) await Bun.sleep(100);
+      }
+      if (!target) throw new Error(`Machine ${options.machineDeviceId} did not publish a native endpoint`);
+      const builder = Endpoint.builder();
+      builder.applyMinimal();
+      builder.secretKey(enrollment.seedBytes());
+      builder.bindAddr("127.0.0.1:0");
+      this.nativeEndpoint = await builder.bind();
+      this.nativeTarget = { endpointId: target.endpointId, addresses: options.addresses };
+      await this.dialNative();
+      this.nativePeerId = options.machineDeviceId;
+    } finally {
+      enrollment.close();
+    }
+  }
+
+  private async dialNative(): Promise<void> {
+    const endpoint = this.nativeEndpoint;
+    const target = this.nativeTarget;
+    if (!endpoint || !target) throw new Error("Native endpoint is not configured");
+    const generation = ++this.nativeGeneration;
+    this.sessionWriter?.abort();
+    this.nativeConnection?.close(1n, []);
+    let connection: Connection | null = null;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 50 && !connection; attempt++) {
+      try {
+        connection = await endpoint.connect(
+          new EndpointAddr(EndpointId.fromString(target.endpointId), undefined, target.addresses),
+          Array.from(Buffer.from(PEER_ALPN)),
+        );
+      } catch (error) {
+        lastError = error;
+        await Bun.sleep(100);
+      }
+    }
+    if (!connection) throw new Error(`Native dial failed: ${String(lastError)}`);
+    const stream = await connection.openBi();
+    const writer = new StreamRecordWriter(
+      { send: stream.send },
+      () => generation === this.nativeGeneration,
+      () => connection.close(1n, []),
+      SESSION_STREAM_MAX_QUEUED_BYTES,
+    );
+    const reader = new StreamRecordReader(
+      { recv: stream.recv },
+      PEER_MAX_BRIDGE_RECORD_BYTES,
+      () => connection.close(1n, []),
+    );
+    // The first record on every native stream, session included, declares
+    // its kind before anything else — StreamRecordWriter queues in order, so
+    // this goes out ahead of the hello.
+    void writer.send(encodeStreamOpen({ kind: "session" }));
+    this.nativeConnection = connection;
+    this.sessionWriter = writer;
+    void (async () => {
+      try {
+        while (generation === this.nativeGeneration) this.handleSessionRecord(await reader.read());
+      } catch {
+        if (generation === this.nativeGeneration) this.sessionWriter = null;
+      }
+    })();
+  }
+
+  /** Redial the configured native endpoint with fresh session state after peer failure. */
+  async reconnectNative(): Promise<void> {
+    this.resetE2e();
+    await this.dialNative();
+  }
+  /** Interrupt only the native payload path; the central control socket stays authenticated. */
+  dropNative(): void {
+    this.nativeGeneration++;
+    this.sessionWriter?.abort();
+    this.sessionWriter = null;
+    // Closing the connection ends every project stream on it (bridge-observed
+    // FIN/reset); marking closingLocally first classifies that as "fin" for
+    // anyone awaiting `ended`, since this is our own teardown, not a fault.
+    for (const state of this.projectStreams.values()) state.closingLocally = true;
+    this.projectStreams.clear();
+    this.readyProjects.clear();
+    this.nativeConnection?.close(1n, []);
+    this.nativeConnection = null;
+  }
+
+  /** `connection.stableId()` of the live native connection, or null. */
+  get nativeConnectionId(): number | null {
+    return this.nativeConnection?.stableId() ?? null;
+  }
+
+  /** Opens one extra bidi stream on the live native connection, writes `bytes`
+   *  (length-prefixed by default, or verbatim for a hand-built oversize
+   *  prefix), then reads whatever the peer sends back and splits it into
+   *  `[u32 len]`-framed records. Drives streams the session protocol never
+   *  opens, for the stream-admission gate. */
+  async openNativeStreamRaw(
+    bytes: Uint8Array,
+    opts?: { framed?: boolean; timeoutMs?: number },
+  ): Promise<{ records: Uint8Array[]; ended: "fin" | "error" | "timeout" }> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const framed = opts?.framed ?? true;
+    const timeoutMs = opts?.timeoutMs ?? 5_000;
+    const stream = await connection.openBi();
+    const outgoing = framed ? prefixWithLength(bytes) : bytes;
+    await stream.send.writeAll(Array.from(outgoing));
+
+    let ended: "fin" | "error" | "timeout";
+    let raw: Buffer = Buffer.alloc(0);
+    const read = stream.recv.readToEnd(65_536);
+    const timedOut = Bun.sleep(timeoutMs).then(() => "timeout" as const);
+    const settled = await Promise.race([
+      read.then((data) => ({ kind: "data" as const, data }), () => ({ kind: "error" as const })),
+      timedOut.then((kind) => ({ kind })),
+    ]);
+    if (settled.kind === "timeout") {
+      ended = "timeout";
+    } else if (settled.kind === "error") {
+      ended = "error";
+    } else {
+      ended = "fin";
+      raw = Buffer.from(settled.data);
+    }
+    stream.send.reset(0n).catch(() => {});
+    return { records: splitLengthPrefixedRecords(raw), ended };
+  }
+
+  /** Opens a `kind:"terminal"` stream on the live native connection and writes
+   *  the open frame as the first record (openBi + write is one call, per the
+   *  binding constraint that a Dart-side stream is invisible until its first
+   *  write — mirrored here for parity, though this side has no such limit).
+   *  It does NOT send `terminal:subscribe`: the caller does, as the contract
+   *  requires it be the first record. Records are read with the same
+   *  `StreamRecordReader` the bridge uses, capped at the bridge's own
+   *  outbound record cap, so an oversize or malformed body fails the same way
+   *  production code would. */
+  async openTerminalStream(open: { projectId: string; requestId: string; checkoutId?: string }): Promise<TerminalStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const stream = await openStreamWithFrame(connection, {
+      kind: "terminal", projectId: open.projectId, requestId: open.requestId, checkoutId: open.checkoutId,
+    });
+
+    const records: Array<Record<string, any>> = [];
+    const waiters: Array<{
+      match: (record: Record<string, any>) => boolean;
+      resolve: (record: Record<string, any>) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
+    let settleEnded = () => {};
+    const ended = new Promise<void>((resolve) => {
+      settleEnded = resolve;
+    });
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_TERMINAL_BRIDGE_RECORD_MAX_BYTES, () => {});
+    void (async () => {
+      try {
+        while (true) {
+          const bytes = await reader.read();
+          let obj: Record<string, any>;
+          try {
+            obj = JSON.parse(Buffer.from(bytes).toString("utf8"));
+          } catch {
+            continue;
+          }
+          let delivered = false;
+          for (let i = 0; i < waiters.length; i++) {
+            if (waiters[i].match(obj)) {
+              const waiter = waiters.splice(i, 1)[0];
+              clearTimeout(waiter.timer);
+              waiter.resolve(obj);
+              delivered = true;
+              break;
+            }
+          }
+          if (!delivered) records.push(obj);
+        }
+      } catch {
+        // The bridge's half ended — FIN (orderly retirement/refusal) or reset
+        // (overflow, stream-lost) look the same from here; `ended` doesn't
+        // distinguish them, and Dart can't either.
+      } finally {
+        settleEnded();
+      }
+    })();
+
+    return {
+      records,
+      next(predicate, timeoutMs = 10_000): Promise<Record<string, any>> {
+        for (let i = 0; i < records.length; i++) {
+          if (predicate(records[i]!)) return Promise.resolve(records.splice(i, 1)[0]!);
+        }
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            const idx = waiters.findIndex((w) => w.timer === timer);
+            if (idx !== -1) waiters.splice(idx, 1);
+            reject(new Error(`Timed out waiting for terminal-stream record (${timeoutMs}ms)`));
+          }, timeoutMs);
+          waiters.push({ match: predicate, resolve, timer });
+        });
+      },
+      async send(msg): Promise<void> {
+        const body = prefixWithLength(Buffer.from(JSON.stringify(msg), "utf8"));
+        await stream.send.writeAll(Array.from(body));
+      },
+      async finish(): Promise<void> {
+        await stream.send.finish();
+      },
+      reset(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+      ended,
+    };
+  }
+
+  /** Opens a `kind:"tunnel-tcp"` stream: the open frame, then the one
+   *  `tunnel:tcp-open` head record. The bridge answers with exactly one record
+   *  (`tunnel:tcp-ready`, `tunnel:tcp-error` or `stream:refused`); after a
+   *  ready every byte in either direction is raw upstream TCP payload.
+   *  `opts.open` may override head fields (`connId`, `checkoutId`) to build a
+   *  deliberate mismatch for a refusal-path row. */
+  async openTunnelTcpStream(opts: {
+    projectId: string;
+    port: number;
+    connId?: string;
+    probe?: boolean;
+    open?: Record<string, unknown>;
+  }): Promise<TunnelTcpStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const connId = opts.connId ?? crypto.randomUUID();
+    const stream = await openStreamWithFrame(connection, { kind: "tunnel-tcp", projectId: opts.projectId, connId });
+    const head = {
+      type: "tunnel:tcp-open",
+      connId,
+      port: opts.port,
+      checkoutId: "main",
+      ...(opts.probe ? { probe: true } : {}),
+      ...opts.open,
+    };
+    // A refusal lands before the bridge reads this head, so its STOP_SENDING
+    // can beat this write; the in-band record on the receive half is what
+    // decides the outcome, never the write.
+    await stream.send.writeAll(Array.from(prefixWithLength(Buffer.from(JSON.stringify(head), "utf8")))).catch(() => {});
+
+    let outcome: TunnelTcpEnded | null = null;
+    let received: Buffer = Buffer.alloc(0);
+    let paused = false;
+    const resumeWaiters: Array<() => void> = [];
+    const dataWaiters: Array<() => void> = [];
+    const notifyData = () => {
+      for (const w of dataWaiters.splice(0)) w();
+    };
+
+    let readyResolve!: (r: { tls?: boolean }) => void;
+    let readyReject!: (e: Error) => void;
+    const readyPromise = new Promise<{ tls?: boolean }>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+    // A refused or reset row may never call `ready()`; without this that
+    // rejection surfaces as an unhandled rejection instead of the `ended`
+    // status the row asserts on.
+    readyPromise.catch(() => {});
+
+    let endedResolve!: (v: TunnelTcpEnded) => void;
+    const ended = new Promise<TunnelTcpEnded>((resolve) => {
+      endedResolve = resolve;
+    });
+    const finishWith = (v: TunnelTcpEnded) => {
+      if (outcome) return;
+      outcome = v;
+      endedResolve(v);
+      notifyData();
+    };
+
+    void (async () => {
+      let gotReady = false;
+      try {
+        // Raw reads let a clean FIN before the reply be told apart from a reset.
+        const first = await readOneRawRecord(stream.recv, STREAM_TUNNEL_TCP_RECORD_MAX_BYTES);
+        if (first.kind !== "record") {
+          readyReject(new Error(`tunnel-tcp stream ${connId} ended before any reply (${first.kind})`));
+          finishWith("reset-before-ready");
+          return;
+        }
+        const text = Buffer.from(first.bytes).toString("utf8");
+        let obj: any;
+        try {
+          obj = JSON.parse(text);
+        } catch {
+          obj = null;
+        }
+        if (obj?.type === "stream:refused") {
+          readyReject(Object.assign(new Error(`tunnel-tcp stream refused: ${obj.code} ${obj.message}`), { refusal: obj }));
+          finishWith("refused");
+          return;
+        }
+        if (obj?.type === "tunnel:tcp-error") {
+          readyReject(Object.assign(new Error(`tunnel-tcp upstream error: ${obj.message}`), { tcpError: obj }));
+          finishWith("upstream-error");
+          return;
+        }
+        if (obj?.type !== "tunnel:tcp-ready") {
+          readyReject(new Error(`unexpected tunnel-tcp reply: ${text.slice(0, 200)}`));
+          finishWith("reset-before-ready");
+          return;
+        }
+        gotReady = true;
+        readyResolve(obj.tls === undefined ? {} : { tls: obj.tls });
+        while (true) {
+          if (paused) await new Promise<void>((resolve) => resumeWaiters.push(resolve));
+          const raw = await stream.recv.read(RAW_READ_BYTES);
+          if (raw.length === 0) {
+            finishWith("fin");
+            return;
+          }
+          received = Buffer.concat([received, Buffer.from(raw)]);
+          notifyData();
+        }
+      } catch {
+        if (!gotReady) readyReject(new Error(`tunnel-tcp stream ${connId} reset before ready`));
+        finishWith(gotReady ? "reset" : "reset-before-ready");
+      }
+    })();
+
+    return {
+      connId,
+      ready(timeoutMs = 10_000) {
+        return withTimeout(readyPromise, timeoutMs, `tunnel-tcp ready for ${connId}`);
+      },
+      async send(bytes: Uint8Array): Promise<void> {
+        for (let offset = 0; offset < bytes.length; offset += STREAM_RECORD_SLICE_BYTES) {
+          const slice = bytes.subarray(offset, Math.min(offset + STREAM_RECORD_SLICE_BYTES, bytes.length));
+          await stream.send.writeAll(Array.from(slice));
+        }
+      },
+      received: () => received,
+      bytesSoFar: () => received.length,
+      async waitFor(predicate: (bytes: Buffer) => boolean, timeoutMs = 10_000): Promise<Buffer> {
+        const deadline = Date.now() + timeoutMs;
+        while (!predicate(received)) {
+          if (outcome) throw new Error(`tunnel-tcp stream ${connId} ended "${outcome}" before the awaited bytes arrived`);
+          const left = deadline - Date.now();
+          if (left <= 0) throw new Error(`Timed out waiting for tunnel-tcp bytes on ${connId} (${timeoutMs}ms)`);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, left);
+            dataWaiters.push(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+        }
+        return received;
+      },
+      pauseReading(): void {
+        paused = true;
+      },
+      resumeReading(): void {
+        paused = false;
+        for (const w of resumeWaiters.splice(0)) w();
+      },
+      async finish(): Promise<void> {
+        await stream.send.finish();
+      },
+      reset(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+      ended,
+    };
+  }
+
+  /** Opens a `kind:"upload"` stream: the open frame, then `opts.bytes` as raw
+   *  bytes in `≤sliceBytes` slices (default `STREAM_RECORD_SLICE_BYTES`), then
+   *  FIN unless `opts.finish` is `false` — a caller building a cancel-mid-body
+   *  or an over/under-declared-size row passes `finish: false` and drives the
+   *  send half itself with `writeMore`/`cancel`. `size` defaults to
+   *  `bytes.length`; passing a different value is how a row declares more or
+   *  less than it actually sends. */
+  async openUploadStream(opts: {
+    projectId: string;
+    checkoutId?: string;
+    requestId?: string;
+    fileName: string;
+    size?: number;
+    mimeType?: string;
+    bytes: Uint8Array;
+    finish?: boolean;
+    sliceBytes?: number;
+  }): Promise<UploadStreamClient> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const requestId = opts.requestId ?? crypto.randomUUID();
+    const size = opts.size ?? opts.bytes.length;
+    const sliceBytes = opts.sliceBytes ?? STREAM_RECORD_SLICE_BYTES;
+    const stream = await openStreamWithFrame(connection, {
+      kind: "upload", projectId: opts.projectId, checkoutId: opts.checkoutId, requestId,
+      fileName: opts.fileName, size, mimeType: opts.mimeType,
+    });
+
+    let written = 0;
+    const writeChunk = async (bytes: Uint8Array): Promise<void> => {
+      for (let offset = 0; offset < bytes.length; offset += sliceBytes) {
+        const slice = bytes.subarray(offset, Math.min(offset + sliceBytes, bytes.length));
+        await stream.send.writeAll(Array.from(slice));
+        written += slice.length;
+      }
+    };
+    await writeChunk(opts.bytes);
+    if (opts.finish ?? true) await stream.send.finish();
+
+    let refusal: Record<string, any> | null = null;
+    let resultResolve!: (r: Record<string, any>) => void;
+    let resultReject!: (e: Error) => void;
+    const resultPromise = new Promise<Record<string, any>>((resolve, reject) => {
+      resultResolve = resolve;
+      resultReject = reject;
+    });
+    resultPromise.catch(() => {});
+
+    let endedResolve!: (v: "result" | "refused" | "reset" | "fin-without-result") => void;
+    const ended = new Promise<"result" | "refused" | "reset" | "fin-without-result">((resolve) => {
+      endedResolve = resolve;
+    });
+
+    void (async () => {
+      const outcome = await readOneRawRecord(stream.recv, STREAM_UPLOAD_BRIDGE_RECORD_MAX_BYTES);
+      if (outcome.kind === "fin") {
+        resultReject(new Error(`upload stream ${requestId} ended with no result`));
+        endedResolve("fin-without-result");
+        return;
+      }
+      if (outcome.kind === "reset") {
+        resultReject(new Error(`upload stream ${requestId} was reset before any result`));
+        endedResolve("reset");
+        return;
+      }
+      const text = Buffer.from(outcome.bytes).toString("utf8");
+      let obj: any;
+      try {
+        obj = JSON.parse(text);
+      } catch {
+        obj = null;
+      }
+      if (obj?.type === "stream:refused") {
+        refusal = obj;
+        resultReject(Object.assign(new Error(`upload stream refused: ${obj.code} ${obj.message}`), { refusal: obj }));
+        endedResolve("refused");
+        return;
+      }
+      if (obj?.type === "file:upload-result") {
+        resultResolve(obj);
+        endedResolve("result");
+        return;
+      }
+      resultReject(new Error(`unexpected upload-stream record: ${text.slice(0, 200)}`));
+      void stream.send.reset(0n).catch(() => {});
+      endedResolve("reset");
+    })();
+
+    return {
+      requestId,
+      bytesWritten(): number {
+        return written;
+      },
+      result(timeoutMs = 15_000): Promise<Record<string, any>> {
+        return withTimeout(resultPromise, timeoutMs, `upload result for ${requestId}`);
+      },
+      ended,
+      get refusal() {
+        return refusal;
+      },
+      writeMore(bytes: Uint8Array): Promise<void> {
+        return writeChunk(bytes);
+      },
+      cancel(): void {
+        void stream.send.reset(0n).catch(() => {});
+      },
+    };
+  }
+
+  /** Connects from the configured native endpoint to the configured target
+   *  with `alpn`. Returns "refused" if connect rejects or the connection
+   *  closes within `timeoutMs`, otherwise "connected" (and closes it). */
+  async probeNativeAlpn(alpn: string, timeoutMs = 5_000): Promise<"refused" | "connected"> {
+    const endpoint = this.nativeEndpoint;
+    const target = this.nativeTarget;
+    if (!endpoint || !target) throw new Error("Native endpoint is not configured");
+    let connection: Connection;
+    try {
+      connection = await endpoint.connect(
+        new EndpointAddr(EndpointId.fromString(target.endpointId), undefined, target.addresses),
+        Array.from(Buffer.from(alpn)),
+      );
+    } catch {
+      return "refused";
+    }
+    const outcome = await Promise.race([
+      connection.closed().then(() => "closed" as const, () => "closed" as const),
+      Bun.sleep(timeoutMs).then(() => "open" as const),
+    ]);
+    if (outcome === "closed") return "refused";
+    connection.close(1n, []);
+    return "connected";
+  }
+  /** Sends a `{type:"session:ping"}` session frame and resolves with the
+   *  round-trip ms on the matching `session:pong` — the app's own wedge-probe,
+   *  driven from an eval so a test can confirm the bridge still answers after
+   *  a long idle window during which it sends no session frame of its own. */
+  ping(timeoutMs = 5_000): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const sentAt = Date.now();
+      const timer = setTimeout(() => {
+        const idx = this.pongWaiters.findIndex((w) => w.timer === timer);
+        if (idx !== -1) this.pongWaiters.splice(idx, 1);
+        reject(new Error(`Timed out waiting for pong (${timeoutMs}ms)`));
+      }, timeoutMs);
+      this.pongWaiters.push({ sentAt, resolve, timer });
+      this.sendSessionFrame({ type: "session:ping" });
+    });
+  }
+
+  /** Every inbound session frame's `type`, in arrival order, since this
+   *  client was created. */
+  sessionFrameTypes(): string[] {
+    return [...this.sessionFrameLog];
+  }
+
   /** Resolve once the underlying socket has closed (true), or false on timeout.
    *  Observes relay-initiated supersession/close. */
   waitForClose(timeoutMs = 5_000): Promise<boolean> {
@@ -402,200 +1114,70 @@ export class RelayClient {
     });
   }
 
-  // --- Binary receive path (kind-byte dispatch) ---
+  // --- Binary receive path (plaintext; QUIC/TLS between leased endpoints is
+  //     the confidentiality layer, so a frame's payload is consumed directly) ---
 
-  private handleBinaryFrame(data: ArrayBuffer | Uint8Array): void {
-    const buf = Buffer.from(data as Uint8Array);
-    let decoded: { header: unknown; payload: Uint8Array; kind: FrameKind };
-    try {
-      decoded = decodeRouteFrame(buf);
-    } catch {
-      return; // malformed frame — drop
-    }
-    const header = decoded.header as { type?: string; from?: string; channel?: string };
-    if (header.type !== "message") return;
-    const channel = header.channel === "preview" ? "preview" : "control";
-
-    if (decoded.kind === FrameKind.handshake) {
-      // Kind-1 plaintext admits exactly the handshake messages; the phone only
-      // ever consumes agent-hello.
-      let obj: any;
-      try {
-        obj = JSON.parse(Buffer.from(decoded.payload).toString("utf8"));
-      } catch {
-        return;
-      }
-      if (obj?.type === "handshake:agent-hello") this.deliver(obj);
-      return;
-    }
-    // kind === sealed: decrypt-or-drop.
-    this.handleSealedFrame(Buffer.from(decoded.payload), channel);
-  }
-
-  private handleSealedFrame(payload: Buffer, channel: "control" | "preview"): void {
-    // Make-before-break: try the established context first, then a rekey candidate.
-    if (this.established) {
-      const pt = this.established.transport.open(payload);
-      if (pt !== null) {
-        this.noteConsumed(channel, payload.length);
-        this.onSealedPlaintext(pt, channel, false);
-        return;
-      }
-    }
-    if (this.pending) {
-      const pt = this.pending.transport.open(payload);
-      if (pt !== null) {
-        this.onSealedPlaintext(pt, channel, true);
-        return;
-      }
-    }
-    // The agent charged these bytes to its window the moment it wrote them, so
-    // a frame nothing could open is still consumed — leaving it uncounted would
-    // shrink that window for the rest of the session.
-    if (this.established) this.noteConsumed(channel, payload.length);
-    // Undecryptable now: most likely a candidate agent-ready racing ahead of key
-    // derivation — buffer for replay once the transport is installed.
-    this.pendingEncrypted.push(new Uint8Array(payload));
-  }
-
-  private noteConsumed(channel: "control" | "preview", bytes: number): void {
-    this.rxConsumed[channel] += bytes;
-    if (this.rxConsumed[channel] - this.rxCredited[channel] >= CREDIT_BATCH_BYTES) this.sendCredit(channel);
-  }
-
-  /** `consumed` is cumulative, so a lost or reordered credit costs nothing —
-   *  the next one carries the whole total. */
-  private sendCredit(channel: "control" | "preview"): void {
-    const ctx = this.established;
-    if (!ctx || !this._pairedPeerId || this.creditsPaused) return;
-    this.rxCredited[channel] = this.rxConsumed[channel];
-    this.sendSealedFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, ctx.transport, "control");
-  }
-
-  private resetRxFlow(): void {
-    this.rxConsumed = { control: 0, preview: 0 };
-    this.rxCredited = { control: 0, preview: 0 };
-  }
-
-  private onSealedPlaintext(plaintext: string, channel: "control" | "preview", fromPending: boolean): void {
-    // Fragmented app traffic → buffer; onComplete routes the reassembled envelope.
-    if (this.fragReassembler.accept(plaintext)) {
-      if (!fromPending) this.recordSealedRecv();
-      return;
-    }
+  private handleSessionRecord(data: Uint8Array): void {
     let obj: any;
     try {
-      obj = JSON.parse(plaintext);
+      obj = JSON.parse(Buffer.from(data).toString("utf8"));
     } catch {
-      return;
+      return; // "plaintext-not-json"
     }
-    if (obj && typeof obj === "object" && typeof obj.type === "string") {
-      // Bare session/liveness frame (top-level `type`). App traffic is always
-      // wrapped in `{ s?, m }`, so a top-level `type` is unambiguously a session
-      // frame.
-      if (obj.type === "pong" && this.swallowPongs) return; // liveness lever — drop, don't record
-      if (!fromPending) this.recordSealedRecv();
+    if (!(obj && typeof obj === "object" && typeof obj.type === "string")) return; // "unrecognized-plaintext"
+    // `type` alone is the discriminator — a bare `ping`/`pong` is not in
+    // `SESSION_FRAME_TYPES`, so it falls through to the control plane.
+    if (isSessionFrameType(obj.type)) {
       this.handleSessionFrame(obj);
-      return;
-    }
-    if (obj && typeof obj === "object" && "m" in obj) {
-      if (!fromPending) this.recordSealedRecv();
-      this.routeAppEnvelope(obj as { s?: string; m: unknown });
-      return;
+    } else {
+      this.dispatchAbMessage(JSON.stringify(obj));
     }
   }
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string }): void {
+  private handleSessionFrame(obj: { type: string; attemptId?: string }): void {
+    this.sessionFrameLog.push(obj.type);
     switch (obj.type) {
-      case "handshake:agent-ready":
+      case "session:established":
         this.deliver(obj);
         return;
-      case "established":
-        // dropEstablished hook: swallow the FIRST established for the in-flight
-        // attempt so the phone must retransmit app:ready to establish.
-        if (this.dropEstablishedAttemptId && obj.attemptId === this.dropEstablishedAttemptId) {
-          this.dropEstablishedAttemptId = null;
-          return;
-        }
-        // Counters are per session on both sides: the agent zeroes its window
-        // as it sends this, so anything carried over would credit bytes it no
-        // longer has charged.
-        this.resetRxFlow();
-        this.deliver(obj);
+      case "session:ping":
+        if (this.established) this.sendSessionFrame({ type: "session:pong" });
         return;
-      case "ping": {
-        // Answer sealed under whichever context is currently confirmed.
-        const ctx = this.established;
-        if (ctx) {
-          this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
-          // The agent's liveness tick is this client's only clock: re-sending
-          // both cumulative credits here is what heals one the relay dropped,
-          // for two ~60-byte frames per tick.
-          this.sendCredit("control");
-          this.sendCredit("preview");
+      case "session:pong": {
+        const waiter = this.pongWaiters.shift();
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(Date.now() - waiter.sentAt);
         }
         return;
       }
-      case "credit":
-        // The agent credits this client's own sends. Nothing here writes more
-        // than a window ahead of a reply, so there is no window to release.
-        return;
-      case "pong":
-        this.missedPongs = 0;
-        return;
-      case "session-takeover":
-        // Sent by the bridge to a session it is about to tear down. A bridge
-        // now keeps one session per app device, so the only producer left is
-        // capacity eviction past that cap. Deliver it like any other session
-        // frame so a test can `waitFor` the mechanism directly, instead of
-        // only inferring it from a later dead round trip.
-        this.deliver(obj);
-        return;
       default:
-        return; // unexpected session frame — drop
+        return; // session:hello: this client never receives one (app-> bridge only)
     }
   }
 
-  private routeReassembledEnvelope(json: string): void {
-    let env: { s?: string; m?: unknown };
-    try {
-      env = JSON.parse(json);
-    } catch {
-      return;
-    }
-    if (env && typeof env === "object" && "m" in env) this.routeAppEnvelope(env as { s?: string; m: unknown });
-  }
-
-  private routeAppEnvelope(env: { s?: string; m: unknown }): void {
-    const s = env.s;
-    const streamId = typeof s === "string" && s !== CONTROL_STREAM_ID ? s : undefined;
-    this.dispatchAbMessage(JSON.stringify(env.m), streamId);
-  }
-
-  /** Parse a plaintext AbMessage (or tunnel frame) and route it to waiters/queue.
-   *  `streamId` tags it so `waitForStreamAbType` can distinguish project streams
-   *  from the control plane; control-plane messages carry none. */
+  /** Parse a plaintext AbMessage and route it to waiters/queue. `streamId`
+   *  tags it so `waitForStreamAbType` can distinguish project-stream traffic
+   *  from the control plane; control-plane messages carry none. Anything that
+   *  fails to parse as an AbMessage is dropped, matching the bridge's own
+   *  handling of a stray one. */
   private dispatchAbMessage(json: string, streamId?: string): void {
     const msg = parseMessage(json);
-    if (!msg) {
-      // Tunnel-protocol frames aren't AbMessages — surface them raw by requestId.
-      try {
-        const raw = JSON.parse(json);
-        if (typeof raw?.type === "string" && raw.type.startsWith("tunnel:")) {
-          if (streamId) raw._streamId = streamId;
-          this.deliver(raw);
-        }
-      } catch {
-        /* not JSON — drop */
-      }
-      return;
-    }
-    // `stream-ready` teaches the phone the streamId for a project.
+    if (!msg) return;
+    // Ready-notice bookkeeping (mirrors MachineSession's `_readyProjects`):
+    // `stream-ready` no longer carries a streamId — it is only ever this
+    // project's readiness signal now. An `agent:projects` advert is the other
+    // source, keyed on `running`.
+    const anyMsg = msg as any;
     if (msg.type === ("stream-ready" as AbMessage["type"])) {
-      const anyMsg = msg as any;
-      if (anyMsg.projectId && anyMsg.streamId) this.streamByProject.set(anyMsg.projectId, anyMsg.streamId);
+      if (anyMsg.projectId) this.readyProjects.add(anyMsg.projectId);
+    } else if (msg.type === ("agent:projects" as AbMessage["type"])) {
+      for (const p of anyMsg.projects ?? []) {
+        if (p.running) this.readyProjects.add(p.projectId);
+        else this.readyProjects.delete(p.projectId);
+      }
     }
-    if (streamId) (msg as any)._streamId = streamId;
+    if (streamId) anyMsg._streamId = streamId;
     this.deliver(msg);
   }
 
@@ -612,311 +1194,266 @@ export class RelayClient {
     this.messageQueue.push(msg);
   }
 
-  // --- E2E handshake ---
-
-  /** Set while a `dropEstablished` attempt is in flight (the attemptId whose
-   *  first `established` must be swallowed). */
-  private dropEstablishedAttemptId: string | null = null;
+  // --- Session establishment ---
 
   /**
-   * Perform the v3 acked E2E handshake with the agent through the relay.
+   * Establish the native session with the agent through the peer connection.
    *
-   * Phone perspective:
-   *  1. Generate ephemeral X25519 keypair + phone-generated `attemptId` + nonce.
-   *  2. Sign the PHONE-role transcript (pull-model: empty agentX25519Pub).
-   *  3. Send kind-1 `client-hello { attemptId, pubkey, nonce, sig }`.
-   *  4. Receive kind-1 `agent-hello { attemptId, pubkey, sig }`; verify against
-   *     the pinned agent Ed25519 key when supplied.
-   *  5. Derive directional keys; install as the (sole) receive context.
-   *  6. Receive sealed `agent-ready { attemptId, confirm }`; verify confirm tag.
-   *  7. Send sealed `app:ready { attemptId, confirm }`, retransmit every 2s until
-   *     the agent's sealed `established { attemptId }` arrives; return only then.
-   *
-   * `attemptId` is correlation only — it never enters the transcript (the nonce
-   * already binds the attempt cryptographically).
+   * Phone perspective: send a plaintext `session:hello { attemptId }` on the
+   * control channel and resolve once `session:established { attemptId }`
+   * comes back with a matching id. QUIC/TLS between the lease-authorized
+   * endpoints is the confidentiality layer now, so there is no key derivation
+   * or confirm tag — the bridge's lease re-check on the hello is what
+   * authorizes this session.
    */
   async performE2EHandshake(
     agentDeviceId: string,
     timeoutMs = 10_000,
-    opts: {
-      /** MITM: corrupt the received agent-hello pubkey before deriving. */
-      corruptAgentHelloPubkey?: boolean;
-      /** Omit the client-hello transcript signature (unsigned client). */
-      omitClientHelloSig?: boolean;
-      /** Replace agent-ready's confirm with random bytes before verifying. */
-      corruptAgentReadyConfirm?: boolean;
-      /** Pinned agent Ed25519 pubkey (raw 32 bytes, base64). When set, the phone
-       *  verifies the agent-hello transcript signature and ABORTS on mismatch. */
-      agentEd25519Pub?: string;
-      /** Wedge-recovery hook: skip the FIRST app:ready send; the 2s retransmit
-       *  then establishes the session (wedge recovery). */
-      dropFirstAppReady?: boolean;
-      /** Wedge-recovery hook: swallow the agent's first `established` so the phone
-       *  retransmits app:ready and establishes on the agent's idempotent re-send. */
-      dropEstablished?: boolean;
-      /** Wedge-recovery hook: never retransmit app:ready. Combined with
-       *  `dropFirstAppReady` the attempt times out (a FRESH attempt must recover
-       *  — no permanent wedge state). */
-      noRetransmit?: boolean;
-      /** Play a pre-`pullsTree` app: omit the capability so the bridge keeps
-       *  pushing the file tree on re-sync (gate-lazy-hydration's legacy row). */
-      omitPullsTree?: boolean;
-      /** Play a pre-`terminalFramesV1` app: omit the capability so the bridge
-       *  keeps this client on the legacy raw-output display path (old-app
-       *  compatibility eval). */
-      omitTerminalFramesV1?: boolean;
-    } = {},
   ): Promise<void> {
-    this.e2eMode = true;
-
-    // Reset partial state from a prior failed attempt. A CONFIRMED live session
-    // is left intact (a failed re-attempt must not tear down a working session).
-    if (!this.sessionConfirmed) {
-      this.established?.transport.zeroize();
-      this.established = null;
-      this.pending?.transport.zeroize();
-      this.pending = null;
-      this.pendingEncrypted = [];
+    if (!this.nativePeerId) throw new Error("Native peer is not connected");
+    if (agentDeviceId !== this.nativePeerId) {
+      throw new Error(
+        `Handshake peer ${agentDeviceId} does not match authenticated native peer ${this.nativePeerId}`,
+      );
     }
-
-    const keypair = generateEphemeralKeypair();
-    const phoneX25519Pub = keypair.publicKey;
     const attemptId = randomBytes(8).toString("hex");
-    const nonce = randomBytes(16);
 
-    let sigB64 = "";
-    if (!opts.omitClientHelloSig) {
-      const phoneTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "phone",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub: Buffer.alloc(0),
-        phoneX25519Pub,
-        nonce,
-      });
-      const pkcs8 = rawSeedToPkcs8(this.privateKeySeed);
-      sigB64 = nodeSign(null, phoneTranscript, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-    }
-
-    // Step 3: kind-1 client-hello.
-    this.sendHandshakePlaintext(agentDeviceId, {
-      type: "handshake:client-hello",
-      attemptId,
-      pubkey: phoneX25519Pub.toString("base64"),
-      nonce: nonce.toString("base64"),
-      sig: sigB64,
-    });
-
-    // Step 4: agent-hello.
-    const agentHello = await this.waitFor(
-      (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
+    const establishedP = this.waitFor(
+      (m: any) => m.type === "session:established" && m.attemptId === attemptId,
       timeoutMs,
     );
-    let agentX25519Pub = Buffer.from(agentHello.pubkey, "base64");
-    if (opts.corruptAgentHelloPubkey) {
-      const corrupted = Buffer.from(agentX25519Pub);
-      corrupted[0] ^= 0xff;
-      agentX25519Pub = corrupted;
-    }
-
-    // Step 5: derive keys over the AGENT-role transcript (agent pub as received).
-    const agentTranscript = buildTranscript({
-      registrationId: agentDeviceId,
-      role: "agent",
-      agentDeviceId,
-      phoneDeviceId: this.transcriptDeviceId,
-      agentX25519Pub,
-      phoneX25519Pub,
-      nonce,
-    });
-    if (opts.agentEd25519Pub) {
-      if (!verifyTranscriptSig(agentTranscript, opts.agentEd25519Pub, agentHello.sig ?? "")) {
-        throw new Error("agent-hello sig invalid — aborting handshake (possible MITM)");
-      }
-    }
-    const sharedSecret = deriveSharedSecret(keypair.privateKey, agentX25519Pub);
-    keypair.privateKey.fill(0);
-    const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
-    // Phone transport: send = p2a (phone→agent), recv = a2p (agent→phone).
-    const transport = new E2eTransport({ sendKey: sessionKeys.p2a, recvKey: sessionKeys.a2p });
-    const ctx: E2eContext = { attemptId, transport, confirmKey: sessionKeys.confirm };
-    this.established = ctx;
-    this.replayPendingEncrypted();
-
-    // Step 6: sealed agent-ready + confirm-tag verify.
-    const agentReady = await this.waitFor(
-      (m: any) => m.type === "handshake:agent-ready" && m.attemptId === attemptId,
-      timeoutMs,
-    );
-    let agentConfirmB64: string = agentReady.confirm ?? "";
-    if (opts.corruptAgentReadyConfirm) agentConfirmB64 = randomBytes(32).toString("base64");
-    if (!verifyConfirmTag(agentConfirmTag(sessionKeys.confirm), Buffer.from(agentConfirmB64, "base64"))) {
-      transport.zeroize();
-      this.established = null;
-      throw new Error("agent-ready confirm tag invalid — handshake rejected");
-    }
-
-    // Step 7: sealed app:ready with retransmit until established.
-    // `capabilities` mirrors the production Dart client (connection_handshake.dart):
-    // without checkoutRouting the bridge treats this app as pre-worktree and
-    // refuses to stream any project holding a managed session; `pullsTree` tells
-    // it the app fetches its own file tree, so the re-sync need not push one;
-    // `terminalFramesV1` opts this client into rendered-frame terminal display —
-    // omitting it must fail CLOSED to the legacy raw-output path (never assumed).
-    const capabilities: Record<string, true> = { checkoutRouting: true };
-    if (!opts.omitPullsTree) capabilities.pullsTree = true;
-    if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
-    const appReady = {
-      type: "app:ready", attemptId,
-      confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-      capabilities,
-    };
-    if (opts.dropEstablished) this.dropEstablishedAttemptId = attemptId;
-    const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
-    if (!opts.dropFirstAppReady) this.sendSealedFrame(appReady, transport, "control");
-    let retransmit: ReturnType<typeof setInterval> | null = null;
-    if (!opts.noRetransmit) {
-      retransmit = setInterval(() => this.sendSealedFrame(appReady, transport, "control"), 2_000);
-      retransmit.unref?.();
-    }
+    this.sendSessionFrame({ type: "session:hello", attemptId });
     try {
       await establishedP;
-    } finally {
-      if (retransmit) clearInterval(retransmit);
-      this.dropEstablishedAttemptId = null;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith("Timed out waiting for message")) {
+        throw error;
+      }
+      throw new NativeAuthorizationNotReadyError(agentDeviceId, error);
     }
+    this.established = { attemptId };
     this.sessionConfirmed = true;
-    this.startLiveness();
-  }
-
-  /**
-   * Make-before-break rekey on the LIVE socket: run a fresh
-   * handshake while keeping the current session's keys live for receiving,
-   * then atomically swap and zeroize the old keys. Used by the rekey gate test
-   * (drive it directly, or let phone-side liveness auto-trigger it).
-   */
-  async rekey(agentDeviceId: string, agentEd25519Pub: string, timeoutMs = 10_000): Promise<void> {
-    if (!this.established) throw new Error("rekey requires an established session");
-    if (this.rekeyInFlight) return;
-    this.rekeyInFlight = true;
-    try {
-      const keypair = generateEphemeralKeypair();
-      const phoneX25519Pub = keypair.publicKey;
-      const attemptId = randomBytes(8).toString("hex");
-      const nonce = randomBytes(16);
-
-      const phoneTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "phone",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub: Buffer.alloc(0),
-        phoneX25519Pub,
-        nonce,
-      });
-      const pkcs8 = rawSeedToPkcs8(this.privateKeySeed);
-      const sigB64 = nodeSign(null, phoneTranscript, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-      this.sendHandshakePlaintext(agentDeviceId, {
-        type: "handshake:client-hello",
-        attemptId,
-        pubkey: phoneX25519Pub.toString("base64"),
-        nonce: nonce.toString("base64"),
-        sig: sigB64,
-      });
-
-      const agentHello = await this.waitFor(
-        (m: any) => m.type === "handshake:agent-hello" && m.attemptId === attemptId,
-        timeoutMs,
-      );
-      const agentX25519Pub = Buffer.from(agentHello.pubkey, "base64");
-      const agentTranscript = buildTranscript({
-        registrationId: agentDeviceId,
-        role: "agent",
-        agentDeviceId,
-        phoneDeviceId: this.transcriptDeviceId,
-        agentX25519Pub,
-        phoneX25519Pub,
-        nonce,
-      });
-      if (!verifyTranscriptSig(agentTranscript, agentEd25519Pub, agentHello.sig ?? "")) {
-        throw new Error("rekey agent-hello sig invalid");
-      }
-      const sharedSecret = deriveSharedSecret(keypair.privateKey, agentX25519Pub);
-      keypair.privateKey.fill(0);
-      const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
-      const transport = new E2eTransport({ sendKey: sessionKeys.p2a, recvKey: sessionKeys.a2p });
-      // Candidate: receive-only until established (old keys still decrypt traffic).
-      this.pending = { attemptId, transport, confirmKey: sessionKeys.confirm };
-      this.replayPendingEncrypted();
-
-      const agentReady = await this.waitFor(
-        (m: any) => m.type === "handshake:agent-ready" && m.attemptId === attemptId,
-        timeoutMs,
-      );
-      if (!verifyConfirmTag(agentConfirmTag(sessionKeys.confirm), Buffer.from(agentReady.confirm ?? "", "base64"))) {
-        transport.zeroize();
-        this.pending = null;
-        throw new Error("rekey agent-ready confirm invalid");
-      }
-      // Unconditional: a rekey must not silently downgrade a live app's capability.
-      const appReady = {
-        type: "app:ready", attemptId,
-        confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
-      };
-      const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
-      this.sendSealedFrame(appReady, transport, "control");
-      const retransmit = setInterval(() => this.sendSealedFrame(appReady, transport, "control"), 2_000);
-      retransmit.unref?.();
-      try {
-        await establishedP;
-      } finally {
-        clearInterval(retransmit);
-      }
-      // Swap: promote the candidate, zeroize the old keys.
-      const old = this.established;
-      this.established = this.pending;
-      this.pending = null;
-      old?.transport.zeroize();
-      this.recordSealedRecv();
-    } finally {
-      this.rekeyInFlight = false;
-    }
-  }
-
-  private replayPendingEncrypted(): void {
-    if (this.pendingEncrypted.length === 0) return;
-    const pending = this.pendingEncrypted.splice(0);
-    for (const p of pending) this.handleSealedFrame(Buffer.from(p), "control");
+    this.e2eGeneration++;
   }
 
   // --- Streams ---
 
   /**
-   * Drill into a project: send control-plane `project:start`, await the sealed
-   * `stream-ready { projectId, streamId }`, and return the streamId to tag
-   * subsequent project traffic. No new socket, no pairing.
+   * Opens `projectId`'s own QUIC stream (project streams replace the old
+   * mux). Drives control-plane `project:start` and waits for the
+   * ready notice UNLESS one has already been seen since establishment or
+   * since this project's last stream end (mirrors `MachineSession.openProject`
+   * step 2). Then `openBi`s `{kind:"project", projectId}` and awaits the first
+   * record. Resolves to the handle, which IS `projectId` (every helper
+   * that took a bridge-minted streamId keeps its signature; the handle no
+   * longer leaks a bridge-internal id). Idempotent while the stream is open.
    */
   async openProjectStream(projectId: string, timeoutMs = 10_000): Promise<string> {
-    const existing = this.streamByProject.get(projectId);
-    if (existing) return existing;
-    this.sendEncrypted(createMessage("project:start", { projectId } as any));
-    const ready = await this.waitFor(
+    const existing = this.projectStreams.get(projectId);
+    if (existing?.open) return projectId;
+    const deadline = Date.now() + timeoutMs;
+    if (!this.readyProjects.has(projectId)) {
+      this.sendEncrypted(createMessage("project:start", { projectId } as any));
+      await this.awaitProjectReady(projectId, Math.max(1, deadline - Date.now()));
+    }
+    const { first } = await this.openProjectBiStream(projectId, Math.max(1, deadline - Date.now()));
+    if (first.refusal) {
+      throw Object.assign(
+        new Error(`project stream ${projectId} refused: ${first.refusal.code} ${first.refusal.message}`),
+        { refusal: first.refusal },
+      );
+    }
+    return projectId;
+  }
+
+  /** Admission probe: opens `projectId`'s QUIC stream directly, with no ready
+   *  wait and no `project:start`. Surfaces the outcome as data instead of
+   *  throwing — a refusal here is the row under test, not a failure. */
+  async openProjectStreamRaw(projectId: string, timeoutMs = 10_000): Promise<{
+    refusal?: { code: string; message: string };
+    first?: Record<string, any>;
+    ended: Promise<"fin" | "error">;
+  }> {
+    const { state, first } = await this.openProjectBiStream(projectId, timeoutMs);
+    return { refusal: first.refusal, first: first.record, ended: state.ended };
+  }
+
+  /** Waits for `projectId`'s ready notice: a live `stream-ready {projectId}`
+   *  on the session stream, or a `control:result {ok:false, verb:"project:start"}`
+   *  naming it (which fails with that error's code). A no-op if the project is
+   *  already in `readyProjects`. */
+  private awaitProjectReady(projectId: string, timeoutMs: number): Promise<void> {
+    if (this.readyProjects.has(projectId)) return Promise.resolve();
+    const ready = this.waitForCancelable(
       (m: any) => m.type === "stream-ready" && m.projectId === projectId,
       timeoutMs,
     );
-    const streamId = (ready as any).streamId as string;
-    this.streamByProject.set(projectId, streamId);
-    return streamId;
+    const failed = this.waitForCancelable(
+      (m: any) => m.type === "control:result" && m.ok === false && m.verb === "project:start" && m.projectId === projectId,
+      timeoutMs,
+    );
+    return Promise.race([
+      ready.promise.then(() => {
+        failed.cancel();
+      }),
+      failed.promise.then((m: any) => {
+        ready.cancel();
+        const code = m.error?.code ?? "PROJECT_START_FAILED";
+        throw Object.assign(new Error(`project:start ${projectId} failed: ${code} ${m.error?.message ?? ""}`), { code });
+      }),
+    ]);
   }
 
-  /** Send a message tagged with a project stream (`{ s: streamId, m }`).
-   *  `msg` is `object` rather than `AbMessage` because the preview channel
-   *  carries tunnel-protocol frames, which are deliberately not AbMessages
-   *  (`parseMessageFast` rejecting them IS the routing). */
-  sendOnStream(streamId: string, msg: object, channel: "control" | "preview" = "control"): void {
-    this.sendAppEnvelope(streamId, msg, channel);
+  /** Opens `projectId`'s bi-directional QUIC stream, writes the open
+   *  frame, and classifies the first record (`stream:refused` then FIN,
+   *  or `stream-ready` naming this project). Registers the binding into
+   *  `projectStreams`/`readyProjects` only once admitted. Every record after
+   *  the first is one bare `AbMessage`, with no reassembly — dispatched with
+   *  `_streamId = projectId` — the same shape `openProjectStream`/
+   *  `openProjectStreamRaw` both build on. */
+  private async openProjectBiStream(
+    projectId: string,
+    timeoutMs: number,
+  ): Promise<{ state: ProjectStreamState; first: { refusal?: { code: string; message: string }; record?: Record<string, any> } }> {
+    const connection = this.nativeConnection;
+    if (!connection) throw new Error("Native connection is not established");
+    const stream = await openStreamWithFrame(connection, { kind: "project", projectId });
+
+    let endedResolve!: (v: "fin" | "error") => void;
+    const ended = new Promise<"fin" | "error">((resolve) => {
+      endedResolve = resolve;
+    });
+    const state: ProjectStreamState = {
+      projectId,
+      stream,
+      open: false,
+      closingLocally: false,
+      ended,
+      writeChain: Promise.resolve(),
+    };
+
+    let firstResolve!: (v: { refusal?: { code: string; message: string }; record?: Record<string, any> }) => void;
+    const firstP = new Promise<{ refusal?: { code: string; message: string }; record?: Record<string, any> }>((resolve) => {
+      firstResolve = resolve;
+    });
+
+    const reader = new StreamRecordReader({ recv: stream.recv }, STREAM_PROJECT_BRIDGE_RECORD_MAX_BYTES, () => {});
+
+    let gotFirst = false;
+    let cleanRefusal = false;
+
+    void (async () => {
+      try {
+        while (true) {
+          const bytes = await reader.read();
+          const text = Buffer.from(bytes).toString("utf8");
+          if (!gotFirst) {
+            gotFirst = true;
+            let obj: any;
+            try {
+              obj = JSON.parse(text);
+            } catch {
+              obj = null;
+            }
+            if (obj?.type === "stream:refused") {
+              cleanRefusal = true;
+              state.refusal = { code: obj.code, message: obj.message };
+              firstResolve({ refusal: state.refusal });
+              continue; // A clean FIN follows a refusal
+            }
+            if (obj?.type === "stream-ready" && obj.projectId === projectId) {
+              state.open = true;
+              this.readyProjects.add(projectId);
+              this.projectStreams.set(projectId, state);
+              firstResolve({ record: obj });
+              continue;
+            }
+            // Protocol error: neither refused nor a matching stream-ready.
+            firstResolve({ refusal: { code: "INVALID_RECORD", message: `unexpected first record: ${text.slice(0, 200)}` } });
+            void stream.send.reset(0n).catch(() => {});
+            continue;
+          }
+          // A stale `__frag` piece has no string `type`; `dispatchAbMessage`
+          // drops it the same way it drops any other unparseable record.
+          this.dispatchAbMessage(text, projectId);
+        }
+      } catch {
+        // The bridge's half ended — FIN (orderly close/refusal) or reset
+        // (overflow, stream-lost) are wire-indistinguishable here.
+      } finally {
+        state.open = false;
+        this.readyProjects.delete(projectId);
+        if (this.projectStreams.get(projectId) === state) this.projectStreams.delete(projectId);
+        if (!gotFirst) firstResolve({ refusal: { code: "STREAM_ENDED", message: "project stream ended before any record" } });
+        endedResolve(cleanRefusal || state.closingLocally ? "fin" : "error");
+      }
+    })();
+
+    const first = await withTimeout(firstP, timeoutMs, `project-stream first record for ${projectId}`);
+    return { state, first };
+  }
+
+  /** Send a message on `handle`: `"0"`/`CONTROL_HANDLE` rides the session
+   *  stream unchanged; any other handle is that project's own QUIC stream,
+   *  written as exactly one record — one `AbMessage` is always one record.
+   *  `channel` is vestigial on both paths: the session stream has no channels
+   *  (only the loopback JSON keeps the label) and a project record
+   *  carries no envelope to label. Throws if the project stream is not open. */
+  sendOnStream(handle: string, msg: object, _channel: "control" | "preview" = "control"): void {
+    if (handle === CONTROL_HANDLE) {
+      this.sendControlMessage(msg);
+      return;
+    }
+    const state = this.projectStreams.get(handle);
+    if (!state?.open) throw new Error(`Project stream ${handle} is not open`);
+    this.writeProjectRecord(state, msg);
+  }
+
+  /** Encodes `msg` as exactly one record and chains it onto the binding's
+   *  write order. Throws synchronously past the app's outbound cap
+   *  (`STREAM_PROJECT_APP_RECORD_MAX_BYTES` — mirrors the bridge's read-side
+   *  refusal and Dart's `message-too-large` drop; nothing is written). A
+   *  write failure surfaces as a delivered `error` message, matching
+   *  `sendBinary`'s handling on the session stream. */
+  private writeProjectRecord(state: ProjectStreamState, msg: object): void {
+    const json = JSON.stringify(msg);
+    const byteLen = Buffer.byteLength(json, "utf8");
+    if (byteLen > STREAM_PROJECT_APP_RECORD_MAX_BYTES) {
+      throw new Error(
+        `project-stream record for ${state.projectId} exceeds STREAM_PROJECT_APP_RECORD_MAX_BYTES (${byteLen} bytes)`,
+      );
+    }
+    const bytes = prefixWithLength(Buffer.from(json, "utf8"));
+    state.writeChain = state.writeChain.then(() => state.stream.send.writeAll(Array.from(bytes)));
+    state.writeChain.catch((error) =>
+      this.deliver({ type: "error", code: "PROJECT_STREAM_SEND_FAILED", message: String(error) }),
+    );
+  }
+
+  /** Finishes our half of `handle`'s project stream and awaits the bridge's
+   *  end. A no-op if the handle names no open stream. */
+  async closeProjectStream(handle: string): Promise<void> {
+    const state = this.projectStreams.get(handle);
+    if (!state) return;
+    state.closingLocally = true;
+    await state.writeChain.catch(() => {});
+    await state.stream.send.finish().catch(() => {});
+    await state.ended;
+  }
+
+  /** Resolves once `handle`'s project stream has ended, `"fin"` for a clean
+   *  close (ours or a refusal's) and `"error"` otherwise (reset and
+   *  stream-lost are wire-indistinguishable from here). Throws if `handle`
+   *  was never opened. */
+  projectStreamEnded(handle: string): Promise<"fin" | "error"> {
+    const state = this.projectStreams.get(handle);
+    if (!state) throw new Error(`Project stream ${handle} was never opened`);
+    return state.ended;
+  }
+
+  /** True iff `handle` names a project whose stream is currently bound. */
+  isProjectStreamOpen(handle: string): boolean {
+    return this.projectStreams.get(handle)?.open ?? false;
   }
 
   /** Await an AbMessage of `type` arriving on a specific project stream. */
@@ -930,74 +1467,26 @@ export class RelayClient {
 
   // --- Sending ---
 
-  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
+  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted). */
   sendEncrypted(msg: AbMessage): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
+    this.sendControlMessage(msg);
   }
 
-  /** Seal + send a tunnel-protocol message on the preview channel of the machine
-   *  CONTROL PLANE — where the bridge deliberately drops it (`onTunnelMessage:
-   *  () => {}` in host-server.ts). The tunnel is served per-project, so a frame
-   *  that expects an answer goes through `sendOnStream(streamId, …, "preview")`;
-   *  this exists only to drive the control-plane drop. */
-  sendEncryptedTunnel(data: object): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
+  /** Write the bare JSON of one control-plane `AbMessage` as a session-stream
+   *  record. Project traffic never shares this path: it
+   *  rides its own QUIC stream via `sendOnStream`/`writeProjectRecord`. */
+  private sendControlMessage(msg: unknown): void {
+    if (!this.established || !this.nativePeerId) throw new Error("Native session is not established");
+    this.sendBinary(Buffer.from(JSON.stringify(msg), "utf8"));
   }
 
-  /** Wrap `msg` in the `{ s?, m }` stream envelope, seal, and send.
-   *  Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted). */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: "control" | "preview"): void {
-    const ctx = this.established;
-    if (!ctx || !this._pairedPeerId) throw new Error("Not paired or no E2E session");
-    const envelope = streamId && streamId !== CONTROL_STREAM_ID ? { s: streamId, m: msg } : { m: msg };
-    this.sendRelayPayload(this._pairedPeerId, ctx.transport.seal(JSON.stringify(envelope)), channel);
+  /** Send one bare session frame (`session:hello`, `session:ping`,
+   *  `session:pong`, …) as a session-stream record. */
+  private sendSessionFrame(obj: object): void {
+    this.sendBinary(Buffer.from(JSON.stringify(obj), "utf8"));
   }
 
-  /** Seal one bare session/liveness frame under `transport` and send it kind-0. */
-  private sendSealedFrame(obj: object, transport: E2eTransport, channel: "control" | "preview"): void {
-    this.sendRelayPayload(this._pairedPeerId!, transport.seal(JSON.stringify(obj)), channel);
-  }
-
-  /** Send a kind-1 plaintext handshake frame to `to`. */
-  private sendHandshakePlaintext(to: string, obj: object): void {
-    const frame = encodeRouteFrame(
-      { type: "message", to, channel: "control" },
-      Buffer.from(JSON.stringify(obj), "utf8"),
-      FrameKind.handshake,
-    );
-    this.sendBinary(frame);
-  }
-
-  private _pairedPeerId: string | null = null;
-
-  /** Set the addressed peer id (the BARE agent deviceUuid) that outbound app
-   *  traffic routes to. Admission is account-trust, not a pairing ceremony —
-   *  this is local addressing bookkeeping only, never sent over the wire. */
-  setPeerId(peerId: string): void {
-    this._pairedPeerId = peerId;
-  }
-
-  /** Send a sealed binary payload as a route-message frame (kind-0). */
-  private sendRelayPayload(to: string, payload: Uint8Array | Buffer, channel: "control" | "preview" = "control"): void {
-    const bytes = payload instanceof Buffer ? payload : Buffer.from(payload);
-    this.sendBinary(encodeRouteFrame({ type: "message", to, channel }, bytes, FrameKind.sealed));
-  }
-
-  /** Send an OPAQUE payload to a peer as a sealed-kind route frame. The relay
-   *  forwards it verbatim; used by low-level routing/isolation tests (the payload
-   *  is not real ciphertext, so the peer will drop it). */
-  sendMessage(to: string, channel: string, payload: string | Uint8Array | Buffer): void {
-    const payloadBytes =
-      typeof payload === "string"
-        ? Buffer.from(payload, "utf8")
-        : payload instanceof Buffer
-          ? payload
-          : Buffer.from(payload);
-    const ch = channel === "preview" ? "preview" : "control";
-    this.sendBinary(encodeRouteFrame({ type: "message", to, channel: ch }, payloadBytes, FrameKind.sealed));
-  }
-
-  /** Send raw JSON to the relay (control messages, e.g. `stream-open`/`stream-close`). */
+  /** Send raw JSON to the central relay, including retired verbs in rejection tests. */
   sendRaw(data: any): void {
     if (!this.ws) throw new Error("Not connected");
     const raw = JSON.stringify(data);
@@ -1006,85 +1495,9 @@ export class RelayClient {
   }
 
   private sendBinary(data: Uint8Array): void {
-    if (!this.ws) throw new Error("Not connected");
-    this.ws.send(data);
-  }
-
-  // --- Phone-side liveness ---
-
-  private recordSealedRecv(): void {
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-  }
-
-  private startLiveness(): void {
-    this.stopLiveness();
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-  }
-
-  private stopLiveness(): void {
-    if (this.livenessTimer) {
-      clearInterval(this.livenessTimer);
-      this.livenessTimer = null;
-    }
-  }
-
-  /**
-   * Enable phone-side liveness: after `pingSilenceMs` of sealed-receive silence
-   * send a sealed ping; after `maxMissedPongs` unanswered pings, auto-rekey on
-   * the live socket. Off by default so short tests aren't
-   * disturbed. Combine with {@link setSwallowPongs} to starve liveness on demand.
-   */
-  enableLiveness(
-    agentDeviceId: string,
-    agentEd25519Pub: string,
-    opts: { pingSilenceMs?: number; maxMissedPongs?: number } = {},
-  ): void {
-    this.pingSilenceMs = opts.pingSilenceMs ?? this.pingSilenceMs;
-    this.maxMissedPongs = opts.maxMissedPongs ?? this.maxMissedPongs;
-    this.stopLiveness();
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-    this.livenessTimer = setInterval(() => {
-      if (!this.established || this.rekeyInFlight) return;
-      if (Date.now() - this.lastSealedRecvAt < this.pingSilenceMs) return;
-      if (this.missedPongs >= this.maxMissedPongs) {
-        void this.rekey(agentDeviceId, agentEd25519Pub).catch(() => {});
-        this.lastSealedRecvAt = Date.now();
-        this.missedPongs = 0;
-        return;
-      }
-      this.missedPongs++;
-      this.sendSealedFrame({ type: "ping" }, this.established.transport, "control");
-    }, Math.max(250, this.pingSilenceMs));
-    this.livenessTimer.unref?.();
-  }
-
-  /** Test lever: when true, inbound sealed `pong`s are dropped (not counted), so
-   *  phone-side liveness starves and rekeys. */
-  setSwallowPongs(v: boolean): void {
-    this.swallowPongs = v;
-  }
-
-  /** Test lever: while true this client emits no `credit` frame, so the agent's
-   *  send window on a channel closes after CHANNEL_WINDOW_BYTES and stays
-   *  closed. Liveness is unaffected — session frames bypass the gate — so the
-   *  session survives the stall. Releasing flushes both cumulative totals at
-   *  once, which is all the agent needs to resume. */
-  setCreditsPaused(v: boolean): void {
-    this.creditsPaused = v;
-    if (!v) {
-      this.sendCredit("control");
-      this.sendCredit("preview");
-    }
-  }
-
-  /** Cumulative sealed payload bytes taken off `channel` since this session was
-   *  established — the receiver-side view of what the agent charged to its
-   *  window. */
-  consumedBytes(channel: "control" | "preview"): number {
-    return this.rxConsumed[channel];
+    if (!this.sessionWriter) throw new Error("Native payload is not connected");
+    void this.sessionWriter.send(data).catch((error) =>
+      this.deliver({ type: "error", code: "NATIVE_SEND_FAILED", message: String(error) }));
   }
 
   // --- Waiters ---
@@ -1153,66 +1566,6 @@ export class RelayClient {
   }
 
   /**
-   * Assemble one tunneled HTTP response: the `tunnel:http-start` for `requestId`
-   * (head + first body slice), then — unless that start was `last` — every
-   * `tunnel:http-chunk` up to the `tunnel:http-end`. `timeoutMs` bounds the
-   * WHOLE response, not each frame, so a stalled body fails on the same clock a
-   * whole-body reply used to.
-   *
-   * The seq and count checks are the app's own loss detection, restated here:
-   * the relay drops single frames on rate limit or backpressure and a FIFO
-   * cannot show a hole, so a body that quietly lost a chunk must fail the test
-   * rather than come back short.
-   */
-  async waitForTunnelResponse(requestId: string, timeoutMs = 10_000): Promise<TunnelHttpResult> {
-    const deadline = Date.now() + timeoutMs;
-    const left = () => Math.max(1, deadline - Date.now());
-
-    const start = await this.waitFor(
-      (m: any) => m?.type === "tunnel:http-start" && m.requestId === requestId,
-      left(),
-    );
-    const parts: Buffer[] = [decodeTunnelSlice(start)];
-    let frames = 1;
-    let chunks = 0;
-
-    while (start.last !== true) {
-      // Each waitFor takes the OLDEST match, and the bridge emits a stream's
-      // frames in order on one channel, so this walks the body in seq order.
-      const frame = await this.waitFor(
-        (m: any) =>
-          (m?.type === "tunnel:http-chunk" || m?.type === "tunnel:http-end") && m.requestId === requestId,
-        left(),
-      );
-      frames++;
-      if (frame.type === "tunnel:http-chunk") {
-        if (frame.seq !== chunks + 1) {
-          throw new Error(`seq gap on ${requestId}: chunk ${frame.seq} arrived, expected ${chunks + 1}`);
-        }
-        chunks++;
-        parts.push(decodeTunnelSlice(frame));
-        continue;
-      }
-      if (typeof frame.error === "string") {
-        throw new Error(`tunnel stream ${requestId} ended with error: ${frame.error}`);
-      }
-      if (frame.chunks !== chunks) {
-        throw new Error(`chunk count mismatch on ${requestId}: end claims ${frame.chunks}, received ${chunks}`);
-      }
-      break;
-    }
-
-    return {
-      status: start.status,
-      headers: (start.headers ?? {}) as Record<string, string>,
-      setCookies: (start.setCookies ?? []) as string[],
-      body: Buffer.concat(parts),
-      frames,
-      chunks,
-    };
-  }
-
-  /**
    * Pull-then-replay welcome state — mirrors the app's `RelayTransport.connect()`.
    * Issues the `state.snapshot` RPC and replays the cached frames through the
    * normal dispatch path. A pre-RPC agent answers `ok:false` → we fall through to
@@ -1234,18 +1587,24 @@ export class RelayClient {
     return this.wsClosed;
   }
 
-  /** Re-establish a fresh authenticated socket under the SAME identity after an
-   *  unpaired close (does NOT restore a paired peer id). */
+  get lifecycleGenerations(): Readonly<{
+    control: number;
+    native: number;
+    e2e: number;
+  }> {
+    return {
+      control: this.wsGeneration,
+      native: this.nativeGeneration,
+      e2e: this.e2eGeneration,
+    };
+  }
+
+  /** Re-establish the central control socket under the same account identity. */
   async reconnectAndAuth(relayUrl: string): Promise<void> {
     await this.connectAndAuthenticate(relayUrl);
   }
 
-  /** Hard-close the socket WITHOUT touching E2E/session bookkeeping —
-   *  simulates an unintentional network drop (unlike `disconnect()`, a
-   *  deliberate app-side teardown that also resets E2E state and clears the
-   *  paired peer id). Leaves `_pairedPeerId`/E2E context intact so a
-   *  subsequent `reconnectAndAuth` + `performE2EHandshake` mirrors a real
-   *  redial, not a fresh pairing. */
+  /** Hard-close central control without touching the native session. */
   dropSocket(): void {
     this.ws?.close();
     this.ws = null;
@@ -1259,29 +1618,15 @@ export class RelayClient {
     this.helloOpts.licenseToken = token;
   }
 
-  /** Reconnect with the SAME identity, restoring the paired peer id — the grant
-   *  survives on the relay, so routing works immediately. Call
-   *  `performE2EHandshake` again for a fresh session. */
-  async reconnect(relayUrl: string, pairedPeerId: string): Promise<void> {
-    this.resetE2e();
-    this._pairedPeerId = pairedPeerId;
-    await this.connectAndAuthenticate(relayUrl);
-  }
-
   private resetE2e(): void {
-    this.established?.transport.zeroize();
     this.established = null;
-    this.pending?.transport.zeroize();
-    this.pending = null;
-    this.e2eMode = false;
     this.sessionConfirmed = false;
-    this.pendingEncrypted = [];
-    this.streamByProject.clear();
-    this.stopLiveness();
+    for (const state of this.projectStreams.values()) state.closingLocally = true;
+    this.projectStreams.clear();
+    this.readyProjects.clear();
   }
 
   async disconnect(): Promise<void> {
-    this.stopLiveness();
     this.waiters.forEach((w) => {
       clearTimeout(w.timer);
       w.reject(new Error("Disconnected"));
@@ -1289,8 +1634,12 @@ export class RelayClient {
     this.waiters = [];
     this.messageQueue = [];
     this.resetE2e();
-    this._pairedPeerId = null;
+    this.nativePeerId = null;
     this.ws?.close();
     this.ws = null;
+    this.dropNative();
+    await this.nativeEndpoint?.close();
+    this.nativeEndpoint = null;
+    this.nativeTarget = null;
   }
 }

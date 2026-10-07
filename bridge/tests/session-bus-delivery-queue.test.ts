@@ -1,4 +1,4 @@
-// Turn-boundary delivery (`docs/session-messaging.md` §7.2). Two guarantees are
+// Turn-boundary delivery. Two guarantees are
 // load-bearing and both fail silently if broken: a line never lands mid-turn,
 // and a line never vanishes — the sending machine is told a message left the
 // moment it does, so a line dropped here is one nothing on either side can
@@ -50,7 +50,7 @@ function harness(abDir: string, opts: { live?: boolean; confirmable?: boolean } 
   const openTurns = new Set<string>();
   const injected: QueuedLine[] = [];
   let live = opts.live !== false;
-  // Default false: five of the six agents announce nothing, so that is the
+  // Default false: most agents announce nothing, so that is the
   // ordinary session, and a write is the only answer one gives.
   const confirmable = opts.confirmable === true;
   let now = 1_000;
@@ -246,9 +246,9 @@ describe("turn-boundary delivery", () => {
   });
 
   test("a line submitted into an agent that announces nothing is removed on the write", () => {
-    // Five of the six adapters declare `observation.turnStart: false`, so no
-    // edge is ever coming for them. Holding the line would time out and
-    // re-inject on every delivery to every one of them.
+    // Most adapters declare `observation.turnStart: false`, so no edge is ever
+    // coming for them. Holding the line would time out and re-inject on every
+    // delivery to every one of them.
     const h = harness(tempDir());
     h.queue.queue(line());
     expect(h.queue.lines).toHaveLength(0);

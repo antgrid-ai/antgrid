@@ -14,13 +14,14 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _projectId = 'pending-proj';
 
@@ -66,7 +67,10 @@ void main() {
         (ref) => Stream.value(const TerminalState()),
       ),
     ],
-    child: MaterialApp(home: Scaffold(body: child)),
+    child: MaterialApp(
+      builder: abToastHostBuilder,
+      home: Scaffold(body: child),
+    ),
   );
 
   testWidgets('the Start button reports the start it is waiting on', (

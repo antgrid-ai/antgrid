@@ -1,11 +1,14 @@
-// Task 9 cutover: the remote transport connects and signs AS the app's own
-// `kind:"app"` DeviceRecord on every resolve path.
+import '../helpers/test_license_token_minter.dart';
+import '../helpers/fixed_peer_connector.dart';
+import '../helpers/test_peer_runtime.dart';
+// Task 9 cutover: the remote transport connects and authenticates the CENTRAL
+// relay hello AS the app's own `kind:"app"` DeviceRecord on every resolve path.
 //
-// The signing assertion is made against the real handshake bytes: the transcript
-// carries the phone device id and is signed with the phone's Ed25519 seed, so
-// rebuilding it from the emitted `handshake:client-hello` and verifying it under
-// the record's public key proves BOTH halves at once — a hello signed with any
-// other key would neither carry the record's deviceUuid nor verify under its.
+// The native peer hello carries no crypto of its own: QUIC/TLS
+// between lease-authorized Iroh endpoints is the confidentiality layer, so a
+// plaintext `session:hello {attemptId, capabilities}` replaces the old
+// transcript-signed `handshake:client-hello` — there is no signature left to
+// rebuild or verify here.
 //
 // "No resolve path sends a pair-request" is no longer asserted here because it
 // is no longer assertable: Task 10 deleted `RelayService.requestPair`, so the
@@ -15,15 +18,19 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid/connection/connection_supervisor.dart';
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/peer_runtime.dart';
 import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/services/license_token_minter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:cryptography/cryptography.dart';
@@ -40,18 +47,27 @@ const _agentPubB64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 /// Records what the transport actually put on the wire. `connect` authenticates
 /// instantly and announces the agent as present, which is what lets the
 /// supervisor climb all the way to the E2E-handshake rung.
-class _RecordingRelay extends RelayService {
+class _RecordingRelay extends RelayService implements PeerLink {
+  @override
+  bool get isDispatchAllowed => true;
+  @override
+  Stream<PeerLinkState> get payloadStateStream => const Stream.empty();
+  @override
+  Stream<PeerPath> get pathStream => const Stream.empty();
+  @override
+  Stream<PeerLinkFailure> get failureStream => const Stream.empty();
   _RecordingRelay() : super(crypto: CryptoService());
 
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
-  final sent = <({String channel, Uint8List payload, FrameKind kind})>[];
+  final sent = <Uint8List>[];
   DeviceIdentity? connectedAs;
   String? connectedMachineId;
+  String? connectedToken;
   AppState _cur = const AppState();
 
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingSessionRecord> get messageStream => const Stream.empty();
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -71,6 +87,7 @@ class _RecordingRelay extends RelayService {
   }) async {
     connectedAs = identity;
     connectedMachineId = machineDeviceId;
+    connectedToken = licenseToken;
     _cur = const AppState(connectionState: RelayConnectionState.authenticated);
     _states.add(_cur);
     // The relay announces same-account peers right after `welcome`.
@@ -84,14 +101,19 @@ class _RecordingRelay extends RelayService {
   }
 
   @override
-  void sendMessage(
-    String to,
-    String channel,
-    Uint8List payload, {
-    FrameKind kind = FrameKind.sealed,
-  }) {
-    sent.add((channel: channel, payload: payload, kind: kind));
+  Future<PeerSendOutcome> sendRecord(Uint8List payload) async {
+    if (!isDispatchAllowed) return PeerSendOutcome.closed;
+    sent.add(payload);
+    return PeerSendOutcome.accepted;
   }
+
+  @override
+  Future<PeerStream> openStream(
+    StreamOpen open, {
+    required int maxRecordBytes,
+    required int maxQueuedBytes,
+    int? rawAfterRecords,
+  }) => throw UnimplementedError('not exercised by this suite');
 
   @override
   void dispose() {
@@ -99,24 +121,23 @@ class _RecordingRelay extends RelayService {
     unawaited(_presence.close());
   }
 
-  /// The decoded kind-1 handshake frames, in order.
-  List<Map<String, dynamic>> handshakeFrames() => [
-    for (final f in sent)
-      if (f.kind == FrameKind.handshake)
-        jsonDecode(utf8.decode(f.payload)) as Map<String, dynamic>,
-  ];
+  /// The decoded `session:hello` records sent, in order.
+  List<Map<String, dynamic>> helloFrames() => [
+    for (final payload in sent)
+      jsonDecode(utf8.decode(payload)) as Map<String, dynamic>,
+  ].where((m) => m['type'] == kSessionHello).toList();
 }
 
-class _FakeConnectionManager extends RelayConnectionManager {
+class _FakeConnectionManager extends MachineConnectionManager {
   _FakeConnectionManager(this._relay) : super(crypto: CryptoService());
 
   final RelayService _relay;
-  final Map<String, RelayConnection> _conns = {};
+  final Map<String, MachineConnection> _conns = {};
 
   @override
-  RelayConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
+  MachineConnection connectionFor(String machineDeviceId) => _conns.putIfAbsent(
     machineDeviceId,
-    () => RelayConnection(
+    () => MachineConnection(
       machineDeviceId: machineDeviceId,
       crypto: CryptoService(),
       relayOverride: _relay,
@@ -124,7 +145,7 @@ class _FakeConnectionManager extends RelayConnectionManager {
   );
 
   @override
-  RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
+  MachineConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
 Future<DeviceRecord> _connectionRecord() async {
@@ -182,12 +203,21 @@ void main() {
   List<Override> overrides({
     List<InventoryAgent> inventory = const [],
     _RecordingRelay? on,
+    LicenseTokenMinter? minter,
   }) => [
     ...stores.overrides,
+    // These fixtures isolate coordinates and E2E identity from HTTP enrollment.
+    peerRuntimeProvider.overrideWith((ref) async {
+      final runtime = TestPeerRuntime(payloadLink: on ?? relay);
+      ref.onDispose(runtime.dispose);
+      return runtime;
+    }),
     accountAgentsProvider.overrideWith((_) async => inventory),
     localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
     connectionDeviceRecordProvider.overrideWith((_) async => record),
-    connectionTokenMinterProvider.overrideWith((_) async => null),
+    connectionTokenMinterProvider.overrideWith(
+      (_) async => minter ?? TestLicenseTokenMinter(),
+    ),
     cryptoServiceProvider.overrideWith((_) => CryptoService()),
     relayConnectionManagerProvider.overrideWithValue(
       _FakeConnectionManager(on ?? relay),
@@ -200,17 +230,44 @@ void main() {
     }
   }
 
-  test('the remote transport connects and signs the handshake with the '
-      'connection DeviceRecord, never PhoneIdentity', () async {
+  test(
+    'central dials reuse the saved token instead of forcing a mint',
+    () async {
+      var mints = 0;
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.test',
+        clientId: 'cid',
+        clientSecret: 'secret',
+        httpClient: MockClient(
+          (_) async => http.Response(
+            '{"access_token":"saved-${++mints}","expires_in":3600}',
+            200,
+          ),
+        ),
+      );
+      expect(await minter.token(), 'saved-1');
+      await stores.recentAgentsStore.upsert(_recent(_machine));
+      final c = ProviderContainer(overrides: overrides(minter: minter));
+      addTearDown(c.dispose);
+      await c.read(accountAgentsProvider.future);
+      c.read(agentTransportForProvider(_machine));
+      await pump(c, () => relay.connectedToken != null);
+      expect(relay.connectedToken, 'saved-1');
+      expect(mints, 1);
+    },
+  );
+
+  test('the remote transport connects on the relay slot and sends a plaintext '
+      'session:hello, never a signed transcript', () async {
     await stores.recentAgentsStore.upsert(_recent(_machine));
     final c = ProviderContainer(overrides: overrides());
     addTearDown(c.dispose);
     await c.read(accountAgentsProvider.future);
 
-    // The handshake never confirms against this fake, so don't await the
-    // transport — only the identity it presented is under test.
+    // The bridge fake never answers `established`, so don't await the
+    // transport — only the hello it sent is under test.
     c.read(agentTransportForProvider(_machine));
-    await pump(c, () => relay.handshakeFrames().isNotEmpty);
+    await pump(c, () => relay.helloFrames().isNotEmpty);
 
     expect(
       relay.connectedAs?.deviceId,
@@ -226,48 +283,13 @@ void main() {
     );
     expect(relay.connectedMachineId, _machine);
 
-    final hello = relay.handshakeFrames().single;
-    expect(hello['type'], 'handshake:client-hello');
-
-    // Rebuild the exact bytes the phone signed and verify them under the
-    // record's public key. The transcript names the BARE deviceUuid even though
-    // the hello above is scoped: it binds the account identity the agent
-    // resolves us by, and a transport address there would make one phone sign a
-    // different transcript per machine (see docs/protocol/e2e-handshake.md).
-    final transcript = buildTranscriptV2(
-      TranscriptFields(
-        registrationId: _machine,
-        role: 'phone',
-        agentDeviceId: _machine,
-        phoneDeviceId: record.deviceUuid,
-        agentX25519Pub: Uint8List(0),
-        phoneX25519Pub: base64Decode(hello['pubkey'] as String),
-        nonce: base64Decode(hello['nonce'] as String),
-      ),
-    );
-    expect(
-      await verifyTranscriptSigV2(
-        transcript: transcript,
-        ed25519PubB64: record.ed25519Pub,
-        sigB64: hello['sig'] as String,
-      ),
-      isTrue,
-      reason:
-          'the transcript names the record deviceUuid AND is signed with '
-          'its Ed25519 seed',
-    );
-
-    // A DIFFERENT account key over the same bytes must NOT verify — otherwise
-    // the check above would pass for any signer.
-    expect(
-      await verifyTranscriptSigV2(
-        transcript: transcript,
-        ed25519PubB64: _agentPubB64,
-        sigB64: hello['sig'] as String,
-      ),
-      isFalse,
-      reason: 'only the connection record may sign the handshake transcript',
-    );
+    // QUIC/TLS between lease-authorized endpoints is the confidentiality layer
+    // now, so the native hello carries only a type and an attemptId — no
+    // capabilities, no transcript, no signature, nothing naming the
+    // connection DeviceRecord at all.
+    final hello = relay.helloFrames().single;
+    expect(hello['attemptId'], isA<String>());
+    expect(hello, {'type': 'session:hello', 'attemptId': hello['attemptId']});
   }, timeout: const Timeout(Duration(seconds: 30)));
 
   test(
@@ -282,8 +304,8 @@ void main() {
       addTearDown(withPaired.dispose);
       await withPaired.read(accountAgentsProvider.future);
       withPaired.read(agentTransportForProvider(_machine));
-      await pump(withPaired, () => relay.handshakeFrames().isNotEmpty);
-      expect(relay.handshakeFrames(), isNotEmpty, reason: 'recent + inventory');
+      await pump(withPaired, () => relay.helloFrames().isNotEmpty);
+      expect(relay.helloFrames(), isNotEmpty, reason: 'recent + inventory');
 
       // recent only (no inventory row)
       final relay2 = _RecordingRelay();
@@ -291,12 +313,8 @@ void main() {
       addTearDown(recentOnly.dispose);
       await recentOnly.read(accountAgentsProvider.future);
       recentOnly.read(agentTransportForProvider(_machine));
-      await pump(recentOnly, () => relay2.handshakeFrames().isNotEmpty);
-      expect(
-        relay2.handshakeFrames(),
-        isNotEmpty,
-        reason: 'recent-only dialled',
-      );
+      await pump(recentOnly, () => relay2.helloFrames().isNotEmpty);
+      expect(relay2.helloFrames(), isNotEmpty, reason: 'recent-only dialled');
 
       // inventory only (a machine we hold no RecentAgent for)
       final relay3 = _RecordingRelay();
@@ -309,61 +327,27 @@ void main() {
       addTearDown(invOnly.dispose);
       await invOnly.read(accountAgentsProvider.future);
       invOnly.read(agentTransportForProvider('other-machine'));
-      await pump(invOnly, () => relay3.handshakeFrames().isNotEmpty);
-      expect(relay3.handshakeFrames(), isNotEmpty, reason: 'inventory dialled');
+      await pump(invOnly, () => relay3.helloFrames().isNotEmpty);
+      expect(relay3.helloFrames(), isNotEmpty, reason: 'inventory dialled');
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );
 
-  test(
-    'the routable rung is fed by peer presence, not by a paired grant',
-    () async {
-      const coords = ConnCoords(
-        relayUrl: 'wss://relay.example/ws',
-        agentEd25519PubB64: _agentPubB64,
-      );
-      final mech = RelayMechanisms(
-        relay: relay,
-        crypto: CryptoService(),
-        machineDeviceId: _machine,
-        identity: connectionIdentityFor(record, machineDeviceId: _machine),
-        phoneDeviceId: record.deviceUuid,
-        phoneEd25519Seed: base64Decode(record.ed25519Priv),
-        epoch: 1,
-        resolveCoords: () async => coords,
-        mintToken: () async => 'tok',
-      );
-      addTearDown(mech.release);
+  test('native readiness remains independent of central presence', () async {
+    const coords = ConnCoords(
+      relayUrl: 'wss://relay.example/ws',
+      agentEd25519PubB64: _agentPubB64,
+    );
+    final mech = PeerConnectionMechanisms(
+      peerRuntime: FixedPeerConnector(relay),
+      machineDeviceId: _machine,
+      resolveCoords: () async => coords,
+    );
+    addTearDown(mech.release);
 
-      expect(mech.agentOnline, isFalse, reason: 'nothing dialled yet');
+    expect(mech.payloadConnected, isFalse, reason: 'nothing dialled yet');
 
-      // The socket only ever reaches `authenticated` — there is no grant and no
-      // `paired` state to gate on. `RelayMechanisms` doesn't self-subscribe to
-      // presence (see `notePresence`'s doc comment); production feeds it from
-      // `RelayConnection.ensureStarted`'s `peerPresenceStream` listener, so the
-      // fixture reproduces that wiring directly here.
-      await mech.dial(coords, 'tok');
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(
-        relay.currentState.connectionState,
-        RelayConnectionState.authenticated,
-      );
-      expect(
-        mech.socketAuthenticated,
-        isTrue,
-        reason: 'socket auth alone must not make the peer routable',
-      );
-      expect(mech.agentOnline, isFalse);
-
-      mech.notePresence(true);
-      expect(
-        mech.agentOnline,
-        isTrue,
-        reason: 'peer-online for this machine makes it routable',
-      );
-
-      mech.notePresence(false);
-      expect(mech.agentOnline, isFalse, reason: 'peer-offline unroutes it');
-    },
-  );
+    await mech.connectPayload(coords);
+    expect(mech.payloadConnected, isTrue);
+  });
 }

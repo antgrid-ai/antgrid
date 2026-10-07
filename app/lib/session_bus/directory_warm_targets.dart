@@ -1,4 +1,4 @@
-// The other half of the peek-only directory (E13, `docs/session-messaging.md`):
+// The other half of the peek-only directory:
 // what a MISS does. The pump only ever asks the peer control planes this app
 // already holds, and a desktop at rest holds none, so the ordinary first answer
 // to `list_sessions` is "3 machines, none connected, none asked" — honest, and
@@ -25,7 +25,7 @@ import '../services/account_agents_api.dart' show InventoryAgent;
 const Duration kDirectoryWarmWindow = Duration(minutes: 5);
 
 /// Ceiling on machines warmed by one miss. Each is a persistent WebSocket plus
-/// an E2E session, the same cost `kEagerControlPlaneCap` bounds on mobile — and
+/// a peer session, the same cost `kEagerControlPlaneCap` bounds on mobile — and
 /// desktop is lazy precisely because connecting to everything at once has
 /// already caused connection storms here (see `eagerControlPlanesEnabledProvider`).
 /// A miss is evidence that SOME peer was wanted, never evidence that all of them

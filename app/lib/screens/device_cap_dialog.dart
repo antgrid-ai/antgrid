@@ -12,7 +12,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../providers/auth.dart';
 import '../providers/device_provisioning.dart';
-import '../providers/post_signin_provisioning.dart';
+import '../providers/provisioning_coordinator.dart';
 import '../services/devices_api.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
@@ -31,11 +31,12 @@ Future<void> showDeviceCapDialog(
   WidgetRef ref,
   DeviceCapInfo info,
 ) async {
+  final container = ref.container;
   await showDialog<void>(
     context: context,
     builder: (_) => DeviceCapDialog(info: info),
   );
-  ref.read(deviceCapProvider.notifier).set(null);
+  container.read(deviceCapProvider.notifier).set(null);
 }
 
 /// Cap remediation dialog, shared by both caps because both are answered the
@@ -66,6 +67,8 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
   bool get _isWorker => _info.kind == DeviceCapKind.worker;
 
   Future<void> _remove(CappedDevice d) async {
+    final devicesApi = ref.read(devicesApiProvider);
+    final provisioning = ref.read(provisioningCoordinatorProvider);
     final confirmed = await AbConfirmDialog.show(
       context: context,
       title: _isWorker ? 'Sign out machine?' : 'Remove device?',
@@ -84,7 +87,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
       _busyId = d.id;
       _error = null;
     });
-    final ok = await ref.read(devicesApiProvider).revoke(d.id);
+    final ok = await devicesApi.revoke(d.id);
     if (!mounted) return;
     if (!ok) {
       setState(() {
@@ -102,7 +105,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
 
     // A slot is free — register this machine now and close on success.
     try {
-      await retryDeviceProvisioning(ref);
+      await provisioning.retryCurrentUser();
       if (mounted) Navigator.of(context).pop();
     } on ProvisioningException catch (e) {
       if (!mounted) return;

@@ -1,7 +1,7 @@
 # Commands reference
 
 On-demand commands. The everyday ones (setup, launchers, the test/analyze
-gates) live in the root `CLAUDE.md`; this file holds the rest so they cost no
+gates) live in the root `AGENTS.md`; this file holds the rest so they cost no
 context until you need them.
 
 ## Occasional dev commands
@@ -17,7 +17,7 @@ cd web && bun run generate:key   # Ed25519 signing seed
 
 ## Worktrees
 
-Only when asked — see the note at the top of the root `CLAUDE.md`.
+Only when asked — see the note at the top of the root `AGENTS.md`.
 
 `scripts/worktree.ts` provisions the gitignored artifacts a bare `git worktree
 add` leaves missing (`node_modules`, prisma client, per-service `.env`, Flutter
@@ -114,9 +114,12 @@ antgrid watch --dir ~/.antgrid-dev  # a debug-build app's host
 
 **Both halves.** The app records its own side when `ANTGRID_NETWATCH` is set in
 its environment (runtime, so arming it needs no rebuild), to
-`<ANTGRID_DIR>/netwatch.log`. `--join` pairs the two on `frameId` — the sealed
-frame's AES-GCM nonce, which the relay forwards untouched and both endpoints
-therefore compute identically:
+`<ANTGRID_DIR>/netwatch.log`. `--join` pairs the two on `frameId` — a sha256
+hash of the frame's own payload bytes (`frameIdFor`, `bridge/src/netwatch.ts`),
+which both endpoints compute identically since the payload crosses the wire
+unchanged. More than one occurrence can legitimately share an id (a resend, an
+identical control message), so pairing matches occurrence order within each
+`(frameId, channel, sender)` key rather than assuming uniqueness:
 
 ```bash
 ANTGRID_NETWATCH=1 <launch the app>
@@ -124,9 +127,9 @@ antgrid watch --dir ~/.antgrid-dev --join ~/.antgrid-dev/netwatch.log
 ```
 
 ```
-22:11:56.211  app  -> tx  ctrl  sealed  412B  a3f9c211  terminal:input  s:9f1c22ab
-22:11:56.233  brg  <- rx  ctrl  sealed  412B  a3f9c211  terminal:input  +22ms
-22:11:56.240  app  -> tx  ctrl  sealed   88B  cc12ef44  file:read       ✗ never arrived
+22:11:56.211  app  -> tx  ctrl  frame   412B  a3f9c211  terminal:input  s:9f1c22ab
+22:11:56.233  brg  <- rx  ctrl  frame   412B  a3f9c211  terminal:input  +22ms
+22:11:56.240  app  -> tx  ctrl  frame    88B  cc12ef44  file:read       ✗ never arrived
 ```
 
 This answers what neither endpoint can alone — the route header carries no
@@ -250,7 +253,7 @@ rebinding. The page loads nothing from anywhere, renders every peer-supplied
 value through `textContent`, and runs under a nonce CSP whose default is `'none'`.
 
 Two things it still does NOT show. A relay session that never established: both
-halves of that capture ride the sealed control plane, so `--remote` can describe
+halves of that capture ride the control plane, so `--remote` can describe
 a connection that is misbehaving but structurally cannot describe one that never
 came up (a refused loopback hello, by contrast, is an ordinary event). And which
 machine an app-side frame belongs to: the app's recorder is process-wide, so an
@@ -323,7 +326,7 @@ whichever agent is installed, which bills a vendor this session never chose. And
 which for a three-word naming task is the largest single cost lever there is.
 It means exactly that on every row — no `--model` was passed — but only **title**
 rows consult a per-agent default: a title call passes one for the agents that
-declare `AgentSpec.cheapNamingModel` (`bridge/src/agents/registry.ts`), read off
+declare `AgentSpec.cheapNamingModel` (`packages/antgrid-agents/src/agents/registry.ts`), read off
 the agent that **actually ran**, since a borrowed call's model has to match
 whichever CLI serves it and not the one the session asked for. So `default` on a
 title row means either that nobody has verified a model string that vendor's
@@ -470,3 +473,39 @@ An export file is written to be pasted into a bug report, and it outlives
 the run, the window and the arm's own TTL. `--json` is the mode that withholds
 nothing: it goes to a pipe the operator is watching, not to a file they attach to
 a ticket a week later.
+
+## Iroh evidence gates
+
+Run from the repository root unless a directory is named. Dart/Flutter commands
+must run serially; never run bare root `bun test`.
+
+```powershell
+bun run --filter antgrid-wire test
+bun run --filter antgrid-relay test
+bun run --filter antgrid-web test
+bun run --filter antgrid-bridge test
+bun run --filter antgrid-evals test:evals
+bun run --filter antgrid-evals test:evals:native-soak
+```
+
+The default serialized eval sweep excludes gates that require a separately
+installed native binary. Resolve the stock relay from
+`ANTGRID_IROH_RELAY_BIN`, or `iroh-relay` on `PATH`
+(`cargo install iroh-relay --version 1.2.0 --locked --features server`), then
+run `bun run --filter antgrid-evals test:evals:iroh-relay-authorization`.
+Set `IROH_INTEROP_NATIVE_LIBRARY` to the verified Dart native library before
+running `test:evals:dart-client-e2e` and `test:evals:peer-resume`.
+Backend gates also require the existing PostgreSQL/Prisma test prerequisites.
+
+In `packages/antgrid_peer_transport`, run `dart analyze` and `dart test`.
+Configure the upstream signed native DLL through `iroh_quic:setup` or the
+verified prototype cache. Never use `--no-verify`. Cross-binding qualification
+against a real bridge is `test:evals:dart-client-e2e` and `test:evals:peer-resume`
+above, not a standalone script. They do not reach the raw NOT_READY admission
+refusal or the close on remote access switched off; those are proved over the
+TS binding only. The same package supplies app and CLI native code, and FRB
+disposal occurs only at process-final teardown.
+
+The native soak is intentionally excluded from the default eval sweep. It runs
+for 30 minutes unless its documented test-only duration override is set, records
+its seed, and must settle owned-resource counts after every fault cycle.

@@ -1,19 +1,100 @@
 # Architecture reference
 
-Background detail pulled out of the root `CLAUDE.md`. The per-component
-`CLAUDE.md` files are the authority for their own subsystems; this file holds
+Background detail pulled out of the root `AGENTS.md`. The per-component
+`AGENTS.md` files are the authority for their own subsystems; this file holds
 only the cross-cutting shape.
 
 ## Message flow
 
+Remote payloads use Iroh; QUIC/TLS 1.3 between two endpoint IDs the
+authorization snapshot names is the confidentiality layer, with no app-layer
+sealing on top of it and no application-level WebSocket fallback. The central
+WebSocket remains for discovery, presence and revocation. See
+[`docs/protocol/peer-session.md`](protocol/peer-session.md) for the
+session hello, stream admission and the stream catalogue.
+
 ```
-App (Flutter) <--E2E encrypted--> Relay (WS router) <--E2E encrypted--> Agent (Bun)
+App (Flutter) <--QUIC/TLS over Iroh (direct or relayed)--> Agent (Bun)
 ```
 
-The relay authenticates devices via a single signed `hello` frame (Ed25519
-proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
-(terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
-frames under the credit window).
+The central relay authenticates devices via a signed `hello` frame (Ed25519
+proof-of-possession) — unrelated to peer payload admission, which is decided
+entirely by the authorization lease (`docs/protocol/peer-session.md` §1). The
+session stream carries the hello, the app's wedge-probe `session:ping`, and
+machine-scoped verbs such as `agent:projects` and `stream-ready` — QUIC
+keep-alive/idle is the liveness layer (`docs/protocol/peer-session.md` §3);
+every project gets its own stream (`docs/protocol/peer-session.md` §1d),
+carrying that project's bus traffic — session-bus frames, `preview:url`, and
+so on — as bare records with per-record caps (§5). Terminal attachments, tunnel connections and remote file
+uploads get their own streams in turn (§1b, §1c, §1e): preview traffic is raw TCP:
+each connection the previewing device accepts on its loopback forwarder port rides
+one `tunnel-tcp` QUIC stream, with one JSON head record each way and then raw
+bytes in both directions (§1c), never a bus frame.
+A remote file upload rides its own stream the same way: the app writes the
+file's raw bytes directly, with no bus frame and no app-layer chunking, and
+the bridge answers with one result record. The desktop app's own local
+upload writes the bytes to a temp file on the shared filesystem instead —
+it crosses the loopback socket as one `file:upload-local` message
+(`bridge/src/protocol.ts`) naming that path, and gets back one
+`file:upload-result`.
+
+### Native peer payloads
+
+The authenticated central WebSocket retains inventory, presence and policy
+invalidation. The Dart `PeerLink` interface separates that control
+connection from payload lifecycle. `MachineSession` and the session-hello driver
+consume the native link; feature services retain their existing interfaces.
+Native implementation and authoritative lease handling live in the
+`packages/antgrid_peer_transport` package, shared with its standalone CLI smoke.
+
+The bridge's `PeerSessionOwner` owns session establishment over Iroh, not
+liveness; each stream writes bare length-prefixed records with its own
+per-record caps (`docs/protocol/peer-session.md` §5). `CentralControlClient` owns central
+authentication, presence, policy invalidation and push delivery; it has no
+binary payload API. `NativeHostConnection` composes those independent owners
+with endpoint lifecycle recovery for authenticated native connections. Native
+requests keep remote command authorization, project catalog checks and
+checkout routing. Host-assigned stream readiness is independent of central
+stream admission, allowing native project use during a leased central outage.
+
+Each enrollment has a distinct protected endpoint seed. Device-bound OAuth
+credentials authorize challenge, dual-signature registration and snapshot APIs
+under `/account/devices/me/`. Registrations retain history and decimal-string
+generations. Snapshots supply entitlement, peer signing keys, endpoint identities
+and approved relay origins. Active leases refresh every 20 seconds and expire no
+later than 60 seconds from monotonic request start. Dispatch and queued writes
+recheck authorization; revocation closes affected sessions. Transactional policy
+outbox delivery informs connected clients and configured private relay targets.
+
+An app-initiated Iroh connection is reused across projects. ALPN
+`antgrid/peer/2` admits multiple native bidirectional streams. Every stream opens
+with one `[u32 BE len][UTF-8 JSON StreamOpen]` record; the first stream on a
+connection must declare `{kind:"session"}` and then carries the existing route
+frames (peer frames with a four-byte big-endian length prefix) unchanged — an
+invalid or non-session first open closes the connection, since there is no
+session yet to keep alive. Every later stream is admitted in its own task by
+`PeerStreamAcceptor` (`bridge/src/peer/stream-dispatch.ts`), enforcing a
+pending-open cap and a 5s open-frame deadline before dispatching by `kind`; a
+refusal is in-band (`stream:refused` then FIN), a missed deadline resets that
+stream, and neither costs the connection. See `docs/protocol/peer-session.md` §1a
+for the admission order and refusal codes. Transport selection precedes the
+session hello and is fenced by attempt generation; the app's
+`ConnectionSupervisor` remains the retry authority. Central outages do
+not close a healthy authorized native payload connection.
+
+Approved relay maps disable implicit public discovery. Native connections relay
+through the stock upstream `iroh-relay` binary, configured with `access.http`:
+on each new connection the relay POSTs the endpoint ID and a `relay=<origin>`
+query to web's `/internal/iroh-access`, which re-runs the registration, device,
+entitlement and generation checks and answers `true` or `false` — the relay
+itself holds no per-account registry and performs no further check afterward.
+Mid-connection revocation is not enforced by the relay: a revoked endpoint keeps
+its relay connection, and the bridge closes its own peer connection instead,
+immediately on the central `peer-policy-changed` push or at the latest when its
+lease expires (`PEER_LEASE_MS`, `packages/antgrid-wire/src/peer-authorization.ts`;
+refresh timing in [peer session §7](protocol/peer-session.md)). Native error classification and key erasure
+also require qualification. Nothing in this branch authorizes enabling
+production preference before those gates pass.
 
 ### The session bus
 
@@ -25,7 +106,7 @@ app is the only carrier, and it forwards the frame verbatim onto the target
 machine's own relay connection. The receiving bridge answers on the one app
 session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
 broadcast, so the traffic is invisible to the human's phone by design. There is
-no separate spec document: the host-side invariants are in `bridge/CLAUDE.md`,
+no separate spec document: the host-side invariants are in `bridge/AGENTS.md`,
 and the rest is documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
@@ -41,10 +122,8 @@ message types that carry a `checkoutId`; the app mirrors it **by hand** as
 silent.
 
 Checkout lifecycle and storage live in `bridge/src/worktrees/`, and the checkout path
-itself never crosses the wire. An app must advertise the `checkoutRouting` capability on
-`app:ready` (`docs/protocol/e2e-handshake.md`) or it is refused a project holding a
-managed session, rather than shown main's workspace beside an isolated agent.
-`WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
+itself never crosses the wire. `WORKTREE_SESSIONS_SUPPORTED`
+(`bridge/src/worktree-capability.ts`) is the kill switch.
 
 Tree state flows pull-first, one directory at a time. `FileService.setTreeInterest`
 registers one tree hydrator while Files is visible; checkout activation alone does
@@ -59,14 +138,6 @@ reads, and notifications remain independent. There is no whole-tree path left at
 all: the `file:tree:snapshot:request` pull and the `buildTree` walk behind it are
 removed, so an app that predates this protocol gets no tree rather than a large
 one.
-
-The app's capability literals live in the relay-client package
-(`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
-`AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
-schema does not declare, no suite spans the two sides, and the fail direction is
-silent. `pullsTree` is now parsed and ignored on the bridge, kept for one release so
-a bridge that drops it cannot leave an older app treeless; `checkoutRouting` is the
-live example of a capability that still gates behaviour.
 
 ## Terminal frames and history
 
@@ -108,10 +179,11 @@ and offers recovery through a fresh attachment, never raw-stream fallback.
 
 Each authenticated app connection owns its terminal attachments, acknowledgments,
 pause state, and delivery budget. Relay replies name the subscribing peer before
-encryption; another connected app receives neither its frames nor its history
+they are sent; another connected app receives neither its frames nor its history
 pages. Project streams on the same connection share the terminal byte budget.
-A disconnect or rekey retires that peer's attachments while other viewers stay
-attached. Cancellation removes unsent fragments from that peer's send queue.
+A disconnect retires that peer's attachments while other viewers stay
+attached. Cancellation resets that attachment's own stream, discarding whatever
+it still had queued.
 
 Terminal size ownership is explicit. Passive live viewers show **Take control**;
 activating it sends an immediate `terminal:resize` with `intent: takeover` using
@@ -151,8 +223,9 @@ Subscription identity includes the authenticated connection, project stream,
 checkout, terminal, run, and attachment. A replacement PTY gets a new run ID;
 reconnect gets a new attachment ID. Consumption acknowledgments retire at most
 four frames / 1 MiB per viewer, bounded by 2 MiB across terminal attachments on
-the connection. Terminal payloads are coalesced before encryption and
-fragmentation; existing transport credits and authorization checks still apply.
+the connection. Terminal payloads are coalesced before being written as a
+record on the terminal's own stream (`docs/protocol/peer-session.md` §1b); QUIC/TLS
+is the confidentiality layer and authorization checks still apply per record.
 Acknowledgment is consumption, not evidence that the Flutter engine painted.
 
 Normal-buffer rows are archived at the parser's scroll boundary in indexed
@@ -191,7 +264,8 @@ before emulator disposal; its immutable frame remains until acknowledgment or
 attachment expiry, and the app keeps the completed viewport available.
 
 The terminal protocol uses the existing authenticated transports: relay traffic
-is E2E encrypted; the current loopback listener uses a local bearer token.
+runs over the authenticated QUIC/TLS native connection; the current loopback
+listener uses a local bearer token.
 Terminal qualification commands live in `bridge/package.json` and `evals/package.json`.
 
 ## Shared packages (`packages/`)
@@ -205,18 +279,27 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
   and materialized into content-addressed directories for external runtimes.
   Built-in registration remains static; dynamic plugin loading is not implemented.
 
-- **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
+- **`antgrid_relay_client`** — pure Dart central-control client plus the peer session
+  protocol over an injected native `PeerLink`, no Flutter.
+- **`antgrid_peer_transport`** — native Iroh transport and authorization leases, shared
+  by the app and its standalone CLI smoke.
 - **`antgrid_eval_client`** — E2E eval fixtures.
-- **`antgrid-wire`** — TS Bun workspace holding the binary route-frame codec
-  **and** the relay control-envelope Zod schemas (`hello`/`welcome`/`stream-*`/
-  `error`, the `ClientMessage`/`ServerMessage` unions, `ErrorCode`), plus the
-  spoof-safe client-IP/XFF resolver (`client-ip.ts`) used by relay and web.
-  Shared by bridge/relay/web/evals.
+- **`antgrid-wire`** — TS Bun workspace holding the session-stream frame type
+  names (`SESSION_FRAME_TYPES`) **and** the relay control-envelope Zod schemas
+  (`hello`/`welcome`/`stream-*`/`error`, the `ClientMessage`/`ServerMessage`
+  unions, `ErrorCode`), plus the spoof-safe client-IP/XFF resolver
+  (`client-ip.ts`) used by relay and web. Shared by bridge/relay/web/evals.
 
-  Single source of truth for `FRAME_VERSION`, which is distinct from the relay
-  message `protocolVersion`. `relay/src/protocol.ts` is a thin re-export shim of
-  this package; the Dart `antgrid_relay_client` mirrors these schemas by hand,
-  so the two drifting apart is silent.
+  A session-stream record carries no header, version byte or kind byte: it is
+  one length-prefixed JSON record per session frame or control-plane message,
+  discriminated on the JSON body's own `type` alone (`isSessionFrameType`). A
+  `StreamOpen` record is what tags a stream's kind, and the authenticated
+  native connection supplies peer identity — see `docs/protocol/peer-session.md`
+  for the record layout, the stream catalogue, and the session hello it
+  carries. `relay/src/protocol.ts` is a thin re-export shim of this package;
+  the Dart clients mirror these schemas by hand, so drift is silent. Shared
+  fixtures under `evals/fixtures/` pin both control envelopes and peer transport
+  bytes and constants across TypeScript and Dart.
 
 Other dirs: `docs/` (design notes), `scripts/dev.ts` (fallback dev runner),
 `aspire/` (default dev launcher).
@@ -331,4 +414,6 @@ the empty string, never an absent key. A step's own `env:` wins over that
 contract, which wins over the inherited environment.
 
 Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
-start gate and what survives a restart — is in `bridge/CLAUDE.md`.
+start gate and what survives a restart — is in `bridge/AGENTS.md`.
+
+Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; the central protocol has no stream registration or payload acknowledgements. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establishes a new session generation.

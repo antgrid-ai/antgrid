@@ -4,779 +4,441 @@ import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Fake for every mechanism the supervisor drives. Each verb records its calls
-/// and the getters are settable, so a test can script "dial succeeds but the
-/// socket never authenticates" — the shapes real relay code produces — without
-/// a relay, a socket, or a wall-clock wait.
-class ScriptedMechanisms implements ConnMechanisms {
-  ConnCoords? coords = const ConnCoords(
-    relayUrl: 'wss://relay.test',
-    agentEd25519PubB64: 'AGENT_PUB',
-  );
-
-  bool socketAuthenticatedValue = false;
-  bool agentOnlineValue = false;
-  bool sessionEstablishedValue = false;
-
-  int resolveCalls = 0;
-  int mintCalls = 0;
-  int dialCalls = 0;
+class _Native implements PeerConnectionContract {
+  final _events = StreamController<PeerConnectionEvent>.broadcast(sync: true);
+  bool payload = false;
+  bool established = false;
+  int coordsCalls = 0;
+  int payloadCalls = 0;
   int establishCalls = 0;
   int releaseCalls = 0;
-
-  final List<String> dialedTokens = <String>[];
-
-  /// Number of upcoming calls that fail before the scripted success.
-  int coordsNulls = 0;
-  int dialFailures = 0;
-  int establishFailures = 0;
-
-  /// When set, [dial] parks on this until the test completes it.
-  Completer<void>? dialGate;
-
-  /// When set, [mintToken] parks on this until the test completes it — the
-  /// window in which a coords change can invalidate the pending dial.
-  Completer<void>? mintGate;
+  int forceCalls = 0;
+  int fenceCalls = 0;
+  int payloadFailures = 0;
+  Completer<ConnCoords?>? coordsGate;
+  Completer<void>? establishGate;
+  Completer<void>? releaseGate;
+  Completer<void>? forceGate;
+  Object? releaseError;
+  Object? forceError;
+  bool establishFails = false;
 
   @override
-  Future<ConnCoords?> resolveCoords() async {
-    resolveCalls++;
-    if (coordsNulls > 0) {
-      coordsNulls--;
-      return null;
-    }
-    return coords;
+  Stream<PeerConnectionEvent> get events => _events.stream;
+
+  @override
+  Future<ConnCoords?> resolveCoords() {
+    coordsCalls++;
+    return coordsGate?.future ??
+        Future.value(
+          const ConnCoords(
+            relayUrl: 'wss://central.example',
+            agentEd25519PubB64: 'agent-key',
+          ),
+        );
   }
 
   @override
-  Future<String> mintToken() async {
-    mintCalls++;
-    final gate = mintGate;
-    if (gate != null) {
-      await gate.future;
+  Future<void> connectPayload(ConnCoords coords) async {
+    payloadCalls++;
+    if (payloadFailures > 0) {
+      payloadFailures--;
+      throw StateError('native unavailable');
     }
-    return 'token-$mintCalls';
+    payload = true;
   }
 
   @override
-  Future<void> dial(ConnCoords coords, String token) async {
-    dialCalls++;
-    dialedTokens.add(token);
-    final gate = dialGate;
-    if (gate != null) {
-      await gate.future;
-    }
-    if (dialFailures > 0) {
-      dialFailures--;
-      throw StateError('dial rejected');
-    }
-    socketAuthenticatedValue = true;
-  }
-
-  @override
-  bool get socketAuthenticated => socketAuthenticatedValue;
-
-  @override
-  bool get agentOnline => agentOnlineValue;
+  bool get payloadConnected => payload;
 
   @override
   Future<void> establishSession() async {
     establishCalls++;
-    if (establishFailures > 0) {
-      establishFailures--;
-      throw StateError('handshake failed');
-    }
-    sessionEstablishedValue = true;
+    if (establishFails) throw StateError('handshake failed');
+    await establishGate?.future;
+    established = true;
   }
 
   @override
-  bool get sessionEstablished => sessionEstablishedValue;
+  bool get sessionEstablished => established;
+
+  @override
+  void fenceDispatch() {
+    fenceCalls++;
+  }
 
   @override
   Future<void> release() async {
     releaseCalls++;
-    socketAuthenticatedValue = false;
-    agentOnlineValue = false;
-    sessionEstablishedValue = false;
+    if (releaseError case final error?) throw error;
+    await releaseGate?.future;
+    payload = false;
+    established = false;
+  }
+
+  @override
+  Future<void> forceClose() async {
+    forceCalls++;
+    if (forceError case final error?) throw error;
+    await forceGate?.future;
   }
 }
 
-/// Lets microtasks and zero-duration timers drain. Backoffs in these tests are
-/// either 0ms or a few ms, so nothing here waits on real network-scale delays.
-Future<void> settle([int rounds = 16]) async {
-  for (var i = 0; i < rounds; i++) {
+class _Central implements CentralControlContract {
+  final auth = StreamController<String>.broadcast(sync: true);
+  bool reconnect = true;
+  bool fail = false;
+  int connectCalls = 0;
+  int disconnectCalls = 0;
+
+  @override
+  Stream<String> get authErrorStream => auth.stream;
+  @override
+  bool get needsReconnect => reconnect;
+  @override
+  Future<void> connect(ConnCoords coords) async {
+    connectCalls++;
+    if (fail) throw StateError('central unavailable');
+    reconnect = false;
+  }
+
+  @override
+  void disconnect() {
+    disconnectCalls++;
+    reconnect = true;
+  }
+}
+
+Future<void> _settle() async {
+  for (var i = 0; i < 20; i++) {
     await Future<void>.delayed(Duration.zero);
   }
 }
 
-Future<void> waitUntil(bool Function() condition) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
-  while (!condition()) {
-    if (DateTime.now().isAfter(deadline)) {
-      fail('condition not met within 5s');
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-  }
-}
+NativeConnectionSupervisor _supervisor(
+  _Native native, {
+  DateTime Function()? now,
+  Duration graceful = const Duration(milliseconds: 10),
+  Duration forced = const Duration(milliseconds: 10),
+  void Function(BlockReason, String?)? onBlocked,
+}) => NativeConnectionSupervisor(
+  native,
+  backoffBaseMs: 0,
+  backoffCapMs: 0,
+  jitter: (_) => 0,
+  now: now,
+  gracefulStopTimeout: graceful,
+  forcedStopTimeout: forced,
+  onBlocked: onBlocked,
+);
 
 void main() {
-  late ScriptedMechanisms mech;
-
-  setUp(() {
-    mech = ScriptedMechanisms();
-  });
-
-  ConnectionSupervisor build({
-    int backoffBaseMs = 1000,
-    int backoffCapMs = 30000,
-    int routableStallMs = 2000,
-    int Function(int)? jitter,
-  }) {
-    final sup = ConnectionSupervisor(
-      mech,
-      backoffBaseMs: backoffBaseMs,
-      backoffCapMs: backoffCapMs,
-      routableStallMs: routableStallMs,
-      jitter: jitter ?? (_) => 0,
+  test('peer rejection blocks once and reports its failure code', () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
     );
-    addTearDown(sup.dispose);
-    return sup;
-  }
+    supervisor.setWanted(true);
+    await _settle();
+    expect(supervisor.status, const Connected());
 
-  test(
-    'an agent that is simply not running reaches Blocked(agentOffline) on its '
-    'own — no external evaluate() ever fires',
-    () async {
-      // The production scenario the routable rung used to lose: coords resolve,
-      // the dial succeeds, and then nothing else happens because presence is
-      // pushed by a peer that is not there. Nothing in the app calls evaluate()
-      // in that state, so without a stall timer the UI sits on Climbing forever
-      // and never tells the user the agent is offline.
-      final sup = build(routableStallMs: 5);
+    supervisor.notePeerRejected('AUTHORIZATION_DENIED');
+    await _settle();
+    expect(supervisor.status, const Blocked(BlockReason.peerRejected));
+    expect(blocks, [(BlockReason.peerRejected, 'AUTHORIZATION_DENIED')]);
 
-      sup.setWanted(true);
-      await waitUntil(() => sup.status is Blocked);
+    supervisor.notePeerRejected('OTHER_CODE');
+    await _settle();
+    expect(blocks.length, 1);
 
-      expect(sup.status, const Blocked(BlockReason.agentOffline));
-      expect(mech.dialCalls, 1, reason: 'the socket rung was satisfied');
-      expect(mech.establishCalls, 0);
-    },
-  );
-
-  test('evaluate is idempotent — concurrent calls produce one dial', () async {
-    mech.agentOnlineValue = true;
-    mech.dialGate = Completer<void>();
-    final sup = build();
-
-    sup.setWanted(true);
-    await settle(4);
-    expect(mech.dialCalls, 1, reason: 'first evaluate reached the dial');
-
-    final a = sup.evaluate();
-    final b = sup.evaluate();
-    mech.dialGate!.complete();
-    await Future.wait<void>(<Future<void>>[a, b]);
-    await settle();
-
-    expect(mech.dialCalls, 1);
-    expect(mech.mintCalls, 1);
-    expect(mech.resolveCalls, 1);
-    expect(sup.status, const Connected());
+    supervisor.retry();
+    await _settle();
+    expect(supervisor.status, const Connected());
+    supervisor.notePeerRejected('SECOND');
+    await _settle();
+    expect(blocks.length, 2);
+    expect(blocks.last, (BlockReason.peerRejected, 'SECOND'));
   });
 
-  test(
-    'climbs rung by rung: coords → dial(fresh token) → waits presence → establishes',
-    () async {
-      final sup = build();
-      final seen = <SupervisorStatus>[];
-      final sub = sup.statusStream.listen(seen.add);
-      addTearDown(sub.cancel);
-
-      sup.setWanted(true);
-      await settle();
-
-      expect(mech.resolveCalls, 1);
-      expect(mech.dialCalls, 1);
-      expect(mech.dialedTokens.single, 'token-1');
-      expect(
-        mech.establishCalls,
-        0,
-        reason: 'the routable rung must wait for presence',
-      );
-      expect(sup.status, const Climbing(ConnRung.socket));
-
-      mech.agentOnlineValue = true;
-      sup.notePresence(true);
-      await settle();
-
-      expect(mech.establishCalls, 1);
-      expect(sup.status, const Connected());
-      expect(
-        seen,
-        containsAllInOrder(<SupervisorStatus>[
-          const Climbing(ConnRung.socket),
-          const Connected(),
-        ]),
-      );
-    },
-  );
-
-  test('a fresh token is minted for EVERY dial attempt', () async {
-    mech.agentOnlineValue = true;
-    mech.dialFailures = 2;
-    final sup = build(backoffBaseMs: 0);
-
-    sup.setWanted(true);
-    await waitUntil(() => mech.dialCalls >= 3);
-    await settle();
-
-    expect(mech.mintCalls, 3);
-    expect(mech.dialedTokens.length, 3);
-    expect(mech.dialedTokens.toSet().length, 3, reason: 'no token reuse');
-    expect(sup.status, const Connected());
-  });
-
-  test(
-    'highest satisfied rung only — established session + dead socket reruns dial, not handshake',
-    () async {
-      mech.agentOnlineValue = true;
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
-      expect(mech.dialCalls, 1);
-      expect(mech.establishCalls, 1);
-
-      // Session object still believes it is established; the socket under it died.
-      mech.socketAuthenticatedValue = false;
-      sup.noteSocketState(authenticated: false);
-      await settle();
-
-      expect(mech.dialCalls, 2, reason: 'the lowest broken rung is the socket');
-      expect(mech.mintCalls, 2);
-      expect(
-        mech.establishCalls,
-        1,
-        reason: 'the established rung was already satisfied',
-      );
-      expect(sup.status, const Connected());
-    },
-  );
-
-  test('per-rung backoff doubles with jitter and resets on success', () async {
-    final windows = <int>[];
-    mech.agentOnlineValue = true;
-    mech.dialFailures = 3;
-    final sup = build(
-      backoffBaseMs: 4,
-      jitter: (int maxExclusive) {
-        windows.add(maxExclusive);
-        return 0;
-      },
+  test('auth verdicts report their license code; unknown codes report nothing',
+      () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
     );
+    supervisor.setWanted(true);
+    await _settle();
 
-    sup.setWanted(true);
-    await waitUntil(() => mech.dialCalls >= 4);
-    await settle();
+    supervisor.noteAuthError('SOMETHING_ELSE');
+    await _settle();
+    expect(blocks, isEmpty);
 
-    expect(windows, <int>[4, 8, 16]);
-    expect(sup.status, const Connected());
-
-    // A later failure starts from the base again — success reset the rung.
-    windows.clear();
-    mech.dialFailures = 1;
-    mech.socketAuthenticatedValue = false;
-    sup.noteSocketState(authenticated: false);
-    await waitUntil(() => windows.isNotEmpty);
-
-    expect(windows.first, 4);
+    supervisor.noteAuthError('LICENSE_INVALID');
+    await _settle();
+    expect(blocks, [(BlockReason.deviceRevoked, 'LICENSE_INVALID')]);
   });
 
-  test(
-    'the backoff window saturates at the cap and never falls below the base',
-    () async {
-      // The regression this guards is a shift overflow: `base << attempt` with
-      // no clamp goes negative (and then below the base, i.e. a retry storm)
-      // once attempt passes 63. Only a long run of consecutive failures can
-      // see it, so the doubling test above cannot.
-      final windows = <int>[];
-      mech.agentOnlineValue = true;
-      mech.dialFailures = 99;
-      final sup = build(
-        backoffBaseMs: 1,
-        backoffCapMs: 8,
-        jitter: (int maxExclusive) {
-          windows.add(maxExclusive);
-          return 0;
-        },
-      );
+  test('a rejection arriving during teardown reports nothing', () async {
+    final native = _Native();
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    await _settle();
 
-      sup.setWanted(true);
-      await waitUntil(() => windows.length >= 10);
+    final stopping = supervisor.stop();
+    supervisor.notePeerRejected('DISPOSED_AFTER_CONNECT');
+    await stopping;
+    expect(blocks, isEmpty);
+  });
 
-      expect(windows.take(4), <int>[1, 2, 4, 8]);
-      expect(
-        windows.skip(4),
-        everyElement(8),
-        reason: 'the window must saturate at the cap, never keep doubling',
-      );
-      expect(windows, everyElement(inInclusiveRange(1, 8)));
-    },
-  );
-
-  test(
-    'a coords change during mintToken() is not charged to the socket backoff',
-    () async {
-      final windows = <int>[];
-      mech.agentOnlineValue = true;
-      final sup = build(
-        backoffBaseMs: 4,
-        jitter: (int maxExclusive) {
-          windows.add(maxExclusive);
-          return 0;
-        },
-      );
-
-      mech.mintGate = Completer<void>();
-      sup.setWanted(true);
-      await waitUntil(() => mech.mintCalls >= 1);
-
-      // The machine moved while the token was in flight: the coords the dial
-      // was about to use are gone. That is a coords event, not a socket
-      // failure, and must not delay the next dial.
-      sup.noteCoordsChanged();
-      mech.mintGate!.complete();
-      mech.mintGate = null;
-      await waitUntil(() => sup.status == const Connected());
-
-      expect(
-        windows,
-        isEmpty,
-        reason: 'no rung failed, so no backoff window was computed',
-      );
-      expect(mech.dialCalls, 1);
-    },
-  );
-
-  test(
-    'agentOffline blocks after repeated routable stalls and unblocks on notePresence(true)',
-    () async {
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Climbing(ConnRung.socket));
-
-      await sup.evaluate();
-      expect(sup.status, const Climbing(ConnRung.socket));
-
-      await sup.evaluate();
-      expect(sup.status, const Blocked(BlockReason.agentOffline));
-      expect(mech.establishCalls, 0);
-
-      mech.agentOnlineValue = true;
-      sup.notePresence(true);
-      await settle();
-
-      expect(sup.status, const Connected());
-      expect(mech.establishCalls, 1);
-    },
-  );
-
-  test(
-    'sessionTakenOver blocks and ONLY retry() unblocks (presence does not)',
-    () async {
-      mech.agentOnlineValue = true;
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
-
-      mech.sessionEstablishedValue = false;
-      sup.noteSessionTakenOver();
-      await settle();
-      expect(sup.status, const Blocked(BlockReason.sessionTakenOver));
-      expect(mech.establishCalls, 1);
-
-      sup.notePresence(true);
-      sup.noteFreshToken();
-      sup.noteCoordsChanged();
-      sup.noteResume();
-      sup.noteSessionDown();
-      await settle();
-
-      expect(
-        sup.status,
-        const Blocked(BlockReason.sessionTakenOver),
-        reason: 'presence must never auto-resume a session another device took',
-      );
-      expect(mech.establishCalls, 1);
-
-      sup.retry();
-      await settle();
-
-      expect(sup.status, const Connected());
-      expect(mech.establishCalls, 2);
-    },
-  );
-
-  test(
-    'LICENSE_EXPIRED blocks and noteFreshToken() unblocks into a dial',
-    () async {
-      mech.agentOnlineValue = true;
-      mech.dialFailures = 1;
-      final sup = build();
-
-      sup.setWanted(true);
-      await settle();
-      expect(mech.dialCalls, 1);
-
-      sup.noteRelayError('LICENSE_EXPIRED', retryable: false);
-      await settle();
-      expect(sup.status, const Blocked(BlockReason.licenseExpired));
-
-      sup.noteResume();
-      await sup.evaluate();
-      await settle();
-      expect(mech.dialCalls, 1, reason: 'a block does not clear on evaluation');
-
-      sup.noteFreshToken();
-      await settle();
-
-      expect(mech.dialCalls, 2);
-      expect(mech.mintCalls, 2);
-      expect(mech.dialedTokens, <String>['token-1', 'token-2']);
-      expect(sup.status, const Connected());
-    },
-  );
-
-  test(
-    'SUPERSEDED against our OWN stale relay entry recovers on the next dial',
-    () async {
-      // Network blip: the client socket died instantly, the relay still holds
-      // the old entry, and the redial carries the same per-launch epoch — which
-      // the relay rejects as "a newer or equal connection already holds this
-      // deviceId". Once its liveness sweep drops the stale entry the very same
-      // epoch is admitted, so this must not be a dead end.
-      mech.agentOnlineValue = true;
-      final sup = build(backoffBaseMs: 0);
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
-
-      mech.socketAuthenticatedValue = false;
-      mech.sessionEstablishedValue = false;
-      mech.dialFailures = 1;
-      sup.noteRelayError('SUPERSEDED', retryable: false);
-      // Inputs evaluate on a microtask (see _kick), so the stale Connected
-      // status survives until the deferred evaluation runs — drain first or
-      // the waitUntil below matches it before the ladder even starts.
-      await settle();
-      await waitUntil(() => sup.status == const Connected());
-
-      expect(mech.dialCalls, 3);
-    },
-  );
-
-  test('SUPERSEDED blocks only after the relay has had time to sweep, and '
-      'retry() clears it', () async {
-    mech.agentOnlineValue = true;
-    final sup = build(backoffBaseMs: 0);
-    sup.setWanted(true);
-    await settle();
-    expect(sup.status, const Connected());
-
-    mech.socketAuthenticatedValue = false;
-    mech.sessionEstablishedValue = false;
-    mech.dialFailures = 999;
-    for (var i = 0; i < kMaxSupersededRetries - 1; i++) {
-      sup.noteRelayError('SUPERSEDED', retryable: false);
-      await settle();
-      expect(
-        sup.status,
-        isNot(isA<Blocked>()),
-        reason: 'a genuinely newer holder is only provable by persistence',
-      );
+  test('an exhausted handshake reports a block with no code', () async {
+    final native = _Native()..establishFails = true;
+    final blocks = <(BlockReason, String?)>[];
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (reason, code) => blocks.add((reason, code)),
+    );
+    supervisor.setWanted(true);
+    for (var i = 0; i < 200 && supervisor.status is! Blocked; i++) {
+      await Future<void>.delayed(Duration.zero);
     }
 
-    sup.noteRelayError('SUPERSEDED', retryable: false);
-    await settle();
-    expect(sup.status, const Blocked(BlockReason.superseded));
-
-    sup.noteFreshToken();
-    sup.notePresence(true);
-    await settle();
-    expect(sup.status, const Blocked(BlockReason.superseded));
-
-    mech.dialFailures = 0;
-    sup.retry();
-    await waitUntil(() => sup.status == const Connected());
+    expect(supervisor.status, const Blocked(BlockReason.handshakeFailing));
+    expect(blocks, [(BlockReason.handshakeFailing, null)]);
   });
 
-  test('repeated socket failures re-resolve the coords instead of dialling a '
-      'dead endpoint forever', () async {
-    // A host that moved relay (or re-provisioned its identity) while this
-    // machine was held warm: the cached coords can never succeed, and with
-    // no producer for noteCoordsChanged() the ladder used to sit on the 30s
-    // socket cap with no Blocked reason and an inert Retry.
-    mech.agentOnlineValue = true;
-    mech.dialFailures = 999;
-    final sup = build(backoffBaseMs: 0);
-
-    sup.setWanted(true);
-    await waitUntil(() => mech.resolveCalls >= 2);
-
-    expect(mech.dialCalls, greaterThanOrEqualTo(kMaxSocketFailuresPerCoords));
-  });
-
-  test('retry() re-resolves the coords, not just the backoff', () async {
-    mech.agentOnlineValue = true;
-    final sup = build();
-    sup.setWanted(true);
-    await settle();
-    expect(sup.status, const Connected());
-    expect(mech.resolveCalls, 1);
-
-    // The user's Retry is the manual "something out there changed" input, so
-    // it must re-ask where the machine lives — otherwise a stale endpoint
-    // survives every retry the user can make.
-    mech.socketAuthenticatedValue = false;
-    mech.sessionEstablishedValue = false;
-    sup.retry();
-    await settle();
-
-    expect(mech.resolveCalls, 2);
-    expect(sup.status, const Connected());
-  });
-
-  test(
-    'LICENSE_REVOKED and LICENSE_INVALID block on deviceRevoked; only retry() clears it',
-    () async {
-      mech.agentOnlineValue = true;
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
-
-      mech.socketAuthenticatedValue = false;
-      mech.sessionEstablishedValue = false;
-      sup.noteRelayError('LICENSE_REVOKED', retryable: false);
-      await settle();
-      expect(sup.status, const Blocked(BlockReason.deviceRevoked));
-      expect(mech.dialCalls, 1);
-
-      // A revoked device needs re-provisioning outside this supervisor, so no
-      // amount of new tokens, presence or coords may resume it on its own.
-      sup.noteFreshToken();
-      sup.notePresence(true);
-      sup.noteCoordsChanged();
-      sup.noteResume();
-      await settle();
-      expect(sup.status, const Blocked(BlockReason.deviceRevoked));
-      expect(mech.dialCalls, 1);
-
-      sup.retry();
-      await settle();
-      expect(mech.dialCalls, 2);
-      expect(sup.status, const Connected());
-
-      // LICENSE_INVALID lands on the same block.
-      mech.socketAuthenticatedValue = false;
-      sup.noteRelayError('LICENSE_INVALID', retryable: false);
-      await settle();
-      expect(sup.status, const Blocked(BlockReason.deviceRevoked));
-      expect(mech.dialCalls, 2);
-    },
-  );
-
-  test('noteCoordsChanged() unblocks agentOffline and re-resolves', () async {
-    final sup = build();
-    sup.setWanted(true);
-    await settle();
-    await sup.evaluate();
-    await sup.evaluate();
-    expect(sup.status, const Blocked(BlockReason.agentOffline));
-    expect(mech.resolveCalls, 1);
-
-    // New coords are new information about where the agent lives, so the
-    // "offline" verdict earned at the old endpoint no longer holds.
-    mech.coords = const ConnCoords(
-      relayUrl: 'wss://relay2.test',
-      agentEd25519PubB64: 'AGENT_PUB',
+  test('a throwing block observer cannot break the ladder', () async {
+    final native = _Native();
+    final supervisor = _supervisor(
+      native,
+      onBlocked: (_, _) => throw StateError('observer'),
     );
-    mech.agentOnlineValue = true;
-    sup.noteCoordsChanged();
-    await settle();
+    supervisor.setWanted(true);
+    await _settle();
 
-    expect(mech.resolveCalls, 2);
-    expect(sup.status, const Connected());
+    expect(() => supervisor.notePeerRejected('X'), returnsNormally);
+    expect(supervisor.status, const Blocked(BlockReason.peerRejected));
+  });
+
+  test('native ladder climbs coords, payload, established', () async {
+    final native = _Native();
+    final supervisor = _supervisor(native);
+    supervisor.setWanted(true);
+    await _settle();
+
+    expect(supervisor.status, const Connected());
+    expect(native.coordsCalls, 1);
+    expect(native.payloadCalls, 1);
+    expect(native.establishCalls, 1);
+    expect(await supervisor.stop(), NativeStopResult.stopped);
+  });
+
+  test('central supersession is sticky and leaves native healthy', () async {
+    final native = _Native();
+    final nativeSupervisor = _supervisor(native);
+    final central = _Central();
+    final centralSupervisor = CentralControlSupervisor(
+      central,
+      backoffBaseMs: 0,
+      backoffCapMs: 0,
+      jitter: (_) => 0,
+    );
+    const coords = ConnCoords(
+      relayUrl: 'wss://central.example',
+      agentEd25519PubB64: 'agent-key',
+    );
+    nativeSupervisor.setWanted(true);
+    centralSupervisor.noteCoords(coords);
+    centralSupervisor.setWanted(true);
+    await _settle();
+
+    expect(nativeSupervisor.status, const Connected());
+    central.reconnect = true;
+    centralSupervisor.noteRelayError('SUPERSEDED');
+    final calls = central.connectCalls;
+    centralSupervisor.noteStateChanged();
+    await _settle();
+    expect(centralSupervisor.conflict, isTrue);
+    expect(central.connectCalls, calls);
+    expect(nativeSupervisor.status, const Connected());
+
+    centralSupervisor.retry();
+    await _settle();
+    expect(centralSupervisor.conflict, isFalse);
+    expect(central.connectCalls, greaterThan(calls));
+    await centralSupervisor.stop();
+    await nativeSupervisor.stop();
   });
 
   test(
-    'noteCoordsChanged() unblock is not instantly undone by a stale stall count',
+    'central conflict stays sticky while native recovery continues',
     () async {
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      await sup.evaluate();
-      await sup.evaluate();
-      expect(sup.status, const Blocked(BlockReason.agentOffline));
-
-      // The agent is STILL offline at the new endpoint — unlike the sibling
-      // test above, this must not climb straight to Connected. It exercises
-      // whether the unblock actually buys a fresh run of stalls rather than
-      // inheriting the count that just tripped the block.
-      mech.coords = const ConnCoords(
-        relayUrl: 'wss://relay2.test',
-        agentEd25519PubB64: 'AGENT_PUB',
+      final now = DateTime(2026);
+      final native = _Native()..payloadFailures = 2;
+      final nativeSupervisor = NativeConnectionSupervisor(
+        native,
+        backoffBaseMs: 100000,
+        backoffCapMs: 100000,
+        jitter: (_) => 0,
+        now: () => now,
       );
-      sup.noteCoordsChanged();
-      await settle();
+      final central = _Central();
+      final centralSupervisor = CentralControlSupervisor(
+        central,
+        backoffBaseMs: 100000,
+        backoffCapMs: 100000,
+        jitter: (_) => 0,
+        now: () => now,
+      );
+      const coords = ConnCoords(
+        relayUrl: 'wss://central.example',
+        agentEd25519PubB64: 'agent-key',
+      );
+      nativeSupervisor.setWanted(true);
+      centralSupervisor.noteCoords(coords);
+      centralSupervisor.setWanted(true);
+      await _settle();
+      expect(native.payloadCalls, 1);
 
-      expect(sup.status, isNot(const Blocked(BlockReason.agentOffline)));
+      central.reconnect = true;
+      centralSupervisor.noteRelayError('SUPERSEDED');
+      final centralCalls = central.connectCalls;
+      nativeSupervisor.notePresence(true);
+      await _settle();
+
+      expect(
+        native.payloadCalls,
+        2,
+        reason: 'native recovery remains independent',
+      );
+      expect(centralSupervisor.conflict, isTrue);
+      expect(
+        central.connectCalls,
+        centralCalls,
+        reason: 'conflict remains sticky',
+      );
+      await centralSupervisor.stop();
+      await nativeSupervisor.stop();
     },
   );
 
-  test('retryable relay errors do not block — they just re-evaluate', () async {
-    mech.agentOnlineValue = true;
-    final sup = build();
-    sup.setWanted(true);
-    await settle();
+  test('presence accelerates only bounded offline-to-online edges', () async {
+    var now = DateTime(2026);
+    final native = _Native()..payloadFailures = 4;
+    final supervisor = NativeConnectionSupervisor(
+      native,
+      backoffBaseMs: 100000,
+      backoffCapMs: 100000,
+      jitter: (_) => 0,
+      now: () => now,
+    );
+    supervisor.setWanted(true);
+    await _settle();
+    expect(native.payloadCalls, 1);
 
-    mech.socketAuthenticatedValue = false;
-    sup.noteRelayError('PEER_OFFLINE', retryable: true);
-    await settle();
+    supervisor.notePresence(true);
+    await _settle();
+    expect(native.payloadCalls, 2);
+    supervisor.notePresence(false);
+    supervisor.notePresence(true);
+    await _settle();
+    expect(native.payloadCalls, 2);
 
-    expect(sup.status, const Connected());
-    expect(mech.dialCalls, 2);
+    now = now.add(const Duration(seconds: 31));
+    supervisor.notePresence(false);
+    supervisor.notePresence(true);
+    await _settle();
+    expect(native.payloadCalls, 3);
+    supervisor.noteResume();
+    await _settle();
+    expect(native.coordsCalls, 2, reason: 'presence did not reset failures');
+    await supervisor.stop();
   });
 
-  test('handshake failures block after 6 consecutive attempts', () async {
-    mech.agentOnlineValue = true;
-    mech.establishFailures = 99;
-    final sup = build(backoffBaseMs: 0);
+  test('duplicate stop shares completion and releases once', () async {
+    final native = _Native();
+    final supervisor = _supervisor(native);
+    supervisor.setWanted(true);
+    await _settle();
 
-    sup.setWanted(true);
-    await waitUntil(() => sup.status is Blocked);
-    await settle();
+    final first = supervisor.stop();
+    final second = supervisor.stop();
+    expect(identical(first, second), isTrue);
+    expect(await first, NativeStopResult.stopped);
+    expect(native.releaseCalls, 1);
+    expect(native.fenceCalls, 1);
+  });
 
-    expect(sup.status, const Blocked(BlockReason.handshakeFailing));
-    expect(mech.establishCalls, 6);
+  test('release errors are not reported as successful cleanup', () async {
+    final native = _Native()
+      ..releaseError = StateError('release failed')
+      ..forceError = StateError('force failed');
+    final supervisor = _supervisor(native);
 
-    mech.establishFailures = 0;
-    sup.notePresence(true);
-    await settle();
-
-    expect(sup.status, const Connected());
-    expect(mech.establishCalls, 7);
+    expect(await supervisor.stop(), NativeStopResult.cleanupIncomplete);
+    expect(native.forceCalls, 1);
   });
 
   test(
-    'noteResume() while healthy is a no-op; while broken it re-runs the broken rung',
+    'never-settling teardown returns cleanupIncomplete within bounds',
     () async {
-      mech.agentOnlineValue = true;
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
+      final native = _Native()
+        ..releaseGate = Completer<void>()
+        ..forceGate = Completer<void>();
+      final supervisor = _supervisor(
+        native,
+        graceful: const Duration(milliseconds: 5),
+        forced: const Duration(milliseconds: 5),
+      );
+      final elapsed = Stopwatch()..start();
 
-      sup.noteResume();
-      await settle();
-      expect(mech.dialCalls, 1);
-      expect(mech.establishCalls, 1);
-      expect(mech.resolveCalls, 1);
-      expect(sup.status, const Connected());
-
-      // Socket died with no edge event to announce it — resume must notice.
-      mech.socketAuthenticatedValue = false;
-      sup.noteResume();
-      await settle();
-
-      expect(mech.dialCalls, 2);
-      expect(mech.establishCalls, 1);
-      expect(sup.status, const Connected());
+      expect(await supervisor.stop(), NativeStopResult.cleanupIncomplete);
+      expect(elapsed.elapsed, lessThan(const Duration(seconds: 1)));
+      expect(native.forceCalls, 1);
     },
   );
 
-  test('setWanted(false) releases and stops all timers', () async {
-    mech.agentOnlineValue = true;
-    mech.dialFailures = 99;
-    final sup = build(backoffBaseMs: 4);
+  test('paused status listener cannot hold a completed stop open', () async {
+    final native = _Native();
+    final supervisor = _supervisor(native);
+    final subscription = supervisor.statusStream.listen((_) {})..pause();
 
-    sup.setWanted(true);
-    await waitUntil(() => mech.dialCalls >= 2);
-
-    sup.setWanted(false);
-    await settle();
-    final dialsAtRelease = mech.dialCalls;
-    // Deliberately not an exact count: release() is documented to run on EVERY
-    // evaluation while !wanted, and a starved runner can have two pending —
-    // the backoff timer's _kick and setWanted's — land in the same turn, since
-    // both timers come due together and neither callback drains microtasks
-    // before the other queues its own. Growth AFTER quiescence is the signal.
-    final releasesAtQuiesce = mech.releaseCalls;
-    expect(releasesAtQuiesce, greaterThanOrEqualTo(1));
-    expect(sup.status, const Released());
-
-    await Future<void>.delayed(const Duration(milliseconds: 60));
     expect(
-      mech.dialCalls,
-      dialsAtRelease,
-      reason: 'no work runs while released',
+      await supervisor.stop().timeout(const Duration(seconds: 1)),
+      NativeStopResult.stopped,
     );
-    // dialCalls alone cannot see a leaked timer — the !wanted branch returns
-    // before any dial. release() is the observable: a surviving backoff timer
-    // fires _kick(), which re-runs that branch and releases again. Nothing is
-    // queued once settle() has drained, so any growth here is that timer.
-    expect(
-      mech.releaseCalls,
-      releasesAtQuiesce,
-      reason: 'the armed backoff timer must be cancelled, not merely ignored',
-    );
+    await subscription.cancel();
   });
 
   test(
-    'statusStream is broadcast and replays the current status on listen',
+    'late coordinate completion cannot publish readiness after stop',
     () async {
-      mech.agentOnlineValue = true;
-      final sup = build();
-      sup.setWanted(true);
-      await settle();
-      expect(sup.status, const Connected());
+      final native = _Native()..coordsGate = Completer<ConnCoords?>();
+      final supervisor = _supervisor(
+        native,
+        graceful: const Duration(milliseconds: 5),
+        forced: const Duration(milliseconds: 5),
+      );
+      supervisor.setWanted(true);
+      await _settle();
 
-      final stream = sup.statusStream;
-      expect(stream.isBroadcast, isTrue);
-
-      final first = await stream.first;
-      expect(first, const Connected());
-
-      final second = await sup.statusStream.first;
-      expect(second, const Connected());
+      expect(await supervisor.stop(), NativeStopResult.cleanupIncomplete);
+      native.coordsGate!.complete(
+        const ConnCoords(
+          relayUrl: 'wss://late.example',
+          agentEd25519PubB64: 'late-key',
+        ),
+      );
+      await _settle();
+      expect(supervisor.status, isNot(const Connected()));
+      expect(native.payloadCalls, 0);
     },
   );
-
-  // Named for what it can actually observe: after dispose every path out of a
-  // surviving timer is already guarded, so "no work happens" is the testable
-  // requirement, not "the Timer object was cancelled".
-  test('dispose closes the stream and no input does work afterwards', () async {
-    mech.agentOnlineValue = true;
-    mech.dialFailures = 99;
-    final sup = ConnectionSupervisor(mech, backoffBaseMs: 4, jitter: (_) => 0);
-    var done = false;
-    sup.statusStream.listen(null, onDone: () => done = true);
-
-    sup.setWanted(true);
-    await waitUntil(() => mech.dialCalls >= 2);
-
-    await sup.dispose();
-    final dialsAtDispose = mech.dialCalls;
-    await Future<void>.delayed(const Duration(milliseconds: 60));
-
-    expect(done, isTrue);
-    expect(mech.dialCalls, dialsAtDispose);
-
-    sup.retry();
-    sup.noteResume();
-    await settle();
-    expect(mech.dialCalls, dialsAtDispose);
-  });
 }

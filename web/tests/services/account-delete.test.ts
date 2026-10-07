@@ -10,6 +10,7 @@ import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount } from "../../src/services/account.js";
 import { ensureFreeSubscription, provisionProductAccountForUser } from "../../src/models/subscription.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
+import { createOutboxSender, EmailKeyring } from "../../src/auth/email-outbox.js";
 import { applySubscriptionEvent } from "../../src/billing/reducer.js";
 
 let pg: PgHandle;
@@ -83,6 +84,34 @@ describe("deleteUserAccount", () => {
     expect(residual.providerTransactionId).toBeNull();
     // Device rows hard-deleted (the revoke loop ran + the tx delete fired).
     expect(await pg.db.device.count({ where: { userId: user.id } })).toBe(0);
+  });
+
+  test("deletion removes linked origins, pending approvals and encrypted mail without deleting billing", async () => {
+    const user = await createTestUser(pg.db, "delete-auth@example.com");
+    const origin = { surface: "flutter", platform: "android", method: "magic_link", quality: "reported", version: "1" };
+    await pg.db.user.update({ where: { id: user.id }, data: { registrationOrigin: origin, activationOrigin: origin } });
+    const linked = await pg.db.authJourney.create({ data: { userId: user.id, origin } });
+    const flow = await pg.db.authFlow.create({ data: { journeyId: linked.id, expiresAt: new Date(Date.now()+600000) } });
+    const sendEmail = createOutboxSender(pg.db, new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") }));
+    const { app, auth } = buildTestApp(pg.db, pg.url, { sendEmail });
+    await sendEmail({ to: user.email, subject: "Review", text: "private token", expiresAt: flow.expiresAt });
+    const orphan = await pg.db.emailJob.findFirstOrThrow();
+    await pg.db.emailJob.update({ where: { id: orphan.id }, data: { flowId: flow.id } });
+    const request = await app.request("/api/auth/sign-in/cross-device/start", {
+      method: "POST", headers: { "content-type": "application/json", origin: "http://localhost:8787" }, body: JSON.stringify({ email: user.email }),
+    });
+    expect(request.status).toBe(200);
+    expect(await pg.db.emailJob.count()).toBe(2);
+    expect(await pg.db.pendingSignIn.count()).toBe(1);
+    expect(await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, { userId: user.id, headers: new Headers() })).toBe("deleted");
+    expect(await pg.db.authJourney.count()).toBe(0);
+    expect(await pg.db.authFlow.count()).toBe(0);
+    expect(await pg.db.pendingSignIn.count()).toBe(0);
+    expect(await pg.db.emailJob.count()).toBe(0);
+    const after = await pg.db.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(after.registrationOrigin).toBeNull();
+    expect(after.activationOrigin).toBeNull();
+    expect(await pg.db.productAccount.count()).toBe(1);
   });
 
   test("blocks when a renewing paid subscription exists", async () => {

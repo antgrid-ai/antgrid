@@ -4,13 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
+import '../providers/app_toaster.dart';
 import '../providers/focused_tools.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/session_mode.dart';
@@ -99,7 +99,7 @@ class SessionModeControl extends ConsumerWidget {
 /// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
 /// text-menu host (the mobile overflow popup) instead of a segmented
 /// control. A menu row has no room to show the option NOT being picked, so
-/// the label names the action ("Switch to Terminal"/"Switch to Chat")
+/// the label names the action ("Switch to Terminal"/"Switch to Chat UI")
 /// instead of the two-state choice. Same visibility/capability rules as
 /// [SessionModeControl] — keep the two in lockstep by hand; neither is a
 /// special case of the other's build method.
@@ -128,7 +128,7 @@ class SessionModeMenuItem extends ConsumerWidget {
     final targetEnabled = target == 'terminal' || chatEnabled;
 
     final row = AbLiveMenuRow(
-      label: target == 'chat' ? 'Switch to Chat' : 'Switch to Terminal',
+      label: target == 'chat' ? 'Switch to Chat UI' : 'Switch to Terminal',
       icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
       enabled: targetEnabled,
       disabledReason: chatCapable == null
@@ -253,14 +253,14 @@ Future<void> _switchMode(
             .read(projectSessionProvider(projectId))
             .value
             ?.sessionsService;
+  // The app's toaster, not the header's: the header that asked may be gone
+  // by the time these arrive.
+  final toaster = container.read(appToasterProvider);
   if (service == null) {
-    if (context.mounted) {
-      showAbSnackBar(
-        context,
-        "Couldn't switch to $target — this project isn't connected yet. Try "
-        'again in a moment.',
-      );
-    }
+    toaster.showMessage(
+      "Couldn't switch to $target — this project isn't connected yet. Try "
+      'again in a moment.',
+    );
     return;
   }
 
@@ -278,7 +278,7 @@ Future<void> _switchMode(
     // drop its panel back to the old view and re-enable its toggle mid-flight.
     if (container.read(pendingSessionModeProvider) == ours) pending.set(null);
   }
-  if (result.ok || !context.mounted) return;
+  if (result.ok) return;
   final error = result.error ?? '';
   final String body;
   if (error.contains(kTeardownTimeoutError)) {
@@ -297,7 +297,7 @@ Future<void> _switchMode(
         "Couldn't switch to $target. The session is still in "
         '${session.mode} mode.';
   }
-  // A snack bar, not a second modal: the user already confirmed once, and the
+  // A toast, not a second modal: the user already confirmed once, and the
   // session is no worse off than before the tap.
-  showAbSnackBar(context, body, duration: const Duration(seconds: 8));
+  toaster.showMessage(body, duration: const Duration(seconds: 8));
 }

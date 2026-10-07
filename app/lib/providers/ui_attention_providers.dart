@@ -8,7 +8,7 @@ import 'providers.dart';
 import 'value_controller.dart';
 import 'terminal_demand.dart';
 
-/// Current app lifecycle, mirrored from `workspace_shell`'s
+/// Current app lifecycle, mirrored from `AgentNotificationSurfacer`'s
 /// `didChangeAppLifecycleState`. Defaults to resumed.
 final appLifecycleStateProvider =
     NotifierProvider<ValueController<AppLifecycleState>, AppLifecycleState>(
@@ -22,7 +22,13 @@ final appLifecycleStateProvider =
 final agentSurfaceVisibleProvider =
     NotifierProvider<ValueController<bool>, bool>(() => ValueController(true));
 
-enum WorkbenchSurface { workspace, newSession, appSettings, remoteDevices }
+enum WorkbenchSurface {
+  workspace,
+  newSession,
+  scheduler,
+  appSettings,
+  remoteDevices,
+}
 
 /// The top-level workbench surface rendered beside the project drawer.
 final workbenchSurfaceProvider =

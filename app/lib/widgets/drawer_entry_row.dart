@@ -5,7 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
+import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -19,7 +19,7 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_chip.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../launcher/host_controller.dart' show HostPhase;
@@ -41,7 +41,7 @@ import '../providers/collapsed_drawer.dart';
 import '../providers/drawer_expansion.dart';
 import '../providers/host_status.dart';
 import '../providers/new_session_action.dart'
-    show SessionLimitExceededException, openRemoteProjectForActivation;
+    show openRemoteProjectForActivation;
 import '../providers/new_session_picker.dart'
     show
         enterNewSession,
@@ -53,8 +53,6 @@ import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
-import '../screens/upgrade_screen.dart';
-import '../billing/pricing_visibility.dart';
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
 import 'session_isolation_badge.dart' show sessionIsIsolated;
@@ -171,10 +169,10 @@ class _MachineDrawerHeaderRowState
 /// diverge in leading glyph, trailing kit and depth all at once. It also gives
 /// the local bridge host the only status surface it has in the drawer.
 ///
-/// Deliberately NOT tappable, and so it carries no chevron: a machine band
-/// discloses a control-plane fetch, while every local project is already
-/// listed below this one. A chevron here would promise a load that does not
-/// exist.
+/// Tappable to fold every local project away ([localMachineCollapsedProvider]).
+/// Unlike a remote band the chevron discloses no fetch — the projects are
+/// already known — so the fold is purely for scanning density and is not
+/// persisted.
 class LocalMachineBand extends ConsumerWidget {
   const LocalMachineBand({super.key, this.showRule = true});
 
@@ -194,6 +192,9 @@ class LocalMachineBand extends ConsumerWidget {
           if (showRule) const DrawerBandRule(),
           DrawerBand(
             label: 'This machine',
+            expanded: !ref.watch(localMachineCollapsedProvider),
+            onTap: () =>
+                ref.read(localMachineCollapsedProvider.notifier).toggle(),
             // No host dot under the demo: there is no bridge behind the sample
             // project, and [hostStatusProvider] answers for the REAL machine — on
             // a desktop that opened a project earlier in the session that is a
@@ -859,19 +860,9 @@ String removeLocalProjectBody(ProviderContainer container, String projectId) {
 /// detail for the same reason — the connection error screen is where a reason
 /// belongs, and it has one.
 String connectFailureMessage(Object error) => switch (error) {
-  ConnectionBlockedException(reason: final r) => switch (r) {
-    BlockReason.licenseExpired =>
-      'Connect failed: this machine needs an active plan or a sign-in.',
-    BlockReason.agentOffline => 'Connect failed: that machine is offline.',
-    BlockReason.deviceRevoked =>
-      "Connect failed: this device's access was revoked.",
-    BlockReason.sessionTakenOver =>
-      'Connect failed: another device took over this machine.',
-    BlockReason.superseded =>
-      'Connect failed: a newer connection replaced this one.',
-    BlockReason.handshakeFailing =>
-      'Connect failed: could not verify that machine.',
-  },
+  ConnectionBlockedException(reason: final reason) => blockReasonPresentation(
+    reason,
+  ).connectFailure,
   _ => 'Connect failed.',
 };
 
@@ -889,7 +880,7 @@ Future<bool> selectRemoteAgent(
         .read(recentAgentsProvider)
         .firstWhere((r) => r.agentDeviceId == agentDeviceId);
     // No rendezvous: reading the machine's transport declares the connection
-    // wanted and hands the supervisor the ladder (dial → presence → E2E
+    // wanted and hands the supervisor the ladder (dial → presence → session
     // handshake as this app's own DeviceRecord). It throws with the block
     // reason when the supervisor gives up, which is what the snackbar reports.
     await ref.read(agentTransportForProvider(ra.agentDeviceId).future);
@@ -899,7 +890,7 @@ Future<bool> selectRemoteAgent(
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, connectFailureMessage(e));
+      showAbToast(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -925,19 +916,11 @@ Future<bool> ensureRemoteOnline(
   ProviderContainer ref,
   String registrationId,
 ) async {
-  if (ref.read(agentReachabilityProvider) != AgentReachability.offline) {
-    return true;
-  }
-  // `offline` is reachable ONLY from a Blocked(agentOffline) ladder, so the
-  // transport element is already settled in an error that `noProviderRetry`
-  // guarantees Riverpod will never re-run: awaiting `.future` alone replays the
-  // original exception without dialling anything. BOTH halves are required, for
-  // the reasons `MachineConnectionNotifier.retryAgentConnection` sets out.
-  ref
-      .read(relayConnectionManagerProvider)
-      .peek(registrationId)
-      ?.supervisor
-      ?.retry();
+  final status = ref.read(supervisorStatusProvider(registrationId)).value;
+  if (status is! Blocked) return true;
+  // A block is sticky. This user action is the explicit Retry that clears it;
+  // rebuilding the provider alone would only replay the same verdict.
+  ref.read(relayConnectionManagerProvider).peek(registrationId)?.retry();
   ref.invalidate(agentTransportForProvider(registrationId));
   try {
     // Null is a machine no source can name coordinates for (dropped from the
@@ -946,14 +929,14 @@ Future<bool> ensureRemoteOnline(
     if (await ref.read(agentTransportForProvider(registrationId).future) ==
         null) {
       if (context.mounted) {
-        showAbSnackBar(context, 'That machine is no longer reachable.');
+        showAbToast(context, 'That machine is no longer reachable.');
       }
       return false;
     }
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, connectFailureMessage(e));
+      showAbToast(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -1017,7 +1000,7 @@ Future<bool> activateDrawerEntryById(
         !ref.read(focusedAgentBlockedProvider) &&
         ref.read(agentReachabilityProvider) == AgentReachability.connecting) {
       if (context.mounted) {
-        showAbSnackBar(context, _stillWaitingMessage(ref));
+        showAbToast(context, _stillWaitingMessage(ref));
       }
       return false;
     }
@@ -1064,7 +1047,7 @@ Future<bool> activateDrawerEntryById(
     case InventoryAgentEntry e:
       // Same-account machine straight from the peers inventory. Reading its
       // transport brings the supervisor up; the agent admits us from the
-      // inventory when the E2E handshake lands.
+      // inventory when the session handshake lands.
       final priorTarget = ref.read(selectedTargetProvider);
       ref.read(selectedTargetProvider.notifier).set(null);
       try {
@@ -1076,7 +1059,7 @@ Future<bool> activateDrawerEntryById(
       } catch (ex) {
         ref.read(selectedTargetProvider.notifier).set(priorTarget);
         if (context.mounted) {
-          showAbSnackBar(context, 'Connect failed: $ex');
+          showAbToast(context, 'Connect failed: $ex');
         }
         ok = false;
       }
@@ -1142,19 +1125,10 @@ Future<bool> _openColdRemoteProject(
     );
     recordProjectFocus(ref);
     return true;
-  } on SessionLimitExceededException catch (e) {
-    // A legacy relay's retired cap, not a transient connect failure — retrying
-    // won't clear it, so say what will and show the plan the account is on.
-    ref.read(selectedTargetProvider.notifier).set(priorTarget);
-    if (context.mounted) {
-      showAbSnackBar(context, e.userMessage);
-      if (kPricingSurfacesEnabled) await openUpgrade(context, ref);
-    }
-    return false;
   } catch (e) {
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
-      showAbSnackBar(context, 'Connect failed: $e');
+      showAbToast(context, 'Connect failed: $e');
     }
     return false;
   }
@@ -1262,7 +1236,7 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       enterNewSession(container, retarget: true);
     } catch (e) {
       if (mounted) {
-        showAbSnackBar(context, 'New session failed: $e');
+        showAbToast(context, 'New session failed: $e');
       }
     }
   }
@@ -1279,6 +1253,17 @@ class _MachineOnlineDot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final conflict =
+        ref.watch(centralControlConflictProvider(machineUuid)).value ?? false;
+    if (conflict) {
+      return AbIconButton(
+        icon: AbIcons.refresh,
+        tone: AbIconButtonTone.danger,
+        tooltip: 'Control connection conflict — Retry',
+        onTap: () =>
+            ref.read(relayConnectionManagerProvider).peek(machineUuid)?.retry(),
+      );
+    }
     final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
     if (status == null) return const SizedBox.shrink();
     final (tone, label) = connectionDisplayInfo(status);
@@ -1352,7 +1337,7 @@ class _ErrorDot extends StatelessWidget {
     if (msg == null || msg.isEmpty) return dot;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => showAbSnackBar(context, msg),
+      onTap: () => showAbToast(context, msg),
       child: Padding(
         padding: const EdgeInsets.all(AbTokens.space6),
         child: dot,

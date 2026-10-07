@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
 import 'package:antgrid/widgets/session_delete_flow.dart';
+
+import '../helpers/toast_host.dart';
 
 /// One recorded delete attempt — the pair the ladder is actually responsible
 /// for, since force and deleteBranch destroy different things.
@@ -34,6 +37,7 @@ Future<BuildContext> _pumpHost(WidgetTester tester) async {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
+      builder: abToastHostBuilder,
       home: Scaffold(
         body: Builder(
           builder: (c) {
@@ -76,9 +80,7 @@ Future<void> _tap(WidgetTester tester, String label) async {
 
 /// Clears a reported refusal so its dismissal timer cannot outlive the test.
 Future<void> _dismissToast(WidgetTester tester) async {
-  ScaffoldMessenger.of(
-    tester.element(find.byType(Scaffold)),
-  ).removeCurrentSnackBar();
+  clearAbToasts(tester.element(find.byType(Scaffold)));
   await tester.pumpAndSettle();
 }
 
@@ -314,9 +316,9 @@ void main() {
     expect(deleter.attempts, isEmpty);
   });
 
-  // An unanswered delete is still running on the bridge, so the ladder reports
-  // nothing and leaves the row's own pending state as the only feedback.
-  testWidgets('an accepted delete is pending, reported by nothing', (
+  // An unanswered delete may have executed, so the ladder says exactly that
+  // and releases the row for a deliberate fresh user action.
+  testWidgets('an unresolved delete reports uncertainty and permits retry', (
     tester,
   ) async {
     final ctx = await _pumpHost(tester);
@@ -325,15 +327,17 @@ void main() {
       tester,
       ctx,
       checkoutKind: 'managed-worktree',
-      deleter: _Deleter([SessionDeleteAck.accepted]),
+      deleter: _Deleter([SessionDeleteAck.outcomeUnknown]),
       onInFlight: marks.add,
       drive: (t) async => _tap(t, 'Delete'),
     );
-    expect(result, SessionDeleteResult.pending);
-    expect(find.byType(SnackBar), findsNothing);
-    // Left armed on purpose: the Recent list's remote rows never receive the
-    // bridge's own flag, so this mark is their only pending signal.
-    expect(marks, [true]);
+    expect(result, SessionDeleteResult.outcomeUnknown);
+    expect(
+      find.text('Connection lost; execution could not be confirmed'),
+      findsOneWidget,
+    );
+    expect(marks, [true, false]);
+    await _dismissToast(tester);
   });
 
   testWidgets('the in-flight mark is released by every settled outcome', (

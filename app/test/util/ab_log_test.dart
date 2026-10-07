@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:antgrid/launcher/host_discovery.dart';
 import 'package:antgrid/util/ab_log.dart';
+import 'package:antgrid/util/log_location.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -99,6 +101,21 @@ void main() {
     expect(o['level'], 50);
   });
 
+  test('an unconfigured writer leaves the dev rig app.log alone', () async {
+    // The suite resolves the same hostDir() a debug app uses, so a default
+    // writer appends fixture output to the live log of whatever app is
+    // running — where a fake supervisor's zero-delay backoff reads as a real
+    // retry storm. Matched on a marker rather than a length, because the
+    // running app may legitimately write during this test.
+    AbLog.dispose();
+    final marker = 'unconfigured-${DateTime.now().microsecondsSinceEpoch}';
+    AbLog.warn('AbLogTest', marker);
+    await AbLog.flush();
+    final live = File('${hostDir()}/app.log');
+    final written = live.existsSync() ? live.readAsStringSync() : '';
+    expect(written, isNot(contains(marker)));
+  });
+
   test('creates the parent directory when it does not exist yet', () async {
     // Clean-install case: hostDir() may not exist, and writeAsString won't
     // create missing parents — the write would fail-open and drop every line.
@@ -120,6 +137,142 @@ void main() {
     }
     await AbLog.flush();
     expect(readLines().length, 200);
+  });
+
+  List<Map<String, dynamic>> readDir(String dir) => File('$dir/app.log')
+      .readAsLinesSync()
+      .where((l) => l.trim().isNotEmpty)
+      .map((l) => jsonDecode(l) as Map<String, dynamic>)
+      .toList();
+
+  test('lines logged before the directory resolves land in order once it '
+      'does', () async {
+    AbLog.configurePendingForTest();
+    AbLog.info('C', 'one');
+    AbLog.warn('C', 'two');
+    expect(AbLog.logDirectory, isNull);
+
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    expect(dir, mobileLogDir(tmp.path));
+    expect(AbLog.logDirectory, dir);
+
+    AbLog.info('C', 'three');
+    await AbLog.flush();
+    final lines = readDir(dir!);
+    expect(lines.map((o) => o['msg']), ['one', 'two', 'three']);
+    expect(lines.map((o) => o['level']), [30, 40, 30]);
+  });
+
+  test('a full pre-init buffer drops the oldest and says how many', () async {
+    AbLog.configurePendingForTest(capacity: 3);
+    for (var i = 1; i <= 5; i++) {
+      AbLog.info('C', 'l$i');
+    }
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    await AbLog.flush();
+    final lines = readDir(dir!);
+    expect(lines.first['component'], 'AbLog');
+    expect(lines.first['level'], 40);
+    expect(lines.first['dropped'], 2);
+    expect(lines.skip(1).map((o) => o['msg']), ['l3', 'l4', 'l5']);
+  });
+
+  test('an unresolvable directory keeps the buffer and a later call '
+      'retries', () async {
+    AbLog.configurePendingForTest();
+    AbLog.info('C', 'x');
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () async => throw const FileSystemException('no'),
+      ),
+      isNull,
+    );
+    expect(AbLog.logDirectory, isNull);
+
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    expect(dir, mobileLogDir(tmp.path));
+    AbLog.info('C', 'after');
+    await AbLog.flush();
+    final msgs = readDir(dir!).map((o) => o['msg']).toList();
+    expect(msgs, ['x', 'after']);
+  });
+
+  test('lines overflowed before a failed lookup are still counted on a later '
+      'attach', () async {
+    AbLog.configurePendingForTest(capacity: 2);
+    for (var i = 1; i <= 3; i++) {
+      AbLog.info('C', 'l$i');
+    }
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () async => throw const FileSystemException('no'),
+      ),
+      isNull,
+    );
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    await AbLog.flush();
+    final lines = readDir(dir!);
+    expect(lines.first['dropped'], 1);
+    expect(lines.skip(1).map((o) => o['msg']), ['l2', 'l3']);
+  });
+
+  test('the attach writes to the file name it is given', () async {
+    AbLog.configurePendingForTest();
+    AbLog.info('C', 'push');
+    final dir = await AbLog.initLogDirectory(
+      supportDir: () async => tmp,
+      fileName: kPushLogFileName,
+    );
+    await AbLog.flush();
+    expect(File('$dir/$kPushLogFileName').existsSync(), isTrue);
+    expect(File('$dir/$kAppLogFileName').existsSync(), isFalse);
+  });
+
+  test('a retry naming no file keeps the file the failed lookup named', () async {
+    AbLog.configurePendingForTest();
+    AbLog.info('C', 'push');
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () async => throw const FileSystemException('no'),
+        fileName: kPushLogFileName,
+      ),
+      isNull,
+    );
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    await AbLog.flush();
+    expect(File('$dir/$kPushLogFileName').existsSync(), isTrue);
+    expect(File('$dir/$kAppLogFileName').existsSync(), isFalse);
+  });
+
+  test('a supportDir that throws synchronously is not memoised either', () async {
+    AbLog.configurePendingForTest();
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () => throw const FileSystemException('no'),
+      ),
+      isNull,
+    );
+    final dir = await AbLog.initLogDirectory(supportDir: () async => tmp);
+    expect(dir, mobileLogDir(tmp.path));
+  });
+
+  test('under flutter test the default writer never asks path_provider', () async {
+    AbLog.dispose();
+    var asked = false;
+    expect(
+      await AbLog.initLogDirectory(
+        supportDir: () async {
+          asked = true;
+          return tmp;
+        },
+      ),
+      isNull,
+    );
+    expect(asked, isFalse);
+  });
+
+  test('configureForTest names its directory', () {
+    expect(AbLog.logDirectory, File(logPath).parent.path);
   });
 
   test('a flush with nothing queued does not kill the sink', () async {

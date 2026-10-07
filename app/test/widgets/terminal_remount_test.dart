@@ -21,7 +21,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/terminal_cell_metrics.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:flutter/material.dart';
@@ -215,7 +215,7 @@ void main() {
       tester.getSize(find.byType(GhosttyTerminalView)).width,
       greaterThan(300),
     );
-    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_letterboxFit, findsOneWidget);
     expect(_wrappingScrollView, findsNothing);
 
     await tester.pumpAndSettle();
@@ -324,3 +324,8 @@ void main() {
     await tester.pumpAndSettle();
   }, variant: _macOnly);
 }
+
+// The reader letterbox specifically; SVG icons (e.g. the take-control strip) also build a FittedBox.
+Finder get _letterboxFit => find.byWidgetPredicate(
+  (w) => w is FittedBox && w.fit == BoxFit.scaleDown,
+);

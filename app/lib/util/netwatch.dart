@@ -14,8 +14,8 @@ import 'jsonl_sink.dart';
 /// lockstep BY HAND so the two JSONL streams merge with no translation step —
 /// `antgrid watch --join` reads one file and one SSE snapshot and pairs them on
 /// [frameId] alone. Same hand-mirroring convention as
-/// `kCheckoutVariableMessageTypes` and `FRAME_VERSION`; the two drifting apart
-/// is silent, and shows up only as a join that matches nothing.
+/// `kCheckoutVariableMessageTypes` and `kSessionFrameTypes`; the two drifting
+/// apart is silent, and shows up only as a join that matches nothing.
 ///
 /// This lives in `app/` and NOT in `packages/antgrid_relay_client` on purpose.
 /// That package is MPL-2.0, but transport and app diagnostics stay separate:
@@ -30,6 +30,7 @@ class NetwatchEvent {
     this.transport = 'relay',
     this.channel,
     this.streamId,
+    this.streamKind,
     this.msgType,
     this.bytes,
     this.frameId,
@@ -43,13 +44,13 @@ class NetwatchEvent {
   /// `tx` | `rx`.
   final String dir;
 
-  /// `sealed` | `handshake` | `control` | `drop`.
+  /// `frame` | `hello` | `control` | `json` | `drop` | `lifecycle`.
   final String kind;
 
   /// `relay` | `local`. The two are not the same wire — the relay path is
-  /// sealed frames over a routed socket, the loopback path is plain JSON with
-  /// no seal, no frames and no streams — so a capture that did not say which
-  /// one it came from could be read as relay traffic it never was.
+  /// framed plaintext over a QUIC/TLS-authorized socket, the loopback path is
+  /// plain JSON with no framing and no streams — so a capture that did not say
+  /// which one it came from could be read as relay traffic it never was.
   ///
   /// This app records the relay wire in full and the loopback wire ONLY where
   /// it drops. The agent's `LocalListener` is the far end of the loopback
@@ -60,6 +61,12 @@ class NetwatchEvent {
 
   final String? channel;
   String? streamId;
+
+  /// `session` | `project` | `terminal` | `tunnel-tcp` |
+  /// `upload` — the purpose-specific stream kind, mirroring the bridge's
+  /// `streamLabelOf`. Never part of the join key: [frameId] alone pairs the
+  /// two sides' events.
+  String? streamKind;
 
   /// Plaintext message type, filled in by [Netwatch.annotate] once the layer
   /// that knows it has run. Never a payload.
@@ -85,6 +92,7 @@ class NetwatchEvent {
     'origin': 'app',
     if (channel != null) 'channel': channel,
     if (streamId != null) 'streamId': streamId,
+    if (streamKind != null) 'streamKind': streamKind,
     if (msgType != null) 'msgType': msgType,
     if (bytes != null) 'bytes': bytes,
     if (frameId != null) 'frameId': frameId,
@@ -107,11 +115,13 @@ String netwatchLogPath({String? abDir}) =>
 /// Records frames, holds each one briefly so the layer that knows its message
 /// type can [annotate] it, then writes it out as JSONL.
 ///
-/// The delay is what makes annotation possible at all. A frame's id (its
-/// AES-GCM nonce) is readable only at the transport edge, and its plaintext
-/// type only after decrypt — which on the inbound path is a real `await`
-/// behind a per-channel chain. Rather than thread the id through four calls,
-/// both layers name the same frame by id and this buffer joins them.
+/// The delay is what makes annotation possible at all. A frame's id (a SHA-256
+/// hash of its plaintext payload, mirroring `frameIdFor` in
+/// `bridge/src/netwatch.ts`) is readable only at the transport edge, and its
+/// message type only after the layer above parses it — which on the inbound
+/// path is a real `await` behind a per-channel chain. Rather than thread the
+/// id through four calls, both layers name the same frame by id and this
+/// buffer joins them.
 class Netwatch {
   Netwatch(
     this._sink, {
@@ -153,6 +163,7 @@ class Netwatch {
     String transport = 'relay',
     String? channel,
     String? streamId,
+    String? streamKind,
     String? msgType,
     int? bytes,
     String? frameId,
@@ -169,6 +180,7 @@ class Netwatch {
         transport: transport,
         channel: channel,
         streamId: streamId,
+        streamKind: streamKind,
         msgType: msgType,
         bytes: bytes,
         frameId: frameId,
@@ -196,14 +208,21 @@ class Netwatch {
   /// the buffer is a no-op: the event has already been written and degrades to
   /// a typeless frame, which is honest — better than blocking a send to keep it
   /// annotatable.
-  void annotate(String frameId, {String? msgType, String? streamId}) {
-    // Newest first: a nonce repeat is a cryptographic impossibility, but a
-    // reverse scan also finds the just-recorded frame in one step.
+  void annotate(
+    String frameId, {
+    String? msgType,
+    String? streamId,
+    String? streamKind,
+  }) {
+    // Newest first: an annotation almost always follows its own frame right
+    // away, so a reverse scan finds it in one step even on a hash collision
+    // between two distinct frames sharing identical payload bytes.
     for (var i = _pending.length - 1; i >= 0; i--) {
       final e = _pending[i];
       if (e.frameId != frameId) continue;
       if (msgType != null) e.msgType = msgType;
       if (streamId != null) e.streamId = streamId;
+      if (streamKind != null) e.streamKind = streamKind;
       return;
     }
   }
@@ -279,6 +298,7 @@ class Netwatch {
           frameId,
           msgType: event['msgType'] as String?,
           streamId: event['streamId'] as String?,
+          streamKind: event['streamKind'] as String?,
         );
         return;
       }
@@ -291,6 +311,7 @@ class Netwatch {
         transport: event['transport'] as String? ?? 'relay',
         channel: event['channel'] as String?,
         streamId: event['streamId'] as String?,
+        streamKind: event['streamKind'] as String?,
         msgType: event['msgType'] as String?,
         bytes: event['bytes'] as int?,
         frameId: frameId,

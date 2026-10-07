@@ -58,6 +58,38 @@ writeFileSync(pidFile, String(child.pid));
 process.exit(0);
 `;
 
+const BREAKAWAY_PARENT = `
+import { existsSync, writeFileSync } from "node:fs";
+import { dlopen, FFIType, ptr } from "bun:ffi";
+const [go, cwd, pidFile] = process.argv.slice(2);
+while (!existsSync(go)) Bun.sleepSync(10);
+const kernel32 = dlopen("kernel32.dll", {
+  CreateProcessW: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.i32,
+      FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.i32,
+  },
+  CloseHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
+  GetLastError: { args: [], returns: FFIType.u32 },
+}).symbols;
+const executable = Buffer.from(process.execPath + "\\0", "utf16le");
+const command = Buffer.from('"' + process.execPath + '" -e "' + ${JSON.stringify(SLEEPER)} + '"\\0', "utf16le");
+const directory = Buffer.from(cwd + "\\0", "utf16le");
+const startupInfo = Buffer.alloc(104);
+startupInfo.writeUInt32LE(104, 0);
+const processInfo = Buffer.alloc(24);
+// Explicit breakaway is how Codex's daemon survives its launching terminal.
+const flags = 0x01000000 | 0x08000000;
+if (!kernel32.CreateProcessW(ptr(executable), ptr(command), null, null, 0,
+  flags, null, ptr(directory), ptr(startupInfo), ptr(processInfo))) {
+  throw new Error("CreateProcessW failed: " + kernel32.GetLastError());
+}
+kernel32.CloseHandle(Number(processInfo.readBigUInt64LE(0)));
+kernel32.CloseHandle(Number(processInfo.readBigUInt64LE(8)));
+writeFileSync(pidFile, String(processInfo.readUInt32LE(16)));
+process.exit(0);
+`;
+
 const dirs: string[] = [];
 const pids: number[] = [];
 const jobs: Win32Job[] = [];
@@ -205,6 +237,34 @@ describe.skipIf(!onWindows)("createKillOnCloseJob", () => {
 });
 
 describe.skipIf(!onWindows)("kill-on-close job", () => {
+  test("an explicit breakaway child survives closing its launching job", async () => {
+    const dir = tempDir();
+    const script = join(dir, "breakaway-parent.ts");
+    const go = join(dir, "go");
+    const pidFile = join(dir, "child.pid");
+    writeFileSync(script, BREAKAWAY_PARENT);
+
+    const job = createKillOnCloseJob() as Win32Job;
+    expect(job).not.toBeNull();
+    jobs.push(job);
+    const parent = Bun.spawn([process.execPath, script, go, dir, pidFile], {
+      stdin: "ignore", stdout: "ignore", stderr: "pipe",
+    });
+    const parentPid = track(parent.pid);
+    expect(job.assign(parentPid)).toBe(true);
+    writeFileSync(go, "");
+    const stderr = new Response(parent.stderr).text();
+    expect({ exitCode: await parent.exited, stderr: await stderr }).toEqual({ exitCode: 0, stderr: "" });
+    const childPid = track(readPid(pidFile) ?? undefined);
+    expect(await waitUntil(() => holds(dir, childPid), 10_000)).toBe(true);
+
+    job.close();
+
+    expect(await waitUntil(() => !holds(dir, childPid), 500)).toBe(false);
+    expect(terminateProcesses(listProcessesWithCwdUnder(dir).filter((p) => p.pid === childPid))).toBe(1);
+    expect(await waitUntil(() => !holds(dir, childPid), 10_000)).toBe(true);
+  }, 30_000);
+
   test(
     "closing the job kills a grandchild whose parent already exited",
     async () => {

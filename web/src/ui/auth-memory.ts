@@ -19,7 +19,7 @@
 
 /** Methods step 1 may route to. Mirrored by the switch in `/ui/login/continue`;
  *  anything else there falls through to the magic link. */
-export const AUTH_METHODS = ["password", "link", "github", "google"] as const;
+export const AUTH_METHODS = ["password", "link", "github", "google", "apple"] as const;
 export type AuthMethod = (typeof AUTH_METHODS)[number];
 
 /** Seconds the resend buttons stay disabled. Comfortably above the server's
@@ -28,6 +28,7 @@ export type AuthMethod = (typeof AUTH_METHODS)[number];
 export const RESEND_COOLDOWN_SECONDS = 45;
 
 const STORAGE_KEY = "antgrid.auth.methods.v1";
+const LAST_METHOD_KEY = "antgrid.auth.last-method.v1";
 /** Addresses remembered per browser. Small on purpose: this is a convenience
  *  for the people who use this machine, not a history. */
 const MAX_REMEMBERED = 5;
@@ -40,6 +41,9 @@ const MAX_REMEMBERED = 5;
  *  declarative so the markup stays the source of truth:
  *
  *  - `data-ab-prefill`   on an input  — fill with the most recently used address
+ *  - `data-ab-last-used` on a hidden badge — show for the remembered method of
+ *                                       the typed address, or this browser's
+ *                                       last choice when the address is empty
  *  - `data-ab-recall`    on a form    — set its hidden `method` field from the
  *                                       typed address on submit
  *  - `data-ab-remember`  on a form, button or link — record `<method>` for the address,
@@ -75,7 +79,7 @@ const MAX_REMEMBERED = 5;
  *  gets the magic link, which is the correct answer for an unknown address.
  */
 export const AUTH_MEMORY_SCRIPT = `(function(){
-  var KEY=${JSON.stringify(STORAGE_KEY)},MAX=${MAX_REMEMBERED},COOL=${RESEND_COOLDOWN_SECONDS};
+  var KEY=${JSON.stringify(STORAGE_KEY)},LAST=${JSON.stringify(LAST_METHOD_KEY)},MAX=${MAX_REMEMBERED},COOL=${RESEND_COOLDOWN_SECONDS};
   var OK=${JSON.stringify(AUTH_METHODS)};
   function norm(v){return String(v||"").trim().toLowerCase();}
   function load(){try{var v=JSON.parse(localStorage.getItem(KEY)||"[]");return Array.isArray(v)?v:[];}catch(e){return [];}}
@@ -83,9 +87,14 @@ export const AUTH_MEMORY_SCRIPT = `(function(){
   function recall(email){var e=norm(email);if(!e)return null;
     var hit=load().filter(function(r){return r&&norm(r.e)===e;})[0];
     return hit&&OK.indexOf(hit.m)>=0?hit.m:null;}
-  function remember(email,method){var e=norm(email);
-    if(!e||OK.indexOf(method)<0)return;
+  function remember(email,method){
+    if(OK.indexOf(method)<0)return;
+    // OAuth can start without an address; keep its choice separately from
+    // address hints so it never changes where an unrelated email is routed.
+    try{localStorage.setItem(LAST,method);}catch(e){}
+    var e=norm(email);if(!e)return;
     save([{e:e,m:method}].concat(load().filter(function(r){return r&&norm(r.e)!==e;})));}
+  function lastMethod(){try{var m=localStorage.getItem(LAST);return OK.indexOf(m)>=0?m:null;}catch(e){return null;}}
   function lastEmail(){var r=load()[0];return r&&r.e?r.e:"";}
   function emailFor(el){
     var fixed=el.getAttribute("data-ab-email");
@@ -116,6 +125,21 @@ export const AUTH_MEMORY_SCRIPT = `(function(){
   var settled=document.querySelector("[data-ab-remember-now]");
   if(settled)remember(emailFor(settled),settled.getAttribute("data-ab-remember-now"));
 
+  function refreshLastUsed(){
+    if(!prefill)return;
+    var method=norm(prefill.value)?recall(prefill.value):lastMethod();
+    Array.prototype.forEach.call(document.querySelectorAll("[data-ab-last-used]"),function(badge){
+      badge.hidden=badge.getAttribute("data-ab-last-used")!==method;
+    });
+  }
+  if(prefill){
+    prefill.addEventListener("input",refreshLastUsed);
+    prefill.addEventListener("change",refreshLastUsed);
+    window.addEventListener("pageshow",refreshLastUsed);
+    window.addEventListener("storage",function(e){if(e.key===KEY||e.key===LAST||e.key===null)refreshLastUsed();});
+    refreshLastUsed();
+  }
+
   Array.prototype.forEach.call(document.querySelectorAll("[data-ab-once]"),function(btn){
     var form=btn.form||btn.closest("form");
     if(!form)return;
@@ -142,7 +166,7 @@ export const AUTH_MEMORY_SCRIPT = `(function(){
     if(!btn)return;
     var slot="antgrid.auth.cooldown."+form.getAttribute("data-ab-cooldown")+"."+norm(emailFor(form));
     var label=btn.textContent,timer=null;
-    function readAt(){var v=parseInt(sessionStorage.getItem(slot)||"",10);return isNaN(v)?0:v;}
+    function readAt(){try{var v=parseInt(sessionStorage.getItem(slot)||"",10);return isNaN(v)?0:v;}catch(e){return 0;}}
     function tick(){
       var left=Math.ceil((readAt()+COOL*1000-Date.now())/1000);
       if(left<=0){if(timer){clearInterval(timer);timer=null;}btn.disabled=false;btn.textContent=label;return;}

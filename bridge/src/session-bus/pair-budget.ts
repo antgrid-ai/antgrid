@@ -1,10 +1,10 @@
-// Spec §7.4/§8.2/§11: two agents that can post, notify and reply to each other
+// Two agents that can post, notify and reply to each other
 // with nobody between them are a closed loop, and the loop spends tokens on two
 // machines. This bounds it per **(sender, target) pair** — not per session and
 // not per machine — because a per-session ceiling lets a halted pair carry on
 // through a third session, and a per-machine one lets one session spend
 // another's budget (see "the no-progress halt is per (sender, target) PAIR" in
-// bridge/CLAUDE.md).
+// bridge/AGENTS.md).
 //
 // The record is MIRRORED, not shared: the two ends of a pair can be on two
 // machines, and neither can write the other's store, so each keeps its own copy
@@ -16,18 +16,18 @@
 // alternating pair, [MAX_NOTIFIES_PER_PAIR_HOUR] is spent twice per hour, and a
 // halt binds only whichever side happened to send last.
 //
-// Two different ceilings share one record because §7.4 asks two different
-// questions of the same pair. `notifiesAtMs` bounds how often a pair may
+// Two different ceilings share one record because they answer two different
+// questions about the same pair. `notifiesAtMs` bounds how often a pair may
 // INTERRUPT each other's turn — `post` is deliberately unbudgeted, because it
-// waits for the target to look and costs nothing until then (§7.1, §7.4's third
-// bullet). `exchangesSinceProgress` bounds how long a pair may talk with
+// waits for the target to look and costs nothing until then.
+// `exchangesSinceProgress` bounds how long a pair may talk with
 // nothing to show for it, across every verb — a halted pair that could still
 // `post` would just relabel every `notify` as a `post` and keep going, which is
 // why {@link checkHalt} is a separate gate every send consults, not a branch
 // inside {@link checkNotify}.
 //
-// A halt SURVIVES a bridge restart on purpose: §7.4 says "cleared only
-// by a human", and an in-memory halt that a restart forgets is not that.
+// A halt SURVIVES a bridge restart on purpose: it is cleared only
+// by a human, and an in-memory halt that a restart forgets is not that.
 // `loadPairBudgets`/`savePairBudgets` are what make the survival real, so a
 // producer that keeps a halted record only in memory has not implemented it.
 
@@ -64,14 +64,14 @@ export const PairBudgetRecordSchema = z.object({
   notifiesAtMs: z.array(z.number().int().nonnegative()),
   exchangesSinceProgress: z.number().int().nonnegative(),
   /** Set when {@link noteExchange} hits [NO_PROGRESS_EXCHANGES]. Never aged out
-   *  by time alone — §7.4 makes "cleared only by a human" the whole
-   *  point, so nothing in this module may clear it but {@link clearHalt}. */
+   *  by time alone — clearing it is a human action alone, and that is the
+   *  whole point, so nothing in this module may clear it but {@link clearHalt}. */
   haltedAt: z.number().int().nonnegative().nullable(),
 });
 export type PairBudgetState = z.infer<typeof PairBudgetRecordSchema>;
 
 /** One end of a pair, as bare identity — machine + session, never a project id:
- *  a bus address is matched on machine + session (`bridge/CLAUDE.md`), and the
+ *  a bus address is matched on machine + session (`bridge/AGENTS.md`), and the
  *  same two agents can legitimately hold different project ids for the same
  *  checkout. */
 export interface PairEnd {
@@ -81,11 +81,12 @@ export interface PairEnd {
 
 /**
  * Order-independent: the same record whichever end calls it, because "the
- * pair" — not the direction of one send — is what §7.4 bounds. A reply from B
- * to A has to land on the SAME record A's earlier post to B opened, or the
- * no-progress halt these two counters exist to reach is unreachable — a pair
- * that only ever incremented its own outbound-half counter could ping-pong
- * forever, each side's own tally never reaching [NO_PROGRESS_EXCHANGES].
+ * pair" — not the direction of one send — is what this budget bounds. A
+ * reply from B to A has to land on the SAME record A's earlier post to B
+ * opened, or the no-progress halt these two counters exist to reach is
+ * unreachable — a pair that only ever incremented its own outbound-half
+ * counter could ping-pong forever, each side's own tally never reaching
+ * [NO_PROGRESS_EXCHANGES].
  */
 export function pairKey(from: PairEnd, to: PairEnd): string {
   const a = `${from.machineId}/${from.sessionId}`;
@@ -120,12 +121,11 @@ export function emptyPairBudget(key: string): PairBudgetState {
 }
 
 /**
- * A halt refuses every send on the pair, not only `notify`. §7.4: "A halt
- * refuses further sends"; §8.2 lists "send at all once the pair is
- * halted" among the things an addressable session cannot do. Gating only notify
- * would leave a halted pair looping on `post` forever — the one channel a
- * ceiling never reaches — and the halt would bound nothing. Nothing here
- * mutates.
+ * A halt refuses every send on the pair, not only `notify`. Sending at all
+ * once a pair is halted is exactly what an addressable session must never be
+ * able to do. Gating only notify would leave a halted pair looping on `post`
+ * forever — the one channel a ceiling never reaches — and the halt would
+ * bound nothing. Nothing here mutates.
  */
 export function checkHalt(state: PairBudgetState): SessionBusRefusal | null {
   if (state.haltedAt === null) return null;
@@ -136,11 +136,12 @@ export function checkHalt(state: PairBudgetState): SessionBusRefusal | null {
 }
 
 /**
- * The rolling-hour notify ceiling. NOTIFY ONLY — §7.4's third bullet
- * leaves `post` unbudgeted, so the refusal names it as the verb that still
- * reaches (§7.3's "refuse, and name the verb that reaches" pattern).
- * Reads `notifiesAtMs` live rather than trusting it pre-pruned, so a caller
- * holding state between loads still gets a correct answer; nothing here mutates.
+ * The rolling-hour notify ceiling. NOTIFY ONLY — `post` is deliberately
+ * left unbudgeted, so the refusal names it as the verb that still reaches,
+ * the same "refuse, and name the verb that reaches" pattern used elsewhere
+ * on the bus. Reads `notifiesAtMs` live rather than trusting it pre-pruned, so
+ * a caller holding state between loads still gets a correct answer; nothing
+ * here mutates.
  */
 export function checkNotify(state: PairBudgetState, now: number): SessionBusRefusal | null {
   const recent = state.notifiesAtMs.filter((at) => now - at < PAIR_NOTIFY_WINDOW_MS);
@@ -178,12 +179,11 @@ export function noteExchange(state: PairBudgetState, now: number): PairBudgetSta
 }
 
 /**
- * An artifact published, or a NEW thread opened — §7.4's own definition
- * of progress ("bus exchanges that produce no artifact and no new thread trip a
- * halt") and NOTHING ELSE. Counting an ordinary reply as progress would make the
- * halt unreachable, which is a ceiling that reads as enforced and refuses
- * nothing. Resets the counter but deliberately NOT a halt already tripped; only
- * {@link clearHalt} does that.
+ * An artifact published, or a NEW thread opened — that is the bus's whole
+ * definition of progress, and NOTHING ELSE. Counting an ordinary reply as
+ * progress would make the halt unreachable, which is a ceiling that reads as
+ * enforced and refuses nothing. Resets the counter but deliberately NOT a
+ * halt already tripped; only {@link clearHalt} does that.
  */
 export function noteProgress(state: PairBudgetState): PairBudgetState {
   if (state.exchangesSinceProgress === 0) return state;

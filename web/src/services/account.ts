@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { Prisma } from "../generated/prisma/client.js";
+import { lockAuthAccount } from "../auth/transaction.js";
 import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { RelayPushConfig } from "../relay/push.js";
@@ -22,6 +24,8 @@ import {
   findActiveMembership,
 } from "../models/account-member.js";
 import { PLAN_SLUG_FREE } from "../models/plan.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
+import { revokeAppleAuthorizations } from "./apple-account.js";
 
 export type DeleteAccountResult = "deleted" | "blocked_subscription" | "blocked_team";
 
@@ -81,7 +85,12 @@ export async function deleteUserAccount(
   db: DB,
   relay: RelayPushConfig,
   auth: Auth,
-  args: { userId: string; headers: Headers }
+  args: {
+    userId: string;
+    headers: Headers;
+    /** Absent when this deployment does not offer Sign in with Apple. */
+    apple?: AppleTokenClient;
+  }
 ): Promise<DeleteAccountResult> {
   const { userId, headers } = args;
 
@@ -115,9 +124,13 @@ export async function deleteUserAccount(
   // Run in parallel: the revokes are independent (distinct device rows), so
   // wall-clock stays ~one relay-call timeout regardless of device count rather
   // than stacking per device and blowing the request's response budget.
+  //
+  // Apple's revocation rides the same fan-out for the same reasons, and must
+  // finish before the transaction deletes the account rows holding its tokens.
   const devices = await listActiveDevices(db, userId);
-  await Promise.all(
-    devices.map(async (d) => {
+  await Promise.all([
+    args.apple ? revokeAppleAuthorizations(db, auth, args.apple, userId) : undefined,
+    ...devices.map(async (d) => {
       try {
         await revokeUserDevice(db, relay, auth, { userId, deviceUuid: d.id, headers });
       } catch (err) {
@@ -127,11 +140,19 @@ export async function deleteUserAccount(
           error: err instanceof Error ? err.message : String(err),
         });
       }
-    })
-  );
+    }),
+  ]);
 
   const now = new Date();
   await db.$transaction(async (tx) => {
+    const user = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+    await lockAuthAccount(tx, user.email);
+    const pending = await tx.pendingSignIn.findMany({ where: { OR: [{ approvedUserId: userId }, { email: user.email }] }, select: { journeyId: true } });
+    await tx.authJourney.deleteMany({ where: { OR: [{ userId }, { id: { in: pending.flatMap((flow) => flow.journeyId ? [flow.journeyId] : []) } }] } });
+    await tx.pendingSignIn.deleteMany({ where: { OR: [{ approvedUserId: userId }, { email: user.email }] } });
+    const invites = await tx.accountInvite.findMany({ where: { OR: [{ createdBy: userId }, { email: user.email }] }, select: { id: true } });
+    await tx.emailJob.deleteMany({ where: { relatedReference: { in: invites.map((invite) => `invite:${invite.id}`) } } });
+    await tx.accountInvite.deleteMany({ where: { id: { in: invites.map((invite) => invite.id) } } });
     // Scrub identity on the retained User row.
     await tx.user.update({
       where: { id: userId },
@@ -139,6 +160,8 @@ export async function deleteUserAccount(
         email: `deleted+${userId}@deleted.antgrid.invalid`,
         name: "Deleted user",
         image: null,
+        registrationOrigin: Prisma.DbNull,
+        activationOrigin: Prisma.DbNull,
         // A member's account_id names the team, which survives this deletion.
         // syncUserAccountId only ever fills a null or matching value, so a
         // scrubbed user would otherwise keep pointing at a live team forever.

@@ -23,7 +23,9 @@ test("agent package and bridge respect the public dependency boundary", () => {
           if (!adapter && spec.startsWith(".") && resolve(dirname(path), spec).startsWith(packageRoot)) errors.push(`${file}: relative package import ${spec}`);
         }
         // Type-only property keys (such as a terminal's cursor colour) do not dispatch providers.
-        if (!adapter && ts.isStringLiteral(node) && !ts.isLiteralTypeNode(node.parent) && identities.has(node.text)) errors.push(`${file}: provider identity literal ${node.text}`);
+        // status-shadow.ts may name only the two agents whose title grammar was measured.
+        const measuredTitleAgent = file === "status-shadow.ts" && ts.isStringLiteral(node) && (node.text === "claude-code" || node.text === "codex");
+        if (!adapter && !measuredTitleAgent && ts.isStringLiteral(node) && !ts.isLiteralTypeNode(node.parent) && identities.has(node.text)) errors.push(`${file}: provider identity literal ${node.text}`);
         ts.forEachChild(node, visit);
       };
       visit(source);

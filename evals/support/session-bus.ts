@@ -1,7 +1,14 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
 import type { AbMessage } from "../../bridge/src/protocol";
 import { renderNotify, renderReply } from "../../bridge/src/session-bus/delivery";
+import {
+  MAX_QUEUED_LINES,
+  QueuedLineSchema,
+  type QueuedLine,
+} from "../../bridge/src/session-bus/delivery-queue";
+import { busDbPath } from "../../bridge/src/session-bus/bus-db";
 import type { RelayClient } from "../helpers/relay-client";
 
 /**
@@ -97,7 +104,7 @@ export function hookDoneMarker(event: string): string {
 }
 
 /** The origin every bus project is given. A session is addressed through its
- *  repo key (spec 5.1), so two projects that must see each other need the SAME
+ *  repo key, so two projects that must see each other need the SAME
  *  remote — and one with no remote at all offers no row on either machine. */
 export const BUS_REMOTE_URL = "https://github.com/antgrid/Eval-Fixture.git";
 /** What `normalizeRemoteUrl` (bridge/src/capability-card.ts) makes of it — a
@@ -162,6 +169,63 @@ export function sinkText(path: string): string {
 
 export function countMarkers(text: string, marker: string): number {
   return text.split(marker).length - 1;
+}
+
+/**
+ * Observe the bridge's delivery queue without running its writable database
+ * initializer in this process. A WAL recovery lock is transient; undefined
+ * tells a poll to retry instead of misreporting the queue as empty.
+ */
+export function persistedDeliveryLines(
+  abDir: string,
+  projectId: string,
+): QueuedLine[] | undefined {
+  const path = busDbPath(abDir);
+  if (!existsSync(path)) return [];
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readonly: true });
+    const rows = db.query(
+      "SELECT line FROM bus_deliveries WHERE projectId = ? ORDER BY seq DESC LIMIT ?",
+    ).all(projectId, MAX_QUEUED_LINES) as Array<{ line: string }>;
+    const lines: QueuedLine[] = [];
+    for (const row of rows.reverse()) {
+      let raw: unknown;
+      try { raw = JSON.parse(row.line); } catch { continue; }
+      const parsed = QueuedLineSchema.safeParse(raw);
+      if (parsed.success) lines.push(parsed.data);
+    }
+    return lines;
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code ?? "";
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      /^SQLITE_(?:BUSY|LOCKED)/.test(code)
+      || /database (?:is )?(?:busy|locked)/i.test(message)
+      || /no such table: bus_deliveries/i.test(message)
+    ) {
+      return undefined;
+    }
+    throw error;
+  } finally {
+    try { db?.close(); } catch { /* read-only probe owns no durable state */ }
+  }
+}
+
+export function awaitDeliveryLines(
+  abDir: string,
+  projectId: string,
+  sessionId: string,
+  count: number,
+  timeoutMs: number,
+  what: string,
+): Promise<QueuedLine[]> {
+  return untilAsync(async () => {
+    const snapshot = persistedDeliveryLines(abDir, projectId);
+    if (snapshot === undefined) return undefined;
+    const lines = snapshot.filter((line) => line.sessionId === sessionId);
+    return lines.length === count ? lines : undefined;
+  }, timeoutMs, what);
 }
 
 export async function until<T>(fn: () => T | undefined, timeoutMs: number, what: string): Promise<T> {

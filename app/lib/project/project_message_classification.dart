@@ -56,8 +56,6 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'terminal:notification',
   'terminal:bell',
   'terminal:size',
-  'terminal:snapshot:request',
-  'terminal:snapshot',
   'terminal:subscribe',
   'terminal:subscribed',
   'terminal:frame',
@@ -77,11 +75,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'file:search-cancel',
   'file:search-result',
   'file:search-done',
-  'file:upload-start',
-  'file:upload-ready',
-  'file:upload-chunk',
-  'file:upload-ack',
-  'file:upload-done',
+  'file:upload-local',
   'file:upload-result',
   'git:status',
   'git:diff',
@@ -98,12 +92,6 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'git:stage-result',
   'git:unstage',
   'git:unstage-result',
-  'git:stash-list',
-  'git:stash-list-result',
-  'git:stash-pop',
-  'git:stash-pop-result',
-  'git:stash-drop',
-  'git:stash-drop-result',
   'git:log',
   'git:log-result',
   'git:commit-files',
@@ -144,13 +132,15 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
 /// Authoritative app-side mirror of the bridge's `PREVIEW_CHANNEL_MESSAGE_TYPES`
 /// (`bridge/src/protocol.ts`), gated against it in
 /// `checkout-mirror-contract.test.ts`. Checked by [MessageRouter] before
-/// classification: the preview channel is also the browser tunnel's hot path
-/// (HTTP/WS bulk data at full bandwidth), so anything riding it that is not in
-/// this set is dropped on sight rather than paying for `classifyAbMessage`,
-/// `_retainIfDurable`, and — in debug — the `_isExpectedIgnore` parse. Every
-/// member here must also appear in `_heavyTypes` or `_statusTypes`, or it
-/// would clear this gate only to be silently dropped as [MessageTier.ignore]
-/// one line later.
+/// classification, but only against the LOOPBACK `channel` label — local
+/// mode's own JSON envelope, the one transport this app still labels that
+/// way. A relay-mode connection carries terminal/preview traffic on its own
+/// native stream and never reaches this classifier, so anything riding the
+/// loopback channel that is not in this set is dropped on sight rather than
+/// paying for `classifyAbMessage`, `_retainIfDurable`, and — in debug — the
+/// `_isExpectedIgnore` parse. Every member here must also appear in
+/// `_heavyTypes` or `_statusTypes`, or it would clear this gate only to be
+/// silently dropped as [MessageTier.ignore] one line later.
 ///
 /// Neither member is in [kCheckoutDurableReplayTypes], so nothing here is
 /// retained for replay: a frame that arrives before its checkout's heavy
@@ -221,9 +211,6 @@ const Set<String> _statusTypes = <String>{
   'git:discard-result',
   'git:stage-result',
   'git:unstage-result',
-  'git:stash-list-result',
-  'git:stash-pop-result',
-  'git:stash-drop-result',
   'git:sync-result',
   'git:sync-state',
   'git:status',
@@ -240,8 +227,6 @@ const Set<String> _statusTypes = <String>{
   'session-bus:inbox:result',
   'session-bus:thread:result',
   'session-bus:arrived',
-  'file:upload-ready',
-  'file:upload-ack',
   'file:upload-result',
 };
 
@@ -257,12 +242,6 @@ const Set<String> _statusTypes = <String>{
 /// what makes "add an inbound type without classifying it" fail CI instead of
 /// silently dropping the frame.
 ///
-///   - `tunnel:http-start`/`http-chunk`/`http-end`, `tunnel:ws-data` and
-///     `tunnel:ws-close` all arrive on the `preview` channel and are consumed
-///     by PreviewService's direct transport subscription, bypassing the
-///     control classification path entirely — same as the WS tunnel's own
-///     `tunnel:ws-open` and `tunnel:http-cancel`, which are app→bridge
-///     (outbound) only and so never reach this parser at all.
 ///   - `client:focus-state` is app→agent (outbound); it parses only for the
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
@@ -283,13 +262,7 @@ const Set<String> _statusTypes = <String>{
 ///     `session-bus:arrived` — are this app's own reads of its own bridge,
 ///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
-  'tunnel:http-start',
-  'tunnel:http-chunk',
-  'tunnel:http-end',
-  'tunnel:ws-data',
-  'tunnel:ws-close',
   'client:focus-state',
-  'terminal:snapshot:request',
   'preview:snapshot:request',
   'session-bus:post',
   'session-bus:notify',
@@ -300,7 +273,6 @@ const Set<String> kUnroutedInboundTypes = <String>{
 
 const Set<String> _heavyTypes = <String>{
   'terminal:output',
-  'terminal:snapshot',
   'terminal:frame',
   'terminal:history:page',
   'tree:full',

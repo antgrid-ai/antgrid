@@ -38,7 +38,104 @@ one for exercising the relay path end-to-end — see [App targets](#app-targets)
    `RELAY_INTERNAL_SECRET`, prisma migrations, seeded dev license JWT.
    Aspire orchestrates processes — it does not regenerate secrets.
 
+After switching to a branch with new database migrations, run
+`bun run --filter antgrid-web migrate` from the repository root before starting
+the smoke stack. Aspire does not apply migrations on startup. Missing peer
+authorization tables return HTTP 500 after relay authentication and prevent
+the encrypted session from establishing.
+
 ## Run
+
+All Aspire launchers start web, central relay, the stock upstream `iroh-relay`
+binary and `relay-gateway`. A one-shot `iroh-relay-install` resource provisions
+the binary into `.tmp/iroh-relay-bin` first.
+`bun run aspire:all` launches Windows and Android with Iroh payloads.
+Both apps share one origin on port 3000: `/ws` routes to central control on
+3001; `/relay`, `/ping` and, in cleartext mode, `/generate_204` route to the
+native relay on loopback 443, or loopback 3443 when it serves cleartext (below).
+With TLS the relay serves `/generate_204` only from its plain captive-portal
+listener on loopback 3080, which the gateway does not proxy, so the gateway
+answers 404 for it. Metrics stay on loopback 9091 and are not exposed.
+Aspire generates an ignored `.tmp/aspire-iroh/relay.toml`, advertises the shared
+URL through web authorization, and points the relay's `access.http` check at
+web's `/internal/iroh-access` with a per-run bearer token passed only through
+env. The gateway preserves TLS verification to the native relay.
+
+There are two ways to satisfy the relay's transport requirement. Cleartext
+needs nothing configured and is what you get; supply a certificate when you are
+qualifying anything the chain is part of.
+
+### Cleartext (local development only)
+
+```pwsh
+bun run aspire:all
+```
+
+The relay serves the protocol over plain HTTP, so no DNS name and no certificate
+are needed — which is why configuring no certificate selects it, and
+`$env:ANTGRID_DEV_INSECURE_RELAY` decides it outright: `"true"` serves cleartext
+even where a certificate is configured, `"false"` refuses to launch without one.
+The gateway drops to `http://` and `ANTGRID_RELAY_HOST` defaults to the same
+detected LAN IP the mobile dart-defines use, so a phone or emulator reaches the
+relay on the address it reaches web on; override it to pin a different one. Web
+and the app both refuse a cleartext origin outside loopback and the
+private ranges, so a public name fails at web startup rather than serving
+plaintext to the internet. Nothing accepts a
+plaintext relay origin on trust: web refuses the flag outside `development`/`test`
+and only then mints an `http:` origin into an authorization snapshot, the bridge
+reads the same variable from its own environment, and the app gates on a
+compile-time `--dart-define` that apphost passes only in this mode. A release
+build cannot be talked into it by a snapshot, a setting or a stray variable. The
+shipped schemas stay `https`-only, so this path is the exception and never the
+default anything inherits.
+
+### TLS
+
+Supply a hostname that Windows and the emulator both resolve to this PC, and its
+publicly trusted PEM certificate chain/private key. The pair is what selects
+TLS; one without the other is refused rather than quietly served in the clear:
+
+```pwsh
+$env:ANTGRID_RELAY_HOST = "dev-relay.your-domain.example"
+$env:ANTGRID_RELAY_TLS_CERT = "C:/private/dev-relay/fullchain.pem"
+$env:ANTGRID_RELAY_TLS_KEY = "C:/private/dev-relay/privkey.pem"
+bun run aspire:all
+```
+
+Run the last command from the repository root. The example hostname is a
+placeholder; DNS/certificate issuance is an operator prerequisite. The pinned
+bindings use embedded public CA roots and do not expose custom roots. Installing
+an Aspire/self-signed CA in Windows or Android does not qualify it for Iroh.
+Certificate name, validity and key matching are checked before launch; the native
+TLS connection remains the trust-chain check. Keep key/config files in protected
+locations. Certificates load at startup, so renewal requires restart.
+
+A Rust toolchain must be available through `cargo` on PATH. Aspire runs
+`cargo install iroh-relay --version 1.2.0 --locked --features server` on every
+launch; the first install compiles and can take time, later ones find it
+already installed and exit 0. A failed install keeps the relay from starting.
+Loopback 443 (3443 in cleartext mode), 3080 (TLS captive portal) and 9091
+(metrics), and gateway/central ports 3000/3001 must be free. Unix
+needs permission to bind loopback 443; avoid running the whole app stack as root,
+or use cleartext mode, whose unprivileged port sidesteps it.
+
+Restart the stack to apply launch settings; hot reload cannot change compile-time
+defines or host environment. `apphost.ts` is read once when the AppHost process
+starts, so editing it needs that process restarted — restarting a resource from
+the dashboard re-runs the old callbacks and looks like the edit did nothing. Restarting the desktop interrupts hosted sessions.
+Verify native establishment through netwatch `transport: "iroh"` events; central
+WebSocket control traffic is still expected. Remote payloads require Iroh;
+`ANTGRID_PEER_TRANSPORT` no longer selects a transport. Iroh itself handles
+direct and relayed paths.
+
+Gateway tests run with `npm test` from this directory. They cover the cleartext
+routing mode, which is what an unconfigured stack serves; the TLS mode is a
+separate case in the same file and runs only when an isolated self-signed test
+fixture is passed through `TEST_TLS_CERT`/`TEST_TLS_KEY`, reporting as skipped
+rather than silently not running when they are unset. Run them under Bun: Aspire
+launches the gateway with `process.execPath`, which is Bun here, so a suite run
+only under Node would pass against plumbing the shipped stack never uses. Explicit test trust is confined to the test process;
+production gateway startup exposes no custom-CA or skip-verification option.
 
 ```pwsh
 aspire run

@@ -6,6 +6,8 @@ import 'package:antgrid/update/ios_app_store_update_service.dart';
 import 'package:antgrid/update/macos_appcast_update_service.dart';
 import 'package:antgrid/update/macos_sparkle_update_service.dart';
 import 'package:antgrid/update/update_strategy.dart';
+import 'package:antgrid/update/update_check_result.dart';
+import 'package:in_app_update/in_app_update.dart';
 import 'package:antgrid/update/windows_store_update_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -59,9 +61,11 @@ class _FakeReleases extends GithubReleaseUpdateService {
   int calls = 0;
 
   @override
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     calls++;
-    return result;
+    return result
+        ? const UpdateCheckResult(UpdateCheckStatus.available, candidateId: '2')
+        : UpdateCheckResult.failed;
   }
 }
 
@@ -69,11 +73,14 @@ class _FakeAppcast extends MacosAppcastUpdateService {
   _FakeAppcast(this.result);
   final bool result;
   int calls = 0;
+  String candidate = '2';
 
   @override
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     calls++;
-    return result;
+    return result
+        ? UpdateCheckResult(UpdateCheckStatus.available, candidateId: candidate)
+        : UpdateCheckResult.failed;
   }
 }
 
@@ -97,19 +104,51 @@ class _FakeAppStore extends IosAppStoreUpdateService {
   String? get listingUrl => url;
 
   @override
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     calls++;
-    return result;
+    return result
+        ? const UpdateCheckResult(UpdateCheckStatus.available, candidateId: '2')
+        : UpdateCheckResult.failed;
   }
 }
 
-class _FakePlay extends InAppUpdateService {
-  _FakePlay(this.decision);
-  final UpdateDecision decision;
-  int completes = 0;
+AppUpdateInfo playInfo({
+  bool available = false,
+  InstallStatus status = InstallStatus.unknown,
+  int priority = 0,
+  bool immediate = true,
+  bool flexible = true,
+  bool inProgress = false,
+}) => AppUpdateInfo(
+  updateAvailability: inProgress
+      ? UpdateAvailability.developerTriggeredUpdateInProgress
+      : available
+      ? UpdateAvailability.updateAvailable
+      : UpdateAvailability.updateNotAvailable,
+  immediateUpdateAllowed: immediate,
+  immediateAllowedPreconditions: [],
+  flexibleUpdateAllowed: flexible,
+  flexibleAllowedPreconditions: [],
+  availableVersionCode: 2,
+  installStatus: status,
+  packageName: 'ai.antgrid.app',
+  clientVersionStalenessDays: 0,
+  updatePriority: priority,
+);
 
+class _FakePlay extends InAppUpdateService {
+  _FakePlay(this.info);
+  AppUpdateInfo info;
+  int completes = 0;
+  final starts = <UpdateAction>[];
+  Future<AppUpdateResult>? download;
   @override
-  Future<UpdateDecision> checkAndStart() async => decision;
+  Future<AppUpdateInfo> check() async => info;
+  @override
+  Future<AppUpdateResult> start(UpdateAction action) async {
+    starts.add(action);
+    return await (download ?? Future.value(AppUpdateResult.success));
+  }
 
   @override
   Future<void> completeFlexibleUpdate() async {
@@ -123,7 +162,7 @@ void main() {
   // The browser/App Store hand-offs go through url_launcher, whose default
   // platform implementation is the method channel — unregistered under
   // `flutter test`, so without this their install() dead-ends in the
-  // could-not-open SnackBar instead of the path being asserted.
+  // could-not-open toast instead of the path being asserted.
   List<String> mockUrlLauncher() {
     const channel = MethodChannel('plugins.flutter.io/url_launcher');
     final messenger =
@@ -467,11 +506,11 @@ void main() {
 
   group('PlayUpdateStrategy', () {
     test('row copy promises the restart its install performs', () {
-      final s = PlayUpdateStrategy(service: _FakePlay(UpdateDecision.none));
+      final s = PlayUpdateStrategy(service: _FakePlay(playInfo()));
       // completeFlexibleUpdate restarts the app in place — the generic
       // 'Update available / Update' copy would promise less than the tap does.
-      expect(s.rowTitle, 'Update ready');
-      expect(s.rowActionLabel, 'Restart');
+      expect(s.rowTitle, 'Update available');
+      expect(s.rowActionLabel, 'Update');
     });
 
     test(
@@ -479,13 +518,13 @@ void main() {
       () async {
         expect(
           await PlayUpdateStrategy(
-            service: _FakePlay(UpdateDecision.flexibleReady),
+            service: _FakePlay(playInfo(status: InstallStatus.downloaded)),
           ).check(rowAlreadyLit: false),
           UpdateCheckOutcome.restartReady,
         );
         expect(
           await PlayUpdateStrategy(
-            service: _FakePlay(UpdateDecision.none),
+            service: _FakePlay(playInfo()),
           ).check(rowAlreadyLit: false),
           UpdateCheckOutcome.none,
         );
@@ -496,8 +535,9 @@ void main() {
       tester,
     ) async {
       final context = await pumpContext(tester);
-      final play = _FakePlay(UpdateDecision.flexibleReady);
+      final play = _FakePlay(playInfo(status: InstallStatus.downloaded));
       final s = PlayUpdateStrategy(service: play);
+      await s.detect();
       expect(await s.install(context), UpdateInstallResult.handedOff);
       expect(play.completes, 1);
       // Play restarts the app in place with nothing of ours to unwind, so the
@@ -506,5 +546,143 @@ void main() {
       expect(s.installProgress, isNull);
       expect(s.pendingVersion, isNull);
     });
+  });
+  test(
+    'manual Windows mandatory detection never spends the automatic latch or installs',
+    () async {
+      final store = _FakeStore(StoreUpdateCheck.mandatory, version: '2.0.0.0');
+      final strategy = WindowsStoreStrategy(service: store);
+      expect((await strategy.detect()).status, UpdateCheckStatus.available);
+      expect((await strategy.detect()).version, '2.0.0.0');
+      expect(store.installs, 0);
+      expect(
+        strategy.automaticOutcome(await strategy.detect()),
+        UpdateCheckOutcome.updateAvailableQuiet,
+      );
+    },
+  );
+
+  testWidgets(
+    'Play detection selects immediate or flexible without starting either',
+    (tester) async {
+      final context = await pumpContext(tester);
+      for (final priority in [1, 5]) {
+        final play = _FakePlay(playInfo(available: true, priority: priority));
+        final strategy = PlayUpdateStrategy(service: play);
+        addTearDown(strategy.dispose);
+        final result = await strategy.detect();
+        expect(result.status, UpdateCheckStatus.available);
+        expect(
+          strategy.automaticOutcome(result),
+          UpdateCheckOutcome.startDownloadQuiet,
+        );
+        expect(play.starts, isEmpty);
+        await strategy.install(context);
+        expect(play.starts, [
+          priority == 5 ? UpdateAction.immediate : UpdateAction.flexible,
+        ]);
+        expect(play.completes, 0);
+      }
+    },
+  );
+
+  testWidgets(
+    'Play download must complete before Restart can finish an update',
+    (tester) async {
+      final context = await pumpContext(tester);
+      final completion = Completer<AppUpdateResult>();
+      final play = _FakePlay(playInfo(available: true))
+        ..download = completion.future;
+      final strategy = PlayUpdateStrategy(service: play);
+      addTearDown(strategy.dispose);
+      final states = <UpdateCheckStatus>[];
+      final sub = strategy.statusChanges.listen((r) => states.add(r.status));
+      addTearDown(sub.cancel);
+      await strategy.detect();
+      final install = strategy.install(context);
+      expect((await strategy.detect()).status, UpdateCheckStatus.downloading);
+      expect(await strategy.install(context), UpdateInstallResult.notInstalled);
+      expect(play.starts, [UpdateAction.flexible]);
+      expect(play.completes, 0);
+      completion.complete(AppUpdateResult.success);
+      await install;
+      await tester.pump();
+      expect(states, [
+        UpdateCheckStatus.downloading,
+        UpdateCheckStatus.restartReady,
+      ]);
+      expect(strategy.rowActionLabel, 'Restart');
+      await strategy.install(context);
+      expect(play.completes, 1);
+    },
+  );
+
+  test('Play leaves an existing flexible download alone', () async {
+    final play = _FakePlay(
+      playInfo(
+        inProgress: true,
+        immediate: false,
+        status: InstallStatus.downloading,
+      ),
+    );
+    final strategy = PlayUpdateStrategy(service: play);
+    addTearDown(strategy.dispose);
+    final result = await strategy.detect();
+    expect(result.status, UpdateCheckStatus.downloading);
+    expect(strategy.automaticOutcome(result), UpdateCheckOutcome.none);
+    expect(play.starts, isEmpty);
+    expect(play.completes, 0);
+  });
+
+  testWidgets('Sparkle rejection remembers a candidate, allowing a newer one', (
+    tester,
+  ) async {
+    final context = await pumpContext(tester);
+    final sparkle = _FakeSparkle();
+    final appcast = _FakeAppcast(true);
+    final strategy = MacosSparkleStrategy(sparkle: sparkle, appcast: appcast);
+    addTearDown(strategy.dispose);
+    await strategy.prepare();
+    expect((await strategy.detect()).status, UpdateCheckStatus.available);
+    await strategy.install(context);
+    sparkle.onUpdaterUpdateNotAvailable(null);
+    await tester.pump();
+    expect((await strategy.detect()).status, UpdateCheckStatus.unsupported);
+    appcast.candidate = '3';
+    expect((await strategy.detect()).status, UpdateCheckStatus.available);
+  });
+  testWidgets(
+    'manual Play action can use immediate when automatic policy waits for flexible',
+    (tester) async {
+      final context = await pumpContext(tester);
+      final play = _FakePlay(playInfo(available: true, flexible: false));
+      final strategy = PlayUpdateStrategy(service: play);
+      addTearDown(strategy.dispose);
+      final result = await strategy.detect();
+      expect(result.status, UpdateCheckStatus.available);
+      expect(strategy.automaticOutcome(result), UpdateCheckOutcome.none);
+      expect(play.starts, isEmpty);
+      await strategy.install(context);
+      expect(play.starts, [UpdateAction.immediate]);
+    },
+  );
+
+  test('manual action labels match each platform handoff', () {
+    const available = UpdateCheckResult(UpdateCheckStatus.available);
+    const ready = UpdateCheckResult(UpdateCheckStatus.restartReady);
+    final strategies = <UpdateStrategy, String>{
+      WindowsStoreStrategy(): 'Install & restart',
+      MacosSparkleStrategy(): 'Update',
+      LinuxBrowserStrategy(): 'Open download page',
+      IosAppStoreStrategy(): 'Open App Store',
+      PlayUpdateStrategy(): 'Update',
+    };
+    for (final entry in strategies.entries) {
+      addTearDown(entry.key.dispose);
+      expect(entry.key.actionLabel(available), entry.value);
+      if (entry.key is PlayUpdateStrategy) {
+        expect(entry.key.actionLabel(ready), 'Restart');
+      }
+    }
   });
 }

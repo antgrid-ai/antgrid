@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
+import 'ab_touch_sizing.dart';
 
 /// Visual emphasis for [AbButton].
 enum AbButtonVariant {
@@ -32,6 +33,7 @@ class AbButton extends StatefulWidget {
     this.fontSize,
     this.fontWeight,
     this.wrapLabel = false,
+    this.expand = false,
   });
 
   final String label;
@@ -61,6 +63,11 @@ class AbButton extends StatefulWidget {
   /// setting this owes the button a bounded width, which a [Column] gives and a
   /// [Row] does not.
   final bool wrapLabel;
+
+  /// Fills whatever width the parent hands it (an [Expanded] slot in a button
+  /// row) with the label centred, instead of hugging the label at the start of
+  /// that slot. Needs a bounded width, like [wrapLabel].
+  final bool expand;
 
   @override
   State<AbButton> createState() => _AbButtonState();
@@ -97,6 +104,10 @@ class _AbButtonState extends State<AbButton> {
     if (widget.wrapLabel) label = Flexible(child: label);
 
     Widget visual = Container(
+      constraints: BoxConstraints(
+        minWidth: AbTouchSizing.extentOf(context),
+        minHeight: AbTouchSizing.extentOf(context),
+      ),
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
         color: fillColor,
@@ -104,7 +115,10 @@ class _AbButtonState extends State<AbButton> {
         borderRadius: AbTokens.borderRadius5,
       ),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisSize: widget.expand ? MainAxisSize.max : MainAxisSize.min,
+        mainAxisAlignment: widget.expand
+            ? MainAxisAlignment.center
+            : MainAxisAlignment.start,
         children: [
           if (widget.leading != null) ...[
             widget.leading!,
@@ -119,28 +133,31 @@ class _AbButtonState extends State<AbButton> {
       return Opacity(opacity: AbTokens.opacityDisabled, child: visual);
     }
 
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      onShowHoverHighlight: (v) {
-        if (_hovered != v) setState(() => _hovered = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AbFocusRing(
-          focused: _focused,
-          borderRadius: AbTokens.borderRadius5,
-          child: visual,
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onTap?.call();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AbFocusRing(
+            focused: _focused,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
+          ),
         ),
       ),
     );

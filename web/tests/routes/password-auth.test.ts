@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { appleEnvOverrides, buildTestApp } from "../helpers/app.js";
 import { createTestUser, createTestSession } from "../helpers/fixtures.js";
 import { CREDENTIAL_PROVIDER_ID } from "../../src/models/credential.js";
 
@@ -121,13 +121,22 @@ async function signUpAndVerify(
 ): Promise<string> {
   const res = await signUp(app, email, password);
   expect(res.ok).toBe(true);
-  const verified = await app.request(linkFrom(captured, "Verify"), {
-    redirect: "manual",
-  });
-  expect(verified.status).toBe(302);
-  const cookie = sessionCookie(verified);
+  await verifyCaptured(app, captured);
+  const cookie = sessionCookie(await signIn(app, email, password));
   expect(cookie).not.toBeNull();
   return cookie!;
+}
+
+async function verifyCaptured(app: TestApp, captured: CapturedEmail[]) {
+  const review = await app.request(linkFrom(captured, "Verify"));
+  expect(review.status).toBe(200);
+  const html = await review.text();
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)![1];
+  const token = new URL(linkFrom(captured, "Verify")).searchParams.get("token")!;
+  const verified = await app.request("/ui/verify-email/confirm", { method: "POST", headers: { origin: "http://localhost:8787", "content-type": "application/x-www-form-urlencoded", cookie: review.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") }, body: new URLSearchParams({ token, csrf }) });
+  expect(verified.status).toBe(302);
+  expect(sessionCookie(verified)).toBeNull();
+  return verified;
 }
 
 describe("password sign-up", () => {
@@ -148,7 +157,7 @@ describe("password sign-up", () => {
     // databaseHooks.user.create.after — the billing account exists from the
     // first row, so nothing downstream has to cope with a user without one.
     const account = await pg.db.productAccount.findUnique({ where: { userId: user.id } });
-    expect(account).not.toBeNull();
+    expect(account).toBeNull();
 
     expect(cap.captured.length).toBe(1);
     expect(cap.captured[0].to).toBe("nina@example.com");
@@ -164,10 +173,10 @@ describe("password sign-up", () => {
     expect(res.status).toBe(302);
     const loc = location(res);
     expect(loc.pathname).toBe("/login/check-email");
-    expect(loc.searchParams.get("resent")).toBe("1");
+    expect(loc.searchParams.get("throttled")).toBe("1");
     expect(sessionCookie(res)).toBeNull();
     // sendOnSignIn re-sent the link rather than dead-ending the user.
-    expect(cap.captured.length).toBe(2);
+    expect(cap.captured.length).toBe(1);
   });
 
   test("opening the link verifies, signs in, and password sign-in then works", async () => {
@@ -201,6 +210,7 @@ describe("password sign-up", () => {
     // Better-Auth answers a duplicate with a synthetic success while
     // requireEmailVerification is on, so the reply must look like a fresh
     // sign-up — anything else turns the endpoint into an enumeration oracle.
+    await pg.db.authRateBucket.deleteMany();
     const res = await signUp(app, "quinn@example.com", NEW_PASSWORD);
     expect(res.ok).toBe(true);
 
@@ -245,10 +255,8 @@ describe("the sign-up page", () => {
     // The link is the proof sign-up lacked, so opening it is what signs them
     // in — and it must leave the password they just chose alone, unlike the
     // magic link, which purges an unproven credential at the same flip.
-    const verified = await app.request(linkFrom(cap.captured, "Verify"), {
-      redirect: "manual",
-    });
-    expect(sessionCookie(verified)).not.toBeNull();
+    const verified = await verifyCaptured(app, cap.captured);
+    expect(sessionCookie(verified)).toBeNull();
     expect(location(await signIn(app, "tomas@example.com", PASSWORD)).pathname).toBe(
       "/dashboard"
     );
@@ -263,6 +271,7 @@ describe("the sign-up page", () => {
     // Byte-for-byte the reply a fresh address gets. Anything else here — a
     // distinct error, a distinct page, even a distinct query string — turns the
     // form into the account-lookup oracle the whole flow is built to withhold.
+    await pg.db.authRateBucket.deleteMany();
     const res = await signUpForm(app, "ulla@example.com", NEW_PASSWORD);
     expect(res.headers.get("location")).toBe(
       "/login/check-email?email=ulla%40example.com&created=1"
@@ -401,7 +410,7 @@ async function replyShape(res: Response, email: string) {
     headerNames: [...new Set(res.headers.keys())].sort(),
     cookieNames: res.headers
       .getSetCookie()
-      .map((c) => c.split("=")[0])
+      .map((c) => c.split("=")[0].replace(/antgrid\.cross_device_token\.[0-9a-f-]+/, "antgrid.cross_device_token.<id>"))
       .sort(),
     body: redact(await res.text()),
   };
@@ -533,6 +542,33 @@ describe("POST /ui/login/continue", () => {
       expect(loc.pathname).not.toBe("/oauth/start");
       expect(loc.search).not.toContain("provider=");
     }
+  });
+
+  test("an apple hint reaches Apple only while this deployment offers it", async () => {
+    const cap = makeCapture();
+    const body = { email: "fay@example.com", method: "apple" };
+
+    const on = buildTestApp(pg.db, pg.url, { envOverrides: appleEnvOverrides() }).app;
+    const offered = location(await post(on, "/ui/login/continue", body));
+    expect(offered.pathname).toBe("/oauth/start");
+    expect(offered.searchParams.get("provider")).toBe("apple");
+
+    // Keys withdrawn after the browser remembered Apple: a provider redirect
+    // would dead-end in a 400, so the hint falls through like any unknown one.
+    const off = buildTestApp(pg.db, pg.url, { sendEmail: cap.sendEmail }).app;
+    const withdrawn = location(await post(off, "/ui/login/continue", body));
+    expect(withdrawn.pathname).toMatch(/^\/login\/pending\/[0-9a-f-]{36}$/);
+    expect(cap.captured.map((e) => e.to)).toEqual(["fay@example.com"]);
+  });
+
+  test("the login page offers Apple only when it is configured", async () => {
+    const on = buildTestApp(pg.db, pg.url, { envOverrides: appleEnvOverrides() }).app;
+    const off = buildTestApp(pg.db, pg.url).app;
+    const offered = await (await on.request("/login")).text();
+    const absent = await (await off.request("/login")).text();
+    expect(offered).toContain('href="/oauth/start?provider=apple&amp;callbackURL=/dashboard"');
+    expect(absent).not.toContain('href="/oauth/start?provider=apple&amp;callbackURL=/dashboard"');
+    expect(absent).toContain('href="/oauth/start?provider=github&amp;callbackURL=/dashboard"');
   });
 
   test("an empty address never leaves step 1", async () => {
@@ -874,6 +910,7 @@ describe("password reset", () => {
     expect((await app.request("/account", { headers: { cookie } })).status).toBe(200);
 
     // POST/redirect/GET: a reload of the confirmation must not re-send.
+    await pg.db.authRateBucket.deleteMany();
     const requested = await post(app, "/ui/forgot-password", { email: "uma@example.com" });
     expect(requested.status).toBe(302);
     expect(location(requested).pathname).toBe("/forgot-password/sent");
@@ -924,6 +961,7 @@ describe("password reset", () => {
     // page points such a user at.
     const user = await createTestUser(pg.db, "vic@example.com");
 
+    await pg.db.authRateBucket.deleteMany();
     await post(app, "/ui/forgot-password", { email: "vic@example.com" });
     const opened = await app.request(linkFrom(cap.captured, "Reset"), { redirect: "manual" });
     const token = location(opened).searchParams.get("token")!;
@@ -1140,14 +1178,16 @@ async function signInByMagicLink(
   captured: CapturedEmail[],
   email: string
 ): Promise<string> {
+  await pg.db.authRateBucket.deleteMany();
   const start = await post(app, "/ui/login/start", { email });
   expect(start.status).toBe(302);
-  const bindCookie = (start.headers.get("set-cookie") ?? "").split(";")[0];
+  const bindCookie = start.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
   const url = new URL(linkFrom(captured, "sign-in"));
   const approve = await post(app, "/ui/login/approve", {
     id: url.searchParams.get("id")!,
     token: url.searchParams.get("t")!,
-  });
+    csrf: "test-csrf",
+  }, `antgrid.approve_csrf.${url.searchParams.get("id")}=test-csrf`);
   expect(approve.status).toBe(302);
   const poll = await app.request(`/ui/login/poll/${url.searchParams.get("id")}`, {
     headers: { cookie: bindCookie },
@@ -1377,6 +1417,7 @@ describe("password reset", () => {
       (await pg.db.user.findUniqueOrThrow({ where: { email } })).emailVerified
     ).toBe(false);
 
+    await pg.db.authRateBucket.deleteMany();
     await post(app, "/ui/forgot-password", { email });
     const token = new URL(linkFrom(cap.captured, "Reset")).pathname.split("/").pop()!;
     const reset = await app.request(`/api/auth/reset-password/${token}?callbackURL=/reset-password`, {

@@ -47,14 +47,14 @@ describe("checkout protocol contract", () => {
 
   test("session:setup is wired at all five registration points", () => {
     // Miss one and the type silently fails: it parses but nothing answers, or it
-    // answers but never parses. The list is the checklist in CLAUDE.md.
+    // answers but never parses. The list is the checklist in AGENTS.md.
     const protocol = readFileSync(join(import.meta.dir, "../src/protocol.ts"), "utf8");
     // 1. the schema, 2. the AbMessageSchema union, 3. the export.
     expect(protocol).toContain('type: z.literal("session:setup")');
     expect(sourceBlock(protocol, "export const AbMessageSchema")).toContain("SessionSetupMessage,");
     expect(protocol).toContain("export type SessionSetup =");
 
-    // 5. the handler. CLAUDE.md still calls it "the index.ts switch"; the inbound
+    // 5. the handler. AGENTS.md still calls it "the index.ts switch"; the inbound
     // switch itself now lives in agent-core.ts.
     const core = readFileSync(join(import.meta.dir, "../src/agent-core.ts"), "utf8");
     expect(core).toContain('case "session:setup"');

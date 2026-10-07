@@ -1,8 +1,121 @@
 import 'ab_message.dart'
-    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry, GitStashEntry;
+    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry;
+import 'git_status_index.dart';
 import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
+
+typedef _SortKeyed = ({int rank, String folded, String name, FileNode node});
+
+// Reads `node.name` exactly once; the read-counting tests depend on it.
+_SortKeyed _sortKeyOf(FileNode node) {
+  final name = node.name;
+  return (
+    rank: node.type == FileNodeType.directory ? 0 : 1,
+    folded: name.toLowerCase(),
+    name: name,
+    node: node,
+  );
+}
+
+int _compareSortKeyed(_SortKeyed a, _SortKeyed b) {
+  var c = a.rank - b.rank;
+  if (c != 0) return c;
+  c = a.folded.compareTo(b.folded);
+  if (c != 0) return c;
+  // Reversed on purpose: of two names equal ignoring case, the lowercase one
+  // comes first. That is the order the bridge's `localeCompare` lists ASCII
+  // case twins in, so re-sorting a listing never reorders them.
+  c = b.name.compareTo(a.name);
+  if (c != 0) return c;
+  return a.node.path.compareTo(b.node.path);
+}
+
+/// Explorer sibling order: directories first, then name ignoring case.
+///
+/// Names equal ignoring case (README.md beside readme.md on a case-sensitive
+/// filesystem) are ordered lowercase first, then by path, so the order
+/// depends only on the set of children. `List.sort` is stable only for short
+/// lists, and a directory patched by [applyChildrenDelta] must come out
+/// exactly as a fresh listing of it would.
+///
+/// Keys are computed once per node because lowercasing inside the comparator
+/// allocates twice per comparison, on the UI thread, for directories as large
+/// as the bridge's `MAX_LISTING_ENTRIES` (and larger once deltas grow them).
+List<FileNode> sortFileNodes(Iterable<FileNode> nodes) {
+  final keyed = [for (final n in nodes) _sortKeyOf(n)]
+    ..sort(_compareSortKeyed);
+  return [for (final k in keyed) k.node];
+}
+
+// Paths are equal at its only call site, so this means the whole sort key is
+// unchanged. It does no lowercasing.
+bool _holdsSortPosition(FileNode before, FileNode after) =>
+    (before.type == FileNodeType.directory) ==
+        (after.type == FileNodeType.directory) &&
+    before.name == after.name;
+
+/// Applies one parent's share of a `tree:update` frame to its [children].
+///
+/// [children] must already be in [sortFileNodes] order.
+///
+/// Removals land before upserts, so a path removed and re-added in one frame
+/// is reconciled with no prior. A directory recreated that way comes back
+/// unloaded, not carrying the deleted one's listing.
+///
+/// [reconcile]'s prior is an earlier upsert of the same path in this call,
+/// otherwise the current child.
+///
+/// An upsert that keeps its kind and name keeps its index, so a frame of
+/// rewrites (every save, on every platform) never sorts. The directory is
+/// re-sorted once, and only when something is added, re-added or changes
+/// kind.
+List<FileNode> applyChildrenDelta(
+  List<FileNode> children, {
+  required Set<String> removed,
+  required List<FileNode> upserts,
+  required FileNode Function(FileNode incoming, FileNode? prior) reconcile,
+}) {
+  final existing = <String, FileNode>{};
+  if (upserts.isNotEmpty) {
+    final wanted = {for (final u in upserts) u.path};
+    for (final child in children) {
+      final path = child.path;
+      if (wanted.contains(path)) existing[path] = child;
+    }
+  }
+
+  final next = <String, FileNode>{};
+  for (final incoming in upserts) {
+    final path = incoming.path;
+    final prior = next.containsKey(path)
+        ? next[path]
+        : (removed.contains(path) ? null : existing[path]);
+    next[path] = reconcile(incoming, prior);
+  }
+
+  var moved = false;
+  final placed = <String>{};
+  final out = <FileNode>[];
+  for (final child in children) {
+    final path = child.path;
+    if (removed.contains(path)) continue;
+    final replacement = next[path];
+    if (replacement == null) {
+      out.add(child);
+      continue;
+    }
+    if (!placed.add(path)) continue;
+    out.add(replacement);
+    if (!_holdsSortPosition(child, replacement)) moved = true;
+  }
+  for (final entry in next.entries) {
+    if (placed.contains(entry.key)) continue;
+    out.add(entry.value);
+    moved = true;
+  }
+  return moved ? sortFileNodes(out) : out;
+}
 
 class FileNode {
   final String name;
@@ -87,26 +200,15 @@ class FileNode {
       }
     }
 
-    // Sort: directories first, then alphabetical by name (case-insensitive)
-    children.sort((a, b) {
-      if (a.type == FileNodeType.directory &&
-          b.type != FileNodeType.directory) {
-        return -1;
-      }
-      if (a.type != FileNodeType.directory &&
-          b.type == FileNodeType.directory) {
-        return 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-
     return FileNode(
       name: name,
       path: path,
       type: type,
       size: json['size'] as int?,
       extension: json['extension'] as String?,
-      children: children,
+      // The guard spares every parsed leaf two list allocations: a large
+      // listing parses one childless node per entry.
+      children: children.length < 2 ? children : sortFileNodes(children),
       truncated: json['truncated'] == true,
       // A file has nothing to load, so it reads as always-loaded; a
       // directory is loaded exactly when this node carried a `children` key.
@@ -146,6 +248,11 @@ class FilesPaneState {
   final int? searchLine;
   final String? searchQuery;
 
+  /// A folder a terminal link revealed. A folder has no
+  /// [selectedFilePath] of its own, so this is what the tree marks and
+  /// scrolls to; selecting a file clears it.
+  final String? revealedDirectoryPath;
+
   const FilesPaneState({
     this.selectedFilePath,
     this.viewingFile,
@@ -153,6 +260,7 @@ class FilesPaneState {
     this.fileModifiedExternally = false,
     this.searchLine,
     this.searchQuery,
+    this.revealedDirectoryPath,
   });
 
   static const empty = FilesPaneState();
@@ -168,6 +276,8 @@ class FilesPaneState {
     bool clearSearchLine = false,
     String? searchQuery,
     bool clearSearchQuery = false,
+    String? revealedDirectoryPath,
+    bool clearRevealedDirectoryPath = false,
   }) {
     return FilesPaneState(
       selectedFilePath: clearSelectedFilePath
@@ -179,6 +289,9 @@ class FilesPaneState {
           fileModifiedExternally ?? this.fileModifiedExternally,
       searchLine: clearSearchLine ? null : (searchLine ?? this.searchLine),
       searchQuery: clearSearchQuery ? null : (searchQuery ?? this.searchQuery),
+      revealedDirectoryPath: clearRevealedDirectoryPath
+          ? null
+          : (revealedDirectoryPath ?? this.revealedDirectoryPath),
     );
   }
 }
@@ -316,15 +429,6 @@ class GitPaneState {
   /// panel can offer the agent handoff after the toast has gone.
   final GitSyncFailure? lastSyncFailure;
 
-  /// Every stash in the repository, most recent first — fetched lazily the
-  /// same way [history] is (see [FileService.claimStashLoad]), and re-fetched
-  /// after every checkout, pop, or drop rather than mutated locally: a stash
-  /// list is repo-wide (shared across every worktree), so anything else
-  /// risks drifting from a stash the user or agent created outside this
-  /// panel. Drives the Git panel's Restore/Discard banner — see
-  /// `git_panel.dart`'s `_StashBanner`.
-  final List<GitStashEntry> stashes;
-
   const GitPaneState({
     this.diffPath,
     this.diffContent,
@@ -341,7 +445,6 @@ class GitPaneState {
     this.syncing,
     this.lastSyncFailure,
     this.history = GitHistoryState.empty,
-    this.stashes = const [],
   });
 
   static const empty = GitPaneState();
@@ -367,7 +470,6 @@ class GitPaneState {
     GitSyncFailure? lastSyncFailure,
     bool clearSyncFailure = false,
     GitHistoryState? history,
-    List<GitStashEntry>? stashes,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -393,7 +495,6 @@ class GitPaneState {
           ? null
           : (lastSyncFailure ?? this.lastSyncFailure),
       history: history ?? this.history,
-      stashes: stashes ?? this.stashes,
     );
   }
 }
@@ -451,61 +552,54 @@ class FileTreeState {
   final Set<String> expandedPaths;
   final String? projectId;
   final Map<String, String> gitFileStatuses; // path → M/A/D/R/U/! (deduped)
-  /// Raw per-entry list (a path can appear twice — once staged, once
-  /// unstaged) backing the Git tab's sectioned Staged/Changes/Merge view.
-  final List<GitFileStatusEntry> gitFileEntries;
+  final GitStatusIndex? _gitStatus;
+
+  /// Built once per `git:status`; every other emission carries the same
+  /// instance, so identity says whether the status changed. Null-backed so the
+  /// state itself stays const-constructible.
+  GitStatusIndex get gitStatus => _gitStatus ?? GitStatusIndex.empty;
   final bool showChangedOnly;
   final FilesPaneState files;
   final GitPaneState git;
   final PreviewPaneState preview;
-
-  /// Last git commit/discard result message. Paired with [gitOpFeedbackSeq]:
-  /// it's a one-shot *event*, not durable state. The message string may repeat
-  /// verbatim (two "Discarded changes"), so consumers (the toaster) de-dup on
-  /// the monotonically-increasing seq, which makes every op a distinct event
-  /// without anyone having to clear the message first.
-  final String? gitOpFeedback;
-  final int gitOpFeedbackSeq;
 
   const FileTreeState({
     this.root,
     this.expandedPaths = const {},
     this.projectId,
     this.gitFileStatuses = const {},
-    this.gitFileEntries = const [],
+    GitStatusIndex? gitStatus,
     this.showChangedOnly = false,
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
     this.preview = PreviewPaneState.empty,
-    this.gitOpFeedback,
-    this.gitOpFeedbackSeq = 0,
-  });
+  }) : _gitStatus = gitStatus;
+
+  /// Raw per-entry list (a path can appear twice — once staged, once
+  /// unstaged).
+  List<GitFileStatusEntry> get gitFileEntries => gitStatus.entries;
 
   FileTreeState copyWith({
     FileNode? root,
     Set<String>? expandedPaths,
     String? projectId,
     Map<String, String>? gitFileStatuses,
-    List<GitFileStatusEntry>? gitFileEntries,
+    GitStatusIndex? gitStatus,
     bool? showChangedOnly,
     FilesPaneState? files,
     GitPaneState? git,
     PreviewPaneState? preview,
-    String? gitOpFeedback,
-    int? gitOpFeedbackSeq,
   }) {
     return FileTreeState(
       root: root ?? this.root,
       expandedPaths: expandedPaths ?? this.expandedPaths,
       projectId: projectId ?? this.projectId,
       gitFileStatuses: gitFileStatuses ?? this.gitFileStatuses,
-      gitFileEntries: gitFileEntries ?? this.gitFileEntries,
+      gitStatus: gitStatus ?? _gitStatus,
       showChangedOnly: showChangedOnly ?? this.showChangedOnly,
       files: files ?? this.files,
       git: git ?? this.git,
       preview: preview ?? this.preview,
-      gitOpFeedback: gitOpFeedback ?? this.gitOpFeedback,
-      gitOpFeedbackSeq: gitOpFeedbackSeq ?? this.gitOpFeedbackSeq,
     );
   }
 }
@@ -595,6 +689,15 @@ class FileResolvePathResultMessage {
   final bool isDirectory;
   final String? externalImagePath;
 
+  /// Whether the resolved path exists as a file or directory right now. null:
+  /// an older bridge that does not report existence; treat as present.
+  final bool? exists;
+
+  /// The bridge could not find out within its deadline, or was too busy to
+  /// try, so [exists] being false here is not a verdict and a retry may
+  /// succeed. False from an older bridge, which reported both cases as absent.
+  final bool timedOut;
+
   const FileResolvePathResultMessage({
     required this.id,
     required this.timestamp,
@@ -603,6 +706,8 @@ class FileResolvePathResultMessage {
     this.relPath,
     this.isDirectory = false,
     this.externalImagePath,
+    this.exists,
+    this.timedOut = false,
   });
 }
 

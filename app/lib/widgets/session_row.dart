@@ -14,7 +14,7 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_row_trailing.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
@@ -245,7 +245,9 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   @override
   Widget build(BuildContext context) {
     final activeId = ref.watch(activeSessionIdProvider);
-    final selected = activeId == session.id;
+    final selected =
+        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.workspace &&
+        activeId == session.id;
     final work = ref.watch(
       sessionWorkStatusProvider((
         entryId: widget.entryId,
@@ -426,10 +428,9 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // Captured before the first await: this row is routinely disposed by the
     // switch its own tap triggers (mobile pops the drawer, a cross-project
     // activate rebuilds it), and a refusal the user asked for must not vanish
-    // with it. The navigator outlives any one route or overlay entry; falls back
-    // to the row's own context where there is no Navigator (widget tests).
-    final refusalHost =
-        Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
+    // with it.
+    final toaster = AbToaster.maybeOf(context);
+
     final liveId = ref.read(selectedRegistrationIdProvider);
     if (widget.entryId == liveId) {
       // Same project — local fast path. For a same-project remote `liveId`
@@ -471,7 +472,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // checkout is gone — the tap was otherwise a silent no-op. Returning
           // is part of the answer: focusing the workspace onto a session that
           // never spawned reads as the app having lost the output.
-          if (refusalHost.mounted) reportStartRefusal(refusalHost, error);
+          reportStartRefusal(toaster, error);
           return;
         } on TimeoutException {
           // A dropped reply must not abandon the focus + surface + nav writes
@@ -479,15 +480,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // spawned the PTY anyway (`session:updated` then reconciles the row).
           // Leaving the activeSessionId set while the surface never switches is
           // the worst of both — a tap that visibly did nothing.
-          if (refusalHost.mounted) {
-            showAbSnackBar(refusalHost, _startNoAnswerMessage);
-          }
+          reportSessionNotice(toaster, _startNoAnswerMessage);
         } on SessionDownException {
           // Same "may still be coming up" shape as the timeout above — the
           // machine went away, not the bridge refusing.
-          if (refusalHost.mounted) {
-            showAbSnackBar(refusalHost, _startNoAnswerMessage);
-          }
+          reportSessionNotice(toaster, _startNoAnswerMessage);
         }
         // A different project can be activated while start() is in flight. The
         // writes below (focus, surface, nav entry) all belong to THIS project,
@@ -794,6 +791,7 @@ class _SessionMenu extends ConsumerWidget {
     ProviderContainer ref,
     _SessionAction action,
   ) async {
+    final toaster = AbToaster.maybeOf(anchor);
     final svc = await warmServiceFor(ref, entryId, (s) => s.sessionsService);
     if (svc == null || !anchor.mounted) return;
     // Every branch here is an explicit menu pick, so a dropped reply owes the
@@ -811,7 +809,7 @@ class _SessionMenu extends ConsumerWidget {
           try {
             await svc.start(session.id, raiseRefusal: true);
           } on SessionOperationException catch (error) {
-            if (anchor.mounted) reportStartRefusal(anchor, error);
+            reportStartRefusal(toaster, error);
           }
         case _SessionAction.stop:
           await svc.stopSession(session.id);
@@ -833,9 +831,7 @@ class _SessionMenu extends ConsumerWidget {
             // fork had happened. The same answer the New Session canvas treats
             // as a refused create.
             if (fork == null) {
-              if (anchor.mounted) {
-                reportSessionNotice(anchor, sessionForkRefusalCopy(null, null));
-              }
+              reportSessionNotice(toaster, sessionForkRefusalCopy(null, null));
               return;
             }
             // Started before the focus switch, not after: focusing another
@@ -850,31 +846,25 @@ class _SessionMenu extends ConsumerWidget {
             // still be coming up.
             try {
               final started = await svc.start(fork.id, raiseRefusal: true);
-              if (started == null && anchor.mounted) {
+              if (started == null) {
                 reportSessionNotice(
-                  anchor,
+                  toaster,
                   sessionStartRefusalCopy(null, null),
                 );
               }
             } on SessionOperationException catch (error) {
-              if (anchor.mounted) reportStartRefusal(anchor, error);
+              reportStartRefusal(toaster, error);
             } on TimeoutException {
-              if (anchor.mounted) {
-                reportSessionNotice(anchor, _startNoAnswerMessage);
-              }
+              reportSessionNotice(toaster, _startNoAnswerMessage);
             } on SessionDownException {
-              if (anchor.mounted) {
-                reportSessionNotice(anchor, _startNoAnswerMessage);
-              }
+              reportSessionNotice(toaster, _startNoAnswerMessage);
             }
             if (anchor.mounted) await _focusSession(anchor, ref, svc, fork.id);
           } on SessionOperationException catch (error) {
-            if (anchor.mounted) {
-              reportSessionNotice(
-                anchor,
-                sessionForkRefusalCopy(error.errorCode, error.message),
-              );
-            }
+            reportSessionNotice(
+              toaster,
+              sessionForkRefusalCopy(error.errorCode, error.message),
+            );
           }
         case _SessionAction.rename:
           final name = await promptSessionRename(anchor, session.name);
@@ -892,14 +882,11 @@ class _SessionMenu extends ConsumerWidget {
           await _deleteSession(anchor, ref, svc);
       }
     } on TimeoutException {
-      if (anchor.mounted) {
-        showAbSnackBar(
-          anchor,
-          "The agent didn't answer. Check the connection and try again.",
-        );
-      }
+      toaster?.showMessage(
+        "The agent didn't answer. Check the connection and try again.",
+      );
     } on SessionDownException catch (e) {
-      if (anchor.mounted) showAbSnackBar(anchor, e.toString());
+      toaster?.showMessage(e.toString());
     }
   }
 

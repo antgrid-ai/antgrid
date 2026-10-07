@@ -13,7 +13,7 @@ export interface PushBlob {
  * Seal `payloadJson` to the phone's persistent push public key using an
  * ephemeral-static X25519 sealed box + AES-256-GCM. The recipient derives the
  * same key from (its static private key, epk). Keep the KDF in lockstep with
- * packages/antgrid_relay_client/lib/src/e2e/push_open.dart and the wire schema
+ * packages/antgrid_relay_client/lib/src/push/push_open.dart and the wire schema
  * in packages/antgrid-wire/src/push-protocol.ts.
  */
 export function sealPush(payloadJson: string, recipientPushPubkeyB64: string): PushBlob {

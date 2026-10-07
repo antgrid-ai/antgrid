@@ -7,6 +7,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
+import 'host_discovery.dart';
 import 'project_resolve.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
@@ -116,6 +117,8 @@ class BootstrapPayload {
           'x25519Pub': d.x25519Pub,
           'x25519Priv': d.x25519Priv,
           'deviceUuid': d.deviceUuid,
+          'userId': d.userId,
+          if (d.endpointSecret != null) 'endpointSecret': d.endpointSecret,
         },
       };
     }
@@ -139,18 +142,12 @@ class LaunchResult {
   final bool owned;
   final String projectId;
 
-  /// Structured events emitted by the agent via stderr JSON lines.
-  /// Closed when the agent process exits.
-  /// Empty stream for orphan-attached agents (no process to listen to).
-  final Stream<AgentEvent> events;
-
   LaunchResult({
     required this.transport,
     required this.agentPid,
     required this.owned,
     required this.projectId,
-    Stream<AgentEvent>? events,
-  }) : events = events ?? const Stream.empty();
+  });
 }
 
 void _log(String msg) {
@@ -314,17 +311,11 @@ class LocalAgentLauncher {
         // bridge, and this app is that bridge's loopback owner — the sole
         // carrier for session-bus frames addressed to another machine (the
         // bridge hands them to the owner only when it claims this).
-        // `sessionBusCarrier` is read off the RAW hello envelope
-        // (`local-listener.ts`), which is why it is absent from
-        // `AppReadyMessage.capabilities` in bridge/src/protocol.ts: adding it
-        // there would not make it reach the loopback path, and the relay path
-        // has no use for it — a peer bridge hands frames to its OWN owner.
-        capabilities: const {
-          'checkoutRouting': true,
-          'pullsTree': true,
-          'terminalFramesV1': true,
-          'sessionBusCarrier': true,
-        },
+        sessionBusCarrier: true,
+        // The host directory is the one place app and bridge are known to
+        // share a filesystem view: the bridge publishes host.json there for
+        // this app to read.
+        uploadTempDir: '${hostDir()}/upload-tmp',
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');
@@ -333,7 +324,6 @@ class LocalAgentLauncher {
         agentPid: host.pid,
         owned: _host.ownedHostPid != null,
         projectId: projectId,
-        events: _host.hostEvents,
       );
     } catch (_) {
       // Any failure against the cached host — control error, data-plane

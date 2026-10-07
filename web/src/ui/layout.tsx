@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { tryGetContext } from "hono/context-storage";
 import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
 import { BETA } from "../billing/plans.js";
@@ -9,6 +10,7 @@ import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
 import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportLauncher } from "./salesiq.js";
 import { Analytics } from "./analytics.js";
+import { pricingHidden } from "./pricing-visibility.js";
 import {
   THEME_CHOICES,
   THEME_TOGGLE_SCRIPT,
@@ -30,6 +32,8 @@ export type LayoutProps = {
   title: string;
   user?: LayoutUser | null;
   section?: NavSection;
+  analytics?: boolean;
+  contentWidth?: "standard" | "wide";
   children: Child;
 };
 
@@ -52,12 +56,14 @@ const NAV: { section: NavSection; href: string; label: string }[] = [
   { section: "pricing", href: "/pricing", label: "Pricing" },
 ];
 
-export function Layout({ title, user, section, children }: LayoutProps) {
+export function Layout({ title, user, section, children, analytics = true, contentWidth = "standard" }: LayoutProps) {
   // Rendered into the markup rather than applied by a script: the first frame
   // is then already the reader's scheme, with nothing to flash. Absent when
   // there is no override, and hono/jsx omits an undefined attribute, so the
   // page follows the OS through `color-scheme: light dark`.
   const theme = currentTheme();
+  const path = tryGetContext()?.req.path ?? "";
+  if (/^\/(?:login|signup|oauth|api\/auth|reset-password|forgot-password|invite)/.test(path)) analytics = false;
   return (
     <html lang="en" data-theme={theme}>
       <head>
@@ -103,7 +109,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
       </head>
       <body class="min-h-screen bg-page font-sans text-ink">
         <header class="border-b border-edge bg-group">
-          <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3 sm:gap-6">
+          <div class={`${contentWidth === "wide" ? "max-w-[1600px]" : "max-w-5xl"} mx-auto px-4 sm:px-6 h-14 flex items-center gap-3 sm:gap-6`}>
             {/* Badge sits INSIDE the home link so it reads as part of the
                 lockup rather than a second announcement — and stays a span:
                 an anchor here would nest, which is invalid, and a status
@@ -127,7 +133,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               // labels. That is measured: the wordmark as an <img> left Devices
               // visible at 414px until the file landed, then scrolled it out.
               <nav class="flex min-w-0 items-center gap-1 overflow-x-auto text-sm [scrollbar-width:none]">
-                {NAV.map((item) => {
+                {NAV.filter((item) => item.section !== "pricing" || !pricingHidden()).map((item) => {
                   const here = item.section === section;
                   return (
                     <a
@@ -160,7 +166,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             ) : null}
           </div>
         </header>
-        <main class="max-w-5xl mx-auto p-6">{children}</main>
+        <main class={`${contentWidth === "wide" ? "operator-page max-w-[1600px] p-4 sm:p-6" : "max-w-5xl p-6"} mx-auto`}>{children}</main>
         {salesIqSupportLauncher(user ?? undefined)}
         <script dangerouslySetInnerHTML={{ __html: SALESIQ_CONTROLLER_SCRIPT }} />
         {user && (
@@ -169,7 +175,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             <script dangerouslySetInnerHTML={{ __html: THEME_TOGGLE_SCRIPT }} />
           </>
         )}
-        <Analytics />
+        {analytics && <Analytics />}
       </body>
     </html>
   );

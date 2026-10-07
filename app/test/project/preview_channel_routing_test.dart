@@ -1,14 +1,15 @@
-// Proves the negatives the Wave 6 scout only asserted: a preview-channel
-// terminal frame reaches its checkout's slice of the heavy tier, and a
-// preview-channel tunnel frame — the browser tunnel's own hot path on the
-// same wire channel — never does, driven through a real MessageRouter (via
-// ProjectSession) over a fake AgentTransport rather than trusted by inspection.
+// Drives the routing decision through a real MessageRouter (via
+// ProjectSession) over a fake AgentTransport instead of trusting it by
+// inspection: a preview-channel terminal frame reaches its checkout's slice
+// of the heavy tier, and a preview-channel tunnel frame — the browser
+// tunnel's own hot path on the same wire channel — never does.
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
+import 'package:antgrid/project/inbound_frame.dart';
 
 Future<ProjectSession> _openSession(FakeAgentTransport transport) async {
   final cache = await CachedSessionsStore.open();
@@ -32,7 +33,7 @@ void main() {
       final transport = FakeAgentTransport();
       final session = await _openSession(transport);
 
-      final received = <Map<String, dynamic>>[];
+      final received = <InboundFrame>[];
       final sub = session.checkoutHeavyStream('checkout-a').listen(received.add);
       await Future<void>.delayed(Duration.zero);
 
@@ -45,7 +46,7 @@ void main() {
       }, channel: 'preview');
       await Future<void>.delayed(Duration.zero);
 
-      expect(received.map((m) => m['type']), ['terminal:frame']);
+      expect(received.map((f) => f.type), ['terminal:frame']);
 
       await sub.cancel();
       await session.close();
@@ -58,7 +59,7 @@ void main() {
       final transport = FakeAgentTransport();
       final session = await _openSession(transport);
 
-      final received = <Map<String, dynamic>>[];
+      final received = <InboundFrame>[];
       final sub = session.checkoutHeavyStream('checkout-a').listen(received.add);
       await Future<void>.delayed(Duration.zero);
 
@@ -71,7 +72,7 @@ void main() {
       }, channel: 'preview');
       await Future<void>.delayed(Duration.zero);
 
-      expect(received.map((m) => m['type']), ['terminal:history:page']);
+      expect(received.map((f) => f.type), ['terminal:history:page']);
 
       await sub.cancel();
       await session.close();
@@ -85,8 +86,8 @@ void main() {
       final transport = FakeAgentTransport();
       final session = await _openSession(transport);
 
-      final heavy = <Map<String, dynamic>>[];
-      final status = <Map<String, dynamic>>[];
+      final heavy = <InboundFrame>[];
+      final status = <InboundFrame>[];
       final heavySub =
           session.checkoutHeavyStream('checkout-a').listen(heavy.add);
       final statusSub =
@@ -117,7 +118,7 @@ void main() {
       // the drop above is the channel gate and not a malformed payload.
       transport.emitJson(treeUpdate('00000000-0000-0000-0000-000000000005'));
       await Future<void>.delayed(Duration.zero);
-      expect(heavy.map((m) => m['type']), ['tree:update']);
+      expect(heavy.map((f) => f.type), ['tree:update']);
 
       await heavySub.cancel();
       await statusSub.cancel();
@@ -131,7 +132,7 @@ void main() {
       final transport = FakeAgentTransport();
       final session = await _openSession(transport);
 
-      final received = <Map<String, dynamic>>[];
+      final received = <InboundFrame>[];
       final sub = session.checkoutHeavyStream('checkout-a').listen(received.add);
       await Future<void>.delayed(Duration.zero);
 

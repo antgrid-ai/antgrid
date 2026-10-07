@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
@@ -8,7 +7,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../analytics/events.dart';
 import '../connection/connection_supervisor.dart';
-import '../connection/relay_mechanisms.dart';
+import '../connection/peer_connection.dart';
 import '../demo/demo_identity.dart';
 import '../demo/demo_transport.dart';
 import '../launcher/local_agent_launcher.dart';
@@ -18,6 +17,7 @@ import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../services/account_agents_api.dart';
 import '../services/app_settings_service.dart';
+import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 import '../storage/recent_agents_store.dart';
@@ -33,11 +33,12 @@ import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'local_transport_fault.dart';
 import 'projects.dart';
+import 'provisioning_coordinator.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
 import 'relay_connection.dart';
-import 'relay_error_banner.dart';
+import 'peer_runtime.dart';
 import 'value_controller.dart';
 
 final selectedTargetProvider =
@@ -90,13 +91,6 @@ void selectProject(ProviderContainer ref, String projectId) {
 void selectProjectInContainer(ProviderContainer c, String projectId) {
   c.read(selectedTargetProvider.notifier).set(LocalProject(projectId));
 }
-
-/// Set to `true` by the local-transport builder when the agent emits an
-/// `auth_revoked` stderr event. The UI listens with `ref.listen` and shows a
-/// snackbar, then resets this flag to `false` so repeat events re-notify.
-final authRevokedBannerProvider = NotifierProvider<ValueController<bool>, bool>(
-  () => ValueController(false),
-);
 
 /// Riverpod seam for [LocalAgentLauncher]. Override in tests to inject a fake
 /// launcher without touching the file system or spawning a real host process.
@@ -154,23 +148,25 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// Resolves the coordinates for the machine backing [projectId] (RecentAgent →
 /// cached InventoryAgent, freshness-first), opens (or reuses) that machine's
 /// single [MachineSession] via `RelayConnectionManager.connectionFor(uuid)`,
-/// then binds [projectId] to a stream over it: the control plane (stream "0")
-/// for a bare machine id, or the project's data-plane stream for a compound
-/// `<uuid>.<projectId>` — 0 RTT when the agent already advertised its streamId,
-/// else `project:start` + await `stream-ready`. No new socket, no
-/// per-project handshake, so the v2 drill-in race is gone. Rekey lives inside
-/// [MachineSession]; keys hot-swap under the live streams with no invalidate
-/// here.
+/// then binds [projectId] to a stream over it: the control plane
+/// (`session.control`) for a bare machine id, or a dedicated native project
+/// stream for a compound `<uuid>.<projectId>` (`session.openProject`)
+/// — 0 RTT when the agent already advertised the project ready, else
+/// `project:start` + await its own stream-ready. No new socket, no
+/// per-project handshake, so the v2 drill-in race is gone. A liveness failure
+/// inside [MachineSession] closes the connection and re-dials through a fresh
+/// session hello — a session has no in-place repair; live streams re-bind onto
+/// the new session with no invalidate here.
 ///
 /// Admission is ACCOUNT trust: there is no pair-request and no relay grant. The
-/// app connects and signs the E2E transcript as its own `kind:"app"`
-/// [DeviceRecord], which the agent recognises from the account peers inventory.
+/// app connects with its own `kind:"app"` [DeviceRecord] identity, and the
+/// agent admits it by resolving the QUIC-authenticated endpoint against the
+/// account peers inventory — nothing the app sends is what proves who it is.
 Future<AgentTransport?> _buildRelayTransportFor(
   Ref ref,
   String projectId,
 ) async {
   final mgr = ref.read(relayConnectionManagerProvider);
-  final crypto = ref.read(cryptoServiceProvider);
   final recentStore = ref.read(recentAgentsStoreProvider);
 
   // Machine-level identity: a compound project id resolves via its base machine.
@@ -231,7 +227,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
   if (resolve == null) return null;
 
   // The ONE remote-control identity: the app's own `kind:"app"` DeviceRecord.
-  // It authenticates the relay hello AND signs the E2E transcript, so the agent
+  // It authenticates the relay hello, and its Ed25519 pubkey is how the agent
   // resolves us from the account peers inventory.
   final record = await ref.read(connectionDeviceRecordProvider.future);
   // Scoped to THIS machine so each of the app's sockets holds its own relay
@@ -239,11 +235,6 @@ Future<AgentTransport?> _buildRelayTransportFor(
   // epoch, so sharing one slot across machines lets the second machine wanted
   // kill the first (see [relaySlotId]).
   final identity = connectionIdentityFor(record, machineDeviceId: base);
-  // The E2E transcript stays on the BARE device id even though the hello is
-  // scoped: it is what the agent resolves us by in the account peers inventory,
-  // so it must name the account device, not the transport address.
-  final phoneDeviceId = record.deviceUuid;
-  final phoneEd25519Seed = base64Decode(record.ed25519Priv);
   final r = resolve;
 
   final invHit = uncachedInventoryHit;
@@ -288,21 +279,14 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final conn = mgr.connectionFor(base);
 
   final epoch = await ref.read(relayEpochProvider.future);
-  // Resolved once because it holds CREDENTIALS, not a token — every dial still
-  // mints. Failing to resolve one is deliberately not fatal: the dial then
-  // presents an empty token and the relay's license verdict is what tells the
-  // user to sign in, which is the same feedback the pre-supervisor flow gave.
-  LicenseTokenMinter? minter;
-  try {
-    minter = await ref.read(connectionTokenMinterProvider.future);
-  } catch (e) {
-    AbLog.warn(
-      'AgentTransport',
-      'no license-token minter',
-      fields: {'machine': base, 'error': '$e'},
+  // Enrollment and its credentials are required before a remote connection is constructed.
+  final tokenMinter = await ref.read(connectionTokenMinterProvider.future);
+  if (tokenMinter == null) {
+    throw ProvisioningException(
+      'AUTH',
+      'Device credentials are required for remote connections',
     );
   }
-  final tokenMinter = minter;
   // Freshness-first, same polarity as the pubkey: the inventory-resolved
   // endpoint wins over the one pinned on the cached machine row, which is
   // exactly the value that goes stale when a host moves relay.
@@ -314,49 +298,54 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final minterResolver = ref.read(connectionMinterResolverProvider);
   var resolveCalls = 0;
 
+  final peerRuntime = await ref.read(peerRuntimeProvider.future);
+  if (!ref.mounted) throw StateError('Transport provider disposed');
+  Future<ConnCoords?> resolveConnectionCoords() {
+    final refresh = resolveCalls++ > 0;
+    return coordsResolver.resolve(
+      base: base,
+      refreshInventory: refresh,
+      fallback: ConnCoords(
+        relayUrl: relayUrl,
+        agentEd25519PubB64: r.agentEd25519PubB64,
+      ),
+    );
+  }
+
+  LicenseTokenMinter? dialMinter;
+  Future<String> mintConnectionToken() async {
+    final live = await minterResolver.resolve(tokenMinter);
+    if (live == null) {
+      throw ProvisioningException(
+        'AUTH',
+        'Device credentials are required for remote connections',
+      );
+    }
+    dialMinter = live;
+    return live.token();
+  }
+
   conn.ensureStarted(
-    mechanisms: RelayMechanisms(
+    mechanisms: PeerConnectionMechanisms(
+      peerRuntime: peerRuntime,
+      diagnostic: conn.relay.netTap,
+      machineDeviceId: base,
+      resolveCoords: resolveConnectionCoords,
+    ),
+    central: RelayCentralControlDialer(
       relay: conn.relay,
-      crypto: crypto,
       machineDeviceId: base,
       identity: identity,
-      phoneDeviceId: phoneDeviceId,
-      phoneEd25519Seed: phoneEd25519Seed,
       epoch: epoch,
-      resolveCoords: () {
-        // Re-read on every call, never a closure over the build-time answer:
-        // the supervisor re-runs this step precisely when the last answer has
-        // stopped being dialable — a host that moved relay or re-provisioned
-        // its Ed25519 identity — and replaying the same values would make the
-        // re-resolve pointless. The first call reuses whatever the inventory
-        // already holds; later ones refresh it, because they only happen after
-        // the socket rung has failed against the previous answer.
-        final refresh = resolveCalls++ > 0;
-        return coordsResolver.resolve(
-          base: base,
-          refreshInventory: refresh,
-          fallback: ConnCoords(
-            relayUrl: relayUrl,
-            agentEd25519PubB64: r.agentEd25519PubB64,
-          ),
-        );
-      },
-      mintToken: () async {
-        // Through the container-lifetime resolver, never this element's `ref`,
-        // for the same reason as the coords step — see
-        // [ConnectionMinterResolver].
-        final live = await minterResolver.resolve(tokenMinter);
-        // Fresh per attempt, never a cached token: one minted before a long
-        // backoff is already expired by the time its dial runs.
-        return live == null ? '' : live.mint();
-      },
+      mintToken: mintConnectionToken,
+      rejectToken: (token) => dialMinter?.discard(token),
     ),
   );
-  // A changed agent pin makes the mechanisms swap the whole MachineSession,
-  // which disposes the StreamTransport built below. Nothing else rebuilds this
-  // entry — Retry only invalidates the FOCUSED id — so without this every other
-  // warm project on this machine would keep serving a dead transport. Wired
-  // before the session is awaited so a swap mid-handshake is not missed.
+  // A redial onto a new payload link swaps the whole MachineSession, which
+  // disposes the StreamTransport built below. Nothing else rebuilds this entry
+  // — Retry only invalidates the FOCUSED id — so without this every other warm
+  // project on this machine would keep serving a dead transport. Wired before
+  // the session is awaited so a swap mid-handshake is not missed.
   final replacements = conn.sessionReplacements.listen((_) {
     if (ref.mounted) ref.invalidateSelf();
   });
@@ -367,21 +356,19 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final StreamTransport transport;
   if (projectId == base) {
     // Bare machine id → the control-plane stream.
-    transport = session.streamFor(kControlStreamId);
+    transport = session.control;
   } else {
     final projId = baseProjectId(projectId);
-    final known = session.streamIdForProject(projId);
-    final streamId =
-        known ??
-        await session.bindProject(
-          projId,
-          createAbMessage('project:start', {'projectId': projId}),
-        );
-    transport = session.streamFor(streamId);
+    transport = await session.openProject(
+      projId,
+      createAbMessage('project:start', {'projectId': projId}),
+    );
   }
-  await transport.connect();
   // Detach only THIS stream on teardown; the machine connection's lifetime is
   // governed by the control-plane reaper / registry eviction, not here.
+  // Registered before connect(), which can wait out the bind's snapshot: an
+  // onDispose attempted after this provider was disposed in that window
+  // throws, leaving the stream bound with no owner to release it.
   ref.onDispose(
     () => detached(
       'AgentTransport',
@@ -389,6 +376,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
       transport.dispose,
     ),
   );
+  await transport.connect();
   return transport;
 }
 
@@ -444,9 +432,20 @@ class ConnectionCoordsResolver {
             : null;
       }
     } else {
-      // Whatever the inventory already holds — the first resolve must not put a
-      // network round-trip in front of the very first dial.
-      inventory = _ref.read(accountAgentsProvider).value;
+      // A persisted key can predate a host re-enrollment. Resolve the inventory
+      // already loading at startup before comparing it to a fresh peer lease.
+      final current = _ref.read(accountAgentsProvider);
+      inventory = current.value;
+      if (current.isLoading || inventory == null) {
+        try {
+          inventory = await _ref
+              .read(accountAgentsProvider.future)
+              .timeout(_kCoordsInventoryTimeout);
+        } catch (_) {
+          // The cached key remains usable only if the authoritative lease
+          // subsequently confirms it.
+        }
+      }
     }
     if (!_ref.mounted) return fallback;
     final cached = _ref
@@ -533,9 +532,9 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // parallel `openFolder()` calls against the agent's single-owner socket
   // lock — symptom: `LocalTransport` reports "socket closed before ready"
   // because the new WS opens while the old one is still half-closed.
-  // We also deliberately do not watch `hostDeviceUuid`: a relay-promotion
-  // flow updates it via `upsert`, and a watcher there would dispose the
-  // very transport that is driving the flow.
+  // We also deliberately do not watch `hostDeviceUuid`: `ProjectsNotifier.rehost`
+  // updates it via `upsert` when this device's persisted host identity moves,
+  // and a watcher here would dispose the very transport driving that project.
   final folder = ref.watch(
     projectsProvider.select((projects) {
       for (final p in projects) {
@@ -565,7 +564,9 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // secondary safety net. Machine-level credentials are carried unconditionally;
   // relay access is not gated on any per-project flag. Failure resolves to null
   // (open proceeds machine-less) — provisioning must never block the open.
-  final device = await resolveDeviceRecord(ref, logTag: 'agentTransport');
+  final device = await ref
+      .read(provisioningCoordinatorProvider)
+      .resolveDeviceRecord(logTag: 'agentTransport');
   final launcher = ref.read(localAgentLauncherProvider);
   // The desktop always opens a LOCAL core and connects over loopback. The
   // device + endpoints are always carried into the host's machine bootstrap
@@ -594,34 +595,6 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // registry eviction) — without it a since-recovered project stays pinned on
   // the blocking error screen over the very reconnect it was waiting for.
   ref.read(localTransportFaultProvider(projectId).notifier).clear();
-
-  // Listen for structured stderr events from the spawned agent process.
-  // For orphan-attached agents result.events is an empty stream (no-op).
-  final eventSub = result.events.listen((event) async {
-    if (event.kind == 'auth_revoked') {
-      AbLog.info(
-        'AgentTransport',
-        'auth_revoked event received — clearing keychain device record',
-      );
-      await ref.read(keychainDeviceStoreProvider).clear();
-      ref.read(authRevokedBannerProvider.notifier).set(true);
-    }
-  });
-  ref.onDispose(eventSub.cancel);
-
-  // Parallel listener for agent:relayError → inline AbBanner. Unlike the
-  // mobileEnabled-only sub below, this one fires for every project mode so
-  // any runtime relay error surfaces above the workspace body instead of
-  // being swallowed.
-  final errSub = result.transport.messages.listen((m) {
-    if (m.json['type'] != 'agent:relayError') return;
-    final code = (m.json['code'] as String?) ?? 'UNKNOWN';
-    final msg = (m.json['message'] as String?) ?? '';
-    ref
-        .read(relayErrorBannerProvider.notifier)
-        .set(RelayErrorBanner(code, msg));
-  });
-  ref.onDispose(errSub.cancel);
 
   // The one consumer of a LocalTransport's post-ready teardown: a 4409
   // (another app superseded ownership) or any other close leaves the

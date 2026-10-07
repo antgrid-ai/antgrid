@@ -24,7 +24,7 @@ const _proYearlyFeatures = [
   'Unlimited terminal sessions',
   'File explorer & git viewer',
   'Browser preview tunneling',
-  'E2E encrypted — zero-knowledge relay',
+  'End-to-end encrypted (QUIC/TLS 1.3) — relays cannot read content',
   'Priority support',
 ];
 
@@ -248,7 +248,8 @@ class _PricingHeader extends StatelessWidget {
         Text(
           'Monitor and control your AI coding agents from anywhere, on your '
           'own machines. Pro is billed per seat — one per person on your '
-          'team. E2E encrypted, zero-knowledge relay.',
+          'team. End-to-end encrypted between your devices (QUIC/TLS 1.3); '
+          'relays cannot read content.',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontSm,

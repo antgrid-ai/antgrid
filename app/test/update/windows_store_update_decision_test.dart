@@ -259,7 +259,11 @@ void main() {
     test('an unusable version degrades to null, keeping the check', () async {
       onWindows();
       mockChannel(
-        (_) async => <Object?, Object?>{'updateCount': 1, 'version': ''},
+        (_) async => <Object?, Object?>{
+          'updateCount': 1,
+          'mandatory': false,
+          'version': '',
+        },
       );
       final status = await service.checkForUpdates();
       expect(status.check, StoreUpdateCheck.optional);
@@ -274,15 +278,21 @@ void main() {
       expect(await service.checkForUpdates(), StoreUpdateStatus.none);
     });
 
-    test('a channel failure resolves to none, never a throw', () async {
+    test('a missing Store identity is unsupported, never up to date', () async {
       onWindows();
       mockChannel(
-        (_) async => throw PlatformException(code: 'store_unavailable'),
+        (_) async => throw PlatformException(
+          code: 'store_unavailable',
+          message: 'no package identity',
+        ),
       );
-      expect(await service.checkForUpdates(), StoreUpdateStatus.none);
+      expect(
+        await service.checkForUpdates(),
+        const StoreUpdateStatus(check: StoreUpdateCheck.unsupported),
+      );
     });
 
-    test('off Windows it answers none without a channel call', () async {
+    test('off Windows it answers unsupported without a channel call', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       var calls = 0;
@@ -290,7 +300,10 @@ void main() {
         calls++;
         return <Object?, Object?>{'updateCount': 1};
       });
-      expect(await service.checkForUpdates(), StoreUpdateStatus.none);
+      expect(
+        await service.checkForUpdates(),
+        const StoreUpdateStatus(check: StoreUpdateCheck.unsupported),
+      );
       expect(calls, 0);
     });
   });

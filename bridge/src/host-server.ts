@@ -1,14 +1,14 @@
+import type { RemoteHostConnection } from "./remote-host-connection";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
+import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
 import { sendHeartbeat } from "./heartbeat";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
-import { TrustedPeersProvider } from "./trusted-peers";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
@@ -20,13 +20,10 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger, armLogLevel, currentLogLevel } from "./logger";
 import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "host-server" });
-import { RelayClient, type RelayClientOptions } from "./relay-client";
-import type { MachineRelaySession } from "./relay-promotion";
-import type { AgentEnableRelay } from "./protocol";
+import { NativeHostConnection, type NativeHostOptions } from "./peer/native-host-connection";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
-import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
@@ -71,9 +68,15 @@ import {
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
-import { isIsolatedCheckoutKind, isManagedCheckoutKind } from "./worktrees/checkout-types";
+import { isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
+import { SchedulerService, SchedulerLaunchError } from "./scheduler/service";
+import { ScheduleInputSchema, SchedulePatchSchema, type Schedule } from "./scheduler/models";
+import { schedulingModesForAgent } from "antgrid-agents/builtins";
+import { baseSlotDeviceId } from "./relay-slot";
+import { SchedulerRequestSchemas } from "./scheduler/requests";
+import { schedulerErrorCode } from "./scheduler/cron";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -108,7 +111,7 @@ function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): 
 
 /** Omitted `projectIds` means the most recently active projects in this
  *  machine's catalog — the add-machine dialog fills one dropdown from all of
- *  them (§7.5), so asking per project would be N round trips for one card. Both
+ *  them, so asking per project would be N round trips for one card. Both
  *  paths are held to the same bound: the catalog never shrinks, so "all of them"
  *  has to cost the same as an explicit list. */
 const CapabilityCardParams = z.object({
@@ -127,7 +130,6 @@ const GitCheckoutParams = z.object({
   projectId: z.string(),
   branch: z.string().min(1),
   allowActiveSessions: z.boolean().optional(),
-  stashIfDirty: z.boolean().optional(),
 });
 
 /** Desktop warm-core cap (mirrors the app's kWarmCapLocal). The host runs on a
@@ -135,6 +137,7 @@ const GitCheckoutParams = z.object({
 export const kHostWarmCap = 10;
 
 export interface HostServerOptions {
+  desktopOwned?: boolean;
   /** Machine-level remote config (device auth + relay/license endpoints).
    *  Present whenever a device record exists; cores opened with mode "remote"
    *  use it. Absent → only local cores can be opened. */
@@ -144,10 +147,10 @@ export interface HostServerOptions {
   /** Test seam: builds the lazy machine OAuth runtime on the first remote open.
    *  Defaults to {@link buildRemoteRuntime} (real OAuth + token maintenance). */
   remoteRuntimeFactory?: (r: HostRemoteConfig, onMinted?: () => void) => Promise<RemoteRuntime>;
-  /** Test seam: builds the single machine {@link RelayClient}. Defaults to a
-   *  real `new RelayClient(opts)` — overridden in tests to observe stream
-   *  admission (onAdmitted/onRejected) without a live relay socket. */
-  relayClientFactory?: (opts: RelayClientOptions) => RelayClient;
+  /** Test seam: builds the single native machine host. Defaults to a
+   *  real `new NativeHostConnection(opts)` — overridden in tests to observe native stream
+   *  binding without live central or native endpoints. */
+  remoteHostFactory?: (opts: NativeHostOptions) => RemoteHostConnection;
   /** Test seam: override the pushHeartbeat() cadence. Defaults to
    *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
   heartbeatIntervalMs?: number;
@@ -165,7 +168,7 @@ export interface HostRemoteConfig {
   relayUrl: string;
   licenseApiUrl: string;
   identity: DeviceIdentity;
-  auth: { clientId: string; clientSecret: string; deviceUuid: string };
+  auth: { clientId: string; clientSecret: string; deviceUuid: string; userId?: string; endpointSecret?: string };
   /** Called when OAuth detects the credential was revoked (host exits). */
   onAuthRevoked: () => void;
 }
@@ -190,7 +193,7 @@ async function buildRemoteRuntime(r: HostRemoteConfig, onMinted?: () => void): P
     onAuthRevoked: r.onAuthRevoked,
   });
   const initial = await oauth.mint();
-  // onMinted redials the machine socket after a LICENSE_EXPIRED stop (recoverable
+  // onMinted redials the central control socket after a LICENSE_EXPIRED stop (recoverable
   // by time); the initial mint deliberately doesn't fire it.
   const maint = startTokenMaintenance(oauth, initial, { onMinted });
   return { maint };
@@ -201,10 +204,9 @@ interface CatalogEntry {
   path: string;
   mode: "local" | "remote";
   lastFocusedMs: number;
-  // Set when an already-open LOCAL core has been promoted onto the relay (an
-  // additive relay slot on its existing bus). Absence means not-yet-promoted;
-  // presence makes a re-issued project:start idempotent. Distinct from the
-  // legacy per-project promotion in project-core.ts (relay-promotion.ts).
+  // Set when an already-open LOCAL core has gained remote access (an
+  // additive native project binding on its existing bus). Absence means not-yet-promoted;
+  // presence makes a re-issued project:start idempotent.
   promotion?: PromotionHandle;
 }
 
@@ -213,9 +215,7 @@ export interface OpenResult {
   connect: ConnectInfo | null;
 }
 
-// pushHeartbeat() rides one cadence for both the device heartbeat POST and the
-// trustedPeers inventory refresh (see pushHeartbeat()'s doc comment). 60s
-// mirrors the interval this device-heartbeat design already settled on for a
+// 60s mirrors the interval this device-heartbeat design already settled on for a
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
@@ -273,7 +273,7 @@ function clampCaptureTtl(ttlMs: number): number {
 
 /**
  * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
- * store (§7.4): one row array per session, hydrated from disk on first touch
+ * store: one row array per session, hydrated from disk on first touch
  * and kept in memory after that, written back throttled like
  * `SessionBusCoordinator`'s own route table beside it
  * (`BUS_ROUTE_PERSIST_INTERVAL_MS`), because every send charges the budget and
@@ -284,8 +284,8 @@ function clampCaptureTtl(ttlMs: number): number {
  *
  * A HALT is the one thing here that must not wait for a throttle window, in
  * either direction: {@link write} forces the write that sets one and
- * {@link clearHalt} the write that lifts one, so the state §7.4 says only a
- * human may change is never the state a crash decides.
+ * {@link clearHalt} the write that lifts one, so the state only a human may
+ * change is never the state a crash decides.
  */
 export class PairBudgetStore {
   private readonly bySession = new Map<string, PairBudgetState[]>();
@@ -328,7 +328,7 @@ export class PairBudgetStore {
   }
 
   /**
-   * Lift every halt [sessionId] is a SENDER in (§7.4: "cleared only by a
+   * Lift every halt [sessionId] is a SENDER in ("cleared only by a
    * human"). Reads the memory-first cache, never disk: the budget belongs to
    * the host, not to any one project's core, so a keystroke has to be able to
    * lift a halt on a session whose project is not currently warm — a
@@ -428,16 +428,17 @@ export class HostServer {
   // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
   // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
-  // Machine-wide sessionId -> owning project (docs/session-messaging.md §5.4's
-  // directory). `liveSessions` defers to whichever core is warm right now, so
-  // an open project's own answer never lags its own sessions.json flush; see
+  // Machine-wide sessionId -> owning project. `liveSessions` defers to
+  // whichever core is warm right now, so an open project's own answer never
+  // lags its own sessions.json flush; see
   // SessionBusSessionIndex's own doc for what that buys and what it costs.
   private readonly sessionIndex = new SessionBusSessionIndex({
     liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
   });
-  // The other half of §5.1's addressable set: the index says which project holds
-  // a session, this says which projects are the same repository. Refreshed on
-  // the same three edges as the index, for the reason its `note` doc gives.
+  // The other half of the addressable-session lookup: the index says which
+  // project holds a session, this says which projects are the same
+  // repository. Refreshed on the same three edges as the index, for the
+  // reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
   // The asking half of the remote directory: an in-memory mirror of what the
   // app's pump last learned peeking peer capability cards.
@@ -445,8 +446,8 @@ export class HostServer {
   // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
   // below — declared first so that construction can hand it over.
   private readonly remoteDirectory = new RemoteDirectoryCache();
-  // §5.5's directory, assembled from the two machine-level halves above. The
-  // machine id is read live rather than captured: a core can be built before the
+  // The session directory, assembled from the two machine-level halves above.
+  // The machine id is read live rather than captured: a core can be built before the
   // relay has one, and a row's address is only ever read after it is.
   private readonly sessionDirectory = new SessionDirectory({
     repoKeys: this.repoKeys,
@@ -462,7 +463,7 @@ export class HostServer {
   // home for a peer, no desktop attached to this machine) get separate sets.
   private readonly busRouteMissWarned = new Set<string>();
   private readonly busOwnerMissWarned = new Set<string>();
-  // The host-side no-progress-halt store (§7.4), machine-wide like
+  // The host-side no-progress-halt store, machine-wide like
   // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
   // `sessionIndex.lookup` is what lets it answer for a session whose project
   // is not currently warm.
@@ -470,7 +471,7 @@ export class HostServer {
     resolveAbDir(),
     (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
   );
-  // The ONE session bus for this machine (E9/§5.4): every project core built
+  // The ONE session bus for this machine: every project core built
   // by `startCore` below is handed this exact instance rather than building
   // its own, so a route learned while handling project A's inbound frame is
   // visible to project B's outbound send for the same context, and a
@@ -485,7 +486,7 @@ export class HostServer {
     self: (sessionId) => {
       // A relay registration is the NETWORK address; LOCAL_MACHINE_ID is this
       // bridge's name for itself when it has none. The two sessions a purely
-      // local exchange (§6.1) involves never leave this machine, so a host
+      // local exchange involves never leave this machine, so a host
       // launched local-only — or one whose control-plane mint threw — must
       // still be able to name itself for that exchange rather than refuse it
       // `AGENT_NOT_READY` over an address neither side needs. `addressable()`
@@ -500,9 +501,10 @@ export class HostServer {
       // way. The index's own label is a folder-basename snapshot kept for a
       // project with no core warm right now (SessionIndexEntry's own doc), so
       // it is the fallback here, never the first answer: preferring it
-      // unconditionally is the Wave 1 regression this resolves.
+      // unconditionally would show a stale label even while a live core knows
+      // the current one.
       const projectLabel = this.cores.get(entry.projectId)?.core.projectName || entry.projectLabel;
-      // Labels travel because the other machine cannot look them up (E4), and
+      // Labels travel because the other machine cannot look them up, and
       // this one has to travel on a LOCAL exchange too: `deliverLocal` folds
       // through the same `handleInbound`, so a same-machine delivery renders
       // from this ref exactly as a cross-machine one does. Sourced through
@@ -528,7 +530,7 @@ export class HostServer {
     // policy is: `mobile-access:set` has to take effect without restarting
     // anything.
     offMachineSendAllowed: () => this.remoteAccessPolicy.isEnabled(),
-    // §6.1: a target on THIS host is handed straight into the SAME fold the
+    // A target on THIS host is handed straight into the SAME fold the
     // remote path folds through (`handleInbound`) — no relay, no carrier, no
     // route table — so wrapping, queueing and turn-boundary injection are
     // byte-identical for both paths. `dispatch()` (coordinator.ts) already
@@ -571,7 +573,7 @@ export class HostServer {
         return false;
       }
     },
-    // The one human signal that lifts a no-progress halt (§7.4) — delegated to
+    // The one human signal that lifts a no-progress halt — delegated to
     // the host-wide store so it can answer for a session this host is not
     // currently holding warm; see PairBudgetStore.clearHalt.
     clearHalt: (sessionId) => this.pairBudgetStore.clearHalt(sessionId),
@@ -639,7 +641,7 @@ export class HostServer {
     return true;
   }
 
-  /** The §7.3 same-machine wake: start a session this host holds, resolved the
+  /** The same-machine wake: start a session this host holds, resolved the
    *  same way `deliverLocal` resolves a delivery target — `sessionIndex` names
    *  the owning project, and only a WARM core (`this.cores`) is asked. A cold
    *  project (known but not open) answers false rather than being brought up:
@@ -654,34 +656,24 @@ export class HostServer {
     return true;
   }
 
-  // The always-on, coreless control-plane relay registered under the BARE
-  // deviceUuid (no projectId), used to advertise the project catalog and accept
-  // mobile-access-gated project verbs from a paired phone. Opened only when remote
-  // config is present; one phone at a time on this registration (concurrent
-  // multi-phone control is out of scope). null until startRemoteControlPlane().
-  private controlPlaneRelay: RelayClient | null = null;
+  // The host-owned NativeHostConnection uses the BARE deviceUuid for its central
+  // control identity (no projectId), advertises the project catalog there, and accepts
+  // mobile-access-gated project verbs over its native control stream. Opened when remote
+  // config is present; each authorized app has its own native session (concurrent
+  // devices are supported). null until startRemoteControlPlane().
+  private controlPlaneRelay: RemoteHostConnection | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
-  // Account device inventory, the primary E2E-admission trust source.
-  // Built once on the first startRemoteControlPlane() call
-  // and reused across reconnects so its in-memory cache stays warm; refreshed
-  // on the existing heartbeat cadence (see pushHeartbeat()).
-  private trustedPeers: TrustedPeersProvider | null = null;
   // Owns the periodic pushHeartbeat() cadence (started once, in
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  // Machine remote config synthesized from the desktop wizard's `agent:enableRelay`
-  // credentials when the host was launched WITHOUT remote config (local-only). Lets
-  // `requireRemoteConfig()` bring the one machine socket up on demand.
-  private wizardRemote: HostRemoteConfig | null = null;
+  private scheduler: SchedulerService | null = null;
+  private schedulerError: string | undefined;
+  private readonly schedulerObservers = new Map<string, () => void>();
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
-  // projectId → the streamId its relay data-plane stream was allocated. Read by
-  // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
-  // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
-  private readonly streamIds = new Map<string, string>();
 
   constructor(private readonly opts: HostServerOptions) {
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
@@ -704,7 +696,7 @@ export class HostServer {
     // would read every cold project's on-disk session as unaddressable (a
     // warned miss, per the index's own doc) instead of re-arming its held
     // retries. Route-table hydration reads the one machine-level route table
-    // (E9/§5.4/C5) and needs no project list to do it, so it has nothing to
+    // and needs no project list to do it, so it has nothing to
     // wait for — it is only kept alongside `resume()` here so both land before
     // the same first inbound frame this process folds. `.finally` rather than
     // chaining off the resolved promise: a hydrate that fails for one project
@@ -760,14 +752,14 @@ export class HostServer {
   /** TEST SEAM: install a control-plane bus + a fake connected peer, then run
    *  the exact re-advertise the file-watch callback runs. Lets the
    *  policy/catalog-change → re-advertise path be verified without standing up a
-   *  live relay (the fake relay URL never connects, so no real peer exists). */
+   *  live remote transport (the test fixture admits no real native peer). */
   readvertiseForTest(bus: MessageBus): void {
     this.controlPlaneBus = bus;
     this.controlPlaneRelay = {
       hasEstablishedSession: () => true,
-      anySessionSupportsCheckoutRouting: () => false,
-      close: () => {},
-    } as unknown as RelayClient;
+      close: async () => {},
+      recheckAuthorization: () => {},
+    } as unknown as RemoteHostConnection;
     this.readvertiseToControlPlane();
   }
 
@@ -780,7 +772,8 @@ export class HostServer {
    *  port + token (also written to host.json). */
   async startControlPlane(): Promise<{ port: number; token: string }> {
     const token = randomBytes(32).toString("base64url");
-    const listener = new ControlListener({ token, handler: (req) => this.handleControl(req) });
+    const listener = new ControlListener({ token, handler: (req) => this.handleControl(req),
+      onPeerResume: () => this.notePeerResume() });
     await listener.start();
     this.control = listener;
     writeHostFile(hostFilePath(), {
@@ -818,13 +811,22 @@ export class HostServer {
       );
       this.fatalRevokeArmed = true;
     }
+    this.startScheduler();
     return { port: listener.port, token };
   }
 
-  /** Open the always-on, coreless control-plane RelayClient registered under the
-   *  bare deviceUuid (no projectId → registrationId === deviceUuid). It carries
-   *  no preview tunnel and owns no terminal; it advertises the project catalog
-   *  and dispatches mobile-access-gated project verbs. */
+  notePeerResume(): void {
+    try { this.scheduler?.resume(); } catch { this.schedulerError = "Scheduler storage is unavailable"; }
+    if (this.controlPlaneRelay) {
+      void this.controlPlaneRelay.noteResume().catch((error) =>
+        log.warn("host: peer authorization refresh after resume failed: %s", String(error)));
+    }
+  }
+
+  /** Open the host-owned NativeHostConnection using the
+   *  bare deviceUuid for central authentication and native enrollment. It owns
+   *  native payload sessions and project/preview streams. Its machine-level
+   *  bus advertises the project catalog and dispatches mobile-access-gated verbs. */
   private async startRemoteControlPlane(): Promise<void> {
     const r = this.requireRemoteConfig();
     await this.ensureRemoteRuntime();
@@ -832,71 +834,79 @@ export class HostServer {
     const bus = new MessageBus();
     const abDir = resolveAbDir();
 
-    // Built once and reused across reconnects (same licenseApiUrl/getToken the
-    // heartbeat push already uses — see pushHeartbeat()) so the on-disk cache
-    // and in-memory map survive socket churn.
-    if (!this.trustedPeers) {
-      this.trustedPeers = new TrustedPeersProvider({
-        licenseApiUrl: r.licenseApiUrl,
-        getToken: rt.maint.getToken,
-        filePath: join(abDir, "trusted-peers.json"),
-      });
+    if (!r.auth.userId || !r.auth.endpointSecret) {
+      throw new Error("Remote transport requires a secure endpoint enrollment; sign in again");
     }
-
-    const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => new RelayClient(o));
+    const buildClient = this.opts.remoteHostFactory ??
+      ((options: NativeHostOptions) => new NativeHostConnection(options));
+    const identity = { ...r.identity, deviceId: r.auth.deviceUuid };
+    const getLicenseToken = () => Promise.resolve(rt.maint.getToken());
     const client = buildClient({
-      url: joinRelayWsPath(r.relayUrl),
-      // Bare deviceUuid: this is the ONLY registration shape in v3 — one socket
-      // per machine, project cores attach as multiplexed streams.
-      identity: { ...r.identity, deviceId: r.auth.deviceUuid },
-      abDir,
+      central: {
+        url: joinRelayWsPath(r.relayUrl),
+        identity,
+        abDir,
+        onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
+        getLicenseToken,
+        pairedPhones: this.pairedPhonesStore,
+        onAuthenticated: () => this.pushHeartbeat(),
+      },
+      native: {
+      enrollment: {
+        accountId: r.auth.userId,
+        deviceId: r.auth.deviceUuid,
+        enrollmentId: r.auth.clientId,
+      },
+      endpointSecret: r.auth.endpointSecret,
+      licenseApiUrl: r.licenseApiUrl,
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      // A terminal-stream open has no `project:start` to catalogue a
+      // project through, so it consults this machine's own catalog directly —
+      // the same bound `isSafeProjectId` pairs with everywhere else.
+      projectCataloged: (projectId) => this.seenProjects.has(projectId),
+      // Bare deviceUuid: one central control identity and one native endpoint
+      // per machine; project cores attach as host-local native streams.
+      identity,
       // A terminal relay LICENSE verdict tells the user to
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
-      onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
-      getLicenseToken: () => Promise.resolve(rt.maint.getToken()),
+      getLicenseToken,
       pairedPhones: this.pairedPhonesStore,
-      trustedPeers: this.trustedPeers,
-      generateKeypair: () => generateEphemeralKeypair(),
-      onTunnelMessage: () => {}, // no preview tunnel on the control plane
       // The always-on control plane is the registration a phone's autoOpen dials,
       // so it MUST keep the account inventory's relay_url/machine_name fresh —
       // otherwise the only writers are incidental promotion/remote-core heartbeats,
       // and a machine whose LAN IP changed advertises a dead relay_url (the phone
-      // then dials the wrong address → AGENT_OFFLINE → never pairs). RelayClient
+      // then dials the wrong address → AGENT_OFFLINE). The central client
       // fires onAuthenticated on every (re)connect, so this re-publishes the
       // current relayUrl each time the control plane comes up.
-      onAuthenticated: () => this.pushHeartbeat(),
       onHandshakeComplete: () => {
         this.sendProjectsAdvertisement(bus);
         void this.sendToolsAdvertisement(bus);
+        this.readvertiseToControlPlane();
       },
-      // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
-      // this machine — NOT the phone dropping) marks the sessions unreachable
-      // for the gap; `peer-online` revives them with NO fresh E2E handshake in
-      // between (the phone never saw a disconnect, so it never re-sends
-      // client-hello — see relay-client.ts's post-establishment lockout). Any
-      // `readvertiseToControlPlane()` call that raced that gap (e.g. a desktop
-      // mobile-access toggle) silently no-opped on the then-empty session set
-      // with no retry. Re-advertising here — after the revival, before this
-      // callback runs — closes that window instead of leaving the phone stuck
-      // on a stale catalog until an unrelated project:start forces a full
-      // recompute.
-      onPeerOnline: () => this.readvertiseToControlPlane(),
-      // No peer-disconnect hook is wired on purpose. A transient disconnect is
-      // NOT a revocation, and multiple phones share this one control-plane
-      // registration, so demoting here would tear down promoted slots that OTHER
+      // Native peer admission can complete without a fresh central event. Re-advertise
+      // after the peer is reachable so a catalog update that raced native reconnect
+      // is not left stale. Central reconnect and presence never close an
+      // otherwise healthy native session.
+      // No peer-disconnect hook is wired on purpose. A transient native disconnect is
+      // NOT a revocation, and multiple apps hold independent peer sessions on this
+      // host, so demoting here would tear down project bindings that OTHER
       // still-connected phones are actively using. Promotions are torn down only
       // by turning mobile access off (mobile-access:set → demoteAllPromoted) and
-      // core lifecycle (stop / evict / shutdown). The promoted slot is a bounded
-      // idle outbound socket meanwhile; it reconnects with the core.
+      // core lifecycle (stop / evict / shutdown). The native peer lifecycle owns
+      // its bounded queues and reconnects independently of central control.
+      },
     });
 
     bus.setInboundHandler((msg, channel, _source, peerId) => {
-      // Admission is "an account-trusted app completed the E2E handshake", so
-      // only presence is checked here. Authorization is the machine switch,
-      // applied per verb — and the asking session names itself, which is what
-      // lets `project:start` answer from THAT device's capabilities.
-      if (!client.hasEstablishedSession()) return;
+      // Admission is "this peer completed the session hello", checked PER
+      // PEER now that a pre-establishment frame is no longer stopped by a
+      // decrypt failure — any lease-authorized endpoint can reach this
+      // dispatch with no session at all (see the pre-establishment drop in
+      // PeerSessionOwner.receiveSessionRecord). Authorization is still the
+      // machine switch, applied per verb, and the asking session names
+      // itself, which is what lets `project:start` answer from THAT device's
+      // capabilities.
+      if (!peerId || client.peerSession(peerId) == null) return;
       this.dispatchControlPlaneInbound(msg, channel, bus, peerId);
     });
     client.setBus(bus);
@@ -904,11 +914,11 @@ export class HostServer {
     this.controlPlaneRelay = client;
     this.controlPlaneBus = bus;
     client.connect();
-    log.info("host: remote control plane relay opened (device=%s)", client.deviceId);
+    log.info("host: native remote connection opened (device=%s)", client.deviceId);
 
     // pushHeartbeat() was previously event-triggered only (onAuthenticated +
     // mobile-access mutations), so a long-lived, stably-connected bridge never
-    // re-fetched trustedPeers — a removed/re-keyed phone's stale identity stuck
+    // re-published relayUrl/machineName — a LAN IP change or rename stuck
     // around indefinitely. Give it the actual cadence the design describes.
     if (!this.heartbeatTimer) {
       const intervalMs = this.opts.heartbeatIntervalMs ?? HEARTBEAT_REFRESH_INTERVAL_MS;
@@ -917,100 +927,18 @@ export class HostServer {
     }
   }
 
-  /** Bring the machine relay socket up (from the desktop wizard's credentials if
-   *  the host was launched local-only) and return its stream-attach surface.
-   *  Idempotent: reuses the live control-plane socket when present. */
-  async ensureMachineRelay(msg: AgentEnableRelay): Promise<MachineRelaySession> {
-    const auth = msg.auth;
-    if (!auth?.deviceUuid || !auth.ed25519Pub || !auth.ed25519Priv) {
-      throw new Error("enableRelay requires signed-in account device credentials");
-    }
-    const relayBase = msg.relayUrl ?? this.opts.remote?.relayUrl ?? process.env.RELAY_URL ?? null;
-    if (!relayBase) throw new Error("no relay URL configured");
-    // The host's boot credentials arrive once, on stdin, and are never re-read.
-    // If that pair was already dead when the host started, its mint failed and
-    // nothing came up — no token maintenance, no machine socket. Adopt the
-    // caller's freshly-authenticated pair instead of retrying a client the web
-    // has deleted. Deliberately gated on "nothing is live and nothing is being
-    // built": swapping under a live runtime would orphan its token maintenance,
-    // and swapping under an IN-FLIGHT mint would leave that build racing this
-    // one, with only the last-assigned runtime ever stopped at shutdown.
-    const existing = this.remoteConfig();
-    if (
-      existing &&
-      auth.clientId &&
-      auth.clientSecret &&
-      auth.clientId !== existing.auth.clientId &&
-      !this.controlPlaneRelay &&
-      !this.remoteRuntime &&
-      !this.remoteRuntimePromise
-    ) {
-      existing.auth = {
-        clientId: auth.clientId,
-        clientSecret: auth.clientSecret,
-        deviceUuid: auth.deviceUuid,
-      };
-      // The identity travels WITH the auth block. A sign-out rotates the whole
-      // account device, so keeping the old Ed25519 pair here would sign the
-      // relay's v3 hello with a key that is not the one registered for the new
-      // deviceUuid — AUTH_FAILED, and the socket never comes up at all.
-      existing.identity = {
-        ...existing.identity,
-        deviceId: auth.deviceUuid,
-        ed25519PublicKey: auth.ed25519Pub,
-        ed25519PrivateKey: auth.ed25519Priv,
-      };
-    }
-    // Synthesize a machine remote config from the wizard creds when the host has
-    // none (local-only launch). requireRemoteConfig() then returns it.
-    if (!this.opts.remote && !this.wizardRemote) {
-      this.wizardRemote = {
-        relayUrl: relayBase,
-        licenseApiUrl: msg.licenseApiUrl ?? "",
-        identity: {
-          deviceId: auth.deviceUuid,
-          deviceName: selfMachineName(),
-          createdAt: new Date().toISOString(),
-          ed25519PublicKey: auth.ed25519Pub,
-          ed25519PrivateKey: auth.ed25519Priv,
-        },
-        auth: { clientId: auth.clientId ?? "", clientSecret: auth.clientSecret ?? "", deviceUuid: auth.deviceUuid },
-        onAuthRevoked: () => {},
-      };
-    }
-    await this.ensureRemoteRuntime();
-    if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
-    const client = this.controlPlaneRelay!;
-    return {
-      attachStream: (bus, opts) => client.attachStream(bus, opts),
-      establishedPeers: () => client.establishedPeers(),
-      peerSession: (peerId) => client.peerSession(peerId),
-      sendPushDeliver: (m) => client.sendPushDeliver(m),
-      // The LIVE socket's id, like every member beside it — not the inbound
-      // auth's. The credential swap above is gated on nothing being live, so a
-      // re-enable over an already-running socket leaves `client` registered
-      // under the previous deviceUuid; `auth.deviceUuid` would then name a
-      // machine the relay does not have this host on, and every push a
-      // wizard-promoted core seals would be unopenable on the phone.
-      agentDeviceId: client.deviceId,
-    };
-  }
-
   /** Build the project advertisement for the connected phone: the machine's
    *  whole catalog (seen hints ∪ warm cores), each tagged with whether it's
    *  DIALABLE — or NOTHING at all while mobile access is off. Every
    *  account-trusted phone sees the same list; the machine switch is the only
    *  thing that varies, which is why this takes no phone identity.
    *
-   *  `running` here means "has an admitted relay data-plane slot" (the core's
+   *  `running` here means "has a host-local native project binding" (the core's
    *  {@link ProjectCore.isRelayRegistered}), NOT merely "warm/open on the host".
-   *  A desktop-open project that was never promoted is warm but has NO relay
-   *  slot — advertising it `running:true` made the phone dial a slot the relay
-   *  never admitted, looping AGENT_OFFLINE. So a warm-but-unpromoted core reads
-   *  `running:false` until project:start promotes it and the slot registers; the
-   *  phone's awaitProjectRunning then keys correctly off the post-register advert
-   *  (and off the rejection control:result, which current relays never send —
-   *  the retired SESSION_LIMIT_EXCEEDED came from older ones). The
+   *  A desktop-open project that was never promoted is warm but has NO native project
+   *  binding — advertising it `running:true` made the app wait on a stream the host
+   *  never bound. So a warm-but-unpromoted core reads
+   *  `running:false` until project:start promotes it and the binding is ready. The
    *  visibility filter still includes warm cores, so the project is listed — it's
    *  just flagged not-yet-dialable. (The desktop hub advertises plain warmth via
    *  `knownProjectsForHub`, which is a different question; keep them distinct.) */
@@ -1021,25 +949,11 @@ export class HostServer {
       .map((id) => {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
-        const needsCheckoutRouting = entry?.core.hasIsolatedSessions() ?? false;
-        // Optimistic across the fleet, because the advert is ONE broadcast frame
-        // (a replay-cached type sealed below any place that could vary it per
-        // receiver). Both refusals behind it are per-device, and BOTH are
-        // needed: project:start refuses the asking device by its own capability,
-        // and the stream's own `mayAcceptFrom` refuses it on the bind path below
-        // — which a reconnecting app takes WITHOUT a project:start, so the verb
-        // alone would leave a stale device on a mixed fleet bound to a stream
-        // that silently drops everything it sends.
-        const peerCanRoute = this.controlPlaneRelay?.anySessionSupportsCheckoutRouting() === true;
-        const dialable = (entry?.core.isRelayRegistered() ?? false)
-          && (!needsCheckoutRouting || peerCanRoute);
-        // A reconnecting phone binds its ProjectSession to this streamId without a
-        // fresh project:start. Only surfaced for a dialable stream.
-        const streamId = dialable ? this.streamIds.get(id) : undefined;
+        const dialable = entry?.core.isRelayRegistered() ?? false;
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, streamId };
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt };
       });
   }
 
@@ -1103,16 +1017,138 @@ export class HostServer {
     );
   }
 
+  private startScheduler(): void {
+    if (this.scheduler || this.schedulerError || !this.opts.desktopOwned) return;
+    try {
+      this.scheduler = new SchedulerService({
+        abDir: resolveAbDir(), desktopOwned: true,
+        supportedAgents: async () => (await this.buildToolsAdvertisement())
+          .map((tool) => ({ agentId: tool.tool, modes: schedulingModesForAgent(tool.tool) }))
+          .filter((agent) => agent.modes.length > 0),
+        authorize: (schedule) => this.authorizeSchedule(schedule),
+        prepare: async (schedule, _run, bind) => {
+          const seen = this.seenProjects.get(schedule.projectId);
+          if (!seen || !existsSync(seen.path)) throw new SchedulerLaunchError("PROJECT_UNAVAILABLE");
+          await this.open(schedule.projectId, seen.path, "local");
+          const core = this.cores.get(schedule.projectId)!.core;
+          if (!this.schedulerObservers.has(schedule.projectId)) {
+            this.schedulerObservers.set(schedule.projectId, core.observeScheduledSessions((event) => {
+              try { this.scheduler?.observe(event); } catch { this.schedulerError = "Scheduler storage is unavailable"; }
+            }));
+          }
+          const prepared = await core.prepareScheduledSession({
+            scheduleId: schedule.id, name: schedule.name, agentId: schedule.agentId,
+            mode: schedule.mode, approvalPolicy: schedule.approvalPolicy, workspace: schedule.workspace,
+            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId,
+          }, async (identity) => { bind(identity); });
+          return { ...prepared, deliverPrompt: () => prepared.deliverPrompt(schedule.prompt) };
+        },
+        stop: async (run) => {
+          if (run.sessionId) await this.cores.get(run.projectId)?.core.stopScheduledSession(run.sessionId);
+        },
+        releaseWorkspace: async (schedule) => {
+          const store = new CheckoutStore(resolveAbDir(), schedule.projectId);
+          const state = await store.read();
+          if (!state.healthy) throw new Error("Cannot release schedule workspace ownership while checkout metadata is unavailable");
+          for (const checkout of state.records.filter((c) => c.scheduleOwnerId === schedule.id)) {
+            const core = this.cores.get(schedule.projectId)?.core;
+            if (core) await core.releaseScheduleCheckout(schedule.id, checkout.id);
+            else await store.releaseScheduleOwner(schedule.id, checkout.id);
+          }
+        },
+      });
+      this.scheduler.start();
+    } catch {
+      this.schedulerError = "Scheduler storage is unavailable or another desktop host owns this state directory";
+    }
+  }
+
+  private async authorizeSchedule(schedule: Schedule): Promise<string | null> {
+    if (!isSafeProjectId(schedule.projectId) || !this.seenProjects.has(schedule.projectId)) {
+      return "Project is no longer in this machine's catalog; open it from the desktop first";
+    }
+    if (schedule.authorDeviceId === null) return null;
+    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
+    if (!await this.controlPlaneRelay?.authorizeDevice?.(schedule.authorDeviceId)) return "The authorizing device is unavailable or no longer authorized on this account";
+    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
+    return null;
+  }
+
+  private async schedulerProjects(): Promise<{ projectId: string; label: string; isGitRepository: boolean }[]> {
+    const projects = [];
+    for (const [projectId, seen] of this.seenProjects) {
+      if (!isSafeProjectId(projectId) || !existsSync(seen.path)) continue;
+      const resolved = await resolveProject(seen.path);
+      projects.push({ projectId, label: seen.label ?? basename(seen.path), isGitRepository: resolved.isGitRepository });
+    }
+    return projects;
+  }
+
+  async schedulerRequest(method: string, rawParams?: unknown, authorDeviceId: string | null = null): Promise<unknown> {
+    const schema = SchedulerRequestSchemas[method];
+    if (!schema) throw new Error("Unknown scheduler operation; upgrade the target bridge");
+    const params = schema.parse(rawParams ?? {}) as Record<string, unknown>;
+    if (method === "scheduler.capabilities") {
+      const capabilities = this.scheduler ? await this.scheduler.capabilities() : {
+        supported: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, agents: [],
+        error: this.schedulerError ?? "Scheduled execution requires the target desktop app to remain open",
+      };
+      return { ...capabilities, projects: await this.schedulerProjects() };
+    }
+    if (!this.scheduler) throw new Error(this.schedulerError ?? "Scheduling requires a desktop-owned host; upgrade and open the target desktop app");
+    switch (method) {
+      case "scheduler.list": return { schedules: this.scheduler.schedules(), projects: await this.schedulerProjects() };
+      case "scheduler.runs": return { runs: this.scheduler.runs(params.scheduleId as string | undefined) };
+      case "scheduler.preview": return { occurrences: this.scheduler.preview(params.cron as string, params.timezone as string) };
+      case "scheduler.create": {
+        const input = ScheduleInputSchema.parse(params.schedule);
+        await this.validateScheduleProject(input.projectId, input.workspace);
+        return { schedule: await this.scheduler.create(input, authorDeviceId) };
+      }
+      case "scheduler.update": {
+        const patch = SchedulePatchSchema.parse(params.patch);
+        const current = this.scheduler.schedules().find((schedule) => schedule.id === params.id);
+        if (!current) throw new Error("Schedule no longer exists");
+        await this.validateScheduleProject(patch.projectId ?? current.projectId, patch.workspace ?? current.workspace);
+        return { schedule: await this.scheduler.update(current.id, patch, authorDeviceId) };
+      }
+      case "scheduler.delete": await this.scheduler.delete(params.id as string); return {};
+      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string, authorDeviceId) };
+      case "scheduler.stop": await this.scheduler.stop(params.id as string); return {};
+      default: throw new Error("Unknown scheduler operation");
+    }
+  }
+
+  private async validateScheduleProject(projectId: string, workspace: string): Promise<void> {
+    const seen = this.seenProjects.get(projectId);
+    if (!isSafeProjectId(projectId) || !seen || !existsSync(seen.path)) throw new Error("Project is unavailable; open it from the desktop first");
+    const project = await resolveProject(seen.path);
+    if (workspace === "worktree" && (!project.isGitRepository || !WORKTREE_SESSIONS_SUPPORTED)) throw new Error("This project does not support isolated worktrees; choose the shared workspace");
+  }
+
+  async handleSchedulerRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
+    try {
+      if (!peerId || !this.controlPlaneRelay?.peerSession(peerId)) throw new Error("An authenticated native machine session is required");
+      if (!this.remoteAccessPolicy.isEnabled()) throw new Error("Remote access is disabled on this machine");
+      const deviceId = baseSlotDeviceId(peerId);
+      if (!await this.controlPlaneRelay.authorizeDevice?.(deviceId)) throw new Error("Device account authorization is unavailable");
+      if (!this.remoteAccessPolicy.isEnabled()) throw new Error("Remote access is disabled on this machine");
+      return createMessage("response", { requestId: req.requestId, ok: true, result: await this.schedulerRequest(req.method, req.params, deviceId) });
+    } catch (error) {
+      return createMessage("response", { requestId: req.requestId, ok: false,
+        error: { code: schedulerErrorCode(error), message: error instanceof Error ? error.message : "Scheduler request failed" } });
+    }
+  }
+
   /** Answer one control-plane RPC to the app session that ASKED, rather than to
    *  every established session on this machine.
    *
    *  `bus.publish` fans a response out to the desktop and the phone alike, and a
    *  client tells its own answer from a sibling's only by `requestId` — fine for
    *  a verb whose answer every session would have asked for anyway, wrong for
-   *  any answer assembled from ONE asker's params (E14,
-   *  `docs/session-messaging.md`). The session-bearing capability card is the
-   *  loudest case — this machine's session titles and work status — but the
-   *  quieter reason covers the rest: a client correlates a response by
+   *  any answer assembled from ONE asker's params. The session-bearing
+   *  capability card is the loudest case — this machine's session titles and
+   *  work status — but the quieter reason covers the rest: a client correlates a response by
    *  `requestId` alone, and those are per-transport counters that two devices
    *  attached to this bridge both start at zero, so a fanned answer can complete
    *  a DIFFERENT device's pending request with a payload it never asked for.
@@ -1134,8 +1170,8 @@ export class HostServer {
   /** Route one inbound control-plane frame from the paired phone: either the
    *  welcome-replay `state.snapshot` RPC or a project verb. Extracted from the
    *  bus inbound handler so the request/verb split is unit-testable without a
-   *  live relay. `channel` is the bus channel the frame arrived on (always
-   *  "control" for the control plane), echoed back on the RPC response. */
+   *  native machine-control stream. `channel` is the bus channel the frame arrived
+   *  on (always "control" here), echoed back on the RPC response. */
   dispatchControlPlaneInbound(
     msg: AbMessage,
     channel: Channel,
@@ -1150,6 +1186,11 @@ export class HostServer {
     // tools/projects until an unrelated re-advertise. It exposes no authority
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
+      if (msg.method.startsWith("scheduler.")) {
+        void this.handleSchedulerRpc(msg, peerId)
+          .then((res) => this.answerAsker(res, channel, bus, peerId));
+        return;
+      }
       // RECOMPUTE the adverts fresh before answering — the snapshot is the
       // phone's pull, and it fires only once the phone is fully connected,
       // which is STRICTLY later than the handshake push. If that push ran
@@ -1162,7 +1203,7 @@ export class HostServer {
         this.sendProjectsAdvertisement(bus);
         void this.sendToolsAdvertisement(bus)
           .then(() => dispatchRpc(bus, msg))
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("state.snapshot discovery failed: %s", err));
         return;
       }
@@ -1207,7 +1248,7 @@ export class HostServer {
           .catch((err) => log.warn("git.checkout handler threw: %s", err));
         return;
       }
-      void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
+      void dispatchRpc(bus, msg).then((res) => this.answerAsker(res, channel, bus, peerId));
       return;
     }
     // Dispatch the verb (Task 4.4) and feed its FAILURE back to the phone as a
@@ -1217,8 +1258,9 @@ export class HostServer {
     void this.handleControlPlaneVerb(msg, bus, peerId)
       .then((res) => {
         if (!res.ok) {
-          // projectId lets the phone fail the exact pending bind (MachineSession
-          // keys its stream-ready waiters by projectId) instead of guessing.
+          // projectId lets the phone fail the exact pending project open
+          // (MachineSession keys its pending project open by projectId)
+          // instead of guessing.
           const projectId = "projectId" in msg && typeof msg.projectId === "string" ? msg.projectId : undefined;
           bus.publish(
             createMessage("control:result", { ok: false, verb: msg.type, projectId, error: res.error }),
@@ -1256,8 +1298,8 @@ export class HostServer {
    *  The bridge is the single writer of mobile-access-policy.json, and this
    *  verb is its only mutation path (the store has no fs watcher).
    *
-   *  Turning it OFF is machine-wide and immediate: every promoted relay slot is
-   *  torn down, so no project is left dialable. The socket itself stays
+   *  Turning it OFF is machine-wide and immediate: every promoted native project binding is
+   *  torn down, so no project is left dialable. The central control socket stays
    *  registered — this switch is authorization, not presence — but the catalog
    *  goes empty and every project verb is rejected. */
   async handleRemoteAccessVerb(req: ControlRequest): Promise<ControlResponse> {
@@ -1267,7 +1309,8 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
-          // The mirror deliberately SURVIVES this (E15): it holds what peers
+          this.controlPlaneRelay?.recheckAuthorization();
+          // The mirror deliberately SURVIVES this: it holds what peers
           // offered about themselves, and turning this machine's own door
           // shut is not a reason to forget who is out there — a session here
           // may still open an exchange, and OPENING one is the half no thread
@@ -1289,8 +1332,9 @@ export class HostServer {
     }
   }
 
-  /** The subordinate half of the gate (E12): whether an agent on another of this
-   *  account's machines may see what runs here and reach into it.
+  /** The subordinate half of the agent-reach gate (`agent-reach-policy.ts`):
+   *  whether an agent on another of this account's machines may see what runs
+   *  here and reach into it.
    *
    *  INBOUND ONLY, and deliberately not symmetric. Turning it off does not empty
    *  this machine's mirror of its peers and does not stop an agent here opening
@@ -1317,7 +1361,7 @@ export class HostServer {
 
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
    *  session-list peek. Reads the persisted sessions.json directly — no
-   *  project:start, no data-plane socket, no side effect of running a stopped
+   *  project:start, no native payload connection, no side effect of running a stopped
    *  project's startup terminals. Returns a `response` envelope mirroring
    *  dispatchRpc's shape so the app correlates by requestId unchanged. */
   async handleSessionsListRpc(req: RpcRequest): Promise<AbMessage> {
@@ -1440,15 +1484,15 @@ export class HostServer {
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
   }
 
-  /** The Capability Card (§3.3): OS plus one repo entry per project. It reads
+  /** The Capability Card: OS plus one repo entry per project. It reads
    *  the seen-projects catalog rather than a warm core, so it answers for COLD
    *  projects — which is what "the card exists before any agent runs" means. An
    *  id the catalog does not hold is OMITTED from `projects` rather than failing
    *  the request: the dialog asks about a catalog it was advertised, and one
    *  stale id must not blank the card for every other project.
    *
-   *  `includeSessions` widens the answer with the session half of
-   *  `docs/session-messaging.md` §5.5's directory: `sessions` (possibly `[]`)
+   *  `includeSessions` widens the answer with the session half of the
+   *  directory: `sessions` (possibly `[]`)
    *  is present iff it was asked AND honoured — that presence is the only
    *  signal a caller has that it is talking to a bridge old enough not to
    *  know the flag, so an unasked card must never carry the key. */
@@ -1476,8 +1520,9 @@ export class HostServer {
         error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
       });
     }
-    // The disclosure half of E12. Only the SESSION-bearing card is gated: the
-    // repo/OS half answers a device the user is holding, where remote access is
+    // The disclosure half of the agent-reach gate. Only the SESSION-bearing
+    // card is gated: the repo/OS half answers a device the user is holding,
+    // where remote access is
     // the whole question, while `sessions` is this machine's own titles and work
     // status assembled for another machine's AGENT.
     //
@@ -1647,7 +1692,7 @@ export class HostServer {
         error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
       });
     }
-    const { projectId, branch, allowActiveSessions, stashIfDirty } = parsed.data;
+    const { projectId, branch, allowActiveSessions } = parsed.data;
     if (!isSafeProjectId(projectId)) {
       return createMessage("response", {
         requestId: req.requestId,
@@ -1705,12 +1750,12 @@ export class HostServer {
         }
       }
 
-      const res = await checkoutLocalBranch(seen.path, branch, { stashIfDirty });
+      const res = await checkoutLocalBranch(seen.path, branch);
       await this.refreshWarmGitState(projectId, seen.path);
       return createMessage("response", {
         requestId: req.requestId,
         ok: true,
-        result: { current: res.current, stashed: res.stashed },
+        result: { current: res.current },
       });
     } catch (err: any) {
       return createMessage("response", {
@@ -1721,7 +1766,7 @@ export class HostServer {
     }
   }
 
-  /** Dispatch an E2E control-plane verb from the connected account-trusted
+  /** Dispatch a control-plane verb from the connected account-trusted
    *  phone. Returns a structured result; callers on the bus path discard it
    *  (void). */
   async handleControlPlaneVerb(
@@ -1741,22 +1786,9 @@ export class HostServer {
       // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
-      // The ASKING device's own capability, not the machine's best: the advert
-      // is deliberately optimistic (any attached app can route), so this is where
-      // a stale device on a mixed fleet gets a precise refusal instead of a
-      // silent dial into a project it would render as the main worktree.
-      const askerCanRoute = peerId
-        ? this.controlPlaneRelay?.peerSession(peerId)?.checkoutRouting === true
-        : false;
-      if (await this.projectRequiresCheckoutRouting(verb.projectId) && !askerCanRoute) {
-        return {
-          ok: false,
-          error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
-        };
-      }
       const entry = this.cores.get(verb.projectId);
       // An already-open LOCAL core (desktop attached over loopback) gets PROMOTED:
-      // an additive relay slot is wired onto its EXISTING bus — no close+reopen,
+      // an additive native project binding is wired onto its EXISTING bus — no close+reopen,
       // the live local session is undisturbed. ensureRemoteRuntime FIRST because a
       // local-opened core never built the machine runtime, and remoteDepsFor()
       // throws when remoteRuntime is null. Wrapped like the open() path so a mint
@@ -1772,17 +1804,7 @@ export class HostServer {
           return { ok: false, error: { code: "OPEN_FAILED", message: (err as Error)?.message ?? String(err) } };
         }
         entry.promotion = handle;
-        // Gate the phone-facing running advert on a REAL relay register and
-        // surface a terminal rejection (only the retired SESSION_LIMIT_EXCEEDED,
-        // from a relay predating the worker-limit change). project:start
-        // itself returns ok immediately — the outcome is pushed asynchronously.
-        this.reportFirstRegister(handle.firstRegister, projectId, bus, () => {
-          // Tear the rejected slot down so a later retry can re-promote, and so
-          // the core reads not-promoted again.
-          try { handle.stop(); } catch {}
-          const e = this.cores.get(projectId);
-          if (e?.promotion === handle) e.promotion = undefined;
-        });
+        this.reportFirstRegister(handle.firstRegister, projectId, bus);
         return { ok: true };
       } else if (!entry) {
         // Not open at all → fresh remote open. open() can throw (runtime mint
@@ -1796,32 +1818,20 @@ export class HostServer {
         const coreRef = this.cores.get(projectId)?.core;
         const firstRegister = coreRef?.whenRelayRegistered();
         if (firstRegister) {
-          this.reportFirstRegister(firstRegister, projectId, bus, () => {
-            // A fresh remote core's relay slot IS its primary session — a rejected
-            // register leaves it unreachable, so close it for a clean retry. Guard
-            // on identity (like the promote path's `e?.promotion === handle`): a
-            // concurrent evict/stop/reopen may have replaced this core's slot
-            // between project:start and the async rejection — don't tear down a
-            // newer, unrelated core that now holds the same projectId.
-            if (this.cores.get(projectId)?.core === coreRef) {
-              void this.stop(projectId).catch(() => {});
-            }
-          });
+          this.reportFirstRegister(firstRegister, projectId, bus);
           return { ok: true };
         }
       }
       // else: already remote OR already promoted → idempotent. The phone's
-      // project:start IS the "what stream do I bind?" question, and the re-advert
-      // alone can't answer it — the bus's payload dedup legally suppresses a
-      // byte-identical re-advert to a reconnecting phone. stream-ready is
-      // dedup-immune (not in REPLAY_TYPES), so publish the binding whenever the
-      // slot is actually relay-admitted (same dialable gate as the advert).
+      // project:start IS the "may I open this project's stream?" question, and
+      // the re-advert alone can't answer it — the bus's payload dedup legally
+      // suppresses a byte-identical re-advert to a reconnecting phone.
+      // stream-ready is dedup-immune (not in REPLAY_TYPES), so publish it
+      // whenever the slot is actually relay-admitted (same dialable gate as the
+      // advert) — it is the ready notice hazard-J gates the app's project-stream
+      // open on, not a binding handoff.
       if (this.cores.get(projectId)?.core.isRelayRegistered()) {
-        const streamId = this.streamIds.get(projectId);
-        if (streamId) {
-          this.controlPlaneRelay?.noteStreamBound(streamId);
-          bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
-        }
+        bus.publish(createMessage("stream-ready", { projectId }), "control");
       }
       // Re-advertise so the phone re-reads the current dialable state
       // (running:true only if the slot is actually relay-admitted —
@@ -1833,60 +1843,34 @@ export class HostServer {
     return { ok: false, error: { code: "UNKNOWN_VERB", message: `unsupported control-plane verb: ${verb.type}` } };
   }
 
-  /** Report a relay slot's FIRST register outcome to the requesting phone over
-   *  the control plane. On success, advertise `running:true` ONLY now — so the
-   *  phone never dials a data-plane slot the gate hasn't admitted (the empty-slot
-   *  AGENT_OFFLINE loop). On a terminal rejection, run `onFatal` (tear the dead
-   *  slot down) and push a structured `control:result` so the phone surfaces the
-   *  real reason instead of retrying.
-   *  Non-blocking + never throws into the caller. */
+  /** Advertise a host-local project binding once it is ready. */
   private reportFirstRegister(
-    firstRegister: Promise<RegisterOutcome>,
+    firstRegister: Promise<void>,
     projectId: string,
     bus: MessageBus,
-    onFatal: () => void,
   ): void {
     void firstRegister
-      .then((outcome) => {
-        if (outcome.ok) {
-          // Advertise the streamId binding so the phone can attach its
-          // ProjectSession services without a fresh project:start.
-          const streamId = this.streamIds.get(projectId);
-          if (streamId) {
-            this.controlPlaneRelay?.noteStreamBound(streamId);
-            bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
-          }
-          this.sendProjectsAdvertisement(bus);
-          return;
-        }
-        onFatal();
-        bus.publish(
-          createMessage("control:result", {
-            ok: false,
-            verb: "project:start",
-            projectId,
-            error: { code: outcome.code, message: outcome.message },
-          }),
-          "control",
-        );
+      .then(() => {
+        bus.publish(createMessage("stream-ready", { projectId }), "control");
+        this.sendProjectsAdvertisement(bus);
       })
       .catch((e) => log.warn("reportFirstRegister threw for %s: %s", projectId, e));
   }
 
-  /** True once an already-open core has been promoted onto the relay (additive
-   *  relay slot). Diagnostic/test seam for the promote path. */
+  /** True once an already-open core has gained an additive native project
+   *  binding. Diagnostic/test seam for the promote path. */
   isPromoted(id: string): boolean {
     return !!this.cores.get(id)?.promotion;
   }
 
-  /** Tear down every active relay slot (PromotionHandle) and return each core
+  /** Tear down every promoted native project binding and return each core
    *  to loopback-only. Called when `mobile-access:set` turns the machine off:
    *  the switch is machine-wide, so no project may be left dialable. NOT wired
    *  to phone disconnect, which must not demote (a transient drop is not a
    *  revocation). Idempotent: safe to call when no core is promoted. The core
    *  itself — and its live loopback session — is left ENTIRELY untouched; only
-   *  the additive relay slot is stopped. Public so tests can invoke it directly
-   *  without standing up a real relay connection. */
+   *  the additive native binding is stopped. Public so tests can invoke it directly
+   *  without standing up a real native peer connection. */
   demoteAllPromoted(): void {
     for (const [projectId, entry] of this.cores) {
       if (!entry.promotion) continue;
@@ -1895,14 +1879,14 @@ export class HostServer {
       } catch (e) {
         // PromotionHandle.stop() isolates each teardown sub-step internally; an
         // unexpected throw escaping those inner catches must be reported, never
-        // dropped silently. The slot is still cleared below.
+        // dropped silently. The binding is still cleared below.
         log.warn("Failed to demote promoted core %s: %s", projectId, e instanceof Error ? e.message : String(e));
       }
       entry.promotion = undefined;
     }
   }
 
-  /** Test/diagnostic seam: the control-plane relay device id (bare deviceUuid),
+  /** Test/diagnostic seam: the native host connection's device id (bare deviceUuid),
    *  or null if the control plane was not started. */
   get controlPlaneRegistrationId(): string | null {
     return this.controlPlaneRelay?.deviceId ?? null;
@@ -1910,6 +1894,13 @@ export class HostServer {
 
   private async handleControl(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
+      case "scheduler:request": {
+        try {
+          return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
+        } catch (error) {
+          return { id: req.id, ok: false, error: { code: schedulerErrorCode(error), message: error instanceof Error ? error.message : "Scheduler request failed" } };
+        }
+      }
       case "project:list":
         return { id: req.id, ok: true, type: "project:list", projects: this.list() };
       case "project:resolve": {
@@ -1948,7 +1939,7 @@ export class HostServer {
       case "project:start": {
         // Re-advertises an already-open core. `connect` is the loopback
         // port+token for all modes — every core binds a listener regardless of
-        // whether it also holds a relay slot. Starting a known-but-stopped
+        // whether it also holds a native project binding. Starting a known-but-stopped
         // project by id (no path) needs a persisted catalog and is deferred to
         // the app-launcher unit.
         const existing = this.get(req.projectId);
@@ -2072,9 +2063,9 @@ export class HostServer {
             }
           }
 
-          const res = await checkoutLocalBranch(req.projectPath, req.branch, { stashIfDirty: req.stashIfDirty });
+          const res = await checkoutLocalBranch(req.projectPath, req.branch);
           await this.refreshWarmGitState(req.projectId, req.projectPath);
-          return { id: req.id, ok: true, type: "git:checkout", current: res.current, stashed: res.stashed };
+          return { id: req.id, ok: true, type: "git:checkout", current: res.current };
         } catch (err: any) {
           return {
             id: req.id,
@@ -2089,8 +2080,8 @@ export class HostServer {
         // No control plane = no app to ask, and answering `ok` would leave the
         // watcher waiting for a half that can never arrive.
         const relay = this.controlPlaneRelay;
-        if (!relay || !relay.hasEstablishedSession) {
-          return { id: req.id, ok: false, error: { code: "NO_APP_CONNECTED", message: "no app has an E2E session with this machine" } };
+        if (!relay || !relay.hasEstablishedSession()) {
+          return { id: req.id, ok: false, error: { code: "NO_APP_CONNECTED", message: "no app has an established session with this machine" } };
         }
         // The app refuses a TTL-less arm outright (nothing on the device can
         // stop a capture, so an arm nothing lapses is the one thing it will not
@@ -2272,7 +2263,7 @@ export class HostServer {
   /** The asking half of the remote directory's fill path: the app's pump
    *  hands over one cycle of what it learned peeking peer capability cards.
    *  Exempt from THIS machine's own remote-access switch, like the rest of this
-   *  plane (E15): every row here was offered by the peer that owns it, under
+   *  plane: every row here was offered by the peer that owns it, under
    *  that peer's own switch, and mirroring one discloses nothing about this
    *  machine. `clear()` on the refusal branch is what makes losing a relay
    *  identity take effect immediately rather than riding out the mirror's
@@ -2282,15 +2273,15 @@ export class HostServer {
   ): ControlResponse {
     const selfMachineId = this.controlPlaneRegistrationId;
     if (selfMachineId === null) {
-      // A row offered while this machine has no relay identity is
+      // A row offered while this machine has no remote device identity is
       // un-messageable (SessionBusCoordinator.message -> self() refuses
       // AGENT_NOT_READY on a null machine id), so mirroring it would hand
       // agents a directory that lies about what it can reach.
-      this.remoteDirectory.clear("no relay identity");
+      this.remoteDirectory.clear("no remote device identity");
       return {
         id: req.id,
         ok: false,
-        error: { code: "NOT_ADDRESSABLE", message: "this machine has no relay identity yet, so it cannot accept a peer directory" },
+        error: { code: "NOT_ADDRESSABLE", message: "this machine has no remote device identity yet, so it cannot accept a peer directory" },
       };
     }
     // unservedReads comes off replace()'s own return, not a follow-up
@@ -2391,9 +2382,8 @@ export class HostServer {
     let relayUrl: string | undefined;
     if (mode === "remote") {
       await this.ensureRemoteRuntime();
-      // A remote core attaches to the ONE machine socket; ensure it
-      // is up (startControlPlane already opened it when launched with remote
-      // config — this guards the wizard-bootstrapped path).
+      // A remote core attaches to the host-owned native connection;
+      // startControlPlane opens it only when launched with remote config.
       if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
       remote = this.remoteDepsFor(projectId);
       // The core can't derive this itself — only a standalone agent with an
@@ -2413,25 +2403,22 @@ export class HostServer {
       // Same rule, one layer down: this bit is read only after the switch above
       // says yes, so a core sees it live too.
       agentReachEnabled: () => this.agentReachPolicy.isEnabled(),
-      // Same rule, and for a second reason on top of it: the desktop wizard can
-      // credential a host that launched local-only, and a core already warm at
-      // that moment must move with it rather than stay permanently uncredentialed.
-      // Deliberately NOT scoped to remote-mode cores — a signed-in Free user
-      // opening the same project locally would otherwise route around the gate,
-      // and local is the desktop default.
+      // Read live: the tier resolves only once the remote runtime is up, which
+      // can be after a core warmed. Deliberately NOT scoped to remote-mode
+      // cores — local is the desktop default, so a signed-in Free user opening
+      // the same project locally would otherwise route around the gate.
       tierClaim: () => this.tierClaimNow(),
-      // Read live and given to every mode: the control plane can come up (or a
-      // wizard can credential this host) long after a local core warmed, and the
-      // session bus asks for this the moment a machine is added to one of its
-      // sessions — which is a local core's business as often as a remote one's.
+      // Read live and given to every mode: the control plane can come up long
+      // after a local core warmed, and the session bus asks for this the moment
+      // a machine is added to one of its sessions — which is a local core's
+      // business as often as a remote one's.
       machineDeviceId: () => this.controlPlaneRegistrationId,
-      ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       // One coordinator for every project this host has open — see the field's
       // own doc for why the route table and `self()` are keyed off the shared
       // session index rather than this core's own id.
       sessionBus: this.sessionBus,
       sessionDirectory: this.sessionDirectory,
-      // §7.3's same-machine wake: resolves the OWNING core exactly as
+      // The same-machine wake: resolves the OWNING core exactly as
       // `deliverLocal` does, so it only ever starts a session this host
       // already holds warm — a cold project is not brought up over a notify.
       startSession: (sessionId) => this.startLocalSession(sessionId),
@@ -2503,7 +2490,7 @@ export class HostServer {
       },
     };
     const build = this.opts.remoteRuntimeFactory ?? buildRemoteRuntime;
-    // Late binding: the machine RelayClient is constructed AFTER the runtime (its
+    // Late binding: the native host connection is constructed AFTER the runtime (its
     // token maintenance) in startRemoteControlPlane/startCore, so this closure
     // reads controlPlaneRelay lazily at each re-mint. A LICENSE_EXPIRED stop keeps
     // maintenance re-minting; the first fresh mint redials the stopped socket. The
@@ -2529,11 +2516,9 @@ export class HostServer {
     return r;
   }
 
-  /** The machine remote config, or null. `wizardRemote` is the desktop-wizard
-   *  promotion of a host launched local-only, so anything that reads only
-   *  `opts.remote` silently no-ops on that whole path. */
+  /** The machine remote config, or null. */
   private remoteConfig(): HostRemoteConfig | null {
-    return this.opts.remote ?? this.wizardRemote;
+    return this.opts.remote ?? null;
   }
 
   /**
@@ -2566,9 +2551,6 @@ export class HostServer {
     const r = this.remoteConfig();
     if (!r || !this.remoteRuntime) return;
     const rt = this.remoteRuntime;
-    // Rides the heartbeat cadence to keep the E2E-admission inventory cache
-    // warm without a dedicated poll loop.
-    void this.trustedPeers?.refresh();
     void sendHeartbeat({
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
@@ -2610,13 +2592,16 @@ export class HostServer {
   }
 
   async stop(projectId: string): Promise<void> {
+    this.scheduler?.interruptProject(projectId, "Project stopped by user");
+    this.schedulerObservers.get(projectId)?.();
+    this.schedulerObservers.delete(projectId);
     const entry = this.cores.get(projectId);
     if (!entry) return;
     this.noteColdSnapshot(entry);
     this.cores.delete(projectId);
-    // A promoted local core holds a relay slot separate from its loopback session
-    // (core.shutdown only closes the core's own `this.relay`, which a local core
-    // never set). Stop the slot explicitly so it doesn't leak past teardown.
+    // A promoted local core holds a native project binding separate from its loopback session
+    // (core.shutdown only closes the primary binding, which a local core
+    // never set). Stop the promoted binding explicitly so it cannot outlive teardown.
     try { entry.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for %s: %s", projectId, e instanceof Error ? e.message : String(e)); }
     await entry.core.shutdown();
   }
@@ -2626,7 +2611,7 @@ export class HostServer {
    *  AUTHORITATIVE session list (the app merely caches it), so without this a
    *  removed project's sessions reload on the next open. Each step is
    *  best-effort — a failure in one must never strand the others:
-   *    1. stop a warm core (kills its PTYs + any relay slot),
+   *    1. stop a warm core (kills its PTYs + any native project binding),
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
    *    4. drop what the project owns that step 3's disk delete cannot reach:
@@ -2646,6 +2631,13 @@ export class HostServer {
    *  off (or on) for every other.
    *  Idempotent: forgetting an unknown/already-forgotten id is a no-op. */
   async forget(projectId: string): Promise<void> {
+    const checkouts = await new CheckoutStore(resolveAbDir(), projectId).read();
+    if (!checkouts.healthy || checkouts.records.some((checkout) => checkout.scheduleOwnerId)) {
+      throw new Error("Delete this project's schedules before forgetting its schedule-owned workspaces");
+    }
+    if (this.scheduler?.hasActiveProject(projectId)) {
+      throw new Error("Stop this project's scheduled runs before forgetting it");
+    }
     await this.stop(projectId);
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
@@ -2724,6 +2716,10 @@ export class HostServer {
   }
 
   async shutdown(reason?: string): Promise<void> {
+    await this.scheduler?.close();
+    this.scheduler = null;
+    for (const unsubscribe of this.schedulerObservers.values()) unsubscribe();
+    this.schedulerObservers.clear();
     // Persist the hint catalog up front so memory↔disk agree on a clean exit
     // (and so it survives even if a force-kill backstop fires before the slower
     // core teardown below finishes).
@@ -2732,7 +2728,7 @@ export class HostServer {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.controlPlaneRelay?.close();
+    await this.controlPlaneRelay?.close();
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
     this.remoteRuntime?.maint.stop();
@@ -2755,7 +2751,7 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
-    // Every core's `TerminalManager` shares this ONE store (D3); close it only
+    // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.
     closeTerminalHistoryStore();
   }
@@ -2774,42 +2770,23 @@ export class HostServer {
   }
 
   /** Stream-attach surface for a project core: it attaches its bus to the ONE
-   *  machine socket rather than owning a RelayClient. The wrapper
-   *  records the allocated streamId under `projectId` (for the advertisement +
-   *  stream-ready) and clears it on detach. */
+   *  native host connection rather than owning a peer connection. `projectId`
+   *  is carried in `opts` (the project stream open frame names it, not a
+   *  host-allocated id), so the wrapper needs no per-project bookkeeping of its
+   *  own — it passes straight through to `ProjectStreamRegistry.attach`. */
   private remoteDepsFor(projectId: string): ProjectCoreRemoteDeps {
     const client = this.controlPlaneRelay;
-    if (!client) throw new Error("HostServer: machine relay socket not started (call startRemoteControlPlane first)");
+    if (!client) throw new Error("HostServer: native remote connection not started (call startRemoteControlPlane first)");
     return {
-      attachStream: (bus, opts) => {
-        const handle = client.attachStream(bus, opts);
-        this.streamIds.set(projectId, handle.streamId);
-        return {
-          streamId: handle.streamId,
-          sendTunnel: (data, target) => handle.sendTunnel(data, target),
-          sendTo: (msg, channel, target) => handle.sendTo(msg, channel, target),
-          detach: () => {
-            if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
-            handle.detach();
-          },
-        };
-      },
+      attachStream: (bus, opts) => client.attachStream(bus, opts),
       establishedPeers: () => client.establishedPeers(),
       peerSession: (peerId) => client.peerSession(peerId),
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
+      accountDisowns: (deviceId, ed25519Pub) => client.accountDisowns(deviceId, ed25519Pub),
     };
-  }
-
-  /** Cold projects have no core to inspect, so compatibility derives only from
-   * the host-owned session store. A remote request never supplies a path. */
-  private async projectRequiresCheckoutRouting(projectId: string): Promise<boolean> {
-    const warm = this.cores.get(projectId)?.core;
-    if (warm) return warm.hasIsolatedSessions();
-    const sessions = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
-    return sessions.some((session) => isIsolatedCheckoutKind(session.checkoutKind));
   }
 
   /** Cold deletion still owns the same safe worktree lifecycle as a warm core.
@@ -2878,7 +2855,14 @@ export class HostServer {
     // singular `sessionId` is informational (nothing reads it), so the row can
     // simply go.
     const members = persisted.filter((entry) => entry.checkoutId === session.checkoutId);
-    if (members.length > 1) {
+    const checkoutStore = new CheckoutStore(resolveAbDir(), projectId);
+    const checkoutState = await checkoutStore.read();
+    if (!checkoutState.healthy) throw new Error("Checkout storage could not be read completely");
+    const checkout = checkoutState.records.find((record) => record.id === session.checkoutId);
+    if (members.length > 1 || checkout?.scheduleOwnerId) {
+      await checkoutStore.update(session.checkoutId, (record) => record.sessionId === sessionId
+        ? { ...record, sessionId: members.find((member) => member.id !== sessionId)?.id ?? null }
+        : record);
       return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     if (options.removeCheckout === false) {
@@ -2948,6 +2932,8 @@ export class HostServer {
       const victim = this.selectEvictionVictim(justOpened);
       if (!victim) break;
       const entry = this.cores.get(victim);
+      this.schedulerObservers.get(victim)?.();
+      this.schedulerObservers.delete(victim);
       if (entry) this.noteColdSnapshot(entry);
       this.cores.delete(victim);
       try { entry?.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
@@ -2957,10 +2943,10 @@ export class HostServer {
       await entry?.core.shutdown("evicted").catch(() => {});
       evictedAny = true;
     }
-    // A phone's picker shows running:true for warm cores; an evicted core must
-    // flip back to running:false there. The data socket drops on its own (the
-    // core's RelayClient closes), but the control-plane advertisement is the
-    // picker-facing signal. The app-side warm cap (kWarmCapRelay) can exceed this
+    // A phone's picker shows running:true for native-bound warm cores; an evicted
+    // core must flip back to running:false there. Its native binding closes with the core,
+    // but the control-plane advertisement is the picker-facing signal. The
+    // app-side warm cap (kWarmCapRelay) can exceed this
     // host cap, so without this re-advertise the app may still believe an evicted
     // project is warm.
     if (evictedAny) this.readvertiseToControlPlane();
@@ -2972,6 +2958,7 @@ export class HostServer {
     let oldest = Infinity;
     for (const [id, e] of this.cores) {
       if (id === protect) continue;
+      if (this.scheduler?.hasActiveProject(id)) continue;
       if (e.lastFocusedMs < oldest) { oldest = e.lastFocusedMs; victim = id; }
     }
     return victim;

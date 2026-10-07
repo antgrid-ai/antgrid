@@ -2,20 +2,20 @@ import { test, expect, afterEach } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RelayClient } from "../../src/relay-client";
+import { CentralControlClient } from "../../src/central-control-client";
 import { loadPairedPhones } from "../../src/paired-phones";
 
-let clients: RelayClient[] = [];
+let clients: CentralControlClient[] = [];
 afterEach(() => {
   for (const c of clients.splice(0)) try { c.close(); } catch {}
 });
 
-/** Build a RelayClient with a fake OPEN WebSocket that records every send() so
+/** Build a CentralControlClient with a fake OPEN WebSocket that records every send() so
  *  we can assert the exact control frame `sendPushDeliver` puts on the wire.
  *  Mirrors the in-file fake-ws pattern in tests/relay-client-register.test.ts. */
-function makeClientWithFakeWs(): { client: RelayClient; sent: unknown[] } {
+function makeClientWithFakeWs(): { client: CentralControlClient; sent: unknown[] } {
   const sent: unknown[] = [];
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url: "ws://127.0.0.1:1",
     identity: {
       deviceId: "uuid-1",
@@ -24,7 +24,6 @@ function makeClientWithFakeWs(): { client: RelayClient; sent: unknown[] } {
       ed25519PublicKey: "pk",
       ed25519PrivateKey: "sk",
     },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => "tok",
   });
   clients.push(client);
@@ -42,6 +41,13 @@ test("sendPushDeliver emits a top-level push:deliver control frame", () => {
   expect(pd.pushToken).toBe("tok");
   expect(pd.provider).toBe("fcm");
   expect(pd.blob).toEqual({ epk: "E", box: "B" });
+});
+
+test("sendPushDeliver puts the collapse key on the wire frame", () => {
+  const { client, sent } = makeClientWithFakeWs();
+  client.sendPushDeliver({ pushToken: "tok", provider: "apns", blob: { epk: "E", box: "B" }, collapseKey: "K_-9" });
+  const pd = sent.map((s) => JSON.parse(s as string)).find((f) => f.type === "push:deliver");
+  expect(pd.collapseKey).toBe("K_-9");
 });
 
 test("sendPushDeliver is a safe no-op when the socket is not open", () => {
@@ -64,10 +70,9 @@ function seedPhone(pushToken: string) {
 
 test("push:result { ok:false, reason:unregistered } prunes the dead token", () => {
   const pairedPhones = seedPhone("dead-token");
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url: "ws://127.0.0.1:1",
     identity: { deviceId: "uuid-1", deviceName: "m", createdAt: new Date().toISOString(), ed25519PublicKey: "pk", ed25519PrivateKey: "sk" },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => "tok",
     pairedPhones,
   });
@@ -84,10 +89,9 @@ test("push:result { ok:false, reason:unregistered } prunes the dead token", () =
 
 test("push:result with a non-unregistered failure keeps the token (log-only, no crash)", () => {
   const pairedPhones = seedPhone("live-token");
-  const client = new RelayClient({
+  const client = new CentralControlClient({
     url: "ws://127.0.0.1:1",
     identity: { deviceId: "uuid-1", deviceName: "m", createdAt: new Date().toISOString(), ed25519PublicKey: "pk", ed25519PrivateKey: "sk" },
-    generateKeypair: () => { throw new Error("not used"); },
     getLicenseToken: () => "tok",
     pairedPhones,
   });

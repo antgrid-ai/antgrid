@@ -1,13 +1,15 @@
 import 'dart:async';
 
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
+import '../models/git_status_index.dart';
 import '../models/git_sync_state.dart';
+import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -23,6 +25,8 @@ class FileFindSuperseded implements Exception {
   @override
   String toString() => 'A newer file:find superseded this one.';
 }
+
+typedef _ParentDelta = ({Set<String> removed, List<FileNode> upserts});
 
 /// Per-project file tree + git status + viewing-file service.
 ///
@@ -42,14 +46,13 @@ class FileService {
   /// drives it from.
   static const Duration findDebounce = Duration(milliseconds: 250);
 
-  StreamSubscription<Map<String, dynamic>>? _heavySub;
-  StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<InboundFrame>? _heavySub;
+  StreamSubscription<InboundFrame>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
 
   /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
   int _snapshotEpoch = -1;
-  int _gitOpSeq = 0;
   bool _disposed = false;
   bool _treeRecoveryPending = false;
   final Set<Object> _treeOwners = {};
@@ -128,19 +131,39 @@ class FileService {
   Stream<FileTreeState> get stateStream => _stateController.stream;
   FileTreeState get currentState => _state;
 
+  /// One message per finished git op, with no replay; see
+  /// `OperationalErrorToaster` for why it is not a field on [FileTreeState].
+  final _gitOpFeedbackController = StreamController<String>.broadcast();
+  Stream<String> get gitOpFeedback => _gitOpFeedbackController.stream;
+
   String get projectId => session.projectId;
 
-  /// Notified when a fragmentable transfer (file:content, git:diff-content)
-  /// lands, so the recovery coordinator can reset its retry counter.
-  void Function(FragHint hint)? onFragmentSuccess;
-
-  /// Wall-clock bound for the one-shot git:diff verb. The frag-abort backstop
-  /// ([handleFragmentFailure]) only fires once a fragmented transfer STARTS then
-  /// aborts; a send dropped before any frame arrives (keyless relay window /
-  /// session down) has no backstop and would strand [GitState.diffLoading].
-  /// Injectable so tests drive a short window.
+  /// Wall-clock bound for the one-shot git:diff verb. A send dropped before
+  /// any frame arrives (keyless relay window / session down) would otherwise
+  /// strand [GitState.diffLoading] forever. Injectable so tests drive a short
+  /// window.
   final Duration gitActionTimeout;
   ReplyLatch? _diffLatch;
+
+  /// Consecutive stream resets one outstanding request survives before its
+  /// pane is failed instead of re-requested. Bounds a transfer that resets its
+  /// stream every time it is sent.
+  static const int kMaxStreamResetReissues = 2;
+
+  /// The diff pane's in-flight request, set by [requestDiff]/[requestCommitDiff]
+  /// and cleared when the matching reply lands or the diff is cleared or
+  /// superseded. Deliberately NOT cleared by the latch's timeout or a
+  /// [SessionDownException] — those leave the pane still waiting, which is
+  /// exactly what [reissueAfterStreamReset] needs to re-send.
+  ({String path, String? sha})? _inflightDiff;
+
+  /// The Git view pane's in-flight [requestFileContent], set by [gitViewFile]
+  /// and cleared the same way as [_inflightDiff].
+  String? _inflightGitView;
+
+  /// Keyed `'diff <sha?> <path>'` / `'view <path>'`, cleared on the matching
+  /// reply alongside [_inflightDiff]/[_inflightGitView].
+  final Map<String, int> _resetReissues = {};
 
   /// Bounds a `git:log` page fetch the same way [_diffLatch] bounds
   /// `git:diff` — one slot, superseded on the next fetch (a scroll-triggered
@@ -190,8 +213,8 @@ class FileService {
     this.gitActionTimeout = const Duration(seconds: 15),
     this.gitSyncTimeout = const Duration(seconds: 150),
   }) : _state = FileTreeState(projectId: session.projectId) {
-    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyFrame);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
     // The bridge caches `git:sync-state` for replay, but only a checkout whose
     // bundle existed at connect time receives that replay — an isolated
     // session's does not. Asking also re-fires on every reconnect, which is
@@ -234,9 +257,6 @@ class FileService {
   /// Restores selected-file and preview pulls independently of full-tree demand.
   void activate() {
     if (_disposed) return;
-    if (_stashesRequested) {
-      session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
-    }
     if (_state.files.selectedFilePath != null) {
       session.hydrateCheckout(
         checkoutId,
@@ -252,7 +272,6 @@ class FileService {
   /// Leaves cached content and feature-owned tree demand intact.
   void deactivate() {
     if (_disposed) return;
-    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, 'file:preview');
   }
@@ -340,8 +359,7 @@ class FileService {
   /// Shallowest-first, so a chunk's replies can be placed under parents that
   /// are already on the spine — see [_handleChildrenMessage].
   Future<void> _fetchChildrenChunked(Iterable<String> paths) {
-    final ordered = paths.toSet().toList()
-      ..sort((a, b) => _depthOf(a).compareTo(_depthOf(b)));
+    final ordered = _shallowestFirst(paths.toSet(), (p) => p);
     if (ordered.isEmpty) return Future.value();
     _markLoading(ordered);
     // Claimed when the request is ISSUED, not when the reply is applied —
@@ -361,7 +379,26 @@ class FileService {
     return Future.wait(sends);
   }
 
-  int _depthOf(String path) => path.isEmpty ? 0 : path.split('/').length;
+  static const int _slash = 0x2F;
+
+  static int _depthOf(String path) {
+    if (path.isEmpty) return 0;
+    var depth = 1;
+    for (var i = 0; i < path.length; i++) {
+      if (path.codeUnitAt(i) == _slash) depth++;
+    }
+    return depth;
+  }
+
+  static List<T> _shallowestFirst<T>(
+    Iterable<T> items,
+    String Function(T item) pathOf,
+  ) {
+    final keyed = [
+      for (final item in items) (depth: _depthOf(pathOf(item)), item: item),
+    ]..sort((a, b) => a.depth.compareTo(b.depth));
+    return [for (final k in keyed) k.item];
+  }
 
   /// Marks every directory about to be listed as pending, so the tree's
   /// loading row covers the expanded-set restore, reveal, select and the
@@ -403,8 +440,12 @@ class FileService {
     _stateController.add(state);
   }
 
-  void _onHeavyJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessage(json);
+  // `tree:full` has no arm on either handler: an old bridge's
+  // watcher-overflow resend (superseded by `file:tree:invalidated`, see
+  // [_handleInvalidated]) is a harmless no-op.
+
+  void _onHeavyFrame(InboundFrame f) {
+    final parsed = f.parsed;
     if (parsed == null) return;
     if (parsed is FileTreeUnchangedMessage) {
       // Nothing to apply — the agent is confirming the revision we claimed.
@@ -446,9 +487,6 @@ class FileService {
       }
       return;
     }
-    // `tree:full` has no handler: an old bridge's watcher-overflow resend
-    // (superseded by `file:tree:invalidated`, see [_handleInvalidated]) falls
-    // through every branch here and is a harmless no-op, not an exception.
     if (parsed is FileContentMessage) {
       _handleFileContent(parsed);
       return;
@@ -460,9 +498,16 @@ class FileService {
     if (_completeFind(parsed)) return;
   }
 
-  void _onStatusJson(Map<String, dynamic> json) {
-    final parsed = parseAbMessage(json);
+  void _onStatusFrame(InboundFrame f) {
+    final parsed = f.parsed;
     if (parsed == null) return;
+    // An error-bearing file:content is coerced onto this tier by
+    // classifyAbMessage, so the heavy handler never sees it; without this the
+    // pane that asked would spin on a read the machine already refused.
+    if (parsed is FileContentMessage) {
+      _handleFileContent(parsed);
+      return;
+    }
     // Also here, not only on the heavy tier: `classifyAbMessage` coerces ANY
     // envelope carrying an `error` to `MessageTier.status`, and every failure
     // `file:find` can produce carries one — the bridge's "no finder" and
@@ -503,29 +548,6 @@ class FileService {
     }
     if (parsed is GitUnstageResultMessage) {
       if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
-      return;
-    }
-    if (parsed is GitStashListResultMessage) {
-      if (parsed.error == null) {
-        _setState(
-          _state.copyWith(git: _state.git.copyWith(stashes: parsed.stashes)),
-        );
-      }
-      return;
-    }
-    // Neither result asks for the list back: the agent already follows every
-    // pop and drop with a fresh `git:stash-list-result` on both outcomes, so a
-    // request here is a second round trip for a list already on its way.
-    if (parsed is GitStashPopResultMessage) {
-      if (!parsed.success) {
-        _emitOpFeedback(parsed.error ?? 'Could not restore the stash');
-      }
-      return;
-    }
-    if (parsed is GitStashDropResultMessage) {
-      if (!parsed.success) {
-        _emitOpFeedback(parsed.error ?? 'Could not discard the stash');
-      }
       return;
     }
     if (parsed is GitSyncResultMessage) {
@@ -581,52 +603,18 @@ class FileService {
     );
   }
 
-  /// Surface a one-shot git op result. Bumping the seq makes each result a
-  /// distinct event so the toaster re-fires even on an identical message — no
-  /// clear-first dance, no coupling to the toaster's de-dup internals.
   void _emitOpFeedback(String message) {
-    _setState(
-      _state.copyWith(gitOpFeedback: message, gitOpFeedbackSeq: ++_gitOpSeq),
-    );
+    if (_disposed) return;
+    _gitOpFeedbackController.add(message);
   }
 
-  /// Applies an incremental `tree:update` delta using the same
-  /// identity-preserving spine copy [_handleChildrenMessage] uses — see
-  /// [_updateAt]. A delta into a directory this app has never fetched has
-  /// nothing to insert INTO (dropped); a delta into one whose listing was
-  /// TRUNCATED cannot be inserted locally either — `children` there is an
-  /// ordered PREFIX, and there is no way to know whether the changed node
-  /// belongs inside that prefix or past the cut the bridge already made — so
-  /// that directory is queued for [_fetchChildrenChunked] instead.
+  /// Applies a `tree:update` frame via [applyTreeDelta], then raises the open
+  /// file's changed-on-disk flag and dispatches any re-list.
   void _applyTreeUpdate(TreeUpdateMessage msg) {
     final currentRoot = _state.root;
     if (currentRoot == null) return;
 
-    var root = currentRoot;
-    final relist = <String>{};
-
-    for (final removedPath in msg.removed) {
-      root = _applyToParent(root, removedPath, relist, (parent) {
-        final children = parent.children
-            .where((c) => c.path != removedPath)
-            .toList();
-        return _rebuild(parent, children: children);
-      });
-    }
-
-    for (final node in [...msg.added, ...msg.modified]) {
-      root = _applyToParent(root, node.path, relist, (parent) {
-        FileNode? prior;
-        for (final child in parent.children) {
-          if (child.path == node.path) prior = child;
-        }
-        final children = _sorted([
-          ...parent.children.where((c) => c.path != node.path),
-          _deltaNode(node, prior),
-        ]);
-        return _rebuild(parent, children: children);
-      });
-    }
+    final (:root, :relist) = applyTreeDelta(currentRoot, msg);
 
     final viewingModified =
         _state.files.selectedFilePath != null &&
@@ -652,6 +640,70 @@ class FileService {
     }
   }
 
+  static String _parentPathOf(String path) {
+    final cut = path.lastIndexOf('/');
+    return cut < 0 ? '' : path.substring(0, cut);
+  }
+
+  /// Applies one `tree:update` frame to [root] with the identity-preserving
+  /// spine copy [_handleChildrenMessage] uses — see [_updateAt]. A delta into
+  /// a directory this app has never fetched has nothing to insert INTO
+  /// (dropped); a delta into one whose listing was TRUNCATED cannot be
+  /// inserted locally either — `children` there is an ordered PREFIX, and
+  /// there is no way to know whether the changed node belongs inside that
+  /// prefix or past the cut the bridge already made — so that directory is
+  /// returned in `relist` for [_fetchChildrenChunked] instead.
+  ///
+  /// Entries are grouped by parent, so a frame of K entries into one
+  /// directory spine-copies and sorts it once, not K times. Parents are
+  /// applied shallowest first, so an entry that removes or replaces a
+  /// directory lands before entries inside it are routed, and those entries
+  /// see it gone or unloaded.
+  ///
+  /// Static and pure so tests can count the work a frame does.
+  @visibleForTesting
+  static ({FileNode root, Set<String> relist}) applyTreeDelta(
+    FileNode root,
+    TreeUpdateMessage msg,
+  ) {
+    final byParent = <String, _ParentDelta>{};
+    _ParentDelta deltaFor(String path) => byParent.putIfAbsent(
+      _parentPathOf(path),
+      () => (removed: <String>{}, upserts: <FileNode>[]),
+    );
+    for (final removedPath in msg.removed) {
+      deltaFor(removedPath).removed.add(removedPath);
+    }
+    for (final node in msg.added) {
+      deltaFor(node.path).upserts.add(node);
+    }
+    for (final node in msg.modified) {
+      deltaFor(node.path).upserts.add(node);
+    }
+
+    var next = root;
+    final relist = <String>{};
+    for (final parentPath in _shallowestFirst(byParent.keys, (p) => p)) {
+      final delta = byParent[parentPath]!;
+      next = _applyToParent(
+        root,
+        next,
+        parentPath,
+        relist,
+        (parent) => _rebuild(
+          parent,
+          children: applyChildrenDelta(
+            parent.children,
+            removed: delta.removed,
+            upserts: delta.upserts,
+            reconcile: _deltaNode,
+          ),
+        ),
+      );
+    }
+    return (root: next, relist: relist);
+  }
+
   /// Reconciles one `tree:update` entry with what the app already holds at
   /// that path.
   ///
@@ -662,7 +714,7 @@ class FileService {
   /// means the bridge listed it" rule reads it as an authoritative empty and
   /// blanks whatever was expanded there. Neither the carried-over state nor
   /// the unloaded fallback can be wrong: the bridge did not look inside.
-  FileNode _deltaNode(FileNode node, FileNode? prior) {
+  static FileNode _deltaNode(FileNode node, FileNode? prior) {
     if (node.type != FileNodeType.directory) return node;
     if (prior == null || prior.type != FileNodeType.directory) {
       return _rebuild(node, children: const [], childrenLoaded: false);
@@ -676,23 +728,39 @@ class FileService {
     );
   }
 
-  /// Routes one `tree:update` entry (add/modify/remove, named by
-  /// [targetPath]) to its parent directory and applies [edit] to it — or, if
-  /// the parent is not loaded or is truncated, leaves [root] untouched (and
-  /// for a truncated parent, records it in [relist]). See
-  /// [_applyTreeUpdate]'s doc for why those two cases cannot apply locally.
-  FileNode _applyToParent(
+  /// Edits the directory at [parentPath] with [edit] — or, if it is not
+  /// loaded or is truncated, leaves [root] untouched (and for a truncated
+  /// one, records it in [relist]). See [applyTreeDelta]'s doc for why those
+  /// two cases cannot apply locally. [before] is the tree as it was before
+  /// this frame; [root] is that tree as already edited by shallower parents.
+  static FileNode _applyToParent(
+    FileNode before,
     FileNode root,
-    String targetPath,
+    String parentPath,
     Set<String> relist,
     FileNode Function(FileNode parent) edit,
   ) {
-    final parts = targetPath.split('/');
-    final parentPath = parts.length <= 1
-        ? ''
-        : parts.sublist(0, parts.length - 1).join('/');
     final parent = _findNode(root, parentPath);
-    if (parent == null || !parent.childrenLoaded) return root;
+    // A delta routes only into a directory. A path this frame turned into a
+    // file has nothing to insert into.
+    if (parent == null || parent.type != FileNodeType.directory) return root;
+    if (!parent.childrenLoaded) {
+      // Unloaded now but a loaded, truncated listing before this frame means
+      // the frame removed and recreated it (a directory entry with no
+      // directory prior lands unloaded; see [_deltaNode]). Its entries would
+      // have forced a re-list of the old one, and dropping them silently
+      // leaves a directory the user may have open rendering empty, with
+      // nothing to retry from.
+      final prior = _findNode(before, parentPath);
+      if (prior != null &&
+          prior.type == FileNodeType.directory &&
+          prior.childrenLoaded &&
+          prior.truncated &&
+          !prior.childrenLoading) {
+        relist.add(parentPath);
+      }
+      return root;
+    }
     if (parent.truncated) {
       // A re-list already in flight covers every delta that lands while it
       // is out — without this a directory under a build's churn re-lists up
@@ -705,7 +773,7 @@ class FileService {
   }
 
   /// Read-only lookup by path — the root's own path is `''`.
-  FileNode? _findNode(FileNode node, String path) {
+  static FileNode? _findNode(FileNode node, String path) {
     if (node.path == path) return node;
     if (node.type != FileNodeType.directory) return null;
     for (final child in node.children) {
@@ -726,7 +794,7 @@ class FileService {
   /// "drop a delta into an unloaded directory" contract [_applyToParent]
   /// relies on for the shallower unloaded-parent case, and load-bearing on
   /// its own wherever a caller passes a path with no live caller-side check.
-  FileNode _updateAt(
+  static FileNode _updateAt(
     FileNode root,
     String dirPath,
     FileNode Function(FileNode dir) fn,
@@ -751,7 +819,7 @@ class FileService {
   /// carried over unchanged. The one node constructor every spine-copy site
   /// below goes through, so a field added to [FileNode] only has to be
   /// threaded here.
-  FileNode _rebuild(
+  static FileNode _rebuild(
     FileNode node, {
     List<FileNode>? children,
     bool? truncated,
@@ -769,22 +837,6 @@ class FileService {
     childrenLoading: childrenLoading ?? node.childrenLoading,
     ignored: node.ignored,
   );
-
-  List<FileNode> _sorted(List<FileNode> nodes) {
-    final sorted = List<FileNode>.of(nodes);
-    sorted.sort((a, b) {
-      if (a.type == FileNodeType.directory &&
-          b.type != FileNodeType.directory) {
-        return -1;
-      }
-      if (a.type != FileNodeType.directory &&
-          b.type == FileNodeType.directory) {
-        return 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return sorted;
-  }
 
   Timer? _subscriptionSendTimer;
 
@@ -929,13 +981,19 @@ class FileService {
     // descendants stay claimed and must — re-expanding re-lists depth 1 only
     // and `_carryLoaded` carries the stale subtree back in) are what should
     // go first.
-    final paths = _loadedDirectoryPaths().toList()
-      ..sort((a, b) {
-        final byVisibility =
-            (expanded.contains(a) ? 0 : 1) - (expanded.contains(b) ? 0 : 1);
+    final keyed = [
+      for (final path in _loadedDirectoryPaths())
+        (
+          visibleRank: expanded.contains(path) ? 0 : 1,
+          depth: _depthOf(path),
+          path: path,
+        ),
+    ]..sort((a, b) {
+        final byVisibility = a.visibleRank - b.visibleRank;
         if (byVisibility != 0) return byVisibility;
-        return _depthOf(a).compareTo(_depthOf(b));
+        return a.depth.compareTo(b.depth);
       });
+    final paths = [for (final k in keyed) k.path];
     final capped = paths.length > _maxSubscribedPaths
         ? paths.sublist(0, _maxSubscribedPaths)
         : paths;
@@ -966,8 +1024,7 @@ class FileService {
     // only be placed under a parent already on the spine, so applying a
     // child's listing before its parent's is the one order guaranteed to
     // lose it.
-    final ordered = msg.listings.toList()
-      ..sort((a, b) => _depthOf(a.path).compareTo(_depthOf(b.path)));
+    final ordered = _shallowestFirst(msg.listings, (l) => l.path);
 
     var root = _state.root;
     for (final listing in ordered) {
@@ -1020,7 +1077,7 @@ class FileService {
         name: root?.name ?? '',
         path: '',
         type: FileNodeType.directory,
-        children: _sorted(_carryLoaded(listing.children, root)),
+        children: sortFileNodes(_carryLoaded(listing.children, root)),
         truncated: listing.truncated,
         childrenLoaded: true,
         childrenLoading: false,
@@ -1033,7 +1090,7 @@ class FileService {
       listing.path,
       (dir) => _rebuild(
         dir,
-        children: _sorted(_carryLoaded(listing.children, dir)),
+        children: sortFileNodes(_carryLoaded(listing.children, dir)),
         truncated: listing.truncated,
         childrenLoaded: true,
         childrenLoading: false,
@@ -1150,8 +1207,9 @@ class FileService {
       encoding: msg.encoding,
       mimeType: msg.mimeType,
     );
-    if (msg.error == null) {
-      onFragmentSuccess?.call(FragHint('file:content', msg.path));
+    if (msg.path == _inflightGitView) {
+      _inflightGitView = null;
+      _resetReissues.remove('view ${msg.path}');
     }
     final files = msg.path == _state.files.selectedFilePath
         ? _state.files.copyWith(
@@ -1186,10 +1244,14 @@ class FileService {
     }
     final openPath = _state.git.diffPath ?? _state.git.viewingPath;
     final clearStaleGit = openPath != null && !statuses.containsKey(openPath);
+    if (clearStaleGit) {
+      _inflightDiff = null;
+      _inflightGitView = null;
+    }
     _setState(
       _state.copyWith(
         gitFileStatuses: statuses,
-        gitFileEntries: msg.files,
+        gitStatus: GitStatusIndex(msg.files),
         git: clearStaleGit
             ? _state.git.copyWith(clearDiff: true, clearViewing: true)
             : _state.git,
@@ -1198,7 +1260,10 @@ class FileService {
   }
 
   void _handleGitDiffContent(GitDiffContentMessage msg) {
-    onFragmentSuccess?.call(FragHint('git:diff-content', msg.path));
+    if (_inflightDiff?.path == msg.path && _inflightDiff?.sha == null) {
+      _inflightDiff = null;
+      _resetReissues.remove('diff null ${msg.path}');
+    }
     // Also guards on diffCommitSha being unset: a working-tree diff reply
     // landing after the user has already switched to a commit's diff for the
     // SAME path must not overwrite it.
@@ -1303,7 +1368,10 @@ class FileService {
   }
 
   void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
-    onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
+    if (_inflightDiff?.path == msg.path && _inflightDiff?.sha == msg.sha) {
+      _inflightDiff = null;
+      _resetReissues.remove('diff ${msg.sha} ${msg.path}');
+    }
     if (msg.path != _state.git.diffPath ||
         msg.sha != _state.git.diffCommitSha) {
       return;
@@ -1322,23 +1390,12 @@ class FileService {
     );
   }
 
-  /// A fragmented transfer for [hint] aborted and exhausted its retries. Clear
-  /// the pane that was awaiting it so the UI stops showing a loading spinner.
-  void handleFragmentFailure(FragHint hint) {
-    switch (hint.type) {
-      case 'file:content':
-        _failFileContent(hint.key);
-      case 'git:diff-content':
-      case 'git:commit-diff-content':
-        _failDiff(hint.key);
-    }
-  }
-
   void _failFileContent(String path) {
     final errored = FileContent(
       path: path,
       size: 0,
-      error: 'Transfer failed — file too large to receive over the relay.',
+      error:
+          'Transfer failed — the connection to the machine reset while loading.',
     );
     final files = path == _state.files.selectedFilePath
         ? _state.files.copyWith(
@@ -1366,6 +1423,50 @@ class FileService {
     _diffLatch?.settle();
     _diffLatch = null;
     _setState(_state.copyWith(git: _state.git.copyWith(diffLoading: false)));
+  }
+
+  /// Re-sends the reads this service is still waiting on, after the project
+  /// stream carrying them was reset and reopened (their replies died with
+  /// it). Called by [ProjectSession] once a checkout's bundle is known to be
+  /// live again — see its `projectStreamEvents` listener.
+  void reissueAfterStreamReset() {
+    final diff = _inflightDiff;
+    if (diff != null &&
+        _state.git.diffPath == diff.path &&
+        _state.git.diffCommitSha == diff.sha) {
+      final key = 'diff ${diff.sha} ${diff.path}';
+      final attempts = (_resetReissues[key] ?? 0) + 1;
+      if (attempts > kMaxStreamResetReissues) {
+        _inflightDiff = null;
+        _resetReissues.remove(key);
+        _failDiff(diff.path);
+      } else {
+        _resetReissues[key] = attempts;
+        final sha = diff.sha;
+        if (sha == null) {
+          requestDiff(diff.path);
+        } else {
+          requestCommitDiff(sha, diff.path);
+        }
+      }
+    }
+
+    final view = _inflightGitView;
+    if (view != null && _state.git.viewingPath == view) {
+      final key = 'view $view';
+      final attempts = (_resetReissues[key] ?? 0) + 1;
+      if (attempts > kMaxStreamResetReissues) {
+        _inflightGitView = null;
+        _resetReissues.remove(key);
+        _failFileContent(view);
+      } else {
+        _resetReissues[key] = attempts;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(viewingLoading: true)),
+        );
+        requestFileContent(view);
+      }
+    }
   }
 
   void applyPreferences(ProjectPreferences prefs) {
@@ -1441,7 +1542,8 @@ class FileService {
   /// actually renders rather than sitting on stale or empty content — unlike
   /// [toggleExpanded]'s single directory, nothing else will ever ask for
   /// these. Used to reveal a folder a terminal link pointed at, which —
-  /// unlike a file — has no `selectedFilePath` of its own to make it visible.
+  /// unlike a file — has no `selectedFilePath` of its own to make it visible,
+  /// so it is recorded as [FilesPaneState.revealedDirectoryPath] instead.
   Future<void> revealDirectory(String path) async {
     final segments = path.split('/').where((s) => s.isNotEmpty);
     final expanded = Set<String>.from(_state.expandedPaths);
@@ -1451,7 +1553,14 @@ class FileService {
       acc = acc.isEmpty ? segment : '$acc/$segment';
       if (expanded.add(acc)) newlyExpanded.add(acc);
     }
-    _setState(_state.copyWith(expandedPaths: expanded));
+    _setState(
+      _state.copyWith(
+        expandedPaths: expanded,
+        files: acc.isEmpty
+            ? _state.files.copyWith(clearRevealedDirectoryPath: true)
+            : _state.files.copyWith(revealedDirectoryPath: acc),
+      ),
+    );
     await _fetchChildrenChunked(newlyExpanded);
   }
 
@@ -1461,7 +1570,17 @@ class FileService {
   /// when it doesn't resolve inside this checkout. Only the bridge can answer
   /// this: the app never learns the checkout's absolute root (see
   /// `docs/architecture.md`), so it cannot relativize the path itself.
-  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+  ///
+  /// [terminalId] and [base] come from a bridge-detected path link: the first
+  /// names the terminal whose working directories the path may be relative to,
+  /// the second the one base the detector matched, and the bridge resolves
+  /// against that base alone. Both are omitted for a `file://` link, which the
+  /// bridge resolves against the checkout root only.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(
+    String rawPath, {
+    String? terminalId,
+    String? base,
+  }) {
     final requestId = const Uuid().v4();
     final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
@@ -1474,6 +1593,8 @@ class FileService {
         'projectId': projectId,
         'requestId': requestId,
         'path': rawPath,
+        'terminalId': ?terminalId,
+        'base': ?base,
       }),
     );
     return pending.future;
@@ -1589,6 +1710,7 @@ class FileService {
           searchQuery: searchQuery,
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
+          clearRevealedDirectoryPath: true,
         ),
         expandedPaths: expandedWithAncestors,
       ),
@@ -1725,11 +1847,8 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
   }
 
-  /// Commit whatever is currently staged, with [message]. Result (success or
-  /// error) arrives as git:commit-result and is surfaced via [gitOpFeedback];
-  /// the changed-file list refreshes automatically from the bridge's
-  /// git:status. Which files land in the commit is decided by prior
-  /// [stageFiles]/[unstageFiles] calls, not by this one.
+  /// Commit whatever is currently staged, with [message]. Which files land
+  /// is decided by prior [stageFiles]/[unstageFiles] calls.
   void commit(String message) {
     session.sendForCheckout(
       checkoutId,
@@ -1802,7 +1921,7 @@ class FileService {
       createAbMessage('git:sync', {'projectId': projectId, 'op': op.name}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
+      latch.done.timeout(gitSyncTimeout).catchError((_) {
         if (_disposed || _syncLatch != latch) return;
         _syncLatch = null;
         _setState(
@@ -1834,6 +1953,8 @@ class FileService {
   }
 
   void requestDiff(String path) {
+    _inflightGitView = null;
+    _inflightDiff = (path: path, sha: null);
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -1849,7 +1970,7 @@ class FileService {
     // Tier-2 one-shot: bound git:diff on wall-clock so a send dropped before any
     // frame arrives clears diffLoading. Guarded on diffPath so a superseding
     // diff (or a navigate-away) can't have its spinner cleared by a stale
-    // timeout. The frag-abort backstop still handles mid-transfer aborts.
+    // timeout.
     _diffLatch?.settle();
     final latch = _diffLatch = ReplyLatch();
     session.sendForCheckout(
@@ -1857,7 +1978,7 @@ class FileService {
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
@@ -1894,65 +2015,6 @@ class FileService {
     return true;
   }
 
-  bool _stashesRequested = false;
-
-  /// Claims the first-ever stash load for this service's lifetime — same
-  /// contract as [claimHistoryLoad], and for the same reason: `GitPanel`
-  /// calls this on every build, and only the winning call may fire the
-  /// `git:stash-list` send.
-  bool claimStashLoad() {
-    if (_stashesRequested) return false;
-    _stashesRequested = true;
-    return true;
-  }
-
-  /// Fetch every stash in the repository. Called once when the Git tab first
-  /// mounts (via [claimStashLoad]); the agent pushes a fresh list itself after
-  /// every pop and drop, since the list is the only honest record of what is
-  /// left — see [GitPaneState.stashes].
-  void loadStashes() {
-    // Registered on the first ask rather than in the constructor, for the same
-    // reason history is not hydrated at all: a FileService exists whether or
-    // not the Git panel is ever opened. Once the panel HAS asked, the list has
-    // to survive a reconnect — [claimStashLoad] is one-shot for the service's
-    // lifetime and nothing else ever re-reads it, so the banner would go on
-    // offering a stash the agent popped while the socket was down.
-    // Registering IS the first ask — a hydrator fires immediately when the
-    // session is already established and on the next establishment otherwise,
-    // so a separate send here would only double it. Re-registering under the
-    // same key supersedes, so repeat calls are free.
-    session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
-  }
-
-  static const _stashHydratorKey = 'git:stash-list';
-
-  Future<void> _hydrateStashes() => session.sendForCheckout(
-    checkoutId,
-    createAbMessage('git:stash-list', {'projectId': projectId}),
-  );
-
-  /// Reapplies [ref] and drops it on success — the Git panel banner's
-  /// "Restore". Callers on a branch OTHER than the one the stash was made on
-  /// should switch first: a pop is a 3-way merge against the stash's own
-  /// base, and popping onto an unrelated branch invites a conflict that has
-  /// nothing to do with what the user asked for.
-  void restoreStash(String ref) {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('git:stash-pop', {'projectId': projectId, 'ref': ref}),
-    );
-  }
-
-  /// Discards [ref] permanently — the Git panel banner's "Discard". Callers
-  /// must confirm first.
-  void dropStash(String ref) {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('git:stash-drop', {'projectId': projectId, 'ref': ref}),
-    );
-  }
-
-  /// History tab: fetch the first page of commits, replacing whatever was
   /// loaded before. Called once when the tab is first shown.
   void loadHistory() {
     _historyLatch?.settle();
@@ -2008,7 +2070,7 @@ class FileService {
       }),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _historyLatch != latch) return;
@@ -2080,7 +2142,7 @@ class FileService {
       createAbMessage('git:commit-files', {'projectId': projectId, 'sha': sha}),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed || _commitFilesLatches[sha] != latch) return;
@@ -2136,6 +2198,8 @@ class FileService {
   /// [requestDiff] opens for the working tree, distinguished on screen by
   /// [GitPaneState.diffCommitSha].
   void requestCommitDiff(String sha, String path) {
+    _inflightGitView = null;
+    _inflightDiff = (path: path, sha: sha);
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -2157,7 +2221,7 @@ class FileService {
       }),
     );
     unawaited(
-      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+      latch.done.timeout(gitActionTimeout).catchError((
         _,
       ) {
         if (_disposed ||
@@ -2201,6 +2265,7 @@ class FileService {
     // Superseded by the user closing the diff — a clean end, not a strand.
     _diffLatch?.settle();
     _diffLatch = null;
+    _inflightDiff = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearDiff: true)));
   }
 
@@ -2208,6 +2273,8 @@ class FileService {
   /// loading the file's content into the Git pane (separate from any file the
   /// Files tab may have selected).
   void gitViewFile(String path) {
+    _inflightDiff = null;
+    _inflightGitView = path;
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -2223,6 +2290,7 @@ class FileService {
   /// Git pane: exit "View File from diff" mode, returning to the changed-files
   /// list (or the active diff, if one is still set).
   void clearGitViewing() {
+    _inflightGitView = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearViewing: true)));
   }
 
@@ -2275,7 +2343,6 @@ class FileService {
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _subscriptionHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
-    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     _subscriptionSendTimer?.cancel();
     _subscriptionSendTimer = null;
     await _heavySub?.cancel();
@@ -2284,6 +2351,7 @@ class FileService {
     _statusSub = null;
     await _resumeSub?.cancel();
     _resumeSub = null;
+    await _gitOpFeedbackController.close();
     await _stateController.close();
   }
 }

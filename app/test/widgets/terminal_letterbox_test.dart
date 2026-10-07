@@ -16,7 +16,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:flutter/foundation.dart';
@@ -27,6 +27,7 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 /// Opened per-test in `setUp`; the wrapper watches terminalZoom, so `_wrap`
 /// must override the (default-throwing) settings provider.
@@ -114,6 +115,7 @@ Widget _wrap(Widget child, {Future<String>? clientId}) => ProviderScope(
     ),
   ],
   child: MaterialApp(
+    builder: abToastHostBuilder,
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),
@@ -325,7 +327,7 @@ void main() {
 
       // Centred inside the letterbox box itself, not the wrapper: the wrapper
       // also carries chrome, so its centre is not the box the child aligns in.
-      final box = tester.getRect(find.byType(FittedBox));
+      final box = tester.getRect(_letterboxFit);
       expect(painted.center.dx, closeTo(box.center.dx, _epsilon));
       expect(painted.center.dy, closeTo(box.center.dy, _epsilon));
 
@@ -444,7 +446,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_letterboxFit, findsOneWidget);
     expect(_wrappingScrollView, findsNothing);
 
     debugDefaultTargetPlatformOverride = null;
@@ -762,7 +764,7 @@ void main() {
         closeTo(authoritativeWidth, _epsilon),
       );
       expect(
-        tester.getSize(find.byType(FittedBox)).width,
+        tester.getSize(_letterboxFit).width,
         closeTo(600, _epsilon),
       );
 
@@ -931,3 +933,8 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 }
+
+// The reader letterbox specifically; SVG icons (e.g. the take-control strip) also build a FittedBox.
+Finder get _letterboxFit => find.byWidgetPredicate(
+  (w) => w is FittedBox && w.fit == BoxFit.scaleDown,
+);

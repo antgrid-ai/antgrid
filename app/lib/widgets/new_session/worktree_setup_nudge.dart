@@ -11,7 +11,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
-import '../../design/widgets/ab_snack_bar.dart';
+import '../../design/widgets/ab_toast.dart';
 import '../../models/ab_config.dart';
 import '../../models/file_tree_models.dart';
 import '../../project/project_session.dart';
@@ -237,7 +237,7 @@ Future<void> _applyStarterSetup(
   String entryId,
 ) async {
   void say(String message) {
-    if (context.mounted) showAbSnackBar(context, message);
+    if (context.mounted) showAbToast(context, message);
   }
 
   final session = await warmServiceFor<ProjectSession>(
@@ -245,7 +245,7 @@ Future<void> _applyStarterSetup(
     entryId,
     (s) => s,
     // Past warmServiceFor's default: a remote target may be a cold machine
-    // whose socket and E2E handshake still have to come up.
+    // whose socket and session handshake still have to come up.
     timeout: const Duration(seconds: 30),
   );
   if (session == null) {

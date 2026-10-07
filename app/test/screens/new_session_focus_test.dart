@@ -15,7 +15,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/session_mode.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/sessions_service.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 

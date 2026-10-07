@@ -152,83 +152,122 @@ final terminalStateProvider = StreamProvider<TerminalState>((ref) {
 /// is the registry key, i.e. already in its correct local-or-remote shape.
 typedef ProjectScoped<T extends Object> = ({String entryId, T message});
 
-/// Agent desktop-notification signals (OSC 9 / OSC 777) merged across
-/// ALL warm projects — not just the focused one — so a background project's
-/// agent can still raise a toast / OS notification. Rebuilds (and re-subscribes)
-/// when the warm set changes or a session resolves; the warm-set is small
-/// (kWarmCap), so the per-rebuild resubscribe is cheap.
-final terminalNotificationsProvider =
-    StreamProvider<ProjectScoped<TerminalNotificationMessage>>((ref) {
-      final openProjects = ref.watch(projectSessionRegistryProvider);
-      final controller =
-          StreamController<ProjectScoped<TerminalNotificationMessage>>();
-      final subs = <StreamSubscription<dynamic>>[];
-      for (final id in openProjects) {
-        final session = ref.watch(projectSessionProvider(id)).value;
-        if (session == null) continue;
-        for (final bundle in session.checkoutServiceBundles) {
-          subs.add(
-            bundle.terminalService.notificationStream.listen(
-              (m) => controller.add((entryId: id, message: m)),
-            ),
-          );
-        }
-        subs.add(
-          session.checkoutServiceBundleStream.listen((bundle) {
-            subs.add(
-              bundle.terminalService.notificationStream.listen(
-                (m) => controller.add((entryId: id, message: m)),
-              ),
-            );
-          }),
-        );
-      }
-      ref.onDispose(() {
-        for (final s in subs) {
-          s.cancel();
-        }
-        controller.close();
-      });
-      return controller.stream;
-    });
+/// Every warm project's events by entryId: no StreamProvider (it replays the
+/// last event), no `ref.watch` (a rebuild drops events queued on old subs).
+Stream<ProjectScoped<T>> _warmProjectEvents<T extends Object>(
+  Ref ref, {
+  Iterable<Stream<T>> Function(ProjectSession)? perProject,
+  required Iterable<Stream<T>> Function(CheckoutServices) perCheckout,
+}) {
+  final controller = StreamController<ProjectScoped<T>>.broadcast();
+  final projects = <String, _WarmProjectFeed>{};
 
-/// Plugin/hook-sourced agent notifications (notification:push) merged across all
-/// warm projects — same fan-out as terminalNotificationsProvider but for the
-/// intent-aware plugin path. Rebuilds when the warm set changes.
+  void wire(String id, _WarmProjectFeed feed, ProjectSession? session) {
+    if (identical(session, feed.session)) return;
+    feed.cancelSources();
+    feed.session = session;
+    if (session == null) return;
+    void forward(Stream<T> source) {
+      late final StreamSubscription<T> sub;
+      // A released checkout disposes its services, closing these — so a warm
+      // set that outlives many checkouts does not hold on to every one.
+      sub = source.listen(
+        (m) => controller.add((entryId: id, message: m)),
+        onDone: () => feed.sources.remove(sub),
+      );
+      feed.sources.add(sub);
+    }
+
+    void forwardCheckout(CheckoutServices bundle) =>
+        perCheckout(bundle).forEach(forward);
+    perProject?.call(session).forEach(forward);
+    session.checkoutServiceBundles.forEach(forwardCheckout);
+    feed.sources.add(
+      session.checkoutServiceBundleStream.listen(forwardCheckout),
+    );
+  }
+
+  ref.listen<List<String>>(projectSessionRegistryProvider, (_, warm) {
+    for (final id in [...projects.keys]) {
+      if (!warm.contains(id)) projects.remove(id)!.close();
+    }
+    for (final id in warm) {
+      if (projects.containsKey(id)) continue;
+      final feed = projects[id] = _WarmProjectFeed();
+      feed.watch = ref.listen(
+        projectSessionProvider(id),
+        (_, next) => wire(id, feed, next.value),
+        fireImmediately: true,
+      );
+    }
+  }, fireImmediately: true);
+  ref.onDispose(() {
+    for (final feed in projects.values) {
+      feed.cancelSources();
+    }
+    controller.close();
+  });
+  return controller.stream;
+}
+
+/// One warm project's subscriptions and the session they were taken from.
+class _WarmProjectFeed {
+  ProviderSubscription<AsyncValue<ProjectSession>>? watch;
+  ProjectSession? session;
+  final sources = <StreamSubscription<Object?>>{};
+
+  void cancelSources() {
+    for (final s in sources) {
+      s.cancel();
+    }
+    sources.clear();
+  }
+
+  void close() {
+    watch?.close();
+    cancelSources();
+  }
+}
+
+/// Hands [onEvent] each event of [provider]'s stream, following it across
+/// rebuilds; a bare `ref.listen` only reports that the stream was replaced.
+void Function() listenToEvents<T>(
+  WidgetRef ref,
+  ProviderListenable<Stream<T>> provider,
+  void Function(T event) onEvent,
+) {
+  StreamSubscription<T>? events;
+  final source = ref.listenManual(provider, (_, stream) {
+    unawaited(events?.cancel());
+    events = stream.listen(onEvent);
+  }, fireImmediately: true);
+  return () {
+    source.close();
+    unawaited(events?.cancel());
+  };
+}
+
+/// Agent desktop-notification signals merged across ALL warm projects, so a
+/// background project's agent can still notify.
+final terminalNotificationsProvider =
+    Provider<Stream<ProjectScoped<TerminalNotificationMessage>>>(
+      (ref) => _warmProjectEvents(
+        ref,
+        perCheckout: (bundle) => [bundle.terminalService.notificationStream],
+      ),
+    );
+
+/// Plugin/hook-sourced agent notifications (notification:push), merged across
+/// all warm projects like terminalNotificationsProvider.
 final agentPushNotificationsProvider =
-    StreamProvider<ProjectScoped<NotificationPushMessage>>((ref) {
-      final openProjects = ref.watch(projectSessionRegistryProvider);
-      final controller =
-          StreamController<ProjectScoped<NotificationPushMessage>>();
-      final subs = <StreamSubscription<dynamic>>[];
-      for (final id in openProjects) {
-        final session = ref.watch(projectSessionProvider(id)).value;
-        if (session == null) continue;
-        for (final bundle in session.checkoutServiceBundles) {
-          subs.add(
-            bundle.terminalService.pushNotificationStream.listen(
-              (m) => controller.add((entryId: id, message: m)),
-            ),
-          );
-        }
-        subs.add(
-          session.checkoutServiceBundleStream.listen((bundle) {
-            subs.add(
-              bundle.terminalService.pushNotificationStream.listen(
-                (m) => controller.add((entryId: id, message: m)),
-              ),
-            );
-          }),
-        );
-      }
-      ref.onDispose(() {
-        for (final s in subs) {
-          s.cancel();
-        }
-        controller.close();
-      });
-      return controller.stream;
-    });
+    Provider<Stream<ProjectScoped<NotificationPushMessage>>>(
+      (ref) => _warmProjectEvents(
+        ref,
+        perCheckout: (bundle) => [
+          bundle.terminalService.pushNotificationStream,
+        ],
+      ),
+    );
 
 /// Handler "needs you" escalations (handler:escalation) merged across all warm
 /// projects — same fan-out as [agentPushNotificationsProvider]. Drives the
@@ -683,6 +722,24 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // See provider_retry.dart.
 }, retry: noProviderRetry);
 
+/// Git op, checkout and session-refusal feedback from every warm project, not
+/// just the focused one, or results landing after a focus switch are lost.
+final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(
+  (ref) => _warmProjectEvents(
+    ref,
+    perProject: (session) => [
+      session.sessionsService.errors.map((m) => 'Session error: $m'),
+    ],
+    // Checkout failures are already whole sentences ('Checkout failed' is the
+    // service's own fallback), so they surface verbatim.
+    perCheckout: (bundle) => [
+      bundle.fileService.gitOpFeedback,
+      bundle.terminalService.gitErrors,
+    ],
+  ),
+  name: 'operationalErrors',
+);
+
 /// Per-project SearchService façade.
 final searchServiceProvider = _focusedCheckoutService<SearchService>(
   (s) => s.searchService,
@@ -748,17 +805,8 @@ final connectionStateProvider = StreamProvider<AppState>((ref) {
   return seededStream(() => relay.currentState, relay.stateStream);
 });
 
-/// Whether the active agent is reachable through the relay.
-///
-/// - `connecting` — the supervisor hasn't reached [Connected] yet (climbing,
-///   released, or nothing dialed at all).
-/// - `online` — the ladder is fully climbed (`Connected`).
-/// - `offline` — the ladder stopped specifically because the agent never
-///   showed up (`Blocked(agentOffline)`). Every OTHER block reason (license,
-///   revoked, superseded…) still needs the user or an out-of-band re-mint, not
-///   a bare reconnect attempt, so it stays `connecting` here rather than
-///   collapsing into the same "not reachable" bucket.
-enum AgentReachability { connecting, online, offline }
+/// Whether the active agent has an established native session.
+enum AgentReachability { connecting, online }
 
 /// Pure mapping, pulled out of [agentReachabilityProvider] so the derivation
 /// is pinned against literal [SupervisorStatus] values without dialling a
@@ -768,7 +816,6 @@ enum AgentReachability { connecting, online, offline }
 AgentReachability reachabilityForStatus(SupervisorStatus? status) =>
     switch (status) {
       Connected() => AgentReachability.online,
-      Blocked(reason: BlockReason.agentOffline) => AgentReachability.offline,
       _ => AgentReachability.connecting,
     };
 
@@ -778,15 +825,9 @@ final agentReachabilityProvider = Provider<AgentReachability>((ref) {
   return reachabilityForStatus(ref.watch(supervisorStatusProvider(id)).value);
 });
 
-/// True when the focused machine's ladder has STOPPED on a [Blocked] reason.
-///
-/// [AgentReachability] deliberately folds every block except `agentOffline`
-/// into `connecting`, which reads correctly as "not usable yet" but is wrong
-/// for anything that treats `connecting` as "an attempt is in flight, wait for
-/// it". A blocked ladder never stops being `connecting` on its own, so such a
-/// guard would wait forever — including the drawer's duplicate-tap guard,
-/// which would then swallow every tap and leave the user unable to reach the
-/// error surface that holds Retry.
+/// True when the focused machine's native ladder has stopped on a block.
+/// Reachability remains connecting for every block, so action guards must
+/// consult this separately to keep the explicit Retry surface reachable.
 final focusedAgentBlockedProvider = Provider<bool>((ref) {
   final id = ref.watch(selectedRegistrationIdProvider);
   if (id == null) return false;
@@ -1027,7 +1068,7 @@ class MachineConnectionNotifier extends Notifier<void> {
           .where((id) => baseDeviceUuid(id) == machineUuid),
     );
     for (final id in forgottenIds) {
-      mgr.release(id);
+      await mgr.release(id);
       // `AndSettle` (awaited) before purge: eviction's `onEvict` writes the
       // status cache that `purgeEntryState` then deletes — ordering matters.
       await registry.forceEvictAndSettle(id);
@@ -1064,7 +1105,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       final machineUuid = baseDeviceUuid(activeId);
       // Same guard, and the same reason, as the control-plane reaper's: the
       // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
-      // one from here would kill the live E2E session and every other project
+      // one from here would kill the live peer session and every other project
       // stream riding it. Cancel only ever abandons an attempt in flight.
       if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
         mgr.release(machineUuid);
@@ -1075,7 +1116,7 @@ class MachineConnectionNotifier extends Notifier<void> {
 
   /// User-initiated retry from the boot panel or the connection-error screen.
   ///
-  /// Hands the machine's [ConnectionSupervisor] its `retry()` input — clearing
+  /// Hands the machine connection its `retry()` input — clearing
   /// the block and the backoff — rather than dialling here: a second component
   /// deciding when to reconnect is exactly what the supervisor replaced.
   ///
@@ -1099,11 +1140,7 @@ class MachineConnectionNotifier extends Notifier<void> {
       'retry → supervisor',
       fields: {'target': registrationId},
     );
-    ref
-        .read(relayConnectionManagerProvider)
-        .peek(registrationId)
-        ?.supervisor
-        ?.retry();
+    ref.read(relayConnectionManagerProvider).peek(registrationId)?.retry();
     ref.invalidate(agentTransportForProvider(registrationId));
   }
 }

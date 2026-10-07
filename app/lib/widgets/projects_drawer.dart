@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_docked_column.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
@@ -22,6 +21,9 @@ import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
+import '../navigation/nav_controller.dart';
+import '../navigation/nav_location.dart';
+import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
@@ -237,6 +239,51 @@ class _NavActions extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final surface = ref.watch(workbenchSurfaceProvider);
+    final schedulerEnabled = !ref.watch(demoModeProvider);
+    void openScheduler() {
+      ref
+          .read(workbenchSurfaceProvider.notifier)
+          .set(WorkbenchSurface.scheduler);
+      ref
+          .read(navControllerProvider.notifier)
+          .commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+      closeDrawerIfOverlay(context);
+    }
+
+    Widget navigationRow({
+      required String label,
+      required String icon,
+      required bool selected,
+      required VoidCallback onTap,
+      bool enabled = true,
+    }) {
+      Widget row = AbListRow(
+        title: Text(label, style: AbTokens.sansStyle()),
+        leading: AbIcon(
+          icon,
+          size: AbTokens.iconButtonGlyph,
+          color: context.antgrid.textSecondary,
+        ),
+        density: AbRowDensity.sm,
+        horizontalPadding: AbTokens.space8,
+        selected: selected,
+        selectionStyle: AbRowSelection.surface,
+        hoverable: true,
+        enabled: enabled,
+        onTap: enabled ? onTap : null,
+      );
+      if (isMobilePlatform) {
+        row = ConstrainedBox(
+          constraints: const BoxConstraints(
+            minHeight: AbTokens.touchControlMin,
+          ),
+          child: row,
+        );
+      }
+      return Semantics(selected: selected, enabled: enabled, child: row);
+    }
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
@@ -246,12 +293,24 @@ class _NavActions extends ConsumerWidget {
       ),
       child: SizedBox(
         width: double.infinity,
-        child: AbButton(
-          label: 'New Session',
-          color: context.antgrid.accent,
-          fontSize: AbTokens.fontBody,
-          leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-          onTap: () => enterNewSession(ref.container),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            navigationRow(
+              label: 'New Session',
+              icon: AbIcons.add,
+              selected: surface == WorkbenchSurface.newSession,
+              onTap: () => enterNewSession(ref.container),
+            ),
+            const SizedBox(height: AbTokens.space4),
+            navigationRow(
+              label: 'Scheduler',
+              icon: AbIcons.calendar,
+              selected: surface == WorkbenchSurface.scheduler,
+              enabled: schedulerEnabled,
+              onTap: openScheduler,
+            ),
+          ],
         ),
       ),
     );
@@ -467,9 +526,9 @@ class _Body extends ConsumerWidget {
 /// Pull-to-refresh / refresh-button handler for the drawer. Re-fetches the
 /// machine inventory (HTTPS) and re-pulls the live project advert for every
 /// machine in the reaper's alive set. That is not the same as "already open":
-/// since E13 the set also carries machines a directory read missed, which this
-/// app has decided it wants a socket to and is dialling anyway — so the gesture
-/// can push one of those dials rather than only refreshing what is up. It still
+/// the set also carries machines a directory read missed, which this app has
+/// decided it wants a socket to and is dialling anyway — so the gesture can
+/// push one of those dials rather than only refreshing what is up. It still
 /// opens nothing for a machine the app has made no such decision about.
 /// Also re-lists the focused project's sessions (data plane).
 ///
@@ -529,6 +588,17 @@ class _EntryWithSessions extends ConsumerWidget {
     // what opens the machine's control-plane socket. A local project (or a
     // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
     // collapse in [collapsedDrawerIdsProvider].
+    // A folded "This machine" keeps only its band (on the first local row);
+    // every other local row folds to nothing but keeps its keyed slot so the
+    // reorder indices stay valid.
+    final folded =
+        entry.kind == EntryKind.local &&
+        ref.watch(localMachineCollapsedProvider);
+    if (folded) {
+      return showLocalBand
+          ? LocalMachineBand(showRule: showRule)
+          : const SizedBox.shrink();
+    }
     final machineUuid = entry.machineUuid;
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)

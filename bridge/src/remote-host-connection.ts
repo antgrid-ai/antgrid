@@ -1,0 +1,17 @@
+import type { PeerSessionOwner } from "./peer-session-owner";
+import type { CentralControlClient } from "./central-control-client";
+
+/** Host capabilities shared by native production connections and protocol fixtures. */
+export interface RemoteHostConnection extends Pick<PeerSessionOwner,
+  "deviceId" | "setBus" | "attachStream" | "establishedPeers" | "peerSession" |
+  "hasEstablishedSession" | "sendOnChannel" |
+  "send"> {
+  connect(): void;
+  close(): Promise<void>;
+  redialWithFreshToken(): void;
+  sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void;
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean;
+  noteResume(): Promise<boolean>;
+  recheckAuthorization(): void;
+  authorizeDevice?(deviceId: string): Promise<boolean>;
+}

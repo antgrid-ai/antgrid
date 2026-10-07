@@ -4,7 +4,7 @@ import 'package:antgrid/models/search_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/search_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -174,6 +174,84 @@ void main() {
       expect(svc.currentState.isSearching, isFalse);
       expect(svc.currentState.totalMatches, 2);
       expect(svc.currentState.engine, 'ripgrep');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    Map<String, dynamic> hit(String path, int line) => {
+      'path': path,
+      'line': line,
+      'column': 0,
+      'lineContent': 'foo',
+      'contextBefore': const <String>[],
+      'contextAfter': const <String>[],
+    };
+
+    Future<void> emitResult(
+      FakeAgentTransport t,
+      String? reqId,
+      List<Map<String, dynamic>> matches,
+    ) async {
+      t.emit('file:search-result', {
+        'projectId': 'p',
+        'requestId': reqId,
+        'matches': matches,
+      });
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    List<String> shape(SearchService svc) => [
+      for (final g in svc.currentState.results)
+        '${g.path}:${g.matches.map((m) => m.line).join(',')}',
+    ];
+
+    test("a batch keeps first-seen file order, each file's arrival order, "
+        'and the same group object for every file it did not touch', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      final reqId = svc.currentState.currentRequestId;
+
+      await emitResult(t, reqId, [
+        hit('a', 1),
+        hit('b', 1),
+        hit('a', 2),
+        hit('c', 1),
+        hit('b', 2),
+      ]);
+      expect(shape(svc), ['a:1,2', 'b:1,2', 'c:1']);
+      final bGroup = svc.currentState.results[1];
+
+      await emitResult(t, reqId, [hit('c', 2), hit('a', 3), hit('d', 1)]);
+      expect(shape(svc), ['a:1,2,3', 'b:1,2', 'c:1,2', 'd:1']);
+      expect(identical(svc.currentState.results[1], bGroup), isTrue);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a new search drops batches for the one it superseded and groups its '
+        'own from scratch', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(session);
+
+      svc.search('foo');
+      await Future<void>.delayed(Duration.zero);
+      final first = svc.currentState.currentRequestId;
+      await emitResult(t, first, [hit('a', 1)]);
+
+      svc.search('bar');
+      await Future<void>.delayed(Duration.zero);
+      await emitResult(t, first, [hit('a', 9)]);
+      expect(svc.currentState.results, isEmpty);
+
+      await emitResult(t, svc.currentState.currentRequestId, [hit('a', 5)]);
+      expect(shape(svc), ['a:5']);
 
       await svc.dispose();
       await session.close();

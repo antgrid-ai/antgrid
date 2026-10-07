@@ -36,6 +36,7 @@ abstract final class AbIcons {
   static const chevronDown = Codicon.chevron_down;
   static const chevronUp = Codicon.chevron_up;
   static const refresh = Codicon.refresh;
+  static const calendar = Codicon.calendar;
   static const revert = Codicon.discard;
   static const pin = Codicon.pin;
   static const unpin = Codicon.pinned;
@@ -43,7 +44,9 @@ abstract final class AbIcons {
   static const stop = Codicon.stop_circle;
   static const restart = Codicon.debug_restart;
   static const send = Codicon.arrow_right;
+  static const enterKey = Codicon.newline;
   static const shield = Codicon.shield;
+  static const lock = Codicon.lock;
   static const search = Codicon.search;
   static const arrowUp = Codicon.arrow_up;
   static const arrowDown = Codicon.arrow_down;
@@ -101,6 +104,8 @@ abstract final class AbIcons {
   static const folder = Codicon.folder;
   static const newFolder =
       Codicon.new_folder; // folder + plus (add-local action)
+  static const file = Codicon.file;
+  static const fileMedia = Codicon.file_media;
   static const fileBinary = Codicon.file_binary;
   static const error = Codicon.error;
   static const warning = Codicon.warning;

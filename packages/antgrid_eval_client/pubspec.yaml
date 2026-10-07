@@ -4,9 +4,12 @@ publish_to: none
 version: 1.0.0
 
 environment:
-  sdk: ^3.11.0
+  sdk: ^3.12.0
 
 dependencies:
   antgrid_relay_client:
     path: ../antgrid_relay_client
+  antgrid_peer_transport:
+    path: ../antgrid_peer_transport
+  iroh_quic: 1.0.3
   uuid: ^4.5.1

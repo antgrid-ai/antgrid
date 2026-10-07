@@ -18,9 +18,10 @@ async function git(cwd: string, args: string[]) {
   return stdout.trim();
 }
 
-// Windows tmpdir() can be a short (8.3) path, and the resolver realpath's
-// everything it compares — so expectations must be canonicalised the same way
-// or they compare a short spelling against a long one.
+// tmpdir() is not canonical — a short (8.3) path on Windows, a /var symlink into
+// /private/var on macOS — and the resolver realpath's everything it compares, so
+// expectations must be canonicalised the same way or they compare two spellings
+// of one directory.
 function canonical(path: string): string {
   return realpathSync.native(path);
 }
@@ -50,8 +51,9 @@ describe("resolveProject", () => {
   test("preserves the existing primary-checkout project id", async () => {
     await git(dir, ["init"]);
     const resolved = await resolveProject(dir);
+    const repoPath = canonical(dir);
     expect(resolved).toMatchObject({
-      projectId: computeProjectId(dir), repoPath: dir, selectedPath: dir, isGitRepository: true, kind: "primary",
+      projectId: computeProjectId(repoPath), repoPath, selectedPath: repoPath, isGitRepository: true, kind: "primary",
     });
   });
 
@@ -189,8 +191,9 @@ describe("resolveProject", () => {
 
   test("keeps non-Git folders as ordinary path-hash projects", async () => {
     const resolved = await resolveProject(dir);
+    const repoPath = canonical(dir);
     expect(resolved).toEqual({
-      projectId: computeProjectId(dir), repoPath: dir, selectedPath: dir, isGitRepository: false, kind: "plain",
+      projectId: computeProjectId(repoPath), repoPath, selectedPath: repoPath, isGitRepository: false, kind: "plain",
     });
   });
 

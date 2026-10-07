@@ -1,8 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { getOAuthState, isAPIError, createAuthMiddleware } from "better-auth/api";
+import { scopedAuthDb, authTransaction, authScope, lockAuthAccount } from "./transaction.js";
+import { createRequestFlow } from "./request-flow.js";
+import { classifyJourney, createFlow, linkFlowUser, recordStage } from "./flows.js";
+import { jwtVerify } from "jose";
+import { FlowResultSchema, safeReturnPath, requestOrigin } from "./contracts.js";
+import { recipientLimit, sharedIpLimit } from "./recipient-limit.js";
+import { nativeAuth, digest } from "./native-plugin.js";
+import { authEmail } from "./templates.js";
+import { APIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { oneTimeToken } from "better-auth/plugins";
+import { appleClientSecret } from "./apple-client-secret.js";
 import { crossDeviceMagicLink } from "./cross-device-plugin.js";
 import { abOAuthProviderPlugins } from "./oauth-provider.js";
 import { prismaAdapter } from "better-auth/adapters/prisma";
@@ -59,7 +70,7 @@ const RESET_PASSWORD_CALLBACK = "/reset-password";
  *  the providers whose link can verify that address as a side effect. Feeds
  *  both `accountLinking.trustedProviders` and the credential purge below, so
  *  the two cannot drift. */
-const TRUSTED_SOCIAL_PROVIDERS = ["github", "google"] as const;
+const TRUSTED_SOCIAL_PROVIDERS = ["github", "google", "apple"] as const;
 
 /** Floor for a password guarding remote control of the user's dev machine.
  *  Above Better-Auth's default of 8; the reset and account forms state it. */
@@ -71,7 +82,51 @@ export const MIN_PASSWORD_LENGTH = 12;
  *  can never succeed. Keep in lockstep with the option below. */
 export const MAX_PASSWORD_LENGTH = 128;
 
+/** Whether this deployment offers Sign in with Apple. env.ts accepts the four
+ *  keys only as a set, so any one of them stands for all. */
+export function appleSignInConfigured(env: Env): boolean {
+  return env.APPLE_CLIENT_ID !== undefined;
+}
+
+/**
+ * Apple's provider options, or undefined when the deployment has not
+ * configured Sign in with Apple (env.ts accepts the four keys only as a set).
+ *
+ * `clientSecret` is a getter, not a value: Better-Auth hands this same object
+ * to the provider and reads the property at each token exchange, which is
+ * what lets the six-month JWT re-mint on a long-running process.
+ */
+function appleProvider(env: Env) {
+  if (!env.APPLE_CLIENT_ID || !env.APPLE_TEAM_ID || !env.APPLE_KEY_ID || !env.APPLE_PRIVATE_KEY) {
+    return undefined;
+  }
+  const secret = appleClientSecret({
+    teamId: env.APPLE_TEAM_ID,
+    keyId: env.APPLE_KEY_ID,
+    clientId: env.APPLE_CLIENT_ID,
+    privateKey: env.APPLE_PRIVATE_KEY,
+  });
+  return {
+    clientId: env.APPLE_CLIENT_ID,
+    appBundleIdentifier: env.APPLE_APP_BUNDLE_ID,
+    get clientSecret() {
+      return secret();
+    },
+    // An identity token's audience is whoever asked Apple for it: the bundle
+    // ID from the native iOS app, the Services ID from the web.
+    // When set, this list overrides appBundleIdentifier in token verification.
+    audience: [env.APPLE_APP_BUNDLE_ID, env.APPLE_CLIENT_ID],
+  };
+}
+
 export function createAuth(deps: CreateAuthDeps) {
+  const send = deps.sendEmail;
+  deps = { ...deps, sendEmail: async (mail) => {
+    try { return await send(mail); }
+    catch (error) { if (authScope.getStore()) authScope.getStore()!.enqueueFailed = true; throw error; }
+  } };
+  const rateDb = deps.db;
+  deps = { ...deps, db: scopedAuthDb(deps.db) };
   const database =
     deps.databaseOverride ?? prismaAdapter(deps.db, { provider: "postgresql" });
   const baseURL = deps.env.BETTER_AUTH_URL;
@@ -93,43 +148,168 @@ export function createAuth(deps: CreateAuthDeps) {
     return url.toString();
   }
 
-  return betterAuth({
+  const auth = betterAuth({
     database,
+    logger: { level: "error", log: (level, message) => console.error("[auth] operation failed", { level, category: message.startsWith("Failed") ? "failure" : "auth" }) },
     secret: deps.env.BETTER_AUTH_SECRET,
     baseURL: deps.env.BETTER_AUTH_URL,
+    // Apple returns the web flow by POSTing the authorization to our callback
+    // from its own origin; Better-Auth's origin check refuses it otherwise.
+    // Trusted only where Apple is offered, so no other deployment widens it.
+    trustedOrigins: appleSignInConfigured(deps.env) ? ["https://appleid.apple.com"] : [],
     account: {
       accountLinking: {
         enabled: true,
         trustedProviders: [...TRUSTED_SOCIAL_PROVIDERS],
         allowDifferentEmails: false,
       },
+      // Keyed on BETTER_AUTH_SECRET, so rotating that secret also makes every
+      // stored provider token unreadable, not just every session. Rows written
+      // before this was on stay readable: a token that does not look like
+      // ciphertext is returned as-is, and the next sign-in rewrites it
+      // encrypted. Code outside Better-Auth that touches these columns goes
+      // through setTokenUtil / decryptOAuthToken (services/apple-account.ts).
+      encryptOAuthTokens: true,
+    },
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if ((ctx.path === "/one-time-token/generate" && (deps.env.LEGACY_NATIVE_OAUTH === false || deps.env.LEGACY_NATIVE_OAUTH_ISSUANCE === false)) ||
+          (ctx.path === "/one-time-token/verify" && deps.env.LEGACY_NATIVE_OAUTH === false)) {
+          throw new APIError("FORBIDDEN", { code: "UPGRADE_REQUIRED", message: "Update Antgrid to continue signing in." });
+        }
+        const email = typeof ctx.body?.email === "string" ? normalizeEmail(ctx.body.email) : undefined;
+        const mailPaths = ["/sign-up/email", "/request-password-reset", "/send-verification-email", "/sign-in/cross-device/start"];
+        if (email && mailPaths.includes(ctx.path)) {
+          const retry = await rateDb.$transaction((tx) => recipientLimit(tx as PrismaClient, deps.env.BETTER_AUTH_SECRET, email));
+          if (retry) { authScope.getStore()!.retryAfter = retry; ctx.setHeader("Retry-After", String(retry)); throw new APIError("TOO_MANY_REQUESTS", { code: "EMAIL_THROTTLED", message: "Please wait before requesting another email" }); }
+        }
+        const rules: Record<string, [number, number]> = {
+          "/sign-in/email": [10, 0.2], "/sign-up/email": [10, 1 / 360], "/request-password-reset": [5, 1 / 60],
+          "/send-verification-email": [5, 1 / 60], "/sign-in/cross-device/start": [5, 0.2],
+        };
+        const rule = rules[ctx.path];
+        if (rule) {
+          const ip = ctx.headers?.get("x-forwarded-for") ?? "unresolved";
+          const retry = await rateDb.$transaction((tx) => sharedIpLimit(tx as PrismaClient, ip, ctx.path, ...rule));
+          if (retry) { authScope.getStore()!.retryAfter = retry; ctx.setHeader("Retry-After", String(retry)); throw new APIError("TOO_MANY_REQUESTS"); }
+        }
+
+        const accountEmails = new Set<string>();
+        if (email) accountEmails.add(email);
+        let approvalFlowId: string | undefined;
+        let approvalMethod: "verification" | "reset" | undefined;
+        if (ctx.path === "/verify-email" && ctx.query?.token) {
+          const verified = await jwtVerify(String(ctx.query.token), new TextEncoder().encode(ctx.context.secret), { algorithms: ["HS256"] }).catch(() => null);
+          if (typeof verified?.payload.email === "string") accountEmails.add(normalizeEmail(verified.payload.email));
+          const record = await deps.db.verification.findFirst({ where: { identifier: "auth-review:" + digest(String(ctx.query.token)).toString("hex"), expiresAt: { gt: new Date() } } });
+          if (record && authScope.getStore()) {
+            approvalFlowId = record.value;
+            approvalMethod = "verification";
+            const flow = await deps.db.authFlow.findUnique({ where: { id: record.value }, include: { journey: { include: { user: true } } } });
+            if (flow?.journey.user) accountEmails.add(normalizeEmail(flow.journey.user.email));
+          }
+        }
+        if (["/sign-out", "/reset-password", "/change-password", "/set-password", "/change-email", "/delete-user"].includes(ctx.path)) {
+          const current = await ctx.context.internalAdapter.findSession(await ctx.getSignedCookie(ctx.context.authCookies.sessionToken.name, ctx.context.secret) || "");
+          if (current) accountEmails.add(normalizeEmail(current.user.email));
+          if (ctx.path === "/reset-password" && ctx.body?.token) {
+            const receipt = await deps.db.verification.findFirst({ where: { identifier: "auth-reset:" + digest(String(ctx.body.token)).toString("hex") } });
+            if (receipt && authScope.getStore()) { approvalFlowId = receipt.value; approvalMethod = "reset"; }
+            const token = await deps.db.verification.findFirst({ where: { identifier: "reset-password:" + String(ctx.body.token) } });
+            const user = token && await deps.db.user.findUnique({ where: { id: token.value } });
+            if (user) accountEmails.add(normalizeEmail(user.email));
+          }
+        }
+        // Recovery may target a different account from the browser's current
+        // session; a stable order prevents reciprocal requests from deadlocking.
+        for (const accountEmail of [...accountEmails].sort()) await lockAuthAccount(deps.db, accountEmail);
+        if (email && mailPaths.includes(ctx.path)) {
+          if (ctx.path !== "/sign-in/cross-device/start") await createRequestFlow(deps.db,ctx.context.secret,email,
+            ctx.path === "/sign-up/email" ? "password" : ctx.path === "/request-password-reset" ? "reset" : "verification",ctx.headers ?? null,
+            (name) => ctx.getCookie(name),(name,value,maxAge) => { ctx.setCookie(name,value,{ httpOnly: true,secure: baseURL.startsWith("https:"),sameSite: "lax",path: "/",maxAge }); });
+        }
+        if (ctx.path === "/sign-in/email" || (ctx.path === "/sign-in/social" && ctx.body?.idToken)) {
+          if (email) await createRequestFlow(deps.db,ctx.context.secret,email,"password",ctx.headers ?? null,
+            (name) => ctx.getCookie(name),(name,value,maxAge) => { ctx.setCookie(name,value,{ httpOnly: true,secure: baseURL.startsWith("https:"),sameSite: "lax",path: "/",maxAge }); });
+          else await createFlow(deps.db,requestOrigin(ctx.headers ?? null,String(ctx.body?.provider ?? "oauth")),600);
+        }
+        if (approvalFlowId && approvalMethod && authScope.getStore()) {
+          authScope.getStore()!.flowId = approvalFlowId;
+          await recordStage(deps.db, approvalFlowId, "approval_submitted");
+          await deps.db.authFlow.update({ where: { id: approvalFlowId }, data: { approvalOrigin: requestOrigin(ctx.headers ?? null, approvalMethod) } });
+        }
+      }),
     },
     databaseHooks: {
       user: {
+        update: {
+          before: async (data, ctx) => {
+            if (data.emailVerified === true && ctx?.path.startsWith("/callback/")) {
+              const state = await getOAuthState().catch(() => null);
+              if (state?.callbackURL) {
+                const url = new URL(state.callbackURL, baseURL);
+                const flowId = ["/oauth/handoff", "/oauth/web-complete"].includes(url.pathname) ? url.searchParams.get("flow") : null;
+                if (flowId) authScope.getStore()!.flowId = flowId;
+              }
+            }
+            return { data };
+          },
+        },
         create: {
           before: async (user) => {
+            const state = await getOAuthState().catch(() => null);
+            if (state?.callbackURL) {
+              const url = new URL(state.callbackURL, baseURL);
+              const flow = ["/oauth/handoff", "/oauth/web-complete"].includes(url.pathname) ? url.searchParams.get("flow") : null;
+              if (flow && authScope.getStore()) authScope.getStore()!.flowId = flow;
+            }
             if (typeof user.email === "string") {
+              await lockAuthAccount(deps.db, normalizeEmail(user.email));
               return { data: { ...user, email: normalizeEmail(user.email) } };
             }
             return { data: user };
           },
           after: async (user) => {
-            await provisionBillingAccount(deps.db, user.id);
+            await linkFlowUser(deps.db, user.id, "user_created");
+            if (user.emailVerified) { await linkFlowUser(deps.db, user.id, "ownership_verified"); await provisionBillingAccount(deps.db, user.id); }
           },
         },
       },
       session: {
         create: {
+          before: async (session) => {
+            const state = await getOAuthState().catch(() => null);
+            if (state?.callbackURL) {
+              const url = new URL(state.callbackURL, baseURL);
+              const flow = ["/oauth/handoff", "/oauth/web-complete"].includes(url.pathname) ? url.searchParams.get("flow") : null;
+              if (flow && authScope.getStore()) authScope.getStore()!.flowId = flow;
+            }
+            const user = await deps.db.user.findUnique({ where: { id: session.userId } });
+            if (user) await lockAuthAccount(deps.db, user.email);
+            return { data: session };
+          },
           after: async (session) => {
             // Backfill billing account for users created before hooks or via
             // internalAdapter.createUser (cross-device), and on every sign-in.
+            await linkFlowUser(deps.db, session.userId, "ownership_verified");
             await provisionBillingAccount(deps.db, session.userId);
+            const flowId = authScope.getStore()?.flowId;
+            if (flowId) await deps.db.authFlow.update({ where: { id: flowId }, data: { sessionId: session.id } });
+            await recordStage(deps.db, flowId, "session_issued");
           },
         },
       },
       account: {
         create: {
           before: async (account) => {
+            const owner = await deps.db.user.findUnique({ where: { id: String(account.userId) } });
+            const state = await getOAuthState().catch(() => null);
+            if (state?.callbackURL) {
+              const url = new URL(state.callbackURL, baseURL);
+              const flow = ["/oauth/handoff", "/oauth/web-complete"].includes(url.pathname) ? url.searchParams.get("flow") : null;
+              if (flow) authScope.getStore()!.flowId = flow;
+            }
+            if (owner) { await lockAuthAccount(deps.db, owner.email); await classifyJourney(deps.db, owner.id, owner.emailVerified); }
             // Linking a trusted social account to a user who is NOT yet
             // verified is about to flip `emailVerified` for them
             // (oauth2/link-account.mjs), which would arm any password a
@@ -149,31 +329,6 @@ export function createAuth(deps: CreateAuthDeps) {
         },
       },
     },
-    // Take the outbound email off the response path. Two reasons, both load
-    // bearing: `runInBackgroundOrAwait` otherwise AWAITS the send, which (a)
-    // makes the enumeration-safe endpoints answer a known address a full
-    // ZeptoMail round trip slower than an unknown one, and (b) puts a mail
-    // outage inside the try that wraps OAuth user creation, failing a
-    // first-time GitHub sign-up with "unable to create user" after the rows
-    // are already committed.
-    //
-    // Keep the `.catch`. `runInBackgroundOrAwait` attaches its own before
-    // calling us, so this one never fires for a send — but the sibling
-    // `runInBackground` passes the promise RAW and only falls back to a
-    // catch-all when no handler is configured, i.e. supplying one opts out of
-    // the guard. An unhandled rejection there takes the Bun process down.
-    advanced: {
-      backgroundTasks: {
-        handler: (p) => {
-          p.catch((e) => console.error("background task failed", e));
-        },
-      },
-    },
-    // Secondary to the magic link and OAuth, and the only path that can create
-    // a user we have NOT already proven owns the address — those two prove it
-    // before the row exists. So: no session until the address is verified.
-    // `databaseHooks.user.create.after` provisions a real ProductAccount, and
-    // autoSignIn would hand that account to whoever typed the address.
     emailAndPassword: {
       enabled: true,
       autoSignIn: false,
@@ -186,19 +341,27 @@ export function createAuth(deps: CreateAuthDeps) {
       // path for a user who never had a password. Better-Auth creates the
       // credential row when none exists (api/routes/password.mjs).
       sendResetPassword: async ({ user, token }) => {
+        try {
+        const flowId = authScope.getStore()?.flowId;
+        if (flowId) {
+          const flow = await deps.db.authFlow.findUniqueOrThrow({ where: { id: flowId } });
+          await deps.db.authJourney.update({ where: { id: flow.journeyId }, data: { userId: user.id } });
+          await classifyJourney(deps.db, user.id, user.emailVerified);
+          await deps.db.verification.create({ data: { id: crypto.randomUUID(), identifier: "auth-reset:" + digest(token).toString("hex"), value: flowId, expiresAt: new Date(Date.now() + 3600000) } });
+        }
         await deps.sendEmail({
           to: user.email,
-          subject: "Reset your Antgrid password",
-          text:
-            `Reset your password: ${resetPasswordUrl(token)}\n\n` +
-            `Link expires in 1 hour. If you did not request this, ignore this ` +
-            `email — your password is unchanged.`,
+          ...authEmail({ action: "Reset your Antgrid password", url: resetPasswordUrl(token),
+            description: "Continue only if you requested a password reset.", createdAt: new Date(), expiresAt: new Date(Date.now() + 3600000) }),
+          expiresAt: new Date(Date.now() + 3600000),
         });
+        } catch (error) { if (authScope.getStore()) authScope.getStore()!.enqueueFailed = true; throw error; }
       },
       // A reset is the account-takeover recovery path, so it must also sever
       // whatever the attacker was holding. Sessions only — device tokens are
       // revoked from /devices, and killing them here would strand every agent
       // machine on a routine password change.
+      resetPasswordTokenExpiresIn: 3600,
       revokeSessionsOnPasswordReset: true,
       onPasswordReset: async ({ user }) => {
         // Opening the emailed reset link is the same proof of address ownership
@@ -213,12 +376,19 @@ export function createAuth(deps: CreateAuthDeps) {
             data: { emailVerified: true },
           });
         }
+        await linkFlowUser(deps.db, user.id, "ownership_verified");
+        await provisionBillingAccount(deps.db, user.id);
         console.info(
           JSON.stringify({ evt: "auth.password.reset", userId: user.id, at: new Date().toISOString() })
         );
       },
     },
     emailVerification: {
+      expiresIn: 3600,
+      afterEmailVerification: async (user) => {
+        await linkFlowUser(deps.db, user.id, "ownership_verified");
+        await provisionBillingAccount(deps.db, user.id);
+      },
       sendOnSignUp: true,
       // OFF on purpose. The resend an unverified sign-in needs is issued by
       // /ui/login/password instead, so it spends the same per-IP email budget
@@ -227,16 +397,23 @@ export function createAuth(deps: CreateAuthDeps) {
       // than the email bucket — enough to bomb an address you signed up for
       // yourself and never verified.
       sendOnSignIn: false,
-      autoSignInAfterVerification: true,
+      autoSignInAfterVerification: false,
       sendVerificationEmail: async ({ user, token }) => {
+        try {
+        const flowId = authScope.getStore()?.flowId;
+        if (flowId) {
+          const flow = await deps.db.authFlow.findUniqueOrThrow({ where: { id: flowId } });
+          await deps.db.authJourney.update({ where: { id: flow.journeyId }, data: { userId: user.id } });
+          await classifyJourney(deps.db, user.id, user.emailVerified);
+        }
+        if (flowId) await deps.db.verification.create({ data: { id: crypto.randomUUID(), identifier: "auth-review:" + digest(token).toString("hex"), value: flowId, expiresAt: new Date(Date.now() + 3600000) } });
         await deps.sendEmail({
           to: user.email,
-          subject: "Verify your email for Antgrid",
-          text:
-            `Verify your email: ${verifyEmailUrl(token)}\n\n` +
-            `Link expires in 1 hour. If you did not create an Antgrid account, ` +
-            `ignore this email.`,
+          ...authEmail({ action: "Verify your email for Antgrid", url: verifyEmailUrl(token),
+            description: "Review this request before verifying your email address.", createdAt: new Date(), expiresAt: new Date(Date.now() + 3600000) }),
+          expiresAt: new Date(Date.now() + 3600000),
         });
+        } catch (error) { if (authScope.getStore()) authScope.getStore()!.enqueueFailed = true; throw error; }
       },
     },
     socialProviders: {
@@ -248,8 +425,10 @@ export function createAuth(deps: CreateAuthDeps) {
         clientId: deps.env.GOOGLE_CLIENT_ID,
         clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
       },
+      apple: appleProvider(deps.env),
     },
     plugins: [
+      nativeAuth(deps.db, baseURL),
       crossDeviceMagicLink({
         db: deps.db,
         sendEmail: deps.sendEmail,
@@ -280,6 +459,10 @@ export function createAuth(deps: CreateAuthDeps) {
     // (routes/ui.tsx); nothing here is a backstop for one that doesn't.
     rateLimit: {
       customRules: {
+        // app.ts applies a refilling token bucket to this endpoint. The
+        // built-in counter resets only after an idle window, so even steady
+        // lease refresh traffic eventually exhausts it at any finite max.
+        "/oauth2/token": false,
         "/sign-in/cross-device/start": { window: 60, max: 5 },
         "/sign-in/cross-device/approve": { window: 60, max: 10 },
         "/sign-in/cross-device/status": { window: 60, max: 60 },
@@ -296,6 +479,51 @@ export function createAuth(deps: CreateAuthDeps) {
       },
     },
   });
+  const invoke = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (deps.databaseOverride && typeof rateDb.$transaction !== "function") return fn();
+    class RejectedResponse { constructor(public response: T) {} }
+    try { return await authTransaction(deps.db, async () => {
+      let result: T = await fn();
+      const scope = authScope.getStore()!;
+      if (scope.enqueueFailed) {
+        if (result instanceof Response) throw new RejectedResponse(new Response(JSON.stringify({ code: "EMAIL_UNAVAILABLE", message: "Email service unavailable" }), { status: 503, headers: { "content-type": "application/json" } }) as T);
+        throw new APIError("SERVICE_UNAVAILABLE", { code: "EMAIL_UNAVAILABLE", message: "Email service unavailable" });
+      }
+      if (result instanceof Response && result.ok && scope.flowId) {
+        const flow = await deps.db.authFlow.findUnique({ where: { id: scope.flowId } });
+        if (flow && result.headers.get("content-type")?.includes("application/json")) {
+          const body = await result.clone().json();
+          const receipt = FlowResultSchema.parse({ id: flow.id, journeyId: flow.journeyId, status: flow.sessionId ? "ready" : "pending",
+            serverTime: new Date().toISOString(), expiresAt: flow.expiresAt.toISOString(), retryAt: new Date(flow.createdAt.getTime()+45000).toISOString(), delivery: "accepted" });
+          result = new Response(JSON.stringify({ ...body, flow: receipt }), { status: result.status,headers: result.headers }) as T;
+        }
+      }
+      if (result instanceof Response && scope.retryAfter) {
+        const headers = new Headers(result.headers); headers.set("Retry-After", String(scope.retryAfter));
+        result = new Response(result.body, { status: result.status, statusText: result.statusText, headers }) as T;
+      }
+      if (result instanceof Response && result.status >= 400) throw new RejectedResponse(result);
+      return result;
+    }); } catch (err) { if (err instanceof RejectedResponse) return err.response; throw err; }
+  };
+  return new Proxy(auth, { get(target, key) {
+    if (key === "handler") return (request: Request) => invoke(() => target.handler(request));
+    if (key === "api") return new Proxy(target.api, { get(api, name) {
+      const fn = Reflect.get(api, name);
+      return typeof fn === "function" ? (...args: unknown[]) => invoke(async () => {
+        try { return await fn(...args); }
+        catch (error) {
+          if ((args[0] as { asResponse?: boolean } | undefined)?.asResponse && isAPIError(error)) {
+            const retry = authScope.getStore()?.retryAfter;
+            return new Response(JSON.stringify(error.body ?? { code: "AUTH_FAILED" }), { status: error.statusCode,
+              headers: { "content-type": "application/json", ...retry ? { "Retry-After": String(retry) } : {} } });
+          }
+          throw error;
+        }
+      }) : fn;
+    } });
+    return Reflect.get(target, key);
+  } });
 }
 
 export type Auth = ReturnType<typeof createAuth>;

@@ -8,18 +8,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
 import '../launcher/host_control_client.dart';
+import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
 import '../services/pending_reply.dart' show SessionDownException;
+import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/new_session/picker_sources.dart';
+import '../widgets/session_start_refusal.dart';
 import 'account_agents.dart';
 import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'analytics.dart';
+import 'app_toaster.dart';
 import 'cached_sessions.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
@@ -33,44 +37,12 @@ import 'session_opening_prompt.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
 
-/// Thrown when activating a remote project is refused by the retired
-/// concurrent-remote-agent cap (`SESSION_LIMIT_EXCEEDED`, surfaced by the host
-/// as a `project:start` control-plane error). Current relays never emit it —
-/// the paid axis is the per-account worker cap, enforced at device
-/// registration — so this only fires against a relay that has not been
-/// upgraded. Kept distinct from a generic start failure because a retry alone
-/// won't clear it. [message] is the relay's human string.
-class SessionLimitExceededException implements Exception {
-  final String message;
-  const SessionLimitExceededException(this.message);
-
-  /// What the user is shown. The relay's [message] describes a cap that no
-  /// longer exists, so every surface renders this instead — one place to
-  /// delete when the code itself goes.
-  String get userMessage =>
-      'This machine is on an older relay that still limits how many remote '
-      'projects can run at once. Update it, or close another remote project '
-      'and try again.';
-
-  @override
-  String toString() => 'SessionLimitExceededException: $message';
-}
-
-/// Map a failed `project:start` outcome to the exception the caller throws. The
-/// session-limit rejection is a legacy-relay path (see
-/// [SessionLimitExceededException]); everything else (NOT_ALLOWED, OPEN_FAILED,
-/// timeout → no error) is a generic, transient failure. `lastError` is the
-/// control plane's last error after [awaitProjectRunning] returned false.
+/// Convert any failed project:start outcome into the generic retryable surface.
 Never throwProjectStartFailure(
   String projectId,
   String machineUuid,
   ControlPlaneError? lastError,
 ) {
-  // Retired on current relays, retained so an un-upgraded one still produces a
-  // typed rejection rather than an opaque StateError.
-  if (lastError?.code == 'SESSION_LIMIT_EXCEEDED') {
-    throw SessionLimitExceededException(lastError!.message);
-  }
   throw StateError('Could not start project $projectId on $machineUuid');
 }
 
@@ -85,23 +57,6 @@ class ActiveSessionsBranchSwitchException implements Exception {
   @override
   String toString() =>
       'ActiveSessionsBranchSwitchException($targetId, $branch)';
-}
-
-/// Thrown when the pre-start branch switch refuses because the folder's
-/// working tree is dirty (`DIRTY_WORKTREE`) and the caller hasn't already
-/// opted into stashing. The composer catches this, offers to stash, and
-/// retries with `stashIfDirty: true` — see [startNewSession].
-class DirtyWorktreeBranchSwitchException implements Exception {
-  final String targetId;
-  final String branch;
-  const DirtyWorktreeBranchSwitchException({
-    required this.targetId,
-    required this.branch,
-  });
-
-  @override
-  String toString() =>
-      'DirtyWorktreeBranchSwitchException($targetId, $branch)';
 }
 
 /// Start action for the New Session page.
@@ -130,7 +85,6 @@ class DirtyWorktreeBranchSwitchException implements Exception {
 Future<void> startNewSession(
   ProviderContainer ref, {
   bool allowActiveSessions = false,
-  bool stashIfDirty = false,
 }) async {
   final target = ref.read(selectedTargetProjectProvider);
   if (target == null) return;
@@ -226,7 +180,6 @@ Future<void> startNewSession(
               projectPath: target.detail,
               branch: explicitBranch,
               allowActiveSessions: allowActiveSessions,
-              stashIfDirty: stashIfDirty,
             );
           } finally {
             client.close();
@@ -245,7 +198,6 @@ Future<void> startNewSession(
             projectId: target.projectId ?? target.id,
             branch: explicitBranch,
             allowActiveSessions: allowActiveSessions,
-            stashIfDirty: stashIfDirty,
           );
         }
       } on HostControlException catch (e) {
@@ -255,22 +207,10 @@ Future<void> startNewSession(
             branch: explicitBranch,
           );
         }
-        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
-          throw DirtyWorktreeBranchSwitchException(
-            targetId: target.id,
-            branch: explicitBranch,
-          );
-        }
         rethrow;
       } on RpcException catch (e) {
         if (e.code == 'ACTIVE_SESSIONS') {
           throw ActiveSessionsBranchSwitchException(
-            targetId: target.id,
-            branch: explicitBranch,
-          );
-        }
-        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
-          throw DirtyWorktreeBranchSwitchException(
             targetId: target.id,
             branch: explicitBranch,
           );
@@ -423,12 +363,17 @@ Future<void> startNewSession(
         leaveNewSession(ref);
       }
 
-      // 5. Reconcile the reply now that the user is already in the session. A
-      // queued start is a SUCCESS — the entry comes back carrying
-      // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
-      // session, an older agent's unknown tool) leaves the draft intact for a
-      // return to this canvas; a CODED refusal still raises past here.
-      final started = await starting;
+      // 5. A queued start is a SUCCESS; only a bare rejection leaves the draft
+      // intact, while a CODED refusal is reported below.
+      final SessionEntry? started;
+      try {
+        started = await starting;
+      } on SessionOperationException catch (error) {
+        // Voiced only here, not rethrown: the composer may still be mounted and
+        // would toast the same refusal twice.
+        reportStartRefusal(ref.read(appToasterProvider), error);
+        return;
+      }
       if (started == null) {
         abort(NewSessionStartAbortReason.startRefused);
         return;
@@ -449,18 +394,8 @@ Future<void> startNewSession(
       // gets its own reason instead of collapsing into replyTimedOut below.
       abort(NewSessionStartAbortReason.sessionDown);
     } on TimeoutException {
-      // A dropped/late reply is retryable. Typed bridge failures intentionally
-      // reach the composer so it can show their safe display message — though
-      // a START refusal now arrives after the hand-off, by which point the
-      // composer is unmounted and it is the workspace's OperationalErrorToaster
-      // that voices it (the service stamps the reason onto SessionsState.error
-      // before failing the pending request).
-      //
-      // The abort is what a CREATE timeout is owed: that one is still on the
-      // canvas, it is the longest wait this flow has, and ending it without a
-      // word is the silent vanish the whole progress model exists to remove. A
-      // start timeout records one too and nobody is left to read it, which is
-      // cheaper than deciding the reason from which await threw.
+      // A dropped/late reply is retryable; typed bridge failures reach the
+      // composer. Abort so a CREATE timeout doesn't vanish silently.
       abort(NewSessionStartAbortReason.replyTimedOut);
     }
   } finally {
@@ -628,7 +563,7 @@ Future<String> openRemoteProjectForActivation(
   ).registrationId; // "<uuid>.<projId>"
 
   // No pairing step: the control-plane read below is what declares the machine
-  // socket wanted, and the supervisor owns the dial + E2E handshake from there.
+  // socket wanted, and the supervisor owns the dial + session handshake from there.
   // Await the inventory when we hold no cached coordinates, so a still-loading
   // inventory isn't mistaken for "machine unknown".
   final recent = ref
@@ -642,22 +577,9 @@ Future<String> openRemoteProjectForActivation(
     }
   }
 
-  // ALWAYS send project:start before dialing the data plane — never gate on the
-  // advert. The host advertises `running:true` ONLY for a relay-ADMITTED slot
-  // (ProjectCore.isRelayRegistered), so a desktop-open-but-unpromoted project
-  // reads running:false and a stopped one does too; either way dialing it without
-  // a slot would loop AGENT_OFFLINE forever. project:start is the promote trigger
-  // and is idempotent for an already-dialable core. awaitProjectRunning then
-  // returns immediately ONLY when the advert truthfully reads running (i.e. the
-  // slot is admitted); for a not-yet-dialable core it waits for the host's
-  // post-register advert (or, on a legacy relay, the retired
-  // SESSION_LIMIT_EXCEEDED control:result).
-  //
-  // Keep-alive dependency: the caller must still be holding machine:M's socket
-  // open (the picker via its viewed source; the drawer via the expanded
-  // machine/project row) — controlPlaneAliveTargetsProvider keeps it alive, and
-  // the reaper would otherwise drop it mid-start (awaitProjectRunning can take
-  // up to 30s).
+  // ALWAYS send project:start before opening the project stream — never gate
+  // on the advert. Activation is idempotent, and awaitProjectRunning waits for
+  // the host's post-start advert before the project stream is opened.
   final cpClient = await ref.read(
     controlPlaneClientForProvider(machineUuid).future,
   );
@@ -667,10 +589,8 @@ Future<String> openRemoteProjectForActivation(
   try {
     await cpClient.startProject(projectId);
   } on RpcException {
-    // The send couldn't be delivered (keyless reconnect window) — fail fast via
-    // the standard start-failure surface instead of letting awaitProjectRunning
-    // burn the full 30s. lastError won't be a session-limit code here, so this
-    // maps to the generic transient "couldn't start" the user can retry.
+    // A control send failure uses the same generic retry surface as an advert
+    // timeout; neither changes native connection policy.
     throwProjectStartFailure(
       projectId,
       machineUuid,
@@ -680,9 +600,6 @@ Future<String> openRemoteProjectForActivation(
   onAwaitingRunning?.call();
   final ok = await awaitProjectRunning(cpClient, projectId);
   if (!ok) {
-    // Distinguish a legacy relay's retired session cap from a generic transient
-    // start failure: an old host still pushes SESSION_LIMIT_EXCEEDED as the
-    // project:start control-plane error when it rejects the slot.
     throwProjectStartFailure(
       projectId,
       machineUuid,

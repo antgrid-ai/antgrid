@@ -8,6 +8,10 @@
 		     a hardcoded value here would break one side or the other. -->
 		<key>aps-environment</key>
 		<string>$(APS_ENVIRONMENT)</string>
+		<key>com.apple.developer.applesignin</key>
+		<array>
+			<string>Default</string>
+		</array>
 		<key>keychain-access-groups</key>
 		<!-- The app's own bundle group MUST stay first: the first entry is the
 		     default access group for un-grouped flutter_secure_storage items

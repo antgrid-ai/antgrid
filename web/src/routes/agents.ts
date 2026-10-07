@@ -9,7 +9,7 @@ import type { Env } from "../env.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
 import { requireBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
-import { listAppDevicePeers } from "../models/device.js";
+import { heartbeatDayRecorder } from "../usage/heartbeat-day.js";
 
 // mobileAccessEnabled/relayUrl/machineName are agent-only concepts (the
 // bridge always sends them); an app (phone) heartbeat sends only deviceUuid,
@@ -23,22 +23,13 @@ const HeartbeatBody = z.object({
 
 export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   const r = new Hono<{ Variables: AuthVars }>();
+  const recordHeartbeatDay = heartbeatDayRecorder(deps.db);
 
   // Heartbeat is called by both agent (bridge) and app (phone) devices, each
   // presenting an OAuth `client_credentials` JWT (NOT a Better-Auth session
   // cookie). Gate it with Bearer-JWT verification against web's own JWKS.
   r.use(
     "/account/devices/me/heartbeat",
-    requireBearerJwt({ auth: deps.auth, env: deps.env })
-  );
-
-  // Peers is called by the bridge to discover enrolled app-device Ed25519 keys
-  // for the same account. Bearer-JWT gated (same OAuth client_credentials path
-  // as heartbeat). Path uses `me/peers` (two segments after /devices) to avoid
-  // Hono matching `/account/devices/:id` in deviceRoutes, which gates on a
-  // cookie-based requireUser and would reject Bearer tokens.
-  r.use(
-    "/account/devices/me/peers",
     requireBearerJwt({ auth: deps.auth, env: deps.env })
   );
 
@@ -62,30 +53,17 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     });
   });
 
-  r.get("/account/devices/me/peers", async (c) => {
-    const userId = c.get("userId");
-    const peers = await listAppDevicePeers(deps.db, userId);
-    return c.json({
-      // keys: unconsumed by any current client; devices below is what
-      // bridge/src/trusted-peers.ts reads.
-      keys: peers.map((p) => p.publicKey.toString("base64")),
-      devices: peers.map((p) => ({
-        deviceId: p.deviceId,
-        ed25519Pub: p.publicKey.toString("base64"),
-      })),
-    });
-  });
-
   r.post("/account/devices/me/heartbeat", async (c) => {
     const userId = c.get("userId");
     const parsed = HeartbeatBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
     const body = parsed.data;
 
+    const now = new Date();
     const result = await deps.db.device.updateMany({
       where: { userId, deviceId: body.deviceUuid, revokedAt: null },
       data: {
-        lastSeenAt: new Date(),
+        lastSeenAt: now,
         ...(body.mobileAccessEnabled != null
           ? { mobileAccessEnabled: body.mobileAccessEnabled }
           : {}),
@@ -95,6 +73,7 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     });
     if (result.count === 0) return c.json({ error: "NOT_FOUND" }, 404);
 
+    await recordHeartbeatDay(userId, body.deviceUuid, now);
     return c.json({ ok: true });
   });
 

@@ -319,5 +319,63 @@ void main() {
       );
       await recent.close();
     });
+
+    test(
+      'incomplete ownership cleanup locks sign-out and preserves identity',
+      () async {
+        useInMemoryPrefs();
+        final recent = await RecentAgentsStore.open();
+        final keychain = KeychainDeviceStore(
+          storage: _MemDeviceSecret(),
+          controllerStorage: _MemDeviceSecret(),
+        );
+        await keychain.write(_record('dev-1'));
+        final devicesApi = DevicesApi(
+          licenseApiUrl: 'http://localhost:8787',
+          cookieProvider: () async => 'better-auth.session_token=signed.value',
+          httpClient: MockClient(
+            (_) async => http.Response('{devices:[]}', 200),
+          ),
+        );
+        final a = _authWithCookie();
+        var blocked = false;
+        var cleanupCalls = 0;
+        SignOutCleanupIncomplete? publishedFailure;
+        final svc = SignOutService(
+          authService: a.auth,
+          keychainStore: keychain,
+          devicesApi: devicesApi,
+          pushIdentity: _RecordingPushIdentity(),
+          recentAgentsStore: recent,
+          blockNewWork: () => blocked = true,
+          closeSessions: () async {
+            cleanupCalls++;
+            throw StateError('native ownership unresolved');
+          },
+          onCleanupLocked: (failure) => publishedFailure = failure,
+        );
+
+        await expectLater(
+          svc.hardSignOut(),
+          throwsA(isA<SignOutCleanupIncomplete>()),
+        );
+        expect(blocked, isTrue);
+        expect(svc.cleanupLocked, isTrue);
+        expect(publishedFailure, isNotNull);
+        expect(await a.storage.readCookie(), isNotNull);
+        expect(await keychain.read(), isNotNull);
+
+        await expectLater(
+          svc.hardSignOut(),
+          throwsA(isA<SignOutCleanupIncomplete>()),
+        );
+        expect(
+          cleanupCalls,
+          1,
+          reason: 'a locked identity cannot restart teardown',
+        );
+        await recent.close();
+      },
+    );
   });
 }

@@ -1,3 +1,4 @@
+import { createHostPolicyFixture } from "./host-policy-fixture";
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +13,13 @@ function fakeRemoteConfig(): HostRemoteConfig {
     relayUrl: "ws://127.0.0.1:1",
     licenseApiUrl: "http://127.0.0.1:1",
     identity: { deviceId: "dev-1", deviceName: "dev-1", createdAt: "2026-01-01T00:00:00.000Z" },
-    auth: { clientId: "cid", clientSecret: "secret", deviceUuid: "uuid-1" },
+    auth: {
+      clientId: "cid",
+      clientSecret: "secret",
+      deviceUuid: "uuid-1",
+      userId: "user-1",
+      endpointSecret: "endpoint-secret",
+    },
     onAuthRevoked: () => {},
   };
 }
@@ -74,7 +81,7 @@ beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-cp-forget-abdir-"));
   process.env.ANTGRID_DIR = abDir;
-  host = new HostServer({
+  host = createHostPolicyFixture({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
   });

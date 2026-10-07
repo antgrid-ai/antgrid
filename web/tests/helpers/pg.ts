@@ -22,6 +22,11 @@ export type PgHandle = {
 };
 
 const APP_TABLES = [
+  "email_recipient_events", "email_jobs", "auth_flow_events", "auth_flows", "auth_journeys", "auth_rate_buckets", "auth_cohorts",
+  "peer_authorization_outbox",
+  "peer_authorization_policies",
+  "peer_endpoint_challenges",
+  "peer_endpoint_registrations",
   "oauth_consent",
   "oauth_access_token",
   "oauth_refresh_token",
@@ -36,6 +41,9 @@ const APP_TABLES = [
   "product_accounts",
   "pending_sign_in",
   "analytic_event",
+  "usage_daily",
+  "usage_relay_seen",
+  "usage_heartbeat_seen",
   "waitlist_signup",
   "session",
   "account",
@@ -96,7 +104,7 @@ export async function startTestPg(): Promise<PgHandle> {
     }
   }
 
-  const adapter = new PrismaPg({ connectionString: testUri });
+  const adapter = new PrismaPg({ connectionString: testUri, options: "-c timezone=UTC" });
   const db = new PrismaClient({ adapter });
 
   return {

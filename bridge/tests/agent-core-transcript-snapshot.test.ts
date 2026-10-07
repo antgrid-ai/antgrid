@@ -88,6 +88,9 @@ test("session.transcriptSnapshot returns empty frames for an unknown/not-running
   if (res?.type === "response") {
     expect(res.ok).toBe(true);
     expect((res.result as { frames?: unknown[] })?.frames).toEqual([]);
+    // A session that is not running has no live turn, no open prompts and no
+    // update in flight — said explicitly, so a client holding stale state drops it.
+    expect(res.result).toMatchObject({ activeTurnId: null, live: [], update: { running: false } });
   }
 });
 
@@ -152,9 +155,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerSessionProvider(() => ({
-    peerId: "app-dev#machine-dev", peerPubkey: pk1, checkoutRouting: true, reachable: true, pullsTree: false,
-  }));
+  core.setPeerSessionProvider(() => ({ peerId: "app-dev#machine-dev", peerPubkey: pk1 }));
   core.onHandshakeComplete();
   await waitForServices(sent);
 
@@ -163,6 +164,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
     createMessage("request", { requestId: "r3", method: "session.transcriptSnapshot", params: { sessionId: "ghost" } }),
     "control",
     "relay",
+    "app-dev#machine-dev",
   );
   await new Promise((r) => setTimeout(r, 200));
   expect(findResponse(sent, "r3")).toBeUndefined();
@@ -176,6 +178,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
     createMessage("request", { requestId: "r3b", method: "session.transcriptSnapshot", params: { sessionId: "ghost" } }),
     "control",
     "relay",
+    "app-dev#machine-dev",
   );
 
   const deadline = Date.now() + 2000;

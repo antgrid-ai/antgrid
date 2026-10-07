@@ -30,6 +30,8 @@ import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/new_session/project_menu.dart';
 
+import '../helpers/toast_host.dart';
+
 // Fabricated sources follow the pattern used in test/widgets/project_menu_test.dart
 // and test/widgets/environment_menu_test.dart: pickerSourcesProvider is a pure
 // Provider<List<PickerSource>>, so it can be overridden with a literal list.
@@ -184,12 +186,13 @@ Widget _host({
     onOpenFolder: onOpenFolder ?? () {},
     submit:
         submit ??
-        (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
+        (_, {allowActiveSessions = false}) async {},
   );
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
       theme: buildAbTheme(),
+      builder: abToastHostBuilder,
       home: Scaffold(
         body: Align(
           alignment: Alignment.bottomCenter,
@@ -209,7 +212,7 @@ void main() {
       _host(
         overrides: _baseOverrides(target: _project),
         submit:
-            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+            (ref, {allowActiveSessions = false}) async {
               submitCount++;
             },
       ),
@@ -236,7 +239,7 @@ void main() {
       _host(
         overrides: _baseOverrides(target: _project),
         submit:
-            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+            (ref, {allowActiveSessions = false}) async {
               submitCount++;
             },
       ),
@@ -258,7 +261,7 @@ void main() {
         _host(
           overrides: _baseOverrides(target: _project),
           submit:
-              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              (ref, {allowActiveSessions = false}) async {
                 submitCount++;
               },
         ),
@@ -292,7 +295,7 @@ void main() {
       _host(
         overrides: _baseOverrides(target: _project),
         submit:
-            (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+            (ref, {allowActiveSessions = false}) async {
               submitCount++;
             },
       ),
@@ -490,7 +493,7 @@ void main() {
     );
     // Tapping the disabled Chat row must not change the mode, and must not
     // close the menu. (On the default Android test platform the tap surfaces
-    // the reason as a snack bar — pump past its duration so its dismiss timer
+    // the reason as a toast — pump past its duration so its dismiss timer
     // isn't pending at test end.)
     await _openModeMenu(tester);
     await tester.tap(find.byKey(const Key('new-session-mode-chat')));
@@ -712,6 +715,7 @@ void main() {
           ],
           child: MaterialApp(
             theme: buildAbTheme(),
+            builder: abToastHostBuilder,
             home: Scaffold(
               body: Align(
                 alignment: Alignment.bottomCenter,
@@ -723,7 +727,6 @@ void main() {
                               (
                                 _, {
                                 allowActiveSessions = false,
-                                stashIfDirty = false,
                               }) async {},
                         )
                       : const SizedBox.shrink(),
@@ -848,7 +851,7 @@ void main() {
         await tester.tapAt(const Offset(5, 5));
         await tester.pumpAndSettle();
         expect(_selectedMode(tester), 'terminal');
-        // Drain the disabled-tap snack bar's dismiss timer (Android default
+        // Drain the disabled-tap toast's dismiss timer (Android default
         // test platform takes the mobile feedback path).
         await tester.pump(const Duration(seconds: 5));
         await tester.pumpAndSettle();
@@ -1001,7 +1004,6 @@ void main() {
                 (
                   ref, {
                   allowActiveSessions = false,
-                  stashIfDirty = false,
                 }) async {
                   submitCalls.add(allowActiveSessions);
                   if (!allowActiveSessions) {
@@ -1054,7 +1056,7 @@ void main() {
             ),
           ],
           submit:
-              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              (ref, {allowActiveSessions = false}) async {
                 submitCalls.add(allowActiveSessions);
                 if (!allowActiveSessions) {
                   throw ActiveSessionsBranchSwitchException(
@@ -1094,63 +1096,6 @@ void main() {
   });
 
   group('git checkout refusals', () {
-    testWidgets('DIRTY_WORKTREE offers to stash and retries on confirm', (
-      tester,
-    ) async {
-      var submitCalls = <bool>[];
-      await tester.pumpWidget(
-        _host(
-          overrides: [
-            ..._baseOverrides(target: _project),
-            newSessionBranchSelectionProvider.overrideWith(
-              () => ValueController(
-                const NewSessionBranchSelection(
-                  targetId: 'p-my-repo',
-                  branch: 'dev',
-                ),
-              ),
-            ),
-          ],
-          submit:
-              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
-                submitCalls.add(stashIfDirty);
-                if (!stashIfDirty) {
-                  throw DirtyWorktreeBranchSwitchException(
-                    targetId: _project.id,
-                    branch: 'dev',
-                  );
-                }
-              },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.enterText(
-        find.byKey(const Key('new-session-prompt-field')),
-        'start session',
-      );
-      await tester.pump();
-
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(submitCalls, [false]);
-      expect(find.text('Stash uncommitted changes?'), findsOneWidget);
-
-      await tester.tap(find.text('Stash & switch'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(submitCalls, [false, true]);
-    });
-
-    // Only the TYPED DirtyWorktreeBranchSwitchException gets the stash offer
-    // above — a bare HostControlException carrying the same code (e.g. from a
-    // caller that skipped the conversion `startNewSession` does) has no safe
-    // retry to offer here, so it must land as clear, specific text (naming
-    // the files, as the bridge's own message does) rather than the raw
-    // exception dump the generic catch-all prints.
     testWidgets(
       'DIRTY_WORKTREE shows the bridge message, not a raw exception dump',
       (tester) async {
@@ -1171,7 +1116,6 @@ void main() {
                 (
                   ref, {
                   allowActiveSessions = false,
-                  stashIfDirty = false,
                 }) async {
                   throw HostControlException(
                     'DIRTY_WORKTREE',
@@ -1208,7 +1152,7 @@ void main() {
   });
 
   group('create-time isolation refusals', () {
-    /// Submits, then settles far enough for the refusal's snack bar to render.
+    /// Submits, then settles far enough for the refusal's toast to render.
     Future<void> submitPrompt(WidgetTester tester) async {
       await tester.enterText(
         find.byKey(const Key('new-session-prompt-field')),
@@ -1219,8 +1163,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
     }
 
-    /// Drains the 8s snack bar so its dismiss timer can't outlive the test.
-    Future<void> drainSnackBar(WidgetTester tester) async {
+    /// Drains the 8s toast so its dismiss timer can't outlive the test.
+    Future<void> drainToast(WidgetTester tester) async {
       await tester.pump(const Duration(seconds: 8));
       await tester.pump(const Duration(milliseconds: 300));
     }
@@ -1228,7 +1172,7 @@ void main() {
     Widget refusingHost(SessionOperationException refusal) => _host(
       overrides: _baseOverrides(target: _project),
       submit:
-          (ref, {allowActiveSessions = false, stashIfDirty = false}) async =>
+          (ref, {allowActiveSessions = false}) async =>
               throw refusal,
     );
 
@@ -1253,7 +1197,7 @@ void main() {
       expect(find.textContaining('Failed to start session'), findsNothing);
       expect(find.textContaining('unknown base branch'), findsNothing);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('an unmapped code keeps the bridge message', (tester) async {
@@ -1270,7 +1214,7 @@ void main() {
 
       expect(find.text('fatal: invalid reference: nope'), findsOneWidget);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('a refusal carrying neither falls back', (tester) async {
@@ -1282,7 +1226,7 @@ void main() {
 
       expect(find.text('Could not start the session.'), findsOneWidget);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('the composer stays put with the prompt intact', (
@@ -1308,7 +1252,7 @@ void main() {
         findsOneWidget,
       );
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('an unexpected launch failure uses generic actionable copy', (
@@ -1318,7 +1262,7 @@ void main() {
         _host(
           overrides: _baseOverrides(target: _project),
           submit:
-              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              (ref, {allowActiveSessions = false}) async {
                 throw const FormatException('provider executable exploded');
               },
         ),
@@ -1335,7 +1279,7 @@ void main() {
       expect(find.textContaining('FormatException'), findsNothing);
       expect(find.textContaining('provider executable exploded'), findsNothing);
 
-      await drainSnackBar(tester);
+      await drainToast(tester);
     });
 
     testWidgets('a launch failure after disposal does not read widget ref', (
@@ -1346,7 +1290,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) {
+          submit: (ref, {allowActiveSessions = false}) {
             started = true;
             return pendingStart.future;
           },
@@ -1469,7 +1413,7 @@ void main() {
         _host(
           overrides: _baseOverrides(target: _project),
           submit:
-              (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              (ref, {allowActiveSessions = false}) async {
                 submitCount++;
               },
         ),
@@ -1649,7 +1593,7 @@ void main() {
       // Flipping the prompt to readOnly closes the platform input connection on
       // a touch platform, so the soft keyboard collapses on Send and — with
       // focus still on the field — springs back the instant the start ends,
-      // over a form the user was not typing in and over the snackbar saying
+      // over a form the user was not typing in and over the toast saying
       // why. Dropping focus makes that close deliberate and one-way.
       expect(isMobilePlatform, isTrue);
       final node = await focusedPrompt(tester);
@@ -1736,6 +1680,7 @@ void main() {
           overrides: _baseOverrides(target: _project, worktreeSupported: true),
           child: MaterialApp(
             theme: buildAbTheme(),
+            builder: abToastHostBuilder,
             home: Scaffold(
               body: Align(
                 alignment: Alignment.bottomCenter,
@@ -1747,7 +1692,6 @@ void main() {
                               (
                                 _, {
                                 allowActiveSessions = false,
-                                stashIfDirty = false,
                               }) async {},
                         )
                       : const SizedBox.shrink(),

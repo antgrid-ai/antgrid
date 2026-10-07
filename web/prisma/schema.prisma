@@ -113,9 +113,9 @@ model Plan {
   // active `kind:"agent"` device row is one worker; app rows are never counted.
   workerLimit    Int     @map("worker_limit")
   // Abuse bound on `kind:"app"` rows (phones, desktop controllers) only. Never
-  // shown in pricing and never a lever: each app row mints an OAuth client and
-  // lands in `listAppDevicePeers`, which is returned in full to every bridge, so
-  // unbounded app registration puts an unbounded list on the E2E admission path.
+  // shown in pricing and never a lever: each app row mints an OAuth client, so
+  // unbounded app registration puts an unbounded number of live clients on the
+  // account.
   appDeviceLimit Int     @map("app_device_limit")
   // List-price seat cap. NULL is how an Enterprise contract says "unlimited",
   // which also makes this the one catalog field Prisma treats as optional on
@@ -233,8 +233,58 @@ model Device {
   // partial indexes, and it is blind to them on introspection — so declaring a
   // plain `@@index` here makes every `migrate dev` try to CREATE a conflicting
   // plain index (→ "already exists"). Leave it out; the raw-SQL index stands.
+  // `devices_device_id_active_idx` (usage migration) is partial for the same reason.
   @@index([userId, mobileAccessEnabled], map: "device_user_mobile_idx")
   @@map("devices")
+}
+
+model PeerEndpointRegistration {
+  endpointId String @id @map("endpoint_id") @db.Char(64)
+  userId String @map("user_id")
+  deviceId String @map("device_id") @db.Uuid
+  enrollmentId String @map("enrollment_id")
+  generation BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+
+  @@unique([enrollmentId, generation])
+  // One active endpoint per enrollment is a partial unique index in SQL.
+  @@index([userId])
+  @@map("peer_endpoint_registrations")
+}
+
+model PeerEndpointChallenge {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id")
+  deviceId String @map("device_id") @db.Uuid
+  enrollmentId String @map("enrollment_id")
+  endpointId String @map("endpoint_id") @db.Char(64)
+  expectedGeneration BigInt @map("expected_generation")
+  challenge String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@map("peer_endpoint_challenges")
+}
+
+model PeerAuthorizationPolicy {
+  userId String @id @map("user_id")
+  generation BigInt @default(0)
+  relayConfigHash String? @map("relay_config_hash")
+  @@map("peer_authorization_policies")
+}
+
+model PeerAuthorizationOutbox {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String @map("user_id")
+  generation BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("peer_authorization_outbox")
 }
 
 model User {
@@ -248,6 +298,9 @@ model User {
   accountId           String?         @map("account_id") @db.Uuid
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
+  registrationOrigin  Json? @map("registration_origin")
+  activationOrigin    Json? @map("activation_origin")
+  authJourneys        AuthJourney[]
   sessions            Session[]
   accounts            Account[]
   memberships         AccountMember[]
@@ -309,6 +362,9 @@ model Verification {
 }
 
 model PendingSignIn {
+  journeyId String? @map("journey_id") @db.Uuid
+  issuedSessionId String? @map("issued_session_id")
+  returnPath String @default("/dashboard") @map("return_path")
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email            String
   // HMAC of nonce that travels in the magic-link URL. Plain nonce is never stored.
@@ -364,7 +420,46 @@ model AnalyticEvent {
 
   @@index([name, ts], map: "analytic_event_name_ts_idx")
   @@index([installId, ts], map: "analytic_event_install_ts_idx")
+  @@index([createdAt], map: "analytic_event_created_at_idx")
   @@map("analytic_event")
+}
+
+// ---------- Operator usage history ----------
+// Written by src/usage/sampler.ts; the migration explains the GREATEST-only
+// write rule and why usage_relay_seen and usage_heartbeat_seen are pruned.
+
+model UsageDaily {
+  day               DateTime @id @db.Date
+  activeUsers       Int      @default(0) @map("active_users")
+  activeMobileApps  Int      @default(0) @map("active_mobile_apps")
+  activeDesktopApps Int      @default(0) @map("active_desktop_apps")
+  activeAgents      Int      @default(0) @map("active_agents")
+  relayPeakApps     Int      @default(0) @map("relay_peak_apps")
+  relayPeakAgents   Int      @default(0) @map("relay_peak_agents")
+  relayPeakTotal    Int      @default(0) @map("relay_peak_total")
+  relaySeenApps     Int      @default(0) @map("relay_seen_apps")
+  relaySeenAgents   Int      @default(0) @map("relay_seen_agents")
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("usage_daily")
+}
+
+model UsageRelaySeen {
+  day        DateTime @db.Date
+  deviceId   String   @map("device_id")
+  deviceType String   @map("device_type")
+
+  @@id([day, deviceId])
+  @@map("usage_relay_seen")
+}
+
+model UsageHeartbeatSeen {
+  day      DateTime @db.Date
+  userId   String   @map("user_id")
+  deviceId String   @map("device_id")
+
+  @@id([day, userId, deviceId])
+  @@map("usage_heartbeat_seen")
 }
 
 // ---------- Marketing waitlist ----------
@@ -489,4 +584,88 @@ model OauthConsent {
   @@index([clientId])
   @@index([userId])
   @@map("oauth_consent")
+}
+
+model AuthJourney {
+  recipientHash Bytes? @map("recipient_hash")
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String? @map("user_id")
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  origin Json
+  category String @default("unknown")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  flows AuthFlow[]
+  @@index([createdAt])
+  @@map("auth_journeys")
+}
+model AuthFlow {
+  approvalOrigin Json? @map("approval_origin")
+  returnPath String @default("/dashboard") @map("return_path")
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId String @map("journey_id") @db.Uuid
+  journey AuthJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  state String @default("pending")
+  sessionId String? @map("session_id")
+  challenge String?
+  launchHash Bytes? @map("launch_hash")
+  bindingHash Bytes? @map("binding_hash")
+  codeHash Bytes? @map("code_hash")
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  events AuthFlowEvent[]
+  mail EmailJob[]
+  @@index([expiresAt])
+  @@map("auth_flows")
+}
+model AuthFlowEvent {
+  flowId String @map("flow_id") @db.Uuid
+  flow AuthFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  stage String
+  at DateTime @default(now()) @db.Timestamptz(6)
+  failure String?
+  @@id([flowId, stage])
+  @@map("auth_flow_events")
+}
+model EmailJob {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  flowId String? @map("flow_id") @db.Uuid
+  flow AuthFlow? @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  reference String @unique
+  relatedReference String? @map("related_reference")
+  providerId String? @map("provider_id")
+  keyVersion String? @map("key_version")
+  payload Bytes?
+  state String @default("queued")
+  attempts Int @default(0)
+  nextAt DateTime @default(now()) @map("next_at") @db.Timestamptz(6)
+  leaseId String? @map("lease_id") @db.Uuid
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  failure String?
+  events EmailRecipientEvent[]
+  @@index([state, nextAt])
+  @@map("email_jobs")
+}
+model EmailRecipientEvent {
+  id String @id
+  jobId String @map("job_id") @db.Uuid
+  job EmailJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind String
+  at DateTime @default(now()) @db.Timestamptz(6)
+  @@map("email_recipient_events")
+}
+model AuthRateBucket {
+  key String @id
+  stamps DateTime[] @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@map("auth_rate_buckets")
+}
+model AuthCohort {
+  day DateTime @db.Date
+  dimension String
+  counts Json
+  @@id([day, dimension])
+  @@map("auth_cohorts")
 }

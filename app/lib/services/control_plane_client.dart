@@ -132,7 +132,7 @@ class CapabilityCard {
   /// rather than reported empty, so one stale id cannot blank the rest.
   final Map<String, RepoCard> projects;
 
-  /// Session half of the directory (`docs/session-messaging.md` §5.5), read
+  /// Session half of the directory, read
   /// only when `capabilityCard(includeSessions: true)` asked for it.
   ///
   /// `null` means the key was ABSENT — a bridge predating the field, or a call
@@ -640,7 +640,7 @@ class ControlPlaneClient {
       }
       return true;
     } on RpcException {
-      // Pre-RPC agent, offline target, or timeout — the live stream still feeds
+      // Offline target, refusal or timeout — the live stream still feeds
       // updates; the caller decides whether to clear the now-stale advert.
       return false;
     }
@@ -664,27 +664,27 @@ class ControlPlaneClient {
   /// reconnect would spuriously boot stopped projects. project:start has no RPC
   /// reply, so the bound is on DELIVERABILITY. During a keyless (session-down)
   /// window the stream still reads `connected` but the send SILENTLY DROPS
-  /// (`sendOnStream` no-ops without keys) — project:start never reaches the host
+  /// (`sendOnSession` no-ops without keys) — project:start never reaches the host
   /// and `awaitProjectRunning` then burns the full 30s before a generic failure.
   /// Refuse to fire into that window (throw an [RpcException]) so the caller can
   /// surface a retry now instead of waiting it out.
   Future<void> startProject(String projectId) async {
     if (_disposed) return;
-    await transport.action(() async {
+    await (() async {
       if (!transport.isEstablished) {
         throw RpcException(
           'E_NOT_ESTABLISHED',
           'project:start not delivered — the session is reconnecting',
         );
       }
-      // Deliberately un-timed inside the action's own bound: the send resolves
-      // at hand-off to the socket, and every path that abandons a queued frame
+      // Deliberately un-timed inside the outer bound: the send resolves at
+      // hand-off to the socket, and every path that abandons a queued frame
       // — session teardown, dispose, the stream detaching — completes it, so
       // this cannot outlive the session that owns it.
       await transport.send(
         createAbMessage('project:start', {'projectId': projectId}),
       );
-    });
+    })().timeout(const Duration(seconds: 15));
   }
 
   /// Fetch the persisted session list for [projectId] over the control plane —
@@ -704,9 +704,11 @@ class ControlPlaneClient {
 
   /// Delete a session over the control plane — the Recent tab's delete path for
   /// a remote project (works whether the project is running or stopped; the
-  /// bridge routes warm-core vs disk). Lets an [RpcException] (NOT_ALLOWED,
-  /// `WORKTREE_DIRTY`, timeout) propagate so the caller can either climb its
-  /// confirm ladder or toast a failure.
+  /// bridge routes warm-core vs disk). A bridge refusal raises [RpcException]
+  /// (NOT_ALLOWED, `WORKTREE_DIRTY`), because that is an application-confirmed
+  /// answer; only loss before/after dispatch is represented by the result enum,
+  /// so the caller can reconcile uncertainty instead of only climbing a confirm
+  /// ladder or toasting a failure.
   ///
   /// [force] and [deleteBranch] are omitted when null rather than sent as
   /// `false`, because they carry the user's answer to a question that is only
@@ -718,17 +720,14 @@ class ControlPlaneClient {
   /// The only verb here that overrides the transport's 10s default: removing an
   /// isolated checkout is unbounded work on the bridge (see
   /// [kSessionDeleteAckTimeout]), so inheriting a fast-read default made every
-  /// slow-but-successful delete arrive as a timeout. The return type stays a
-  /// bool — a lapse still surfaces as `RpcException('E_TIMEOUT')`, and telling
-  /// an accepted delete from a failed one belongs where the transport's own
-  /// codes are already separated from the bridge's.
-  Future<bool> deleteSession(
+  /// slow-but-successful delete arrive as a timeout.
+  Future<RemoteRequestResult<bool>> deleteSessionWithOutcome(
     String projectId,
     String sessionId, {
     bool? force,
     bool? deleteBranch,
   }) async {
-    final res = await transport.request(
+    final result = await transport.requestWithOutcome(
       'sessions.delete',
       params: {
         'projectId': projectId,
@@ -738,7 +737,14 @@ class ControlPlaneClient {
       },
       timeout: kSessionDeleteAckTimeout,
     );
-    return res['deleted'] == true;
+    return switch (result.outcome) {
+      RemoteCommandOutcome.confirmed => RemoteRequestResult.confirmed(
+        result.value['deleted'] == true,
+      ),
+      RemoteCommandOutcome.notSent => const RemoteRequestResult.notSent(),
+      RemoteCommandOutcome.outcomeUnknown =>
+        const RemoteRequestResult.outcomeUnknown(),
+    };
   }
 
   /// Read the machine's Capability Card — its OS plus one repo entry per
@@ -755,7 +761,7 @@ class ControlPlaneClient {
   /// [repoKeys] narrows the answer to projects whose `RepoCard.remote`
   /// matches one of these — a key from a prior card, never re-derived here.
   /// [includeSessions] widens the answer with [CapabilityCard.sessions] (the
-  /// session half of `docs/session-messaging.md` §5.5) and narrows the target
+  /// session half of the directory) and narrows the target
   /// set further, to projects holding an addressable session. Omitting both
   /// sends a request BYTE-IDENTICAL to a plain card ask, so an older bridge
   /// sees no change at all — widening an existing method produces no error on
@@ -797,6 +803,11 @@ class ControlPlaneClient {
     }
   }
 
+  Future<Map<String, dynamic>> schedulerRequest(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) => transport.request(method, params: params);
+
   /// See [HostControlClient.gitRemoteState] — same verb over the relay.
   Future<BranchRemoteStatus> gitRemoteState({
     required String projectId,
@@ -820,7 +831,6 @@ class ControlPlaneClient {
     required String projectId,
     required String branch,
     bool allowActiveSessions = false,
-    bool stashIfDirty = false,
   }) async {
     final res = await transport.request(
       'git.checkout',
@@ -828,7 +838,6 @@ class ControlPlaneClient {
         'projectId': projectId,
         'branch': branch,
         'allowActiveSessions': allowActiveSessions,
-        'stashIfDirty': stashIfDirty,
       },
     );
     final current = res['current'];

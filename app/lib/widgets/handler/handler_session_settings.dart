@@ -211,13 +211,12 @@ class HandlerSessionSettings extends StatelessWidget {
 /// panel, and the parked notice when the judge can't run headless.
 ///
 /// The four presets and the user-authored [handlerLensOwnLabel] are ONE radio
-/// group — chips behaving identically, never presets plus a disclosure
-/// (redesign spec §2, §3.2). There is no chip for adding NOTHING: that is the
-/// floor line's own subject and the state a session starts in, so a chip for it
-/// offered the user a choice that was already made. A lens ADDS
-/// questions and nothing else — the bridge's rules own where handling gives
-/// way to escalating — so nothing here may read as a dial over how much the
-/// session decides alone.
+/// group — chips behaving identically, never presets plus a disclosure. There
+/// is no chip for adding NOTHING: that is the floor line's own subject and the
+/// state a session starts in, so a chip for it offered the user a choice that
+/// was already made. A lens ADDS questions and nothing else — the bridge's
+/// rules own where handling gives way to escalating — so nothing here may
+/// read as a dial over how much the session decides alone.
 ///
 /// The notice stays HERE rather than with the picker it names because it is an
 /// answer about the lens — why this control is stored and inert. Its copy
@@ -250,11 +249,11 @@ class HandlerLensControl extends ConsumerStatefulWidget {
   final bool commitBriefOnEdit;
 
   /// Fired on every tap of a lens chip, including the one already selected —
-  /// picking "Your own" counts too, since it is exclusive with the presets the
-  /// same way they are exclusive with each other (§9). A host whose seed may
-  /// not be what the far end holds needs to know a control was ANSWERED, which
-  /// is not the same question as whether the value ended up different — see
-  /// the arm sheet's touch flags.
+  /// picking "Your own" counts too, since it is exclusive with the presets
+  /// the same way they are exclusive with each other. A host whose seed may
+  /// not be what the far end holds needs to know a control was ANSWERED,
+  /// which is not the same question as whether the value ended up different
+  /// — see the arm sheet's touch flags.
   final VoidCallback? onRoleTapped;
 
   /// Fired on every edit of the "Your own" panel's text.
@@ -266,10 +265,10 @@ class HandlerLensControl extends ConsumerStatefulWidget {
 }
 
 /// Local, never-on-wire id for the sixth chip. A user lens has no
-/// [HandlerLens] value and no wire role id (redesign spec §13 — an id on the
-/// wire is what keeps a PRESET's text bridge-authored) so this control needs a
-/// marker of its own to route a tap; [handlerLensFromWire] must never resolve
-/// it to a real lens.
+/// [HandlerLens] value and no wire role id (an id on the wire is what keeps a
+/// PRESET's text bridge-authored) so this control needs a marker of its own
+/// to route a tap; [handlerLensFromWire] must never resolve it to a real
+/// lens.
 const _ownChipId = '__own__';
 
 class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
@@ -281,10 +280,10 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
   /// arrived) is allowed to move this without a tap; see [didUpdateWidget].
   late bool _ownSelected;
 
-  /// The user's own text, held across a preset switch (redesign spec §6: the
-  /// draft survives locally and only an explicit clear discards it) — a commit
-  /// never hands this straight to [HandlerLensControl.onChanged]; it sends the
-  /// `"; "`-joined string instead (§8, [handlerJoinOwnLensLines]).
+  /// The user's own text, held across a preset switch (the draft survives
+  /// locally and only an explicit clear discards it) — a commit never hands
+  /// this straight to [HandlerLensControl.onChanged]; it sends the `"; "`-
+  /// joined string instead ([handlerJoinOwnLensLines]).
   late final TextEditingController _ownController;
 
   /// Bumped on every tap of the sixth chip, which is what moves the cursor into
@@ -389,13 +388,14 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
       // answered too. A host that collects rather than diffs (the arm sheet)
       // sends an untouched brief as null — "leave the stored one alone" — and
       // the bridge would then run this preset ON TOP of a user lens whose panel
-      // this tap has just hidden, which is the one state §6 says cannot exist.
+      // this tap has just hidden, which is the one state that can never
+      // exist: a preset and a user lens are always mutually exclusive.
       widget.onBriefEdited?.call();
       setState(() => _ownSelected = false);
       widget.onChanged((
         judgeTool: widget.value.judgeTool,
         judgeModel: widget.value.judgeModel,
-        // Every preset clears the brief: two stances cannot both run (§6), so
+        // Every preset clears the brief: two stances cannot both run, so
         // the draft rides only in [_ownController] until "Your own" comes
         // back.
         lens: (roleId: id, brief: ''),
@@ -449,7 +449,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
       caption = handlerLensUnsetBlurb;
     } else if (_ownSelected) {
       nextPassEligible = true;
-      caption = null; // the panel sits directly below and says it (§7)
+      caption = null; // the panel sits directly below and says it
     } else if (unknownId) {
       caption = handlerLensUnknownBlurb;
     } else {
@@ -519,7 +519,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
 /// Joins a multi-line draft into the one line the bridge actually stores.
 /// `oneLine` (`bridge/src/handler/decision.ts`) collapses a bare newline to a
 /// SPACE, so two rules typed on two lines would otherwise arrive as one fused,
-/// grammatical, WRONG sentence (redesign spec §8). Joining with `"; "` here
+/// grammatical, WRONG sentence. Joining with `"; "` here
 /// keeps each line's boundary alive through that collapse; blank lines are
 /// dropped so a stray Enter costs nothing.
 String handlerJoinOwnLensLines(String raw) => raw
@@ -531,7 +531,7 @@ String handlerJoinOwnLensLines(String raw) => raw
 /// The permanent line under the section head — every session is judged on
 /// this regardless of pick, so it is prose rather than another eyebrow:
 /// a second [AbSectionHeader] here would rank as a sibling section instead of
-/// a continuation of the one above it (redesign spec §7).
+/// a continuation of the one above it.
 class _FloorLine extends StatelessWidget {
   const _FloorLine();
 
@@ -548,7 +548,7 @@ class _FloorLine extends StatelessWidget {
 
 /// The user-authored stance: guidance, then the free-text field. Shown only
 /// while "Your own" is the selected chip — every other chip hides this and
-/// leaves [controller]'s draft untouched (redesign spec §6).
+/// leaves [controller]'s draft untouched.
 class _OwnLensPanel extends StatefulWidget {
   const _OwnLensPanel({
     required this.controller,
@@ -572,7 +572,7 @@ class _OwnLensPanel extends StatefulWidget {
   final bool commitOnEdit;
 
   /// The raw, unjoined text as the field holds it — the caller applies the
-  /// `"; "` join (redesign spec §8, [handlerJoinOwnLensLines]).
+  /// `"; "` join ([handlerJoinOwnLensLines]).
   final ValueChanged<String> onCommit;
 
   /// See [HandlerLensControl.onBriefEdited].

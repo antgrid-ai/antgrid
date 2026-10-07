@@ -4,7 +4,7 @@
 // NOTE on Windows: the "each agent only sees its own terminals" body is
 // currently `test.skip`. The shared `setupLocalTestEnv` helper hard-codes
 // `agent: { tool: claude }` in the synthesized antgrid.yaml, which makes the
-// agent auto-spawn a `claude` PTY on `app:ready`. Claude Code's interactive
+// agent auto-spawn a `claude` PTY as soon as the local owner connects. Claude Code's interactive
 // "trust this folder?" prompt then stalls the eval before the explicit
 // `bun -e` terminal can flush its output through the PTY in our settle
 // window — the same pre-existing flake also affects `local-terminal.test.ts`
@@ -44,12 +44,6 @@ test.skip(
     envB.client.on((m) => {
       if (m.type === "terminal:output") outputsB.push((m as any).data);
     });
-
-    // confirm is the E2E handshake tag — meaningless on the trusted local socket,
-    // but the v3 schema requires it; agent-core only uses app:ready as a resync nudge.
-    envA.client.send(createMessage("app:ready", { confirm: "" }));
-    envB.client.send(createMessage("app:ready", { confirm: "" }));
-    await new Promise((r) => setTimeout(r, 500));
 
     envA.client.send(
       createMessage("terminal:start", {

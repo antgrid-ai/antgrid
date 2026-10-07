@@ -18,15 +18,17 @@ import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/prefs_test_mock.dart';
+import '../../helpers/toast_host.dart';
 
 const _tests = HandlerInstructionItem(
   id: 'i1',
@@ -198,6 +200,7 @@ Future<void> _pumpDrawer(
         ),
       ],
       child: const MaterialApp(
+        builder: abToastHostBuilder,
         home: Scaffold(body: HandlerBacklogDrawer(terminalId: 't1')),
       ),
     ),
@@ -243,8 +246,13 @@ Future<void> _drainSessionCacheFlush(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-/// Lets the snack bar's dismiss timer expire, so it can't outlive the test.
-Future<void> _drainSnackBar(WidgetTester tester) async {
+/// Asserts the held edit answered with [reason] as a toast, then lets the
+/// toast's dismiss timer expire so it can't outlive the test.
+Future<void> _drainToast(WidgetTester tester, String reason) async {
+  expect(
+    find.descendant(of: find.byType(AbToast), matching: find.text(reason)),
+    findsOneWidget,
+  );
   await tester.pump(const Duration(seconds: 4));
   await tester.pumpAndSettle();
 }
@@ -768,13 +776,7 @@ void main() {
           const [],
           instructions: (
             total: 12,
-            items: [
-              'first instruction',
-              'second',
-              'third',
-              'fourth',
-              'fifth',
-            ],
+            items: ['first instruction', 'second', 'third', 'fourth', 'fifth'],
           ),
         );
         await _pumpDrawer(tester, session);
@@ -834,18 +836,17 @@ void main() {
       expect(find.text('and tag it'), findsOneWidget);
     });
 
-    testWidgets(
-      'nothing asked for renders neither the heading nor a row',
-      (tester) async {
-        // `askedFor` is empty only when BOTH sources are: no instructions
-        // list and no goal — the shape a fresh arm with an empty composer
-        // sends.
-        final session = await _armedSession(const [], goal: '');
-        await _pumpDrawer(tester, session);
+    testWidgets('nothing asked for renders neither the heading nor a row', (
+      tester,
+    ) async {
+      // `askedFor` is empty only when BOTH sources are: no instructions
+      // list and no goal — the shape a fresh arm with an empty composer
+      // sends.
+      final session = await _armedSession(const [], goal: '');
+      await _pumpDrawer(tester, session);
 
-        expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
-      },
-    );
+      expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
+    });
 
     testWidgets(
       'an older-bridge frame with a goal renders exactly one row and no elision',
@@ -903,31 +904,30 @@ void main() {
       expect(find.textContaining('more in between'), findsNothing);
     });
 
-    testWidgets(
-      'a restated sentence hides one entry, not every copy of it',
-      (tester) async {
-        // `engine.instruct` does not dedupe, so re-sending the sentence the
-        // session was opened with leaves TWO identical entries in the list —
-        // and only the newer of them is the one the pending row is drawing.
-        // Hiding both would take entry #1 off the only surface that renders
-        // it, and leave the elision line pinned behind the wrong sentence.
-        final session = await _armedSession(const []);
-        await _pumpDrawer(tester, session);
+    testWidgets('a restated sentence hides one entry, not every copy of it', (
+      tester,
+    ) async {
+      // `engine.instruct` does not dedupe, so re-sending the sentence the
+      // session was opened with leaves TWO identical entries in the list —
+      // and only the newer of them is the one the pending row is drawing.
+      // Hiding both would take entry #1 off the only surface that renders
+      // it, and leave the elision line pinned behind the wrong sentence.
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
 
-        await _sendInstruction(tester, 'ship the fix');
-        _emitStatus(
-          session,
-          const [],
-          instructions: (total: 2, items: ['ship the fix', 'ship the fix']),
-        );
-        await tester.pump();
+      await _sendInstruction(tester, 'ship the fix');
+      _emitStatus(
+        session,
+        const [],
+        instructions: (total: 2, items: ['ship the fix', 'ship the fix']),
+      );
+      await tester.pump();
 
-        // Once in this block as entry #1, once in the pending row below.
-        expect(find.text('ship the fix'), findsNWidgets(2));
-        expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
-        expect(find.textContaining('more in between'), findsNothing);
-      },
-    );
+      // Once in this block as entry #1, once in the pending row below.
+      expect(find.text('ship the fix'), findsNWidgets(2));
+      expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
+      expect(find.textContaining('more in between'), findsNothing);
+    });
 
     testWidgets('a pasted sentence long enough to be clipped still matches', (
       tester,
@@ -1342,7 +1342,7 @@ void main() {
       await _pick(tester, 'Delete');
 
       expect(configures(session), isEmpty);
-      await _drainSnackBar(tester);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('the same edit goes through once the snapshot lands', (
@@ -1388,7 +1388,7 @@ void main() {
       await _pick(tester, 'Stop waiting on 1');
 
       expect(configures(session), isEmpty);
-      await _drainSnackBar(tester);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('two outstanding instructions are counted, not quoted', (

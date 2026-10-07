@@ -245,9 +245,8 @@ class NotificationPushMessage {
   final String? message;
   final String? sessionTitle;
 
-  /// Which session fired this, when the hook carried a terminal id. Absent for
-  /// an unattributed hook. Lets the surfacer stay quiet about the chat the user
-  /// is already reading — see workspace_shell's _onAgentNotificationPush.
+  /// Which session fired this; absent for an unattributed hook. Lets the
+  /// surfacer stay quiet about the chat the user is already reading.
   final String? sessionId;
   final String? projectId;
 
@@ -940,79 +939,6 @@ class GitUnstageResultMessage {
   });
 }
 
-/// One `git stash` entry, as `git:stash-list-result` reports it.
-class GitStashEntry {
-  /// e.g. `stash@{0}` — stable only until the next pop/drop shifts the list.
-  final String ref;
-
-  /// The branch HEAD pointed at when this stash was created; "" if the
-  /// bridge couldn't parse it back off git's own reflog subject.
-  final String branch;
-  final String message;
-
-  /// Unix seconds.
-  final int createdAt;
-
-  const GitStashEntry({
-    required this.ref,
-    required this.branch,
-    required this.message,
-    required this.createdAt,
-  });
-}
-
-class GitStashListResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final List<GitStashEntry> stashes;
-  final String? error;
-
-  const GitStashListResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.stashes,
-    this.error,
-  });
-}
-
-class GitStashPopResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final String ref;
-  final bool success;
-  final String? error;
-
-  const GitStashPopResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.ref,
-    required this.success,
-    this.error,
-  });
-}
-
-class GitStashDropResultMessage {
-  final String id;
-  final int timestamp;
-  final String projectId;
-  final String ref;
-  final bool success;
-  final String? error;
-
-  const GitStashDropResultMessage({
-    required this.id,
-    required this.timestamp,
-    required this.projectId,
-    required this.ref,
-    required this.success,
-    this.error,
-  });
-}
-
 /// One row of `git:log-result` — a commit as the History tab lists it.
 class GitLogEntry {
   final String sha;
@@ -1267,50 +1193,6 @@ class ClientFocusStateMessage {
     required this.id,
     required this.timestamp,
     required this.paused,
-  });
-}
-
-class TerminalSnapshotRequestMessage {
-  final String id;
-  final int timestamp;
-  final String terminalId;
-
-  const TerminalSnapshotRequestMessage({
-    required this.id,
-    required this.timestamp,
-    required this.terminalId,
-  });
-}
-
-class TerminalSnapshotMessage {
-  final String id;
-  final int timestamp;
-  final String terminalId;
-  final String scrollback;
-  final int seq;
-
-  /// Whether [scrollback] is a COMPLETE attach sequence — preamble, serialized
-  /// screen, supplemental modes — to be applied verbatim with nothing prepended
-  /// or appended. False (an older agent) means it is a mode prelude plus a raw
-  /// byte tail, and the client must place its own erase.
-  final bool composed;
-
-  /// Whether [scrollback] carries history ABOVE the screen, behind a `3J`
-  /// that erases what the engine already holds.
-  ///
-  /// A reply is broadcast to every client on the project, so this frame may
-  /// be the answer to a DIFFERENT device's cold attach. Only the client that
-  /// asked has an empty engine; for anyone else the erase is pure loss.
-  final bool history;
-
-  const TerminalSnapshotMessage({
-    required this.id,
-    required this.timestamp,
-    required this.terminalId,
-    required this.scrollback,
-    required this.seq,
-    this.composed = false,
-    this.history = false,
   });
 }
 
@@ -1736,6 +1618,10 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         relPath: json['relPath'] as String?,
         isDirectory: json['isDirectory'] as bool? ?? false,
         externalImagePath: json['externalImagePath'] as String?,
+        // An `is` check rather than a cast: the heavy-message path parses with
+        // no try, and an older bridge omits the field.
+        exists: json['exists'] is bool ? json['exists'] as bool : null,
+        timedOut: json['timedOut'] is bool ? json['timedOut'] as bool : false,
       );
 
     case 'file:find-result':
@@ -1816,21 +1702,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         sourceSessionId: json['sourceSessionId'] as String?,
         attributes: attributes,
       );
-
-    case 'tunnel:http-start':
-      return TunnelHttpStartMessage.fromJson(json);
-
-    case 'tunnel:http-chunk':
-      return TunnelHttpChunkMessage.fromJson(json);
-
-    case 'tunnel:http-end':
-      return TunnelHttpEndMessage.fromJson(json);
-
-    case 'tunnel:ws-data':
-      return TunnelWsDataMessage.fromJson(json);
-
-    case 'tunnel:ws-close':
-      return TunnelWsCloseMessage.fromJson(json);
 
     case 'command:output':
       final projectId = json['projectId'];
@@ -1998,76 +1869,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         projectId: unstageProjectId,
         success: unstageSuccess,
         files: unstageFiles,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-list-result':
-      final stashProjectId = json['projectId'];
-      if (stashProjectId is! String) return null;
-      final stashesJson = json['stashes'];
-      final stashes = <GitStashEntry>[];
-      if (stashesJson is List) {
-        for (final s in stashesJson) {
-          if (s is! Map) continue;
-          final ref = s['ref'];
-          final branch = s['branch'];
-          final message = s['message'];
-          final createdAt = s['createdAt'];
-          if (ref is! String ||
-              branch is! String ||
-              message is! String ||
-              createdAt is! int) {
-            continue;
-          }
-          stashes.add(
-            GitStashEntry(
-              ref: ref,
-              branch: branch,
-              message: message,
-              createdAt: createdAt,
-            ),
-          );
-        }
-      }
-      return GitStashListResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: stashProjectId,
-        stashes: stashes,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-pop-result':
-      final popProjectId = json['projectId'];
-      final popRef = json['ref'];
-      final popSuccess = json['success'];
-      if (popProjectId is! String || popRef is! String || popSuccess is! bool) {
-        return null;
-      }
-      return GitStashPopResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: popProjectId,
-        ref: popRef,
-        success: popSuccess,
-        error: json['error'] as String?,
-      );
-
-    case 'git:stash-drop-result':
-      final dropProjectId = json['projectId'];
-      final dropRef = json['ref'];
-      final dropSuccess = json['success'];
-      if (dropProjectId is! String ||
-          dropRef is! String ||
-          dropSuccess is! bool) {
-        return null;
-      }
-      return GitStashDropResultMessage(
-        id: id,
-        timestamp: timestamp,
-        projectId: dropProjectId,
-        ref: dropRef,
-        success: dropSuccess,
         error: json['error'] as String?,
       );
 
@@ -2268,36 +2069,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         id: id,
         timestamp: timestamp,
         paused: paused,
-      );
-
-    case 'terminal:snapshot:request':
-      final terminalId = json['terminalId'];
-      if (terminalId is! String) return null;
-      return TerminalSnapshotRequestMessage(
-        id: id,
-        timestamp: timestamp,
-        terminalId: terminalId,
-      );
-
-    case 'terminal:snapshot':
-      final terminalId = json['terminalId'];
-      final scrollback = json['scrollback'];
-      final seq = json['seq'];
-      if (terminalId is! String || scrollback is! String || seq is! int) {
-        return null;
-      }
-      return TerminalSnapshotMessage(
-        id: id,
-        timestamp: timestamp,
-        terminalId: terminalId,
-        scrollback: scrollback,
-        seq: seq,
-        // Anything but a literal `true` reads false, which selects the legacy
-        // branch — the one that is safe against a blob it cannot interpret.
-        composed: json['composed'] == true,
-        // Same conservative read as `composed`: anything but a literal
-        // `true` is a blob that erases nothing above the screen.
-        history: json['history'] == true,
       );
 
     case 'terminal:subscribed':

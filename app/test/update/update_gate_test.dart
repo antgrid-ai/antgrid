@@ -5,9 +5,14 @@ import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/update/update_gate.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
+import 'package:antgrid/update/update_check_result.dart';
+import 'package:antgrid/update/update_check_controller.dart';
+import '../helpers/update_fakes.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/toast_host.dart';
 
 class _FakeStrategy extends UpdateStrategy {
   _FakeStrategy(
@@ -20,7 +25,10 @@ class _FakeStrategy extends UpdateStrategy {
   final bool isActive;
   final String? note;
   final Stream<void>? retracted;
-  final List<bool> litArgs = [];
+  int checks = 0;
+
+  @override
+  bool get skipAutomaticWhenPending => false;
   int installs = 0;
 
   @override
@@ -33,10 +41,19 @@ class _FakeStrategy extends UpdateStrategy {
   Stream<void>? get updateRetracted => retracted;
 
   @override
-  Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
-    litArgs.add(rowAlreadyLit);
-    return outcome;
+  Future<UpdateCheckResult> detect() async {
+    checks++;
+    return switch (outcome) {
+      UpdateCheckOutcome.none => UpdateCheckResult.upToDate,
+      UpdateCheckOutcome.restartReady => const UpdateCheckResult(
+        UpdateCheckStatus.restartReady,
+      ),
+      _ => const UpdateCheckResult(UpdateCheckStatus.available),
+    };
   }
+
+  @override
+  UpdateCheckOutcome automaticOutcome(UpdateCheckResult result) => outcome;
 
   @override
   Future<UpdateInstallResult> install(BuildContext context) async {
@@ -85,11 +102,14 @@ Future<({ProviderContainer container, _SpyController install})> _pumpGate(
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: UpdateGate(child: SizedBox.shrink())),
+      child: const MaterialApp(
+        builder: abToastHostBuilder,
+        home: UpdateGate(child: SizedBox.shrink()),
+      ),
     ),
   );
-  // First pump runs the post-frame check's future; second settles the
-  // overlay insert it may trigger.
+  // First pump runs the post-frame check's future; second builds the toast it
+  // may raise.
   await tester.pump();
   await tester.pump();
   return (container: container, install: spy);
@@ -109,7 +129,7 @@ void main() {
     final h = await _pumpGate(tester, strategy);
 
     expect(h.container.read(updateAvailableProvider), isTrue);
-    expect(strategy.litArgs, [false]);
+    expect(strategy.checks, 1);
     expect(find.byType(AbToast), findsOneWidget);
     expect(find.text('Update available'), findsOneWidget);
 
@@ -145,7 +165,7 @@ void main() {
 
     // Windows' optional tier keeps returning updateAvailable while lit —
     // the row must stay latched without a toast on every throttled check.
-    expect(strategy.litArgs, [true]);
+    expect(strategy.checks, 1);
     expect(h.container.read(updateAvailableProvider), isTrue);
     expect(find.byType(AbToast), findsNothing);
   });
@@ -190,7 +210,7 @@ void main() {
     );
     final h = await _pumpGate(tester, strategy);
 
-    expect(strategy.litArgs, isEmpty);
+    expect(strategy.checks, 0);
     expect(h.container.read(updateAvailableProvider), isFalse);
     expect(find.byType(AbToast), findsNothing);
   });
@@ -211,10 +231,7 @@ void main() {
     // so rather than come up looking like an ordinary start.
     await _pumpGate(
       tester,
-      _FakeStrategy(
-        UpdateCheckOutcome.none,
-        note: kUpdateStoppedSessionsNote,
-      ),
+      _FakeStrategy(UpdateCheckOutcome.none, note: kUpdateStoppedSessionsNote),
       afterUpdate: '1.20677.100',
     );
 
@@ -255,7 +272,10 @@ void main() {
     addTearDown(retracted.close);
     final h = await _pumpGate(
       tester,
-      _FakeStrategy(UpdateCheckOutcome.updateAvailable, retracted: retracted.stream),
+      _FakeStrategy(
+        UpdateCheckOutcome.updateAvailable,
+        retracted: retracted.stream,
+      ),
     );
     expect(h.container.read(updateAvailableProvider), isTrue);
 
@@ -279,13 +299,13 @@ void main() {
     // the update the first check already toasted.
     final strategy = _FakeStrategy(UpdateCheckOutcome.updateAvailable);
     await _pumpGate(tester, strategy);
-    expect(strategy.litArgs, [false]);
+    expect(strategy.checks, 1);
 
     resume(tester);
     await tester.pump();
     await tester.pump();
 
-    expect(strategy.litArgs, [false]);
+    expect(strategy.checks, 1);
     expect(find.byType(AbToast), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 11)); // expire the toast timer
@@ -298,10 +318,45 @@ void main() {
     await _pumpGate(tester, strategy);
     await tester.pump(const Duration(seconds: 11)); // expire the toast timer
 
-    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+    await tester.pumpWidget(
+      const MaterialApp(builder: abToastHostBuilder, home: SizedBox.shrink()),
+    );
     resume(tester);
     await tester.pump();
 
-    expect(strategy.litArgs, [false]);
+    expect(strategy.checks, 1);
   });
+  testWidgets(
+    'Android automatic flow uses the install controller without a confirmation',
+    (tester) async {
+      final h = await _pumpGate(
+        tester,
+        _FakeStrategy(UpdateCheckOutcome.startDownloadQuiet),
+      );
+      expect(h.install.starts, 1);
+      expect(h.install.confirmArgs, [false]);
+      expect(find.byType(AbToast), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'manual ownership suppresses an automatic mandatory handoff and announcements',
+    (tester) async {
+      final completion = Completer<UpdateCheckResult>();
+      final strategy = FakeUpdateStrategy(
+        policy: UpdateCheckOutcome.updateAvailableQuiet,
+      )..onDetect = () => completion.future;
+      final h = await _pumpGate(tester, strategy);
+      final checker = h.container.read(updateCheckControllerProvider.notifier);
+      checker.claimDialog();
+      final request = checker.checkManually();
+      completion.complete(const UpdateCheckResult(UpdateCheckStatus.available));
+      await request;
+      await tester.pump();
+      expect(h.install.starts, 0);
+      expect(strategy.installs, 0);
+      expect(find.byType(AbToast), findsNothing);
+      checker.releaseDialog();
+    },
+  );
 }

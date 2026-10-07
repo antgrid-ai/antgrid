@@ -1,12 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { recordStage } from "../auth/flows.js";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
-import { checkCapAndUpsert, listActiveDevices, type DeviceKind } from "../models/device.js";
+import {
+  checkCapAndUpsert,
+  isMobilePlatform,
+  listActiveDevices,
+  PlatformSchema,
+  type DeviceKind,
+} from "../models/device.js";
 import { revokeUserDevice } from "../services/device.js";
 import { deleteUserAccount } from "../services/account.js";
 import {
@@ -18,21 +25,25 @@ import { createDeviceOAuthClient, deleteDeviceOAuthClient } from "../models/devi
 import { countActiveSeatHolders, findActiveMembership } from "../models/account-member.js";
 import { tokenBucket } from "../util/rate-limit.js";
 import type { RelayPushConfig } from "../relay/push.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
 
 const UuidSchema = z.uuid();
 
 const CreateDeviceBody = z.object({
   deviceUuid: z.string().uuid(),
   ed25519Pub: z.string().min(1),
-  x25519Pub: z.string().min(1),
-  platform: z.enum(["macos", "windows", "linux", "ios", "android"]),
+  platform: PlatformSchema,
   displayName: z.string().min(1).max(120),
-  // Desktop controllers register as kind:"app" despite a desktop platform —
-  // the peers inventory (bridge E2E admission) serves kind:"app" rows only.
+  // Desktop controllers register as kind:"app" despite a desktop platform.
   kind: z.enum(["app", "agent"]).optional(),
 });
 
-export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig }) {
+export function deviceRoutes(deps: {
+  db: DB;
+  auth: Auth;
+  relay: RelayPushConfig;
+  apple?: AppleTokenClient;
+}) {
   const r = new Hono<{ Variables: AuthVars }>();
   // Scoped narrowly to the routes this router actually defines. Using a
   // `/account/*` wildcard here would also intercept routes mounted on other
@@ -59,10 +70,9 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
 
     // Phones are `app` devices; desktops/servers that host agents are `agent`.
     // The kind is load-bearing: `listMobileEnabledAgents` (the machine picker)
-    // reads `agent`, while `listAppDeviceKeys` (same-account pair-membership
-    // proof) reads `app`.
+    // reads `agent` rows only.
     const kind: DeviceKind =
-      body.kind ?? (body.platform === "ios" || body.platform === "android" ? "app" : "agent");
+      body.kind ?? (isMobilePlatform(body.platform) ? "app" : "agent");
 
     // If this device UUID already exists, the desktop app may have lost its
     // keychain copy of the OAuth client secret. Create a fresh OAuth client and
@@ -182,6 +192,8 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
   });
 
   r.get("/account/me", async (c) => {
+    const flows = await deps.db.authFlow.findMany({ where: { sessionId: c.get("sessionId"), state: { not: "revoked" }, journey: { userId: c.get("userId") } }, select: { id: true } });
+    for (const flow of flows) await recordStage(deps.db, flow.id, "first_client_use");
     const userId = c.get("userId");
     const email = c.get("userEmail");
     const name = c.get("userName");
@@ -227,6 +239,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     const result = await deleteUserAccount(deps.db, deps.relay, deps.auth, {
       userId,
       headers: c.req.raw.headers,
+      apple: deps.apple,
     });
     if (result === "blocked_subscription") {
       return c.json({ error: "SUBSCRIPTION_ACTIVE" }, 409);

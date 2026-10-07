@@ -20,6 +20,7 @@ import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
 import 'ui_attention_providers.dart';
+import 'scheduler.dart' show schedulerTargetProvider;
 
 /// The machine-level loopback host controller (singleton; spawns/attaches the
 /// host daemon and hands out a verified port+token via `ensureHost`).
@@ -30,9 +31,8 @@ final hostControllerProvider = Provider<HostController>(
 /// Resolves a folder's host-owned repository identity, given only the folder
 /// path — the seam widgets call through so tests can substitute a fake
 /// without spawning a real bridge host.
-typedef LocalProjectResolver = Future<ResolvedLocalProject> Function(
-  String folder,
-);
+typedef LocalProjectResolver =
+    Future<ResolvedLocalProject> Function(String folder);
 
 /// Default implementation: ensures the singleton host (spawning if needed —
 /// this is the widget-facing seam, unlike the poll-driven closure in
@@ -64,20 +64,13 @@ final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?,
     agentTransportForProvider(bareDeviceUuid).future,
   );
   if (transport == null) return null;
-  // Reactive offline: the relay transport never emits a disconnect, so feed
-  // the client the machine socket's peer-presence. In v3 the phone's socket is
-  // NOT cascade-closed when the agent drops — the relay sends
-  // `peer-offline` (which keeps the socket `paired`), so presence must key on
-  // the peer-presence stream, not the connection state. `RelayService` emits
-  // false on both `peer-offline` and a raw socket drop, so a `false` here
-  // means the agent is unreachable either way and the client clears its stale
-  // advert (picker/drawer flip to offline WITHOUT a manual refresh); the live
-  // stream repopulates it when the agent re-adverts.
-  //
-  // peek (not connectionFor): the transport above already materialized this
-  // connection; a null peek just means no live socket → no presence to feed.
+  // The payload may remain usable during a central outage. Only the supervisor's
+  // effective peer state may invalidate the project's live adverts.
   final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
-  final presence = conn?.relay.peerPresenceStream;
+  final presence = conn?.statusStream
+      .where((status) => status != null)
+      .map((status) => status is Connected)
+      .distinct();
   // The capture tap goes on the SAME RelayService the presence above came from
   // — the socket this control plane rides. Absent when there is no live one, in
   // which case the client simply is not a capture surface: the machine's request
@@ -275,12 +268,12 @@ Future<void> refreshMachineInventoryAndControlPlanes(
 
       // A machine can sit Connected UNDER a stale cached rejection (a failed
       // eager launch dial that later self-recovered via peer presence).
-      // Releasing it would kill the live E2E session and every project stream
+      // Releasing it would kill the live peer session and every project stream
       // riding the socket — and the invalidate + re-read below succeeds on the
       // live connection anyway, so only a not-connected machine is torn down
       // for its fresh attempt.
       if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
-        relayManager.release(uuid);
+        await relayManager.release(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       await refreshControlPlanes(ref, [
@@ -327,7 +320,7 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
         // isLoading covers a rebuild in flight — Riverpod retains the previous
         // error while refreshing, so hasError alone would misread it as stale.
         if (cached.isLoading || !cached.hasError) return;
-        if (existing.supervisor?.status is! Connected) mgr.release(uuid);
+        if (existing.supervisor?.status is! Connected) await mgr.release(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       try {
@@ -358,6 +351,10 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // promotion/data-plane setup can settle. This also keeps a focused remote's
   // control plane available for retry and status operations after an open error.
   final focusedTarget = ref.watch(selectedTargetProvider);
+  if (ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.scheduler) {
+    final machine = ref.watch(schedulerTargetProvider);
+    if (machine != null) alive.add(machine);
+  }
   if (focusedTarget != null && !focusedTarget.isLocal) {
     alive.add(baseDeviceUuid(focusedTarget.registrationId));
   }
@@ -368,9 +365,11 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // source would otherwise hold a socket open forever. That fallback bites on
   // mobile especially, where there is no Local tab, so the default 'local'
   // selection resolves `visiblePickerSource` to the first MACHINE.
+  final surface = ref.watch(workbenchSurfaceProvider);
   final pickerVisible =
-      ref.watch(selectedRegistrationIdProvider) == null ||
-      ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
+      surface != WorkbenchSurface.scheduler &&
+      (ref.watch(selectedRegistrationIdProvider) == null ||
+          surface == WorkbenchSurface.newSession);
   if (pickerVisible) {
     // The New Session canvas shows the recent-sessions list alongside the
     // composer's machine picker, and Recents has no single "viewed" machine —
@@ -428,7 +427,7 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // unchanged emission), which is what keeps this fan-in — whose rebuilds have
   // crashed the frame before — off the path of ordinary bus traffic.
   alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
-  // Machines a directory read MISSED, warm until their own deadline (E13). The
+  // Machines a directory read MISSED, warm until their own deadline. The
   // link set above covers a peer this app is already carrying an exchange for;
   // this covers the peer nobody has reached yet, which is the case the
   // peek-only directory otherwise answers "none asked" forever.

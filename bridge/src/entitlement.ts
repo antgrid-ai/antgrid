@@ -43,7 +43,7 @@ const CAPABILITY_TIERS: Record<Capability, ReadonlySet<Tier>> = {
 /**
  * A live reading of this runtime's device credential. Both fields move
  * together, which is why they are one thunk: a machine can gain credentials
- * after its cores are already warm (the desktop wizard promotes a host launched
+ * after its cores are already warm (a sign-in completing after a host started
  * local-only), so neither half may be captured at construction.
  */
 export interface TierClaim {

@@ -331,10 +331,16 @@ abstract final class AbTokens {
   /// fill behind it is fixed.
   static const captionCloseForeground = Color(0xFFFFFFFF);
 
+  /// Sign in with Apple's logo and title. Not theme colors: Apple's design
+  /// guidelines, which App Review enforces, allow only pure black or white.
+  static const appleSignInInkOnLight = Color(0xFF000000);
+  static const appleSignInInkOnDark = Color(0xFFFFFFFF);
+
   // Minimum interactive-target edge: 44 splits Apple HIG's 44pt and Android's
   // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers
   // are precise and dense toolbars must stay compact.
   static const tapTargetMin = 44.0;
+  static const touchControlMin = 48.0;
 
   // Status dots.
   static const double dotSizeSm = 6.0;
@@ -342,6 +348,8 @@ abstract final class AbTokens {
 
   // ── Motion ──
   static const motionSnap = Duration(milliseconds: 80);
+  static const menuHoverOpen = Duration(milliseconds: 150);
+  static const menuHoverClose = Duration(milliseconds: 250);
   static const motionDefault = Duration(milliseconds: 160);
   static const motionSettle = Duration(milliseconds: 320);
 

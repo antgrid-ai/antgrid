@@ -9,8 +9,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phone
 import { generateEphemeralKeypair } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
-import type { PeerSessionView } from "../../src/stream-mux";
-import { peerView } from "../relay-stubs";
+import type { PeerSessionView } from "../../src/project-streams";
 
 // A machine holds one E2E session per attached app device, so "the connected
 // phone" no longer names anyone. These drive the REAL project-core push wiring
@@ -49,15 +48,15 @@ function registerPhone(store: PairedPhonesStore, phonePubkey: string, pushToken:
 }
 
 function session(peerPubkey: string): PeerSessionView {
-  // Unreachable: the sessions survive a relay presence drop with their keys, which
-  // is exactly the window push exists to cover.
-  return peerView({ peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey, reachable: false });
+  return { peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey };
 }
 
-/** A remote core whose transport reports [peers] as established. onPeerOnline is
- *  never fired, so nobody can receive in band and the dispatcher falls back — the
- *  state a bridge is in whenever the relay presence has dropped under it. */
-async function startCore(peers: PeerSessionView[], register: (store: PairedPhonesStore) => void) {
+/** A remote core whose native transport reports [peers] as established. */
+async function startCore(
+  peers: PeerSessionView[],
+  register: (store: PairedPhonesStore) => void,
+  accountDisowns: (deviceId: string, ed25519Pub: string) => boolean = () => false,
+) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-multi-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -80,12 +79,13 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
     remote: {
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const };
+        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
       establishedPeers: () => peers,
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -104,12 +104,12 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
   return { notify, delivered, focus };
 }
 
-test("push reaches BOTH established devices, not whichever one spoke last", async () => {
+test("push reaches every paired device when no native session is established", async () => {
   // Regression: targeting filtered the phone registry down to the single
-  // `currentPeerPubkey()`, so on a two-device fleet the notification landed on
+  // one selected peer, so on a two-device fleet the notification landed on
   // one phone and the other never heard about the turn at all.
   const { notify, delivered } = await startCore(
-    [session("PK_A"), session("PK_B")],
+    [],
     (store) => {
       registerPhone(store, "PK_A", "TOKEN_A", "fcm");
       registerPhone(store, "PK_B", "TOKEN_B", "apns");
@@ -124,7 +124,7 @@ test("push reaches BOTH established devices, not whichever one spoke last", asyn
   expect(delivered.find((d) => d.pushToken === "TOKEN_B")?.provider).toBe("apns");
 });
 
-test("a paired phone with no session at all is still a push target", () => {
+test("only a paired phone with no native session is a push target", () => {
   // The registry is how a device that is AWAY is reached — it is precisely the
   // one that holds no session. Filtering targets down to devices that DO hold a
   // session inverted that: the phone in the user's pocket, whose session the TTL
@@ -137,7 +137,7 @@ test("a paired phone with no session at all is still a push target", () => {
     },
   ).then(({ notify, delivered }) => {
     notify();
-    expect(delivered.map((d) => d.pushToken).sort()).toEqual(["TOKEN_A", "TOKEN_AWAY"]);
+    expect(delivered.map((d) => d.pushToken)).toEqual(["TOKEN_AWAY"]);
   });
 });
 
@@ -146,7 +146,7 @@ test("a push-incapable sibling holding a live session does not suppress the away
   // registers no push token, so "some session is established" silenced the
   // fallback entirely — the desktop is backgrounded, the phone's session was
   // reaped, and nothing reached the user at all.
-  const desktop = peerView({ peerId: "desktop#machine", peerPubkey: "PK_DESKTOP" });
+  const desktop: PeerSessionView = { peerId: "desktop#machine", peerPubkey: "PK_DESKTOP" };
   const { notify, delivered, focus } = await startCore(
     [desktop],
     (store) => registerPhone(store, "PK_PHONE", "TOKEN_PHONE", "fcm"),
@@ -163,8 +163,8 @@ test("a push-incapable sibling holding a live session does not suppress the away
 test("a phone whose own session is reachable and unpaused is not pushed to while a backgrounded sibling opens the fallback", async () => {
   // The per-device half of the same question: the fallback is machine-wide, but
   // a device that can read the frame on its live stream must not also be buzzed.
-  const held = peerView({ peerId: "pk_held#machine", peerPubkey: "PK_HELD" });
-  const pocketed = peerView({ peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET" });
+  const held: PeerSessionView = { peerId: "pk_held#machine", peerPubkey: "PK_HELD" };
+  const pocketed: PeerSessionView = { peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET" };
   const { notify, delivered, focus } = await startCore(
     [held, pocketed],
     (store) => {
@@ -177,4 +177,24 @@ test("a phone whose own session is reachable and unpaused is not pushed to while
   notify();
 
   expect(delivered.map((d) => d.pushToken)).toEqual(["TOKEN_POCKET"]);
+});
+
+test("a phone the account has revoked is not pushed to", async () => {
+  // Regression: sign-out revokes the device, but its row and push token survive
+  // on every machine the phone held no warm project session with at that moment.
+  // PK_OLD is a re-signed-in device: same id, but the lease names its new key.
+  const lease = new Set(["pk_kept|PK_KEPT", "pk_old|PK_NEW"]);
+  const { notify, delivered } = await startCore(
+    [],
+    (store) => {
+      registerPhone(store, "PK_KEPT", "TOKEN_KEPT", "fcm");
+      registerPhone(store, "PK_SIGNED_OUT", "TOKEN_SIGNED_OUT", "fcm");
+      registerPhone(store, "PK_OLD", "TOKEN_OLD", "fcm");
+    },
+    (deviceId, ed25519Pub) => !lease.has(`${deviceId}|${ed25519Pub}`),
+  );
+
+  notify();
+
+  expect(delivered.map((d) => d.pushToken)).toEqual(["TOKEN_KEPT"]);
 });

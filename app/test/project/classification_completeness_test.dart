@@ -21,12 +21,11 @@ import 'package:antgrid/project/project_message_classification.dart';
 /// All wire types each service expects to receive (across either stream).
 /// We assert each is classified as either heavy or status — never ignore.
 /// Some services (e.g. PreviewService) defensively dispatch the same set
-/// from both `_onHeavyJson` and `_onStatusJson`; we only care that the
+/// from both tiers; we only care that the
 /// classifier doesn't drop any of them.
 const Map<String, List<String>> serviceWireTypes = {
   'TerminalService': [
     // heavy
-    'terminal:snapshot',
     'terminal:output',
     // heavy — frame-mode display
     'terminal:frame',
@@ -88,8 +87,6 @@ const Map<String, List<String>> serviceWireTypes = {
   ],
   'UploadService': [
     // status
-    'file:upload-ready',
-    'file:upload-ack',
     'file:upload-result',
   ],
 };

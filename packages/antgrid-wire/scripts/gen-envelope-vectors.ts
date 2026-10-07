@@ -19,9 +19,7 @@ const AGENT_ID = "33333333-3333-4333-8333-333333333333";
 
 // Sample retryable flags only — realistic, but the relay decides for real.
 const RETRYABLE_SAMPLE = new Set([
-  "RATE_LIMITED",
   "MESSAGE_RATE_LIMITED",
-  "PEER_OFFLINE",
   "LICENSE_UNAVAILABLE",
 ]);
 
@@ -34,8 +32,6 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
     dart: "parsed",
     json: { type: "welcome", deviceId: SLOT, epoch: 1752624000, serverTime: TS },
   },
-  { name: "stream-opened", dart: "parsed", json: { type: "stream-opened", streamId: "s-7" } },
-  { name: "stream-closed", dart: "parsed", json: { type: "stream-closed", streamId: "s-7" } },
   ...ErrorCode.options.map((code) => ({
     name: `error:${code}`,
     dart: "parsed" as const,
@@ -45,13 +41,13 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
       message: `sample ${code}`,
       retryable: RETRYABLE_SAMPLE.has(code),
       // Optional fields pinned on their documented carriers.
-      ...(code === "SESSION_LIMIT_EXCEEDED" ? { ref: "s-7" } : {}),
       ...(code === "AUTH_FAILED" ? { serverTime: TS } : {}),
     },
   })),
   { name: "peer-online", dart: "parsed", json: { type: "peer-online", peerId: AGENT_ID } },
   { name: "peer-offline", dart: "parsed", json: { type: "peer-offline", peerId: AGENT_ID } },
   { name: "pong", dart: "parsed", json: { type: "pong" } },
+  { name: "peer-policy-changed", dart: "parsed", json: { type: "peer-policy-changed", generation: "9007199254740993" } },
   {
     name: "push:result",
     dart: "tolerated",
@@ -80,8 +76,6 @@ const client: Array<{ name: string; dartEmits: boolean; json: unknown }> = [
       sig: "ORt1T7qaueHx0g0ap3NMClaJ9w8PNPExKuLAdj/7vyM4NWy4hPKZHTnjyrAjl9g0++0HxsOTD2QowObKBZlNBg==",
     },
   },
-  { name: "stream-open", dartEmits: true, json: { type: "stream-open", streamId: "s-7" } },
-  { name: "stream-close", dartEmits: true, json: { type: "stream-close", streamId: "s-7" } },
   { name: "ping", dartEmits: true, json: { type: "ping" } },
   {
     name: "push:deliver",

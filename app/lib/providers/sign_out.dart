@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/connection_supervisor.dart';
+import '../connection/peer_runtime_owner.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/devices_api.dart';
@@ -7,6 +9,7 @@ import '../services/push_identity.dart';
 import '../services/sign_out_service.dart';
 import 'auth.dart';
 import 'chat_composer_drafts.dart';
+import 'scheduler_drafts.dart';
 import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
@@ -14,12 +17,22 @@ import 'providers.dart';
 import 'push.dart';
 import 'recent_agents.dart';
 import 'relay_connection.dart';
+import 'peer_runtime.dart';
 import 'subscription.dart';
+import 'value_controller.dart';
+
+final signOutCleanupErrorProvider =
+    NotifierProvider<
+      ValueController<SignOutCleanupIncomplete?>,
+      SignOutCleanupIncomplete?
+    >(() => ValueController<SignOutCleanupIncomplete?>(null));
 
 /// Assembles a [SignOutService] from the live providers, wiring the two
 /// Riverpod-dependent steps (minter stop, session eviction) as callbacks.
 final signOutServiceProvider = Provider<SignOutService>((ref) {
   final auth = ref.read(authServiceProvider);
+  final machineConnections = ref.read(relayConnectionManagerProvider);
+  final peerRuntimeOwner = ref.read(peerRuntimeOwnerProvider);
   return SignOutService(
     authService: auth,
     keychainStore: ref.read(keychainDeviceStoreProvider),
@@ -29,6 +42,7 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
     ),
     pushIdentity: PushIdentity.secure(),
     recentAgentsStore: ref.read(recentAgentsStoreProvider),
+    blockNewWork: machineConnections.blockNewWork,
     clearPushToken: () async {
       final sessions = ref
           .read(projectSessionRegistryProvider)
@@ -59,13 +73,25 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
     },
     clearCaches: () => purgeAccountCaches(ref),
     releaseControlPlanes: () async {
-      // Per-id release, not disposeAll: disposeAll closes the manager's change
-      // stream for good, and the same manager must serve a later re-sign-in.
-      final mgr = ref.read(relayConnectionManagerProvider);
-      for (final id in mgr.openControlPlaneIds()) {
-        mgr.release(id);
+      final results = await machineConnections.disposeAll();
+      final incomplete = results.entries
+          .where((entry) => entry.value == NativeStopResult.cleanupIncomplete)
+          .map((entry) => entry.key)
+          .toList(growable: false);
+      if (incomplete.isNotEmpty) {
+        throw StateError(
+          'machine cleanup incomplete for ${incomplete.length} connection(s)',
+        );
       }
     },
+    clearPeerRuntime: () async {
+      final result = await peerRuntimeOwner.clear();
+      if (!result.complete) {
+        throw PeerRuntimeOwnerLockedException(peerRuntimeOwner.cleanupFailure!);
+      }
+    },
+    onCleanupLocked: (failure) =>
+        ref.read(signOutCleanupErrorProvider.notifier).set(failure),
   );
 });
 
@@ -79,8 +105,41 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
 /// no widget behind it, and a `WidgetRef` read after the teardown's awaits
 /// would throw on a disposed element anyway.
 Future<void> performHardSignOut(ProviderContainer ref) async {
+  final progress = ref.read(_hardSignOutProgressProvider);
+  progress.running = true;
+  try {
+    await _performHardSignOut(ref);
+  } finally {
+    progress.running = false;
+  }
+}
+
+/// Whether a [performHardSignOut] is running. The server-side revoke inside it
+/// is itself heard as a revocation — the local host's relay is told within a
+/// second — so the revocation paths ask this before starting a second
+/// teardown on top of the first.
+bool hardSignOutInFlight(ProviderContainer ref) =>
+    ref.read(_hardSignOutProgressProvider).running;
+
+class _HardSignOutProgress {
+  bool running = false;
+}
+
+/// A plain holder no teardown step invalidates, so it outlives the provider
+/// resets it brackets.
+final _hardSignOutProgressProvider = Provider<_HardSignOutProgress>(
+  (_) => _HardSignOutProgress(),
+);
+
+Future<void> _performHardSignOut(ProviderContainer ref) async {
+  ref.read(schedulerDraftsProvider.notifier).clear();
   await ref.read(signOutServiceProvider).hardSignOut();
+  ref.read(signOutCleanupErrorProvider.notifier).set(null);
   ref.read(chatComposerDraftsProvider).clear();
+  ref.invalidate(peerRuntimeProvider);
+  ref.invalidate(peerRuntimeOwnerProvider);
+  ref.invalidate(relayConnectionManagerProvider);
+  ref.invalidate(signOutServiceProvider);
   ref.invalidate(licenseTokenMinterProvider);
   // Load-bearing on its own, and NOT covered by the minter invalidate below:
   // this is a non-autoDispose FutureProvider, so invalidating a provider that

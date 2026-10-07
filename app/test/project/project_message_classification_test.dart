@@ -23,11 +23,9 @@ void main() {
         'git:checkout-result',
         'git:status',
         'git:diff-content',
-        'file:upload-ready',
-        'file:upload-ack',
         'file:upload-result',
       ];
-      expect(statusTypes.length, 21);
+      expect(statusTypes.length, 19);
       for (final t in statusTypes) {
         expect(
           classifyAbMessageByType(t),
@@ -37,10 +35,9 @@ void main() {
       }
     });
 
-    test('heavy stream — all 11 heavy types classify as heavy', () {
+    test('heavy stream — all 10 heavy types classify as heavy', () {
       const heavyTypes = <String>[
         'terminal:output',
-        'terminal:snapshot',
         'tree:full',
         'tree:update',
         'file:tree:children',
@@ -51,7 +48,7 @@ void main() {
         'file:search-result',
         'file:search-done',
       ];
-      expect(heavyTypes.length, 11);
+      expect(heavyTypes.length, 10);
       for (final t in heavyTypes) {
         expect(
           classifyAbMessageByType(t),
@@ -62,7 +59,6 @@ void main() {
     });
 
     test('snapshot replies are heavy', () {
-      expect(classifyAbMessageByType('terminal:snapshot'), MessageTier.heavy);
       expect(classifyAbMessageByType('file:tree:children'), MessageTier.heavy);
       expect(classifyAbMessageByType('preview:snapshot'), MessageTier.heavy);
     });
@@ -82,7 +78,6 @@ void main() {
         'hello',
         'something-unknown',
         '',
-        'terminal:snapshot:request',
         'preview:snapshot:request',
         'client:focus-state',
       ];

@@ -58,6 +58,7 @@ for (const path of [
   "packages/antgrid-wire/LICENSE",
   "packages/antgrid_relay_client/LICENSE",
   "packages/antgrid_eval_client/LICENSE",
+  "packages/antgrid_peer_transport/LICENSE",
 ]) {
   if (await Bun.file(path).text() !== canonicalMpl) {
     errors.push(`${path}: not an exact copy of the canonical MPL-2.0 text`);
@@ -120,7 +121,8 @@ for (const id of declaredIds) {
 const knownIdentifiers = new Set(declaredIds);
 const binaryPath = /\.(png|jpe?g|ico|svg|ttf|otf|woff2?|zip|gz|jar|dll|so|dylib|exe|lock|pdf|mp4|webp)$/i;
 for (const path of tracked) {
-  if (binaryPath.test(path) || !existsSync(path)) continue;
+  // A tracked symlink can resolve to a directory (.agents/skills does); its target is scanned on its own.
+  if (binaryPath.test(path) || !existsSync(path) || !statSync(path).isFile()) continue;
   const declarations = (await Bun.file(path).text())
     .matchAll(/SPDX-License-Identifier(?::\s*|\s*=\s*")([A-Za-z0-9.+-]+)/g);
   for (const declaration of declarations) {

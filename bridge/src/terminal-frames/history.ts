@@ -15,6 +15,12 @@ export interface HistoryPage {
   rows: TerminalHistoryRow[];
 }
 
+export interface HistoryNeighbours {
+  before: TerminalHistoryRow[];
+  after: TerminalHistoryRow[];
+  reachedEnd: boolean;
+}
+
 interface RunRecord { epoch: number; nextRowId: number; bytes: number; gapped: number }
 interface StoredRow { payload: string; bytes: number; rowId: number; serial: number }
 
@@ -290,6 +296,19 @@ export class TerminalHistoryStore {
     return rows.reverse();
   }
 
+  /** Up to `limit` rows on one side of a page, oldest first. Unlike `read`
+   *  there is no byte cap: these rows are read, never sent. */
+  readBeside(runId: string, epoch: number, rowId: number, side: "before" | "after", limit: number): TerminalHistoryRow[] {
+    const before = side === "before";
+    const rows = this.db
+      .query<{ payload: string }, [string, number, number, number]>(
+        `SELECT payload FROM terminal_rows WHERE runId = ? AND epoch = ? AND rowId ${before ? "<" : ">="} ? ORDER BY rowId ${before ? "DESC" : "ASC"} LIMIT ?`,
+      )
+      .all(runId, epoch, rowId, limit)
+      .map((row) => TerminalHistoryRowSchema.parse(JSON.parse(row.payload)));
+    return before ? rows.reverse() : rows;
+  }
+
   // The ON DELETE CASCADE removes every matching terminal_rows row as part of this one
   // statement, and (verified: SQLite fires a child table's own triggers for FK-cascaded
   // deletes regardless of the recursive_triggers setting) terminal_row_delete runs for
@@ -309,7 +328,7 @@ export class TerminalHistoryStore {
   // The checkpoint/vacuum and the close are two SEPARATE best-effort steps, not one:
   // a failing checkpoint must not skip the close, or the connection (and its `-wal`/
   // `-shm` files) stays open for the rest of the process — on Windows that locks the
-  // path against the D3 startup sweep on every later boot.
+  // path against the startup sweep on every later boot.
   close(): void {
     for (const handle of this.handles.values()) { handle.flush(); handle.retire(); }
     this.handles.clear();
@@ -430,6 +449,28 @@ export class TerminalRunHistory {
     let rows: TerminalHistoryRow[] = [];
     if (!expired && !this.retired) this.attempt(() => { rows = this.store.read(this.runId, epoch, before); });
     return { history, expired, beforeRowId: rows[0]?.rowId ?? before, rows };
+  }
+
+  /**
+   * The rows on either side of a served page, for reading only. A mention that
+   * crosses the page's edge is only whole when the rows around it are in hand.
+   * `reachedEnd` is true when the archive holds nothing newer than what came
+   * back, which is where the live screen takes over.
+   *
+   * Never throws, like the rest of this class: a failed read is an empty one,
+   * and an empty side is reported as not having reached the end.
+   */
+  neighbours(epoch: number, firstRowId: number, afterRowId: number, limit: number): HistoryNeighbours {
+    const none: HistoryNeighbours = { before: [], after: [], reachedEnd: false };
+    if (this.retired || this.disabled) return none;
+    try {
+      this.flush();
+      const before = this.store.readBeside(this.runId, epoch, firstRowId, "before", limit);
+      const after = this.store.readBeside(this.runId, epoch, afterRowId, "after", limit);
+      return { before, after, reachedEnd: after.length < limit };
+    } catch {
+      return none;
+    }
   }
 
   retire(): void { this.retired = true; this.pending = []; this.pendingBytes = 0; }

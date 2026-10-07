@@ -510,6 +510,41 @@ void main() {
     expect(m.failure, 'archiving is off');
   });
 
+  test('a stale page reply cannot move a live boundary backward', () {
+    // The reply's `history` is whatever the bridge held when it answered --
+    // which a live frame's own `applyBoundary`, racing independently, can
+    // already have overtaken by the time the reply lands.
+    final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1000));
+    m.markRequested('r1');
+    m.applyBoundary(_boundary(nextRowId: 5000));
+    m.applyPage(
+      _page(
+        requestId: 'r1',
+        rows: _rowsBelow(1000),
+        history: _boundary(nextRowId: 1000),
+      ),
+    );
+    expect(m.boundary!.nextRowId, 5000);
+    expect(m.hasHistory, isTrue);
+  });
+
+  test('a stale page reply judges the top against the held boundary', () {
+    // Retention moved the first retained row up while the page was in
+    // flight; the reply's own boundary still names the old one.
+    final m = TerminalHistoryModel()..applyBoundary(_boundary(nextRowId: 1000));
+    m.markRequested('r1');
+    m.applyBoundary(_boundary(firstRowId: 800, nextRowId: 5000));
+    m.applyPage(
+      _page(
+        requestId: 'r1',
+        rows: _rowsBelow(1000),
+        history: _boundary(nextRowId: 1000),
+      ),
+    );
+    expect(m.rows.first.rowId, 800);
+    expect(m.atOldest, isTrue);
+  });
+
   test('a gap is read off the boundary, notifies, and ends with its epoch', () {
     final m = TerminalHistoryModel()..applyBoundary(_boundary());
     expect(m.gapped, isFalse);
@@ -567,5 +602,27 @@ void main() {
     expect(m.boundary, isNull);
     expect(m.cursor, isNull);
     expect(m.canLoadMore, isFalse);
+  });
+
+  test('a seek notifies unless it repeats the one whose page is in flight', () {
+    for (final (name, inFlight, retained, newer, target, notifies) in [
+      ('a repeat in flight', true, false, false, 2000, false),
+      ('the other direction', true, false, true, 2000, true),
+      ('another target', true, false, false, 3000, true),
+      ('nothing in flight', false, false, false, 2000, true),
+      ('a retained window', true, true, false, 2000, true),
+    ]) {
+      final model = TerminalHistoryModel()
+        ..applyBoundary(_boundary(nextRowId: 10000))
+        ..seek(2000);
+      if (inFlight) model.markRequested('r');
+      if (retained) model.retainWindow();
+      var count = 0;
+      model.addListener(() => count++);
+
+      model.seek(target, newer: newer);
+      expect(count, notifies ? 1 : 0, reason: name);
+      expect(model.hasPendingSeek, isTrue, reason: name);
+    }
   });
 }

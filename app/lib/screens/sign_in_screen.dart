@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart'
+    show AppleLogoPainter;
 import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
+import '../util/detached.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_focus_ring.dart';
@@ -31,6 +36,20 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
   (ref) => LastAuthMethodStore(),
 );
 
+/// Offered where App Review requires it beside GitHub and Google (iOS,
+/// guideline 4.8), and on macOS so an account made on the iPhone — possibly
+/// under a Hide My Email address the user cannot type — is reachable from the
+/// Mac without minting a second one.
+bool get _offersAppleSignIn =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.macOS;
+
+/// Apple's own sheet, which needs no browser, runs on iOS only: it needs the
+/// applesignin entitlement, and Apple will not put that in the Developer ID
+/// profile the macOS build ships under. macOS signs in through the browser as
+/// the web client instead.
+bool get _appleSheet => defaultTargetPlatform == TargetPlatform.iOS;
+
 /// Sign-in screen.
 ///
 /// Sign-in is optional on desktop — signed-out users land in [AppShell] and
@@ -49,8 +68,11 @@ final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
 ///
 /// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
-/// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path.
+/// entirely over HTTPS — no browser, no deeplink. GitHub and Google remain as
+/// secondary options on the browser+deeplink path (an in-app sheet on iOS, see
+/// [AuthService.startOAuth]), and Sign in with Apple ([_offersAppleSignIn]) on
+/// Apple's native sheet where [_appleSheet] allows, else on that same browser
+/// path.
 ///
 /// There is no password SIGN-UP here. Creating an account with one lands on
 /// "check your email" and then needs a second trip back to sign in (the server
@@ -88,13 +110,11 @@ enum _Phase {
 /// knows the address needs one. None of those asks the server anything, which
 /// is what keeps the address step from implying whether the account behind it
 /// has a password at all.
-enum _Step { email, password }
+enum _Step { email, password, signup }
 
-class _SignInScreenState extends ConsumerState<SignInScreen> {
+class _SignInScreenState extends ConsumerState<SignInScreen>
+    with WidgetsBindingObserver {
   static const _pollInterval = Duration(seconds: 3);
-  // ~11 minutes at the 3s interval — backstops the server's 10-min link
-  // window so an unreachable server doesn't poll forever.
-  static const _maxPollTicks = 220;
 
   /// Matches `RESEND_COOLDOWN_SECONDS` in `web/src/ui/auth-memory.ts` so a user
   /// waits the same time whichever surface they started on.
@@ -112,8 +132,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   MagicLinkSession? _session;
   Timer? _pollTimer;
   bool _polling = false;
-  int _pollTicks = 0;
+  bool _resending = false;
+  DateTime? _pollDeadline;
+  DateTime? _pollRetryAt;
   StreamSubscription<String>? _oauthFailureSub;
+
+  /// An in-app OAuth round trip is running under the spinner, so its failures
+  /// belong to this screen even though the form is not showing.
+  bool _oauthInApp = false;
 
   /// Bumped every time the user walks away from the flow they were in
   /// ([_backToForm], [_goToStep]). A request that snapshots this and finds it
@@ -127,10 +153,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   /// starts the clock — and counted down by [_cooldownTimer].
   int _resendSecondsLeft = 0;
   Timer? _cooldownTimer;
+  DateTime? _resendDeadline;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // OAuth outcomes arrive as a deep link long after the button's future
     // completed (and possibly into a fresh process), so failures reach the
     // screen through this stream, not a call stack.
@@ -161,7 +189,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.invalidate(currentUserProvider);
+      detached('SignInScreen', 'Resume sign-in polling', _pollOnce);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _cooldownTimer?.cancel();
     _oauthFailureSub?.cancel();
@@ -173,7 +210,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   void _onOAuthFailure(String message) {
     // A late bounce must not clobber an in-progress magic-link flow — OAuth is
     // only ever started from the form, so only the form shows its failures.
-    if (!mounted || _phase != _Phase.form) return;
+    if (!mounted || (_phase != _Phase.form && !_oauthInApp)) return;
     setState(() => _error = message);
   }
 
@@ -195,7 +232,18 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     unawaited(target.remember(email, method));
   }
 
-  Future<void> _startOAuth(String provider) async {
+  Future<void> _startApple() =>
+      _appleSheet ? _signInWithApple() : _startOAuth(AuthMethod.apple);
+
+  /// [method]'s name is the web's provider id.
+  Future<void> _startOAuth(AuthMethod method) async {
+    assert(
+      method == AuthMethod.github ||
+          method == AuthMethod.google ||
+          method == AuthMethod.apple,
+      '$method is not a social provider',
+    );
+    final provider = method.name;
     ref
         .read(analyticsServiceProvider)
         ?.track(AnalyticsEvents.signInStarted, props: {'provider': provider});
@@ -204,20 +252,46 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // browser detour can outlive this widget — a `ref` touched then throws.
     final store = ref.read(lastAuthMethodStoreProvider);
     final auth = ref.read(authServiceProvider);
-    // Back to the form even if Continue routed us here from [_Phase.submitting]:
-    // OAuth's outcome arrives as a deep link much later, and [_onOAuthFailure]
-    // only shows itself on the form.
+    final container = ref.container;
+    // A hand-off returns to the form even if Continue routed us here from
+    // [_Phase.submitting]: its outcome arrives as a deep link much later, and
+    // [_onOAuthFailure] only shows itself on the form. An in-app round trip
+    // holds the spinner until the session is redeemed, so a second tap cannot
+    // start another sign-in underneath it.
+    final inApp = auth.oauthRunsInApp;
     setState(() {
-      _phase = _Phase.form;
+      _phase = inApp ? _Phase.submitting : _Phase.form;
       _error = null;
+      _notice = null;
+      _oauthInApp = inApp;
     });
+    final OAuthStart started;
     try {
-      await auth.startOAuth(provider);
+      started = await auth.startOAuth(provider);
     } on AuthException catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.message);
+      setState(() {
+        _phase = _Phase.form;
+        _oauthInApp = false;
+        _error = e.message;
+      });
       return;
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = 'Could not complete sign-in. Try again.';
+      });
+      return;
+    } finally {
+      _oauthInApp = false;
     }
+    // Signed in, the root replaces this screen; anything else is back to the
+    // form, where a failure reported during the round trip is already shown.
+    if (mounted && started != OAuthStart.signedIn) {
+      setState(() => _phase = _Phase.form);
+    }
+    if (started == OAuthStart.notSignedIn) return;
     // Only once the browser is actually up: written before the launch, the hint
     // outlives a launch that never happened and then routes every later
     // Continue back to a provider that has never worked. It still records the
@@ -225,11 +299,64 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // deep link carries none — so a hint can still land wrong. What keeps that
     // survivable is "Continue with a password": it reaches step 2 whatever the
     // hint says, and step 2 carries the link.
-    _remember(
-      email,
-      provider == 'github' ? AuthMethod.github : AuthMethod.google,
-      store: store,
-    );
+    _remember(email, method, store: store);
+    if (started != OAuthStart.signedIn) return;
+    // The in-app round trip has no deep link behind it, so nothing else will
+    // tell the root the user signed in.
+    _warmSignedIn(container);
+  }
+
+  /// The session cookie is already stored: tell the root, and warm billing in
+  /// parallel with the user refresh so pricing is ready when the shell opens.
+  /// Takes a container so a caller past an await need not touch [ref].
+  static void _warmSignedIn(ProviderContainer container) {
+    container
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInCompleted);
+    container.invalidate(currentUserProvider);
+    container.invalidate(subscriptionProvider);
+    container.invalidate(pricingCatalogProvider);
+    prefetchSubscriptionCache(container);
+  }
+
+  Future<void> _signInWithApple() async {
+    final email = _emailController.text.trim();
+    final auth = ref.read(authServiceProvider);
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInStarted, props: {'provider': 'apple'});
+    setState(() {
+      _phase = _Phase.submitting;
+      _error = null;
+      _notice = null;
+    });
+    final bool signedIn;
+    try {
+      signedIn = await auth.signInWithApple();
+    } catch (e) {
+      // Anything, not just AuthException: a keychain that refuses the cookie
+      // write throws its own type, and leaving the phase at submitting would
+      // disable every control on the screen for good.
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = e is AuthException
+            ? e.message
+            : 'Apple sign-in failed. Try again.';
+      });
+      return;
+    }
+    if (!mounted) return;
+    if (!signedIn) {
+      // Dismissing Apple's sheet is a choice, not a failure: back to the form
+      // with nothing to explain.
+      setState(() => _phase = _Phase.form);
+      return;
+    }
+    // Keyed on the TYPED address, like the OAuth hint: the sheet may answer
+    // with a private relay address the user never typed here.
+    _remember(email, AuthMethod.apple);
+    _warmSignedIn(ref.container);
   }
 
   /// Reclaim a sign-in started before this process existed.
@@ -265,9 +392,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _phase = _Phase.pending;
     });
     _startPolling();
-    // The ticket carries no send time, so the conservative reading is that the
-    // link just went out — better one 45s wait than a resend burst on relaunch.
-    _startResendCooldown();
+    _startResendCooldown(deadline: session.retryAt);
   }
 
   bool _looksLikeEmail(String s) {
@@ -302,11 +427,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       case AuthMethod.password:
         _goToStep(_Step.password);
       case AuthMethod.github:
-        await _startOAuth('github');
+        await _startOAuth(AuthMethod.github);
       case AuthMethod.google:
-        await _startOAuth('google');
+        await _startOAuth(AuthMethod.google);
+      case AuthMethod.apple when _offersAppleSignIn:
+        await _startApple();
       // A remembered link, and an address this device has never seen, take the
-      // same path — the link is what works without knowing anything.
+      // same path — the link is what works without knowing anything. So does an
+      // Apple hint on a platform that does not offer Apple, which another
+      // surface can have recorded.
+      case AuthMethod.apple:
       case AuthMethod.link:
       case null:
         await _sendLink();
@@ -316,7 +446,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   /// Starts a magic link for [email]. Every ref read happens before the await
   /// so nothing here depends on the widget outliving the request; the caller
   /// owns the mounted check and the UI transition.
-  Future<MagicLinkSession> _startMagicLink(String email) {
+  Future<MagicLinkSession> _startMagicLink(
+    String email, {
+    MagicLinkSession? previous,
+  }) {
     final auth = ref.read(authServiceProvider);
     ref
         .read(analyticsServiceProvider)
@@ -327,7 +460,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // Before the send lands, deliberately: a failed send does not change what
     // this address needs, and the link is still the right answer next time.
     _remember(email, AuthMethod.link);
-    return auth.startMagicLink(email);
+    return auth.startMagicLink(email, previous: previous);
   }
 
   Future<void> _sendLink() async {
@@ -348,12 +481,19 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _phase = _Phase.pending;
       });
       _startPolling();
-      _startResendCooldown();
+      _startResendCooldown(deadline: session.retryAt);
     } on AuthException catch (e) {
       if (!mounted) return;
+      _honorRetry(e);
       setState(() {
         _phase = _Phase.form;
         _error = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = 'Could not complete sign-in. Try again.';
       });
     }
   }
@@ -372,7 +512,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   /// different email" sits live right beneath the tap — hence the generation
   /// guard on the way back in.
   Future<void> _resendLink() async {
-    if (_resendSecondsLeft > 0) return;
+    if (_resendSecondsLeft > 0 || _resending) return;
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) return;
     setState(() {
@@ -383,17 +523,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     // even while the round-trip is outstanding.
     _startResendCooldown();
     final generation = _flowGeneration;
+    _resending = true;
     try {
-      final session = await _startMagicLink(email);
+      final session = await _startMagicLink(email, previous: _session);
       if (!mounted) return;
       if (_flowGeneration != generation || _phase != _Phase.pending) {
-        // The user abandoned this link while the send was in the air.
-        // [AuthService.startMagicLink] persists its ticket before returning, so
-        // it landed AFTER [_backToForm]'s discard; left there it would restore
-        // the abandoned address on the next launch. This can also drop a ticket
-        // a newer send just wrote, which costs that flow only its
-        // relaunch-restore — its in-memory session still polls to completion.
-        unawaited(ref.read(authServiceProvider).discardPendingMagicLink());
         return;
       }
       setState(() {
@@ -403,30 +537,40 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _notice = 'Sent. Check your inbox again in a moment.';
       });
       _startPolling();
+      _startResendCooldown(deadline: session.retryAt);
     } on AuthException catch (e) {
       if (!mounted ||
           _flowGeneration != generation ||
           _phase != _Phase.pending) {
         return;
       }
+      _honorRetry(e);
       setState(() => _error = e.message);
+    } catch (_) {
+      if (mounted && _flowGeneration == generation) {
+        setState(() => _error = 'Could not resend the link. Try again.');
+      }
+    } finally {
+      _resending = false;
     }
   }
 
-  void _startResendCooldown() {
+  void _startResendCooldown({DateTime? deadline}) {
     _cooldownTimer?.cancel();
-    setState(() => _resendSecondsLeft = _resendCooldown.inSeconds);
+    _resendDeadline = deadline ?? clock.now().add(_resendCooldown);
+    int remaining() =>
+        (_resendDeadline!.difference(clock.now()).inMilliseconds / 1000)
+            .ceil()
+            .clamp(0, 3600);
+    setState(() => _resendSecondsLeft = remaining());
     _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      // Only the two screens carrying a resend show this counting down, so a
-      // flow that has moved on — approved, expired, bounced — must not keep
-      // rebuilding once a second for the rest of the window.
       if (!mounted ||
           (_phase != _Phase.pending && _phase != _Phase.verifyEmail)) {
         timer.cancel();
         _cooldownTimer = null;
         return;
       }
-      setState(() => _resendSecondsLeft--);
+      setState(() => _resendSecondsLeft = remaining());
       if (_resendSecondsLeft <= 0) {
         timer.cancel();
         _cooldownTimer = null;
@@ -434,7 +578,22 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     });
   }
 
+  void _honorRetry(AuthException failure) {
+    if (failure.kind == AuthFailure.throttled && failure.retryAfter != null) {
+      _startResendCooldown(deadline: clock.now().add(failure.retryAfter!));
+    }
+  }
+
+  DateTime? _receiptRetry(AuthFlowReceipt? receipt) => receipt == null
+      ? null
+      : clock.now().add(receipt.retryAt.difference(receipt.serverTime));
+
   void _goToStep(_Step step) {
+    detached(
+      'SignInScreen',
+      'Cancel previous sign-in',
+      ref.read(authServiceProvider).cancelAuthentication,
+    );
     // The cooldown belongs to the send that armed it, and the periodic timer
     // self-cancels the moment the phase leaves pending/verifyEmail — so a
     // counter left standing here can never tick back down, and would disable
@@ -509,6 +668,17 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _phase = _Phase.form;
         _error = e.message;
       });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _phase = _Phase.form;
+          _error = 'Could not complete sign-in. Try again.';
+        });
+      }
+    } finally {
+      if (mounted && _phase == _Phase.submitting) {
+        setState(() => _phase = _Phase.form);
+      }
     }
   }
 
@@ -544,15 +714,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // rejected credential would offer to save a password the server just
         // refused, and this screen is about to be popped out from under it.
         TextInput.finishAutofillContext();
-        ref
-            .read(analyticsServiceProvider)
-            ?.track(AnalyticsEvents.signInCompleted);
-        // Cookie already persisted by the service. Same warm-up as the
-        // magic-link ready path so pricing is ready when the shell opens.
-        ref.invalidate(currentUserProvider);
-        ref.invalidate(subscriptionProvider);
-        ref.invalidate(pricingCatalogProvider);
-        prefetchSubscriptionCache(ref);
+        _warmSignedIn(ref.container);
       case PasswordSignIn.invalidCredentials:
         setState(() {
           _phase = _Phase.form;
@@ -564,18 +726,21 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // web/src/auth/better-auth.ts) — without this the user waits on a mail
         // that was never going to arrive.
         try {
-          await ref.read(authServiceProvider).sendVerificationEmail(email);
+          final receipt = await ref
+              .read(authServiceProvider)
+              .sendVerificationEmail(email);
           if (!mounted) return;
           // This screen IS the landing after that send, so the resend beneath
           // it starts its clock here rather than offering an instant retry of
           // mail that has not had time to arrive.
-          _startResendCooldown();
+          _startResendCooldown(deadline: _receiptRetry(receipt));
         } on AuthException catch (e) {
           if (!mounted) return;
           // Handled here rather than left to `_submitPassword`: the sign-in
           // reached a verdict, so bouncing back to the form would throw away
           // a correct password over a failed follow-up send. The resend
           // button on this screen is the retry.
+          _honorRetry(e);
           setState(() => _error = e.message);
         }
     }
@@ -608,35 +773,40 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _flowGeneration != generation ||
         _phase != _Phase.verifyEmail;
     try {
-      await ref.read(authServiceProvider).sendVerificationEmail(email);
+      final receipt = await ref
+          .read(authServiceProvider)
+          .sendVerificationEmail(email);
       if (abandoned()) return;
+      _startResendCooldown(deadline: _receiptRetry(receipt));
       // The server answers identically whether or not it sent anything, so
       // this confirms the REQUEST, not a delivery we cannot vouch for.
       setState(() => _notice = 'Sent. Check your inbox again in a moment.');
     } on AuthException catch (e) {
       if (abandoned()) return;
+      _honorRetry(e);
       setState(() => _error = e.message);
     }
   }
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTicks = 0;
-    _pollTimer = Timer.periodic(_pollInterval, (_) => _pollOnce());
+    _pollRetryAt = null;
+    _pollDeadline = _session?.expiresAt ?? clock.now().add(kMagicLinkWindow);
+    _pollTimer = Timer.periodic(
+      _pollInterval,
+      (_) => detached('SignInScreen', 'Poll sign-in', _pollOnce),
+    );
   }
 
   Future<void> _pollOnce() async {
     final session = _session;
-    if (session == null || _polling) return;
-    // Client-side backstop: once the link window has lapsed, stop polling
-    // and surface the expired state even if the server is unreachable
-    // (which would otherwise return MagicLinkStatus.error forever).
-    _pollTicks++;
-    if (_pollTicks > _maxPollTicks) {
+    if (session == null || _polling || _resending) return;
+    if (_pollDeadline?.isAfter(clock.now()) == false) {
       _pollTimer?.cancel();
       if (mounted) setState(() => _phase = _Phase.expired);
       return;
     }
+    if (_pollRetryAt?.isAfter(clock.now()) == true) return;
     _polling = true;
     try {
       final poll = await ref.read(authServiceProvider).pollStatus(session);
@@ -645,12 +815,24 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       // was cancelled but this future was already awaiting, so without this
       // guard a stale result would snap the UI to bounced or sign in on an
       // abandoned flow.
-      if (!mounted || !identical(_session, session)) return;
+      if (!mounted || _resending || !identical(_session, session)) return;
 
       // A hard bounce means the link will never arrive — stop polling and tell
       // the user. ZeptoMail reports no "delivered" event, so there is no success
       // signal; we just keep waiting for approval until then.
-      if (poll.delivery == DeliveryStatus.bounced) {
+      if (poll.status == MagicLinkStatus.pending &&
+          (poll.delivery == DeliveryStatus.failed ||
+              poll.delivery == DeliveryStatus.expired)) {
+        _pollTimer?.cancel();
+        setState(() {
+          _phase = _Phase.expired;
+          _error =
+              'Email could not be delivered. Request a new link or use another sign-in method.';
+        });
+        return;
+      }
+      if (poll.status == MagicLinkStatus.pending &&
+          poll.delivery == DeliveryStatus.bounced) {
         _pollTimer?.cancel();
         unawaited(ref.read(authServiceProvider).discardPendingMagicLink());
         setState(() => _phase = _Phase.bounced);
@@ -660,15 +842,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       switch (poll.status) {
         case MagicLinkStatus.ready:
           _pollTimer?.cancel();
-          ref
-              .read(analyticsServiceProvider)
-              ?.track(AnalyticsEvents.signInCompleted);
-          // Cookie already persisted by pollStatus. Warm billing in parallel
-          // with the user refresh so pricing is ready as soon as the shell opens.
-          ref.invalidate(currentUserProvider);
-          ref.invalidate(subscriptionProvider);
-          ref.invalidate(pricingCatalogProvider);
-          prefetchSubscriptionCache(ref);
+          _warmSignedIn(ref.container);
         case MagicLinkStatus.expired:
         case MagicLinkStatus.consumed:
         case MagicLinkStatus.unbound:
@@ -679,6 +853,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           // keep polling until the link window lapses
           break;
       }
+    } on AuthException catch (e) {
+      if (mounted && identical(_session, session)) {
+        if (e.kind == AuthFailure.throttled && e.retryAfter != null) {
+          _pollRetryAt = clock.now().add(e.retryAfter!);
+        }
+        _honorRetry(e);
+        setState(() => _error = e.message);
+      }
     } finally {
       _polling = false;
     }
@@ -686,7 +868,8 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
 
   void _backToForm() {
     _pollTimer?.cancel();
-    _pollTicks = 0;
+    _pollDeadline = null;
+    _pollRetryAt = null;
     _cooldownTimer?.cancel();
     _cooldownTimer = null;
     unawaited(ref.read(authServiceProvider).discardPendingMagicLink());
@@ -738,25 +921,28 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
             // step would commit the address on its own and offer to save a
             // password with no username attached.
             Center(
-              child: AutofillGroup(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const AbBrandMark.lockup(height: AbTokens.space16 * 5),
-                      const SizedBox(height: AbTokens.space12),
-                      switch (_phase) {
-                        _Phase.pending => _pendingBody(context),
-                        _Phase.bounced => _bouncedBody(context),
-                        _Phase.expired => _expiredBody(context),
-                        _Phase.verifyEmail => _verifyEmailBody(context),
-                        _Phase.resetSent => _resetSentBody(context),
-                        _Phase.form ||
-                        _Phase.submitting => _formBody(context, canPop),
-                      },
-                    ],
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(AbTokens.space16),
+                child: AutofillGroup(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const AbBrandMark.lockup(height: AbTokens.space16 * 5),
+                        const SizedBox(height: AbTokens.space12),
+                        switch (_phase) {
+                          _Phase.pending => _pendingBody(context),
+                          _Phase.bounced => _bouncedBody(context),
+                          _Phase.expired => _expiredBody(context),
+                          _Phase.verifyEmail => _verifyEmailBody(context),
+                          _Phase.resetSent => _resetSentBody(context),
+                          _Phase.form ||
+                          _Phase.submitting => _formBody(context, canPop),
+                        },
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -770,6 +956,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   Widget _formBody(BuildContext context, bool canPop) => switch (_step) {
     _Step.email => _emailStepBody(context, canPop),
     _Step.password => _passwordStepBody(context),
+    _Step.signup => _signupBody(context),
   };
 
   /// Step 1: an address and nothing else. No sign-in/sign-up fork, and no
@@ -822,7 +1009,22 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space12),
-        // One bordered group rather than three stacked buttons: these are three
+        if (_offersAppleSignIn) ...[
+          _SignInButton(
+            label: 'Continue with Apple',
+            leading: (color) => _AppleMark(color: color),
+            appleInk: true,
+            onPressed: busy
+                ? null
+                : () => detached(
+                    'SignInScreen',
+                    'Apple sign-in failed',
+                    _startApple,
+                  ),
+          ),
+          const SizedBox(height: AbTokens.space8),
+        ],
+        // One bordered group rather than stacked buttons: these are all
         // answers to a single question — how to prove the address is yours —
         // and [AbSegmented]'s construction is how this app already asks a small
         // closed set where the alternatives must stay visible. Not AbSegmented
@@ -838,12 +1040,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
             _AuthMethodSpec(
               icon: AbIcons.github,
               label: 'GitHub',
-              onTap: busy ? null : () => _startOAuth('github'),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.github),
             ),
             _AuthMethodSpec(
               icon: _googleMark,
               label: 'Google',
-              onTap: busy ? null : () => _startOAuth('google'),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.google),
             ),
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
@@ -887,10 +1089,65 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   /// read here, before the call, because the pop leaves it defunct.
   void _enterDemo() => enterDemoMode(ref.container);
 
-  /// Step 2. The address is settled, so it reads as text rather than an input;
-  /// "change" is the only way back. Every exit stays open — reset, and the
-  /// magic link, which is also the answer for an account whose password was
-  /// never set (the case INVALID_EMAIL_OR_PASSWORD refuses to distinguish).
+  Future<void> _signUp() => _submitPassword((email) async {
+    final receipt = await ref
+        .read(authServiceProvider)
+        .signUpWithPassword(email: email, password: _passwordController.text);
+    if (!mounted) return;
+    setState(() {
+      _phase = _Phase.verifyEmail;
+      _notice =
+          'If this address is eligible, a verification link will arrive. Check your spam folder.';
+    });
+    _startResendCooldown(deadline: _receiptRetry(receipt));
+  });
+
+  Widget _signupBody(BuildContext context) {
+    final busy = _phase == _Phase.submitting;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Create an account with a password',
+          style: AbTokens.sansStyle(color: context.antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
+          _emailController.text.trim(),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        AbPasswordField(
+          controller: _passwordController,
+          hintText:
+              'Password ($kMinPasswordLength?$kMaxPasswordLength characters)',
+          enabled: !busy,
+          autofillHints: const [AutofillHints.newPassword],
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) =>
+              detached('SignInScreen', 'Create account', _signUp),
+        ),
+        ?_message(context),
+        const SizedBox(height: AbTokens.space8),
+        _SignInButton(
+          label: busy ? 'Creating account...' : 'Create account',
+          onPressed: busy
+              ? null
+              : () => detached('SignInScreen', 'Create account', _signUp),
+          variant: _SignInButtonVariant.primary,
+        ),
+        _MutedLink(
+          label: 'Sign in instead',
+          onTap: busy ? null : () => _goToStep(_Step.password),
+        ),
+        _MutedLink(
+          label: 'Use a different email',
+          onTap: busy ? null : _changeEmail,
+        ),
+      ],
+    );
+  }
+
   Widget _passwordStepBody(BuildContext context) {
     final antgrid = context.antgrid;
     final busy = _phase == _Phase.submitting;
@@ -938,6 +1195,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         ),
         const SizedBox(height: AbTokens.space8),
         _MutedLink(
+          label: 'Create an account with a password',
+          onTap: busy ? null : () => _goToStep(_Step.signup),
+        ),
+        _MutedLink(
           label: 'Forgot your password?',
           onTap: busy ? null : _forgotPassword,
         ),
@@ -955,16 +1216,19 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   Widget? _message(BuildContext context) {
     final text = _error ?? _notice;
     if (text == null) return null;
-    return Padding(
-      padding: const EdgeInsets.only(top: AbTokens.space8),
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          color: _error != null
-              ? context.antgrid.error
-              : context.antgrid.textMuted,
+    return Semantics(
+      liveRegion: true,
+      child: Padding(
+        padding: const EdgeInsets.only(top: AbTokens.space8),
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: _error != null
+                ? context.antgrid.error
+                : context.antgrid.textMuted,
+          ),
         ),
       ),
     );
@@ -987,8 +1251,8 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
-          'Your password is correct, but\n$email\nhasn\'t been verified '
-          'yet.${sent ? ' We sent a fresh link.' : ''}',
+          'Check the inbox for $email. If this address is eligible, a link will arrive. It expires in one hour. Check your spam folder. '
+          '${sent ? ' Verification was requested.' : ''}',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXs,
@@ -1219,32 +1483,38 @@ class _MutedLinkState extends State<_MutedLink> {
         ),
       );
     }
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            onTap();
-            return null;
+    return MergeSemantics(
+      child: Semantics(
+        link: true,
+        enabled: true,
+        child: FocusableActionDetector(
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: (v) {
+            if (_focused != v) setState(() => _focused = v);
           },
-        ),
-      },
-      child: GestureDetector(
-        onTap: onTap,
-        child: AbFocusRing(
-          focused: _focused,
-          borderRadius: AbTokens.borderRadius,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
-            child: Text(
-              widget.label,
-              textAlign: TextAlign.center,
-              style: AbTokens.sansStyle(
-                color: antgrid.textMuted,
-                fontSize: AbTokens.fontXs,
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                onTap();
+                return null;
+              },
+            ),
+          },
+          child: GestureDetector(
+            onTap: onTap,
+            child: AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+                child: Text(
+                  widget.label,
+                  textAlign: TextAlign.center,
+                  style: AbTokens.sansStyle(
+                    color: antgrid.textMuted,
+                    fontSize: AbTokens.fontXs,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1271,10 +1541,21 @@ class _SignInButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.variant = _SignInButtonVariant.normal,
+    this.leading,
+    this.appleInk = false,
   });
   final String label;
   final VoidCallback? onPressed;
   final _SignInButtonVariant variant;
+
+  /// A mark before the label, drawn in the label's colour.
+  final Widget Function(Color color)? leading;
+
+  /// Draws the label and mark in pure black or white, whichever contrasts
+  /// with the fill behind them, as Apple requires of a Sign in with Apple
+  /// button. Decided from the fill rather than a light/dark flag because
+  /// custom themes can put any colour there.
+  final bool appleInk;
 
   @override
   State<_SignInButton> createState() => _SignInButtonState();
@@ -1289,48 +1570,78 @@ class _SignInButtonState extends State<_SignInButton> {
     final antgrid = context.antgrid;
     final enabled = widget.onPressed != null;
     final isPrimary = widget.variant == _SignInButtonVariant.primary;
+    final fill = isPrimary
+        ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
+        : (_hovered ? antgrid.bgElevated : antgrid.bgSurface);
+    final foreground = widget.appleInk
+        ? (fill.computeLuminance() > 0.5
+              ? AbTokens.appleSignInInkOnLight
+              : AbTokens.appleSignInInkOnDark)
+        : isPrimary
+        ? antgrid.accentForeground
+        : antgrid.textPrimary;
     final visual = Container(
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
-        color: isPrimary
-            ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
-            : (_hovered ? antgrid.bgElevated : antgrid.bgSurface),
+        color: fill,
         border: Border.all(
           color: isPrimary ? antgrid.accent : antgrid.borderDefault,
         ),
         borderRadius: AbTokens.borderRadius5,
       ),
-      child: Text(
-        widget.label,
-        textAlign: TextAlign.center,
-        style: AbTokens.sansStyle(
-          color: isPrimary ? antgrid.accentForeground : antgrid.textPrimary,
-        ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (widget.leading case final leading?) ...[
+            leading(foreground),
+            const SizedBox(width: AbTokens.space6),
+          ],
+          Flexible(
+            child: Text(
+              widget.label,
+              textAlign: TextAlign.center,
+              style: AbTokens.sansStyle(color: foreground),
+            ),
+          ),
+        ],
       ),
     );
-    if (!enabled) return Opacity(opacity: 0.4, child: visual);
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      onShowHoverHighlight: (v) {
-        if (_hovered != v) setState(() => _hovered = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onPressed?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
+    if (!enabled) {
+      return Semantics(
+        button: true,
+        enabled: false,
+        child: Opacity(opacity: 0.4, child: visual),
+      );
+    }
+    return MergeSemantics(
+      child: Semantics(
+        button: true,
+        enabled: true,
         onTap: widget.onPressed,
-        child: AbFocusRing(
-          focused: _focused,
-          borderRadius: AbTokens.borderRadius5,
-          child: visual,
+        child: FocusableActionDetector(
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: (v) {
+            if (_focused != v) setState(() => _focused = v);
+          },
+          onShowHoverHighlight: (v) {
+            if (_hovered != v) setState(() => _hovered = v);
+          },
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                widget.onPressed?.call();
+                return null;
+              },
+            ),
+          },
+          child: GestureDetector(
+            onTap: widget.onPressed,
+            child: AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius5,
+              child: visual,
+            ),
+          ),
         ),
       ),
     );
@@ -1352,6 +1663,26 @@ const String _googleMark =
     '2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0C5.867 0 .307 5.387.307 12'
     's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
     '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
+
+/// Apple's logo artwork, sized to sit beside a [_SignInButton] title.
+///
+/// Sign in with Apple is a full-width outlined [_SignInButton] rather than a
+/// cell in [_AuthMethodRow]: Apple's guidelines want its title spelled out,
+/// and it may be no less prominent than the other providers. It is not the
+/// plugin's `SignInWithAppleButton`, whose solid black or white fill competed
+/// with the primary Continue button.
+class _AppleMark extends StatelessWidget {
+  const _AppleMark({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: AbTokens.fontBody * 25 / 31,
+    height: AbTokens.fontBody,
+    child: CustomPaint(painter: AppleLogoPainter(color: color)),
+  );
+}
 
 /// One way to prove the address is yours, as rendered by [_AuthMethodRow].
 class _AuthMethodSpec {

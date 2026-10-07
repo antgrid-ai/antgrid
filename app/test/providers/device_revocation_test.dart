@@ -1,13 +1,17 @@
+import '../helpers/fixed_peer_connector.dart';
 // Revoking a device from the web must sign THIS app out — the relay kicks the
-// socket while it is live, and the token mint answers 401 once it isn't. These
+// socket while it is live, and the token mint refuses its credentials once it isn't. These
 // pin the three properties the feature rests on: the teardown runs exactly once
 // however many machines report it, an inconclusive (offline) probe never signs
 // anyone out, and LICENSE_INVALID stays a connection fault rather than an
 // account verdict.
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:antgrid/connection/relay_mechanisms.dart';
+import 'package:antgrid/connection/peer_connection.dart';
+import 'package:antgrid/launcher/host_controller.dart';
+import 'package:antgrid/launcher/local_agent_launcher.dart' show AgentEvent;
+import 'package:antgrid/providers/control_plane.dart'
+    show hostControllerProvider;
 import 'package:antgrid/providers/device_revocation.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -20,6 +24,7 @@ import 'package:antgrid/services/push_identity.dart';
 import 'package:antgrid/services/sign_out_service.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -132,27 +137,30 @@ class _ErrorOnlyRelay extends RelayService {
   }
 }
 
-DeviceIdentity _identity() => DeviceIdentity(
-  deviceId: 'phone-1',
-  name: 'Test Phone',
-  ed25519PrivateKey: Uint8List(64),
-  ed25519PublicKey: Uint8List(32),
-  x25519PrivateKey: Uint8List(32),
-  x25519PublicKey: Uint8List(32),
-);
+/// Stands in for the host's stderr event tail.
+class _EventHost extends HostController {
+  _EventHost() : super(spawnHost: () async => throw UnimplementedError());
+  final events = StreamController<AgentEvent>.broadcast();
+  @override
+  Stream<AgentEvent> get hostEvents => events.stream;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late _CountingSignOut signOut;
 
-  Future<ProviderContainer> containerWith({LicenseTokenMinter? minter}) async {
+  Future<ProviderContainer> containerWith({
+    LicenseTokenMinter? minter,
+    HostController? host,
+  }) async {
     useInMemoryPrefs();
     signOut = _CountingSignOut(await RecentAgentsStore.open());
     final container = ProviderContainer(
       overrides: [
         signOutServiceProvider.overrideWithValue(signOut),
         licenseTokenMinterProvider.overrideWith((ref) async => minter),
+        if (host != null) hostControllerProvider.overrideWithValue(host),
       ],
     );
     addTearDown(container.dispose);
@@ -168,6 +176,28 @@ void main() {
 
     expect(signOut.calls, 1);
     expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  test('400 invalid_client from a deleted device signs it out', () async {
+    final container = await containerWith(
+      minter: _minter(
+        () async => http.Response('{"error":"invalid_client"}', 400),
+      ),
+    );
+    await checkDeviceRevoked(container);
+    expect(signOut.calls, 1);
+    expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  test('other 400 errors leave the session alone', () async {
+    final container = await containerWith(
+      minter: _minter(
+        () async => http.Response('{"error":"invalid_scope"}', 400),
+      ),
+    );
+    await checkDeviceRevoked(container);
+    expect(signOut.calls, 0);
+    expect(container.read(revokedNoticeProvider), isFalse);
   });
 
   test('an unreachable license service is NOT a revocation', () async {
@@ -239,14 +269,74 @@ void main() {
     expect(signOut.calls, 2);
   });
 
+  group('the local host reporting auth_revoked', () {
+    Future<(ProviderContainer, _EventHost, void Function(int))>
+    watching() async {
+      // The watch is desktop-only, and this binding reports Android.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var status = 500;
+      final host = _EventHost();
+      addTearDown(host.events.close);
+      final container = await containerWith(
+        minter: _minter(() async => http.Response('{"error":"x"}', status)),
+        host: host,
+      );
+      container.listen(hostRevocationWatchProvider, (_, _) {});
+      return (container, host, (int s) => status = s);
+    }
+
+    test(
+      'probes at once, inside the cooldown a resume probe just set',
+      () async {
+        final (container, host, respond) = await watching();
+        // Inconclusive, but it starts the cooldown.
+        await checkDeviceRevoked(container);
+        expect(signOut.calls, 0);
+
+        respond(401);
+        host.events.add(AgentEvent('auth_revoked', const {}));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(signOut.calls, 1);
+        expect(container.read(revokedNoticeProvider), isTrue);
+      },
+    );
+
+    test(
+      'lets the mint decide: credentials it still accepts stay signed in',
+      () async {
+        final (container, host, _) = await watching();
+        host.events.add(AgentEvent('auth_revoked', const {}));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(signOut.calls, 0);
+        expect(container.read(revokedNoticeProvider), isFalse);
+      },
+    );
+
+    test('ignores the revoke that a sign-out of its own sets off', () async {
+      final (container, host, respond) = await watching();
+      respond(401);
+
+      final signingOut = performHardSignOut(container);
+      host.events.add(AgentEvent('auth_revoked', const {}));
+      await signingOut;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(signOut.calls, 1, reason: 'one teardown: the user sign-out');
+      expect(container.read(revokedNoticeProvider), isFalse);
+    });
+  });
+
   group('RelayConnection error classification', () {
     late _ErrorOnlyRelay relay;
 
     setUp(() => relay = _ErrorOnlyRelay());
     tearDown(() async => relay.closeStreams());
 
-    RelayConnection started({required void Function() onRevoked}) {
-      final conn = RelayConnection(
+    MachineConnection started({required void Function() onRevoked}) {
+      final conn = MachineConnection(
         machineDeviceId: 'M',
         crypto: CryptoService(),
         relayOverride: relay,
@@ -254,18 +344,12 @@ void main() {
       );
       addTearDown(conn.dispose);
       conn.ensureStarted(
-        mechanisms: RelayMechanisms(
-          relay: relay,
-          crypto: CryptoService(),
+        mechanisms: PeerConnectionMechanisms(
+          peerRuntime: FixedPeerConnector.stub(),
           machineDeviceId: 'M',
-          identity: _identity(),
-          phoneDeviceId: 'phone-1',
-          phoneEd25519Seed: List<int>.filled(32, 7),
-          epoch: 1,
           // Null coords park the ladder before the dial: this test is about the
           // error stream, not the climb.
           resolveCoords: () async => null,
-          mintToken: () async => 'token',
         ),
       );
       return conn;

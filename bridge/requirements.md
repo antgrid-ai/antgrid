@@ -20,24 +20,20 @@ The user experience is simple: install the agent, run `antgrid`, sign in to the 
 ## Architecture
 
 ```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│   ANTGRID APP      │       │  RELAY SERVER   │       │  ANTGRID AGENT     │
-│   (Flutter)     │◄─WSS─►│  (lightweight)  │◄─WSS─►│  (Bun)          │
-│                 │       │                 │       │                 │
-│ • Code viewer   │       │ • Routes msgs   │       │ • Spawns PTYs   │
-│ • Terminal view │       │ • Offline queue  │       │ • Watches files │
-│ • Browser       │       │ • Zero-knowledge│       │ • Scans ports   │
-│ • Send commands │       │ • Auth only     │       │ • Encrypts all  │
+┌─────────────────┐                                 ┌─────────────────┐
+│   ANTGRID APP   │◄═══ Iroh (QUIC/TLS 1.3) ═══════►│  ANTGRID AGENT  │
+│   (Flutter)     │                                 │  (Bun)          │
+│ • Code viewer   │       ┌─────────────────┐       │ • Spawns PTYs   │
+│ • Terminal view │◄─WSS─►│  CONTROL RELAY  │◄─WSS─►│ • Watches files │
+│ • Browser       │       │ • Auth/presence │       │ • Scans ports   │
+│ • Send commands │       │ • No payloads   │       │                 │
 └─────────────────┘       └─────────────────┘       └─────────────────┘
-       ▲                         ▲                         ▲
-  E2E Encrypted            Can't read               E2E Encrypted
-  (AES-256-GCM)            anything                 (AES-256-GCM)
 ```
 
 **Key architectural decisions:**
 - Agent makes OUTBOUND connections only — no ports opened on the dev machine
-- No SSH required — communication goes through a WebSocket relay
-- Zero-trust relay — all encryption/decryption happens only on Agent and mobile app
+- No SSH required — payloads travel over an authenticated Iroh connection; the central WebSocket is control-only
+- The control relay never carries or sees application payloads
 - Agent keeps AI coding tools running even if the mobile app disconnects
 - Mobile app reconnects seamlessly and catches up on missed output
 
@@ -216,16 +212,12 @@ The config parser resolves these patterns:
 - Match detected ports against configured labels in antgrid.yaml
 - Diff and send `ports:update` only on changes
 
-### 4. End-to-End Encryption ✅
-**Purpose:** Ensure all transmitted data is encrypted such that the relay server has zero knowledge of content.
+### 4. Payload Confidentiality ✅
+**Purpose:** Keep every payload readable only by the two authorized endpoints.
 
-- X25519 ECDH ephemeral key exchange — new keypair per connection
-- AES-256-GCM encryption with HKDF-SHA256 key derivation
-- Per-message nonce (96-bit random) to prevent replay attacks
-- Session binding — both agent & client public keys incorporated into HKDF salt
-- Key zeroization — shared secrets and private keys zeroed after use
-- GCM authentication tags for tamper detection
-- Challenge-response handshake prevents relay spoofing
+- Payloads travel only over native Iroh connections between the two endpoint IDs the authorization snapshot names; QUIC/TLS 1.3 is the confidentiality layer (`docs/protocol/peer-session.md`)
+- The central relay rejects application payloads outright
+- Push notifications are sealed separately (`push/seal.ts`), and the relay never holds their keys
 
 ### 5. Account-Trust Admission ✅
 **Purpose:** Frictionless setup — sign in on both ends and the machines are there, with no ceremony to carry between them.
@@ -233,7 +225,6 @@ The config parser resolves these patterns:
 - No pairing step and no scan: `GET /account/agents` hands the app every mobile-enabled machine on the account, with its relay URL and Ed25519 identity key
 - A phone is admitted iff it is account-trusted AND the machine's remote-access switch is on AND the project is in the host's catalog
 - Device identity persisted in `~/.antgrid/device.json` (UUID, hostname, creation timestamp)
-- E2E ephemeral keypair is per-connection and in-memory only (regenerated on each handshake; never persisted)
 
 ### 6. Relay Connection Management ✅
 **Purpose:** Maintain a reliable outbound WebSocket connection that survives network interruptions.
@@ -266,13 +257,8 @@ Future work:
 
 All messages share a base schema: `{ id: UUID, timestamp: number, type: string }`.
 
-### Handshake Messages
-Authoritative flow, field types and sealing rules: `docs/protocol/e2e-handshake.md`.
-
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `handshake:client-hello` | Client → Agent | Client ephemeral pubkey + nonce |
-| `handshake:agent-ready` | Agent → Client | Confirms shared secret derived |
+### Session Messages
+Authoritative flow and field types: `docs/protocol/peer-session.md`.
 
 ### Terminal Messages
 | Type | Direction | Purpose |
@@ -289,7 +275,6 @@ Authoritative flow, field types and sealing rules: `docs/protocol/e2e-handshake.
 | Type | Direction | Purpose |
 |------|-----------|---------|
 | `agent:status` | Agent → App | Terminal list + agent metadata |
-| `agent:disconnecting` | Agent → App | Graceful shutdown notice |
 | `ping` / `pong` | Bidirectional | Heartbeat (30s interval) |
 
 ### File Tree Messages
@@ -306,17 +291,37 @@ Authoritative flow, field types and sealing rules: `docs/protocol/e2e-handshake.
 | `ports:update` | Agent → App | Detected listening ports + metadata |
 | `preview:url` | Agent → App | Proxy URL for a detected port |
 
-### Tunnel Messages (separate protocol)
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `tunnel:http-request` | App → Agent | HTTP request for a localhost port, forwarded through the relay |
-| `tunnel:http-start` | Agent → App | Response head plus body slice 0; `last` when that slice is the whole body |
-| `tunnel:http-chunk` | Agent → App | Body slice `seq` (1-based, dense) |
-| `tunnel:http-end` | Agent → App | Body is over: `chunks` emitted, `error` when it is incomplete |
-| `tunnel:http-cancel` | App → Agent | Stop streaming a response (tab gone, or the app saw a gap) |
-| `tunnel:ws-open` | App → Agent | Open an upstream WebSocket for the previewed page's own socket |
-| `tunnel:ws-data` | App → Agent, Agent → App | One WebSocket frame, in whichever direction it was sent |
-| `tunnel:ws-close` | App → Agent, Agent → App | Tear the tunnel down; carries `code`/`reason` when the closer had one |
+### Tunnel Messages (own QUIC streams, not the bus)
+
+Each TCP connection the phone's preview forwarder accepts gets its own peer stream
+(`{kind:"tunnel-tcp"}`, `docs/protocol/peer-session.md` §1c) — these records never ride the
+project/session stream's `AbMessage` traffic. Each direction carries at most one JSON control
+record; after the bridge's reply, the stream is raw TCP bytes and nothing parses HTTP.
+
+| Type | Direction | Stream | Purpose |
+|------|-----------|--------|---------|
+| `tunnel:tcp-open` | App → Agent | `tunnel-tcp`, 1st record | Head-of-stream: `connId`, `port`, `checkoutId`, optional `probe` |
+| `tunnel:tcp-ready` | Agent → App | `tunnel-tcp`, reply | Upstream connected (raw bytes follow); for a probe, carries `tls` and the stream ends |
+| `tunnel:tcp-error` | Agent → App | `tunnel-tcp`, reply | The upstream connect failed; the stream ends |
+
+Either side ends the connection by closing its send half; the other side winds down with it.
+
+### Upload Messages (own QUIC stream, not the bus)
+
+A remote file upload gets its own peer stream (`{kind:"upload"}`, `docs/protocol/peer-session.md`
+§1e) rather than riding the project/session stream's `AbMessage` traffic. The open frame carries
+`projectId`, `requestId`, `fileName`, `size`, and the optional `checkoutId`/`mimeType`; the app then
+writes exactly `size` raw bytes and FINs its send half, needing no verb of its own for the file's
+bytes. The bridge answers with exactly one length-prefixed JSON record, then FINs in turn.
+
+| Type | Direction | Stream | Purpose |
+|------|-----------|--------|---------|
+| `stream:refused` | Agent → App | `upload`, only record (open refused) | Refusal `code`/`message` when the stream is rejected up front |
+| `file:upload-result` | Agent → App | `upload`, only record | Terminal outcome (`ok`, or an error code) for the upload |
+
+The desktop app's own local upload writes the bytes to a temp file on the shared filesystem instead: it crosses the loopback socket as one `file:upload-local` message (`projectId`, `requestId`,
+`fileName`, `sourcePath`, optional `mimeType`/`checkoutId`) and gets back one `file:upload-result`,
+same as above. A relay-origin frame naming `file:upload-local` is dropped before dispatch.
 
 ---
 
@@ -327,7 +332,7 @@ bridge/
 ├── src/
 │   ├── index.ts                  # CLI entry point & main event loop
 │   ├── protocol.ts               # Message definitions (Zod schemas, 21 types)
-│   ├── tunnel-protocol.ts        # Tunnel message types (HTTP proxy via relay)
+│   ├── tunnel-protocol.ts        # Tunnel message types (raw TCP forwarding)
 │   ├── config.ts                 # antgrid.yaml parsing & variable interpolation
 │   ├── device.ts                 # Device identity management (~/.antgrid/device.json)
 │   ├── banner.ts                 # Startup banner
@@ -340,8 +345,7 @@ bridge/
 │   ├── file-watcher.ts           # Chokidar-based file monitoring
 │   ├── file-tree.ts              # File system scanning & reading
 │   ├── port-scanner.ts           # Platform-specific port detection
-│   ├── localhost-fetch.ts        # HTTP proxying to localhost services
-│   ├── tunnel-manager.ts         # Preview URL & HTTP request routing
+│   ├── tunnel-manager.ts         # Preview URL & raw TCP forwarding
 │   └── types/
 ├── tests/                        # 15 test files (bun test)
 │   ├── crypto.test.ts
@@ -351,7 +355,6 @@ bridge/
 │   ├── banner.test.ts
 │   ├── logger.test.ts
 │   ├── port-scanner.test.ts
-│   ├── localhost-fetch.test.ts
 │   ├── file-tree.test.ts
 │   ├── file-watcher.test.ts
 │   ├── scrollback.test.ts
@@ -392,10 +395,10 @@ bridge/
  6. Validate config against Zod schema → show clear errors with context if invalid
  7. Resolve variable interpolation: ${env.*}, ${project.path}
  8. Load or generate device identity from ~/.antgrid/device.json (device ID, name, creation date)
- 9. Generate ephemeral X25519 keypair for E2E encryption
-10. Display startup banner with agent info
-11. Connect to relay server via WebSocket
-12. Perform challenge-response handshake with ECDH key exchange
+ 9. Display startup banner with agent info
+10. Connect to the control relay (signed v3 hello) and bind the Iroh endpoint
+11. Accept authorized app peers over Iroh (`session:hello`)
+12. Admit each peer against the authorization snapshot
 13. On successful connection:
     a. Log connection success
     b. Start file watcher on project directory
@@ -415,16 +418,15 @@ Handle SIGINT (Ctrl+C), SIGTERM, and SIGHUP signals:
 
 ```
 1. Log "Shutting down Antgrid Agent..."
-2. Send "agent:disconnecting" status to Antgrid app (with 2s timeout)
-3. Stop accepting new messages from Antgrid app
-4. Stop file watcher and port scanner
-5. For each running terminal:
+2. Stop accepting new messages from Antgrid app
+3. Stop file watcher and port scanner
+4. For each running terminal:
    a. Send SIGTERM to the process
    b. Wait up to 5 seconds for graceful exit
    c. If still running after 5s, send SIGKILL
-6. Close WebSocket connection to relay
-7. Log summary: "Antgrid Agent stopped. X terminals closed."
-8. Exit process with code 0
+5. Close WebSocket connection to relay
+6. Log summary: "Antgrid Agent stopped. X terminals closed."
+7. Exit process with code 0
 ```
 
 On uncaught exceptions:

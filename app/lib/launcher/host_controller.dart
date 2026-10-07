@@ -107,6 +107,7 @@ class HostController {
     Future<HostFile?> Function()? readHost,
     Future<bool> Function(int pid)? pidAlive,
     Future<bool> Function(HostFile host)? ping,
+    Future<void> Function(HostFile host)? notifyPeerResume,
     Future<HostFile> Function()? spawnHost,
     Future<void> Function(int pid)? terminate,
     Future<void> Function(int pid)? terminateTree,
@@ -114,15 +115,20 @@ class HostController {
     bool Function()? devMode,
     bool Function(String startedAtIso)? bridgeStale,
     Future<void> Function(Duration d)? delay,
+    bool awaitBootstrap = false,
+    Duration bootstrapWait = const Duration(seconds: 30),
   }) : _readHost = readHost ?? _defaultReadHost,
        _pidAlive = pidAlive ?? isPidAlive,
        _ping = ping ?? _defaultPing,
+       _notifyPeerResume = notifyPeerResume ?? _defaultNotifyPeerResume,
        _terminate = terminate ?? terminatePid,
        _terminateTree = terminateTree ?? _defaultTerminateTree,
        _now = now ?? DateTime.now,
        _devMode = devMode ?? _defaultDevMode,
        _bridgeStale = bridgeStale ?? _defaultBridgeStale,
        _delay = delay ?? Future<void>.delayed,
+       _awaitBootstrap = spawnHost == null || awaitBootstrap,
+       _bootstrapWait = bootstrapWait,
        _spawnHost = spawnHost {
     // _spawnHost defaults to the real spawn only when not injected. We can't
     // reference an instance method in an initializer, so bind it here.
@@ -132,6 +138,7 @@ class HostController {
   final Future<HostFile?> Function() _readHost;
   final Future<bool> Function(int pid) _pidAlive;
   final Future<bool> Function(HostFile host) _ping;
+  final Future<void> Function(HostFile host) _notifyPeerResume;
   final Future<void> Function(int pid) _terminate;
   final Future<void> Function(int pid) _terminateTree;
   final DateTime Function() _now;
@@ -140,6 +147,11 @@ class HostController {
   final Future<void> Function(Duration d) _delay;
   final Future<HostFile> Function()? _spawnHost;
   late final Future<HostFile> Function() _spawnHostFn;
+
+  /// Whether a spawn must hold for [bootstrapBuilder]: always for the real
+  /// spawn, which cannot start a host without one; opt-in for an injected one.
+  final bool _awaitBootstrap;
+  final Duration _bootstrapWait;
 
   // Dev mode = we're running an UNBUNDLED bridge whose code can be stale across
   // a hot-restart (bun has no hot-reload), so a healthy prior-run host should be
@@ -264,9 +276,19 @@ class HostController {
   /// spawn — `openProject` with `??=` (first project to open wins), `warmHost`
   /// with `=` (a device-bearing warm-up overwrites a machine-less one). Mutable
   /// (not final / not a ctor param) so the launcher can assign it after
-  /// constructing the shared host. Required for real spawns; unused when
-  /// [spawnHost] is injected in tests.
-  BootstrapPayload Function()? bootstrapBuilder;
+  /// constructing the shared host. Required for real spawns, and a spawn asked
+  /// for before any builder exists WAITS for one (see [_waitForBootstrap])
+  /// rather than failing.
+  BootstrapPayload Function()? get bootstrapBuilder => _bootstrapBuilder;
+  set bootstrapBuilder(BootstrapPayload Function()? builder) {
+    _bootstrapBuilder = builder;
+    if (builder != null && !_bootstrapReady.isCompleted) {
+      _bootstrapReady.complete();
+    }
+  }
+
+  BootstrapPayload Function()? _bootstrapBuilder;
+  final _bootstrapReady = Completer<void>();
 
   /// PID of a host THIS app spawned (for owned-teardown on quit). Null when we
   /// attached to a host left running by a prior app run.
@@ -301,6 +323,21 @@ class HostController {
     } finally {
       client.close();
     }
+  }
+
+  static Future<void> _defaultNotifyPeerResume(HostFile host) async {
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      await client.peerResume();
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Discovery never starts or replaces a host during a resume notification.
+  Future<void> notifyPeerResume() async {
+    final host = await _readHost();
+    if (host != null) await _notifyPeerResume(host);
   }
 
   /// Refuse to bring a host up until [unsealSpawns].
@@ -693,9 +730,38 @@ class HostController {
     return _markVerified(await _spawn());
   }
 
+  static const _noBootstrap =
+      'HostController: bootstrapBuilder is required to spawn';
+
+  /// Hold a spawn until the launcher supplies its bootstrap.
+  ///
+  /// The warm-up only assigns one after resolving the device record — on a
+  /// first signed-in launch that includes minting an endpoint key into secure
+  /// storage — while anything that reads the host (the remote-access panel,
+  /// the New Session agent list) can ask sooner. Failing that early ask
+  /// published a `failed` phase for a host that was about to come up, and
+  /// left the asker's own cached failure behind; waiting makes it join the
+  /// warm-up's spawn instead. It holds before the generation bump and status
+  /// change, so the wait itself is invisible.
+  Future<void> _waitForBootstrap() async {
+    _log('no bootstrap yet; holding the spawn for the warm-up');
+    try {
+      await _bootstrapReady.future.timeout(_bootstrapWait);
+    } on TimeoutException {
+      // Nothing ever supplied one: a wiring fault, not a slow launch.
+      _setStatus(const HostStatus(HostPhase.failed, detail: _noBootstrap));
+      throw StateError(_noBootstrap);
+    }
+    // The wait can span an update's drain, which must still hold.
+    if (_spawnSealed) throw const HostSpawnSealed();
+  }
+
   /// [_spawnHostFn] wrapped in status reporting, so every spawn — cold, dev
   /// refresh, or supervised restart — moves the UI-visible phase.
   Future<HostFile> _spawn() async {
+    if (_awaitBootstrap && _bootstrapBuilder == null) {
+      await _waitForBootstrap();
+    }
     // Generation is bumped HERE, not in _realSpawnHost, so it advances for
     // injected spawns too — supervision's stale-exit guard is the same code in
     // tests as in production.
@@ -727,7 +793,7 @@ class HostController {
   Future<HostFile> _realSpawnHost() async {
     final builder = bootstrapBuilder;
     if (builder == null) {
-      throw StateError('HostController: bootstrapBuilder is required to spawn');
+      throw StateError(_noBootstrap);
     }
     final payload = builder();
     // Read before the first await: _spawn() bumped it for exactly this spawn.

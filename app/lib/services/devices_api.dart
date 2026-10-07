@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'bounded_http_request.dart';
 import 'cookie_api_client.dart';
 import 'devices_api_contract.dart';
 
@@ -33,7 +34,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<List<DeviceSummary>> list() async {
     final cookie = await cookieProvider();
     if (cookie == null) throw Exception('Not signed in');
-    final res = await client.get(
+    final res = await boundedHttpRequest(
+      client,
+      'GET',
       Uri.parse('$licenseApiUrl/account/devices'),
       headers: {'cookie': cookie},
     );
@@ -58,7 +61,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<bool> revoke(String id) async {
     final cookie = await cookieProvider();
     if (cookie == null) return false;
-    final res = await client.delete(
+    final res = await boundedHttpRequest(
+      client,
+      'DELETE',
       Uri.parse('$licenseApiUrl/account/devices/$id'),
       headers: {'cookie': cookie},
     );
@@ -69,7 +74,6 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   Future<CreatedDevice> createDevice({
     required String deviceUuid,
     required String ed25519Pub,
-    required String x25519Pub,
     required String platform,
     required String displayName,
     String? kind,
@@ -80,13 +84,14 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
     }
     http.Response res;
     try {
-      res = await client.post(
+      res = await boundedHttpRequest(
+        client,
+        'POST',
         Uri.parse('$licenseApiUrl/account/devices'),
         headers: {'content-type': 'application/json', 'cookie': cookie},
         body: jsonEncode({
           'deviceUuid': deviceUuid,
           'ed25519Pub': ed25519Pub,
-          'x25519Pub': x25519Pub,
           'platform': platform,
           'displayName': displayName,
           // Omitted (not null) when unset so the server keeps deriving the kind
@@ -106,7 +111,7 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
         // controllers that pricing never mentions, so the only remedy is to
         // remove an app device — upgrading can never clear it. The
         // APP_DEVICE_CAP body is built in web/src/routes/devices.ts; the
-        // two-axis model is web/CLAUDE.md (the security-invariants paragraph).
+        // two-axis model is web/AGENTS.md (the security-invariants paragraph).
         final cap = _deviceCapFromBody(res.body, kind: DeviceCapKind.appDevice);
         throw ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap);
       }

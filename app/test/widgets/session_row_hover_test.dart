@@ -1,9 +1,12 @@
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -70,6 +73,40 @@ void main() {
 
   group('SessionRow hover and sizing', () {
     testWidgets(
+      'Scheduler clears the session highlight and returning restores it',
+      (tester) async {
+        final session = _session('scheduled-navigation');
+        final container = await pumpRow(tester, FakeAgentTransport(), session);
+        container.read(activeSessionIdProvider.notifier).set(session.id);
+        await tester.pump();
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isTrue,
+        );
+
+        container
+            .read(workbenchSurfaceProvider.notifier)
+            .set(WorkbenchSurface.scheduler);
+        await tester.pump();
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isFalse,
+        );
+        expect(container.read(activeSessionIdProvider), session.id);
+
+        container
+            .read(workbenchSurfaceProvider.notifier)
+            .set(WorkbenchSurface.workspace);
+        await tester.pump();
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isTrue,
+        );
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
       'on desktop, kebab menu appears only on hover and row height never jitters',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -135,55 +172,60 @@ void main() {
       }
     });
 
-    testWidgets('tapping kebab menu opens session actions menu and selecting action executes', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      try {
-        final transport = FakeAgentTransport();
-        final session = _session('sess-3');
-        await pumpRow(tester, transport, session);
+    testWidgets(
+      'tapping kebab menu opens session actions menu and selecting action executes',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        try {
+          final transport = FakeAgentTransport();
+          final session = _session('sess-3');
+          await pumpRow(tester, transport, session);
 
-        final rowFinder = find.byType(SessionRow);
-        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-        addTearDown(mouse.removePointer);
-        await mouse.addPointer(location: Offset.zero);
-        await mouse.moveTo(tester.getCenter(rowFinder));
-        await tester.pump();
+          final rowFinder = find.byType(SessionRow);
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          addTearDown(mouse.removePointer);
+          await mouse.addPointer(location: Offset.zero);
+          await mouse.moveTo(tester.getCenter(rowFinder));
+          await tester.pump();
 
-        final kebab = find.byTooltip('Session actions');
-        expect(kebab, findsOneWidget);
+          final kebab = find.byTooltip('Session actions');
+          expect(kebab, findsOneWidget);
 
-        await tester.tap(kebab);
-        await tester.pumpAndSettle();
+          await tester.tap(kebab);
+          await tester.pumpAndSettle();
 
-        expect(find.text('Stop'), findsOneWidget);
-        expect(find.text('Rename'), findsOneWidget);
-        expect(find.text('Delete'), findsOneWidget);
+          expect(find.text('Stop'), findsOneWidget);
+          expect(find.text('Rename'), findsOneWidget);
+          expect(find.text('Delete'), findsOneWidget);
 
-        // Move mouse away from SessionRow to simulate mouse moving over popup menu items
-        await mouse.moveTo(const Offset(600, 600));
-        await tester.pump();
+          // Move mouse away from SessionRow to simulate mouse moving over popup menu items
+          await mouse.moveTo(const Offset(600, 600));
+          await tester.pump();
 
-        // Kebab is still mounted because menu is open
-        expect(find.byTooltip('Session actions'), findsOneWidget);
+          // Kebab is still mounted because menu is open
+          expect(find.byTooltip('Session actions'), findsOneWidget);
 
-        // Tap 'Rename' menu item
-        await tester.tap(find.text('Rename'));
-        await tester.pumpAndSettle();
+          // Tap 'Rename' menu item
+          await tester.tap(find.text('Rename'));
+          await tester.pumpAndSettle();
 
-        // Rename dialog appears because anchor remained mounted
-        expect(find.text('Rename session'), findsOneWidget);
+          // Rename dialog appears because anchor remained mounted
+          expect(find.text('Rename session'), findsOneWidget);
 
-        // Cancel rename dialog
-        await tester.tap(find.text('Cancel'));
-        await tester.pumpAndSettle();
+          // Cancel rename dialog
+          await tester.tap(find.text('Cancel'));
+          await tester.pumpAndSettle();
 
-        // Menu and dialog closed, and since mouse is away, kebab is now unmounted
-        expect(find.byTooltip('Session actions'), findsNothing);
+          // Menu and dialog closed, and since mouse is away, kebab is now unmounted
+          expect(find.byTooltip('Session actions'), findsNothing);
 
-        await tester.pumpWidget(const SizedBox());
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    });
+          await tester.pumpWidget(const SizedBox());
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
   });
 }

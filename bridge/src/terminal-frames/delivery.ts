@@ -37,6 +37,8 @@ export interface TerminalViewerTransport {
    *  attachment (see `pause`), which resumes on its own. */
   retired?(address: TerminalAddress, attachmentId: string): void;
 }
+/** How long a finished run waits for link stats before its screen is frozen. */
+const FINAL_LINK_WAIT_MS = 150;
 interface Run {
   address: TerminalAddress;
   runId: string;
@@ -133,12 +135,21 @@ export class TerminalFrameHub {
     await run.source.settle();
     if (this.runs.get(key(address)) !== run) return;
     // The final revision shares the live capture budget, then remains cached
-    // until viewers acknowledge it or their attachments expire.
-    if (run.capturedRevision !== run.source.revision) {
-      const delay = TERMINAL_FRAME_INTERVAL_MS - (this.now() - run.lastCapture);
-      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    // until viewers acknowledge it or their attachments expire. Paths printed
+    // just before the exit have stats still in flight; the revision is frozen
+    // only after they get a bounded chance to land, because nothing re-frames
+    // a final screen once a viewer has acknowledged it.
+    const linkDeadline = this.now() + FINAL_LINK_WAIT_MS;
+    for (;;) {
+      if (run.capturedRevision !== run.source.revision) {
+        const delay = TERMINAL_FRAME_INTERVAL_MS - (this.now() - run.lastCapture);
+        if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        if (this.runs.get(key(address)) !== run) return;
+        if (run.capturedRevision !== run.source.revision) this.captureInto(run, this.now(), true);
+      }
+      const remaining = linkDeadline - this.now();
+      if (remaining <= 0 || !(await run.source.settleLinks(remaining))) break;
       if (this.runs.get(key(address)) !== run) return;
-      if (run.capturedRevision !== run.source.revision) this.captureInto(run, this.now(), true);
     }
     run.finalRevision = run.source.revision;
     run.exitCode = exitCode;
@@ -382,7 +393,7 @@ export class TerminalViewerConnection {
 
   private tickAttachment(attachment: Attachment, now: number): void {
     const run = attachment.run;
-    // D5's "retire pending viewer work" on a revocation edge, and no more than
+    // Retires pending viewer work on a revocation edge, and no more than
     // that. The common cause here is `connState.suppressed` — the app
     // backgrounded, or the peer went briefly offline — which is an everyday
     // event that ends by itself, so destroying the attachment would freeze the
@@ -408,7 +419,7 @@ export class TerminalViewerConnection {
         ...wireAddress(run.address), runId: run.runId, attachmentId: attachment.id,
         code: "ENDED", message: "Terminal completed.", finalSequence: attachment.sequence, exitCode: run.exitCode,
       }), new AbortController().signal, () => {});
-      this.retire(attachment);
+      this.retire(attachment, { abortQueued: false });
       return;
     }
     if (attachment.unsent && attachment.unsent.revision < run.source.revision &&
@@ -506,11 +517,11 @@ export class TerminalViewerConnection {
   }
 
   private fail(attachment: Attachment, code: "ACK_TIMEOUT" | "DISPLAY_FAILED", message: string): void {
-    this.retire(attachment);
     this.safeSend(createMessage("terminal:display:status", {
       ...wireAddress(attachment.run.address), runId: attachment.run.runId, attachmentId: attachment.id,
       code, message: message.slice(0, 1024),
     }), new AbortController().signal, () => {});
+    this.retire(attachment);
   }
 
   /** Drops what is queued for a viewer that cannot receive right now, WITHOUT
@@ -546,9 +557,19 @@ export class TerminalViewerConnection {
     }
   }
 
-  private retire(attachment: Attachment): void {
+  /** Every attachment-scoped notice (ENDED, a status) is handed to the
+   *  transport before the retirement that follows it, and `abortQueued`
+   *  decides what that retirement does to what is already in flight.
+   *  `abortQueued: false` (ENDED only, both here and in `retireRun`) leaves
+   *  `attachment.controller` untouched, so the frame most recently handed to
+   *  `transport.send` keeps its own signal and is written rather than dropped
+   *  — aborting the owner would fire the abort listener onto that frame's
+   *  `unsent.controller` even though it already left this class. Every other
+   *  retirement still aborts, which is what makes a pause/fail's own queue
+   *  drop happen. */
+  private retire(attachment: Attachment, opts?: { abortQueued?: boolean }): void {
     if (!this.attachments.delete(attachment.id)) return;
-    attachment.controller.abort();
+    if (opts?.abortQueued !== false) attachment.controller.abort();
     this.bytes -= attachment.bytes;
     this.budget.bytes -= attachment.bytes;
     attachment.pending.clear();
@@ -577,7 +598,7 @@ export class TerminalViewerConnection {
           finalSequence: attachment.sequence, exitCode: exitCode ?? null,
         }), new AbortController().signal, () => {});
       }
-      this.retire(attachment);
+      this.retire(attachment, { abortQueued: false });
     }
   }
 

@@ -51,18 +51,16 @@ export function PendingPage({ email, pendingId }: PendingPageProps) {
       <div
         class="max-w-md mx-auto mt-16 card bg-panel border border-edge"
         data-ab-wake={email}
+        data-ab-remember-now="link"
+        data-ab-email={email}
       >
         <div class="card-body items-center text-center">
           <h1 class="card-title">Check your email</h1>
           <p class="text-sm text-muted">
-            We sent a sign-in link to <span class="font-mono">{email}</span>.
+            A sign-in link was requested for <span class="font-mono">{email}</span>.
           </p>
-          {/* Same-device is the common case and now the short one: the link
-              signs that browser straight in. The approval step is what a link
-              opened somewhere else gets, and the copy leads with the case the
-              reader is actually in. */}
           <p class="text-xs text-muted mt-2">
-            Open it in this browser and you're signed in. On another device,
+            Check your spam folder if it has not arrived. Open the link and
             tap <strong>Approve</strong> and this page follows along. The link
             expires in {EXPIRY_MINUTES} minutes.
           </p>
@@ -89,6 +87,7 @@ export function PendingPage({ email, pendingId }: PendingPageProps) {
             data-ab-cooldown-arm
           >
             <input type="hidden" name="email" value={email} />
+            <input type="hidden" name="previousId" value={pendingId} />
             <button type="submit" class="btn btn-quiet btn-sm">
               Resend the link
             </button>

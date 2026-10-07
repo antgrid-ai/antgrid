@@ -29,8 +29,8 @@ import * as opencodeHooks from "./opencode/hooks";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
-import { lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
-import { readTranscript as readCodexTranscript } from "./codex/transcript";
+import { isInterruptRecord as isClaudeInterruptRecord, lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
+import { isInterruptRecord as isCodexInterruptRecord, readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
 import { claudeForkHandoff, claudeNativeForkArgs, claudeLegacyForkSource } from "./claude-code/fork";
 import { codexForkHandoff, codexNativeForkArgs, codexLegacyForkSource } from "./codex/fork";
@@ -74,6 +74,11 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hooks: claudeHooks,
     mcp: claudeMcp,
     notifyBodyFromTranscript: lastAssistantText,
+    // Measured against the installed 2.1.284 binary: none of the six
+    // interrupt cases (mid-tool/mid-generation, crossed with single Esc,
+    // double Esc, single Ctrl+C) fires any hook — the transcript's own
+    // interrupted-turn entry is the only trace this agent leaves.
+    transcriptInterrupt: isClaudeInterruptRecord,
     driver: createClaudeDriver,
     // Measured against the installed CLI on Windows. One Ctrl-C only arms the
     // quit ("Press Ctrl-C again to exit") and is spent for nothing; two exit an
@@ -176,6 +181,13 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hooks: codexHooks,
     mcp: codexMcp,
     driver: createCodexDriver,
+    // Measured against the installed 0.156.1 binary: single Esc, double Esc
+    // and single Ctrl+C all interrupt an active turn (mid-generation and
+    // mid-tool alike) with no hook or notify firing at all — the rollout
+    // transcript's turn_aborted/interrupted event is the only trace this
+    // agent leaves. A single Ctrl+C on an IDLE prompt exits the CLI instead,
+    // but that is a different case from a turn to confirm closed.
+    transcriptInterrupt: isCodexInterruptRecord,
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
     //
@@ -573,6 +585,16 @@ export function agentSpec(tool: string): AgentSpec | undefined {
   return registry.get(tool);
 }
 
+/** Scheduling needs explicit completion and blocking signals for its opening turn. */
+export function schedulingModesForAgent(tool: string): ("terminal" | "chat")[] {
+  const spec = agentSpec(tool);
+  if (!spec) return [];
+  const modes: ("terminal" | "chat")[] = [];
+  if (spec.cli?.initialPrompt?.("scheduler-capability-probe").length && spec.observation?.turnEnd && spec.observation.handler) modes.push("terminal");
+  if (spec.driver) modes.push("chat");
+  return modes;
+}
+
 /**
  * Whether this tool can drive a headless judge — the only legal values for the
  * Handler's judge-tool override. Named rather than inlined because the callers
@@ -593,7 +615,7 @@ export function judgeCapable(tool: string): boolean {
  * submitted keystroke: the inferred turn is guaranteed a closer, so it cannot
  * wedge the session on "working" (see work-status.ts's userReply).
  *
- * Excludes both ends of the spectrum. Claude declares a real UserPromptSubmit
+ * Excludes both ends of the spectrum. Claude and codex each declare a real
  * turn-start hook, so guessing there could only be wrong. An agent with no
  * turn-end event — opencode and antigravity, whose out-of-band integrations
  * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —
@@ -606,6 +628,18 @@ export function judgeCapable(tool: string): boolean {
 export function needsKeystrokeTurnStart(tool: string | undefined): boolean {
   const tb = tool === undefined ? undefined : agentSpec(tool)?.hooks?.turnBoundaryEvents;
   return tb !== undefined && tb.start.length === 0 && tb.end.length > 0;
+}
+
+/**
+ * This agent's transcript-interrupt predicate, if it declares one — see
+ * {@link AgentSpec.transcriptInterrupt}. Every agent but claude and codex
+ * declares none: a lone Esc/Ctrl+C on such a session has nothing to confirm
+ * an interrupt against, so the bridge closes nothing on the key alone.
+ */
+export function transcriptInterruptFor(
+  tool: string | undefined,
+): ((record: unknown) => boolean) | undefined {
+  return tool === undefined ? undefined : agentSpec(tool)?.transcriptInterrupt;
 }
 
 /**

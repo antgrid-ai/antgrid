@@ -71,7 +71,7 @@ String get _scopeFragment => storageScopePrefix.isEmpty
 /// does not vary it per config. A [scopedStorageKey] prefix therefore does NOT
 /// give a debug/profile build its own storage: it still shares one physical
 /// file with any release install on the same machine (this project's normal
-/// dev setup — see `docs`/CLAUDE.md on running the real app alongside a dev
+/// dev setup — see `docs`/AGENTS.md on running the real app alongside a dev
 /// checkout). That would be a non-issue if a shared file merely interleaved
 /// writes, but the Windows and Linux plugins (`SharedPreferencesAsyncWindows`/
 /// `Linux`, see their `_cachedPreferences`) read the WHOLE file into memory
@@ -115,9 +115,9 @@ SharedPreferencesOptions get desktopSharedPreferencesOptions {
       suiteName: 'ai.antgrid.prefs.$fragment',
     );
   }
-  // Android/iOS/web: each debug/release variant is already a distinct OS-level
-  // install (different application id / bundle id per build config, or an
-  // origin-scoped web storage), so there is no shared-file hazard to guard
-  // against here — the key prefix alone is sufficient, same as release.
+  // Android/iOS/web: debug and release share one application id / bundle id,
+  // so installing one replaces the other and two builds never run against the
+  // same sandbox at once (web storage is origin-scoped). There is no
+  // shared-file hazard to guard against; the key prefix alone is sufficient.
   return const SharedPreferencesOptions();
 }

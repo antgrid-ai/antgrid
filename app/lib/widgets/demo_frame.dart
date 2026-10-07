@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart' show Theme;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,6 +15,19 @@ import '../providers/demo_mode.dart';
 import '../utils/platform_utils.dart';
 import '../window/window_capabilities.dart';
 import 'window_title_bar.dart';
+
+/// Whether the strip may render at all.
+///
+/// The one escape hatch, for a debug entry point that captures product
+/// screenshots of the sample project — a marketing frame carries its "sample
+/// data" disclosure in its caption, and a banner burnt into the image cannot
+/// be one. Paired with [kDebugMode] at
+/// the read below, so no release build can be talked out of the strip whatever
+/// this holds; the same reason [kNavConsoleEnabled] is shaped this way.
+///
+/// Anything that clears this owes the reader the same sentence somewhere they
+/// will see it.
+bool kDemoBannerEnabled = true;
 
 /// The strip that says "this is not your machine", wrapped around every route
 /// while the demo is on.
@@ -46,9 +60,11 @@ class DemoFrame extends ConsumerWidget {
     // already on into a demo with no project drawer and nothing to restore it.
     final narrow = MediaQuery.sizeOf(context).width < kMediumBreakpoint;
     final showTitleBar = !isMobilePlatform && (appOwnsWindowChrome || !narrow);
-    // Everything below is a SIBLING of the app's Navigator, which owns the only
-    // Overlay in the tree — so the caption buttons' tooltips, which are
-    // `OverlayPortal`s and throw at BUILD time rather than on hover, have none.
+    final showBanner = !kDebugMode || kDemoBannerEnabled;
+    // Everything below is a SIBLING of the app's Navigator and sits beside the
+    // toast host's Overlay rather than under it, so no Overlay is an ancestor —
+    // and the caption buttons' tooltips, which are `OverlayPortal`s and throw
+    // at BUILD time rather than on hover, would have none.
     // Wrapping the whole frame instead of just the bar: an Overlay sized to the
     // bar would clip the tooltip it exists to host, since a tooltip on a title
     // bar opens downward into the routes below.
@@ -66,15 +82,19 @@ class DemoFrame extends ConsumerWidget {
                   ? const Row(children: [Spacer(), AbWindowControls()])
                   : const WindowTitleBarContents(),
             ),
-          const SafeArea(bottom: false, child: _DemoBanner()),
+          if (showBanner) const SafeArea(bottom: false, child: _DemoBanner()),
           Expanded(
             // The strip already consumed the status-bar inset; each route's own
-            // SafeArea would otherwise inset past it a second time.
-            child: MediaQuery.removePadding(
-              context: context,
-              removeTop: true,
-              child: child,
-            ),
+            // SafeArea would otherwise inset past it a second time. With no
+            // strip there is nothing to have consumed it, so the route keeps
+            // its own inset.
+            child: showBanner
+                ? MediaQuery.removePadding(
+                    context: context,
+                    removeTop: true,
+                    child: child,
+                  )
+                : child,
           ),
         ],
       ),

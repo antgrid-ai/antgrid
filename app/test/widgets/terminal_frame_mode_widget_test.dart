@@ -1,12 +1,12 @@
-// Widget-layer coverage for Wave 7's live frame-replace terminal protocol.
+// Widget-layer coverage for the live frame-replace terminal protocol.
 // The service half (terminal_service.dart) owns the protocol state machine
 // and its own opt-in suite (test/services/terminal_frame_mode_test.dart);
 // this file owns what TerminalViewWrapper does with that state:
 //
-//   - D7: TerminalAttachStage.ended's chrome (an exhaustive switch, so this
+//   - TerminalAttachStage.ended's chrome (an exhaustive switch, so this
 //     is the only place that stage's rendering is pinned) and the frame
 //     protocol's own display:status message winning over the generic label.
-//   - D10: an applied frame clears a live selection mirror rather than
+//   - an applied frame clears a live selection mirror rather than
 //     leaving it pointed at glyphs the frame just replaced.
 //   - (g): the load a live frame stream (up to 20/s) adds to the widget
 //     tree, measured directly rather than argued.
@@ -21,20 +21,29 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart';
+import 'package:antgrid/models/terminal_history_model.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/providers/agent_transport.dart'
+    show selectedTargetProvider;
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'package:antgrid/util/terminal_links.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
@@ -43,6 +52,8 @@ import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show UploadStreamResult;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -55,6 +66,7 @@ import 'package:super_clipboard/super_clipboard.dart' show DataReader;
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 bool _hasNative() {
   try {
@@ -92,8 +104,6 @@ const _keysWithdrawn = 'Keys are off while the scrollback is open';
 const _touchKeys = <String, String>{
   'Tab': '\t',
   'Esc': '\x1b',
-  'Ctrl+C': '\x03',
-  'Ctrl+D': '\x04',
   '↑': '\x1b[A',
   '↓': '\x1b[B',
   '→': '\x1b[C',
@@ -202,6 +212,16 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   return (service: service, transport: transport);
 }
 
+class _RecordingHistoryModel extends TerminalHistoryModel {
+  final seeks = <int>[];
+
+  @override
+  void seek(int beforeRowId, {bool newer = false}) {
+    seeks.add(beforeRowId);
+    super.seek(beforeRowId, newer: newer);
+  }
+}
+
 /// A frame-mode tab, built directly (not through TerminalService) so its
 /// TerminalDisplayMode.frame is explicit rather than reached by driving the
 /// subscribe handshake — the state machine that gets there is the service
@@ -212,6 +232,7 @@ TerminalTab _tab({
   TerminalDisplayMode mode = TerminalDisplayMode.frame,
   TerminalSessionState sessionState = TerminalSessionState.running,
   List<int>? pty,
+  TerminalHistoryModel? history,
 }) {
   final tab = TerminalTab(
     terminalId: id,
@@ -221,6 +242,7 @@ TerminalTab _tab({
     cols: 80,
     rows: 24,
     mode: mode,
+    history: history,
   );
   // [pty] stands in for the running program: everything the engine's transport
   // accepts is a byte the guest on the other end would have read.
@@ -346,6 +368,7 @@ Widget _wrap(
     terminalStateProvider.overrideWith((ref) => terminalState),
   ],
   child: MaterialApp(
+    builder: abToastHostBuilder,
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),
@@ -396,7 +419,7 @@ void main() {
     );
   });
 
-  group('D7: TerminalAttachStage.ended chrome', () {
+  group('TerminalAttachStage.ended chrome', () {
     testWidgets(
       'renders the protocol\'s own message, undimmed, with no Retry',
       (tester) async {
@@ -467,7 +490,7 @@ void main() {
     });
   });
 
-  group('D7: the failed chrome prefers the protocol\'s own message', () {
+  group('the failed chrome prefers the protocol\'s own message', () {
     testWidgets('a display:status message replaces the generic label', (
       tester,
     ) async {
@@ -502,7 +525,7 @@ void main() {
     });
   });
 
-  group('D10: an applied frame clears a live selection mirror', () {
+  group('an applied frame clears a live selection mirror', () {
     testWidgets(
       'SendToAgentButton disappears once TerminalTab.replaceEpoch bumps',
       (tester) async {
@@ -549,7 +572,7 @@ void main() {
         );
 
         // The signal TerminalService._handleTerminalFrame sends on every
-        // applied frame (D10) — the screen under the selection's row/col
+        // applied frame — the screen under the selection's row/col
         // anchors was just replaced wholesale.
         tab.replaceEpoch.value++;
         await tester.pump();
@@ -616,8 +639,8 @@ void main() {
           findsNothing,
           reason:
               'Ctrl+C and SendToAgentButton both read the mirror, and '
-              'handing the user glyphs they never selected is the harm D10 '
-              'exists to prevent',
+              'handing the user glyphs they never selected is the harm this '
+              'mirror exists to prevent',
         );
       },
     );
@@ -843,12 +866,97 @@ void main() {
   // exercises the controller the wrapper drives rather than the wrapper's
   // own build method. What it proves is the mechanism the wrapper's
   // correctness actually rests on: a frame is one appendOutputBytes call
-  // through the SAME VT parser legacy output uses (D3), and mouse/focus
+  // through the SAME VT parser legacy output uses, and mouse/focus
   // mode state is read fresh off that parser on every call — so a frame
   // that turns a mode on or off is exactly as effective as the guest
   // sending it directly ever was.
   group('(d): mouse tracking and DEC 1004 focus reporting read the frame\'s '
       'own mode state', () {
+    for (final boundary in ['suspend', 'refusal', 'rehydrate']) {
+      testWidgets('pending mouse motion is discarded on $boundary', (
+        tester,
+      ) async {
+        if (_skipWithoutNative()) return;
+        final h = await _makeService(addTearDown, inputReady: true);
+        h.service.activate();
+        await tester.pump();
+        final controller = h.service.currentState.tabs['t1']!.ghostty;
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (bytes) {
+            sent.addAll(bytes);
+            return true;
+          },
+        );
+        controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+        const size = VtMouseEncoderSize(
+          screenWidth: 800,
+          screenHeight: 600,
+          cellWidth: 10,
+          cellHeight: 20,
+        );
+        void move(double x) => controller.sendMouse(
+          action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+          position: VtMousePosition(x: x, y: 10),
+          size: size,
+        );
+        move(10);
+        expect(sent, isNotEmpty);
+        sent.clear();
+        move(30);
+        expect(sent, isEmpty);
+        switch (boundary) {
+          case 'suspend':
+            h.service.suspendDisplay();
+          case 'refusal':
+            h.transport.setEstablished(false);
+            expect(h.service.sendInput('t1', 'x'), isFalse);
+          case 'rehydrate':
+            h.transport.redriveHydrators();
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(sent, isEmpty);
+        await tester.runAsync(h.service.dispose);
+      });
+    }
+
+    testWidgets('direct terminal input flushes pending motion first', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown, inputReady: true);
+      final controller = h.service.currentState.tabs['t1']!.ghostty;
+      controller.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => controller.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      List<Map<String, dynamic>> inputs() => h.transport.sent
+          .where((message) => message['type'] == 'terminal:input')
+          .toList();
+      h.transport.clearSent();
+      move(10);
+      expect(inputs(), hasLength(1));
+      h.transport.clearSent();
+      move(30);
+      expect(inputs(), isEmpty);
+
+      expect(h.service.sendInput('t1', 'x'), isTrue);
+      expect(inputs(), hasLength(2));
+      expect(inputs().first['data'], startsWith('\x1b[<'));
+      expect(inputs().last['data'], 'x');
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(inputs(), hasLength(2));
+      await tester.runAsync(h.service.dispose);
+    });
+
     test('sendMouse reports nothing before a frame enables tracking, and a '
         'report after', () {
       if (_skipWithoutNative()) return;
@@ -1494,6 +1602,8 @@ void main() {
         expect(find.byType(TerminalQuickActionsBar), findsOneWidget);
         expect(find.text(_keysWithdrawn), findsNothing);
         h.transport.sent.clear();
+        await tester.ensureVisible(find.text(entry.key));
+        await tester.pump();
         await tester.tap(find.text(entry.key));
         await tester.pump();
         expect(find.byType(TerminalHistoryView), findsNothing);
@@ -1626,9 +1736,7 @@ void main() {
         await drop();
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);
@@ -1680,9 +1788,7 @@ void main() {
         await onPicked(picked);
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);
@@ -1737,9 +1843,7 @@ void main() {
         await onPicked(picked);
         await tester.pump();
         expect(find.text(_pipelineRefusal), findsOneWidget);
-        ScaffoldMessenger.of(
-          tester.element(find.byType(Scaffold)),
-        ).clearSnackBars();
+        clearAbToasts(tester.element(find.byType(Scaffold)));
         await tester.pump();
 
         await tester.tap(_historyScrollbar);
@@ -1772,7 +1876,7 @@ void main() {
         );
         await tester.pump();
 
-        // The REAL UploadService, driven through the bridge's own protocol and
+        // The REAL UploadService, driven through the transport's upload API and
         // under the cap, so the path genuinely comes back — the multi-second
         // wait every attach gesture's reader check is made before.
         Future<void> upload({required bool openReaderMidUpload}) async {
@@ -1785,28 +1889,20 @@ void main() {
                 ),
           );
           await tester.pump();
-          final requestId =
-              h.transport.sent.lastWhere(
-                    (m) => m['type'] == 'file:upload-start',
-                  )['requestId']
-                  as String;
+          final exchange = h.transport.uploadCalls.last;
           if (openReaderMidUpload) {
             await tester.tap(_historyScrollbar);
             await tester.pump();
           }
-          h.transport.emit('file:upload-ready', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-          });
+          exchange.progress(3, 3);
           await tester.pump();
-          h.transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-          await tester.pump();
-          h.transport.emit('file:upload-result', {
-            'requestId': requestId,
-            'uploadId': 'u1',
-            'ok': true,
-            'path': '/staged/shot.png',
-          });
+          exchange.complete(
+            const UploadStreamResult(
+              ok: true,
+              uploadId: 'u1',
+              path: '/staged/shot.png',
+            ),
+          );
           await tester.pump();
           await tester.pump();
         }
@@ -1896,7 +1992,7 @@ void main() {
     });
   });
 
-  group('D2: an archive epoch turnover empties the reader under the user', () {
+  group('an archive epoch turnover empties the reader under the user', () {
     testWidgets('a new epoch closes the reader rather than blanking it', (
       tester,
     ) async {
@@ -1944,7 +2040,44 @@ void main() {
     });
   });
 
-  group('D3: the affordance is the archive route an agent pane has', () {
+  group('the affordance is the archive route an agent pane has', () {
+    testWidgets('opening history cancels pending live mouse motion', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      tab.ghostty.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      const size = VtMouseEncoderSize(
+        screenWidth: 800,
+        screenHeight: 600,
+        cellWidth: 10,
+        cellHeight: 20,
+      );
+      void move(double x) => tab.ghostty.sendMouse(
+        action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+        position: VtMousePosition(x: x, y: 10),
+        size: size,
+      );
+      move(10);
+      expect(pty, isNotEmpty);
+      pty.clear();
+      move(30);
+      expect(pty, isEmpty);
+
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(pty, isEmpty);
+    });
+
     testWidgets(
       'a mouse-reporting guest swallows the wheel, and the control still '
       'reaches the archive',
@@ -2242,6 +2375,331 @@ void main() {
       expect(
         h.transport.sent.where((m) => m['type'] == 'terminal:start'),
         hasLength(1),
+      );
+    });
+  });
+
+  group('the open reader under scrollbar drags and pane resizes', () {
+    testWidgets('a scrollbar drag hands the reader one target per frame', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final history = _RecordingHistoryModel();
+      final tab = _tab(id: 't1', history: history);
+      _archive(tab, nextRowId: 100000);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+      history.seeks.clear();
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(_historyScrollbar),
+      );
+      for (var i = 0; i < 4; i++) {
+        await gesture.moveBy(const Offset(0, -30));
+      }
+      await tester.pump();
+
+      expect(history.seeks, isNotEmpty);
+      final position = tester
+          .widget<TerminalHistoryScrollbar>(_historyScrollbar)
+          .position;
+      expect(history.seeks.toSet(), {math.min(position + 100, 100000)});
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('the reader reporting its position rebuilds only the '
+        'scrollbar', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settle(tester);
+
+      TerminalHistoryView reader() =>
+          tester.widget<TerminalHistoryView>(find.byType(TerminalHistoryView));
+      final before = reader();
+      final live = _liveView(tester);
+
+      await tester.pump();
+      expect(identical(reader(), before), isTrue);
+
+      before.onPosition!(123);
+      await tester.pump();
+
+      expect(identical(reader(), before), isTrue);
+      expect(identical(_liveView(tester), live), isTrue);
+      expect(
+        tester.widget<TerminalHistoryScrollbar>(_historyScrollbar).position,
+        123,
+      );
+    });
+
+    testWidgets('narrowing a driver pane re-wraps the open reader once, after '
+        'the drag settles', (tester) async {
+      if (_skipWithoutNative()) return;
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+      final width = ValueNotifier<double>(300);
+      addTearDown(width.dispose);
+
+      await tester.pumpWidget(
+        _wrap(
+          ValueListenableBuilder<double>(
+            valueListenable: width,
+            builder: (context, w, child) => _pane(tab, h.service, width: w),
+          ),
+          terminalState: Stream.value(_stateWith()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await _settleWire(tester, h);
+      h.transport.sent.clear();
+
+      int readerCols() => tester
+          .widget<GhosttyTerminalView>(
+            find.descendant(
+              of: find.byType(TerminalHistoryView),
+              matching: find.byType(GhosttyTerminalView),
+            ),
+          )
+          .controller
+          .cols;
+      final cols = readerCols();
+      addTearDown(() => debugTerminalHistoryScratchEngines = 0);
+      debugTerminalHistoryScratchEngines = 0;
+
+      for (final w in [260.0, 220.0, 180.0]) {
+        width.value = w;
+        await tester.pump(const Duration(milliseconds: 16));
+        expect(readerCols(), cols);
+        expect(debugTerminalHistoryScratchEngines, 0);
+        expect(_resizes(h), isEmpty);
+      }
+
+      await _settle(tester);
+      expect(readerCols(), lessThan(cols));
+      expect(debugTerminalHistoryScratchEngines, 1);
+    });
+  });
+
+  group('detected terminal links', () {
+    Map<String, dynamic> resolveRequest(FakeAgentTransport transport) =>
+        transport.sent.lastWhere((m) => m['type'] == 'file:resolve-path');
+
+    /// Answers the pending `file:resolve-path` on the real event loop, where
+    /// the transport's listeners live, then lets the fake clock carry the
+    /// result onward.
+    Future<void> reply(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+      Map<String, dynamic> result,
+    ) async {
+      await tester.runAsync(() async {
+        transport.emit('file:resolve-path-result', {
+          'projectId': 'p',
+          'requestId': resolveRequest(transport)['requestId'],
+          'isDirectory': false,
+          'externalImagePath': null,
+          ...result,
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+    }
+
+    testWidgets('are styled quietly on the live pane and in the reader', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      expect(_liveView(tester).isQuietHyperlink, same(isDetectedTerminalLink));
+
+      _liveView(tester).onScrollPastTop!();
+      await tester.pump();
+
+      final reader = tester.widget<TerminalHistoryView>(
+        find.byType(TerminalHistoryView),
+      );
+      expect(reader.isQuietHyperlink, same(isDetectedTerminalLink));
+      // Without both engines mounted `.last` is the live pane again, and the
+      // reader's own engine would go unchecked.
+      expect(find.byType(GhosttyTerminalView), findsNWidgets(2));
+      final readerEngine = tester.widget<GhosttyTerminalView>(
+        find.byType(GhosttyTerminalView).last,
+      );
+      expect(readerEngine.isQuietHyperlink, same(isDetectedTerminalLink));
+    });
+
+    testWidgets('a path link resolves against the terminal it was printed in', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-path:?p=src%2Fa.ts&b=s&k=f&n=12',
+        ),
+      );
+      await tester.pump();
+
+      final request = resolveRequest(h.transport);
+      expect(request['path'], 'src/a.ts');
+      expect(request['terminalId'], 't1');
+      expect(request['base'], 's');
+
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+      final files = h.service.session.fileService.currentState.files;
+      expect(files.selectedFilePath, 'src/a.ts');
+      expect(files.searchLine, 12);
+    });
+
+    testWidgets('a path link with no workspace menu hands its tab to the shell', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      expect(container.read(workspaceMenuControlProvider), isNull);
+      const focused = LocalProject('p');
+      container.read(selectedTargetProvider.notifier).set(focused);
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      final pending = container.read(pendingWorkspaceViewProvider);
+      expect(pending?.value, WorkspaceView.files);
+      expect(
+        pending?.target,
+        focused,
+        reason: 'the shell drops a handover stamped for a different session',
+      );
+    });
+
+    testWidgets('a path link answered after the focus moved is dropped', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('p'));
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      container
+          .read(selectedTargetProvider.notifier)
+          .set(const LocalProject('other'));
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      expect(container.read(pendingWorkspaceViewProvider), isNull);
+      expect(
+        h.service.session.fileService.currentState.files.selectedFilePath,
+        isNull,
+      );
+    });
+
+    testWidgets('a path link reveals through the workspace menu when present', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalViewWrapper)),
+      );
+      final revealed = <WorkspaceView>[];
+      container
+          .read(workspaceMenuControlProvider.notifier)
+          .set((active: null, reveal: revealed.add));
+
+      unawaited(
+        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+      );
+      await tester.pump();
+      await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
+
+      expect(revealed, [WorkspaceView.files]);
+      expect(container.read(pendingWorkspaceViewProvider), isNull);
+    });
+
+    testWidgets('a detected local URL opens in the preview tab', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      final preview = h.service.session.previewService;
+      await preview.openTab(5173);
+
+      unawaited(
+        _liveView(
+          tester,
+        ).onOpenHyperlink!('antgrid-url:http://localhost:5173/x?y=1#z'),
+      );
+      await tester.pump();
+
+      expect(
+        preview.takeNavRequest(5173),
+        Uri.parse('http://localhost:5173/x?y=1#z'),
       );
     });
   });

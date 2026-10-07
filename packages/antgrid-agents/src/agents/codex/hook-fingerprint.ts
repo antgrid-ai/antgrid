@@ -11,6 +11,8 @@ export const EVENT_LABELS = {
   PermissionRequest: "permission_request",
   Stop: "stop",
   SessionStart: "session_start",
+  PostToolUse: "post_tool_use",
+  UserPromptSubmit: "user_prompt_submit",
 } as const;
 
 // Recursively sort object keys (codex canonical_json) and emit compact JSON

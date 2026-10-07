@@ -10,7 +10,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -699,7 +699,7 @@ void main() {
   // The bridge's removal work is unbounded (measured 12.5s and 14.2s), so
   // silence cannot mean failure — and must not be called one at 15s, which a
   // successful delete routinely outlives.
-  test('an unanswered delete is accepted, and stays silent past 15s', () async {
+  test('an unanswered delete becomes outcomeUnknown at its bound', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final cache = await CachedSessionsStore.open();
@@ -721,14 +721,14 @@ void main() {
 
       async.elapse(kSessionDeleteAckTimeout);
       async.flushMicrotasks();
-      expect(outcome, SessionDeleteAck.accepted);
+      expect(outcome, SessionDeleteAck.outcomeUnknown);
     });
 
     await svc.dispose();
     await session.close();
   });
 
-  test('a reconnect landing inside the delete window is accepted, not a '
+  test('a reconnect landing inside the delete window is unknown, not a '
       'thrown SessionDownException', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
@@ -738,36 +738,95 @@ void main() {
     final future = svc.delete('sess-1');
     t.emitState(TransportState.disconnected);
 
-    expect(await future, SessionDeleteAck.accepted);
+    expect(await future, SessionDeleteAck.outcomeUnknown);
 
     await svc.dispose();
     await session.close();
   });
 
-  // The backstop de-registers the pending entry, which is why a late refusal
-  // has no future left to fail. It still has to reach the user: _handleResult
-  // writes the reason onto the state before it looks the entry up, and
-  // OperationalErrorToaster listens there.
-  test(
-    'a refusal with no pending entry left still lands on the state',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await makeSession(t);
-      final cache = await CachedSessionsStore.open();
-      final svc = SessionsService.fromSession(session, cache: cache);
+  // The backstop drops the pending entry, so a late refusal has no future to
+  // fail; _handleResult must still announce it on `errors`.
+  test('a refusal with no pending entry left is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
 
-      t.emit('session:result', {
-        'requestId': 'long-gone',
-        'ok': false,
-        'errorCode': 'WORKTREE_DELETE_FAILED',
-        'error': 'Could not remove the worktree.',
-      });
-      await Future<void>.delayed(Duration.zero);
+    t.emit('session:result', {
+      'requestId': 'long-gone',
+      'ok': false,
+      'errorCode': 'WORKTREE_DELETE_FAILED',
+      'error': 'Could not remove the worktree.',
+    });
+    await Future<void>.delayed(Duration.zero);
 
-      expect(svc.currentState.error, 'Could not remove the worktree.');
+    expect(errors, ['Could not remove the worktree.']);
 
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an untyped mutation refusal is announced', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
+
+    final future = svc.stopSession('sess-1');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.lastWhere((m) => m['type'] == 'session:stop');
+    t.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': false,
+      'error': 'no such session',
+    });
+
+    // The caller gets null and no reason, so the announcement is all the user
+    // hears about it.
+    expect(await future, isNull);
+    expect(errors, ['no such session']);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a refusal handed to a typed caller is not announced too', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+    final errors = <String>[];
+    svc.errors.listen(errors.add);
+
+    final mode = svc.setMode('sess-1', 'chat');
+    final start = svc.start('sess-1', raiseRefusal: true);
+    await Future<void>.delayed(Duration.zero);
+    t.emit('session:result', {
+      'requestId': t.sent.lastWhere(
+        (m) => m['type'] == 'session:set-mode',
+      )['requestId'],
+      'ok': false,
+      'error': 'mode refused',
+    });
+    t.emit('session:result', {
+      'requestId': t.sent.lastWhere(
+        (m) => m['type'] == 'session:start',
+      )['requestId'],
+      'ok': false,
+      'errorCode': 'WORKTREE_MISSING',
+      'error': 'start refused',
+    });
+
+    expect((await mode).error, 'mode refused');
+    await expectLater(start, throwsA(isA<SessionOperationException>()));
+    expect(errors, isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
 }

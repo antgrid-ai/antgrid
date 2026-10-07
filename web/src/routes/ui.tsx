@@ -1,8 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { Hono } from "hono";
-import { getCookie } from "hono/cookie";
+import { safeReturnPath } from "../auth/contracts.js";
+import { recipientLimit } from "../auth/recipient-limit.js";
+import { AuthReportQuery, loadAuthReport } from "../models/auth-report.js";
+import { AuthReportPage } from "../ui/auth-report.js";
+import { Hono, type MiddlewareHandler } from "hono";
+import { randomBytes } from "node:crypto";
+import { authTransaction, scopedAuthDb } from "../auth/transaction.js";
+import { getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
 import type { DB } from "../db/index.js";
@@ -10,12 +16,13 @@ import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import type { RelayPushConfig } from "../relay/push.js";
 import { findByIdWithHashes, findValidById, checkNonce } from "../models/pending-sign-in.js";
-import { COOKIE_BROWSER_TOKEN, ERR_ALREADY_APPROVED } from "../auth/cross-device-plugin.js";
+import { bindingCookie, ERR_ALREADY_APPROVED } from "../auth/cross-device-plugin.js";
 import { ApproveSignInPage } from "../ui/approve-sign-in.js";
 import { ApprovedPage } from "../ui/approved.js";
 import {
   requireUser,
   requireUserOrRedirect,
+  requireReadOnlyUserOrRedirect,
   type AuthVars,
 } from "../auth/middleware.js";
 import { listActiveDevices } from "../models/device.js";
@@ -34,7 +41,8 @@ import { ForgotPasswordPage } from "../ui/forgot-password.js";
 import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
 import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
 import { SignUpPage } from "../ui/signup.js";
-import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
+import type { AppleTokenClient } from "../auth/apple-tokens.js";
+import { appleSignInConfigured, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
 import {
   hasPasswordCredential,
   pruneDuplicatePasswordCredentials,
@@ -72,7 +80,11 @@ import {
 } from "../billing/cancel-subscription.js";
 import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
-import { fetchConnections } from "../relay/push.js";
+import { StatsPage } from "../ui/stats.js";
+import { OperatorUsersPage, OperatorUserPage, OperatorAccountsPage, OperatorAccountPage } from "../ui/operator.js";
+import { OperatorUsersQuerySchema, OperatorAccountsQuerySchema, loadOperatorUsers, loadOperatorUser, loadOperatorAccounts, loadOperatorAccount } from "../models/operator.js";
+import { fetchConnections, fetchUserConnections } from "../relay/push.js";
+import { loadUsageStats, summarizeLiveRelay } from "../usage/stats.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
 import { AccountPage, AccountDeletedPage } from "../ui/account.js";
 import {
@@ -114,7 +126,7 @@ import {
 import { TeamPage } from "../ui/team.js";
 import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 
-// Internal relay-connections view is restricted to named operators. Gate on
+// Internal operator pages (/internal/*) are restricted to named operators. Gate on
 // email (lowercased) — Better-Auth verifies email ownership at sign-in, so it's
 // a safe identity anchor here. Non-operators get 404, not 403: don't reveal the
 // route exists.
@@ -165,26 +177,18 @@ export function uiRoutes(deps: {
   relay: RelayPushConfig;
   clientIp: ClientIpResolver;
   sendEmail: SendEmail;
+  apple?: AppleTokenClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
-  const startLimiter = tokenBucket(5, 0.2); // 5 burst, 1 per 5s, per IP
+  const rateDatabase = deps.db;
+  deps = { ...deps, db: scopedAuthDb(deps.db) };
   const approveSignInLimiter = tokenBucket(10, 0.5); // 10 burst, 1 per 2s, per IP
-  // Better-Auth's own customRules cover the same endpoints but only arm in
-  // production (`rateLimit.enabled` defaults to `isProduction`), and they never
-  // see these /ui/* paths anyway — the browser forms reach the endpoints via
-  // `auth.api.*`, which is not routed and so never reaches the limiter. Every
-  // form below must therefore carry its own bucket; there is no backstop.
-  const passwordSignInLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
+  // Authentication hooks share admission across replicas and entry points.
   // Step 1 only decides where to go: no mail, no credential check, no lookup.
   // It can afford to be loose because every branch it hands off to spends its
   // own, tighter budget — this bucket exists so the router itself can't be the
   // cheap way to make the expensive branches run.
   const continueLimiter = tokenBucket(20, 1); // 20 burst, 1 per second, per IP
-  const passwordEmailLimiter = tokenBucket(5, 1 / 60); // reset + resend sends
-  // Sized to Better-Auth's own `/sign-up/email` rule (10/hour), which this form
-  // never reaches: it calls the endpoint in-process. Each admitted request
-  // scrypt-hashes a password, writes a user + billing account, and sends mail.
-  const signUpLimiter = tokenBucket(10, 1 / 360); // 10 burst, 1 per 6min, per IP
   // Submitting the sign-up FORM, kept off the bucket above for the same reason
   // the reset form is: a mistyped confirmation or a too-short password is
   // rejected before any of that work happens, and must not spend an hour-long
@@ -282,6 +286,10 @@ export function uiRoutes(deps: {
   /** With `asResponse`, Better-Auth serializes a thrown APIError into the
    *  response. Match on `code` (the stable BASE_ERROR_CODES key), never
    *  `message` — that one is prose and gets reworded upstream. */
+  function forwardRequestCookies(c: import("hono").Context,res: Response) {
+    if (!res.ok) return;
+    for (const cookie of res.headers.getSetCookie()) if (/^antgrid\.(?:request_flow\.|cross_device_token\.|native\.|auth_browser=|return_path=)/.test(cookie)) c.header("set-cookie",cookie,{ append: true });
+  }
   async function authErrorCode(res: Response): Promise<string | null> {
     try {
       const body = (await res.json()) as { code?: unknown };
@@ -298,7 +306,7 @@ export function uiRoutes(deps: {
    *  must not see the browser's cookie. */
   function anonymousHeaders(c: import("hono").Context): Record<string, string> {
     const { cookie: _cookie, ...rest } = forwardedHeaders(c);
-    return rest;
+    return { ...rest, cookie: (c.req.header("cookie") ?? "").split(";").filter((part) => /^antgrid\.(?:request_flow\.|cross_device_token\.|native\.|auth_browser=|return_path=)/.test(part.trim())).join(";") };
   }
 
   /** Both bounds, in one message. Better-Auth throws PASSWORD_TOO_LONG ahead of
@@ -331,6 +339,12 @@ export function uiRoutes(deps: {
     return c.redirect(qs ? `${path}?${qs}` : path);
   }
 
+  const returnDestination = (c: import("hono").Context) => safeReturnPath(getCookie(c, "antgrid.return_path"));
+  r.use("*", async (c,next) => {
+    if (["/login", "/signup"].includes(c.req.path) && c.req.query("returnPath")) setCookie(c, "antgrid.return_path", safeReturnPath(c.req.query("returnPath")),
+      { httpOnly: true,secure: deps.env.BETTER_AUTH_URL.startsWith("https:"),sameSite: "lax",path: "/",maxAge: 3600 });
+    await next();
+  });
   r.get("/", (c) => c.redirect("/dashboard"));
 
   // Better-Auth's POST /api/auth/sign-out returns `{success:true}` JSON, not a
@@ -359,7 +373,14 @@ export function uiRoutes(deps: {
     // Round-tripped by step 2's "change" link, so stepping back never costs the
     // user the address they already typed.
     const email = c.req.query("email") ?? null;
-    return c.html(<LoginPage error={error} notice={notice} email={email} />);
+    return c.html(
+      <LoginPage
+        error={error}
+        notice={notice}
+        email={email}
+        apple={appleSignInConfigured(deps.env)}
+      />,
+    );
   });
 
   /** Send a cross-device magic link and hand the browser its pending page.
@@ -367,12 +388,8 @@ export function uiRoutes(deps: {
    *  Two entry points reach it: step 1's fall-through below, and the forms that
    *  post to /ui/login/start (step 2's "Email me a link instead", the pending
    *  page's resend).
-   *
-   *  Its `startLimiter` token is spent by the CALLER, not here — each entry
-   *  point has to bucket ahead of its own body read (see /ui/login/continue),
-   *  and a second charge here would halve the budget rather than protect
-   *  anything. */
-  async function startMagicLink(c: import("hono").Context, email: string) {
+   */
+  async function startMagicLink(c: import("hono").Context, email: string, previousId?: string) {
     const res = await deps.auth.api.crossDeviceStart({
       method: "POST",
       headers: {
@@ -384,9 +401,11 @@ export function uiRoutes(deps: {
         "x-forwarded-for": deps.clientIp(c) ?? "",
         cookie: c.req.header("cookie") ?? "",
       },
-      body: { email },
+      body: { email, previousId, returnPath: returnDestination(c) },
       asResponse: true
     });
+    forwardRequestCookies(c,res);
+    if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
       return c.redirect(`/login?error=${encodeURIComponent("Could not send link")}`);
     }
@@ -417,9 +436,7 @@ export function uiRoutes(deps: {
     // because nothing better is known. One body so both spend the same token —
     // /ui/login/start's budget is what stands between this and a mailer.
     const sendLink = async () => {
-      if (!startLimiter(ipKey(c))) {
-        return redirectWith(c, "/login", { error: "Too many requests" });
-      }
+
       return startMagicLink(c, email);
     };
 
@@ -447,13 +464,20 @@ export function uiRoutes(deps: {
     switch (method) {
       case "password":
         return redirectWith(c, "/login/password", { email });
-      // Switched on the two literals rather than forwarded: `method` is
+      // Switched on the literals rather than forwarded: `method` is
       // client-supplied, and a value it chose must never reach the `provider`
       // param.
       case "github":
-        return c.redirect("/oauth/start?provider=github&callbackURL=/dashboard");
+        return c.redirect("/oauth/start?provider=github&callbackURL=" + encodeURIComponent(returnDestination(c)));
       case "google":
-        return c.redirect("/oauth/start?provider=google&callbackURL=/dashboard");
+        return c.redirect("/oauth/start?provider=google&callbackURL=" + encodeURIComponent(returnDestination(c)));
+      // Only while this deployment offers Apple: a hint remembered before the
+      // keys were withdrawn would otherwise relaunch a provider that 400s.
+      case "apple":
+        if (appleSignInConfigured(deps.env)) {
+          return c.redirect("/oauth/start?provider=apple&callbackURL=" + encodeURIComponent(returnDestination(c)));
+        }
+        return sendLink();
       default:
         // Absent, unrecognised, or simply wrong about this address — one answer
         // for all three. The link is the only branch that needs no server-side
@@ -475,14 +499,7 @@ export function uiRoutes(deps: {
   });
 
   r.post("/ui/login/password", async (c) => {
-    if (!passwordSignInLimiter(ipKey(c))) {
-      // Back to step 1, not step 2 — the address only exists in the body, and
-      // the bucket has to be spent before that is read (see /ui/login/continue).
-      // Step 1
-      // prefills the last-used address from the browser, so the round trip
-      // costs a click rather than the address.
-      return redirectWith(c, "/login", { error: "Too many requests" });
-    }
+
     const form = await c.req.formData();
     const email = String(form.get("email") ?? "").trim().toLowerCase();
     const password = String(form.get("password") ?? "");
@@ -500,6 +517,8 @@ export function uiRoutes(deps: {
       body: { email, password, rememberMe },
       asResponse: true,
     });
+    forwardRequestCookies(c,res);
+    if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
       if ((await authErrorCode(res)) === "EMAIL_NOT_VERIFIED") {
         // Reached only AFTER the password verified (api/routes/sign-in.mjs), so
@@ -508,16 +527,18 @@ export function uiRoutes(deps: {
         // stateless JWT with no cooldown, so the send has to spend the same
         // per-IP email budget as the resend button or a self-registered,
         // never-verified address becomes a 700-mails-an-hour firehose.
-        const sent = passwordEmailLimiter(ipKey(c));
+        let sent = true;
         if (sent) {
-          await deps.auth.api
+          const response = await deps.auth.api
             .sendVerificationEmail({
               method: "POST",
               headers: anonymousHeaders(c),
               body: { email },
               asResponse: true,
             })
-            .catch(() => undefined);
+            .catch(() => new Response(null, { status: 503 }));
+          sent = response.ok;
+          forwardRequestCookies(c,response);
         }
         // Report what actually happened. Claiming a fresh link on the throttled
         // branch leaves the user waiting on mail nobody sent, and their only
@@ -543,7 +564,7 @@ export function uiRoutes(deps: {
       });
     }
     forwardSetCookies(c, res);
-    return c.redirect("/dashboard");
+    return c.redirect(returnDestination(c));
   });
 
   r.get("/signup", (c) =>
@@ -581,7 +602,6 @@ export function uiRoutes(deps: {
     // actually reach the scrypt hash + user/billing write + mail. Keyed on the
     // IP alone, so which address is being typed changes nothing here — the
     // reply stays as address-blind as the success path.
-    if (!signUpLimiter(ipKey(c))) return fail("Too many requests");
 
     const res = await deps.auth.api.signUpEmail({
       method: "POST",
@@ -592,6 +612,8 @@ export function uiRoutes(deps: {
       body: { email, password, name: email },
       asResponse: true,
     });
+    forwardRequestCookies(c,res);
+    if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
       const code = await authErrorCode(res);
       if (code === "PASSWORD_TOO_SHORT" || code === "PASSWORD_TOO_LONG") {
@@ -643,24 +665,24 @@ export function uiRoutes(deps: {
     // Keeps the bucket ahead of any body read; see /ui/login/continue.
     const email = (c.req.query("email") ?? "").trim().toLowerCase();
     if (!email) return c.redirect("/login");
-    if (!passwordEmailLimiter(ipKey(c))) {
-      return redirectWith(c, "/login/check-email", { email, throttled: "1" });
-    }
+
     // Enumeration-safe by construction: the endpoint reports success without
     // sending for an unknown or already-verified address, so the reply below is
     // the same either way. Errors are swallowed for that same reason. Sent
     // WITHOUT the cookie — a signed-in caller (back button after verifying)
     // would otherwise be answered from the session branch, which throws rather
     // than taking the path this comment describes.
-    await deps.auth.api
+    const response = await deps.auth.api
       .sendVerificationEmail({
         method: "POST",
         headers: anonymousHeaders(c),
         body: { email },
         asResponse: true,
       })
-      .catch(() => undefined);
-    return redirectWith(c, "/login/check-email", { email, resent: "1" });
+      .catch(() => new Response(null, { status: 503 }));
+    forwardRequestCookies(c,response);
+    if (response.headers.get("retry-after")) c.header("Retry-After", response.headers.get("retry-after")!);
+    return redirectWith(c, "/login/check-email", { email, ...(response.ok ? { resent: "1" } : { throttled: "1" }) });
   });
 
   // Landing for the emailed verification link. Better-Auth redirects here bare
@@ -681,7 +703,7 @@ export function uiRoutes(deps: {
         notice: "Email verified. Sign in to continue.",
       });
     }
-    return c.redirect("/dashboard");
+    return c.redirect(returnDestination(c));
   });
 
   r.get("/forgot-password", (c) =>
@@ -697,13 +719,11 @@ export function uiRoutes(deps: {
   );
 
   r.post("/ui/forgot-password", async (c) => {
-    if (!passwordEmailLimiter(ipKey(c))) {
-      return redirectWith(c, "/forgot-password", { error: "Too many requests" });
-    }
+
     const form = await c.req.formData();
     const email = String(form.get("email") ?? "").trim().toLowerCase();
     if (!email) return redirectWith(c, "/forgot-password", { error: "Email required" });
-    await deps.auth.api
+    const response = await deps.auth.api
       .requestPasswordReset({
         method: "POST",
         headers: forwardedHeaders(c),
@@ -712,7 +732,7 @@ export function uiRoutes(deps: {
         body: { email, redirectTo: "/reset-password" },
         asResponse: true,
       })
-      .catch(() => undefined);
+      .catch(() => new Response(null, { status: 503 }));
     // Always the same answer, whether or not that address has an account — the
     // endpoint is enumeration-safe and this page must not undo that. No email
     // is echoed back for the same reason, which is also why the redirect below
@@ -721,6 +741,9 @@ export function uiRoutes(deps: {
     // Redirect rather than render: a rendered POST leaves the send in history,
     // so a refresh re-submits it and spends another token from a bucket the
     // user needs to request a replacement link.
+    forwardRequestCookies(c,response);
+    if (response.headers.get("retry-after")) c.header("Retry-After", response.headers.get("retry-after")!);
+    if (!response.ok) return redirectWith(c, "/forgot-password", { error: response.status === 429 ? "Too many requests. Try again later." : "Email service unavailable. Try again." });
     return c.redirect("/forgot-password/sent");
   });
 
@@ -780,6 +803,8 @@ export function uiRoutes(deps: {
       body: { token, newPassword: password },
       asResponse: true,
     });
+    forwardRequestCookies(c,res);
+    if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
       const code = await authErrorCode(res);
       if (code === "INVALID_TOKEN") return c.html(<ResetLinkInvalidPage />);
@@ -793,13 +818,11 @@ export function uiRoutes(deps: {
   });
 
   r.post("/ui/login/start", async (c) => {
-    if (!startLimiter(ipKey(c))) {
-      return c.redirect("/login?error=Too%20many%20requests");
-    }
+
     const form = await c.req.formData();
     const email = String(form.get("email") ?? "").trim();
     if (!email) return c.redirect("/login?error=Email%20required");
-    return startMagicLink(c, email);
+    return startMagicLink(c, email, String(form.get("previousId") ?? "") || undefined);
   });
 
   r.get("/login/pending/:id", (c) => {
@@ -815,58 +838,13 @@ export function uiRoutes(deps: {
     return session?.user.email?.toLowerCase() ?? null;
   }
 
-  /** Whether the browser opening this link is the one that asked for it.
-   *
-   *  The bind cookie is the same secret /sign-in/cross-device/status demands
-   *  before it hands out a session, so a match proves this browser started THIS
-   *  row — the approval screen exists to warn a second party, and here there
-   *  isn't one. It is httpOnly and written only by start, so no site can plant
-   *  it, and an unattended fetch (SafeLinks, Proofpoint, a mail client
-   *  prefetching URLs) carries no cookies at all and so still meets the screen.
-   */
-  function startedInThisBrowser(
-    c: import("hono").Context,
-    row: { id: string; browserTokenHash: Uint8Array }
-  ): boolean {
-    const cookie = getCookie(c, COOKIE_BROWSER_TOKEN);
-    if (!cookie) return false;
-    const dot = cookie.indexOf(".");
-    if (dot < 0 || cookie.slice(0, dot) !== row.id) return false;
-    return checkNonce(
-      row.browserTokenHash,
-      cookie.slice(dot + 1),
-      deps.env.BETTER_AUTH_SECRET
-    );
-  }
-
-  /** Turn an approved row into a session for the browser holding its bind
-   *  cookie. True when that browser leaves signed in as `email` either way: the
-   *  waiting tab may have claimed the row a poll earlier, which is the same
-   *  outcome one tab sooner, not a failure to report. */
-  async function claimApprovedSession(
-    c: import("hono").Context,
-    email: string
-  ): Promise<boolean> {
-    const res = await deps.auth.api.crossDeviceStatus({
-      method: "GET",
-      headers: { cookie: c.req.header("cookie") ?? "" },
-      asResponse: true,
-    });
-    forwardSetCookies(c, res);
-    // A non-JSON body (a plugin 5xx, a proxy error page) must not 500 the
-    // approval screen: the session-cookie fallback below still answers, and
-    // this is the browser that just clicked its own link.
-    const body = (await res.json().catch(() => ({}))) as { status?: string };
-    if (body.status === "ready") return true;
-    return (await signedInAs(c)) === email.toLowerCase();
-  }
-
   r.get("/ui/login/poll/:id", async (c) => {
     const id = c.req.param("id");
     if (!z.uuid().safeParse(id).success) return c.text("expired", 200);
 
     const res = await deps.auth.api.crossDeviceStatus({
       method: "GET",
+      query: { id },
       headers: { cookie: c.req.header("cookie") ?? "" },
       asResponse: true
     });
@@ -921,54 +899,15 @@ export function uiRoutes(deps: {
     if (!checkNonce(row.nonceHash, token, deps.env.BETTER_AUTH_SECRET)) {
       return c.redirect("/login?error=Invalid%20link");
     }
-    // Both branches below are kept after the nonce check so neither the
-    // approval state nor the interstitial is readable from the row id alone.
-    const ownRequest = startedInThisBrowser(c, row);
-
-    // Re-opening an approved link — back button, a second tap, a mail client
-    // prefetching URLs — is a success the user already earned, not a reused
-    // link. Whoever ends up signed in as the address on the row has nothing
-    // left to do here, so send them where they were going.
-    if (row.approvedAt) {
-      const signedIn = ownRequest
-        ? await claimApprovedSession(c, row.email)
-        : (await signedInAs(c)) === row.email.toLowerCase();
-      return c.redirect(signedIn ? "/dashboard" : "/login/approved");
-    }
-
-    // The link opened in the browser that asked for it: approving is a step
-    // where the user confirms something to themselves, about a request they
-    // made seconds ago, on the device they made it from. Skip it and finish the
-    // sign-in here — the interstitial still stands for every other opener.
-    if (ownRequest) {
-      // Same budget the explicit approve spends: this path approves too.
-      if (!approveSignInLimiter(ipKey(c))) {
-        return c.redirect("/login?error=Too%20many%20requests");
-      }
-      try {
-        await deps.auth.api.crossDeviceApprove({
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: { id: row.id, token },
-        });
-      } catch (err) {
-        // A second open racing the first approved it already — that is this
-        // request's own work landing, so carry on and claim the session.
-        if (!(isAPIError(err) && err.body?.message === ERR_ALREADY_APPROVED)) {
-          return c.redirect("/login?error=Could%20not%20approve");
-        }
-      }
-      const signedIn = await claimApprovedSession(c, row.email);
-      return c.redirect(signedIn ? "/dashboard" : "/login/approved");
-    }
-    // expiresAt = createdAt + 10m. Showing expiresAt as "requested at" is
-    // imprecise but acceptable for the approver UI.
+    const csrf = randomBytes(32).toString("base64url");
+    setCookie(c, `antgrid.approve_csrf.${id}`, csrf, { httpOnly: true, secure: deps.env.BETTER_AUTH_URL.startsWith("https:"), sameSite: "strict", path: "/", maxAge: 600 });
     return c.html(
       <ApproveSignInPage
+        csrf={csrf}
         email={row.email}
         requesterUa={row.requesterUa}
         requesterIp={row.requesterIp}
-        requestedAt={row.expiresAt}
+        requestedAt={row.createdAt}
         pendingId={row.id}
         token={token}
       />
@@ -982,6 +921,7 @@ export function uiRoutes(deps: {
     const form = await c.req.formData();
     const id = String(form.get("id") ?? "");
     const token = String(form.get("token") ?? "");
+    if (!getCookie(c, `antgrid.approve_csrf.${String(form.get("id") ?? "")}`) || getCookie(c, `antgrid.approve_csrf.${String(form.get("id") ?? "")}`) !== form.get("csrf")) return c.text("Forbidden", 403);
     try {
       await deps.auth.api.crossDeviceApprove({
         method: "POST",
@@ -998,6 +938,15 @@ export function uiRoutes(deps: {
       // Better-Auth APIError (bad token / expired / consumed) — surface a
       // generic message so we don't reveal which condition failed.
       return c.redirect("/login?error=Could%20not%20approve");
+    }
+    const own = getCookie(c, bindingCookie(id));
+    if (own) {
+      const result = await deps.auth.api.crossDeviceStatus({ query: { id }, headers: c.req.raw.headers, asResponse: true });
+      forwardSetCookies(c, result);
+      if ((await result.json()).status === "ready") {
+        const row = await findValidById(deps.db, id);
+        return c.redirect(row?.returnPath ?? "/dashboard");
+      }
     }
     return c.redirect("/login/approved");
   });
@@ -1022,7 +971,7 @@ export function uiRoutes(deps: {
     return c.redirect("/login");
   });
 
-  r.post("/ui/subscription/cancel", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.post("/ui/subscription/cancel", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     // The HTMX twin of POST /billing/cancel-subscription, and equally unguarded
     // by requireUserOrRedirect: a member resolves the owner's subscription and
@@ -1051,7 +1000,7 @@ export function uiRoutes(deps: {
     }
   });
 
-  r.post("/ui/subscription/resume", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.post("/ui/subscription/resume", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     if (!(await isBillingAccountOwner(deps.db, userId))) {
       return c.redirect("/dashboard?resume=failed");
@@ -1107,7 +1056,7 @@ export function uiRoutes(deps: {
    * invite verbs gate on — so a member is never shown a control the POST behind
    * it would refuse, and never shown the numbers on someone else's contract.
    */
-  r.get("/team", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/team", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     // Ahead of every read, as on /account and /dashboard: this page reports an
     // account's entitlement, and provisioning is what guarantees there is one.
@@ -1194,7 +1143,7 @@ export function uiRoutes(deps: {
     );
   });
 
-  r.use("/ui/team/*", requireUserOrRedirect({ auth: deps.auth }));
+  r.use("/ui/team/*", requireUserOrRedirect({ auth: deps.auth, db: deps.db }));
 
   /**
    * Owner-only invite verbs, listed in one place for the same reason
@@ -1240,38 +1189,24 @@ export function uiRoutes(deps: {
       ? AccountMemberRoleSchema.enum.member
       : AccountMemberRoleSchema.safeParse(String(rawRole)).data;
     if (!role) return teamRedirect(c, "failed");
+    const normalized = normalizeInviteEmail(email);
+    if (normalized) {
+      const retry = await rateDatabase.$transaction((tx) => recipientLimit(tx as DB,deps.env.BETTER_AUTH_SECRET,normalized));
+      if (retry) { c.header("Retry-After",String(retry)); return c.text("Please wait before requesting another email.",429); }
+    }
 
     await provisionProductAccountForUser(deps.db, userId);
     const accountId = await resolveBillingAccountId(deps.db, userId);
     if (!accountId) return teamRedirect(c, "failed");
 
-    let created;
     try {
-      created = await createAccountInvite(deps.db, {
-        accountId,
-        email,
-        role,
-        createdBy: userId,
-        secret: deps.env.BETTER_AUTH_SECRET,
+      await authTransaction(deps.db, async () => {
+        const created = await createAccountInvite(deps.db, { accountId, email, role, createdBy: userId, secret: deps.env.BETTER_AUTH_SECRET });
+        await sendInviteEmail(deps.sendEmail, { to: created.invite.email, inviteId: created.invite.id, token: created.token,
+          invitedBy: c.get("userEmail") ?? "A team owner", baseUrl: deps.env.BETTER_AUTH_URL });
       });
-    } catch (e) {
-      if (e instanceof InviteError) return teamRedirect(c, CREATE_NOTICE[e.code] ?? "failed");
-      throw e;
-    }
-
-    try {
-      await sendInviteEmail(deps.sendEmail, {
-        to: created.invite.email,
-        inviteId: created.invite.id,
-        token: created.token,
-        invitedBy: c.get("userEmail") ?? "A team owner",
-        baseUrl: deps.env.BETTER_AUTH_URL,
-      });
-    } catch (err) {
-      // The invitation exists and holds a seat; only the mail failed. Say so —
-      // reporting a plain failure would leave the owner re-inviting an address
-      // that now answers ALREADY_INVITED, with resend as the verb they need.
-      console.error("[team] invite mail send failed", err);
+    } catch (error) {
+      if (error instanceof InviteError) return teamRedirect(c, CREATE_NOTICE[error.code] ?? "failed");
       return teamRedirect(c, "send_failed");
     }
     return teamRedirect(c, "sent");
@@ -1286,28 +1221,24 @@ export function uiRoutes(deps: {
     const accountId = await resolveBillingAccountId(deps.db, userId);
     if (!accountId) return teamRedirect(c, "failed");
 
+    const pendingInvite = await findPendingInviteByIdWithHash(deps.db,id);
+    if (pendingInvite?.accountId === accountId) {
+      const retry = await rateDatabase.$transaction((tx) => recipientLimit(tx as DB,deps.env.BETTER_AUTH_SECRET,pendingInvite.email));
+      if (retry) { c.header("Retry-After",String(retry)); return c.text("Please wait before requesting another email.",429); }
+    }
     // Mints a new token and invalidates the one already in the invitee's inbox.
     // Two live tokens for one seat is two ways in, and the older mail is the one
     // an attacker who saw it would still be holding.
-    const resent = await resendAccountInvite(deps.db, {
-      id,
-      accountId,
-      secret: deps.env.BETTER_AUTH_SECRET,
-    });
-    if (!resent) return teamRedirect(c, "failed");
-
     try {
-      await sendInviteEmail(deps.sendEmail, {
-        to: resent.invite.email,
-        inviteId: resent.invite.id,
-        token: resent.token,
-        invitedBy: c.get("userEmail") ?? "A team owner",
-        baseUrl: deps.env.BETTER_AUTH_URL,
+      const accepted = await authTransaction(deps.db, async () => {
+        const resent = await resendAccountInvite(deps.db, { id, accountId, secret: deps.env.BETTER_AUTH_SECRET });
+        if (!resent) return false;
+        await sendInviteEmail(deps.sendEmail, { to: resent.invite.email, inviteId: resent.invite.id, token: resent.token,
+          invitedBy: c.get("userEmail") ?? "A team owner", baseUrl: deps.env.BETTER_AUTH_URL });
+        return true;
       });
-    } catch (err) {
-      console.error("[team] invite resend mail failed", err);
-      return teamRedirect(c, "send_failed");
-    }
+      if (!accepted) return teamRedirect(c, "failed");
+    } catch { return teamRedirect(c, "send_failed"); }
     return teamRedirect(c, "resent");
   });
 
@@ -1490,37 +1421,107 @@ export function uiRoutes(deps: {
     );
   });
 
-  r.get(
-    "/internal/connections",
-    requireUserOrRedirect({ auth: deps.auth }),
-    async (c) => {
+  function requireOperator(page: string): MiddlewareHandler<{ Variables: AuthVars }> {
+    return async (c, next) => {
       const email = c.get("userEmail")?.toLowerCase() ?? "";
-      if (!INTERNAL_OPERATOR_EMAILS.has(email)) {
-        // Record denied probes too — for a surveillance endpoint, a non-operator
-        // fishing for the route is exactly what the audit trail should capture.
-        console.warn(
-          JSON.stringify({
-            evt: "internal.connections.denied",
-            userId: c.get("userId"),
-            email,
-            at: new Date().toISOString(),
-          }),
-        );
+      const allowed = INTERNAL_OPERATOR_EMAILS.has(email);
+      // Audit every access and every denied probe: these pages read the
+      // live-connection map and account-wide usage, which the relay can't
+      // attribute (it only authenticates "web"), so operator attribution must
+      // be logged here, at the gate — and a non-operator fishing for the route
+      // is exactly what the trail should capture.
+      const line = JSON.stringify({
+        evt: `internal.${page}.${allowed ? "access" : "denied"}`,
+        userId: c.get("userId"),
+        actorId: c.get("userId"),
+        ...(page === "users.detail" ? { targetUserId: c.req.param("id") } : {}),
+        ...(page === "accounts.detail" ? { targetAccountId: c.req.param("id") } : {}),
+        at: new Date().toISOString(),
+      });
+      if (!allowed) {
+        console.warn(line);
         return c.notFound();
       }
+      console.info(line);
+      await next();
+    };
+  }
 
-      // Audit every access: a read of the live-connection map is a surveillance
-      // capability the relay can't attribute (it only authenticates "web"), so
-      // operator attribution must be logged here, at the gate.
-      console.info(
-        JSON.stringify({
-          evt: "internal.connections.access",
-          userId: c.get("userId"),
-          email,
-          at: new Date().toISOString(),
-        }),
-      );
+  r.use("/internal/*", async (c, next) => {
+    c.header("Cache-Control", "private, no-store");
+    await next();
+  });
 
+  function operatorQuery(c: UiContext) {
+    const params = c.req.queries();
+    if (Object.values(params).some((values) => values.length !== 1)) return null;
+    return Object.fromEntries(Object.entries(params).map(([key, values]) => [key, values[0]]));
+  }
+
+  r.get("/internal/auth", requireReadOnlyUserOrRedirect(deps), requireOperator("auth"), async (c) => {
+    const filter = AuthReportQuery.safeParse(operatorQuery(c));
+    if (!filter.success) return c.text("Invalid filters", 400);
+    return c.html(<AuthReportPage user={layoutUser(c)} filter={filter.data} data={await loadAuthReport(deps.db, filter.data)} />);
+  });
+  r.get("/internal/users", requireReadOnlyUserOrRedirect(deps), requireOperator("users"), async (c) => {
+    const query = OperatorUsersQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorUsers(deps.db, query.data);
+    return c.html(<OperatorUsersPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/users/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("users.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.string().min(1).max(256).safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorUser(deps.db, id, now);
+    if (!data) return c.notFound();
+    const connections = await fetchUserConnections(deps.relay, id).catch((error) => {
+      console.warn("[internal.users.detail] relay fetch failed", error);
+      return null;
+    });
+    return c.html(<OperatorUserPage user={layoutUser(c)} data={data} connections={connections} now={now} />);
+  });
+
+  r.get("/internal/accounts", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts"), async (c) => {
+    const query = OperatorAccountsQuerySchema.safeParse(operatorQuery(c));
+    if (!query.success) return c.text("Invalid query parameters", 400);
+    const data = await loadOperatorAccounts(deps.db, query.data);
+    return c.html(<OperatorAccountsPage user={layoutUser(c)} data={data} query={query.data} />);
+  });
+
+  r.get("/internal/accounts/:id", requireReadOnlyUserOrRedirect(deps), requireOperator("accounts.detail"), async (c) => {
+    const id = c.req.param("id");
+    if (!z.uuid().safeParse(id).success) return c.notFound();
+    const now = new Date();
+    const data = await loadOperatorAccount(deps.db, id, now);
+    if (!data) return c.notFound();
+    return c.html(<OperatorAccountPage user={layoutUser(c)} data={data} now={now} />);
+  });
+
+  r.get(
+    "/internal/stats",
+    requireReadOnlyUserOrRedirect(deps),
+    requireOperator("stats"),
+    async (c) => {
+      const [stats, live] = await Promise.all([
+        loadUsageStats(deps.db),
+        fetchConnections(deps.relay)
+          .catch((e) => {
+            console.warn("[internal.stats] relay fetch failed", e);
+            return null;
+          })
+          .then((connections) => connections && summarizeLiveRelay(deps.db, connections)),
+      ]);
+      return c.html(<StatsPage user={layoutUser(c)} stats={stats} live={live} />);
+    },
+  );
+
+  r.get(
+    "/internal/connections",
+    requireReadOnlyUserOrRedirect(deps),
+    requireOperator("connections"),
+    async (c) => {
       let connections: Awaited<ReturnType<typeof fetchConnections>> | null;
       try {
         connections = await fetchConnections(deps.relay);
@@ -1540,7 +1541,7 @@ export function uiRoutes(deps: {
 
   r.get("/upgrade", (c) => c.redirect("/pricing"));
 
-  r.get("/pricing", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/pricing", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
     const plans = await listActivePlans(deps.db);
@@ -1667,13 +1668,13 @@ export function uiRoutes(deps: {
     return raw && isPlanId(raw) ? raw : "trial";
   }
 
-  r.get("/checkout", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/checkout", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const selectedPlanId = requestedPlanId(c.req.query("planId"));
 
     const userId = c.get("userId");
     // Gated on a page GET because the page itself writes: it locks the billing
     // provider below, and that lock is immutable once set.
-    if (!(await isBillingAccountOwner(deps.db, userId))) return c.redirect("/dashboard");
+    if (!(await isBillingAccountOwner(deps.db, userId))) return c.redirect(returnDestination(c));
 
     const ctx = await loadCheckoutContext(c, selectedPlanId, { lock: true });
     if (!ctx) return c.redirect("/pricing");
@@ -1701,10 +1702,10 @@ export function uiRoutes(deps: {
    * second price. The plan travels in the query string so a refusal can render
    * the right page without first buffering the body.
    */
-  r.post("/ui/checkout/seats", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.post("/ui/checkout/seats", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     const planId = requestedPlanId(c.req.query("planId"));
-    if (!(await isBillingAccountOwner(deps.db, userId))) return c.redirect("/dashboard");
+    if (!(await isBillingAccountOwner(deps.db, userId))) return c.redirect(returnDestination(c));
 
     // Ahead of the body read, like every other bucket here: a request already
     // destined for a refusal must not buffer an attacker-chosen form first.
@@ -1764,13 +1765,13 @@ export function uiRoutes(deps: {
     });
   });
 
-  r.get("/devices", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/devices", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     const devices = await listActiveDevices(deps.db, userId);
     return c.html(<DevicesPage user={layoutUser(c)} devices={devices} />);
   });
 
-  r.get("/dashboard", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/dashboard", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
     const [sub, devices] = await Promise.all([
@@ -1831,7 +1832,7 @@ export function uiRoutes(deps: {
     return c.text("");
   });
 
-  r.get("/account", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.get("/account", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
     // Same predicates the DELETE endpoint uses — one source of truth.
@@ -1854,7 +1855,7 @@ export function uiRoutes(deps: {
     );
   });
 
-  r.post("/ui/account/password", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.post("/ui/account/password", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     const fail = (message: string) =>
       redirectWith(c, "/account", { passwordError: message });
@@ -1892,6 +1893,8 @@ export function uiRoutes(deps: {
           asResponse: true,
         });
 
+    forwardRequestCookies(c,res);
+    if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
       const code = await authErrorCode(res);
       if (code === "INVALID_PASSWORD") return fail("Current password is incorrect");
@@ -1913,7 +1916,7 @@ export function uiRoutes(deps: {
       // rotates the surviving session's token, and the acting tab is that one.
       const revoked = await deps.auth.api
         .revokeOtherSessions({ headers: c.req.raw.headers, asResponse: true })
-        .catch(() => undefined);
+        .catch(() => new Response(null, { status: 503 }));
       if (revoked) forwardSetCookies(c, revoked);
       // setPassword is check-then-create with no unique index behind it; two
       // submits that interleave leave a second row whose hash outlives the next
@@ -1928,7 +1931,7 @@ export function uiRoutes(deps: {
     });
   });
 
-  r.post("/ui/account/delete", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+  r.post("/ui/account/delete", requireUserOrRedirect({ auth: deps.auth, db: deps.db }), async (c) => {
     const userId = c.get("userId");
     // Re-verify the type-to-confirm word server-side. The page disables the
     // submit button until "DELETE" is typed, but that's client-only — a direct
@@ -1942,6 +1945,7 @@ export function uiRoutes(deps: {
     const result = await deleteUserAccount(deps.db, deps.relay, deps.auth, {
       userId,
       headers: c.req.raw.headers,
+      apple: deps.apple,
     });
     // Both blocked results land back on /account, which renders the reason.
     if (result === "blocked_subscription" || result === "blocked_team") {

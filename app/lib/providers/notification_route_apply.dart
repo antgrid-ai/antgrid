@@ -20,17 +20,11 @@ import 'ui_attention_providers.dart';
 import 'visible_surface.dart';
 
 /// Upper bound on remembered routes. Insertion-ordered eviction, the same shape
-/// as WorkspaceShell's notification dedup — this is a duplicate suppressor, not
-/// a ledger.
+/// as `SurfacedNotificationIds` — this is a duplicate suppressor, not a ledger.
 const int _kMaxAppliedRoutes = 128;
 
-/// Routes this container has already applied.
-///
-/// Deliberately NOT WorkspaceShell's `_notifiedIds`: that set has already
-/// consumed every id it surfaced by the time the user can tap the toast, so
-/// sharing it would make every tappable notification's id already-present and
-/// the tap a permanent no-op. Keys are namespaced for the same reason — the two
-/// stores must stay unable to answer for each other even if they ever meet.
+/// Routes already applied. NOT `SurfacedNotificationIds`: it has consumed the
+/// id before the tap, so sharing it would make every tap a no-op.
 class _AppliedRoutes {
   final LinkedHashSet<String> _keys = LinkedHashSet<String>();
 
@@ -168,7 +162,7 @@ Future<bool> _apply(
   final target = loc.target!;
 
   if (target != ref.read(selectedTargetProvider)) {
-    // The tapped widget is transient — a toast entry, and one this very route
+    // The context is the shell that raised the toast, which this very route
     // tears down — so a dead one falls through to the app's single Navigator,
     // which outlives every route.
     BuildContext? navContext;

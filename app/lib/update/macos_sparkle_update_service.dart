@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import '../util/ab_log.dart';
 import 'github_release_update_service.dart';
@@ -17,19 +18,24 @@ import 'github_release_update_service.dart';
 /// Sparkle checks are disabled in Info.plist (`SUEnableAutomaticChecks`) so
 /// it never shows UI on its own.
 ///
-/// Every method is a safe no-op off macOS and swallows plugin errors — an
-/// unpackaged dev build has no Sparkle to talk to and the feature must
-/// degrade silently rather than block startup.
+/// Inactive builds skip native calls. Plugin errors reach the shared check
+/// and install controllers, which decide how to surface them.
 class MacosSparkleUpdateService implements UpdaterListener {
   MacosSparkleUpdateService();
+
+  static const _cycleChannel = MethodChannel('antgrid/sparkle_update_cycle');
 
   /// Published as a release asset by build-desktop.yml; `releases/latest`
   /// makes this URL stable across versions (prereleases never move it).
   /// Derived so the releases owner/repo lives in exactly one Dart constant.
   static const String appcastUrl =
-      '${GithubReleaseUpdateService.latestDownloadPageUrl}/download/appcast.xml';
+      '${GithubReleaseUpdateService.latestDownloadPageUrl}/download/appcast-macos-arm64.xml';
 
   final _noUpdateFound = StreamController<void>.broadcast();
+  final _flowChanges = StreamController<bool>.broadcast();
+  bool _flowRunning = false;
+  bool get flowRunning => _flowRunning;
+  Stream<bool> get flowChanges => _flowChanges.stream;
   bool _listening = false;
 
   bool get _supported => defaultTargetPlatform == TargetPlatform.macOS;
@@ -47,7 +53,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
   Stream<void> get noUpdateFound => _noUpdateFound.stream;
 
   /// Points Sparkle at the appcast. Must have run once before [startUpdate];
-  /// `UpdateGate` calls it at startup on macOS. Never throws.
+  /// The shared check controller calls it before detection.
   Future<void> configureFeed() async {
     if (!_supported) return;
     // Registered here rather than in the constructor: the strategy is built on
@@ -58,6 +64,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
       _listening = true;
       try {
         autoUpdater.addListener(this);
+        _cycleChannel.setMethodCallHandler(_onUpdateCycle);
       } catch (e) {
         _listening = false;
         AbLog.warn(
@@ -72,24 +79,29 @@ class MacosSparkleUpdateService implements UpdaterListener {
     } catch (e) {
       AbLog.warn(
         'Update',
-        'MacosSparkleUpdateService.configureFeed failed (ignored)',
+        'MacosSparkleUpdateService.configureFeed failed',
         fields: {'error': '$e'},
       );
+      rethrow;
     }
   }
 
   /// Opens Sparkle's update flow (its own dialog: release notes → Install →
-  /// relaunch). A repeat call just re-opens it. Never throws.
+  /// relaunch). Calls while Sparkle already owns a flow are ignored.
   Future<void> startUpdate() async {
     if (!_supported) return;
+    if (_flowRunning) return;
+    _setFlowRunning(true);
     try {
       await autoUpdater.checkForUpdates();
     } catch (e) {
       AbLog.warn(
         'Update',
-        'MacosSparkleUpdateService.startUpdate failed (ignored)',
+        'MacosSparkleUpdateService.startUpdate failed',
         fields: {'error': '$e'},
       );
+      _setFlowRunning(false);
+      rethrow;
     }
   }
 
@@ -102,6 +114,7 @@ class MacosSparkleUpdateService implements UpdaterListener {
   void dispose() {
     if (_listening) {
       _listening = false;
+      _cycleChannel.setMethodCallHandler(null);
       try {
         autoUpdater.removeListener(this);
       } catch (e) {
@@ -113,6 +126,20 @@ class MacosSparkleUpdateService implements UpdaterListener {
       }
     }
     unawaited(_noUpdateFound.close());
+    unawaited(_flowChanges.close());
+  }
+
+  void _setFlowRunning(bool value) {
+    _flowRunning = value;
+    if (!_flowChanges.isClosed) _flowChanges.add(value);
+  }
+
+  Future<void> _onUpdateCycle(MethodCall call) async {
+    if (call.method == 'finished') {
+      // Sparkle also completes normally when a version is dismissed or skipped;
+      // neither the launch reply nor an error event marks that boundary.
+      _setFlowRunning(false);
+    }
   }
 
   // --- UpdaterListener -----------------------------------------------------

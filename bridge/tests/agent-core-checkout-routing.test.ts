@@ -1,11 +1,23 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
+import { TerminalManager } from "../src/terminal-manager";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionEntry } from "../src/protocol";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
+import { __setRootForTest } from "../src/logger";
+
+/** Capture pino JSONL lines written during `fn` — a dropped relay frame's only
+ *  trace is the warn line, so reading the stream is how "dropped, not merely
+ *  unanswered" is distinguished from a reply that just hasn't arrived yet. */
+async function capturingWarnings(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  __setRootForTest({ write: (m: string) => { lines.push(m); } }, "warn");
+  try { await fn(); } finally { __setRootForTest(process.stdout, "info"); }
+  return lines.join("");
+}
 
 let root: string;
 let previousAbDir: string | undefined;
@@ -148,15 +160,6 @@ async function createSession(
   return result.session;
 }
 
-/** Wire one attached device, resolving every peer id to a session that did or
- *  did not declare `checkoutRouting`. This also latches the core as
- *  relay-attached, so clearing the provider afterwards leaves it gated. */
-function attachDevice(checkoutRouting: boolean): void {
-  core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
-  }));
-}
-
 const APP_PEER = "app-dev#machine-dev";
 
 function snapshotRequest(requestId: string): AbMessage {
@@ -234,7 +237,10 @@ test("two isolated sessions edit the same relative file without seeing each othe
   expect(await read("main")).toBe("main\n");
 });
 
-/** Drive a whole upload through one checkout and return the file it produced. */
+/** Drive a whole upload through one checkout and return the file it produced.
+ *  `file:upload-local` names an absolute source path on THIS machine
+ *  (loopback only), so the fixture writes the content to a real temp file
+ *  first, the same way `LocalTransport` stages it on the app side. */
 async function uploadThrough(
   bus: MessageBus,
   sent: AbMessage[],
@@ -242,20 +248,11 @@ async function uploadThrough(
   content: string,
 ): Promise<string> {
   const requestId = `upload-${checkoutId}`;
-  bus.dispatchInbound(createMessage("file:upload-start", {
-    projectId: core!.projectId, requestId, fileName: "note.txt",
-    size: Buffer.byteLength(content), checkoutId,
-  }), "control", "loopback");
-  const ready = await waitFor(sent, (m) =>
-    m.type === "file:upload-ready" && m.requestId === requestId,
-  );
-  if (ready.type !== "file:upload-ready") throw new Error("upload was never ready");
-  bus.dispatchInbound(createMessage("file:upload-chunk", {
-    uploadId: ready.uploadId, seq: 0, data: Buffer.from(content).toString("base64"), checkoutId,
-  }), "control", "loopback");
-  await waitFor(sent, (m) => m.type === "file:upload-ack" && m.uploadId === ready.uploadId);
-  bus.dispatchInbound(createMessage("file:upload-done", {
-    uploadId: ready.uploadId, checkoutId,
+  const sourcePath = mkdtempSync(join(tmpdir(), "antgrid-upload-source-"));
+  const sourceFile = join(sourcePath, "note.txt");
+  writeFileSync(sourceFile, content);
+  bus.dispatchInbound(createMessage("file:upload-local", {
+    projectId: core!.projectId, requestId, fileName: "note.txt", sourcePath: sourceFile, checkoutId,
   }), "control", "loopback");
   const result = await waitFor(sent, (m) =>
     m.type === "file:upload-result" && m.requestId === requestId,
@@ -386,69 +383,6 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   expect(framesFor("svc").some((message) =>
     "checkoutId" in message && message.checkoutId === "main",
   )).toBe(true);
-});
-
-test("a retired terminal snapshot request returns one checkout-scoped upgrade error", async () => {
-  await initRepo();
-  const { bus, sent } = await startWithIsolatedSession();
-  // cwd deliberately outside the project: on Windows a live PTY holds its own
-  // cwd open and the fixture's teardown rm would hit EBUSY.
-  bus.dispatchInbound(
-    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "terminal:started" && message.terminalId === "adhoc",
-  );
-  sent.length = 0;
-
-  bus.dispatchInbound(
-    createMessage("terminal:snapshot:request", { terminalId: "adhoc" }),
-    "control",
-    "loopback",
-  );
-  const reply = await waitFor(sent, (message) => message.type === "terminal:display:status");
-  expect(reply).toMatchObject({ code: "UPGRADE_REQUIRED", checkoutId: "main" });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(sent.filter((message) => message.type === "terminal:display:status").length).toBe(1);
-  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
-});
-
-test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {
-  await initRepo();
-  const { bus, sent } = await startWithIsolatedSession();
-  // cwd deliberately outside the project: on Windows a live PTY holds its own
-  // cwd open and the fixture's teardown rm would hit EBUSY.
-  bus.dispatchInbound(
-    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "terminal:started" && message.terminalId === "adhoc",
-  );
-  sent.length = 0;
-
-  const requestId = crypto.randomUUID();
-  bus.dispatchInbound(
-    createMessage("request", { requestId, method: "terminal.snapshot", params: { terminalId: "adhoc" } }),
-    "control",
-    "loopback",
-  );
-  await waitFor(sent, (message) =>
-    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
-  );
-  // Same isolation concern as the message-path test above: every runtime sees
-  // the inbound frame, so the guard has to short-circuit before the isolated
-  // runtime serializes anything, and the reply must never fan out a second
-  // `terminal:snapshot` broadcast that an old app on the same bus would apply
-  // over its own history claim.
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(sent.filter((message) =>
-    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
-  ).length).toBe(1);
-  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
 });
 
 /** Dispatch `fire` from inside the very delivery of the first `session:updated`
@@ -656,163 +590,14 @@ test.skipIf(process.platform === "win32")(
   20000,
 );
 
-// A relay-attached core whose per-device lookup cannot answer must ANSWER, not
-// drop: `state.snapshot` is the only carrier of a relay checkout's agent:status,
-// so silence reads as a dead machine — a "session timeout" that is really a
-// refusal. A provider that always returns a session and merely toggles the
-// boolean cannot reach these arms, which is why each is driven explicitly.
-test("a refused RPC is answered, not dropped, when the device never declared checkoutRouting", async () => {
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(false);
-
-  sent.length = 0;
-  bus.dispatchInbound(snapshotRequest("snap-1"), "control", "relay", APP_PEER);
-
-  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-1");
-  expect(answer).toMatchObject({
-    type: "response",
-    ok: false,
-    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
-  });
-});
-
-test("a plain verb refused for checkout routing comes back as control:result", async () => {
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(false);
-
-  sent.length = 0;
-  bus.dispatchInbound(createMessage("config:read", {}), "control", "relay", APP_PEER);
-
-  const answer = await waitFor(sent, (m) => m.type === "control:result");
-  expect(answer).toMatchObject({
-    type: "control:result",
-    ok: false,
-    verb: "config:read",
-    error: { code: "CHECKOUT_ROUTING_REQUIRED" },
-  });
-});
-
-test("a refused session verb comes back as session:result, the frame its caller awaits", async () => {
-  // A reply on the wrong frame is not a reply: `sessions_service.dart` completes
-  // every pending session mutation off `session:result` + requestId, so a
-  // `control:result` here would leave the caller timing out exactly as a
-  // silent drop does.
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(false);
-
-  sent.length = 0;
-  bus.dispatchInbound(
-    createMessage("session:stop", { requestId: "stop-1", sessionId: "any" }),
-    "control", "relay", APP_PEER,
-  );
-
-  const answer = await waitFor(sent, (m) => m.type === "session:result" && m.requestId === "stop-1");
-  expect(answer).toMatchObject({ type: "session:result", ok: false, errorCode: "CHECKOUT_ROUTING_REQUIRED" });
-  expect(sent.filter((m) => m.type === "control:result")).toEqual([]);
-});
-
-test("session:list is refused on control:result, never as an empty session:list:result", async () => {
-  // The exclusion is the point: `session:list:result` carries only
-  // `{requestId, sessions[]}`, so the only refusal expressible on it is an empty
-  // list — a project that reads as HAVING no sessions rather than one that
-  // refused to answer. An uncorrelated reply beats a credible lie.
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(false);
-
-  sent.length = 0;
-  bus.dispatchInbound(createMessage("session:list", { requestId: "list-1" }), "control", "relay", APP_PEER);
-
-  const answer = await waitFor(sent, (m) => m.type === "control:result");
-  expect(answer).toMatchObject({ type: "control:result", ok: false, verb: "session:list" });
-  expect(sent.filter((m) => m.type === "session:list:result")).toEqual([]);
-});
-
-test("a refusal is addressed to the device that asked, and a bare control:result is throttled", async () => {
-  // Broadcast, a `session:result` error lands in every client's sessions state
-  // (`sessions_service.dart` writes it before matching the requestId), so the
-  // desktop toasts a refusal for a verb the phone sent. And nothing correlates
-  // a bare control:result, so a device sending at keystroke rate must not be
-  // answered once per frame — the correlated reply still is, every time.
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  const loopbackOnly: AbMessage[] = [];
-  bus.subscribe({ audience: "loopback", deliver: (m) => loopbackOnly.push(m) });
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(false);
-
-  sent.length = 0;
-  loopbackOnly.length = 0;
-  for (let i = 0; i < 3; i++) {
-    bus.dispatchInbound(
-      createMessage("terminal:input", { terminalId: "t", data: String(i), checkoutId: "main" }),
-      "control", "relay", APP_PEER,
-    );
-  }
-  bus.dispatchInbound(snapshotRequest("snap-5"), "control", "relay", APP_PEER);
-  bus.dispatchInbound(snapshotRequest("snap-6"), "control", "relay", APP_PEER);
-  await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-6");
-
-  expect(sent.filter((m) => m.type === "control:result")).toHaveLength(1);
-  expect(sent.filter((m) => m.type === "response")).toHaveLength(2);
-  expect(loopbackOnly.filter((m) => m.type === "control:result" || m.type === "response")).toEqual([]);
-});
-
-test("a peer id that resolves to no session is dropped, not refused, so the retry can heal it", async () => {
-  // Both a device mid-handshake and one whose E2E session has just died land on
-  // this arm, and both recover on the app's next attempt. Answering would end
-  // that: `_pullSnapshot` settles on any code but E_TIMEOUT, so a refusal turns
-  // a race that fixes itself into a workspace telling the user to reconnect.
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  core!.setPeerSessionProvider(() => null);
-
-  sent.length = 0;
-  bus.dispatchInbound(snapshotRequest("snap-4"), "control", "relay", APP_PEER);
-  await new Promise((resolve) => setTimeout(resolve, 200));
-
-  expect(sent.filter((m) => m.type === "response" || m.type === "control:result")).toEqual([]);
-});
-
-test("a relay-attached core whose provider was torn out answers UNAVAILABLE instead of going silent", async () => {
-  // A cleared provider on a warm core is a bridge-side fault nothing re-wires.
-  // Read as "unknown device" it fails closed in silence; read as "local core"
-  // by the mobile-access gate it is not gated at all. It must be neither.
-  await initRepo();
-  const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
-  attachDevice(true);
-  core!.setPeerSessionProvider(null);
-
-  sent.length = 0;
-  bus.dispatchInbound(snapshotRequest("snap-2"), "control", "relay", APP_PEER);
-
-  const answer = await waitFor(sent, (m) => m.type === "response" && m.requestId === "snap-2");
-  expect(answer).toMatchObject({
-    type: "response",
-    ok: false,
-    error: { code: "CHECKOUT_ROUTING_UNAVAILABLE" },
-  });
-});
-
 test("clearing the provider does not hand a relay frame the local-core carve-out", async () => {
-  // A core that has faced the relay stays gated for life. Proved on a project
-  // with NO isolated session, where nothing but the machine switch stands
-  // between a relay frame and dispatch: with mobile access off the pull goes
-  // unanswered, and with it on the same pull is served — so the switch, not a
-  // per-device refusal, is what decided.
+  // A core that has faced remote peers stays gated for life: with mobile
+  // access off the pull goes unanswered, and with it on the same pull is
+  // served — so the switch is what decided.
   await initRepo();
   let mobileAccess = true;
   const { bus, sent } = await bootCore(true, () => mobileAccess);
-  attachDevice(true);
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
   core!.setPeerSessionProvider(null);
   mobileAccess = false;
 
@@ -827,39 +612,151 @@ test("clearing the provider does not hand a relay frame the local-core carve-out
   expect(served).toMatchObject({ type: "response", ok: true });
 });
 
-test("a tunnel request from a session that cannot route checkouts is refused, while a capable device's is proxied", async () => {
-  // The tunnel route bypasses the bus, so the per-device capability check the
-  // bus dispatch makes had to be restated on it: a preview body IS a checkout's
-  // dev server rendered verbatim, and a device that may not address a checkout
-  // must not be handed one's page instead of an error.
+test("admit refuses NOT_ALLOWED for an unknown checkout, and admits a known peer to the checkout runtime's own manager", async () => {
+  // Tunnel streams bypass the bus, so the per-device admission check has to be
+  // restated here: a preview body IS a checkout's dev server rendered
+  // verbatim, and a checkout id that does not resolve must not be handed a
+  // page instead of a refusal.
   await initRepo();
   const { bus, sent } = await bootCore(true);
-  await createSession(bus, sent, "Isolated", "worktree");
+  const session = await createSession(bus, sent, "Isolated", "worktree");
 
-  // Tunnel answers leave through the plaintext hook, never the bus.
-  const plain: object[] = [];
-  core!.setPlainHook(async (frame) => { plain.push(frame); return "sent"; });
-  let checkoutRouting = false;
-  core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
-  }));
-  const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-start");
-  const request = (requestId: string) => core!.handleTunnelMessage({
-    // Nothing listens on this port: an ADMITTED request still answers 502, so a
-    // response frame is proof the gate passed it to the proxy.
-    type: "tunnel:http-request", requestId, port: 65500, method: "GET", path: "/secret",
-  }, "app-dev#machine-dev");
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
 
-  request("stale");
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  expect(responses()).toEqual([]);
+  const unknownCheckout = core!.tunnelStreams.admit("modern-peer", "not-a-real-checkout");
+  expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
 
-  checkoutRouting = true;
-  request("modern");
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline && responses().length === 0) {
-    await new Promise((resolve) => setTimeout(resolve, 15));
-  }
-  expect(responses()).toHaveLength(1);
-  expect(responses()[0]).toMatchObject({ requestId: "modern" });
+  const admitted = core!.tunnelStreams.admit("modern-peer", session.checkoutId);
+  expect(admitted.ok).toBe(true);
 }, 20000);
+
+test("a relay-origin file:upload-local is dropped with a warning, while the identical loopback frame still uploads", async () => {
+  // A remote upload rides its own `upload` stream, never a `file:upload-local`
+  // bus frame — that verb names an absolute path on THIS machine and is
+  // loopback-only, so one arriving over the relay is a peer that cannot be
+  // served this way and must be dropped rather than answered (§2).
+  const { bus, sent } = await bootCore(true);
+  const sourceDir = mkdtempSync(join(tmpdir(), "antgrid-upload-source-"));
+  const sourceFile = join(sourceDir, "a.bin");
+  writeFileSync(sourceFile, "abc");
+
+  const relayLog = await capturingWarnings(async () => {
+    bus.dispatchInbound(createMessage("file:upload-local", {
+      projectId: core!.projectId, requestId: "relay-r1", fileName: "a.bin", sourcePath: sourceFile,
+    }), "control", "relay", "some-peer");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  expect(relayLog).toContain("Dropping inbound");
+  expect(sent.find((m) => m.type === "file:upload-result" && m.requestId === "relay-r1")).toBeUndefined();
+
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("file:upload-local", {
+    projectId: core!.projectId, requestId: "loop-r1", fileName: "a.bin", sourcePath: sourceFile,
+  }), "control", "loopback");
+  const result = await waitFor(sent, (m) => m.type === "file:upload-result" && m.requestId === "loop-r1");
+  expect(result).toMatchObject({ type: "file:upload-result", ok: true });
+});
+
+test("uploadStreams.admit refuses NOT_ALLOWED with the switch off, NOT_ALLOWED for an unknown checkout, and admits a peer to the checkout runtime's own manager", async () => {
+  await initRepo();
+
+  core = await buildAgentCore({
+    folder: root,
+    mode: "remote",
+    remoteAccessEnabled: () => false,
+    worktreeSessionsSupported: true,
+    identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
+  });
+  const switchOffBus = new MessageBus();
+  const switchOffSent: AbMessage[] = [];
+  switchOffBus.subscribe({ deliver: (message) => switchOffSent.push(message) });
+  core.attachTransport(switchOffBus);
+  core.onHandshakeComplete();
+  await waitFor(switchOffSent, (message) => message.type === "agent:status");
+  // remoteFrameAllowed reads the switch only once a relay peer session
+  // provider is wired — an unwired core answers to no switch at all.
+  core.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
+  const switchOffResult = await core.uploadStreams.admit("any-peer", "main");
+  expect(switchOffResult).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
+  await core.shutdown();
+  core = null;
+
+  const { bus, sent } = await bootCore(true);
+  const session = await createSession(bus, sent, "Isolated", "worktree");
+
+  core!.setPeerSessionProvider((peerId) => ({ peerId, peerPubkey: "pub-app" }));
+
+  const unknownCheckout = await core!.uploadStreams.admit("modern-peer", "not-a-real-checkout");
+  expect(unknownCheckout).toMatchObject({ ok: false, refusal: { code: "NOT_ALLOWED" } });
+
+  const admitted = await core!.uploadStreams.admit("modern-peer", session.checkoutId);
+  expect(admitted.ok).toBe(true);
+
+  const admittedMain = await core!.uploadStreams.admit("modern-peer", "main");
+  expect(admittedMain.ok).toBe(true);
+}, 20000);
+
+async function startIsolatedTerminal(
+  bus: MessageBus,
+  sent: AbMessage[],
+  terminalId: string,
+  cwd: string,
+  checkoutId: string,
+): Promise<void> {
+  bus.dispatchInbound(createMessage("terminal:start", { terminalId, cwd, checkoutId }), "control", "loopback");
+  await waitFor(sent, (m) => m.type === "terminal:started" && m.terminalId === terminalId, 10_000);
+}
+
+test("file:resolve-path takes a base only from a terminal of the checkout it names", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const { bus, sent, checkoutId, checkoutPath } = await startWithIsolatedSession();
+  await startIsolatedTerminal(bus, sent, "iso-term", checkoutPath, checkoutId);
+  await startIsolatedTerminal(bus, sent, "main-term", root, "main");
+  const linkBases = spyOn(TerminalManager.prototype, "linkBases");
+  try {
+    const ask = async (requestId: string, asked: string, terminalId: string): Promise<void> => {
+      bus.dispatchInbound(createMessage("file:resolve-path", {
+        projectId: core!.projectId, requestId, path: "same.txt", terminalId, base: "s", checkoutId: asked,
+      }), "control", "loopback");
+      await waitFor(sent, (m) => m.type === "file:resolve-path-result" && m.requestId === requestId);
+    };
+
+    // The isolated terminal's internal id is namespaced, and main passes any id through.
+    await ask("main-names-isolated", "main", `${checkoutId}:iso-term`);
+    expect(linkBases).not.toHaveBeenCalled();
+    await ask("isolated-names-main", checkoutId, "main-term");
+    expect(linkBases).not.toHaveBeenCalled();
+
+    await ask("main-names-main", "main", "main-term");
+    expect(linkBases).toHaveBeenCalledTimes(1);
+    await ask("isolated-names-isolated", checkoutId, "iso-term");
+    expect(linkBases).toHaveBeenCalledTimes(2);
+  } finally {
+    linkBases.mockRestore();
+  }
+}, 30_000);
+
+test("file:resolve-path with terminal ids that name nothing records no terminal of any checkout", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const { bus, sent, checkoutId } = await startWithIsolatedSession();
+  const recorded: string[] = [];
+  const set = Map.prototype.set;
+  const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+    if (typeof key === "string" && key.includes("ghost-")) recorded.push(key);
+    if (typeof value === "string" && value.includes("ghost-")) recorded.push(value);
+    return set.call(this, key, value);
+  });
+  try {
+    for (let i = 0; i < 20; i++) {
+      bus.dispatchInbound(createMessage("file:resolve-path", {
+        projectId: core!.projectId, requestId: `req-${i}`, path: "same.txt", terminalId: `ghost-${i}`, base: "s", checkoutId,
+      }), "control", "loopback");
+      await waitFor(sent, (m) => m.type === "file:resolve-path-result" && m.requestId === `req-${i}`);
+    }
+  } finally {
+    spy.mockRestore();
+  }
+  expect(recorded).toEqual([]);
+}, 30_000);

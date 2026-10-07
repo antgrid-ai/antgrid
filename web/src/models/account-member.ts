@@ -47,13 +47,27 @@ export async function findActiveMembership(
  * error. Nothing downstream will surface that for you.
  */
 export async function resolveBillingAccountId(db: Tx, userId: string): Promise<string | null> {
-  const membership = await findActiveMembership(db, userId);
-  if (membership) return membership.accountId;
-  const account = await db.productAccount.findUnique({
-    where: { userId },
-    select: { id: true },
-  });
-  return account?.id ?? null;
+  return (await resolveBillingAccountIds(db, [userId])).get(userId) ?? null;
+}
+
+export async function resolveBillingAccountIds(
+  db: Tx,
+  userIds: string[]
+): Promise<Map<string, string | null>> {
+  if (!userIds.length) return new Map();
+  const [memberships, accounts] = await Promise.all([
+    db.accountMember.findMany({
+      where: { userId: { in: userIds }, status: ACCOUNT_MEMBER_STATUS_ACTIVE },
+      select: { userId: true, accountId: true },
+    }),
+    db.productAccount.findMany({
+      where: { userId: { in: userIds } },
+      select: { userId: true, id: true },
+    }),
+  ]);
+  const owned = new Map(accounts.map((account) => [account.userId, account.id]));
+  const active = new Map(memberships.map((member) => [member.userId, member.accountId]));
+  return new Map(userIds.map((id) => [id, active.get(id) ?? owned.get(id) ?? null]));
 }
 
 /**

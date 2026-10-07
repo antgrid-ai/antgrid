@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { createMessage } from "../../src/protocol";
 import { composePush } from "../../src/push/compose";
-import { createPushDispatcher, type PushTarget } from "../../src/push/push-dispatcher";
+import { createPushDispatcher, pushCollapseKey, type PushTarget } from "../../src/push/push-dispatcher";
 
 const target: PushTarget = { pushToken: "tok", provider: "fcm", pushPubkey: "pk" };
 
@@ -15,7 +15,7 @@ function harness(overrides: Partial<Parameters<typeof createPushDispatcher>[0]> 
     resolveTargets: () => [target],
     machineUuid: () => "machine-uuid-1",
     seal: (json, pubkey) => { sealed.push(json); sealKeys.push(pubkey); return { epk: "E", box: "B" }; },
-    deliver: (t, prov, blob) => delivered.push({ t, prov, blob }),
+    deliver: (t, prov, blob, collapseKey) => delivered.push({ t, prov, blob, collapseKey }),
     ...overrides,
   });
   return { d, delivered, sealed, sealKeys };
@@ -116,7 +116,88 @@ test("suppressed peer → seals payload and delivers", () => {
   expect(payload).toEqual({
     title: "Handler needs you", body: "Deploy?", kind: "handler",
     projectId: "p1", machineUuid: "machine-uuid-1", terminalId: "t", sourceMessageId: "e1",
+    sentAt: expect.any(Number),
   });
+});
+
+test("the sealed payload carries an integer epoch-ms sentAt", () => {
+  // The phone drops a push older than its max age by this field, so it must be
+  // an integer the Dart side can hand to DateTime.fromMillisecondsSinceEpoch.
+  const { d, sealed } = harness();
+  const before = Date.now();
+  d.onOutbound(createMessage("notification:push", { notificationType: "idle", projectId: "p1" }));
+  const { sentAt } = JSON.parse(sealed[0]);
+  expect(Number.isInteger(sentAt)).toBe(true);
+  expect(sentAt).toBeGreaterThanOrEqual(before);
+  expect(sentAt).toBeLessThanOrEqual(Date.now());
+});
+
+const WIRE_COLLAPSE_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+
+test("each delivery carries a wire-valid collapse key derived from its target", () => {
+  const { d, delivered } = harness();
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "task_complete", sessionId: "sess-1", projectId: "p1",
+  }));
+  expect(delivered[0].collapseKey).toMatch(WIRE_COLLAPSE_KEY);
+  expect(delivered[0].collapseKey).toBe(pushCollapseKey("pk", "machine-uuid-1", "p1", "sess-1"));
+});
+
+test("one session collapses onto one key across pushes", () => {
+  const { d, delivered } = harness();
+  for (const notificationType of ["task_complete", "error"] as const) {
+    d.onOutbound(createMessage("notification:push", { notificationType, sessionId: "sess-1", projectId: "p1" }));
+  }
+  expect(delivered).toHaveLength(2);
+  expect(delivered[0].collapseKey).toBe(delivered[1].collapseKey);
+});
+
+test("collapse keys separate sessions, projects, machines and phones", () => {
+  const base = pushCollapseKey("pk", "m1", "p1", "s1");
+  expect(pushCollapseKey("pk", "m1", "p1", "s1")).toBe(base);
+  expect(pushCollapseKey("pk", "m1", "p1", "s2")).not.toBe(base);
+  expect(pushCollapseKey("pk", "m1", "p2", "s1")).not.toBe(base);
+  expect(pushCollapseKey("pk", "m2", "p1", "s1")).not.toBe(base);
+  expect(pushCollapseKey("pk2", "m1", "p1", "s1")).not.toBe(base);
+  // The newline separator keeps field boundaries from sliding into each other.
+  expect(pushCollapseKey("pk", "m1", "p1s", "1")).not.toBe(base);
+});
+
+test("a push naming no session collapses per project", () => {
+  const { d, delivered } = harness();
+  d.onOutbound(createMessage("notification:push", { notificationType: "idle", projectId: "p1" }));
+  d.onOutbound(createMessage("notification:push", { notificationType: "error", projectId: "p1" }));
+  d.onOutbound(createMessage("notification:push", { notificationType: "idle", sessionId: "sess-1", projectId: "p1" }));
+  expect(delivered[0].collapseKey).toBe(pushCollapseKey("pk", "machine-uuid-1", "p1", undefined));
+  expect(delivered[1].collapseKey).toBe(delivered[0].collapseKey);
+  expect(delivered[2].collapseKey).not.toBe(delivered[0].collapseKey);
+});
+
+test("an escalation never shares a collapse key with its session's later pushes", () => {
+  // APNs replaces on a shared key, and the session keeps pushing after it
+  // escalates; the escalation is the push that must survive.
+  const { d, delivered } = harness();
+  d.onOutbound(escalation({ escalationId: "e1", terminalId: "sess-1" }));
+  d.onOutbound(createMessage("notification:push", { notificationType: "idle", sessionId: "sess-1", projectId: "p1" }));
+  d.onOutbound(escalation({ escalationId: "e2", terminalId: "sess-1" }));
+  expect(delivered).toHaveLength(3);
+  expect(delivered[0].collapseKey).toMatch(WIRE_COLLAPSE_KEY);
+  expect(delivered[0].collapseKey).toBe(pushCollapseKey("pk", "machine-uuid-1", "p1", "sess-1", "e1"));
+  expect(delivered[1].collapseKey).toBe(pushCollapseKey("pk", "machine-uuid-1", "p1", "sess-1"));
+  expect(new Set(delivered.map((x) => x.collapseKey)).size).toBe(3);
+});
+
+test("the collapse key reveals no identifier to the relay", () => {
+  // The relay forwards the key in the clear; it must learn nothing but "same
+  // thread as before".
+  const projectId = "a3f9c2e1b7d04e6a9c8b5f2e1d0c7b6a";
+  const machineUuid = "8f14e45f-ceea-467a-9575-1e2b3c4d5e6f";
+  const terminalId = "sess-7f3a9c";
+  const key = pushCollapseKey("pk", machineUuid, projectId, terminalId);
+  expect(key).toMatch(WIRE_COLLAPSE_KEY);
+  for (const id of [projectId, machineUuid, terminalId]) {
+    for (let i = 0; i + 6 <= id.length; i++) expect(key).not.toContain(id.slice(i, i + 6));
+  }
 });
 
 test("a notification that names no session seals no terminalId key at all", () => {
@@ -169,6 +250,9 @@ test("multiple targets → one sealed delivery each, keyed to that phone's push 
   // Same plaintext, but sealed to each recipient's own key — never a shared ciphertext.
   expect(sealKeys).toEqual(["pk", "pk2"]);
   expect(JSON.parse(sealed[0])).toEqual(JSON.parse(sealed[1]));
+  // ...and collapsed under each phone's own key, so the relay can't correlate
+  // one user's devices by thread.
+  expect(delivered[0].collapseKey).not.toBe(delivered[1].collapseKey);
 });
 
 test("non-user-facing message → ignored", () => {
@@ -281,4 +365,55 @@ test("a turn end naming no session is never suppressed", () => {
     notificationType: "task_complete", message: "built", projectId: "p1", origin: "agent",
   }));
   expect(delivered).toHaveLength(1);
+});
+
+// ── An armed session's StopFailure error belongs to the Handler too ──
+// The hook posts /notify error for every StopFailure class, so the same
+// double-alert the turn-end suppression exists for applies here — keyed on
+// `isHandlerArmed` rather than `handlerOwnsCompletion`, because the Handler's
+// own park notice and escalations fire for any armed slot, backlog or not.
+
+const stopFailure = (over: Record<string, unknown> = {}) => createMessage("notification:push", {
+  notificationType: "error", message: "rate limited", sessionId: "t1", projectId: "p1",
+  origin: "agent", ...over,
+});
+
+test("an armed slot's StopFailure error is not pushed — the Handler owns the outcome", () => {
+  const { d, delivered } = harness({ isHandlerArmed: () => true });
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(0);
+});
+
+test("an armed slot with an empty backlog also drops its StopFailure error", () => {
+  // The 1-tap arm before a goal is stated still gets the Handler's own park
+  // notice on a limit_hit — unlike the turn-end case, there is no wrap-up to
+  // wait for here, so this one must stay suppressed regardless of backlog.
+  const { d, delivered } = harness({ isHandlerArmed: () => true, handlerOwnsCompletion: () => false });
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(0);
+});
+
+test("an unarmed slot keeps its StopFailure error", () => {
+  // Nothing else speaks for that session: with no Handler there is no park
+  // notice or wrap-up, and this notification is the only thing that ever says
+  // the agent stopped.
+  const { d, delivered } = harness();
+  d.onOutbound(stopFailure());
+  expect(delivered).toHaveLength(1);
+});
+
+test("suppression of a StopFailure error is per slot and keyed on agent origin", () => {
+  const asked: string[] = [];
+  const { d, delivered } = harness({
+    isHandlerArmed: (id) => { asked.push(id); return id === "t1"; },
+  });
+  // A different, un-owned session keeps its push.
+  d.onOutbound(stopFailure({ sessionId: "t2" }));
+  // Not `origin: "agent"`, so this is the bridge speaking and must survive
+  // even on a slot the Handler owns.
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "error", message: "internal", sessionId: "t1", projectId: "p1",
+  }));
+  expect(asked).toEqual(["t2"]);
+  expect(delivered).toHaveLength(2);
 });

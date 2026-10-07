@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
+import { utcDayKey } from "../../src/usage/sampler.js";
 import {
   createTestUser,
   createTestSession,
@@ -41,7 +42,6 @@ async function provisionAndMintToken(
     body: JSON.stringify({
       deviceUuid,
       ed25519Pub: pub,
-      x25519Pub: Buffer.alloc(32, 0xcd).toString("base64"),
       platform: "linux",
       displayName: "heartbeat-test-agent",
     }),
@@ -210,6 +210,79 @@ describe("POST /account/devices/me/heartbeat", () => {
     expect(after?.lastSeenAt).not.toBeNull();
     expect(after?.mobileAccessEnabled).toBe(true);
     expect(after?.relayUrl).toBe("wss://relay.antgrid.ai");
+  });
+
+  test("records today's heartbeat day once per device, however many heartbeats arrive", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "kim@example.com");
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+    const { token, deviceUuid } = await provisionAndMintToken(app, cookie);
+
+    const beat = () =>
+      app.request("/account/devices/me/heartbeat", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ deviceUuid }),
+      });
+    expect((await beat()).status).toBe(200);
+    expect((await beat()).status).toBe(200);
+
+    const rows = await pg.db.usageHeartbeatSeen.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].userId).toBe(user.id);
+    expect(rows[0].deviceId).toBe(deviceUuid);
+    expect(utcDayKey(rows[0].day)).toBe(utcDayKey(new Date()));
+  });
+
+  test("a failing day insert (table not yet migrated) does not fail the heartbeat, and the next heartbeat retries it", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "mia@example.com");
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+    const { token, deviceUuid } = await provisionAndMintToken(app, cookie);
+
+    const beat = () =>
+      app.request("/account/devices/me/heartbeat", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ deviceUuid }),
+      });
+    // Renamed rather than dropped so the file's later tests keep their table.
+    await pg.db.$executeRawUnsafe(`ALTER TABLE usage_heartbeat_seen RENAME TO usage_heartbeat_seen_off`);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    let res: Response;
+    try {
+      res = await beat();
+    } finally {
+      warn.mockRestore();
+      await pg.db.$executeRawUnsafe(`ALTER TABLE usage_heartbeat_seen_off RENAME TO usage_heartbeat_seen`);
+    }
+    expect(res.status).toBe(200);
+    const after = await pg.db.device.findUnique({
+      where: { userId_deviceId: { userId: user.id, deviceId: deviceUuid } },
+      select: { lastSeenAt: true },
+    });
+    expect(after?.lastSeenAt).not.toBeNull();
+
+    expect((await beat()).status).toBe(200);
+    expect(await pg.db.usageHeartbeatSeen.count()).toBe(1);
+  });
+
+  test("a heartbeat for a missing device records no day", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "lee@example.com");
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+    const { token } = await provisionAndMintToken(app, cookie);
+
+    const res = await app.request("/account/devices/me/heartbeat", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ deviceUuid: crypto.randomUUID() }),
+    });
+    expect(res.status).toBe(404);
+    expect(await pg.db.usageHeartbeatSeen.count()).toBe(0);
   });
 
   test("persists machineName and /account/agents echoes it", async () => {

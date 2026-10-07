@@ -23,12 +23,13 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const _projectId = 'P';
 const _sessionId = 's1';
@@ -128,6 +129,7 @@ Future<FakeAgentTransport> pumpPane(
         ),
       ],
       child: MaterialApp(
+        builder: abToastHostBuilder,
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
@@ -304,6 +306,7 @@ void main() {
             machineConnectionProvider.overrideWith(() => spy),
           ],
           child: MaterialApp(
+            builder: abToastHostBuilder,
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),

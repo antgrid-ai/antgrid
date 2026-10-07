@@ -12,22 +12,6 @@
       }
     },
     {
-      "name": "stream-opened",
-      "dart": "parsed",
-      "json": {
-        "type": "stream-opened",
-        "streamId": "s-7"
-      }
-    },
-    {
-      "name": "stream-closed",
-      "dart": "parsed",
-      "json": {
-        "type": "stream-closed",
-        "streamId": "s-7"
-      }
-    },
-    {
       "name": "error:AUTH_FAILED",
       "dart": "parsed",
       "json": {
@@ -36,26 +20,6 @@
         "message": "sample AUTH_FAILED",
         "retryable": false,
         "serverTime": "2026-07-16T00:00:00.000Z"
-      }
-    },
-    {
-      "name": "error:MAX_CONNECTIONS",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "MAX_CONNECTIONS",
-        "message": "sample MAX_CONNECTIONS",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:RATE_LIMITED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "RATE_LIMITED",
-        "message": "sample RATE_LIMITED",
-        "retryable": true
       }
     },
     {
@@ -75,26 +39,6 @@
         "type": "error",
         "code": "NOT_AUTHENTICATED",
         "message": "sample NOT_AUTHENTICATED",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:WRONG_DEVICE_TYPE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "WRONG_DEVICE_TYPE",
-        "message": "sample WRONG_DEVICE_TYPE",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:ROUTE_FAILED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "ROUTE_FAILED",
-        "message": "sample ROUTE_FAILED",
         "retryable": false
       }
     },
@@ -159,57 +103,6 @@
       }
     },
     {
-      "name": "error:SESSION_LIMIT_EXCEEDED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "SESSION_LIMIT_EXCEEDED",
-        "message": "sample SESSION_LIMIT_EXCEEDED",
-        "retryable": false,
-        "ref": "s-7"
-      }
-    },
-    {
-      "name": "error:STREAM_LIMIT_EXCEEDED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "STREAM_LIMIT_EXCEEDED",
-        "message": "sample STREAM_LIMIT_EXCEEDED",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:UNKNOWN_PHONE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "UNKNOWN_PHONE",
-        "message": "sample UNKNOWN_PHONE",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:NONCE_MISMATCH",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "NONCE_MISMATCH",
-        "message": "sample NONCE_MISMATCH",
-        "retryable": false
-      }
-    },
-    {
-      "name": "error:APPROVAL_EXPIRED",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "APPROVAL_EXPIRED",
-        "message": "sample APPROVAL_EXPIRED",
-        "retryable": false
-      }
-    },
-    {
       "name": "error:SUPERSEDED",
       "dart": "parsed",
       "json": {
@@ -217,16 +110,6 @@
         "code": "SUPERSEDED",
         "message": "sample SUPERSEDED",
         "retryable": false
-      }
-    },
-    {
-      "name": "error:PEER_OFFLINE",
-      "dart": "parsed",
-      "json": {
-        "type": "error",
-        "code": "PEER_OFFLINE",
-        "message": "sample PEER_OFFLINE",
-        "retryable": true
       }
     },
     {
@@ -263,6 +146,14 @@
       }
     },
     {
+      "name": "peer-policy-changed",
+      "dart": "parsed",
+      "json": {
+        "type": "peer-policy-changed",
+        "generation": "9007199254740993"
+      }
+    },
+    {
       "name": "push:result",
       "dart": "tolerated",
       "json": {
@@ -289,22 +180,6 @@
         "ts": "2026-07-16T00:00:00.000Z",
         "nonce": "BwcHBwcHBwcHBwcHBwcHBw==",
         "sig": "ORt1T7qaueHx0g0ap3NMClaJ9w8PNPExKuLAdj/7vyM4NWy4hPKZHTnjyrAjl9g0++0HxsOTD2QowObKBZlNBg=="
-      }
-    },
-    {
-      "name": "stream-open",
-      "dartEmits": true,
-      "json": {
-        "type": "stream-open",
-        "streamId": "s-7"
-      }
-    },
-    {
-      "name": "stream-close",
-      "dartEmits": true,
-      "json": {
-        "type": "stream-close",
-        "streamId": "s-7"
       }
     },
     {

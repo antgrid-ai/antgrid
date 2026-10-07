@@ -185,6 +185,59 @@ describe("POST /turn-start", () => {
   });
 });
 
+describe("POST /turn-activity", () => {
+  test("fires onTurnActivity with the posted slot and emits NO app-facing frame", async () => {
+    const sent: AbMessage[] = [];
+    let activity = 0;
+    const slots: Array<string | undefined> = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      onTurnActivity: (id) => { activity++; slots.push(id); },
+    }));
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/turn-activity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ terminalId: "t1" }),
+      });
+      expect(res.status).toBe(200);
+      expect(activity).toBe(1);
+      expect(slots).toEqual(["t1"]);
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("tolerates an empty body, naming no session", async () => {
+    let activity = 0;
+    const slots: Array<string | undefined> = [];
+    const srv = startApiServer(ctx({ onTurnActivity: (id) => { activity++; slots.push(id); } }));
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/turn-activity`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(activity).toBe(1);
+      expect(slots).toEqual([undefined]);
+    } finally { srv.stop(); }
+  });
+
+  test("a stale run is answered ok without firing onTurnActivity", async () => {
+    let activity = 0;
+    const srv = startApiServer(ctx({
+      acceptsHookRun: () => false,
+      onTurnActivity: () => { activity++; },
+    }));
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/turn-activity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ terminalId: "t1", runId: "stale" }),
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).stale).toBe(true);
+      expect(activity).toBe(0);
+    } finally { srv.stop(); }
+  });
+});
+
 describe("POST /notify — the enum this schema hand-mirrors", () => {
   test("an awaiting_input notification is accepted and emitted", async () => {
     // Regression: this member was missing from the copy while every claude idle
@@ -244,6 +297,52 @@ describe("POST /notify — the open-prompt suppression", () => {
     try {
       expect((await post(srv.port, { type: "permission_request", terminalId: "t1" })).status).toBe(200);
       expect(sent).toHaveLength(1);
+    } finally { srv.stop(); }
+  });
+});
+
+describe("POST /notify — an idle nudge with nothing waiting on the user", () => {
+  test("is absorbed: the slot is asked to close its turn and nothing is emitted", async () => {
+    // Without it, a turn whose Stop never fired reads "needs you" on the
+    // agent's 60s idle reminder, and the app toasts "Needs your input".
+    const absorbed: string[] = [];
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      absorbIdleNudge: (id) => { absorbed.push(id); return true; },
+    }));
+    try {
+      const res = await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, stale: true });
+      expect(absorbed).toEqual(["t1"]);
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("is emitted when the slot declines it", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), absorbIdleNudge: () => false }));
+    try {
+      await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["awaiting_input"]);
+    } finally { srv.stop(); }
+  });
+
+  test("is never asked about a live block, nor past a prompt on screen", async () => {
+    const absorbed: string[] = [];
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      absorbIdleNudge: (id) => { absorbed.push(id); return true; },
+      hasOpenAgentPrompt: (id) => id === "t2",
+    }));
+    try {
+      await post(srv.port, { type: "permission_request", terminalId: "t1" });
+      expect(await (await post(srv.port, { type: "awaiting_input", terminalId: "t2" })).json())
+        .toEqual({ ok: true, suppressed: true });
+      expect(absorbed).toEqual([]);
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["permission_request"]);
     } finally { srv.stop(); }
   });
 });

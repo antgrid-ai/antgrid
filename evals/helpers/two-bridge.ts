@@ -12,7 +12,7 @@ import {
 } from "../../bridge/src/protocol";
 import { postJson } from "../support/session-bus";
 import { firstProjectStream, resolveOnFreshAdvert } from "../support/stream";
-import { generateAppIdentity, handshakeWithoutPairing, setupTestEnv, waitForHostFile, type TestEnv } from "./harness";
+import { establishNativeSession, generateAppIdentity, setupTestEnv, waitForHostFile, type TestEnv } from "./harness";
 import { LocalTestClient, type LocalConnectInfo } from "./local-client";
 import { RelayClient, type PhoneIdentity } from "./relay-client";
 
@@ -25,8 +25,8 @@ import { RelayClient, type PhoneIdentity } from "./relay-client";
  * each half is exactly the env every single-machine row already runs against.
  *
  * The carrier here is a TEST OBJECT, never a third bridge: no bridge can dial
- * another (D7). It holds FOUR legs, because that is what the desktop apps hold
- * in production and because both directions have to work (§6.1 — a peer
+ * another. It holds FOUR legs, because that is what the desktop apps hold
+ * in production and because both directions have to work (a peer
  * initiates too, and its own app carries that leg):
  *
  * - a LOOPBACK owner socket on each machine. It is what `carrierPresent()`
@@ -127,6 +127,8 @@ export interface Carrier {
   /** The app coming back. The bridge's outbox retries on its own timer, so
    *  what it held while the app was gone goes out shortly after this. */
   attachApp(machine: MachineName): Promise<void>;
+  /** Re-establish E2E and project routing after remote access retired the keys. */
+  reestablishRemote(machine: MachineName): Promise<void>;
   /**
    * One cycle of the app's remote-directory pump, in both directions.
    *
@@ -158,10 +160,11 @@ export interface TwoBridgeEnv {
 /**
  * One account device, seeded into BOTH fake inventories.
  *
- * Each bridge only ever consults its OWN `/account/devices/me/peers`, so an
- * account id seeded on one machine is unadmittable on the other. Seeded after
+ * Each bridge only ever consults its OWN license API's `/authorization`
+ * inventory, so an account id seeded on one machine is unadmittable on the
+ * other. Seeded after
  * both agents started (and cached their startup inventory), which is why every
- * connect below goes through `handshakeWithoutPairing` — it retries on the SAME
+ * connect below goes through `establishNativeSession` — it retries on the same
  * socket until the bridge's inventory refresh lands.
  */
 async function seedSharedAccountDevice(
@@ -187,17 +190,15 @@ async function connectSlotted(
   account: string,
   machineDeviceId: string,
 ): Promise<RelayClient> {
-  const client = await RelayClient.connectAndAuth(env.relay.url, {
-    deviceType: "app",
-    name: "two-bridge-carrier",
+  const client = await env.connectNativeApp({
     identity,
-    deviceId: relaySlotId(account, machineDeviceId),
-    transcriptDeviceId: account,
+    accountDeviceId: account,
+    helloDeviceId: relaySlotId(account, machineDeviceId),
+    name: "two-bridge-carrier",
   });
-  await handshakeWithoutPairing(client, env.agentDeviceId, env.agent.ed25519Pubkey);
+  await establishNativeSession(client, env.agentDeviceId, env.agent.ed25519Pubkey);
   return client;
 }
-
 /**
  * Drill into a project's stream on a freshly handshaked client.
  *
@@ -360,6 +361,16 @@ class TwoBridgeCarrier implements Carrier {
     this.unsubscribe[machine] = client.on((m) => this.observe(m, machine, "loopback"));
     this.loopbacks[machine] = client;
     await client.connect(connect, { capabilities: { sessionBusCarrier: true } });
+  }
+
+  async reestablishRemote(machine: MachineName): Promise<void> {
+    const env = this.machines[machine].env;
+    await this.relays[machine].reconnectNative();
+    await establishNativeSession(this.relays[machine], env.agentDeviceId, env.agent.ed25519Pubkey);
+    this.relayStreams[machine] = await resolveStream(this.relays[machine], env.projectId);
+    await env.app.reconnectNative();
+    await establishNativeSession(env.app, env.agentDeviceId, env.agent.ed25519Pubkey);
+    await resolveStream(env.app, env.projectId);
   }
 
   async pumpDirectory(): Promise<DirectoryPush[]> {

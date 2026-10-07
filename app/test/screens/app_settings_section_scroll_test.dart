@@ -87,9 +87,10 @@ void main() {
   testWidgets('every section is addressable by its key', (tester) async {
     await _withSettings(tester, (_) async {
       for (final section in SettingsSection.values) {
-        // BILLING is native-platform only and this suite runs on desktop; the
-        // rest are on screen or below the fold, but always built.
-        if (section == SettingsSection.billing) continue;
+        if (section == SettingsSection.billing ||
+            section == SettingsSection.help) {
+          continue;
+        }
         expect(
           find.byKey(settingsSectionKey(section)),
           findsOneWidget,
@@ -176,5 +177,26 @@ void main() {
         expect(container.read(pendingSettingsSectionProvider), isNull);
       },
     );
+  });
+
+  testWidgets('old Help section links are consumed without scrolling', (
+    tester,
+  ) async {
+    await _withSettings(tester, (container) async {
+      final appearance = find.byKey(
+        settingsSectionKey(SettingsSection.appearance),
+      );
+      final before = tester.getRect(appearance);
+      container
+          .read(pendingSettingsSectionProvider.notifier)
+          .set(_pending(SettingsSection.help));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(settingsSectionKey(SettingsSection.help)),
+        findsNothing,
+      );
+      expect(container.read(pendingSettingsSectionProvider), isNull);
+      expect(tester.getRect(appearance), before);
+    });
   });
 }

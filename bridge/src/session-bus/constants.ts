@@ -22,14 +22,13 @@ export const MAX_HELD_MESSAGES = 32;
 
 /** Unread posts one session's mailbox holds. A post interrupts nothing, so a
  *  chatty peer can fill this while its target is mid-turn; past it the OLDEST
- *  goes and the drop is COUNTED, because §7.4 makes the loss visible to the
- *  reader rather than merely bounded. */
+ *  goes and the drop is COUNTED, so the loss is visible to the reader rather
+ *  than merely bounded. */
 export const MAX_MAILBOX_POSTS = 50;
 
-/** How long an unread post, and the thread it belongs to, stay worth reading.
- *  Also the whole of §13 Q2's answer: a thread is garbage once its last message
- *  has aged out, so the thread store runs on this clock rather than growing an
- *  expiry of its own. */
+/** How long an unread post, and the thread it belongs to, stay worth reading:
+ *  a thread is garbage once its last message has aged out, so the thread
+ *  store runs on this clock rather than growing an expiry of its own. */
 export const MAILBOX_TTL_MS = 3 * 24 * 60 * 60_000;
 
 /** Threads one session correlates at once. Above the mailbox bound on purpose:
@@ -47,7 +46,7 @@ export const MAX_THREADS_PER_SESSION = 100;
 export const BUS_ROUTE_PERSIST_INTERVAL_MS = 5 * 60_000;
 
 /** Carrier routes the machine remembers across a restart — one table shared by
- *  every project it has open (E9/§5.4), not one per project. Raised from the
+ *  every project it has open, not one per project. Raised from the
  *  old per-project bound for that reason: a machine can hold several warm
  *  projects at once (`kHostWarmCap`, host-server.ts), each with several live
  *  exchanges, all sharing this cap now. Still deliberately loose, because
@@ -152,7 +151,7 @@ export const MAX_REMOTE_DIRECTORY_MACHINES = 8;
 export const MAX_REMOTE_DIRECTORY_WIRE_MACHINES = 64;
 export const MAX_REMOTE_DIRECTORY_WIRE_ROWS = 200;
 
-/** A bridge's name for ITSELF on a purely local exchange (§6.1) when it has no
+/** A bridge's name for ITSELF on a purely local exchange when it has no
  *  relay identity to be addressed by — a machine launched local-only, or one
  *  whose control-plane registration never landed. Two sessions one bridge
  *  spawned need no network to reach each other, so refusing them an address
@@ -164,7 +163,7 @@ export const MAX_REMOTE_DIRECTORY_WIRE_ROWS = 200;
  *  machine under whatever name the machine later acquires. */
 export const LOCAL_MACHINE_ID = "local";
 
-/** Rolling-hour `notify` ceiling per (sender, target) pair (§7.4). `post` is
+/** Rolling-hour `notify` ceiling per (sender, target) pair. `post` is
  *  unbudgeted, so this is deliberately tight: it pushes agents onto `post` for
  *  anything but the genuinely urgent, rather than onto the channel that
  *  interrupts a turn. A product decision, not a default — do not raise it back
@@ -172,7 +171,7 @@ export const LOCAL_MACHINE_ID = "local";
 export const MAX_NOTIFIES_PER_PAIR_HOUR = 4;
 
 /** Sends one (sender, target) pair may make with no artifact and no new thread
- *  between them before a halt trips (§7.4). Counted on the OUTBOUND side only:
+ *  between them before a halt trips. Counted on the OUTBOUND side only:
  *  the halt refuses sends, so what it bounds is what this session sent, and the
  *  peer holds its own row for its own half. Tight on purpose — it only bites
  *  where nobody is watching, because a human typing into either session clears

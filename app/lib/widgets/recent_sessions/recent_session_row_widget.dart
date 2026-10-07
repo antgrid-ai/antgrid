@@ -228,7 +228,8 @@ class _RecentSessionRowWidgetState
         // would leave the offline case, the only one a user can act on, unsaid.
         return switch (outcome) {
           RecentSessionDeleteOutcome.deleted => SessionDeleteAck.deleted,
-          RecentSessionDeleteOutcome.accepted => SessionDeleteAck.accepted,
+          RecentSessionDeleteOutcome.outcomeUnknown =>
+            SessionDeleteAck.outcomeUnknown,
           RecentSessionDeleteOutcome.offline => throw SessionOperationException(
             null,
             '${row.origin.deviceName} is offline — connect to delete.',

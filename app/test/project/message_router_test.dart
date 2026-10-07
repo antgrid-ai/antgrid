@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/project/message_router.dart';
-import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/fake_agent_transport.dart';
+import 'package:antgrid/project/inbound_frame.dart';
 
 void main() {
   late FakeAgentTransport transport;
@@ -17,7 +18,7 @@ void main() {
   });
 
   test('routes status-tier messages to status stream', () async {
-    final received = <Map<String, dynamic>>[];
+    final received = <InboundFrame>[];
     final sub = router.status.listen(received.add);
 
     transport.emit('agent:status', {'status': 'ready'});
@@ -26,7 +27,7 @@ void main() {
 
     await Future<void>.delayed(Duration.zero);
 
-    expect(received.map((m) => m['type']).toList(), [
+    expect(received.map((m) => m.type).toList(), [
       'agent:status',
       'session:updated',
     ]);
@@ -39,7 +40,7 @@ void main() {
     () async {
       expect(transport.sent, isEmpty);
 
-      final received = <Map<String, dynamic>>[];
+      final received = <InboundFrame>[];
       final sub = router.heavy.listen(received.add);
       await Future<void>.delayed(Duration.zero);
 
@@ -50,7 +51,7 @@ void main() {
       transport.emit('terminal:output', {'data': 'chunk'});
       await Future<void>.delayed(Duration.zero);
       expect(received.length, 1);
-      expect(received.first['type'], 'terminal:output');
+      expect(received.first.type, 'terminal:output');
 
       await sub.cancel();
       await Future<void>.delayed(Duration.zero);
@@ -147,8 +148,8 @@ void main() {
   );
 
   test('ignore-tier messages do not reach either stream', () async {
-    final statusRx = <Map<String, dynamic>>[];
-    final heavyRx = <Map<String, dynamic>>[];
+    final statusRx = <InboundFrame>[];
+    final heavyRx = <InboundFrame>[];
     final s1 = router.status.listen(statusRx.add);
     final s2 = router.heavy.listen(heavyRx.add);
 

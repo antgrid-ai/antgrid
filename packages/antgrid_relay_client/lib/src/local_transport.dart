@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/io.dart';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
 import 'relay_service.dart' show RelayNetTap;
+import 'upload_stream.dart';
 
 /// Thrown when the local agent's WebSocket closes during the handshake.
 ///
@@ -58,21 +60,28 @@ class LocalTransport extends BufferedAgentTransport {
   /// accepted the connection; 15s absorbs it, costing nothing on the warm path.
   final Duration connectTimeout;
 
-  /// What this client can do, sent verbatim as the hello's `capabilities`.
-  /// The agent gates behaviour on individual flags in it, so a caller that can
-  /// do more than the default says so here rather than growing a constructor
-  /// flag per capability. A caller that passes its own map REPLACES the
-  /// default, so it owes every key the default carries — Zod strips a key the
-  /// bridge's schema does not declare and nothing spans the two sides.
-  /// `pullsTree` is carried for an older bridge alone: this bridge no longer
-  /// pushes a whole tree under any condition, but one that predates the
-  /// on-demand listing protocol resumes pushing every checkout's `tree:full`
-  /// at each reconnect without it. See the TODO on
-  /// `AppReadyMessage.capabilities.pullsTree` in `bridge/src/protocol.ts`.
-  final Map<String, Object?> capabilities;
+  /// Whether this app forwards session-bus frames for other bridges (the
+  /// desktop app is the only carrier — see `session_bus/` in `app/AGENTS.md`).
+  /// Sent as the hello's `capabilities.sessionBusCarrier` only when true; the
+  /// key is omitted for a non-carrier owner, which the agent treats the same
+  /// as an owner that sends no `capabilities` at all.
+  final bool sessionBusCarrier;
+
+  /// Where a loopback upload writes the temp file whose path it hands the
+  /// bridge. Must be a directory the bridge process can read too: a packaged
+  /// app's system temp can be redirected into a package-private folder, and
+  /// the bridge may belong to another install sharing the same host directory.
+  /// Null falls back to the system temp, which is only safe when app and
+  /// bridge share one filesystem view (tests, unpackaged dev builds).
+  final String? uploadTempDir;
 
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
+
+  /// Replies awaited by in-flight `file:upload-local` requests, keyed by
+  /// requestId — [dispatchDecoded] claims each `file:upload-result` here
+  /// instead of publishing it to [messages].
+  final _uploadReplies = <String, Completer<Map<String, dynamic>>>{};
 
   /// The WS close code from the socket's last teardown after a successful
   /// handshake (e.g. 4409 = another app superseded ownership of the project).
@@ -88,11 +97,8 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
-    this.capabilities = const {
-      'checkoutRouting': true,
-      'pullsTree': true,
-      'terminalFramesV1': true,
-    },
+    this.sessionBusCarrier = false,
+    this.uploadTempDir,
   });
 
   /// Records a frame that never left, or never reached dispatch.
@@ -329,7 +335,7 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        'capabilities': capabilities,
+        if (sessionBusCarrier) 'capabilities': {'sessionBusCarrier': true},
       }),
     );
 
@@ -351,15 +357,10 @@ class LocalTransport extends BufferedAgentTransport {
         'state.snapshot',
         params: {
           'types': ['*'],
-          // Inert against a current bridge, which caches no whole-tree frame
-          // at all — the file tree is listed per directory on demand. Held for
-          // an OLDER bridge, which still retains a `tree:full` per checkout at
-          // open (~2 MB for a project with several managed worktrees): this app
-          // has no handler for one, so a replay of everything would decrypt
-          // megabytes to discard them, and on a slow link that backlog starved
-          // the bridge's relay pongs until the relay closed the socket.
-          // TODO(bharath): drop in the same release as the `pullsTree`
-          // capability, once no bridge in the field caches a tree.
+          // The native path excludes the same type for the same reason
+          // (`_kHeavyReplayTypes` in machine_session.dart): the tree is listed
+          // per directory on demand, and a whole-tree frame folded into the
+          // replay would be one per managed worktree that no reader wants.
           'exclude': const ['tree:full'],
         },
         timeout: const Duration(seconds: 5),
@@ -373,7 +374,8 @@ class LocalTransport extends BufferedAgentTransport {
         }
       }
     } on RpcException {
-      // Pre-RPC agent — fall through, subscribers get live frames only.
+      // A timed-out or refused snapshot is not fatal: subscribers get live
+      // frames only.
     }
     // Born established: fire the tier-3 hydrators once. A local session never
     // re-establishes (no handshake), so this is the only replay — no reconnect
@@ -415,6 +417,112 @@ class LocalTransport extends BufferedAgentTransport {
     }
   }
 
+  /// The bridge shares this machine's filesystem, so a loopback upload
+  /// writes [bytes] to a temp file and names it in one `file:upload-local`
+  /// instead of carrying the bytes over the socket.
+  @override
+  UploadExchange openUpload({
+    required String requestId,
+    required String projectId,
+    required String checkoutId,
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    void Function(int sent, int total)? onProgress,
+  }) {
+    final exchange = _LocalUploadExchange(requestId);
+    // Registered synchronously so a dispose or socket close that lands while
+    // the temp file is still being written fails this upload too.
+    final reply = Completer<Map<String, dynamic>>();
+    reply.future.ignore();
+    _uploadReplies[requestId] = reply;
+    unawaited(
+      _runLocalUpload(exchange, reply.future, {
+        'type': 'file:upload-local',
+        'projectId': projectId,
+        'checkoutId': checkoutId,
+        'requestId': requestId,
+        'fileName': fileName,
+        'mimeType': ?mimeType,
+      }, bytes, onProgress),
+    );
+    return exchange;
+  }
+
+  Future<void> _runLocalUpload(
+    _LocalUploadExchange exchange,
+    Future<Map<String, dynamic>> reply,
+    Map<String, dynamic> request,
+    Uint8List bytes,
+    void Function(int sent, int total)? onProgress,
+  ) async {
+    Directory? dir;
+    try {
+      final parent = uploadTempDir == null
+          ? Directory.systemTemp
+          : await Directory(uploadTempDir!).create(recursive: true);
+      dir = await parent.createTemp('antgrid-upload-');
+      // The bridge stages under the request's fileName, never the source's.
+      final source = File('${dir.path}${Platform.pathSeparator}upload');
+      try {
+        await source.writeAsBytes(bytes, flush: true);
+      } catch (e) {
+        throw UploadFailure('WRITE_FAILED', message: '$e');
+      }
+      if (exchange.settled) return;
+      if (_ch == null) throw const UploadFailure('TRANSPORT_CLOSED');
+      onProgress?.call(0, bytes.length);
+      await send({...request, 'sourcePath': source.path});
+      // A cancelled upload still waits here: the bridge may be copying the
+      // temp file, which is deleted only once it answers or times out.
+      final json = await reply.timeout(
+        kUploadResultTimeout,
+        onTimeout: () => throw const UploadFailure('TIMEOUT'),
+      );
+      final result = UploadStreamResult.tryParse(
+        json,
+        requestId: exchange.requestId,
+      );
+      if (result == null) throw const UploadFailure('PROTOCOL');
+      if (result.ok) onProgress?.call(bytes.length, bytes.length);
+      exchange.settle(result);
+    } on UploadFailure catch (failure) {
+      exchange.settle(failure);
+    } catch (e) {
+      exchange.settle(UploadFailure('WRITE_FAILED', message: '$e'));
+    } finally {
+      _uploadReplies.remove(exchange.requestId);
+      if (dir != null) {
+        unawaited(dir.delete(recursive: true).then((_) {}, onError: (_) {}));
+      }
+    }
+  }
+
+  @override
+  void dispatchDecoded(Map<String, dynamic> json, String channel) {
+    if (json['type'] == 'file:upload-result') {
+      final reply = _uploadReplies[json['requestId']];
+      if (reply != null) {
+        if (!reply.isCompleted) reply.complete(json);
+        return;
+      }
+    }
+    super.dispatchDecoded(json, channel);
+  }
+
+  @override
+  void failAllPending({
+    String code = 'E_DISPOSED',
+    String message = 'transport disposed',
+  }) {
+    for (final reply in _uploadReplies.values) {
+      if (!reply.isCompleted) {
+        reply.completeError(const UploadFailure('TRANSPORT_CLOSED'));
+      }
+    }
+    super.failAllPending(code: code, message: message);
+  }
+
   @override
   Future<void> dispose() async {
     failAllPending();
@@ -424,6 +532,32 @@ class LocalTransport extends BufferedAgentTransport {
     await _ch?.sink.close();
     await outbound.close();
     await stateController.close();
-    await droppedFrameController.close();
   }
+}
+
+class _LocalUploadExchange implements UploadExchange {
+  _LocalUploadExchange(this.requestId) {
+    _result.future.ignore();
+  }
+
+  @override
+  final String requestId;
+  final _result = Completer<UploadStreamResult>();
+
+  bool get settled => _result.isCompleted;
+
+  void settle(Object outcome) {
+    if (settled) return;
+    if (outcome is UploadStreamResult) {
+      _result.complete(outcome);
+    } else {
+      _result.completeError(outcome);
+    }
+  }
+
+  @override
+  Future<UploadStreamResult> get result => _result.future;
+
+  @override
+  void cancel() => settle(const UploadFailure('CANCELLED'));
 }

@@ -24,7 +24,7 @@ straight to a pull request, anything deeper wants an issue first, and `relay/`,
 
 | I want to work on | I need |
 |---|---|
-| `packages/antgrid-wire` — frame codec, relay envelope schemas | Bun |
+| `packages/antgrid-wire` — session-frame types, relay envelope schemas | Bun |
 | `relay/` — routing, auth, epochs, rate limiting, the licence gate | Bun |
 | `bridge/` — PTYs, file watching, git, port scanning, tunnelling | Bun |
 | `web/` — accounts, subscriptions, JWT minting | Bun + Postgres |
@@ -119,9 +119,15 @@ flutter --version
 cd app && flutter pub get
 ```
 
+The app's `iroh_flutter` plugin builds Rust from source. Install **Rust via
+rustup, including the stable toolchain**, for native app builds on every
+platform. `rustup --version` and `cargo +stable --version` must work in the
+environment launching Flutter (including Aspire). The pure-Dart unit suites do
+not need this native build toolchain.
+
 ### Windows — desktop builds
 
-Two things, and the second one surprises people.
+Install the Rust toolchain above and these native dependencies.
 
 **1. Visual Studio 2022 or newer with the "Desktop development with C++"
 workload.** `app/windows/CMakeLists.txt` asks only for CMake 3.14, so that
@@ -129,6 +135,9 @@ number tells you nothing — the real floor comes from the Flutter plugins this
 app pulls in. Visual Studio 2019, whose bundled CMake is 3.20, fails. Visual
 Studio 2022 or newer is the requirement; VS 18 2026 with its bundled CMake 4.3.1
 is what has actually been measured working.
+
+Include the **C++ ATL for the selected x64/x86 MSVC toolset** individual
+component: `flutter_secure_storage_windows` includes `atlstr.h`.
 
 **2. A full JDK.** This is not optional and it is not obvious. `sentry_flutter`
 pulls in the transitive `jni` package, `jni` declares Windows support, so every
@@ -153,35 +162,34 @@ Install the JDK **before** your first `flutter build windows`. A failed first
 configure leaves a permanent mess; see
 [Trap 1](#trap-1-a-failed-windows-cmake-configure-poisons-appbuild-permanently).
 
+**Rust and the launching shell.** After installing rustup, restart the terminal
+or IDE that launches Aspire so it inherits `%USERPROFILE%\.cargo\bin` in PATH.
+Restarting only the Flutter resource inherits Aspire's old environment.
+`iroh_flutter_plugin_cargokit.vcxproj` failing with `MSB8066` / exit code `-1`
+can hide `rustup not found in PATH`; inspect the preceding Cargokit output.
+
+The pinned upstream Cargokit resolver also fails when traversing the hidden
+AppData pub cache. Use a visible cache before dependency resolution and keep
+that environment when launching the app, as desktop CI does:
+
+```powershell
+# From the repository root, in the same terminal that launches Aspire/Flutter.
+$env:PUB_CACHE = Join-Path (Get-Location) '.pub-cache'
+Push-Location app
+flutter pub get --enforce-lockfile
+Pop-Location
+```
+
 **Shell.** Commands in this file are written for a POSIX shell. On Windows, Git
 Bash or WSL runs them as written. In PowerShell 5.1, `&&` is a parser error —
 chain with `;` instead. One script is bash-only regardless of how you invoke it:
 `npm run check:font-tokens` shells out to `bash app/scripts/check_font_tokens.sh`
 and will not run under PowerShell or cmd.
 
-**Symlinks.** Every `AGENTS.md` in this repo is a symlink to the `CLAUDE.md`
-beside it, so an agent looking for the vendor-neutral name reads the same file.
-Windows has supported symlinks since Vista and needs no elevation once Developer
-Mode is on — the obstacle is Git's own default. Unless "Enable symbolic links"
-was ticked during installation, Git for Windows writes `core.symlinks=false` into
-its system config, and a clone made under that setting materialises every symlink
-as a one-line text file holding the target path. That stub reads as ordinary
-content instead of failing, so a dangling or unresolved link can sit unnoticed
-for a long time.
-
-```bash
-git config --global core.symlinks true
-```
-
-Set it **before** cloning: a clone records the value in its own `.git/config` and
-keeps it thereafter. To repair an existing clone, set it there as well, then
-delete the stub files and `git checkout -- .` so git writes real links.
-
 ### macOS — desktop and iOS builds
 
-No extra system packages. A working Xcode toolchain plus the standard Flutter
-macOS setup is enough; CI builds the macOS desktop app with nothing beyond
-Flutter and Bun.
+A working Xcode toolchain, the standard Flutter macOS setup, and the Rust
+toolchain above are required; see the desktop workflow for CI setup.
 
 The desktop app targets **macOS 12 and up** — Flutter 3.47 dropped Big Sur. The
 floor is set in `app/macos/Podfile` and in every `MACOSX_DEPLOYMENT_TARGET` in
@@ -242,9 +250,9 @@ documented in `app/pubspec.yaml` and is by design.
 - Core library desugaring is required (`flutter_local_notifications`); it is
   already wired in `app/android/app/build.gradle.kts`.
 
-Optional: **Rust (rustup + cargo)**, because `super_clipboard` →
-`super_native_extensions` compiles its crate from source whenever no precompiled
-binary matches the target ABI; and an **NDK**, whose `llvm-readelf` is how you
+**Rust (rustup + cargo)** is required by `iroh_flutter`, and is also used by
+`super_clipboard` → `super_native_extensions` whenever no precompiled binary
+matches the target ABI. An **NDK** supplies `llvm-readelf`, which is how you
 check ELF alignment by hand. See
 [Trap 4](#trap-4-a-16-kb-alignment-failure-is-never-fixed-by-bumping-the-ndk).
 
@@ -373,9 +381,8 @@ prebuilt binaries, so alignment is a property of the artifact and nothing in thi
 repo re-applies it.
 
 **Fix.** Identify the offending library, then fix it in the release that
-produced it (for the terminal libraries, see
-[docs/dart-terminal-fork-release.md](docs/dart-terminal-fork-release.md)) — not
-in the app:
+produced it (for the terminal libraries, the `dart_terminal` fork pinned in
+`app/pubspec.yaml`) — not in the app:
 
 ```bash
 llvm-readelf -lW <lib>   # every LOAD Align must be >= 0x4000
@@ -492,6 +499,9 @@ No third-party account is needed for local development.
   fills them with literal stubs (`stub-github-client-id`, etc.). They must be
   *present*, not real. The consequence is that the GitHub and Google sign-in
   buttons render and then fail. Exercising those paths needs your own OAuth apps.
+- Sign in with Apple is off unless all of `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`,
+  `APPLE_KEY_ID` and `APPLE_PRIVATE_KEY` are set; setup leaves them empty. A
+  partial set fails the boot. Real values come from an Apple developer account.
 - **Sign-in still works, credential-free, via the magic link.** `ZEPTOMAIL_TOKEN`
   is optional and setup never fills it. With it unset, the email sender degrades
   to a console logger that prints the whole message:
@@ -822,9 +832,9 @@ contribution is possible at all.
 
 **Zero credentials, zero accounts, no database:**
 
-- **`packages/antgrid-wire`** — the frame codec, the relay control-envelope
-  schemas, `FRAME_VERSION`, and the spoof-safe client-IP resolver shared by the
-  relay and web. `bun run --filter antgrid-wire test`.
+- **`packages/antgrid-wire`** — the session-frame type names, the relay
+  control-envelope schemas, and the spoof-safe client-IP resolver shared by
+  the relay and web. `bun run --filter antgrid-wire test`.
 - **`relay/` in full** — hello verification order, epoch arbitration, the replay
   cache, routing authorization, stream admission, rate limiting, and the licence
   gate logic itself. `bun run --filter antgrid-relay test`. The tests need no
@@ -876,11 +886,11 @@ migrations. A `postgres:16-alpine` container is enough.
 | Path | What it is |
 |---|---|
 | `bridge/` | TypeScript/Bun. Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| `relay/` | TypeScript/Bun. Zero-knowledge WebSocket router — authenticates devices, forwards encrypted frames, reads no payloads. |
+| `relay/` | TypeScript/Bun. Central WebSocket control plane — authenticates devices and carries presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
 | `app/` | Flutter/Dart + Riverpod. Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | `web/` | TypeScript/Bun + Hono + Postgres. Accounts and sign-in, subscriptions, device registration, Ed25519 JWT minting for the relay's gate. |
-| `packages/antgrid-wire` | TypeScript. Frame codec, relay control-envelope schemas, `FRAME_VERSION`, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
-| `packages/antgrid_relay_client` | Pure Dart relay and crypto client, no Flutter. The app's transport layer. |
+| `packages/antgrid-wire` | TypeScript. Session-frame type names, stream-open records, relay control-envelope schemas, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
+| `packages/antgrid_relay_client` | Pure Dart central-control, E2E and session protocol, no Flutter. Native payload links are injected by the ELv2 peer transport. |
 | `packages/antgrid_eval_client` | Dart end-to-end test fixtures. |
 | `site/` | Astro. The static marketing site at `antgrid.ai`. Its own Bun project, **not** a root workspace — `bun install` from the root does not cover it. |
 | `evals/` | End-to-end suite: real bridge processes, an in-process relay, real PTYs. |
@@ -889,9 +899,9 @@ migrations. A `postgres:16-alpine` container is enough.
 | `docs/` | Design notes, protocol specs and release procedures. |
 
 Message flow, the shared-package breakdown and the `antgrid.yaml` project schema
-are in [`docs/architecture.md`](docs/architecture.md). The end-to-end handshake
-has its own specification at
-[`docs/protocol/e2e-handshake.md`](docs/protocol/e2e-handshake.md).
+are in [`docs/architecture.md`](docs/architecture.md). The native peer session has
+its own specification at
+[`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
 
 Note that the wire protocol is mirrored **by hand** between TypeScript and Dart
 — `packages/antgrid-wire` and `packages/antgrid_relay_client` do not share code.

@@ -11,6 +11,8 @@ const log = logger.child({ component: "agent-core" });
 // A machine's project streams share each physical viewer's terminal budget.
 const terminalConnectionBudgets = new Map<ClientKey, { bytes: number; users: number }>();
 import { TerminalManager } from "./terminal-manager";
+import { StatusShadowTracker } from "./status-shadow-tracker";
+import { shadowAgent } from "./status-shadow";
 import {
   TerminalFrameHub, TerminalViewerConnection,
   type TerminalAddress, type TerminalViewerTransport,
@@ -18,25 +20,29 @@ import {
 import { createKeyedLock } from "./keyed-lock";
 import {
   hasTypedContent,
-  isInterruptKeystroke,
+  isCtrlC,
+  isLoneEsc,
   isSubmitKeystroke,
   isTerminalReport,
   opensCommandLine,
   submittedLine,
 } from "./keystrokes";
+import { transcriptInterruptFor } from "antgrid-agents/builtins";
+import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
-import type { PeerSessionView, SendTarget } from "./stream-mux";
-import { FileWatcher } from "./file-watcher";
-import { FileUploadManager } from "./file-upload";
+import type { PeerSessionView, SendTarget, TerminalStreamHooks } from "./project-streams";
+import { FileWatcher, unresolvedResolvePathReply } from "./file-watcher";
+import { linkHistoryRows } from "./terminal-links/history-links";
+import type { LinkBases } from "./terminal-links/resolver";
+import { FileUploadManager, type UploadResultFields, type UploadStreamServer } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { FileFinder } from "./file-find";
 import { PortDetector } from "./port-detector";
-import { TunnelManager } from "./tunnel-manager";
-import type { SendOutcome } from "./send-scheduler";
+import { TunnelManager, type TunnelStreamServer } from "./tunnel-manager";
+import type { SendOutcome } from "./peer/stream-records";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
-import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
@@ -52,7 +58,6 @@ import { isRefusal } from "./session-bus/errors";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
-import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
@@ -61,7 +66,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -88,7 +93,7 @@ import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { runGit } from "./git-spawn";
-import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import {
@@ -110,11 +115,6 @@ import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
  *  to back those walks outlast the app's 2s `project:list` liveness ping, which
  *  reaps a healthy host mid-open (see file-watcher.ts's startWatching note). */
 const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
-
-/** How long a tunnel exchange's origin session stays resolvable, so a response
- *  can be addressed back to the device that asked. Comfortably past the app's
- *  own preview timeouts; an expired entry costs a broadcast, never a body. */
-const TUNNEL_ORIGIN_TTL_MS = 120_000;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -195,6 +195,32 @@ interface CheckoutRuntime {
 // an entry, which is what keeps the verdict — and the warning — one per spawn.
 const hookAliveState = new Map<string, "armed" | "pinged">();
 
+/**
+ * Whether a lone Esc/Ctrl+C keystroke on [sessionId] (agent [tool]) should arm
+ * the transcript-interrupt confirmation (`interrupt-confirm.ts`), given
+ * whether its turn is currently open and whether its transcript path is known.
+ *
+ * A bare key is ambiguous — it closes a picker, a dialog or a task view as
+ * readily as it aborts a turn — so this answers only "is there anything to
+ * confirm", never "did the key interrupt": [data] not being a lone Esc/Ctrl+C,
+ * an idle turn, an agent with no {@link transcriptInterruptFor} predicate
+ * (every agent but claude and codex), or an unknown transcript path each mean
+ * nothing happens and answer undefined here.
+ *
+ * Exported and pure so a test can drive it directly, without a real PTY, a
+ * real transcript file, or a running core.
+ */
+export function shouldArmInterruptConfirm(
+  tool: string | undefined,
+  data: string,
+  turnOpen: boolean,
+  transcriptPath: string | undefined,
+): ((record: unknown) => boolean) | undefined {
+  if (!turnOpen || !transcriptPath) return undefined;
+  if (!isLoneEsc(data) && !isCtrlC(data)) return undefined;
+  return transcriptInterruptFor(tool);
+}
+
 // How long an agent has to ping /hook-alive after a prompt is submitted into it.
 // Measured at 3s on a cold codex TUI; firing early is a false "hooks are dead".
 const HOOK_ALIVE_PROBE_MS = 20_000;
@@ -238,7 +264,7 @@ export interface AgentCore {
    *  Returns the number of terminals that were closed. */
   shutdown(): Promise<number>;
   /** Identity + transport configuration the caller uses to construct a
-   *  RelayClient (or other transports). */
+   *  the native peer-session owner (or another transport). */
   readonly relayUrl: string | null;
   readonly identity: DeviceIdentity;
   readonly projectId: string;
@@ -249,14 +275,13 @@ export interface AgentCore {
    *  for why it reads this rather than a project-index snapshot. */
   readonly projectName: string;
   readonly abDir: string;
-  readonly nextKeypair: () => EphemeralKeypair;
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
   /** The session bus this project's sessions read and write through: the
    *  message log, the held store and the carrier routes for their contexts.
    *  Host-injected, this is shared with every other project the host has
-   *  open (E9/§5.4) — a MACHINE-level object that happens to be reachable
+   *  open — a MACHINE-level object that happens to be reachable
    *  from here, not "this project's own" — so a caller that means to affect
    *  only this project's sessions must go through this core's own methods
    *  (`setSessionBusListener`, `injectBusLine`) rather than the coordinator's
@@ -283,23 +308,20 @@ export interface AgentCore {
   /** Host-level checkouts bypass the inbound Git handler, so callers use this
    *  to keep the core's branch and file snapshots coherent immediately. */
   refreshGitState(): Promise<void>;
-  /** Lifecycle hooks the transport invokes. [peerId] names the app session the
-   *  tunnel request arrived on, so its response can be addressed back to the
-   *  device that asked instead of every attached one. */
-  handleTunnelMessage(raw: unknown, peerId?: string): void;
   onHandshakeComplete(): void;
-  /** Wire the transport's plaintext (tunnel) sender. The MessageBus only
-   *  carries strict AbMessages; tunnel-protocol messages bypass the bus
-   *  and are sent through this hook directly. Pass `null` to clear it (the
-   *  promotion controller does this on teardown so a dead relay closure
-   *  isn't retained). */
-  setPlainHook(fn: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null): void;
-  /** Abort every in-flight tunneled HTTP response, on every checkout runtime
-   *  and on main. Driven from the transport's peer-online/peer-offline hooks:
-   *  a body in flight across a peer loss or a (re)establishment is dead by
-   *  construction, and the relay client's queue clear only reaches a run that
-   *  happens to be parked on a send at that instant. WS tunnels are untouched. */
-  abortTunnelStreams(): void;
+  /** Admits a tunnel (preview) QUIC stream: `TunnelStreamRegistry` calls
+   *  this once a stream's head record names a checkout, after the switch,
+   *  checkout-routing and checkout-existence checks all pass. Never opens or
+   *  promotes a core — `checkoutRuntimes.runtime(checkoutId)` is a lookup over
+   *  what is already running. */
+  readonly tunnelStreams: TunnelStreamServer;
+  /** Admits an upload QUIC stream: `UploadStreamRegistry` calls this once
+   *  the open frame names a checkout, after the switch and checkout-routing
+   *  checks pass. Unlike `tunnelStreams.admit`, this may PREPARE a checkout
+   *  runtime that is not yet running, replicating the lazy prepare
+   *  `attachTransport` runs for a `CHECKOUT_VARIABLE_MESSAGE_TYPES` frame —
+   *  a stream open bypasses that bus-level machinery entirely. */
+  readonly uploadStreams: UploadStreamServer;
   /** Wire a lookup from an app session's route id to what this core may know
    *  about it: the verified pubkey behind it (the push registry's key) and the
    *  capabilities it declared. A machine holds one session per attached device,
@@ -319,23 +341,11 @@ export interface AgentCore {
    *
    *  Pass `null` to clear the lookup when the transport detaches. */
   setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
-  /** Every app session on this core's transport, for the questions that must be
-   *  answered about ALL attached devices rather than the one that asked. Kept
-   *  apart from {@link setPeerSessionProvider} because a lookup cannot answer
-   *  them: a core is handed the device a frame arrived on, never the roster. */
-  setEstablishedPeersProvider(fn: (() => PeerSessionView[]) | null): void;
-  /** Same tree-pull question for the loopback owner. Wired once at listener
-   *  bind — the listener outlives any single owner, and the owner is not a
-   *  peer, so it carries no {@link PeerSessionView}. */
-  setOwnerPullsTreeProvider(fn: (() => boolean) | null): void;
-  /** Current remote app's `terminal:frame` display capability; cleared when that
-   *  transport detaches. */
-  setPeerTerminalFramesV1Provider(fn: (() => boolean) | null): void;
-  /** Same question for the loopback owner. Wired once at listener bind. */
-  setOwnerTerminalFramesV1Provider(fn: (() => boolean) | null): void;
-  /** Whether the client on `source` renders terminals from `terminal:frame`.
-   *  Per-connection on purpose — see the implementation. */
-  clientSupportsTerminalFramesV1(source: ClientKey): boolean;
+  /** Wire the project-stream registry's terminal-stream hooks: `retired` and `subscribeSettled`
+   *  callbacks so this core can end a terminal attachment's stream from the
+   *  ordinary session-teardown and subscribe-reply paths without knowing a
+   *  stream exists. Pass `null` to clear it alongside {@link setPeerSessionProvider}. */
+  setTerminalStreamHooks(hooks: TerminalStreamHooks | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -348,20 +358,21 @@ export interface AgentCore {
    *  prompt — the same bare restart `session:start` drives. Fire-and-forget: a
    *  caller that needs the outcome watches `session:updated` rather than
    *  awaiting this. A no-op for an id this core does not hold, or one already
-   *  running. Exists for the session-bus wake path (§7.3's same-machine
-   *  carve-out) — `host-server.ts` resolves the owning core by session id and
+   *  running. Exists for the session-bus wake path's same-machine carve-out —
+   *  `host-server.ts` resolves the owning core by session id and
    *  calls through here, since only that core's own `SessionManager` can start
    *  a session it persists. */
   startSession(id: string): void;
+  prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession>;
+  observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void;
+  stopScheduledSession(sessionId: string): Promise<void>;
+  releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void>;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
    *  session not-running. Returns null before sessions are initialized
    *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
   listSessions(includeArchived: boolean): SessionEntry[] | null;
-  /** True when any of this project's sessions runs somewhere other than main's
-   *  working tree, and therefore needs checkout-scoped routing. */
-  hasIsolatedSessions(): boolean;
   /** True when the Handler is ARMED on [terminalId]. A blocking prompt on an
    *  armed slot is escalated unconditionally and that escalation is pushed, so
    *  the agent's own question notification would buzz the phone a second time
@@ -435,6 +446,13 @@ export interface BuildAgentCoreOptions {
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
    *  [sessionId] is the session the hook fired for, when it carried one. */
   onTurnStart?: (sessionId?: string) => void;
+  /** Fired when a per-tool-call hook pings the api-server (`POST /turn-activity`)
+   *  — a catch-all "the agent is still here" signal, not a turn boundary. Unlike
+   *  {@link onTurnStart} it must never clear a pending request or a
+   *  call-to-action notification (see {@link turnActivity} in work-status.ts).
+   *  Bridge-internal — never surfaces to the app. [sessionId] is the session the
+   *  hook fired for, when it carried one. */
+  onTurnActivity?: (sessionId?: string) => void;
   /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
    *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
    *  on its own: typing in an idle session is not work. `submitted` (the input
@@ -451,16 +469,18 @@ export interface BuildAgentCoreOptions {
    *  {@link onTurnStart}: it opens a turn only if something was actually
    *  pending. Bridge-internal — never surfaces to the app. */
   onAnswer?: (sessionId: string, requestId?: string) => void;
-  /** Fired when the user presses a bare Escape key into [sessionId]'s PTY (see
-   *  {@link isInterruptKeystroke}), so the owning ProjectCore can close the
+  /** Fired once [sessionId]'s own transcript confirms a keystroke actually
+   *  interrupted its turn (see `interrupt-confirm.ts` and
+   *  {@link shouldArmInterruptConfirm}), so the owning ProjectCore can close the
    *  turn the hook model has no other way to end. A hook-based session's only
-   *  turn-end signal is its own Stop/completion hook, which most agent CLIs
-   *  never fire on a manual interrupt — without this the working dot outlives
-   *  an Esc that genuinely aborted the turn. Bridge-internal — never surfaces
-   *  to the app, and purely a work-status close: the keystroke itself already
-   *  reached the CLI via the normal PTY write and is what actually interrupts
-   *  it. A later real turn-end/notification for the same turn is harmless
-   *  (closeTurn is idempotent on an already-closed turn). */
+   *  turn-end signal is its own Stop/completion hook, which neither Claude nor
+   *  Codex has been OBSERVED to fire on a manual interrupt — without this the
+   *  working dot outlives one that genuinely aborted the turn. Bridge-internal
+   *  — never surfaces to the app, and purely a work-status close: the
+   *  keystroke itself already reached the CLI via the normal PTY write and is
+   *  what actually interrupts it. A later real turn-end/notification for the
+   *  same turn is harmless (closeTurn is idempotent on an already-closed
+   *  turn). */
   onInterrupt?: (sessionId: string) => void;
   /** A hook reported [sessionId]'s turn ENDED on a channel filing no notification
    *  (codex's `notify` argv) — the second closer, so a turn opened by keystroke
@@ -497,6 +517,23 @@ export interface BuildAgentCoreOptions {
    *  nudge's phone push; an absent hook forwards, which is the direction a
    *  supervisor has to fail in. */
   isStaleIdleNudge?: (sessionId: string) => boolean;
+  /** Close [sessionId]'s turn if nothing on record waits on the user, and say
+   *  whether it did — see `AgentContext.absorbIdleNudge`. Absent forwards the
+   *  nudge as before. */
+  absorbIdleNudge?: (sessionId: string) => boolean;
+  /** True while [sessionId] has an open turn, per the owner's own work-status
+   *  reduction — the gate {@link shouldArmInterruptConfirm} asks before arming a
+   *  transcript-interrupt confirmation on a lone Esc/Ctrl+C: idle Ctrl+C is
+   *  reflexive on some CLIs (it exits Codex outright) and an idle double-Esc
+   *  opens Codex's transcript overlay, neither of which has anything for a
+   *  confirmation to watch for. Absent means never open, which only costs the
+   *  confirmation a keystroke it would have declined to arm anyway. */
+  isTurnOpenFor?: (sessionId: string) => boolean;
+  /** Test-only: replaces the transcript-interrupt confirmer's real clock, timer
+   *  and file I/O (`interrupt-confirm.ts`) so a test can drive a confirmation
+   *  window deterministically, with no real sleep and no real file on disk.
+   *  Never set outside a test. */
+  interruptConfirmDeps?: InterruptConfirmDeps;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -504,9 +541,9 @@ export interface BuildAgentCoreOptions {
   relayUrl?: string;
   /** Hand one session-bus frame to the loopback owner — this machine's own
    *  desktop app — and to nothing else. The lead bridge can never reach the peer
-   *  bridge (D7), so the owner is its only carrier; and the MessageBus has no
+   *  bridge, so the owner is its only carrier; and the MessageBus has no
    *  addressing, so publishing instead would put agent traffic on the human's
-   *  phone (spec 4.1). False when there is no owner, or the owner did not
+   *  phone. False when there is no owner, or the owner did not
    *  declare itself a carrier: the frame is held until one attaches. */
   sendToOwner?: (msg: AbMessage) => boolean;
   /** Hand one session-bus frame to ONE attached app session — the peer bridge
@@ -523,7 +560,7 @@ export interface BuildAgentCoreOptions {
    *  whether a peer is reachable at all; absent means no carrier, which is the
    *  honest answer for a core nothing has connected to. */
   carrierPresent?: () => boolean;
-  /** A host-injected, MACHINE-level session bus (E9/§5.4) shared with every
+  /** A host-injected, MACHINE-level session bus shared with every
    *  other project the host has open. Absent means a per-core fallback is
    *  built instead, scoped to this project alone — the same
    *  `opts.X ?? new Y(...)` idiom `pairedPhones` and the rest of this file
@@ -531,7 +568,7 @@ export interface BuildAgentCoreOptions {
    *  coordinator itself, once, machine-wide, at process start; a fallback
    *  resumes itself on construction — see where `sessionBus` is built below. */
   sessionBus?: SessionBusCoordinator;
-  /** The host's machine-level session directory (§5.5), which answers who else
+  /** The host's machine-level session directory, which answers who else
    *  shares this project's repository. Travels with `sessionBus` and for the
    *  same reason: both are machine-wide facts a single core cannot hold. Absent
    *  means `listSessions` is refused rather than narrowed — see
@@ -541,14 +578,14 @@ export interface BuildAgentCoreOptions {
    *  it lives — this core's own project or a sibling one. Travels with
    *  `sessionDirectory` and resolves the same way `deliverLocal` does
    *  (`host-server.ts`'s `sessionIndex.lookup` → the owning warm core →
-   *  `ProjectCore.startSession`). Absent means the session-bus §7.3 wake never
+   *  `ProjectCore.startSession`). Absent means the session-bus wake never
    *  fires — a bare core with no host, or a session on a project this host has
    *  not warmed, cannot be started from here. Returns false when no warm core
    *  holds that session (never throws); true only means the start was asked
    *  for, not that it finished — see `SessionBusApiDeps.startSession`. */
   startSession?: (sessionId: string) => boolean;
-  /** Hand one rendered line to the turn-boundary queue that owns delivery
-   *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
+  /** Hand one rendered line to the turn-boundary queue that owns delivery.
+   *  Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
    *  nothing to wait on and submits immediately instead. */
   queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
@@ -576,45 +613,6 @@ const GIT_POLL_BASE_MS = 10_000;
  *  that a fan-out of arrivals is one push, narrow enough that a sheet open on
  *  that mailbox still re-reads while its reader is looking at it. */
 const BUS_ARRIVED_COALESCE_MS = 100;
-
-/** Whether a refused inbound verb must be answered on `session:result` rather
- *  than `control:result`.
- *
- *  A reply only ends a wait if the caller is listening for it. `sessions_service.dart`
- *  completes every pending session mutation off `session:result` + `requestId`
- *  (`_pendingCreates`, `_pendingRefusableMutations`, `_pendingDeletes`,
- *  `_pendingModeChanges`, `_pendingMutations`); its `control:result` handling is
- *  a separate, uncorrelated surface, so a session verb answered there times out
- *  anyway. Derived from the verb's shape rather than listed, so a new session
- *  verb is covered by construction.
- *
- *  `session:list` is excluded on purpose: `session:list:result` carries only
- *  `{requestId, sessions[]}`, with nowhere to put a refusal, so the only frame
- *  available would report an empty session list — a project that looks empty
- *  rather than refused. It keeps the uncorrelated `control:result`.
- *  `session:focus` carries no `requestId`, and nothing awaits it. Both are
- *  pinned in `agent-core-checkout-routing.test.ts`. */
-function answersOnSessionResult(msg: AbMessage): msg is AbMessage & { requestId: string } {
-  return msg.type.startsWith("session:")
-    && msg.type !== "session:list"
-    && typeof (msg as { requestId?: unknown }).requestId === "string";
-}
-
-/** One notice per (device, refusal) per cooldown for the two checkout-routing
- *  refusal surfaces nothing correlates — the log line and a bare
- *  `control:result`. A refused device keeps sending at keystroke rate
- *  (`terminal:input`, `terminal:ack`), so both would otherwise fire once per
- *  frame. Replies keyed to a `requestId` are never throttled: each ends one
- *  specific wait. Same shape as the mux's `noticeDue`. */
-const CHECKOUT_REFUSAL_NOTICE_MS = 5_000;
-const CHECKOUT_REFUSAL_NOTICE_TTL_MS = 60_000;
-
-/** A settled refusal carries copy for the app; the transient one is dropped so
- *  the app's own retry can heal it, and so carries none — see
- *  `checkoutRoutingRefusal`. */
-type CheckoutRoutingRefusal =
-  | { code: "CHECKOUT_ROUTING_REQUIRED" | "CHECKOUT_ROUTING_UNAVAILABLE"; message: string; detail: string }
-  | { code: "CHECKOUT_ROUTING_PENDING"; detail: string };
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -775,9 +773,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return config.services ?? [];
   }
 
-  // Shared: generate initial keypair and display banner (same for both modes)
-  const initialKeypair = generateEphemeralKeypair();
-
   // The banner is human-facing. In local mode the agent is spawned headless by
   // the App; banner output goes to a log nobody reads — skip it.
   if (opts.mode === "remote") {
@@ -795,6 +790,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
+  const scheduledObservers = new Set<(observation: ScheduledSessionObservation & { projectId: string }) => void>();
   let namer: SessionNamer | null = null;
   let titleObservers: Array<{ stop(): void }> = [];
   // Title-generation budget per conversation, per terminal. The /session-title
@@ -831,7 +827,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
 
-  // --- Wave 5: terminal-frame delivery -----------------------------------
+  // --- Terminal-frame delivery ---------------------------------------------
   //
   // One hub per project core, mirroring `manager` (one `TerminalManager` per
   // core too) — `TerminalAddress` already carries `projectId`, so a
@@ -841,6 +837,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const frameHub = new TerminalFrameHub();
   // Each authenticated app owns its attachments and acknowledgment window.
   const viewerConnections = new Map<ClientKey, TerminalViewerConnection>();
+  /** Concurrent `file:resolve-path` stats per client: every one can hit the
+   *  disk, so a client that floods them is cut off at a small constant. */
+  const resolveInFlight = new Map<ClientKey, number>();
+  let resolveDroppedWarnAt = 0;
   // Authorization is rechecked for each viewer; one backgrounded app must not
   // pause a sibling, and loopback control remains exempt from remote access.
   function viewerTransportFor(source: ClientKey): TerminalViewerTransport {
@@ -861,7 +861,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // subscription, so broadcasting it would charge every other connected
         // client for a stream it never asked for. `runId`/`attachmentId` still
         // ride the message so the requester's own stale generation can ignore
-        // one, exactly like `terminal:snapshot`'s `history` label.
+        // one, exactly like `terminal:history:page`'s `history` label.
         // Only the bulk per-frame payload rides "preview" — `subscribed`/
         // `display:status` are small, latched, one-shot control replies the
         // requester is actively waiting on, and belong with the rest of the
@@ -869,6 +869,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // The channel comes off PREVIEW_CHANNEL_MESSAGE_TYPES rather than a
         // literal, because the app-side gate reads the same set.
         await sendTerminalTo(message, source, signal);
+      },
+      retired(_address, attachmentId) {
+        if (source !== "loopback") terminalStreamHooks?.retired(source, attachmentId);
       },
     };
   }
@@ -898,13 +901,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  watcher with an empty roster sends every delta unfiltered — fail open
    *  rather than silently starve a client nobody has heard from yet.
    *
-   *  Deliberately NOT derived from `establishedPeersProvider`: nothing in
-   *  `bridge/src` calls `setEstablishedPeersProvider`, so in production it answers with no peers
-   *  at all and a roster built from it would omit every phone — turning the
-   *  filter on for a device that never declared what it wanted, which is the
-   *  one outcome the filter exists to prevent. Fed from the inbound choke point in
-   *  `attachTransport` instead, so an RPC-only client (`state.snapshot`
-   *  returns above `handleAbMessage`) still counts. */
+   *  Fed from the inbound choke point in `attachTransport` rather than from
+   *  stream admission, so an RPC-only client (`state.snapshot` returns above
+   *  `handleAbMessage`) still counts. */
   const attachedClients = new Set<ClientKey>();
 
   function dropViewerConnection(source: ClientKey): void {
@@ -914,7 +913,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const budget = terminalConnectionBudgets.get(source);
     if (budget && --budget.users === 0) terminalConnectionBudgets.delete(source);
   }
-  // --- end Wave 5 state ----------------------------------------------------
+  // --- end terminal-frame delivery state ------------------------------------
 
   // What each client last said is on screen (`session:focus`), dropped when it
   // declares it can render nothing here (`client:focus-state`) or when its
@@ -1020,6 +1019,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Zod `.max(64)` never runs on the live path — see git-log.ts's MAX_LOG_PAGE
   // comment. Clamped here instead.
   const MAX_CHILDREN_REQUEST_PATHS = 64;
+  const MAX_RESOLVE_IN_FLIGHT = 8;
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
@@ -1037,6 +1037,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // owner row, and a restarted slot reuses the same namespaced id.
     terminalOwners.set(namespaced, { checkoutId: runtime.checkout.id, externalId: terminalId });
     return namespaced;
+  }
+
+  /** internalTerminalId's lookup without its writes: a client-supplied id must
+   *  not grow configuredTerminalIds or terminalOwners. */
+  function peekInternalTerminalId(runtime: CheckoutRuntime, externalId: string): string | undefined {
+    if (sessions?.get(externalId) || runtime.checkout.id === "main") return externalId;
+    return runtime.configuredTerminalIds.get(externalId);
   }
 
   /** Filesystem root a supervised slot actually runs in. Falls back to the
@@ -1076,14 +1083,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sessionTitle: session.name,
         projectId: project.id,
       }));
+      statusShadow?.observe(session.id, { kind: "notify", type: normalized.type });
       return;
     }
     const stamped = { ...msg, terminalId: externalId } as AbMessage;
     sendFromRuntime(runtime, stamped);
-  }
-
-  function nextKeypair(): EphemeralKeypair {
-    return generateEphemeralKeypair();
   }
 
   // Per-device view of the app sessions attached to this core's transport.
@@ -1100,39 +1104,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     peerSessionProvider = fn;
     if (fn) relayEverAttached = true;
   }
-  // Every app session on the transport, for the questions about ALL of them.
-  // Assigned by nothing today: its sole reader asked whether every attached
-  // client pulled its own file tree, and that fork in behaviour is gone.
-  // TODO(bharath): drop with `AppReadyMessage.capabilities.pullsTree` (see its
-  // TODO in protocol.ts) unless a new all-peers question claims it first.
-  let establishedPeersProvider: (() => PeerSessionView[]) | null = null;
-  function setEstablishedPeersProvider(fn: (() => PeerSessionView[]) | null) {
-    establishedPeersProvider = fn;
+  // The project-stream registry's terminal-stream hooks, wired alongside peerSessionProvider so
+  // a relay attachment's own QUIC stream can be ended from the ordinary
+  // retirement/subscribe-reply paths without those paths knowing it exists.
+  let terminalStreamHooks: TerminalStreamHooks | null = null;
+  function setTerminalStreamHooks(hooks: TerminalStreamHooks | null) {
+    terminalStreamHooks = hooks;
   }
-  // The loopback owner is not a peer, so its tree-pull answer has nowhere to
-  // live in a PeerSessionView. Written by project-core.ts and read by nothing —
-  // held for the same release as the capability itself; see protocol.ts.
-  let ownerPullsTreeProvider: (() => boolean) | null = null;
-  let peerTerminalFramesV1Provider: (() => boolean) | null = null;
-  let ownerTerminalFramesV1Provider: (() => boolean) | null = null;
-  function setOwnerPullsTreeProvider(fn: (() => boolean) | null) {
-    ownerPullsTreeProvider = fn;
-  }
-  function setPeerTerminalFramesV1Provider(fn: (() => boolean) | null) {
-    peerTerminalFramesV1Provider = fn;
-  }
-  function setOwnerTerminalFramesV1Provider(fn: (() => boolean) | null) {
-    ownerTerminalFramesV1Provider = fn;
-  }
-
-  function clientSupportsTerminalFramesV1(source: ClientKey): boolean {
-    if (source === "loopback") return ownerTerminalFramesV1Provider?.() === true;
-    if (source === "relay") return peerTerminalFramesV1Provider?.() === true;
-    return peerSessionProvider?.(source)?.terminalFramesV1 === true;
-  }
-
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted app may
+  // tunnel path, which bypasses the bus). An account-trusted app may
   // drive this project only while the machine is mobile-reachable. A LOOPBACK
   // frame is never gated: local control's trust boundary is the loopback socket
   // + token, and the desktop must keep driving its own machine with mobile
@@ -1168,8 +1148,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return remoteAccessEnabled();
   }
 
-  /** E12's interruption half: whether an UNSOLICITED session-bus frame from a
-   *  peer machine may reach a session here.
+  /** The interruption half of the agent-reach gate (`agent-reach-policy.ts`):
+   *  whether an UNSOLICITED session-bus frame from a peer machine may reach a
+   *  session here.
    *
    *  Same two carve-outs as {@link remoteFrameAllowed}, for the same reasons,
    *  and layered under it rather than beside it — a machine that is not
@@ -1196,199 +1177,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return agentReachEnabled();
   }
 
-  /** Why a frame may not address this project's checkouts, or `null` to admit
-   *  it. A reason rather than a boolean because the caller answers the app, and
-   *  the refusals want different answers.
-   *
-   *  This is the core's own copy of a gate the stream mux applies first
-   *  (`mayAcceptFrom`, wired in `project-core.ts`): on the real transport a
-   *  device that never declared `checkoutRouting`, or that resolves to no
-   *  session, is refused there and never reaches this bus. What remains for the
-   *  arms here is a frame the mux admitted that this core still cannot place —
-   *  its per-device lookup gone, or a transport that threaded no peer id — plus
-   *  the per-device answer restated for a bus attached without a mux.
-   *
-   *  `CHECKOUT_ROUTING_PENDING` is the one arm that is DROPPED rather than
-   *  answered. A peer id resolves to no session while a device is mid-handshake,
-   *  and again between an E2E session dying and the next one establishing; the
-   *  app's own retry heals both, and an answer would not — `_pullSnapshot`
-   *  (`machine_session.dart`) settles on any code but `E_TIMEOUT` — so a refusal
-   *  would turn a race that fixes itself into a workspace telling the user to
-   *  reconnect.
-   *
-   *  Fail-closed per device: a frame whose session has not declared the
-   *  capability is refused while a sibling that has declared it is served. */
-  function checkoutRoutingRefusal(peerId: string | undefined): CheckoutRoutingRefusal | null {
-    // Never faced the relay: no per-device session to consult and no remote app
-    // on the other end. The same carve-out `remoteFrameAllowed` makes, in the
-    // same direction.
-    if (!relayEverAttached) return null;
-    // A core that cannot answer for anyone is asked before the peer id, so this
-    // bridge's own inconsistency is never reported as a capability the device
-    // failed to declare.
-    if (!peerSessionProvider) {
-      return {
-        code: "CHECKOUT_ROUTING_UNAVAILABLE",
-        message: "This machine cannot route workspace traffic right now.",
-        detail: "core is relay-attached but its peer-session provider is unwired",
-      };
-    }
-    // Every production transport threads a peer id, so a missing one is a
-    // defect on this side of the wire — not something the app can reconnect
-    // away, which is why it is not REQUIRED with reconnect advice.
-    if (!peerId) {
-      return {
-        code: "CHECKOUT_ROUTING_UNAVAILABLE",
-        message: "This machine cannot route workspace traffic right now.",
-        detail: "frame carried no peer id",
-      };
-    }
-    const session = peerSessionProvider(peerId);
-    if (!session) {
-      return {
-        code: "CHECKOUT_ROUTING_PENDING",
-        detail: "no session for this peer id (transient — dropping so the app retries)",
-      };
-    }
-    if (session.checkoutRouting !== true) {
-      return {
-        code: "CHECKOUT_ROUTING_REQUIRED",
-        message: "Update the app to open a workspace with an isolated session.",
-        detail: "device did not declare checkoutRouting",
-      };
-    }
-    return null;
-  }
-
-  const refusalNoticeAt = new Map<string, number>();
-  function refusalNoticeDue(peerId: string | undefined, code: string): boolean {
-    const now = Date.now();
-    const key = `${peerId ?? "<none>"} ${code}`;
-    const last = refusalNoticeAt.get(key);
-    if (last !== undefined && now - last < CHECKOUT_REFUSAL_NOTICE_MS) return false;
-    for (const [k, at] of refusalNoticeAt) {
-      if (now - at >= CHECKOUT_REFUSAL_NOTICE_TTL_MS) refusalNoticeAt.delete(k);
-    }
-    refusalNoticeAt.set(key, now);
-    return true;
-  }
-
-  // UNAVAILABLE is this bridge's own inconsistency, which no reconnect clears,
-  // so it is the one arm that needs an operator's eye.
-  function logCheckoutRefusal(
-    action: string,
-    msgType: string,
-    refusal: CheckoutRoutingRefusal,
-    peerId: string | undefined,
-  ): void {
-    const line = `${action} %s: %s (project %s, peer %s, code %s)`;
-    const args = [msgType, refusal.detail, project.id, peerId ?? "<none>", refusal.code] as const;
-    if (refusal.code === "CHECKOUT_ROUTING_UNAVAILABLE") log.error(line, ...args);
-    else log.warn(line, ...args);
-  }
-
-  /** The checkout-routing gate for one inbound bus frame: true when the frame
-   *  must not proceed, having been logged and — for a settled refusal — answered
-   *  to the device that sent it. host-server.ts holds the rule: a rejected verb
-   *  returns `control:result {ok:false,error}`, never a silent drop. It matters
-   *  more here than anywhere, because `state.snapshot` is the only carrier of a
-   *  relay checkout's agent:status, so an unanswered pull reads as a dead
-   *  machine and retries for ~70s before giving up on frames it will never be
-   *  sent. */
-  function refuseCheckoutRouting(
-    bus: MessageBus,
-    msg: AbMessage,
-    channel: Channel,
-    source: InboundSource,
-    peerId: string | undefined,
-  ): boolean {
-    const refusal = checkoutRoutingRefusal(peerId);
-    if (!refusal) return false;
-    const due = refusalNoticeDue(peerId, refusal.code);
-    if (refusal.code === "CHECKOUT_ROUTING_PENDING") {
-      if (due) logCheckoutRefusal("Dropping inbound", msg.type, refusal, peerId);
-      return true;
-    }
-    if (due) logCheckoutRefusal("Refusing inbound", msg.type, refusal, peerId);
-    const error = { code: refusal.code, message: refusal.message };
-    // Addressed to the device that asked, never broadcast: the app writes a
-    // `session:result` error into its sessions state BEFORE matching the
-    // requestId (`sessions_service.dart`), so every other client would toast a
-    // refusal for a verb it never sent. Three carriers, because a refusal only
-    // ends a wait if it lands on the frame the caller is watching. An RPC answer
-    // rides the channel its request came in on, the way every other `response`
-    // here does; the other two are control-plane frames in every other emitter,
-    // and the refused frame may well have arrived on "preview", where a refusal
-    // would queue behind that channel's bulk.
-    if (msg.type === "request") {
-      bus.publishOnly(
-        createMessage("response", { requestId: msg.requestId, ok: false, error }),
-        channel, source, peerId,
-      );
-    } else if (answersOnSessionResult(msg)) {
-      bus.publishOnly(
-        createMessage("session:result", {
-          requestId: msg.requestId,
-          ok: false,
-          // Two fields, not the `{code, message}` object the other carriers
-          // take: `session:result` predates that shape and the app reads them
-          // apart.
-          error: refusal.message,
-          errorCode: refusal.code,
-        }),
-        "control", source, peerId,
-      );
-    } else if (due) {
-      // Nothing correlates a bare control:result, so it is a notice and shares
-      // the log line's cooldown rather than answering every keystroke.
-      bus.publishOnly(
-        createMessage("control:result", { ok: false, verb: msg.type, error }),
-        "control", source, peerId,
-      );
-    }
-    return true;
-  }
-
-  // Which app session a tunnel request came in on, keyed by the id its response
-  // carries back (requestId for HTTP, tunnelId for a websocket). A preview body
-  // answers exactly one request, so fanning it out both wastes the link and
-  // hands one device another device's page. Entries are released on the
-  // terminal frame of the exchange and swept by TTL; a miss falls back to
-  // broadcast — today's behaviour — so a lost entry never costs a response.
-  const tunnelOriginByRef = new Map<string, { peerId: string; at: number }>();
-
-  function tunnelRefOf(data: object): string | null {
-    const d = data as { requestId?: unknown; tunnelId?: unknown };
-    if (typeof d.requestId === "string") return d.requestId;
-    if (typeof d.tunnelId === "string") return d.tunnelId;
-    return null;
-  }
-
-  function noteTunnelOrigin(data: object, peerId: string | undefined): void {
-    if (!peerId) return;
-    const ref = tunnelRefOf(data);
-    if (!ref) return;
-    const now = Date.now();
-    for (const [key, origin] of tunnelOriginByRef) {
-      if (now - origin.at >= TUNNEL_ORIGIN_TTL_MS) tunnelOriginByRef.delete(key);
-    }
-    tunnelOriginByRef.set(ref, { peerId, at: now });
-  }
-
-  function tunnelTargetFor(data: object): SendTarget | undefined {
-    const ref = tunnelRefOf(data);
-    if (!ref) return undefined;
-    const origin = tunnelOriginByRef.get(ref);
-    const type = (data as { type?: unknown }).type;
-    // The frame that ends the exchange releases the entry; a websocket's data
-    // frames keep theirs until the close.
-    if (type === "tunnel:http-response" || type === "tunnel:ws-close") {
-      tunnelOriginByRef.delete(ref);
-    }
-    if (!origin || Date.now() - origin.at >= TUNNEL_ORIGIN_TTL_MS) return undefined;
-    return { kind: "peer", peerId: origin.peerId };
-  }
-
   /** Contexts already warned about for having no route. An unroutable frame is
    *  held and re-tried on every coordinator tick, so a per-attempt warning would
    *  repeat for the life of the bridge. Cleared the next time a route resolves
@@ -1406,14 +1194,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // A session this bridge may address on the bus. Every session this bridge
   // holds is addressable — a session is the unit and there is no membership to
-  // join (`docs/session-messaging.md` E1/E2) — so the only two refusals left are
+  // join — so the only two refusals left are
   // a session id this bridge does not hold and a machine with no relay device id
   // to stamp an address with. The coordinator's `addressable` is what tells
   // those two nulls apart for the caller.
   //
-  // This is not the consent gate. §5.1's repo key and the machine's
-  // remote-access switch are, and they sit in front of the directory rather than
-  // here; a carrier can still only reach a session it was told the id of.
+  // This is not the consent gate. The session directory's repo-key check and
+  // the machine's remote-access switch are, and they sit in front of the
+  // directory rather than here; a carrier can still only reach a session it
+  // was told the id of.
   //
   // Used only by the per-core FALLBACK coordinator below: when `opts.sessionBus`
   // is injected, the host answers `self` machine-wide through its own session
@@ -1445,7 +1234,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let busEventListener: ((event: SessionBusEvent) => void) | null = null;
 
   // The session bus for this project's sessions. Host-supplied and shared with
-  // every other project the host has open (E9/§5.4: one coordinator per
+  // every other project the host has open (one coordinator per
   // MACHINE, not one per project) whenever a host built this core; a bare
   // agent with no host (14+ test files call `buildAgentCore` directly) falls
   // back to a coordinator scoped to this project alone — the exact idiom
@@ -1492,7 +1281,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // True here means the owner ACCEPTED the frame, which is the whole of what
       // this process can observe: the app classifies and forwards afterwards, and
       // an app that finds no leg for it drops it with no way to say so back.
-      // Nothing downstream reports the rest today — the receipt E6 keeps is
+      // Nothing downstream reports the rest today — the delivery receipt is
       // reserved and dark until it is re-keyed to a message id.
       const sentToOwner = opts.sendToOwner?.(frame) ?? false;
       if (sentToOwner) {
@@ -1526,8 +1315,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Fallback path only: a standalone/test core with no host to have hydrated
     // this on its behalf. Routes live in one machine-level table regardless of
     // which core loads them (`bus-db.ts`), so this reads whatever this abDir
-    // holds — for a fallback core that is exactly what the pre-E9 coordinator
-    // always loaded for itself, since nothing else shares its abDir.
+    // holds — for a fallback core that is exactly what a per-project
+    // coordinator always loaded for itself, since nothing else shares its abDir.
     sessionBus.hydrateRoutes();
     // Hydrate whatever a previous process left in flight. Without it a cold
     // coordinator holds no sessions, so nothing re-arms the retries a killed
@@ -1667,63 +1456,77 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     remoteAccessEnabled: offMachineSendAllowed,
   });
 
-  function handleTunnelMessage(raw: unknown, peerId?: string) {
-    const msg = parseTunnelMessage(raw as string | object);
-    if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
-    // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
-    // so a phone could otherwise read a project's dev-server/preview data
-    // without ever touching the bus dispatch gate. Gate here too. Only relay
-    // traffic reaches this path — the loopback owner speaks the bus.
-    if (!remoteFrameAllowed("relay")) {
-      log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
-      return;
-    }
-    // Same per-device capability gate the bus dispatch applies, restated here
-    // because this path bypasses the bus entirely: a tunnel proxies arbitrary
-    // HTTP out of a checkout's dev server, so a session that may not address a
-    // checkout must not be answered with one's page either. A drop, not a
-    // reply: the mux already answered a device it refused, and the arms that
-    // remain here are this bridge's own faults, which no tunnel error frame
-    // would help the preview recover from.
-    const tunnelRefusal = sessions?.hasIsolatedSessions() ? checkoutRoutingRefusal(peerId) : null;
-    if (tunnelRefusal) {
-      if (refusalNoticeDue(peerId, tunnelRefusal.code)) {
-        logCheckoutRefusal("Dropping tunnel", msg.type, tunnelRefusal, peerId);
+  /** Admits a tunnel QUIC stream: called by `TunnelStreamRegistry` once a
+   *  stream's head record names `checkoutId`, so the checks a tunnel verb used
+   *  to run inline in `handleTunnelMessage` run here instead, in the same
+   *  order. Never opens or promotes a core — `checkoutRuntimes.runtime` is a
+   *  lookup over what is already running. */
+  const tunnelStreams: TunnelStreamServer = {
+    admit(peerId, checkoutId) {
+      // Tunnel streams forward raw TCP to localhost:<port> and return what it
+      // answers, so a phone could otherwise read a project's dev-server/preview
+      // data without ever touching the bus dispatch gate. Gate here too. Only
+      // relay traffic reaches a native stream — the loopback owner speaks the
+      // bus (and opens no such stream).
+      if (!remoteFrameAllowed("relay")) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "mobile access is disabled" } };
       }
-      return;
-    }
-    const runtime = checkoutRuntimes.runtime(msg.checkoutId);
-    if (!runtime) {
-      log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
-      return;
-    }
-    if (!runtime.tunnelManager) return;
-    noteTunnelOrigin(msg, peerId);
-    switch (msg.type) {
-      case "tunnel:http-request":
-        runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
-          log.error("tunnel:http-request handler failed: %s", err)
-        );
-        break;
-      case "tunnel:http-cancel":
-        runtime.tunnelManager.onHttpCancel(msg);
-        break;
-      case "tunnel:ws-open":
-        runtime.tunnelManager.onWsOpen(msg);
-        break;
-      case "tunnel:ws-data":
-        runtime.tunnelManager.onWsData(msg);
-        break;
-      case "tunnel:ws-close":
-        runtime.tunnelManager.onWsClose(msg);
-        break;
-    }
-  }
+      const runtime = checkoutRuntimes.runtime(checkoutId);
+      if (!runtime) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "unknown checkout" } };
+      }
+      if (!runtime.tunnelManager) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "tunnels are not available for this checkout" } };
+      }
+      return { ok: true, manager: runtime.tunnelManager };
+    },
+  };
+
+  /** Admits an upload QUIC stream: called by `UploadStreamRegistry` once
+   *  a stream's open frame names `checkoutId`. Shares the switch and
+   *  checkout-routing gate with `tunnelStreams.admit`, but a preview stream
+   *  only ever reads an ALREADY-running checkout while an upload may need to
+   *  start one — a stream open bypasses `attachTransport`'s bus-level dispatch
+   *  entirely, so this replicates its lazy `checkoutRuntimes.resolve` +
+   *  `prepareCheckoutRuntime` for the socket-path upload verbs
+   *  (`CHECKOUT_VARIABLE_MESSAGE_TYPES`) directly. */
+  const uploadStreams: UploadStreamServer = {
+    async admit(peerId, checkoutId) {
+      if (!remoteFrameAllowed("relay")) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "mobile access is disabled" } };
+      }
+      if (sessions?.isCheckoutDeleting(checkoutId)) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "this checkout is being deleted" } };
+      }
+      let runtime: CheckoutRuntime;
+      try {
+        const checkout = await checkoutRuntimes.resolve(checkoutId);
+        if (!checkout) {
+          return { ok: false, refusal: { code: "NOT_ALLOWED", message: "unknown checkout" } };
+        }
+        // Re-checked after the store lookup: a delete that started during that
+        // await would otherwise have its checkout re-prepared right here.
+        if (sessions?.isCheckoutDeleting(checkoutId)) {
+          return { ok: false, refusal: { code: "NOT_ALLOWED", message: "this checkout is being deleted" } };
+        }
+        runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+      } catch (error) {
+        log.warn("Checkout lookup failed for upload stream, checkout %s: %s", checkoutId, error);
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "checkout lookup failed" } };
+      }
+      if (!runtime.uploadManager) {
+        return { ok: false, refusal: { code: "NOT_ALLOWED", message: "uploads are not available for this checkout" } };
+      }
+      return { ok: true, manager: runtime.uploadManager };
+    },
+  };
 
   // [client] is who sent this frame — needed only by the work-status read state,
   // which tracks what each client has on screen separately. Everything else in
   // here is authorized at the bus handler and does not care.
   function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string, clientGeneration = clientGenerations.get(client) ?? 0) {
+    if ((clientGenerations.get(client) ?? 0) !== clientGeneration) return;
+    if (client !== "loopback" && !remoteFrameAllowed("relay")) return;
     switch (msg.type) {
       // A remote bus frame is relayed by an app session between two bridges that
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
@@ -2027,8 +1830,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // they arrive, which gives the phone no way to time the gap itself.
         const id = internalTerminalId(runtime, msg.terminalId);
         const line = submittedLine(msg.data);
+        // Baseline the transcript-interrupt confirmation BEFORE the key reaches
+        // the PTY — Codex's own interrupt marker lands ~36ms after the key, so
+        // reading the transcript's size after the write below risks losing that
+        // race on a fast CLI. sessions?.get, not agentKeyFor: the latter falls
+        // back to the project's default tool for ANY terminal id, including a
+        // service PTY or a config `terminals:` slot — neither runs a turn a
+        // transcript could confirm interrupted. See shouldArmInterruptConfirm.
+        if (sessions?.get(msg.terminalId)) {
+          const transcriptPath = sessions.getAgentTranscriptPath(msg.terminalId);
+          const predicate = shouldArmInterruptConfirm(
+            agentKeyFor(msg.terminalId), msg.data,
+            opts.isTurnOpenFor?.(msg.terminalId) ?? false, transcriptPath,
+          );
+          if (predicate) {
+            interruptConfirmer.arm(msg.terminalId, transcriptPath!, predicate, () => opts.onInterrupt?.(msg.terminalId));
+          }
+        }
         if (line === null) manager.write(id, msg.data);
         else manager.submit(id, line);
+        statusShadow?.input(msg.terminalId, msg.data, "user");
         // Everything below reads the frame as "the user did something". A focus
         // or mouse report is the viewer's VT engine answering a mode the guest
         // turned on, so it goes to the PTY and stops there.
@@ -2052,7 +1873,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           command: opensCommandLine(msg.data),
         });
         // ...and lifts a session-bus no-progress halt. The halt waits on a human
-        // looking (spec 8); a human submitting into that session is the only such
+        // looking; a human submitting into that session is the only such
         // signal a bridge can observe, and an agent cannot forge it because
         // nothing an agent submits arrives as terminal input.
         if (isSubmitKeystroke(msg.data)) {
@@ -2061,7 +1882,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // codex runs SessionStart on its first THREAD. Internal id on purpose.
           armHookAliveProbe(id);
         }
-        if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       }
       case "handler:configure": {
@@ -2274,23 +2094,90 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:resolve-path": {
+        // A request this case will not resolve still gets an answer: the app
+        // waits on the requestId, and silence reads there as an unreachable
+        // machine after its timeout. `busy` marks a request turned away
+        // unexamined, which is not evidence that the path is absent.
+        const answerUnresolved = (busy: boolean): void => {
+          sendAbToItsChannel(createMessage("file:resolve-path-result", {
+            ...unresolvedResolvePathReply(msg.projectId, msg.requestId, busy),
+            checkoutId: runtime.checkout.id,
+          }), client);
+        };
         const fw = runtime.fileWatcher;
-        if (fw) {
-          fw.handleResolvePathRequest(msg.requestId, msg.path);
-        } else {
+        if (!fw) {
           log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+          answerUnresolved(false);
+          break;
         }
+        const pending = resolveInFlight.get(client) ?? 0;
+        if (pending >= MAX_RESOLVE_IN_FLIGHT) {
+          const now = Date.now();
+          if (now - resolveDroppedWarnAt > 5000) {
+            resolveDroppedWarnAt = now;
+            log.warn("file:resolve-path dropped: client already has %d in flight", pending);
+          }
+          answerUnresolved(true);
+          break;
+        }
+        // `parseMessageFast` checked the type and nothing else.
+        const raw = msg as { path?: unknown; terminalId?: unknown; base?: unknown };
+        const terminalId = typeof raw.terminalId === "string" && raw.terminalId.length <= 256
+          ? raw.terminalId : undefined;
+        const base = raw.base === "a" || raw.base === "l" || raw.base === "s" || raw.base === "r"
+          ? raw.base : undefined;
+        let extra: LinkBases | undefined;
+        if (terminalId !== undefined && manager) {
+          const internal = peekInternalTerminalId(runtime, terminalId);
+          // A terminal of another checkout would hand this request its cwd.
+          if (internal !== undefined && manager.has(internal)
+            && terminalOwner(internal).runtime.checkout.id === runtime.checkout.id) {
+            extra = manager.linkBases(internal);
+          }
+        }
+        resolveInFlight.set(client, pending + 1);
+        fw.resolvePath(raw.path, { base, liveCwd: extra?.liveCwd, spawnCwd: extra?.spawnCwd, requestId: msg.requestId })
+          // Targeted: `externalImagePath` is an absolute path, and only the
+          // requester asked for it.
+          .then((reply) => sendAbToItsChannel(
+            createMessage("file:resolve-path-result", { ...reply, checkoutId: runtime.checkout.id }), client))
+          .catch((error) => log.warn("file:resolve-path reply failed: %s", error))
+          .finally(() => {
+            const left = (resolveInFlight.get(client) ?? 1) - 1;
+            if (left <= 0) resolveInFlight.delete(client);
+            else resolveInFlight.set(client, left);
+          });
         break;
       }
-      case "file:upload-start":
-        runtime.uploadManager?.handleStart(msg);
+      case "file:upload-local": {
+        // Defense in depth: the real chokepoint is the source check in
+        // attachTransport's inbound handler, which never lets a relay-origin
+        // frame reach here at all (see `handleAbMessage`'s caller).
+        if (client !== "loopback") break;
+        const reply = (fields: UploadResultFields) => sendAbTo(createMessage("file:upload-result", {
+          requestId: msg.requestId, checkoutId: runtime.checkout.id, ...fields,
+        }), "loopback");
+        // The loopback socket belongs to one core, already admitted through
+        // seenProjects/isSafeProjectId when it opened — this only catches a
+        // mismatched frame, never selects among projects.
+        if (msg.projectId !== project.id) {
+          reply({ ok: false, error: "NOT_ALLOWED", message: "wrong project" });
+          break;
+        }
+        if (!runtime.uploadManager) {
+          reply({ ok: false, error: "NOT_ALLOWED", message: "uploads are not available for this checkout" });
+          break;
+        }
+        // `.catch` before the reply: an escaped rejection reaches index.ts's
+        // `unhandledRejection` hook, which shuts the whole host down.
+        void runtime.uploadManager.copyLocal({
+          requestId: msg.requestId, fileName: msg.fileName, sourcePath: msg.sourcePath,
+        }).catch((err): UploadResultFields => {
+          log.error("file:upload-local failed: %s", err);
+          return { ok: false, error: "WRITE_FAILED", message: "Could not copy the file" };
+        }).then(reply);
         break;
-      case "file:upload-chunk":
-        runtime.uploadManager?.handleChunk(msg);
-        break;
-      case "file:upload-done":
-        runtime.uploadManager?.handleDone(msg);
-        break;
+      }
       case "file:search": {
         const fs = runtime.fileSearcher;
         if (fs) {
@@ -2371,33 +2258,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:unstage": {
         handleGitUnstage(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:unstage handler failed: %s", err)
-        );
-        break;
-      }
-      case "git:stash-list": {
-        handleGitStashList(runtime, msg.projectId).catch((err) =>
-          log.error("git:stash-list handler failed: %s", err)
-        );
-        break;
-      }
-      case "git:stash-pop": {
-        // Tracked for the same reason `git:sync` below is, and more urgently:
-        // a pop rewrites the whole working tree, so it holds the checkout as
-        // its child's cwd for longer than a push does.
-        trackGitRefresh(
-          runtime,
-          handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-pop handler failed: %s", err)
-          ),
-        );
-        break;
-      }
-      case "git:stash-drop": {
-        trackGitRefresh(
-          runtime,
-          handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
-            log.error("git:stash-drop handler failed: %s", err)
-          ),
         );
         break;
       }
@@ -2532,6 +2392,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           .filter((s) => s.mode === "chat" && agentKeyFor(s.id) === spec.tool && s.running)
           .map((s) => s.id);
         log.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
+        updatingTools.set(spec.tool, (updatingTools.get(spec.tool) ?? 0) + 1);
+        // A run that dies without an outcome must not let the previous run's
+        // result settle a client waiting on this one.
+        lastUpdateResults.delete(spec.tool);
         void runAgentUpdate({
           sessionIds: chatIds,
           // stopChat resolves only once the process has exited (its dispose awaits
@@ -2545,13 +2409,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           execUpdate: () => execToolUpdate(spec),
           installedAfter: async () => parseAgentVersion(await execToolVersion(spec)),
         }).then((outcome) => {
-          sendAb(createMessage("agent:updateResult", {
+          const result = createMessage("agent:updateResult", {
             tool: spec.tool, sessionId: msg.sessionId, ok: outcome.ok,
             exitCode: outcome.exitCode,
             installed: outcome.installed ?? undefined,
             // Bound the tail so a chatty updater can't bloat the encrypted frame.
             output: outcome.output.slice(-4_000) || undefined,
-          }));
+          });
+          lastUpdateResults.set(spec.tool, result);
+          sendAb(result);
+        }).finally(() => {
+          const left = (updatingTools.get(spec.tool) ?? 1) - 1;
+          if (left > 0) updatingTools.set(spec.tool, left);
+          else updatingTools.delete(spec.tool);
         });
         break;
       }
@@ -2733,7 +2603,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         focusPausedByClient.set(client, msg.paused);
         recomputeFocusPaused();
         // Both edges, because the app restates its focus only on a STREAM
-        // re-establish (`resyncFocus`, driven by `streamReadyEvents`) — a
+        // re-establish (`resyncFocus`, driven by `projectStreamEvents`) — a
         // background/foreground inside one live connection sends this frame
         // and nothing else. Dropping the entry without putting it back left
         // the checkout the user is sitting on reading as unattended, which is
@@ -2755,23 +2625,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         log.info("focus-state: paused=%s", msg.paused);
         break;
       }
-      case "terminal:snapshot:request": {
-        if (runtime.checkout.id !== checkoutIdOf(msg)) break;
-        sendAbToItsChannel(createMessage("terminal:display:status", {
-          checkoutId: checkoutIdOf(msg), terminalId: msg.terminalId,
-          code: "UPGRADE_REQUIRED", message: "Upgrade the app to view terminal frames.",
-        }), client);
-        break;
-      }
-      // Wave 5: the frame display protocol. All four arrive here already
+      // The frame display protocol. All four arrive here already
       // checkout-resolved — `attachTransport`'s CHECKOUT_VARIABLE_MESSAGE_TYPES
-      // branch (these eight types are all in that set, registered in Wave 1)
+      // branch (these eight types are all in that set)
       // has already run `isCheckoutDeleting` -> `checkoutRuntimes.resolve` ->
       // re-`isCheckoutDeleting` -> `prepareCheckoutRuntime` before calling this
-      // function at all, exactly the dance `handleTerminalSnapshotRpc` runs by
-      // hand for its own RPC entry point. The single re-check below is the
-      // extra one that dance itself documents: a delete can still start in the
-      // gap between that resolution and this switch actually running. Resolved
+      // function at all. The single re-check below is the extra one that
+      // dance itself documents: a delete can still start in the gap between
+      // that resolution and this switch actually running. Resolved
       // explicitly here rather than through the `runtime` this switch already
       // computed above — `runtimeFor` silently falls back to `mainRuntime` for
       // an unresolved checkout, which would let a request naming a just-deleted
@@ -2781,11 +2642,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // `viewerConnectionFor` and `TerminalViewerTransport.authorized` key on.
       case "terminal:subscribe": {
         const checkoutId = checkoutIdOf(msg);
-        if (sessions?.isCheckoutDeleting(checkoutId) === true) break;
+        // Every exit below settles the requestId with the terminal-stream
+        // registry, or a relay attachment that got no attachmentId here waits
+        // out its own subscribe deadline with its stream still open. Never for
+        // loopback, which never binds a stream.
+        const settleSubscribe = (attachmentId: string | undefined) => {
+          if (client !== "loopback") terminalStreamHooks?.subscribeSettled(client, msg.requestId, attachmentId);
+        };
+        if (sessions?.isCheckoutDeleting(checkoutId) === true) { settleSubscribe(undefined); break; }
         const owner = checkoutId === "main" ? mainRuntime : checkoutRuntimes.runtime(checkoutId);
-        if (!owner || owner.disposed) break;
+        if (!owner || owner.disposed) { settleSubscribe(undefined); break; }
         const internalId = internalTerminalId(owner, msg.terminalId);
-        if ((clientGenerations.get(client) ?? 0) !== clientGeneration) break;
+        if ((clientGenerations.get(client) ?? 0) !== clientGeneration) { settleSubscribe(undefined); break; }
         const connection = viewerConnectionFor(client);
         void (async () => {
           await manager?.restoreArchivedTerminal(internalId);
@@ -2796,6 +2664,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           );
         })()
           .then((attachmentId) => {
+            settleSubscribe(attachmentId);
             // Retired already, between the hub reporting the id and this
             // continuation: the release fired before there was a mark, so
             // recording one now would leave it set for good.
@@ -2810,12 +2679,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             }
           }).catch((error) => {
             if (owner.disposed || sessions?.isCheckoutDeleting(checkoutId) === true ||
-                (clientGenerations.get(client) ?? 0) !== clientGeneration) return;
+                (clientGenerations.get(client) ?? 0) !== clientGeneration) { settleSubscribe(undefined); return; }
             log.warn("terminal %s attach failed: %s", internalId, error);
             sendAbToItsChannel(createMessage("terminal:display:status", {
               checkoutId, terminalId: msg.terminalId, requestId: msg.requestId,
               code: "DISPLAY_FAILED", message: "Terminal display unavailable. Reconnect to retry.",
             }), client);
+            settleSubscribe(undefined);
           });
         break;
       }
@@ -2877,21 +2747,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
         if (!page) break;
+        // A dead run's rows resolve against the checkout alone: its own cwds
+        // went with it, and the live terminal's belong to a different run.
+        const liveRun = manager.runId(internalId) === msg.runId;
+        const bases: LinkBases = liveRun
+          ? { ...manager.linkBases(internalId), checkoutRoot: owner.checkout.path }
+          : { checkoutRoot: owner.checkout.path };
+        // The page is the only point where every archived row is reachable with
+        // its neighbours and there is time to await a stat; archived rows never
+        // carry detected links themselves.
+        //
         // Bulk row data, targeted rather than broadcast: a history page answers
         // one request's own `beforeRowId` cursor into scrollback the requester
         // may already partly hold, so the wire it did not arrive on has no use
         // for it and must not be charged for it, including sibling relay apps.
-        sendAbToItsChannel(createMessage("terminal:history:page", {
-          checkoutId,
-          terminalId: msg.terminalId,
-          runId: msg.runId,
-          attachmentId: msg.attachmentId,
-          requestId: msg.requestId,
-          history: page.history,
-          expired: page.expired,
-          beforeRowId: page.beforeRowId,
-          rows: page.rows,
-        }), client);
+        void linkHistoryRows(page.rows, bases, {
+          context: manager.historyContext(msg.runId, page, liveRun ? internalId : undefined),
+        })
+          .catch(() => page.rows)
+          .then((rows) => sendAbToItsChannel(createMessage("terminal:history:page", {
+            checkoutId,
+            terminalId: msg.terminalId,
+            runId: msg.runId,
+            attachmentId: msg.attachmentId,
+            requestId: msg.requestId,
+            history: page.history,
+            expired: page.expired,
+            beforeRowId: page.beforeRowId,
+            rows,
+          }), client))
+          .catch((error) => log.warn("terminal:history:page reply failed: %s", error));
         break;
       }
       case "preview:snapshot:request": {
@@ -2919,7 +2804,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
         const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
-        if (msg.pushToken === "") {
+        // The app re-registers on every handshake, once per warm project, so
+        // the common frame repeats what the row already holds. An upsert is a
+        // non-silent store write: the paired-phones watcher answers it with a
+        // re-advertise to every connected phone. Nothing reads `pushUpdatedAt`,
+        // so leaving it unbumped on a repeat is unobservable.
+        const clear = msg.pushToken === "";
+        const unchanged = clear
+          ? phone.pushToken === undefined && phone.pushProvider === undefined && phone.pushPubkey === undefined
+          : phone.pushToken === msg.pushToken && phone.pushProvider === msg.provider && phone.pushPubkey === msg.pushPubkey;
+        if (unchanged) {
+          log.debug("push:register for phone %s repeats its stored registration; not rewriting", phone.phoneDeviceId);
+          break;
+        }
+        if (clear) {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
             ...phone,
@@ -2984,6 +2882,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
+    statusShadow?.reset();
     for (const observer of titleObservers) observer.stop();
     titleObservers = [];
     // Awaited with the rest, not voided: a chat runtime's dispose now waits out
@@ -3001,24 +2900,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
-  let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   /** Terminal replies belong to the subscribing app, including when several
    *  authenticated apps share the relay transport. */
   let sendAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
   let sendTerminalTo: (msg: AbMessage, only: ClientKey, signal: AbortSignal) => Promise<void> = async () => {};
-  /** The same narrowing on the "preview" channel, so a terminal's bulk display
-   *  payloads queue and get credited separately from the control plane, behind
-   *  `send-scheduler.ts`'s control>preview priority, instead of competing with
-   *  it for `CHANNEL_WINDOW_BYTES`: measured against
-   *  `packages/antgrid-wire/src/flow.ts`, `TERMINAL_CONNECTION_MAX_BYTES` (one
-   *  connection's whole terminal-viewer budget) is half `CHANNEL_WINDOW_BYTES`
-   *  — the other half is what leaves the browser preview tunnel, which shares
-   *  this channel, room of its own — so terminal traffic on "control" could
-   *  alone occupy half a credit window and stall every other control-plane
-   *  message behind it. Priority is not isolation: `SOCKET_INFLIGHT_BYTES` is shared across
-   *  both channels and sits only one window above one channel's, so a saturated
-   *  preview channel still leaves control a bounded headroom before it too waits
-   *  on a credit. */
+  /** The same narrowing on the "preview" channel: a terminal's bulk display
+   *  payloads (a live screen, a requested scrollback page) get their own
+   *  `LocalTransport` queue, separate from the control plane, so a full
+   *  terminal transfer cannot stall every control-plane message queued
+   *  behind it. This is loopback-only plumbing — an attachment with its own
+   *  native QUIC stream bypasses both channels entirely, since `route()`
+   *  in `peer/terminal-streams.ts` intercepts it before this sender is ever
+   *  reached, so the split matters only for the desktop client, which has no
+   *  stream of its own. */
   let sendPreviewAbTo: (msg: AbMessage, only: ClientKey) => void = (_m, _o) => {};
   /** Which channel a message rides is a property of its TYPE, not of the call
    *  site. `PREVIEW_CHANNEL_MESSAGE_TYPES` is mirrored into the app, which drops
@@ -3036,12 +2930,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let dropCheckoutReplay: (checkoutId: string) => void = (_c) => {};
   let isShuttingDown = false;
 
+  // Needs the injected work-status read to have anything to compare against, so
+  // a core built without it (most tests) tracks nothing.
+  const statusShadow = opts.sessionWorkStatusFor && process.env.ANTGRID_STATUS_SHADOW !== "0"
+    ? new StatusShadowTracker({ oldStatusFor: opts.sessionWorkStatusFor })
+    : null;
+
   // Kept as the single funnel for notification:push producers even though it now
   // only forwards: the work reduction folds these off the bus
   // (ProjectCore.observeWorkStatus), so a producer that bypassed sendAb entirely
   // is the one mistake that would still lose the signal.
   function sendNotifying(msg: AbMessage): void {
     sendAb(msg);
+    if (msg.type === "notification:push" && msg.origin === "agent" && msg.sessionId) {
+      statusShadow?.observe(msg.sessionId, { kind: "notify", type: msg.notificationType });
+      const state = msg.notificationType === "task_complete" ? "completed"
+        : msg.notificationType === "error" ? "failed"
+        : msg.notificationType === "permission_request" || msg.notificationType === "awaiting_input" ? "needs-input" : undefined;
+      if (state && sessions?.get(msg.sessionId)?.mode === "terminal") {
+        sessions.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+          state === "failed" ? "Agent reported a turn failure" : undefined);
+      }
+    }
   }
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
@@ -3052,6 +2962,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // only a custom `agent.command` — an arbitrary binary attributable to no spec.
   const agentKeyFor = (terminalId?: string): string | undefined =>
     (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool;
+  // A self-update's outcome is one live frame, so an app away when it lands
+  // would spin forever; the transcript snapshot re-serves both, keyed by tool
+  // because the update replaces one machine-global binary.
+  // A count, not a set: the first of two overlapping runs to finish must not
+  // report the other as done.
+  const updatingTools = new Map<string, number>();
+  const lastUpdateResults = new Map<string, AbMessage>();
   // Judging needs *a* CLI to spawn, so an unattributable slot still resolves to
   // one. Observability must NOT: reporting the default agent's hooks for a
   // binary we cannot identify is the "armed and quiet" lie observability exists
@@ -3068,7 +2985,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // through this adapter is text a renderer produced, where a digest is a
       // diagnostic. The other way into `manager.submit` is `terminal:input`,
       // which is a human's own keystrokes and gets none.
-      submit: (terminalId, line) => manager?.submit(terminalId, line, lineKey(line).sha),
+      submit: (terminalId, line) => {
+        const r = manager?.submit(terminalId, line, lineKey(line).sha);
+        statusShadow?.observe(terminalId, { kind: "key", key: "submit", via: "bus" });
+        return r;
+      },
       getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
       getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
     }),
@@ -3160,6 +3081,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  of the CLI's second announcement of one block. See {@link OpenAgentPrompts}
    *  for why it is keyed by prompt and tool rather than by slot. */
   const openAgentPrompts = new OpenAgentPrompts();
+
+  /** Watches a session's transcript for its agent's own interrupt marker after
+   *  a lone Esc/Ctrl+C — see {@link shouldArmInterruptConfirm} and
+   *  `interrupt-confirm.ts`. Per-core rather than module-scoped: unlike
+   *  `hookAliveState` above, its deps are test-injected. */
+  const interruptConfirmer = createInterruptConfirmer(opts.interruptConfirmDeps);
 
   /** Slots with an ARMED Handler session, mirrored off the engine's own
    *  `handler:status` — a full replacement snapshot that every arm, disarm and
@@ -3753,55 +3680,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitStashList(runtime: CheckoutRuntime, projectId: string) {
-    try {
-      const stashes = await listStashes(runtime.checkout.path);
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", { projectId, stashes }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-list-result", {
-        projectId,
-        stashes: [],
-        error: err?.message || String(err),
-      }));
-    }
-  }
-
-  async function handleGitStashPop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashPop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", { projectId, ref, success: true }));
-      await refreshGitStatusAttended(runtime);
-      sendGitStatus(runtime);
-      sendStatus(runtime);
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-pop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    // Either outcome moves the stash LIST (removed on success, unchanged on
-    // failure) — the panel's banner needs the fresh read either way to know
-    // whether to keep showing this entry.
-    await handleGitStashList(runtime, projectId);
-  }
-
-  async function handleGitStashDrop(runtime: CheckoutRuntime, projectId: string, ref: string) {
-    try {
-      await stashDrop(runtime.checkout.path, ref);
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", { projectId, ref, success: true }));
-    } catch (err: any) {
-      sendFromRuntime(runtime, createMessage("git:stash-drop-result", {
-        projectId,
-        ref,
-        success: false,
-        error: err?.message || String(err),
-      }));
-    }
-    await handleGitStashList(runtime, projectId);
-  }
-
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
     try {
       // `git diff HEAD` emits nothing for untracked files (they're in neither
@@ -3980,8 +3858,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (runtime.disposed) continue;
       runtime.portDetector?.emitCurrent();
     }
-
-    // Re-send each terminal's screen so the app has current output.
   }
 
   async function startCheckoutRuntime(
@@ -3991,7 +3867,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (runtime.started || !manager) return;
     runtime.started = true;
     runtime.servicesDeferred = opts?.deferServices ?? false;
-    const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
       ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
@@ -4005,7 +3880,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectId: project.id,
       portLabels: pd.getPortLabels(),
       previewPorts,
-      sendTunnel: (data) => sendPlain({ ...data, checkoutId: runtimeId }),
       sendEncrypted: send,
       relayHost,
       connState,
@@ -4041,7 +3915,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: runtime.checkout.path,
-      send,
     });
     runtime.uploadManager.startSweeper();
     await yieldToEventLoop();
@@ -4342,7 +4215,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectId: project.id,
       portLabels: pd.getPortLabels(),
       previewPorts,
-      sendTunnel: (data) => sendPlain(data),
       sendEncrypted: (msg) => sendAb(msg),
       relayHost,
       connState,
@@ -4367,11 +4239,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // banner's "View setup log" reads, exactly when the run has failed.
         // Released with the rest of the checkout in `teardownCheckoutRuntime`.
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        // Before noteExited: that fires session:updated synchronously and the
+        // status prune would otherwise resolve an open span as "unobservable".
+        statusShadow?.exited(id);
         // Whatever the agent was displaying died with its terminal, and a slot
         // is reused by a same-id restart — a stale entry would silence the new
         // run's every block.
         openAgentPrompts.clear(id);
         sessions?.noteExited(id, runId);
+        // A pending confirmation's timer is unref'd, so a leaked one costs
+        // nothing at process exit — but a same-id restart must not inherit a
+        // dead run's watch on a transcript the new run may never touch.
+        interruptConfirmer.cancel(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
         // mode flip is exempt for the same reason the handler's arming is: the
@@ -4394,14 +4273,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId });
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
+        statusShadow?.exited(id);
       },
-      // Wave 5: register/evict this terminal's run with the frame-delivery
+      // Register/evict this terminal's run with the frame-delivery
       // hub. `terminalOwner` (not `runtimeFor`/`?? mainRuntime`) is the same
       // resolution `sendTerminalFrame` itself uses for this id, so a hub
       // `TerminalAddress` and the legacy stream's rewritten checkout can never
       // disagree about which checkout owns this terminal.
       onRunStarted: (id, runId, source) => {
         const { runtime, externalId } = terminalOwner(id);
+        // Before register: a restored screen is captured by register's own tick,
+        // and that frame must already know where relative paths resolve. Links
+        // are optional; a root that cannot be set must not fail the run.
+        try { source.setLinkRoot(runtime.checkout.path); } catch { /* unlinked paths */ }
         frameHub.register({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, source, runId);
       },
       // The graceful close, available only where the emulator outlives the PTY
@@ -4519,6 +4403,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     };
     structured = new StructuredAgentManager({
       sendMessage: (msg) => {
+        if ("sessionId" in msg && typeof msg.sessionId === "string") {
+          const state = msg.type === "agent:turn-start" ? "running"
+            : msg.type === "agent:permission-request" || msg.type === "agent:question" ? "needs-input"
+            : msg.type === "agent:request-retracted" ? "running"
+            : msg.type === "agent:turn-end" ? msg.stopReason === "end_turn" ? "completed" : msg.stopReason === "cancelled" ? "interrupted" : "failed"
+            : msg.type === "agent:error" ? "failed" : undefined;
+          if (state) sessions?.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+            state === "failed" ? "Agent reported a turn failure" : state === "interrupted" ? "Agent turn was cancelled" : undefined);
+        }
         observeChatFrameForHandler(msg);
         sendAb(msg);
       },
@@ -4558,6 +4451,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
             if (run && !run.isCurrent()) return;
+            const state = evt.event === "limit_hit" ? "needs-input" : evt.event === "limit_cleared" ? "running" : "failed";
+            sessions?.observeScheduledSession(sessionId, hookRunId, state,
+              state === "failed" ? "Agent reported a turn failure" : undefined);
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
           },
@@ -4574,6 +4470,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
       agentRuntime,
+      onScheduledObservation: (observation) => {
+        for (const observer of scheduledObservers) {
+          try { observer({ ...observation, projectId: project.id }); }
+          catch { log.warn("Scheduled session observer failed for %s", observation.sessionId); }
+        }
+      },
       onAgentEvent: (sessionId, event) => {
         switch (event.type) {
           case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
@@ -4746,6 +4648,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Clears the previous spawn's verdict; `armHookAliveProbe` starts the new
     // deadline. Unconditional, or a no-probe respawn leaves the id stale.
     manager.onSessionCreated((session) => hookAliveState.delete(session.terminalId));
+
+    // Same spec resolution the spawn used: checkoutRuntimes.prepare has cached
+    // the checkout's spec by now, and main reads the project config.
+    manager.onSessionCreated((session) => {
+      const entry = sessions?.get(session.terminalId);
+      if (!entry || !statusShadow) return;
+      const spec = entry.checkoutId && entry.checkoutId !== "main" ? checkoutRuntimes.agentSpec(entry.checkoutId) : undefined;
+      const agent = shadowAgent(entry.tool ?? (entry.command ? undefined : (spec ?? agentSpecFromConfig()).name));
+      if (!agent) return;
+      statusShadow.track(session.terminalId, agent, session);
+      session.onTitleObserved((t) => statusShadow.title(session.terminalId, session, t));
+    });
 
     // Forward URL detections to the app as port:detected messages.
     pd.onDetection((event) => {
@@ -4932,7 +4846,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: project.path,
-      send: (msg) => sendAb(msg),
     });
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
@@ -5153,8 +5066,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // needed" it exists to drop.
       if (body.event === "question") {
         openAgentPrompts.open(body.terminalId, body.promptId, body.promptTool);
+        statusShadow?.observe(body.terminalId, { kind: "ask-open" });
       } else if (body.event === "prompt_answered") {
         openAgentPrompts.close(body.terminalId, body.promptId);
+        statusShadow?.observe(body.terminalId, { kind: "ask-answered" });
       } else if (body.event === "turn_end" || body.event === "turn_failed") {
         // A prompt cannot outlive its turn, which is the same rule work-status's
         // closeTurn already applies. This is the last resort, not the interrupt
@@ -5163,12 +5078,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Claude fires neither Stop nor StopFailure on a user interrupt, so
         // nothing here would ever run for it.
         openAgentPrompts.clear(body.terminalId);
+        statusShadow?.observe(body.terminalId, { kind: "turn-end" });
       }
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      // Backstop for the /session-title pipeline's setAgentSession, which
+      // withholds the path when it refuses the accompanying agent-session id
+      // (an ephemeral helper thread — see setAgentSession's doc): the
+      // transcript-interrupt confirmation only needs a file to read, not a
+      // matched conversation identity, so a session with no path yet takes
+      // whatever a hook reports here instead of never arming at all.
+      if (body.transcriptPath) sessions?.noteTranscriptPath(body.terminalId, body.transcriptPath);
       sessions?.confirmHookRun(body.terminalId, body.runId);
+      const scheduledState = body.event === "turn_end" ? "completed"
+        : body.event === "turn_failed" ? "failed"
+        : body.event === "question" || body.event === "awaiting_input" || body.event === "limit_hit" ? "needs-input"
+        : body.event === "prompt_answered" || body.event === "limit_cleared" ? "running" : undefined;
+      if (scheduledState) sessions?.observeScheduledSession(body.terminalId, body.runId, scheduledState,
+        scheduledState === "failed" ? "Agent reported a turn failure" : undefined);
       // The work reduction's SECOND closer: codex fires this and its Stop hook
       // independently. `turn_end` alone, never `turn_failed` — that is claude
       // parking for the Handler, which withholds its notification on purpose.
@@ -5282,21 +5211,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
+      if (terminalId) sessions?.observeScheduledSession(terminalId, sessions.hookRunId(terminalId), "running");
       opts.onTurnStart?.(terminalId);
     },
+    // Deliberately does not touch openAgentPrompts: a sibling tool completing
+    // must not clear a pending AskUserQuestion's open-prompt latch the way a
+    // real new turn does above.
+    onTurnActivity: (terminalId) => {
+      opts.onTurnActivity?.(terminalId);
+    },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    absorbIdleNudge: (terminalId) => {
+      // A keystroke through a held AskUserQuestion has already cleared the work
+      // reduction's record of that block.
+      if (openAgentPrompts.hasAny(terminalId)) return false;
+      const absorbed = opts.absorbIdleNudge?.(terminalId) ?? false;
+      if (absorbed) statusShadow?.observe(terminalId, { kind: "at-prompt" });
+      return absorbed;
+    },
     hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
-
-  // `params` is z.unknown() on RequestMessage, so `...CheckoutScoped`'s default
-  // never runs on this path -- the "main" default has to live here instead.
-  const TerminalSnapshotRpcParams = z.object({
-    terminalId: z.string().min(1),
-    checkoutId: z.string().default("main"),
-    history: z.boolean().default(false),
-  });
 
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
@@ -5316,21 +5252,32 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         },
       });
     }
-    const frames = (await structured?.getTranscriptSnapshot(parsed.data.sessionId)) ?? [];
-    return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
-  }
-
-  // Correlated RPC twin of `terminal:snapshot:request` (see that case below,
-  // which stays untouched -- old apps and `resyncState`'s unsolicited push
-  // still need it). This is intercepted here rather than registered in
-  // rpc/methods.ts for the same reason session.transcriptSnapshot is: a
-  // MethodDef handler cannot see `manager`, `checkoutRuntimes`, `mainRuntime`,
-  // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
-  // are closure-scoped here.
-  async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
+    // Read before the snapshot, not after: a turn that ends during the read is
+    // then still reported live, so the client keeps the open turn its own
+    // turn-end will close, instead of dropping content the read may have missed.
+    // A turn that STARTS during the read is re-read after it for the same
+    // reason: reporting idle would close the turn the client just received.
+    const { sessionId } = parsed.data;
+    const liveBefore = structured?.liveTurnId(sessionId);
+    const frames = (await structured?.getTranscriptSnapshot(sessionId)) ?? [];
+    const activeTurnId = liveBefore ?? structured?.liveTurnId(sessionId);
+    // Read after the await: a prompt answered or raised during the read must be
+    // reported as it now stands, since the client replaces its cards with this.
+    const live = structured?.liveFrames(sessionId);
+    const tool = agentKeyFor(sessionId);
+    const lastUpdate = tool === undefined ? undefined : lastUpdateResults.get(tool);
     return createMessage("response", {
-      requestId: msg.requestId, ok: false,
-      error: { code: "UPGRADE_REQUIRED", message: "Upgrade the app to view terminal frames." },
+      requestId: msg.requestId,
+      ok: true,
+      result: {
+        frames,
+        ...(activeTurnId === undefined ? {} : { activeTurnId }),
+        ...(live === undefined ? {} : { live }),
+        update: {
+          running: tool !== undefined && (updatingTools.get(tool) ?? 0) > 0,
+          ...(lastUpdate ? { result: lastUpdate } : {}),
+        },
+      },
     });
   }
 
@@ -5343,11 +5290,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendPreviewAbTo = (m, only) => bus.publishOnly(m, "preview", only === "loopback" ? "loopback" : "relay", only === "loopback" || only === "relay" ? undefined : only);
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
-    // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) =>
-      busPlainHook?.(data, tunnelTargetFor(data)) ?? Promise.resolve<SendOutcome>("dropped");
     bus.setInboundHandler((msg, channel, source, peerId) => {
-      const generation = clientGenerations.get(clientKeyOf(source, peerId)) ?? 0;
+      const client = clientKeyOf(source, peerId);
+      const generation = clientGenerations.get(client) ?? 0;
+      const stillAuthorized = () =>
+        (clientGenerations.get(client) ?? 0) === generation &&
+        remoteFrameAllowed(source) &&
+        peerBusReachAllowed(msg, source);
+      // An RPC response belongs to the one asker who sent the request, never
+      // to every device attached to this project — a loopback asker gets it
+      // on the loopback queue alone, and a remote asker gets it addressed to
+      // just its own peer. A relay-origin frame with no `peerId` cannot be
+      // addressed, so it is dropped rather than broadcast to every sibling.
+      const answerAsker = (res: AbMessage): void => {
+        if (source === "loopback") bus.publishOnly(res, channel, "loopback");
+        else if (peerId !== undefined) bus.publishOnly(res, channel, "relay", peerId);
+        else log.warn("Dropping %s: relay asker has no peerId", res.type);
+      };
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
       // inbound verb while the machine is not mobile-reachable, so an
@@ -5355,8 +5314,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
       // switch is on. See remoteFrameAllowed() for the local-mode skip
-      // rationale. The tunnel/HTTP-proxy path is gated separately in
-      // handleTunnelMessage (it bypasses this bus).
+      // rationale. The tunnel path is gated separately, in
+      // `tunnelStreams.admit` (it carries no bus traffic at all — A3).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
       // owner (trusted by the loopback socket + token); after promotion the
@@ -5371,18 +5330,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      if (
-        source !== "loopback" && sessions?.hasIsolatedSessions()
-        && refuseCheckoutRouting(bus, msg, channel, source, peerId)
-      ) {
-        return;
-      }
       if (!peerBusReachAllowed(msg, source)) {
         log.warn(
           "Dropping inbound %s: agent reach is disabled on this machine (project %s)",
           msg.type,
           project.id,
         );
+        return;
+      }
+      // `file:upload-local` names a path on THIS machine — accepted only from
+      // the desktop's own loopback socket, never a relay-origin frame. A
+      // remote app uploads over its own `upload` stream (`uploadStreams.admit`
+      // above) instead.
+      if (source !== "loopback" && msg.type === "file:upload-local") {
+        log.warn("Dropping inbound %s: it names a local path and is accepted only from loopback (project %s)", msg.type, project.id);
         return;
       }
       // Past every gate that could refuse this frame, so the client really is
@@ -5413,29 +5374,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }
         }
         if (msg.method === "session.transcriptSnapshot") {
-          void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          void handleTranscriptSnapshotRequest(msg).then(answerAsker);
           return;
         }
-        if (msg.method === "terminal.snapshot") {
-          // `.catch` before the publish, not after: the handler awaits
-          // `checkoutRuntimes.resolve` (a store read) and
-          // `prepareCheckoutRuntime` (config load + runtime start), neither of
-          // which is guarded inside it. An unhandled rejection here reaches
-          // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
-          // down over one failed screen pull.
-          void handleTerminalSnapshotRpc(msg)
-            .catch((err) => {
-              log.warn("terminal.snapshot failed for project %s: %s", project.id, err);
-              return createMessage("response", {
-                requestId: msg.requestId,
-                ok: false,
-                error: { code: "E_HANDLER", message: "terminal snapshot failed" },
-              });
-            })
-            .then((res) => bus.publish(res, channel));
-          return;
-        }
-        void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
+        if (!stillAuthorized()) return;
+        void dispatchRpc(bus, msg).then(answerAsker);
         return;
       }
       // Explicit checkout IDs never fall back to main. The asynchronous store
@@ -5477,23 +5420,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // await would otherwise have its checkout re-prepared right here.
           if (refuseDeleting()) return;
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
-          handleAbMessage({ ...msg, checkoutId } as AbMessage, clientKeyOf(source, peerId), peerId, generation);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage, client, peerId, generation);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
-      handleAbMessage(msg, clientKeyOf(source, peerId), peerId, generation);
+      handleAbMessage(msg, client, peerId, generation);
     });
-  }
-
-  // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null = null;
-  function setPlainHook(fn: ((data: object, target?: SendTarget) => Promise<SendOutcome>) | null) {
-    busPlainHook = fn;
-  }
-
-  function abortTunnelStreams(): void {
-    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
-    tunnelManager?.abortHttpStreams();
   }
 
   return {
@@ -5551,7 +5483,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectId: project.id,
     projectName: project.name,
     abDir,
-    nextKeypair,
     pairedPhones,
     sessionBus,
     setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void {
@@ -5560,22 +5491,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     injectBusLine,
     refreshSessionWork(): void {
       sessions?.refreshWorkStatus();
+      statusShadow?.reconcile();
     },
     async refreshGitState(): Promise<void> {
       await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatusAttended(mainRuntime)]);
       sendStatus();
       sendGitStatus();
     },
-    handleTunnelMessage,
     onHandshakeComplete,
-    setPlainHook,
-    abortTunnelStreams,
+    tunnelStreams,
+    uploadStreams,
     setPeerSessionProvider,
-    setEstablishedPeersProvider,
-    setOwnerPullsTreeProvider,
-    setPeerTerminalFramesV1Provider,
-    setOwnerTerminalFramesV1Provider,
-    clientSupportsTerminalFramesV1,
+    setTerminalStreamHooks,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
@@ -5612,11 +5539,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (result instanceof Promise) result.catch(() => {});
       } catch { /* fire-and-forget */ }
     },
+    async prepareScheduledSession(spec, bind): Promise<PreparedScheduledSession> {
+      if (!sessions) throw new Error("Project sessions are not ready");
+      return sessions.prepareScheduledSession(spec, bind);
+    },
+    observeScheduledSessions(callback): () => void {
+      scheduledObservers.add(callback);
+      return () => { scheduledObservers.delete(callback); };
+    },
+    async stopScheduledSession(sessionId): Promise<void> {
+      await sessions?.stopScheduledSession(sessionId);
+    },
+    async releaseScheduleCheckout(scheduleId, checkoutId): Promise<void> {
+      if (sessions) await sessions.releaseScheduleCheckout(scheduleId, checkoutId);
+      else await new CheckoutStore(abDir, project.id).releaseScheduleOwner(scheduleId, checkoutId);
+    },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
-    },
-    hasIsolatedSessions(): boolean {
-      return sessions?.hasIsolatedSessions() ?? false;
     },
     isHandlerArmed(terminalId: string): boolean {
       return handlerArmedSlots.has(terminalId);
@@ -5658,7 +5597,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // of the core — a reconnecting app re-declares both halves itself.
       if (focusPausedByClient.delete(client)) recomputeFocusPaused();
       pausedFocusByClient.delete(client);
-      // D5: a dropped connection retires every attachment it held (see
+      // A dropped connection retires every attachment it held (see
       // `TerminalViewerConnection.close`) rather than leaving them to time out
       // one ack-timeout at a time, and a reconnect gets a fresh connection —
       // `viewerConnectionFor` rebuilds lazily on the next subscribe. Each

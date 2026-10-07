@@ -1,5 +1,5 @@
 import { resolveTerminalInvocation } from "./terminal-invocation";
-import { needsShellForAgentBinary, prepareAgentBinary } from "antgrid-agents/terminal-platform";
+import { needsShellForAgentBinary, prepareAgentBinary, stripParentClaudeSession } from "antgrid-agents/terminal-platform";
 import { agentRuntime } from "./agent-host";
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
@@ -330,7 +330,7 @@ export const AGENT_GRACE_MS = 4000;
  * anything added here whose VALUE depends on completing before `process.exit`
  * has to be bounded at its own site. Raising this without raising that poll
  * buys nothing: the extra time is spent inside a window the caller has already
- * given up on. It also stays inside the up-to-5s drain root CLAUDE.md sizes the
+ * given up on. It also stays inside the up-to-5s drain root AGENTS.md sizes the
  * MSIX destage risk against, so the documented figure there still holds.
  *
  * POSIX keeps the caller's own budget: shutdown there already polled for the
@@ -517,6 +517,7 @@ export class TerminalSession {
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
   private outputObservers = new Set<(data: string) => void>();
+  private titleObservers = new Set<(title: string) => void>();
   private notificationScanner = new TerminalNotificationScanner();
   private suppressOscNotifications = false;
   private suppressOscTitle = false;
@@ -535,6 +536,25 @@ export class TerminalSession {
     for (const fn of this.outputObservers) {
       try {
         fn(data);
+      } catch {
+        // observer errors must not break PTY streaming
+      }
+    }
+  }
+
+  /** Sees every OSC 0/2 title, including empty ones and those the hook-owned
+   *  suppression drops before they reach `onTitle`. */
+  onTitleObserved(fn: (title: string) => void): () => void {
+    this.titleObservers.add(fn);
+    return () => {
+      this.titleObservers.delete(fn);
+    };
+  }
+
+  private notifyTitleObservers(title: string): void {
+    for (const fn of this.titleObservers) {
+      try {
+        fn(title);
       } catch {
         // observer errors must not break PTY streaming
       }
@@ -636,7 +656,7 @@ export class TerminalSession {
     // bridge launched without a TERM of its own — the packaged app, started by
     // the OS rather than a shell — would hand every PTY a colorless env.
     const env = stripInheritedCertOverrides({
-      ...process.env,
+      ...stripParentClaudeSession(process.env),
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       TERM_PROGRAM: "ghostty",
@@ -680,6 +700,10 @@ export class TerminalSession {
         this.respondToCapabilityQueries(data);
         try {
           for (const ev of this.notificationScanner.feed(data, Date.now())) {
+            // Tapped before routing so empty and suppressed titles are seen. The
+            // per-observer try/catch matters: a throw here would skip the
+            // remaining OSC 9/777 events in the same chunk.
+            if (ev.kind === "title") this.notifyTitleObservers(ev.title ?? "");
             routeScannerEvent(ev, (title) => {
               if (this.suppressOscTitle) return; // hook owns the structured title
               this.onTitle?.(title);

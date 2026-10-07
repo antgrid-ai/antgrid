@@ -7,7 +7,7 @@ import { z } from "zod/v4";
  * base64 of the AES-256-GCM
  * frame `nonce(12) ‖ ciphertext ‖ tag(16)`; `epk` is the base64 ephemeral X25519
  * public key used to derive the per-push key. Keep in lockstep with
- * bridge/src/push/seal.ts and packages/antgrid_relay_client/lib/src/e2e/push_open.dart.
+ * bridge/src/push/seal.ts and packages/antgrid_relay_client/lib/src/push/push_open.dart.
  */
 export const PushDeliverMessage = z.object({
   type: z.literal("push:deliver"),
@@ -17,6 +17,16 @@ export const PushDeliverMessage = z.object({
     epk: z.string().min(1).max(256),
     box: z.string().min(1).max(8192),
   }),
+  /**
+   * Opaque per-thread key the relay passes to APNs as `apns-collapse-id`, so
+   * a newer push for a thread replaces the older one on the device. Not sent
+   * to FCM, whose four-keys-per-device cap would drop whole threads (relay
+   * fcm.ts). The bridge derives it with a key the relay never sees, so it
+   * must never carry a name, path or id in the clear; the relay learns only
+   * "same thread as before". Optional both ways: older bridges omit it and
+   * older relays strip it as an unknown key.
+   */
+  collapseKey: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
 });
 
 export type PushDeliverMessage = z.infer<typeof PushDeliverMessage>;
@@ -28,7 +38,7 @@ export type PushDeliverMessage = z.infer<typeof PushDeliverMessage>;
  * "unconfigured" (relay has no FCM credential), or "error" (transient send
  * failure). Carries the opaque pushToken so the bridge maps the result back to
  * the phone whose token to prune (Task 7). Keep in lockstep with the relay
- * emitter in relay/src/server.ts and the consumer in bridge/src/relay-client.ts.
+ * emitter in relay/src/server.ts and the consumer in bridge/src/central-control-client.ts.
  */
 export const PushResultMessage = z.object({
   type: z.literal("push:result"),

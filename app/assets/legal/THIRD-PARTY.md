@@ -7,6 +7,27 @@ Antgrid vendors, bundles, links against, or otherwise redistributes.
 
 ## Scope
 
+### Native peer transport additions
+
+The optional Iroh transport adds upstream `@number0/iroh` (MIT OR Apache-2.0),
+`iroh_quic` and `iroh_flutter` (Apache-2.0), and `flutter_rust_bridge` (MIT).
+Version pins and package integrity are recorded in `bun.lock`,
+`app/pubspec.lock` and `packages/antgrid_peer_transport/pubspec.lock`.
+The Flutter plugin includes its upstream Rust `Cargo.lock`; it builds native
+artifacts through upstream cargokit. The signed standalone Windows artifact
+used by the CLI probe is recorded in
+`scripts/iroh-packaging/native-artifacts.json`.
+
+These additions were inspected at their installed package licence files. The
+historical bulk scan below predates the native peer dependencies; a complete
+updated transitive/native redistribution inventory remains a release gate.
+
+The self-hosted relay service ships the stock upstream `iroh-relay` 1.2.0
+binary (MIT OR Apache-2.0), built unmodified by `cargo install --locked` (see
+`aspire/apphost.ts` and the ops repo's relay image); no source is vendored here.
+The container redistributes that binary and its statically linked Rust
+dependencies, so their notices and license texts still require release review.
+
 This file lists **direct** dependencies, plus anything whose compiled output ends
 up inside a shipped artefact. The transitive dependency tree is **not** enumerated
 here — it is too large to maintain by hand and it changes on every lockfile update.
@@ -100,6 +121,15 @@ MIT, BSD, Apache-2.0, OFL and CC BY — are what the rest of this file discharge
 These matter most: what builds is not the upstream release, so the modified work
 and its licence and copyright notices have to be named explicitly.
 
+### macOS updater — vendored completion patch
+
+`packages/auto_updater_macos` vendors the macOS native implementation from
+`auto_updater_macos` 1.0.0 ([leanflutter/auto_updater](https://github.com/leanflutter/auto_updater)),
+copyright © 2022–2024 LiJianying, under MIT. Its upstream licence is retained
+in `packages/auto_updater_macos/LICENSE`. The local patch forwards Sparkle cycle
+completion through an app-owned method channel; see the package's `README.md`.
+The app selects it through `app/pubspec.yaml`'s dependency override.
+
 ### Terminal engine and PTY — forks resolved from git
 
 Three Dart packages from the `kingwill101/dart_terminal` monorepo are not taken
@@ -141,9 +171,7 @@ the app's terminal view needs, Android PTY libraries relinked to pass Play's
 static archives, which is the only link mode Flutter's iOS native-assets driver
 accepts. `portable_pty`'s prebuilt binaries are published from the fork for those
 last two reasons; `ghostty_vte`'s are byte-identical to upstream's and still come
-from `kingwill101/dart_terminal`. What diverges, and what going back would take,
-is tracked in
-[`docs/dart-terminal-fork-release.md`](docs/dart-terminal-fork-release.md).
+from `kingwill101/dart_terminal`.
 
 ### Fork resolved from git
 

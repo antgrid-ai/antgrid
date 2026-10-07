@@ -13,7 +13,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
-import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
@@ -23,9 +23,9 @@ import '../providers/sign_out.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
+import '../util/detached.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
-import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
 
@@ -103,9 +103,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     if (pending == null) return;
     ref.read(pendingSettingsSectionProvider.notifier).set(null);
     if (pending.target != ref.read(selectedTargetProvider)) return;
-    // Silently does nothing for a section this build omits — BILLING and
-    // DESIGN are both conditional — which is the codec's degrade-rather-than-
-    // reject contract carried through to the destination.
+    // Absent sections retain the codec's degrade-rather-than-reject contract,
+    // including the old Help address now served by the account menu.
     final ctx = settingsSectionKey(pending.value).currentContext;
     if (ctx == null) return;
     unawaited(
@@ -140,9 +139,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref.container);
+        if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.error:
-        showAbSnackBar(
+        showAbToast(
           context,
           'Could not delete account. Check your connection and try again.',
           clearPrevious: true,
@@ -405,14 +404,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   ),
                   const SizedBox(height: AbTokens.space12),
                   _Section(
-                    section: SettingsSection.help,
-                    body: const [
-                      SizedBox(height: AbTokens.space8),
-                      HelpAboutSection(),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
                     section: SettingsSection.account,
                     body: [
                       if (ref.watch(currentUserProvider).value != null) ...[
@@ -436,7 +427,11 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                               size: 10,
                               color: antgrid.textSecondary,
                             ),
-                            onTap: () => openAccountInBrowser(ref.container),
+                            onTap: () => detached(
+                              'AppSettingsScreen',
+                              'open account page',
+                              () => openAccountInBrowser(ref.container),
+                            ),
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),

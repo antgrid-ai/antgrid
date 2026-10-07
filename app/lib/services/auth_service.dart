@@ -1,9 +1,16 @@
 import 'dart:async';
+import 'package:clock/clock.dart';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'dart:math';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kDebugMode;
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'bounded_http_request.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../config/build_info.dart';
@@ -91,15 +98,6 @@ String _antgridUserAgent() {
   return 'Antgrid/${BuildInfo.version} ($os $version)';
 }
 
-Uri buildOAuthStartUri({
-  required String licenseApiUrl,
-  required String provider,
-}) {
-  return Uri.parse('$licenseApiUrl/oauth/start').replace(
-    queryParameters: {'provider': provider, 'callbackURL': '/oauth/handoff'},
-  );
-}
-
 /// Bounds enforced before a password ever leaves the device. Mirror of
 /// `MIN_PASSWORD_LENGTH` / `MAX_PASSWORD_LENGTH` in
 /// web/src/auth/better-auth.ts — keep in lockstep. The server rejects an
@@ -136,12 +134,75 @@ String? passwordLengthError(String password) {
 /// avoiding.
 enum PasswordSignIn { ok, invalidCredentials, emailNotVerified }
 
+/// What the Apple sign-in sheet hands back, reduced to the fields the server
+/// takes. A seam for tests: the real sheet is a system UI no widget test can
+/// drive.
+class AppleCredential {
+  const AppleCredential({
+    required this.identityToken,
+    required this.authorizationCode,
+    this.givenName,
+    this.familyName,
+  });
+
+  final String identityToken;
+
+  /// Single-use and valid for five minutes; traded server-side for the refresh
+  /// token that account deletion revokes.
+  final String authorizationCode;
+
+  /// Apple supplies the name on the FIRST authorization only, so this is the
+  /// one chance to send it.
+  final String? givenName;
+  final String? familyName;
+}
+
+/// Presents Apple's sheet for [nonce]. Resolves to null when the user
+/// dismissed it, and throws [AuthException] when it could not complete.
+typedef AppleCredentialRequest =
+    Future<AppleCredential?> Function(String nonce);
+
+/// Runs an OAuth round trip inside the app, resolving to the callback URL the
+/// flow ended on, or to null when the user closed the sheet. Throws
+/// [AuthException] when the sheet could not be shown.
+typedef InAppWebAuth = Future<Uri?> Function(Uri url, String callbackScheme);
+
+/// How far [AuthService.startOAuth] got before returning.
+enum OAuthStart {
+  /// The system browser is up; the outcome arrives later as a deep link.
+  handedOff,
+
+  /// The round trip ran in the app and the session cookie is stored.
+  signedIn,
+
+  /// The round trip ran in the app and ended without a session: the user
+  /// closed the sheet, or redemption failed and was reported on
+  /// [AuthService.oauthFailures].
+  notSignedIn,
+}
+
 /// Thrown by magic-link flows on a non-recoverable failure (bad response,
 /// insecure transport). Pending/transient poll failures are NOT exceptions —
 /// see [MagicLinkStatus.error].
+enum AuthFailure {
+  validation,
+  throttled,
+  unavailable,
+  network,
+  storage,
+  cancelled,
+  expired,
+}
+
 class AuthException implements Exception {
-  AuthException(this.message);
+  AuthException(
+    this.message, {
+    this.kind = AuthFailure.validation,
+    this.retryAfter,
+  });
   final String message;
+  final AuthFailure kind;
+  final Duration? retryAfter;
   @override
   String toString() => 'AuthException: $message';
 }
@@ -151,15 +212,28 @@ class AuthException implements Exception {
 /// cookie value. Kept out of [AuthService] instance state so the service stays
 /// stateless and retry-safe.
 class MagicLinkSession {
-  MagicLinkSession({required this.id, required this.bindCookie, this.email});
+  MagicLinkSession({
+    required this.id,
+    required this.bindCookie,
+    this.email,
+    this.expiresAt,
+    this.retryAt,
+    this.generation,
+    this.journeyId,
+  });
+
+  final DateTime? expiresAt;
+  final DateTime? retryAt;
+  final int? generation;
+  final String? journeyId;
 
   /// Address the link was sent to. Carried so a sign-in restored after the app
   /// was killed can still name the inbox to check. Null for sessions built
   /// in-memory, where the caller already has the address on hand.
   final String? email;
 
-  /// Pending-row id, returned by `/start` for logging/debugging only. The
-  /// server identifies the row from [bindCookie]; polling does not send this.
+  /// Server-generated flow id. The
+  /// server requires this exact id together with [bindCookie] when polling.
   final String id;
 
   /// Value of the `antgrid.cross_device_token` bind cookie that authorizes
@@ -176,7 +250,15 @@ enum MagicLinkStatus { pending, ready, expired, consumed, unbound, error }
 /// never arrive even while the sign-in is still pending. Absent (null) until a
 /// bounce is reported — ZeptoMail emits no "delivered" event, so there is no
 /// success signal to surface.
-enum DeliveryStatus { bounced }
+enum DeliveryStatus {
+  accepted,
+  queued,
+  sending,
+  providerAccepted,
+  failed,
+  expired,
+  bounced,
+}
 
 /// Result of one [AuthService.pollStatus] tick: the sign-in [status] plus an
 /// optional [delivery] signal carried on the pending response.
@@ -186,6 +268,45 @@ class MagicLinkPoll {
   final DeliveryStatus? delivery;
 }
 
+class AuthFlowReceipt {
+  AuthFlowReceipt({
+    required this.id,
+    required this.journeyId,
+    required this.status,
+    required this.serverTime,
+    required this.expiresAt,
+    required this.retryAt,
+    required this.delivery,
+  });
+  final String id;
+  final String journeyId;
+  final MagicLinkStatus status;
+  final DateTime serverTime;
+  final DateTime expiresAt;
+  final DateTime retryAt;
+  final DeliveryStatus? delivery;
+  factory AuthFlowReceipt.fromJson(Map<String, dynamic> json) {
+    try {
+      return AuthFlowReceipt(
+        id: json['id'] as String,
+        journeyId: json['journeyId'] as String,
+        status: MagicLinkStatus.values.byName(json['status'] as String),
+        serverTime: DateTime.parse(json['serverTime'] as String),
+        expiresAt: DateTime.parse(json['expiresAt'] as String),
+        retryAt: DateTime.parse(json['retryAt'] as String),
+        delivery: switch (json['delivery']) {
+          'provider_accepted' => DeliveryStatus.providerAccepted,
+          null => null,
+          final String name => DeliveryStatus.values.byName(name),
+          _ => throw const FormatException('invalid delivery'),
+        },
+      );
+    } catch (_) {
+      throw AuthException('Unexpected server response');
+    }
+  }
+}
+
 class AuthService {
   AuthService({
     required this.licenseApiUrl,
@@ -193,14 +314,113 @@ class AuthService {
     http.Client? httpClient,
     DateTime Function()? now,
     Future<bool> Function(Uri url)? launchUrl,
+    AppleCredentialRequest? requestAppleCredential,
+    InAppWebAuth? authenticateInApp,
   }) : _http = httpClient ?? http.Client(),
-       _now = now ?? DateTime.now,
-       _launchUrl = launchUrl ?? _launchExternal;
+       _now = now ?? clock.now,
+       _launchUrl = launchUrl ?? _launchExternal,
+       _requestAppleCredential = requestAppleCredential ?? _presentAppleSignIn,
+       _authenticateInApp = authenticateInApp ?? _presentWebAuthSession;
 
   final String licenseApiUrl;
   final AuthStorage storage;
   final http.Client _http;
   final DateTime Function() _now;
+  int _generation = 0;
+  Future<void> _storageTail = Future.value();
+  Map<String, dynamic>? _oauthAttempt;
+  String? _requestFlowCookie;
+  String? _requestEmail;
+  Object? _magicResendGuard;
+  String? _magicResendFlowId;
+
+  Future<T> _serializeStorage<T>(Future<T> Function() action) {
+    final result = _storageTail.then((_) => action());
+    _storageTail = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<void> _commitCookie(
+    String cookie,
+    int generation,
+  ) => _serializeStorage(() async {
+    if (generation != _generation) {
+      throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+    }
+    try {
+      final previous = await storage.readCookie();
+      if (generation != _generation) {
+        throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+      }
+      await storage.writeCookie(cookie);
+      if (generation != _generation) {
+        if (previous == null) {
+          await storage.clearCookie();
+        } else {
+          await storage.writeCookie(previous);
+        }
+        throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+      }
+    } on AuthException {
+      rethrow;
+    } catch (_) {
+      throw AuthException(
+        'Could not securely save sign-in. Try again.',
+        kind: AuthFailure.storage,
+      );
+    }
+  });
+
+  Future<void> cancelAuthentication() {
+    final generation = ++_generation;
+    _oauthAttempt = null;
+    _magicResendGuard = null;
+    _magicResendFlowId = null;
+    return _serializeStorage(() async {
+      if (generation == _generation) await storage.clearPendingSignIn();
+    });
+  }
+
+  Map<String, String> get _clientHeaders => {
+    'x-antgrid-surface': 'flutter',
+    'x-antgrid-platform': Platform.operatingSystem,
+    'x-antgrid-version': BuildInfo.version,
+  };
+
+  void _checkAccepted(http.Response response) {
+    if (response.statusCode >= 200 && response.statusCode < 300) return;
+    if (response.statusCode == 429) {
+      final raw = response.headers['retry-after'];
+      final seconds = int.tryParse(raw ?? '');
+      final date = raw == null ? null : _parseHttpDate(raw);
+      final retry = seconds != null
+          ? Duration(seconds: seconds)
+          : date?.difference(_now());
+      throw AuthException(
+        'Too many requests. Please wait before trying again.',
+        kind: AuthFailure.throttled,
+        retryAfter: retry,
+      );
+    }
+    if (response.statusCode >= 500) {
+      throw AuthException(
+        'Sign-in service is temporarily unavailable. Try again.',
+        kind: AuthFailure.unavailable,
+      );
+    }
+    throw AuthException(
+      'Request was not accepted. Check your details and try again.',
+      kind: AuthFailure.validation,
+    );
+  }
+
+  static DateTime? _parseHttpDate(String value) {
+    try {
+      return HttpDate.parse(value);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Injectable for tests only: on desktop `flutter test` registers the REAL
   /// Dart url_launcher plugin, so exercising [startOAuth] against the default
@@ -211,6 +431,71 @@ class AuthService {
     url,
     mode: url_launcher.LaunchMode.externalApplication,
   );
+
+  final InAppWebAuth _authenticateInApp;
+
+  static const _webAuthChannel = MethodChannel('ai.radhaai.antgrid/web_auth');
+
+  static Future<Uri?> _presentWebAuthSession(
+    Uri url,
+    String callbackScheme,
+  ) async {
+    final String? callback;
+    try {
+      callback = await _webAuthChannel.invokeMethod<String>('authenticate', {
+        'url': url.toString(),
+        'callbackScheme': callbackScheme,
+      });
+    } on PlatformException catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'In-app sign-in sheet failed',
+        fields: {'code': e.code},
+      );
+      throw AuthException('Could not open the sign-in page');
+    }
+    return callback == null ? null : Uri.parse(callback);
+  }
+
+  final AppleCredentialRequest _requestAppleCredential;
+
+  static Future<AppleCredential?> _presentAppleSignIn(String nonce) async {
+    final AuthorizationCredentialAppleID credential;
+    try {
+      credential = await SignInWithApple.getAppleIDCredential(
+        scopes: [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: nonce,
+      );
+    } on SignInWithAppleAuthorizationException catch (e) {
+      if (e.code == AuthorizationErrorCode.canceled) return null;
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in sheet failed',
+        fields: {'code': e.code.name},
+      );
+      throw AuthException('Apple sign-in failed. Try again.');
+    } on SignInWithAppleException catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in unavailable',
+        fields: {'failure': e.runtimeType.toString()},
+      );
+      throw AuthException('Apple sign-in is not available on this device.');
+    }
+    final identityToken = credential.identityToken;
+    if (identityToken == null) {
+      throw AuthException('Apple sign-in failed. Try again.');
+    }
+    return AppleCredential(
+      identityToken: identityToken,
+      authorizationCode: credential.authorizationCode,
+      givenName: credential.givenName,
+      familyName: credential.familyName,
+    );
+  }
 
   /// User-facing OAuth failures that surface OUTSIDE any call stack: the
   /// browser detour means the outcome arrives later as a deep link, long after
@@ -240,43 +525,120 @@ class AuthService {
   /// killed during the browser detour) — copy falls back to the generic form.
   String? _lastOAuthProvider;
 
-  /// Open the system browser to begin OAuth. Provider is "github" or "google".
-  /// We pass `callbackURL=/oauth/handoff` so the server can mint
-  /// a single-use one-time token bound to the new session and return it in the
-  /// `antgrid://` deep link; [handleDeepLink] redeems it for the session cookie.
+  /// Begin OAuth. Provider is "github", "google" or "apple".
+  /// The server carries the attempt in OAuth state and issues a handoff code
+  /// bound to the app verifier; [handleDeepLink] redeems it for the session cookie.
   /// Deep links can't receive cookies directly, and forwarding the raw session
   /// would expose it to custom-scheme hijacking and logging.
   ///
-  /// Throws [AuthException] when the browser cannot be opened; failures of the
-  /// round-trip itself are reported on [oauthFailures].
-  Future<void> startOAuth(String provider) async {
+  /// iOS runs the round trip in the app's own sign-in sheet and returns once it
+  /// is over, because App Review rejects a hand-off to Safari (guideline 4).
+  /// Everywhere else this opens the system browser and returns
+  /// [OAuthStart.handedOff].
+  ///
+  /// Throws [AuthException] when the browser or sheet cannot be opened;
+  /// failures of the round-trip itself are reported on [oauthFailures].
+  /// Whether [startOAuth] runs the whole round trip before returning, rather
+  /// than handing off to the system browser.
+  bool get oauthRunsInApp => defaultTargetPlatform == TargetPlatform.iOS;
+
+  Future<OAuthStart> startOAuth(String provider) async {
+    _assertSecureTransport();
+    final generation = ++_generation;
     _lastOAuthProvider = provider;
-    // Better-Auth's social sign-in is POST-only; `/oauth/start` is the
-    // browser-navigable GET wrapper that 302s to the provider authorize URL.
-    final url = buildOAuthStartUri(
-      licenseApiUrl: licenseApiUrl,
-      provider: provider,
-    );
+    final verifier = _newNonce();
+    final response = await _postAuthJson('/api/auth/sign-in/native/start', {
+      'provider': provider,
+      'challenge': base64Url
+          .encode(sha256.convert(utf8.encode(verifier)).bytes)
+          .replaceAll('=', ''),
+    });
+    _checkAccepted(response);
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw AuthException('Unexpected server response');
+    }
+    if (body['id'] is! String ||
+        body['serverTime'] is! String ||
+        body['expiresAt'] is! String ||
+        body['url'] is! String) {
+      throw AuthException('Unexpected server response');
+    }
+    final serverTime = DateTime.tryParse(body['serverTime'] as String);
+    final serverExpiry = DateTime.tryParse(body['expiresAt'] as String);
+    if (serverTime == null || serverExpiry == null) {
+      throw AuthException('Unexpected server response');
+    }
+    final expiresAt = _now().add(serverExpiry.difference(serverTime));
+    final attempt = {
+      'kind': 'oauth',
+      'id': body['id'],
+      'verifier': verifier,
+      'expiresAt': expiresAt.toUtc().toIso8601String(),
+    };
+    final url = Uri.parse(body['url'] as String);
+    if (url.origin != Uri.parse(licenseApiUrl).origin ||
+        url.path != '/oauth/start') {
+      throw AuthException('Unexpected server response');
+    }
+    await _serializeStorage(() async {
+      if (generation != _generation) {
+        throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+      }
+      try {
+        await storage.writePendingSignIn(jsonEncode(attempt));
+      } catch (_) {
+        throw AuthException(
+          'Could not securely save sign-in. Try again.',
+          kind: AuthFailure.storage,
+        );
+      }
+      if (generation != _generation) {
+        await storage.clearPendingSignIn();
+        throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+      }
+      _oauthAttempt = attempt;
+    });
+    if (oauthRunsInApp) {
+      final callback = await _authenticateInApp(url, 'antgrid');
+      if (callback == null) {
+        await cancelAuthentication();
+        return OAuthStart.notSignedIn;
+      }
+      return await handleDeepLink(callback)
+          ? OAuthStart.signedIn
+          : OAuthStart.notSignedIn;
+    }
     final bool opened;
     try {
       opened = await _launchUrl(url);
     } catch (_) {
       // url_launcher throws (rather than returning false) on some platforms
       // when nothing can take the URL; both shapes mean the same thing here.
+      if (generation == _generation) await cancelAuthentication();
       throw AuthException('Could not open the browser');
     }
-    if (!opened) throw AuthException('Could not open the browser');
+    if (!opened) {
+      if (generation == _generation) await cancelAuthentication();
+      throw AuthException('Could not open the browser');
+    }
+    return OAuthStart.handedOff;
   }
 
-  void _emitOAuthFailure() {
+  void _emitOAuthFailure([String? detail]) {
     final provider = switch (_lastOAuthProvider) {
       'github' => 'GitHub',
       'google' => 'Google',
+      'apple' => 'Apple',
       _ => null,
     };
-    final message = provider == null
-        ? "Sign-in didn't complete. Try again."
-        : "$provider sign-in didn't complete. Try again.";
+    final message =
+        detail ??
+        (provider == null
+            ? "Sign-in didn't complete. Try again."
+            : "$provider sign-in didn't complete. Try again.");
     // No listener yet (cold-start deep link consumed before the sign-in
     // screen subscribes) — hold the failure for onListen instead of dropping
     // it on the broadcast floor.
@@ -287,12 +649,19 @@ class AuthService {
     }
   }
 
-  /// Parse `antgrid://auth/callback?token=<ott>`, redeem the single-use one-time
-  /// token at the OTT verify endpoint, and persist the session cookie returned
-  /// via `Set-Cookie`. The OTT (not the raw session) is what travels through
-  /// the deep link, so a hijacked or logged link yields nothing replayable.
-  Future<void> handleDeepLink(Uri uri) async {
-    if (uri.scheme != 'antgrid' || uri.host != 'auth') return;
+  /// Redeem only the active OAuth callback with its securely stored verifier.
+  /// The browser handoff code cannot authenticate a client without that verifier.
+  ///
+  /// Resolves to true once a session cookie is stored.
+  Future<bool> handleDeepLink(Uri uri) async {
+    if (uri.scheme != 'antgrid' ||
+        uri.host != 'auth' ||
+        uri.path != '/callback' ||
+        uri.hasPort ||
+        uri.userInfo.isNotEmpty ||
+        uri.fragment.isNotEmpty) {
+      return false;
+    }
     final Map<String, String> query;
     try {
       query = uri.queryParameters;
@@ -301,67 +670,104 @@ class AuthService {
       // (`antgrid://auth/x?token=%80`) throws out of it. Any web page can fire
       // that URL, and main()'s handleLink is unawaited, so the throw would land
       // as an unhandled async error rather than an ignored link.
-      return;
+      return false;
     }
-    // The handoff bounces its own failures back as `?error=` (no_session |
-    // server_error — web/src/routes/oauth-handoff.ts) so the app regains the
-    // foreground; without surfacing it the user lands on an unchanged sign-in
-    // screen with no explanation.
-    if (query['error'] != null) {
-      _emitOAuthFailure();
-      return;
+    if (uri.queryParametersAll.values.any((values) => values.length != 1) ||
+        query.keys.any((key) => !{'flow', 'code', 'error'}.contains(key)) ||
+        (query.containsKey('code') && query.containsKey('error'))) {
+      return false;
     }
-    final token = query['token'];
-    if (token == null || token.isEmpty) return;
-    // The verify response carries the session cookie; never redeem (and receive
-    // it) over plaintext. Consistent with the magic-link methods' guard.
-    if (!_transportIsSecure) return;
-    // This may run on the cold-start deep link, unawaited from main() (see
-    // main.dart's getInitialLink consumption), so a thrown network error here
-    // would surface as an unhandled zone error. Redemption never throws: on
-    // any failure the cookie stays unset and the failure is reported on
-    // [oauthFailures] so the sign-in screen can offer a retry.
+    if (!_transportIsSecure) return false;
+    final generation = _generation;
     try {
-      final res = await _http.post(
-        Uri.parse('$licenseApiUrl/api/auth/one-time-token/verify'),
-        headers: {'content-type': 'application/json'},
-        body: jsonEncode({'token': token}),
-      );
-      if (res.statusCode != 200) {
-        _emitOAuthFailure();
-        return;
+      if (_oauthAttempt == null) {
+        final raw = await storage.readPendingSignIn();
+        if (raw != null) {
+          final record = jsonDecode(raw) as Map<String, dynamic>;
+          if (record['kind'] == 'oauth' &&
+              generation == _generation &&
+              _oauthAttempt == null) {
+            _oauthAttempt = record;
+          }
+        }
       }
+    } catch (_) {
+      return false;
+    }
+    final attempt = _oauthAttempt;
+    if (generation != _generation ||
+        attempt == null ||
+        query['flow'] != attempt['id'] ||
+        DateTime.tryParse(
+              attempt['expiresAt'] as String? ?? '',
+            )?.isAfter(_now()) !=
+            true) {
+      return false;
+    }
+    if (query['error'] != null) {
+      await cancelAuthentication();
+      if (generation + 1 == _generation) _emitOAuthFailure();
+      return false;
+    }
+    final code = query['code'];
+    if (code == null ||
+        code.isEmpty ||
+        uri.queryParametersAll.values.any((values) => values.length != 1)) {
+      return false;
+    }
+    try {
+      final res = await boundedHttpRequest(
+        _http,
+        'POST',
+        Uri.parse('$licenseApiUrl/api/auth/sign-in/native/redeem'),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({
+          'id': attempt['id'],
+          'code': code,
+          'verifier': attempt['verifier'],
+        }),
+      );
+      _checkAccepted(res);
       // The signed session cookie only exists in Set-Cookie — the JSON body's
       // `token` is the unsigned DB token, not the signed cookie the server
       // expects on replay. [_extractSessionCookie] captures the full
       // `name=value` pair (real name, prefix included) for verbatim replay.
       final cookie = _extractSessionCookie(res.headers['set-cookie']);
       if (cookie == null) {
-        _emitOAuthFailure();
-        return;
+        if (generation == _generation) _emitOAuthFailure();
+        return false;
       }
-      await storage.writeCookie(cookie);
+      await _commitCookie(cookie, generation);
+      await _discardQuietly(generation);
+      if (generation != _generation) return false;
+      _oauthAttempt = null;
+      return true;
     } catch (e) {
-      // Offline, server unreachable, malformed response, or a keychain that
-      // refuses the write — never rethrow. Logged because the user-facing
-      // copy is the same for all of them, and only a keychain failure means
-      // every retry will fail too.
       AbLog.warn(
         'AuthService',
         'OAuth callback redemption failed',
-        fields: {'error': '$e'},
+        fields: {'failure': e.runtimeType.toString()},
       );
-      _emitOAuthFailure();
+      if (generation == _generation) {
+        _emitOAuthFailure(e is AuthException ? e.message : null);
+      }
+      return false;
     }
   }
 
   Future<void> signOut() async {
+    final generation = ++_generation;
+    _requestFlowCookie = null;
+    _requestEmail = null;
+    _oauthAttempt = null;
     final cookie = await storage.readCookie();
     // Never transmit the session token over plaintext. On an insecure
     // transport we skip the server round-trip but still clear it locally.
     if (cookie != null && _transportIsSecure) {
       try {
-        await _http.post(
+        await boundedHttpRequest(
+          _http,
+          'POST',
           Uri.parse('$licenseApiUrl/api/auth/sign-out'),
           headers: {'cookie': cookie},
         );
@@ -369,11 +775,13 @@ class AuthService {
         /* best-effort */
       }
     }
-    await storage.clearCookie();
+    await _serializeStorage(() async {
+      if (generation == _generation) await storage.clearCookie();
+    });
     // A pending ticket outliving sign-out would let SignInScreen restore it on
     // the next launch and mint a fresh session the moment the old link is
     // approved — silently undoing the sign-out.
-    await _discardQuietly();
+    await _discardQuietly(generation);
   }
 
   /// POST JSON to an account-service path, carrying the app's User-Agent and
@@ -388,17 +796,53 @@ class AuthService {
     String path,
     Map<String, Object?> body,
   ) async {
+    final generation = _generation;
+    final email = body['email'] as String?;
+    if (email != null && email != _requestEmail) {
+      _requestEmail = email;
+      _requestFlowCookie = null;
+    }
     try {
-      return await _http.post(
+      final response = await boundedHttpRequest(
+        _http,
+        'POST',
         Uri.parse('$licenseApiUrl$path'),
         headers: {
           'content-type': 'application/json',
+          'origin': Uri.parse(licenseApiUrl).origin,
           'user-agent': _antgridUserAgent(),
+          ..._clientHeaders,
+          if (email != null && _requestFlowCookie != null)
+            'cookie': _requestFlowCookie!,
         },
         body: jsonEncode(body),
       );
+      if (generation == _generation &&
+          email != null &&
+          email == _requestEmail) {
+        final binding = RegExp(
+          r'(antgrid\.request_flow\.[^=;, ]+=[^;, ]+)',
+        ).firstMatch(response.headers['set-cookie'] ?? '');
+        if (binding != null) _requestFlowCookie = binding.group(1);
+      }
+      return response;
     } catch (_) {
-      throw AuthException('Could not reach the sign-in server');
+      throw AuthException(
+        'Could not reach the sign-in server',
+        kind: AuthFailure.network,
+      );
+    }
+  }
+
+  AuthFlowReceipt? _flowReceipt(http.Response response) {
+    if (response.body.trim().isEmpty) return null;
+    try {
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      return json['flow'] == null
+          ? null
+          : AuthFlowReceipt.fromJson(json['flow'] as Map<String, dynamic>);
+    } catch (_) {
+      throw AuthException('Unexpected server response');
     }
   }
 
@@ -431,6 +875,7 @@ class AuthService {
     required String password,
   }) async {
     _assertSecureTransport();
+    final generation = ++_generation;
     final res = await _postAuthJson('/api/auth/sign-in/email', {
       'email': _normalizeEmail(email),
       'password': password,
@@ -438,12 +883,10 @@ class AuthService {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       final cookie = _extractSessionCookie(res.headers['set-cookie']);
       if (cookie == null) throw AuthException('Unexpected server response');
-      await storage.writeCookie(cookie);
+      await _commitCookie(cookie, generation);
       return PasswordSignIn.ok;
     }
-    if (res.statusCode == 429) {
-      throw AuthException('Too many attempts. Try again in a minute.');
-    }
+    if (res.statusCode == 429 || res.statusCode >= 500) _checkAccepted(res);
     switch (_errorCode(res)) {
       case 'EMAIL_NOT_VERIFIED':
         return PasswordSignIn.emailNotVerified;
@@ -455,6 +898,88 @@ class AuthService {
     }
   }
 
+  /// Sign in with Apple's native sheet, persisting the session cookie on
+  /// success. Returns false when the user dismissed the sheet.
+  ///
+  /// The server verifies Apple's identity token and signs in, or creates, the
+  /// account it names. The nonce binds that token to this attempt, and it goes
+  /// to Apple and to the server as the SAME string: Better-Auth compares the
+  /// token's `nonce` claim with the one it is sent verbatim, where Firebase's
+  /// convention hashes one side.
+  Future<bool> signInWithApple() async {
+    _assertSecureTransport();
+    final generation = ++_generation;
+    final nonce = _newNonce();
+    final credential = await _requestAppleCredential(nonce);
+    if (credential == null) return false;
+    final name = {
+      if (credential.givenName case final given? when given.isNotEmpty)
+        'firstName': given,
+      if (credential.familyName case final family? when family.isNotEmpty)
+        'lastName': family,
+    };
+    final res = await _postAuthJson('/api/auth/sign-in/social', {
+      'provider': 'apple',
+      'idToken': {
+        'token': credential.identityToken,
+        'nonce': nonce,
+        if (name.isNotEmpty) 'user': {'name': name},
+      },
+    });
+    if (res.statusCode == 429 || res.statusCode >= 500) _checkAccepted(res);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      // Apple's sheet has already succeeded by now, so the one copy the user
+      // sees stands for every server-side cause — a deployment without Apple
+      // configured (PROVIDER_NOT_FOUND) reads the same as a rejected token.
+      AbLog.warn(
+        'AuthService',
+        'Apple sign-in rejected by server',
+        fields: {'status': res.statusCode, 'code': _errorCode(res)},
+      );
+      throw AuthException('Could not sign in with Apple. Try again.');
+    }
+    final cookie = _extractSessionCookie(res.headers['set-cookie']);
+    if (cookie == null) throw AuthException('Unexpected server response');
+    await _commitCookie(cookie, generation);
+    await _sendAppleAuthorizationCode(cookie, credential.authorizationCode);
+    return true;
+  }
+
+  /// Hands the server the sign-in's authorization code, which it trades for
+  /// the refresh token it must revoke if this account is ever deleted.
+  ///
+  /// Never throws: the user is signed in by now, and losing this call costs
+  /// only that revocation, never the sign-in.
+  Future<void> _sendAppleAuthorizationCode(String cookie, String code) async {
+    try {
+      final res = await boundedHttpRequest(
+        _http,
+        'POST',
+        Uri.parse('$licenseApiUrl/account/apple/authorization-code'),
+        headers: {'cookie': cookie, 'content-type': 'application/json'},
+        body: jsonEncode({'code': code}),
+      );
+      if (res.statusCode >= 200 && res.statusCode < 300) return;
+      AbLog.warn(
+        'AuthService',
+        'Apple authorization code was not accepted',
+        fields: {'status': res.statusCode},
+      );
+    } catch (e) {
+      AbLog.warn(
+        'AuthService',
+        'Apple authorization code could not be sent',
+        fields: {'failure': e.runtimeType.toString()},
+      );
+    }
+  }
+
+  static String _newNonce() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
   /// Create an account. Mints NO session — the server runs `autoSignIn: false`
   /// with `requireEmailVerification`, so the caller's next step is always
   /// "check your email", never a signed-in shell.
@@ -464,7 +989,7 @@ class AuthService {
   /// nothing, so that sign-up cannot enumerate users (api/routes/sign-up.mjs);
   /// this client cannot tell the two apart and the copy downstream must not
   /// claim to.
-  Future<void> signUpWithPassword({
+  Future<AuthFlowReceipt?> signUpWithPassword({
     required String email,
     required String password,
   }) async {
@@ -478,26 +1003,22 @@ class AuthService {
       // it, exactly as /ui/signup does on the web.
       'name': _normalizeEmail(email),
     });
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-    if (res.statusCode == 429) {
-      throw AuthException('Too many attempts. Try again later.');
-    }
+    if (res.statusCode >= 200 && res.statusCode < 300) return _flowReceipt(res);
+    if (res.statusCode == 429 || res.statusCode >= 500) _checkAccepted(res);
     throw AuthException('Could not create the account. Try again.');
   }
 
   /// Ask the server to re-send the verification link for [email].
   ///
-  /// Answers identically whether or not the address has an unverified account,
-  /// so a non-2xx discloses nothing and is swallowed. A TRANSPORT failure is
-  /// not the same thing and propagates: the request never reached the server,
-  /// nothing was sent, and saying so leaks nothing about whether the address
-  /// exists — whereas reporting success would leave the user waiting on mail
-  /// nobody was asked to send.
-  Future<void> sendVerificationEmail(String email) async {
+  /// Uniform successful responses preserve account privacy. Throttling and
+  /// service failures must still reach the user instead of claiming a send.
+  Future<AuthFlowReceipt?> sendVerificationEmail(String email) async {
     _assertSecureTransport();
-    await _postAuthJson('/api/auth/send-verification-email', {
+    final response = await _postAuthJson('/api/auth/send-verification-email', {
       'email': _normalizeEmail(email),
     });
+    _checkAccepted(response);
+    return _flowReceipt(response);
   }
 
   /// Ask the server to email a password-reset link for [email]. The reset
@@ -506,77 +1027,144 @@ class AuthService {
   /// No `redirectTo` — the endpoint runs `originCheck` over that field, and our
   /// `sendResetPassword` builds the link from its own base URL regardless
   /// (web/src/auth/better-auth.ts), so sending one could only ever fail.
-  /// Enumeration-safe like the above, and it draws the same line: a uniform
-  /// server answer is swallowed, an unreachable server is reported.
-  Future<void> requestPasswordReset(String email) async {
+  /// Uniform acceptance does not imply the address has an account.
+  Future<AuthFlowReceipt?> requestPasswordReset(String email) async {
     _assertSecureTransport();
-    await _postAuthJson('/api/auth/request-password-reset', {
+    final response = await _postAuthJson('/api/auth/request-password-reset', {
       'email': _normalizeEmail(email),
     });
+    _checkAccepted(response);
+    return _flowReceipt(response);
   }
 
   /// Begin a magic-link sign-in. POSTs the email to the cross-device start
   /// endpoint and captures the `antgrid.cross_device_token` bind cookie from the
   /// response. The server emails an approval link to [email].
-  Future<MagicLinkSession> startMagicLink(String email) async {
+  Future<MagicLinkSession> startMagicLink(
+    String email, {
+    MagicLinkSession? previous,
+  }) async {
     _assertSecureTransport();
-    final http.Response res;
+    final resending = previous != null;
+    if (resending &&
+        ((previous.generation ?? _generation) != _generation ||
+            _normalizeEmail(previous.email ?? '') != _normalizeEmail(email))) {
+      throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+    }
+    if (resending && _magicResendGuard != null) {
+      throw AuthException('A resend is already in progress.');
+    }
+    // A rejected resend must leave the existing approval claimable.
+    var generation = resending ? _generation : ++_generation;
+    final resendGuard = resending ? Object() : null;
+    if (resending) {
+      _magicResendGuard = resendGuard;
+      _magicResendFlowId = previous.id;
+    }
     try {
-      res = await _http.post(
-        Uri.parse('$licenseApiUrl/api/auth/sign-in/cross-device/start'),
-        headers: {
-          'content-type': 'application/json',
-          'user-agent': _antgridUserAgent(),
-        },
-        body: jsonEncode({'email': email}),
+      final http.Response res;
+      try {
+        res = await boundedHttpRequest(
+          _http,
+          'POST',
+          Uri.parse('$licenseApiUrl/api/auth/sign-in/cross-device/start'),
+          headers: {
+            'content-type': 'application/json',
+            'origin': Uri.parse(licenseApiUrl).origin,
+            'user-agent': _antgridUserAgent(),
+            ..._clientHeaders,
+            if (previous != null)
+              'cookie':
+                  'antgrid.cross_device_token.${previous.id}=${previous.bindCookie}',
+          },
+          body: jsonEncode({
+            'email': _normalizeEmail(email),
+            if (previous != null) 'previousId': previous.id,
+          }),
+        );
+      } catch (_) {
+        // Network failure (offline, DNS, TLS, timeout) → surface as the
+        // method's documented AuthException so callers handle it uniformly.
+        throw AuthException(
+          'Could not reach the sign-in server',
+          kind: AuthFailure.network,
+        );
+      }
+      _checkAccepted(res);
+      Map<String, dynamic>? body;
+      try {
+        body = jsonDecode(res.body) as Map<String, dynamic>?;
+      } catch (_) {
+        throw AuthException('Unexpected server response');
+      }
+      final id = body?['id'] as String?;
+      final bind = _extractCookie(
+        res.headers['set-cookie'],
+        'antgrid.cross_device_token.$id',
       );
-    } catch (_) {
-      // Network failure (offline, DNS, TLS, timeout) → surface as the
-      // method's documented AuthException so callers handle it uniformly.
-      throw AuthException('Could not reach the sign-in server');
-    }
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw AuthException('Could not send sign-in link');
-    }
-    Map<String, dynamic>? body;
-    try {
-      body = jsonDecode(res.body) as Map<String, dynamic>?;
-    } catch (_) {
-      throw AuthException('Unexpected server response');
-    }
-    final id = body?['id'] as String?;
-    final bind = _extractCookie(
-      res.headers['set-cookie'],
-      'antgrid.cross_device_token',
-    );
-    if (id == null || bind == null) {
-      throw AuthException('Unexpected server response');
-    }
-    final session = MagicLinkSession(id: id, bindCookie: bind, email: email);
-    // Survive the process: the user leaves the app to approve the link, and
-    // Android may kill it while backgrounded. [bindCookie] is the only
-    // credential that can claim the approval, so an in-memory-only copy leaves
-    // an approved sign-in permanently unclaimable.
-    //
-    // Best-effort: the link is already sent by the time we get here, and this
-    // only buys back the relaunch case. A store that won't write must not fail
-    // the sign-in the caller can still finish in this process — callers catch
-    // [AuthException], so anything else escapes to the top of a UI callback.
-    try {
-      await storage.writePendingSignIn(
-        jsonEncode({
-          'id': session.id,
-          'bindCookie': session.bindCookie,
-          'email': session.email,
-          'startedAt': _now().toUtc().toIso8601String(),
-        }),
+      if (id == null || bind == null) {
+        throw AuthException('Unexpected server response');
+      }
+      final serverTime = DateTime.tryParse(
+        body?['serverTime'] as String? ?? '',
       );
-    } catch (_) {}
-    return session;
+      final serverExpiry = DateTime.tryParse(
+        body?['expiresAt'] as String? ?? '',
+      );
+      final serverRetry = DateTime.tryParse(body?['retryAt'] as String? ?? '');
+      if (serverTime == null || serverExpiry == null || serverRetry == null) {
+        throw AuthException('Unexpected server response');
+      }
+      final expiresAt = _now().add(serverExpiry.difference(serverTime));
+      final retryAt = _now().add(serverRetry.difference(serverTime));
+      // The binding and server deadline must survive the browser detour.
+      await _serializeStorage(() async {
+        if (generation != _generation) {
+          throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+        }
+        try {
+          await storage.writePendingSignIn(
+            jsonEncode({
+              'kind': 'magic',
+              'id': id,
+              'bindCookie': bind,
+              'email': email,
+              'expiresAt': expiresAt.toUtc().toIso8601String(),
+              'retryAt': retryAt.toUtc().toIso8601String(),
+              'journeyId': body?['journeyId'],
+            }),
+          );
+        } catch (_) {
+          throw AuthException(
+            'Could not securely save sign-in. Try again.',
+            kind: AuthFailure.storage,
+          );
+        }
+        if (generation != _generation) {
+          await storage.clearPendingSignIn();
+          throw AuthException('Sign-in cancelled', kind: AuthFailure.cancelled);
+        }
+        if (resending) generation = ++_generation;
+      });
+      return MagicLinkSession(
+        id: id,
+        bindCookie: bind,
+        email: email,
+        generation: generation,
+        journeyId: body?['journeyId'] as String?,
+        expiresAt: expiresAt,
+        retryAt: retryAt,
+      );
+    } finally {
+      if (identical(_magicResendGuard, resendGuard)) {
+        _magicResendGuard = null;
+        _magicResendFlowId = null;
+      }
+    }
   }
 
   /// Abandon the pending sign-in, so a later launch does not restore it.
-  Future<void> discardPendingMagicLink() => storage.clearPendingSignIn();
+  Future<void> discardPendingMagicLink() => cancelAuthentication();
 
   /// The pending sign-in left by a previous [startMagicLink], if one is still
   /// worth polling. Returns null — and drops the entry — when nothing was
@@ -585,29 +1173,39 @@ class AuthService {
   /// Never throws: callers restore fire-and-forget during widget init, where a
   /// raised error would surface as an unhandled async failure on app launch.
   Future<MagicLinkSession?> restorePendingMagicLink() async {
+    final generation = _generation;
     try {
       final raw = await storage.readPendingSignIn();
-      if (raw == null) return null;
+      if (generation != _generation || raw == null) return null;
       final body = jsonDecode(raw) as Map<String, dynamic>;
+      if (body['kind'] == 'oauth') return null;
       final id = body['id'] as String?;
       final bindCookie = body['bindCookie'] as String?;
-      final startedAt = DateTime.tryParse(body['startedAt'] as String? ?? '');
-      if (id == null || bindCookie == null || startedAt == null) {
+      final expiresAt =
+          DateTime.tryParse(body['expiresAt'] as String? ?? '') ??
+          DateTime.tryParse(
+            body['startedAt'] as String? ?? '',
+          )?.add(kMagicLinkWindow);
+      if (id == null || bindCookie == null || expiresAt == null) {
         throw const FormatException('incomplete pending sign-in');
       }
-      if (_now().toUtc().difference(startedAt.toUtc()) >= kMagicLinkWindow) {
-        await _discardQuietly();
+      if (!expiresAt.isAfter(_now())) {
+        await _discardQuietly(generation);
         return null;
       }
       return MagicLinkSession(
         id: id,
         bindCookie: bindCookie,
         email: body['email'] as String?,
+        expiresAt: expiresAt,
+        retryAt: DateTime.tryParse(body['retryAt'] as String? ?? ''),
+        generation: _generation,
+        journeyId: body['journeyId'] as String?,
       );
     } catch (_) {
       // Unreadable entry (corrupt, an older schema, or a store that won't open)
       // — drop it rather than wedging sign-in on every launch.
-      await _discardQuietly();
+      await _discardQuietly(generation);
       return null;
     }
   }
@@ -618,9 +1216,11 @@ class AuthService {
   /// cost the caller that result. A ticket left behind is self-limiting: the
   /// row it names is already dead server-side, and [restorePendingMagicLink]
   /// drops it outright once [kMagicLinkWindow] lapses.
-  Future<void> _discardQuietly() async {
+  Future<void> _discardQuietly(int generation) async {
     try {
-      await storage.clearPendingSignIn();
+      await _serializeStorage(() async {
+        if (generation == _generation) await storage.clearPendingSignIn();
+      });
     } catch (_) {}
   }
 
@@ -707,15 +1307,39 @@ class AuthService {
   /// exception) so the caller can keep polling until the link window lapses.
   Future<MagicLinkPoll> pollStatus(MagicLinkSession session) async {
     _assertSecureTransport();
+    if (_magicResendGuard != null && _magicResendFlowId == session.id) {
+      return MagicLinkPoll(status: MagicLinkStatus.error);
+    }
+    final generation = session.generation ?? _generation;
+    if (generation != _generation) {
+      return MagicLinkPoll(status: MagicLinkStatus.unbound);
+    }
+    if (session.expiresAt?.isAfter(_now()) == false) {
+      return MagicLinkPoll(status: MagicLinkStatus.expired);
+    }
     final http.Response res;
     try {
-      res = await _http.get(
-        Uri.parse('$licenseApiUrl/api/auth/sign-in/cross-device/status'),
-        headers: {'cookie': 'antgrid.cross_device_token=${session.bindCookie}'},
+      res = await boundedHttpRequest(
+        _http,
+        'GET',
+        Uri.parse(
+          '$licenseApiUrl/api/auth/sign-in/cross-device/status',
+        ).replace(queryParameters: {'id': session.id}),
+        headers: {
+          'cookie':
+              'antgrid.cross_device_token.${session.id}=${session.bindCookie}',
+        },
       );
     } catch (_) {
       return MagicLinkPoll(status: MagicLinkStatus.error);
     }
+    if (generation != _generation) {
+      return MagicLinkPoll(status: MagicLinkStatus.unbound);
+    }
+    if (_magicResendGuard != null && _magicResendFlowId == session.id) {
+      return MagicLinkPoll(status: MagicLinkStatus.error);
+    }
+    if (res.statusCode == 429) _checkAccepted(res);
     if (res.statusCode != 200) {
       return MagicLinkPoll(status: MagicLinkStatus.error);
     }
@@ -727,6 +1351,11 @@ class AuthService {
     }
     final delivery = switch (body?['delivery'] as String?) {
       'bounced' => DeliveryStatus.bounced,
+      'queued' => DeliveryStatus.queued,
+      'sending' => DeliveryStatus.sending,
+      'provider_accepted' => DeliveryStatus.providerAccepted,
+      'failed' => DeliveryStatus.failed,
+      'expired' => DeliveryStatus.expired,
       _ => null,
     };
     switch (body?['status'] as String?) {
@@ -738,8 +1367,8 @@ class AuthService {
         // percent-encoded characters, and [fetchCurrentUser]/signOut replay
         // the pair unencoded. This matches the OAuth/deeplink path
         // ([handleDeepLink]); decoding here would break parity.
-        await storage.writeCookie(cookie);
-        await _discardQuietly();
+        await _commitCookie(cookie, generation);
+        await _discardQuietly(generation);
         return MagicLinkPoll(status: MagicLinkStatus.ready);
       case 'pending':
         return MagicLinkPoll(
@@ -750,13 +1379,13 @@ class AuthService {
       // ticket. `error` deliberately keeps it — the approval may still be
       // waiting behind a flaky network.
       case 'expired':
-        await _discardQuietly();
+        await _discardQuietly(generation);
         return MagicLinkPoll(status: MagicLinkStatus.expired);
       case 'consumed':
-        await _discardQuietly();
+        await _discardQuietly(generation);
         return MagicLinkPoll(status: MagicLinkStatus.consumed);
       case 'unbound':
-        await _discardQuietly();
+        await _discardQuietly(generation);
         return MagicLinkPoll(status: MagicLinkStatus.unbound);
       default:
         return MagicLinkPoll(status: MagicLinkStatus.error);
@@ -772,7 +1401,9 @@ class AuthService {
     // /account/me joins the Better-Auth session to the active subscription
     // so we get the tier in one round-trip; /api/auth/get-session doesn't
     // know about subscriptions.
-    final res = await _http.get(
+    final res = await boundedHttpRequest(
+      _http,
+      'GET',
       Uri.parse('$licenseApiUrl/account/me'),
       headers: {'cookie': cookie},
     );
@@ -781,7 +1412,9 @@ class AuthService {
       // `hasStoredSessionProvider` stops reading true. Leaving it at rest keeps
       // the optimistic fallback in `signedInProvider` re-asserting "signed in"
       // on every later offline blip, for a session the server already refuses.
-      await storage.clearCookie();
+      await _serializeStorage(() async {
+        if (await storage.readCookie() == cookie) await storage.clearCookie();
+      });
       return null;
     }
     if (res.statusCode != 200) return null;
