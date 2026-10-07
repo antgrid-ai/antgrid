@@ -7,6 +7,8 @@ import 'package:antgrid/services/local_notification_service.dart';
 import 'package:antgrid/services/push_background_handler.dart';
 import 'package:push/push.dart';
 
+import '../helpers/prefs_test_mock.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -385,6 +387,103 @@ void main() {
 
     test('kPushMaxAge matches the relay TTL of 43200s', () {
       expect(kPushMaxAge.inSeconds, 43200);
+    });
+  });
+
+  group('pushShouldAlert', () {
+    final now = DateTime.utc(2026, 1, 1, 12);
+    DecodedPush push({DateTime? sentAt, String? kind}) => (
+      title: 't',
+      body: 'b',
+      kind: kind,
+      projectId: null,
+      machineUuid: null,
+      terminalId: null,
+      sourceMessageId: null,
+      sentAt: sentAt,
+    );
+
+    test('the first push rings', () {
+      expect(pushShouldAlert(push(sentAt: now), now, null), isTrue);
+    });
+
+    test('a push within kPushAlertGap of the last alert is silent', () {
+      final last = now.subtract(kPushAlertGap - const Duration(seconds: 1));
+      expect(pushShouldAlert(push(sentAt: now), now, last), isFalse);
+    });
+
+    test('a push kPushAlertGap after the last alert rings', () {
+      expect(
+        pushShouldAlert(push(sentAt: now), now, now.subtract(kPushAlertGap)),
+        isTrue,
+      );
+    });
+
+    test('a push arriving later than kPushLateAfter is silent', () {
+      final sent = now.subtract(kPushLateAfter + const Duration(seconds: 1));
+      expect(pushShouldAlert(push(sentAt: sent), now, null), isFalse);
+    });
+
+    test('exactly kPushLateAfter late still rings', () {
+      final sent = now.subtract(kPushLateAfter);
+      expect(pushShouldAlert(push(sentAt: sent), now, null), isTrue);
+    });
+
+    test('a missing sentAt (older bridge) is not late', () {
+      expect(pushShouldAlert(push(), now, null), isTrue);
+    });
+
+    test('an on-time escalation rings inside the gap', () {
+      final last = now.subtract(const Duration(seconds: 1));
+      expect(
+        pushShouldAlert(push(sentAt: now, kind: 'handler'), now, last),
+        isTrue,
+      );
+    });
+
+    test('a late escalation is silent', () {
+      final sent = now.subtract(const Duration(hours: 1));
+      expect(
+        pushShouldAlert(push(sentAt: sent, kind: 'handler'), now, null),
+        isFalse,
+      );
+    });
+
+    test('a last alert in the future (clock moved back) does not mute', () {
+      final last = now.add(const Duration(minutes: 10));
+      expect(pushShouldAlert(push(sentAt: now), now, last), isTrue);
+    });
+  });
+
+  group('claimPushAlert', () {
+    setUp(useInMemoryPrefs);
+    final now = DateTime.utc(2026, 1, 1, 12);
+    final fresh = (
+      title: 't',
+      body: 'b',
+      kind: null,
+      projectId: null,
+      machineUuid: null,
+      terminalId: null,
+      sourceMessageId: null,
+      sentAt: now,
+    );
+
+    test('a backlog delivered at once rings exactly once', () async {
+      final claims = await Future.wait([
+        for (var i = 0; i < 10; i++) claimPushAlert(fresh, now),
+      ]);
+      expect(claims.where((c) => c), hasLength(1));
+      expect(claims.first, isTrue);
+    });
+
+    test('a silent push does not restart the gap', () async {
+      expect(await claimPushAlert(fresh, now), isTrue);
+      final muted = now.add(const Duration(seconds: 20));
+      expect(await claimPushAlert(fresh, muted), isFalse);
+      // 30s after the ring, not after the muted one.
+      final next = now.add(kPushAlertGap);
+      expect(await claimPushAlert(fresh, next), isTrue);
     });
   });
 

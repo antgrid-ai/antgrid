@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show openPushBlob;
 import 'package:push/push.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/storage_scope.dart';
 import '../navigation/notification_route.dart';
 import '../util/ab_log.dart';
 import 'local_notification_service.dart';
@@ -64,6 +66,71 @@ const kPushMaxAge = Duration(hours: 12);
 bool isStalePush(DecodedPush decoded, DateTime now) {
   final sentAt = decoded.sentAt;
   return sentAt != null && now.difference(sentAt) > kPushMaxAge;
+}
+
+/// How long after its `sentAt` a push may arrive and still ring. Later than
+/// this, it waited in FCM while the device was offline: FCM sends ours at high
+/// priority, so Doze does not hold one this long. It still updates its
+/// session's notification, silently — a reconnect backlog is news to read, not
+/// a run of alarms for events that are already minutes or hours old.
+const kPushLateAfter = Duration(minutes: 5);
+
+/// The shortest gap between two audible push alerts. A burst — a reconnect
+/// backlog delivered on time by the clock, or one agent ending several turns in
+/// a row — rings once and posts the rest silently. Android itself only softens
+/// a burst, and only from 15 on (notification cooldown lowers the volume).
+const kPushAlertGap = Duration(seconds: 30);
+
+/// Whether [decoded], arriving at [now], should ring, given when the last push
+/// alert rang.
+///
+/// A Handler escalation that arrives on time always rings: it is the one push
+/// the user must answer, so a burst of routine pushes must not mute it. A late
+/// one is as stale as any other. A [lastAlertAt] in the future means the device
+/// clock moved back, which says nothing about a burst.
+bool pushShouldAlert(DecodedPush decoded, DateTime now, DateTime? lastAlertAt) {
+  final sentAt = decoded.sentAt;
+  if (sentAt != null && now.difference(sentAt) > kPushLateAfter) return false;
+  if (decoded.kind == 'handler' || lastAlertAt == null) return true;
+  return now.isBefore(lastAlertAt) ||
+      now.difference(lastAlertAt) >= kPushAlertGap;
+}
+
+final _lastAlertKey = scopedStorageKey('push.lastAlertAtMs');
+
+/// Serialises [claimPushAlert] within an isolate: FCM delivers a backlog in a
+/// rush, and two pushes that both read "no recent alert" before either wrote
+/// would both ring.
+Future<void> _alertClaims = Future<void>.value();
+
+/// [pushShouldAlert] against the persisted time of the last alert, recording
+/// [now] when this push rings.
+///
+/// Persisted rather than held in memory because each background push may run
+/// in a fresh headless engine. A storage failure reads as no earlier alert —
+/// ringing — since a muted alert is the worse failure.
+Future<bool> claimPushAlert(DecodedPush decoded, DateTime now) {
+  final claim = _alertClaims.then((_) async {
+    final prefs = SharedPreferencesAsync(
+      options: desktopSharedPreferencesOptions,
+    );
+    DateTime? lastAlertAt;
+    try {
+      final ms = await prefs.getInt(_lastAlertKey);
+      if (ms != null) {
+        lastAlertAt = DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
+      }
+    } catch (_) {}
+    final alert = pushShouldAlert(decoded, now, lastAlertAt);
+    if (alert) {
+      try {
+        await prefs.setInt(_lastAlertKey, now.millisecondsSinceEpoch);
+      } catch (_) {}
+    }
+    return alert;
+  });
+  _alertClaims = claim.then((_) {}, onError: (_) {});
+  return claim;
 }
 
 /// Which OS notification a push occupies: [tag] names its thread, so a newer
@@ -263,6 +330,7 @@ Future<void> pushBackgroundHandler(RemoteMessage message) async {
       payload: route == null ? null : encodeNotificationRoute(route),
       tag: slot?.tag,
       groupKey: slot?.groupKey,
+      silent: !await claimPushAlert(decoded, now),
     );
   } catch (e) {
     AbLog.error(

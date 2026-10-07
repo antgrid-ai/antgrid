@@ -157,12 +157,16 @@ class LocalNotificationService {
   /// alerted — and carries no payload, since it stands for every thread in the
   /// group rather than one route. Elsewhere there is no summary to post: a
   /// second visible notification is all it would be.
+  ///
+  /// [silent] posts (or replaces) the notification without sound or vibration.
+  /// Android only: elsewhere the OS owns how a notification is presented.
   Future<void> show({
     required String title,
     required String body,
     String? payload,
     String? tag,
     String? groupKey,
+    bool silent = false,
   }) async {
     if (!_ready) return;
     final int id;
@@ -178,7 +182,11 @@ class LocalNotificationService {
         title: title,
         body: body,
         payload: payload,
-        notificationDetails: _details(tag: tag, groupKey: groupKey),
+        notificationDetails: _details(
+          tag: tag,
+          groupKey: groupKey,
+          silent: silent,
+        ),
       );
       if (groupKey != null && defaultTargetPlatform == TargetPlatform.android) {
         final summaryTag = '$_summaryTagPrefix$groupKey';
@@ -206,6 +214,7 @@ class LocalNotificationService {
     String? tag,
     String? groupKey,
     bool summary = false,
+    bool silent = false,
   }) => NotificationDetails(
     android: AndroidNotificationDetails(
       'agent_notifications',
@@ -221,6 +230,7 @@ class LocalNotificationService {
       tag: tag,
       groupKey: groupKey,
       setAsGroupSummary: summary,
+      silent: silent,
       onlyAlertOnce: summary,
       groupAlertBehavior: summary
           ? GroupAlertBehavior.children
