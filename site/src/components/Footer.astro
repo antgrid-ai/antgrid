@@ -22,7 +22,7 @@ import Wordmark from "./ui/Wordmark.astro";
           Your agents and machines in one place. Hand over the follow-ups on long-running tasks to Handler.
         </p>
         <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-marker text-muted2">
-          <Icon name="tabler:lock" class="text-signal" width="12" height="12" />end-to-end encrypted · zero-knowledge relay
+          <Icon name="tabler:lock" class="text-signal" width="12" height="12" />end-to-end encrypted · no relay holds a key
         </span>
       </div>
       <div>
@@ -59,7 +59,7 @@ import Wordmark from "./ui/Wordmark.astro";
       <span>© 2026 antgrid</span>
       <span aria-hidden="true">·</span>
       {/* The repo, with no ask attached. /security already sends readers here to
-          check the handshake spec against the client that implements it, so the
+          check the peer session spec against the client that implements it, so the
           link exists on the site either way — it just had nowhere a reader could
           find it without being sold something first. The star ask lives on
           /download, the one page where a reader already has what they came

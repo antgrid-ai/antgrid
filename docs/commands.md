@@ -326,7 +326,7 @@ whichever agent is installed, which bills a vendor this session never chose. And
 which for a three-word naming task is the largest single cost lever there is.
 It means exactly that on every row — no `--model` was passed — but only **title**
 rows consult a per-agent default: a title call passes one for the agents that
-declare `AgentSpec.cheapNamingModel` (`bridge/src/agents/registry.ts`), read off
+declare `AgentSpec.cheapNamingModel` (`packages/antgrid-agents/src/agents/registry.ts`), read off
 the agent that **actually ran**, since a borrowed call's model has to match
 whichever CLI serves it and not the one the session asked for. So `default` on a
 title row means either that nobody has verified a model string that vendor's
