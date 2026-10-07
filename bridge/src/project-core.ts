@@ -39,7 +39,7 @@ export interface ProjectCoreRemoteDeps {
    *  supplier ship unroutable pushes and still compile. */
   machineDeviceId(): string;
   /** Blind FCM/APNs push forward over the central control socket. */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string }; collapseKey?: string }): void;
   /** Whether the account's current authorization lease leaves out this device
    *  or this identity key. Sign-out revokes the device and wipes its keys, but
    *  the push row it registered survives on every machine it could not reach in
@@ -783,7 +783,7 @@ export class ProjectCore {
         return targets;
       },
       seal: (json, pubkey) => sealPush(json, pubkey),
-      deliver: (token, provider, blob) => remote.sendPushDeliver({ pushToken: token, provider, blob }),
+      deliver: (token, provider, blob, collapseKey) => remote.sendPushDeliver({ pushToken: token, provider, blob, collapseKey }),
     });
     const unsubscribePush = bus.subscribe({
       deliver: (msg) => {

@@ -43,6 +43,13 @@ test("sendPushDeliver emits a top-level push:deliver control frame", () => {
   expect(pd.blob).toEqual({ epk: "E", box: "B" });
 });
 
+test("sendPushDeliver puts the collapse key on the wire frame", () => {
+  const { client, sent } = makeClientWithFakeWs();
+  client.sendPushDeliver({ pushToken: "tok", provider: "apns", blob: { epk: "E", box: "B" }, collapseKey: "K_-9" });
+  const pd = sent.map((s) => JSON.parse(s as string)).find((f) => f.type === "push:deliver");
+  expect(pd.collapseKey).toBe("K_-9");
+});
+
 test("sendPushDeliver is a safe no-op when the socket is not open", () => {
   const { client, sent } = makeClientWithFakeWs();
   (client as any).ws = { readyState: 3 /* CLOSED */, send: (d: unknown) => sent.push(d), close: () => {} };

@@ -3,6 +3,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/navigation/notification_route.dart';
 import 'package:antgrid/services/push_identity.dart';
+import 'package:antgrid/services/local_notification_service.dart';
 import 'package:antgrid/services/push_background_handler.dart';
 import 'package:push/push.dart';
 
@@ -147,6 +148,7 @@ void main() {
         machineUuid: 'machine-1',
         terminalId: 'sess-7',
         sourceMessageId: 'm9',
+        sentAt: null,
       );
       expect(
         routeOfPush(decoded),
@@ -169,6 +171,7 @@ void main() {
         machineUuid: null,
         terminalId: 'sess-7',
         sourceMessageId: null,
+        sentAt: null,
       );
       expect(routeOfPush(decoded)?.terminalId, 'sess-7');
     });
@@ -182,6 +185,7 @@ void main() {
         machineUuid: null,
         terminalId: null,
         sourceMessageId: 'm9',
+        sentAt: null,
       );
       // The same repo at the same path on two machines mints one projectId.
       expect(routeOfPush(decoded), isNull);
@@ -196,6 +200,7 @@ void main() {
         machineUuid: null,
         terminalId: null,
         sourceMessageId: 'm9',
+        sentAt: null,
       );
       expect(routeOfPush(decoded), isNull);
     });
@@ -221,10 +226,7 @@ void main() {
         pushIdentity: identity,
       );
       final route = routeOfPush(decoded!);
-      expect(
-        decodeNotificationRoute(encodeNotificationRoute(route!)),
-        route,
-      );
+      expect(decodeNotificationRoute(encodeNotificationRoute(route!)), route);
     });
   });
 
@@ -264,6 +266,7 @@ void main() {
       machineUuid: null,
       terminalId: null,
       sourceMessageId: 'src1',
+      sentAt: null,
     );
     expect(pushDedupKey(withSrc), 'src1');
 
@@ -275,6 +278,7 @@ void main() {
       machineUuid: null,
       terminalId: null,
       sourceMessageId: null,
+      sentAt: null,
     );
     // No id → null so the caller shows the push rather than deduping it away.
     expect(pushDedupKey(noSrc), isNull);
@@ -295,6 +299,181 @@ void main() {
 
     test('a null data payload is an empty map, not a crash', () {
       expect(pushDataOf(RemoteMessage()), isEmpty);
+    });
+  });
+
+  group('sentAt', () {
+    Future<DecodedPush?> decodeWith(Object? sentAt) async {
+      final identity = PushIdentity.inMemory();
+      final kp = await identity.ensureKeypair();
+      return decodePush(
+        await _sealTo(kp.pubkeyB64, {
+          'title': 'Task complete',
+          'body': 'done',
+          'sentAt': ?sentAt,
+        }),
+        pushIdentity: identity,
+      );
+    }
+
+    test('decodePush parses epoch milliseconds', () async {
+      final decoded = await decodeWith(1767225600000);
+      expect(
+        decoded!.sentAt,
+        DateTime.fromMillisecondsSinceEpoch(1767225600000, isUtc: true),
+      );
+    });
+
+    // Like the ids, a sentAt the app cannot read costs that field, never the
+    // alert, and it must never read as stale.
+    for (final (label, raw) in <(String, Object?)>[
+      ('missing', null),
+      ('a string', '1767225600000'),
+      ('a bool', true),
+      ('zero', 0),
+      ('negative', -5),
+      ('beyond DateTime range', 1e300),
+      ('a map', <String, Object?>{'ms': 1}),
+    ]) {
+      test(
+        'decodePush maps $label sentAt to null and keeps the push',
+        () async {
+          final decoded = await decodeWith(raw);
+          expect(decoded, isNotNull);
+          expect(decoded!.title, 'Task complete');
+          expect(decoded.sentAt, isNull);
+        },
+      );
+    }
+  });
+
+  group('isStalePush', () {
+    final now = DateTime.utc(2026, 1, 1, 12);
+    DecodedPush sentAt(DateTime? at) => (
+      title: 't',
+      body: 'b',
+      kind: null,
+      projectId: null,
+      machineUuid: null,
+      terminalId: null,
+      sourceMessageId: null,
+      sentAt: at,
+    );
+
+    test('exactly kPushMaxAge old is not stale', () {
+      expect(isStalePush(sentAt(now.subtract(kPushMaxAge)), now), isFalse);
+    });
+
+    test('just over kPushMaxAge is stale', () {
+      final at = now.subtract(kPushMaxAge + const Duration(milliseconds: 1));
+      expect(isStalePush(sentAt(at), now), isTrue);
+    });
+
+    test('a fresh push is not stale', () {
+      final at = now.subtract(const Duration(minutes: 5));
+      expect(isStalePush(sentAt(at), now), isFalse);
+    });
+
+    test('a future sentAt (clock skew) is not stale', () {
+      final at = now.add(const Duration(days: 2));
+      expect(isStalePush(sentAt(at), now), isFalse);
+    });
+
+    test('a missing sentAt (older bridge) is not stale', () {
+      expect(isStalePush(sentAt(null), now), isFalse);
+    });
+
+    test('kPushMaxAge matches the relay TTL of 43200s', () {
+      expect(kPushMaxAge.inSeconds, 43200);
+    });
+  });
+
+  group('notificationSlotOf', () {
+    DecodedPush push({
+      String? machineUuid = 'machine-1',
+      String? projectId = 'proj-42',
+      String? terminalId,
+      String? kind,
+      String? sourceMessageId,
+    }) => (
+      title: 't',
+      body: 'b',
+      kind: kind,
+      projectId: projectId,
+      machineUuid: machineUuid,
+      terminalId: terminalId,
+      sourceMessageId: sourceMessageId,
+      sentAt: null,
+    );
+
+    test('one session keeps one tag and one id across pushes', () {
+      final a = notificationSlotOf(push(terminalId: 'sess-7'))!;
+      final b = notificationSlotOf(push(terminalId: 'sess-7'))!;
+      expect(a.tag, b.tag);
+      expect(notificationIdForTag(a.tag), notificationIdForTag(b.tag));
+    });
+
+    test('different sessions get different tags in one project group', () {
+      final a = notificationSlotOf(push(terminalId: 'sess-7'))!;
+      final b = notificationSlotOf(push(terminalId: 'sess-8'))!;
+      expect(a.tag, isNot(b.tag));
+      expect(a.groupKey, b.groupKey);
+      expect(a.groupKey, 'machine-1|proj-42');
+    });
+
+    test('a push with no session is the project thread', () {
+      final slot = notificationSlotOf(push())!;
+      expect(slot.tag, 'machine-1|proj-42');
+      expect(slot.groupKey, 'machine-1|proj-42');
+    });
+
+    test('another project or machine is another group', () {
+      final base = notificationSlotOf(push(terminalId: 'sess-7'))!;
+      final otherProject = notificationSlotOf(
+        push(projectId: 'proj-43', terminalId: 'sess-7'),
+      )!;
+      final otherMachine = notificationSlotOf(
+        push(machineUuid: 'machine-2', terminalId: 'sess-7'),
+      )!;
+      expect(otherProject.groupKey, isNot(base.groupKey));
+      expect(otherMachine.groupKey, isNot(base.groupKey));
+      expect(otherMachine.tag, isNot(base.tag));
+    });
+
+    test('an escalation never shares a slot with its session', () {
+      // The session keeps pushing after it escalates; a shared tag would let
+      // the next agent push replace the question the user has to answer.
+      final escalation = notificationSlotOf(
+        push(terminalId: 'sess-7', kind: 'handler', sourceMessageId: 'esc-1'),
+      )!;
+      final later = notificationSlotOf(
+        push(terminalId: 'sess-7', kind: 'agent', sourceMessageId: 'msg-2'),
+      )!;
+      final another = notificationSlotOf(
+        push(terminalId: 'sess-7', kind: 'handler', sourceMessageId: 'esc-2'),
+      )!;
+      expect(escalation.tag, isNot(later.tag));
+      expect(
+        notificationIdForTag(escalation.tag),
+        isNot(notificationIdForTag(later.tag)),
+      );
+      expect(escalation.tag, isNot(another.tag));
+      expect(escalation.groupKey, later.groupKey);
+      expect(
+        notificationSlotOf(push(terminalId: 'sess-7', kind: 'handler'))!.tag,
+        isNot(later.tag),
+      );
+    });
+
+    test('no slot without both machineUuid and projectId', () {
+      expect(notificationSlotOf(push(machineUuid: null)), isNull);
+      expect(notificationSlotOf(push(projectId: null)), isNull);
+      expect(
+        notificationSlotOf(
+          push(machineUuid: null, projectId: null, terminalId: 'sess-7'),
+        ),
+        isNull,
+      );
     });
   });
 
