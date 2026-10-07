@@ -292,6 +292,7 @@ class _VoiceSetupState extends State<VoiceSetup> {
   final _focus = FocusNode();
   @override
   void dispose() {
+    widget.controller.cancelPendingStart(widget.target);
     _focus.dispose();
     super.dispose();
   }

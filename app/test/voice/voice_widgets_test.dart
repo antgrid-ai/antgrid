@@ -55,6 +55,39 @@ void main() {
     },
   );
 
+  testWidgets('chat keeps recognized text when the engine fails without text', (
+    tester,
+  ) async {
+    final c = VoiceInputController(SimulatedSpeechEngine())
+      ..availability = SpeechAvailability.ready;
+    final input = ComposerController();
+    var sends = 0;
+    await tester.pumpWidget(
+      host(
+        c,
+        VoiceChatEditor(
+          target: target,
+          controller: input,
+          builder: (controller) =>
+              RichComposer(controller: controller, onSend: () => sends++),
+        ),
+      ),
+    );
+    c.start(target);
+    c.accept(const SpeechEvent(1, 'keep this recognized text'));
+    expect(input.isEmpty, isTrue);
+    c.accept(const SpeechEvent(1, '', error: 'microphone disconnected'));
+    await tester.pump();
+    expect(input.toMarkdown(), 'keep this recognized text');
+    expect(c.draft(target).phase, VoicePhase.error);
+    expect(c.draft(target).message, 'microphone disconnected');
+    expect(sends, 0);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(milliseconds: 600));
+    c.dispose();
+    input.dispose();
+  });
+
   testWidgets('production gate hides preview controls', (tester) async {
     final c = VoiceInputController(SimulatedSpeechEngine());
     await tester.pumpWidget(

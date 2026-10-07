@@ -71,6 +71,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<SpeechSetupProgress>? _prepare;
   int _capture = 0;
   bool _disposed = false;
+  ({VoiceTarget target, Object token})? _pendingStart;
 
   VoiceScenario? get scenario => switch (_engine) {
     final SimulatedSpeechEngine e => e.scenario,
@@ -100,6 +101,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _swap(SpeechEngine next) {
+    cancelPendingStart();
     _prepare?.cancel();
     if (!identical(_engine, _default)) _engine.dispose();
     _engine = next;
@@ -113,6 +115,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
 
   void start(VoiceTarget target) {
     if (draft(target).text.isNotEmpty) return;
+    cancelPendingStart();
     if (active != null) preserve(active!);
     final d = draft(target);
     d.message = null;
@@ -148,6 +151,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void prepare(VoiceTarget target) {
+    cancelPendingStart();
     _prepare?.cancel();
     final d = draft(target)
       ..phase = availability.downloadBytes > 0
@@ -203,33 +207,47 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> grant(VoiceTarget target) async {
+    if (_disposed || active != null) return;
     final d = draft(target);
-    final bool granted;
+    final engine = _engine;
+    final pending = (target: target, token: Object());
+    _pendingStart = pending;
+    bool current() =>
+        !_disposed && identical(_pendingStart?.token, pending.token);
     try {
-      granted = await _engine.requestPermission();
+      final granted = await engine.requestPermission();
+      if (!current()) return;
+      if (!granted) {
+        d.phase = VoicePhase.denied;
+        notifyListeners();
+        return;
+      }
+      final next = await engine.availability();
+      if (!current()) return;
+      availability = next;
+      start(target);
     } on SpeechEngineException catch (error) {
-      if (_disposed || d.busy) return;
+      if (!current()) return;
       d
         ..phase = VoicePhase.error
         ..message = error.message;
       notifyListeners();
-      return;
+    } finally {
+      if (current()) _pendingStart = null;
     }
-    if (_disposed || d.busy) return;
-    if (!granted) {
-      d.phase = VoicePhase.denied;
-      notifyListeners();
-      return;
-    }
-    availability = await _engine.availability();
-    if (_disposed) return;
-    start(target);
+  }
+
+  /// Permission dialogs cannot be cancelled, but their late answers must not
+  /// start a microphone after the initiating surface has gone away.
+  void cancelPendingStart([VoiceTarget? target]) {
+    if (target == null || _pendingStart?.target == target) _pendingStart = null;
   }
 
   void accept(SpeechEvent event) {
     if (_disposed || event.capture != _capture || active == null) return;
     final d = draft(active!);
-    d.text = event.text;
+    // A failure can carry no hypothesis even after useful partials arrived.
+    if (event.error == null || event.text.isNotEmpty) d.text = event.text;
     if (event.finalized || event.error != null) {
       d.phase = event.error != null ? VoicePhase.error : VoicePhase.review;
       d.message =
@@ -248,6 +266,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void preserve(VoiceTarget target, {bool deferNotification = false}) {
+    cancelPendingStart(target);
     if (active != target) return;
     draft(target).phase = VoicePhase.review;
     draft(target).message = 'Dictation stopped. Text kept in this session.';
@@ -261,7 +280,14 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  void preserveCurrent({bool deferNotification = false}) {
+    cancelPendingStart();
+    final target = active;
+    if (target != null) preserve(target, deferNotification: deferNotification);
+  }
+
   void cancel(VoiceTarget target) {
+    cancelPendingStart(target);
     if (active == target) _release();
     _prepare?.cancel();
     _drafts[target] = VoiceDraft();
@@ -269,6 +295,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void cancelSetup(VoiceTarget target) {
+    cancelPendingStart(target);
     _prepare?.cancel();
     final d = draft(target);
     if (d.busy) return;
@@ -306,12 +333,19 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed && active != null) preserve(active!);
+    if (state == AppLifecycleState.resumed) return;
+    // A permission dialog can make the app inactive without backgrounding it.
+    if (state == AppLifecycleState.inactive) {
+      if (active != null) preserve(active!);
+    } else {
+      preserveCurrent();
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
+    cancelPendingStart();
     _release();
     _prepare?.cancel();
     if (!identical(_engine, _default)) _engine.dispose();
@@ -353,8 +387,7 @@ final voiceInputProvider = Provider<VoiceInputController>((ref) {
   final controller = VoiceInputController(ref.watch(speechEngineProvider));
   detached('Voice', 'read speech availability', controller.refresh);
   void stopForNavigation() {
-    final target = controller.active;
-    if (target != null) controller.preserve(target, deferNotification: true);
+    controller.preserveCurrent(deferNotification: true);
   }
 
   ref.listen(selectedRegistrationIdProvider, (_, _) => stopForNavigation());
