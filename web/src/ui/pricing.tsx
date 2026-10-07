@@ -28,6 +28,7 @@ const FREE_FEATURES = [
   "Remote control from your phone",
   "Unlimited terminal sessions",
   "File explorer & git viewer",
+  "Browser preview tunneling",
   "End-to-end encrypted · zero-knowledge relay",
 ] as const;
 
