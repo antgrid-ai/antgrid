@@ -346,7 +346,60 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// input transform so it also reaches IME keystrokes, which go straight from
   /// the engine to the wire without passing through this widget.
   final TerminalModifierLatch _modifiers = TerminalModifierLatch();
-  late final String Function(String) _modifierTransform = _modifiers.apply;
+  late final String Function(String) _modifierTransform = _transformInput;
+
+  /// The touch key bar's sticky modifiers, applied to every keystroke the pane
+  /// sends — plus the one chord they can mean instead of a keystroke: an armed
+  /// Ctrl and a `c` over a selection copies it, exactly as the hardware chord
+  /// does in [_handleEarlyKey], rather than interrupting whatever is running.
+  String _transformInput(String data) {
+    final m = _modifiers.value;
+    if (m.ctrl && !m.alt && (data == 'c' || data == 'C') && _hasSelection) {
+      _modifiers.clear();
+      _copySelectionAndClear();
+      return '';
+    }
+    return _modifiers.apply(data);
+  }
+
+  /// Copies the selection and drops it, so the highlight going away is the
+  /// confirmation that the copy happened. Clears the engine's selection too:
+  /// the mirror alone would be repopulated by the view's next notify.
+  void _copySelectionAndClear() {
+    final selection = _selectedText;
+    if (selection == null || selection.isEmpty) return;
+    detached(
+      'TerminalView',
+      'clipboard copy failed',
+      () => Clipboard.setData(ClipboardData(text: selection)),
+    );
+    _dropSelection();
+  }
+
+  /// The engine's own copy paths — Cmd+C on macOS (Ctrl chords never reach the
+  /// view: [_handleEarlyKey] takes them first) and the selection context menu.
+  /// Routed here so they drop the selection the same way.
+  ///
+  /// Never throws: the view starts this unawaited, so a clipboard the platform
+  /// refuses would otherwise surface as an unattributed fatal. The selection
+  /// stays put then, so the user can try again.
+  Future<void> _onEngineCopy(String text) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+    } catch (_) {
+      return;
+    }
+    _dropSelection();
+  }
+
+  void _dropSelection() {
+    if (!mounted) return;
+    setState(() {
+      _selectedText = null;
+      _selectedAnchors = null;
+    });
+    _selectionController.clear();
+  }
 
   /// The engine's own selection, dropped on every frame that replaces
   /// the screen its row/col anchors point into. The view cannot do this
@@ -613,7 +666,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// Returning live is shared by asynchronous uploads and immediate inputs.
   bool _typeIntoTerminal(String text) {
     if (_historyOpen) _closeHistory();
-    final data = _modifiers.apply(text);
+    final data = _transformInput(text);
+    if (data.isEmpty) return true;
     if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
       return true;
     }
@@ -1118,19 +1172,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
     // Ctrl+C (Ctrl-gated on every platform; Cmd+C stays with Ghostty's
     // native copy on macOS):
-    //   selection → copy + swallow (Windows Terminal-style)
+    //   selection → copy, clear it + swallow (Windows Terminal-style)
     //   no selection, agent running → swallow (don't SIGINT the agent)
     //   otherwise → fall through so the PTY gets ^C
     if (event.logicalKey == LogicalKeyboardKey.keyC && ctrl && !alt) {
       // Same one-shot spend as the paste chord above — see its comment.
       _realModifierState.clear();
-      final selection = _selectedText;
-      if (selection != null && selection.isNotEmpty) {
-        detached(
-          'TerminalView',
-          'clipboard copy failed',
-          () => Clipboard.setData(ClipboardData(text: selection)),
-        );
+      if (_hasSelection) {
+        _copySelectionAndClear();
         return KeyEventResult.handled;
       }
       final agentRunning =
@@ -1605,6 +1654,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       showKeyboardOnInteraction: _hasPhysicalKeyboard,
       softKeyboardController: _softKeyboardController,
       selectionController: _selectionController,
+      onCopySelection: _onEngineCopy,
       fontSize: terminalFontSize,
       // The bundled mono face, so the cell grid measures identically on every
       // platform. Never hardcode a family here: an earlier 'Cascadia Mono'

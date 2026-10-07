@@ -19,6 +19,7 @@ class AbToast extends StatelessWidget {
     this.iconColor,
     this.actionLabel,
     this.onAction,
+    this.onTap,
     this.onClose,
     this.hovered = false,
   });
@@ -31,6 +32,10 @@ class AbToast extends StatelessWidget {
   final Color? iconColor;
   final String? actionLabel;
   final VoidCallback? onAction;
+
+  /// Makes the whole card the target, for a toast whose only sensible action
+  /// is "go there" — a chip would just be a smaller copy of the card.
+  final VoidCallback? onTap;
 
   /// Renders a trailing dismiss button when given; the stack wires one into
   /// every toast it shows.
@@ -181,7 +186,22 @@ class AbToast extends StatelessWidget {
         ],
       ),
     );
-    final announced = Semantics(liveRegion: true, container: true, child: card);
+    final target = onTap == null
+        ? card
+        : MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: card,
+            ),
+          );
+    final announced = Semantics(
+      liveRegion: true,
+      container: true,
+      button: onTap != null,
+      child: target,
+    );
     if (!hasClose) return announced;
     return Focus(canRequestFocus: false, skipTraversal: true, child: announced);
   }
@@ -195,6 +215,8 @@ class _ActiveToast {
   bool isRepeatOf(AbToast other) =>
       toast.actionLabel == null &&
       other.actionLabel == null &&
+      toast.onTap == null &&
+      other.onTap == null &&
       toast.title == other.title &&
       toast.description == other.description &&
       toast.icon == other.icon &&
@@ -226,9 +248,9 @@ class AbToaster extends ChangeNotifier {
   /// Shows [toast], auto-dismissing after [duration].
   ///
   /// A toast with the same title, description and icon as one already showing,
-  /// and no action on either, replaces that card: one card, with a full timer,
-  /// in the newest position. A toast with an action never replaces another,
-  /// since each carries its own callback.
+  /// and no action or tap target on either, replaces that card: one card, with
+  /// a full timer, in the newest position. A toast with a callback never
+  /// replaces another, since each carries its own.
   void show(AbToast toast, {Duration duration = _kDefaultToastDuration}) {
     // A captured toaster can outlive its owner — a reply landing after the
     // app, or a test's container, has been torn down.
@@ -554,6 +576,12 @@ class _DismissingToastState extends State<_DismissingToast> {
             : () {
                 _dismissNow();
                 toast.onAction!();
+              },
+        onTap: toast.onTap == null
+            ? null
+            : () {
+                _dismissNow();
+                toast.onTap!();
               },
         onClose: _dismissNow,
         hovered: _hovered,

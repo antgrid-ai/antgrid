@@ -1,5 +1,5 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -11,11 +11,14 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
+import '../design/widgets/ab_toast.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
 import '../models/git_status_index.dart';
+import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 
 /// A widget that renders a file tree with expand/collapse, file selection,
@@ -745,6 +748,29 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     widget.onTap!();
   }
 
+  /// The row's context menu: right-click on desktop, long-press on touch.
+  /// The path is project-relative — what an agent prompt or a terminal in the
+  /// checkout wants, and the one form a remote project can answer too.
+  Future<void> _showMenu(Offset globalPosition) async {
+    AbSwipeActions.closeAny();
+    final action = await showAbMenu<String>(
+      context: context,
+      anchorRect: Rect.fromCenter(center: globalPosition, width: 1, height: 1),
+      header: widget.node.name,
+      entries: const [
+        AbMenuItem(label: 'Copy path', icon: AbIcons.copy, value: 'path'),
+      ],
+    );
+    if (!mounted || action == null) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: widget.node.path));
+    } catch (_) {
+      if (mounted) showAbToast(context, 'Could not copy the path.');
+      return;
+    }
+    if (mounted) showAbToast(context, 'Path copied');
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDirectory = widget.node.type == FileNodeType.directory;
@@ -950,7 +976,23 @@ class _FileTreeRowState extends State<_FileTreeRow> {
       );
     }
 
-    return row;
+    // A void gesture callback discards the future it starts — see
+    // util/detached.dart.
+    return GestureDetector(
+      onSecondaryTapUp: (d) => detached(
+        'FileTreeRow',
+        'row menu failed',
+        () => _showMenu(d.globalPosition),
+      ),
+      onLongPressStart: isMobilePlatform
+          ? (d) => detached(
+              'FileTreeRow',
+              'row menu failed',
+              () => _showMenu(d.globalPosition),
+            )
+          : null,
+      child: row,
+    );
   }
 }
 

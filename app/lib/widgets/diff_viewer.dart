@@ -11,6 +11,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
@@ -216,16 +217,6 @@ class _DiffViewerState extends State<DiffViewer> {
     height: kCodeFontHeight,
   );
 
-  /// Scrollbar geometry copied from re_editor's own bar (`_kScrollbarThickness`
-  /// and the `_RawScrollbar` it builds in `_code_scroll.dart`), which is what
-  /// the file viewer draws. Raw values, not tokens, because the thing they must
-  /// stay equal to is a private constant in a package — a token would drift
-  /// from it silently. The thumb colour is left at [RawScrollbar]'s default for
-  /// the same reason: re_editor never overrides it either.
-  static const double _scrollbarThickness = 8;
-  static const Radius _scrollbarRadius = Radius.circular(10);
-  static const double _scrollbarMargin = 2;
-
   final ScrollController _horizontal = ScrollController();
   final ScrollController _vertical = ScrollController();
 
@@ -425,11 +416,6 @@ class _DiffViewerState extends State<DiffViewer> {
         // its own axis: the horizontal viewport's at depth 0, the list's one
         // viewport boundary further in at depth 1.
         //
-        // Both stay visible rather than fading with use (unlike re_editor's
-        // own default pair) — a diff this wide gives no other cue that a line
-        // runs off screen, so the thumb should read as "there's more here" at
-        // a glance, not only once the pointer happens to find it.
-        //
         // SelectionArea makes every line's code text (never the gutter/marker
         // columns — see [_buildGutter]/[_buildMarker]) selectable and
         // copyable, the same as a real editor. [_buildContextMenu] is what
@@ -440,22 +426,14 @@ class _DiffViewerState extends State<DiffViewer> {
         return SelectionArea(
           contextMenuBuilder: _buildContextMenu,
           onSelectionChanged: (content) => _lastSelection = content,
-          child: RawScrollbar(
+          child: AbScrollbar(
             controller: _vertical,
             notificationPredicate: (n) => n.depth == 1,
             scrollbarOrientation: ScrollbarOrientation.right,
-            thickness: _scrollbarThickness,
-            radius: _scrollbarRadius,
-            crossAxisMargin: _scrollbarMargin,
-            thumbVisibility: true,
-            child: RawScrollbar(
+            child: AbScrollbar(
               controller: _horizontal,
               notificationPredicate: (n) => n.depth == 0,
               scrollbarOrientation: ScrollbarOrientation.bottom,
-              thickness: _scrollbarThickness,
-              radius: _scrollbarRadius,
-              crossAxisMargin: _scrollbarMargin,
-              thumbVisibility: true,
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 controller: _horizontal,

@@ -240,7 +240,11 @@ class _GitPanelScaffold extends StatelessWidget {
       children: [
         _GitBranchBar(panel: panel, counts: counts, git: git),
         if (git.lastSyncFailure case final failure?)
-          _SyncFailureStrip(failure: failure, git: git),
+          _SyncFailureStrip(
+            failure: failure,
+            git: git,
+            fileService: panel.fileService,
+          ),
         const AbSeparator.horizontal(),
         Expanded(child: body),
       ],
@@ -1063,19 +1067,32 @@ class _GitHistorySectionHeader extends StatelessWidget {
 ///
 /// It persists rather than auto-dismissing: the toast that already fired says
 /// what happened, and this says what can be done about it — which is worth
-/// nothing if it disappears while the user is still reading the toast.
+/// nothing if it disappears while the user is still reading the toast. It
+/// leaves once the report reaches the agent, or when the user dismisses it.
 class _SyncFailureStrip extends ConsumerWidget {
-  const _SyncFailureStrip({required this.failure, required this.git});
+  const _SyncFailureStrip({
+    required this.failure,
+    required this.git,
+    required this.fileService,
+  });
 
   final GitSyncFailure failure;
   final GitPaneState git;
+  final FileService fileService;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return AbInlineBanner(
       text: '${failure.op.label} failed — ${failure.message}',
       color: context.antgrid.gitConflict,
-      trailing: failure.warrantsAgent
+      trailing: AbIconButton(
+        icon: AbIcons.close,
+        tooltip: 'Dismiss',
+        onTap: () => fileService.dismissSyncFailure(failure),
+      ),
+      // Below the message rather than beside it: git's stderr runs to several
+      // lines, and a button in the same row squeezes it into a narrow column.
+      footer: failure.warrantsAgent
           ? AbButton(
               label: 'Ask agent to fix',
               // A tap handler discards the future it starts, so a rejection
@@ -1097,13 +1114,14 @@ class _SyncFailureStrip extends ConsumerWidget {
     // working tree is what it holds when the message is composed.
     final entries =
         ref.read(fileTreeStateProvider).value?.gitFileEntries ?? const [];
-    await offerSyncFailureToAgent(
+    final handedOff = await offerSyncFailureToAgent(
       context: context,
       container: ref.container,
       failure: failure,
       sync: git.sync,
       changed: entries,
     );
+    if (handedOff) fileService.dismissSyncFailure(failure);
   }
 }
 
@@ -1234,7 +1252,11 @@ class _GitPanelBody extends ConsumerWidget {
       children: [
         _GitBranchBar(panel: panel, counts: counts, git: git),
         if (git.lastSyncFailure case final failure?)
-          _SyncFailureStrip(failure: failure, git: git),
+          _SyncFailureStrip(
+            failure: failure,
+            git: git,
+            fileService: panel.fileService,
+          ),
         const AbSeparator.horizontal(),
         Expanded(
           // Nothing to switch to without changes: History takes the column.
@@ -1283,7 +1305,11 @@ class _GitPanelBody extends ConsumerWidget {
       children: [
         _GitBranchBar(panel: panel, counts: counts, git: git),
         if (git.lastSyncFailure case final failure?)
-          _SyncFailureStrip(failure: failure, git: git),
+          _SyncFailureStrip(
+            failure: failure,
+            git: git,
+            fileService: panel.fileService,
+          ),
         const AbSeparator.horizontal(),
         if (hasChanges) ...[
           _ChangesSectionHeader(

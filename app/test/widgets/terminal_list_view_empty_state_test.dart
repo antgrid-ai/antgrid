@@ -1,6 +1,5 @@
-// "No terminals — open a shell to interact with your project" is a claim about
-// the PROJECT, and an empty list is not evidence for it while terminals are
-// still being attached. These are the only guards on that copy, so a change to
+// "No terminals running" is a claim about the PROJECT, and an empty list is
+// not evidence for it while terminals are still being attached. These are the only guards on that copy, so a change to
 // the fork that silently restores the lie fails nowhere else.
 import 'dart:async';
 
@@ -72,11 +71,7 @@ void main() {
       );
 
       expect(find.text('attaching terminals…'), findsOneWidget);
-      expect(find.text('No terminals'), findsNothing);
-      expect(
-        find.text('Open a shell to interact with your project'),
-        findsNothing,
-      );
+      expect(find.text('No terminals running'), findsNothing);
     });
 
     testWidgets('reports a failed attach and offers both ways forward', (
@@ -93,7 +88,7 @@ void main() {
       // Opening a shell works whether or not the re-ask lands, so the failure
       // state keeps it beside Retry.
       expect(find.text('New Terminal'), findsOneWidget);
-      expect(find.text('No terminals'), findsNothing);
+      expect(find.text('No terminals running'), findsNothing);
 
       // The pane renders off the stubbed provider above, so the tap is
       // asserted where it actually lands: the real per-project service, whose
@@ -110,11 +105,7 @@ void main() {
     ) async {
       await _pumpEmptyList(tester, CheckoutAttachStatus.ready);
 
-      expect(find.text('No terminals'), findsOneWidget);
-      expect(
-        find.text('Open a shell to interact with your project'),
-        findsOneWidget,
-      );
+      expect(find.text('No terminals running'), findsOneWidget);
       expect(find.text('New Terminal'), findsOneWidget);
       expect(find.text('attaching terminals…'), findsNothing);
       expect(find.text("Couldn't load terminals"), findsNothing);
@@ -131,11 +122,7 @@ void main() {
         CheckoutAttachStatus.unknown,
       );
 
-      expect(find.text('No terminals'), findsOneWidget);
-      expect(
-        find.text('Open a shell to interact with your project'),
-        findsOneWidget,
-      );
+      expect(find.text('No terminals running'), findsOneWidget);
       expect(find.text('attaching terminals…'), findsNothing);
       expect(find.text("Couldn't load terminals"), findsNothing);
     });

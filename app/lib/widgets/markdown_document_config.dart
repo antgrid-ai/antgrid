@@ -7,6 +7,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import 'markdown_heading_configs.dart';
 
 /// Prose leading for a document body — the font's own (~1.2) is for labels.
@@ -125,10 +126,7 @@ MarkdownConfig buildMarkdownDocumentConfig(
         ),
         // Columns size to their content, so a wide table would otherwise run
         // off the measure instead of scrolling.
-        wrapper: (table) => SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: table,
-        ),
+        wrapper: (table) => AbHorizontalScrollView(child: table),
       ),
       ListConfig(
         marginLeft: _listGutter,

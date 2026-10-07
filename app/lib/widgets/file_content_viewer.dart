@@ -14,6 +14,7 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/file_tree_models.dart';
@@ -477,6 +478,22 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                         readOnly: true,
                         wordWrap: false,
                         showCursorWhenReadOnly: true,
+                        // re_editor's default keeps only the vertical thumb
+                        // pinned; its horizontal one fades out, hiding that a
+                        // long line runs off screen.
+                        scrollbarBuilder: (context, child, details) {
+                          final horizontal =
+                              details.direction == AxisDirection.right;
+                          return AbScrollbar(
+                            controller: horizontal
+                                ? _scrollController!.horizontalScroller
+                                : _scrollController!.verticalScroller,
+                            scrollbarOrientation: horizontal
+                                ? ScrollbarOrientation.bottom
+                                : ScrollbarOrientation.right,
+                            child: child,
+                          );
+                        },
                         style: CodeEditorStyle(
                           fontSize: kCodeFontSize,
                           fontFamily: AbTokens.fontMono,

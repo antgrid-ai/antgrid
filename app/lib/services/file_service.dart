@@ -2104,6 +2104,15 @@ class FileService {
     );
   }
 
+  /// Clears the failure strip — but only while [failure] is still the one on
+  /// screen, so a dismissal racing a newer push/pull can't swallow its result.
+  void dismissSyncFailure(GitSyncFailure failure) {
+    if (!identical(_state.git.lastSyncFailure, failure)) return;
+    _setState(
+      _state.copyWith(git: _state.git.copyWith(clearSyncFailure: true)),
+    );
+  }
+
   /// History tab: fold every expanded commit's file list shut without
   /// dropping the cached files — the same "Collapse All" the Changes tab's
   /// folder toggle offers, applied to expanded commits instead of folders.

@@ -1839,6 +1839,9 @@ class TerminalService {
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
         needsFirstRun: msg.needsFirstRun,
+        // Carried when a frame omits it (an older bridge): a checkout's folder
+        // does not move between two status frames.
+        checkoutPath: msg.checkoutPath ?? _state.checkoutPath,
       ),
     );
     // A tab can leave the status without ever exiting — a service dropped
@@ -1913,7 +1916,10 @@ class TerminalService {
           data = kept;
         }
         final transform = _inputTransforms[terminalId];
-        sendInput(terminalId, transform == null ? data : transform(data));
+        final out = transform == null ? data : transform(data);
+        // Empty when the transform consumed the keystroke itself (a sticky
+        // Ctrl+C that copied a selection); there is nothing left to send.
+        if (out.isNotEmpty) sendInput(terminalId, out);
         return true;
       },
       onResize: null,
@@ -2178,6 +2184,29 @@ class TerminalService {
           );
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: terminalId));
     requestStart(terminalId, name: name);
+  }
+
+  /// Respawns [terminalId] in place. The bridge kills a live run under the
+  /// same id before spawning, so this is safe on a running terminal.
+  void restartTerminal(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    requestStart(terminalId, name: tab.name);
+  }
+
+  /// Clears [terminalId]'s screen by asking its shell to: the bridge's screen
+  /// is authoritative, so a local wipe would be repainted by the next frame.
+  /// cmd.exe has no clear-screen key and gets `cls`; bash, zsh, fish and
+  /// PowerShell's PSReadLine all clear on Ctrl+L.
+  bool clearTerminal(String terminalId) => sendInput(
+    terminalId,
+    clearScreenInputFor(_state.tabs[terminalId]?.shell),
+  );
+
+  /// What [clearTerminal] types into a terminal running [shell].
+  static String clearScreenInputFor(String? shell) {
+    final base = (shell ?? '').split(RegExp(r'[\\/]')).last.toLowerCase();
+    return base == 'cmd' || base == 'cmd.exe' ? 'cls\r' : '\x0c';
   }
 
   void _settlePendingTerminal(String terminalId) {

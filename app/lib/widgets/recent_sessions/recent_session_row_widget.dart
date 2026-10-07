@@ -32,6 +32,7 @@ import '../session_deleting_badge.dart';
 import '../session_isolation_badge.dart';
 import '../session_approval_badge.dart';
 import '../session_shared_workspace_badge.dart';
+import 'recent_sessions_summary.dart' show RecentGroupBy;
 
 /// One row in the Recent tab: agent mark (status-badged) · session name ·
 /// project · relative time · delete affordance (desktop hover).
@@ -42,10 +43,16 @@ class RecentSessionRowWidget extends ConsumerStatefulWidget {
     this.onDeleted,
     this.onOpened,
     this.surfaceColor,
+    this.groupedBy,
   });
 
   final RecentSessionRow row;
   final VoidCallback? onDeleted;
+
+  /// The grouping whose header sits above this row, if any. The row drops
+  /// whichever of machine/project that header already names; null (search
+  /// results) shows both.
+  final RecentGroupBy? groupedBy;
 
   /// Fired after the row has navigated. Exists for hosts that must dismiss
   /// themselves once a row is taken — the search popup, which would otherwise
@@ -142,6 +149,7 @@ class _RecentSessionRowWidgetState
           return compact
               ? _MobileLayout(
                   row: row,
+                  originText: recentOriginText(row.origin, widget.groupedBy),
                   status: status,
                   setup: setup,
                   agentLabel: agentLabel,
@@ -152,6 +160,7 @@ class _RecentSessionRowWidgetState
                 )
               : _DesktopLayout(
                   row: row,
+                  originText: recentOriginText(row.origin, widget.groupedBy),
                   status: status,
                   setup: setup,
                   agentLabel: agentLabel,
@@ -275,6 +284,7 @@ const double _railProjectWidth = 220;
 class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout({
     required this.row,
+    required this.originText,
     required this.status,
     required this.setup,
     required this.agentLabel,
@@ -286,6 +296,7 @@ class _DesktopLayout extends StatelessWidget {
   });
 
   final RecentSessionRow row;
+  final String originText;
   final AgentWorkStatus status;
   final SessionSetup? setup;
   final String agentLabel;
@@ -341,7 +352,7 @@ class _DesktopLayout extends StatelessWidget {
           // < 560px compact fallback above owns the too-narrow case.
           SizedBox(
             width: _railProjectWidth,
-            child: _ProjectLabel(name: _projectDisplayText(row.origin)),
+            child: _ProjectLabel(name: originText),
           ),
           if (command != null) ...[
             Text(
@@ -399,6 +410,7 @@ class _DesktopLayout extends StatelessWidget {
 class _MobileLayout extends StatelessWidget {
   const _MobileLayout({
     required this.row,
+    required this.originText,
     required this.status,
     required this.setup,
     required this.agentLabel,
@@ -409,6 +421,7 @@ class _MobileLayout extends StatelessWidget {
   });
 
   final RecentSessionRow row;
+  final String originText;
   final AgentWorkStatus status;
   final SessionSetup? setup;
   final String agentLabel;
@@ -467,13 +480,15 @@ class _MobileLayout extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: AbTokens.space2),
-        Padding(
-          padding: const EdgeInsets.only(left: _mobileProjectIndent),
-          // Device-prefixed like desktop: on mobile there's no other place
-          // for a remote row to carry which machine it ran on.
-          child: _ProjectLabel(name: _projectDisplayText(row.origin)),
-        ),
+        if (originText.isNotEmpty) ...[
+          const SizedBox(height: AbTokens.space2),
+          Padding(
+            padding: const EdgeInsets.only(left: _mobileProjectIndent),
+            // Device-prefixed like desktop: on mobile there's no other place
+            // for a remote row to carry which machine it ran on.
+            child: _ProjectLabel(name: originText),
+          ),
+        ],
       ],
     );
   }
@@ -499,12 +514,17 @@ class _SessionName extends StatelessWidget {
   }
 }
 
-/// Remote rows prefix the project name with the origin device — the group
-/// header only carries that identity when grouped "by machine", so a row
-/// grouped by project/status must still show which machine it ran on itself.
-String _projectDisplayText(RecentOrigin origin) {
-  if (origin.isLocal) return origin.projectName;
-  return '${origin.deviceName} · ${origin.projectName}';
+/// Where a row ran, minus whatever its group header already names: by machine
+/// the project alone, by project the machine alone (nothing for a local row,
+/// which never names its device), otherwise `machine · project` for remote rows.
+@visibleForTesting
+String recentOriginText(RecentOrigin origin, RecentGroupBy? groupedBy) {
+  return switch (groupedBy) {
+    RecentGroupBy.machine => origin.projectName,
+    RecentGroupBy.project => origin.isLocal ? '' : origin.deviceName,
+    _ when origin.isLocal => origin.projectName,
+    _ => '${origin.deviceName} · ${origin.projectName}',
+  };
 }
 
 class _ProjectLabel extends StatelessWidget {

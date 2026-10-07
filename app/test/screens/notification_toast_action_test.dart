@@ -91,9 +91,10 @@ void main() {
         addTearDown(sub.close);
 
         final toast = tester.widget<AbToast>(find.byType(AbToast));
-        expect(toast.actionLabel, 'Open');
+        expect(toast.actionLabel, isNull);
+        expect(toast.onTap, isNotNull);
 
-        await tester.tap(find.text('Open'));
+        await tester.tap(find.byType(AbToast));
         await _settle(tester);
 
         expect(container.read(activeSessionIdProvider), _escalation.terminalId);
@@ -138,22 +139,22 @@ void main() {
     await _withShell(tester, controller.stream, (container) async {
       controller.add((entryId: _entryId, message: _escalation));
       await _settle(tester);
-      await tester.tap(find.text('Open'));
+      await tester.tap(find.byType(AbToast));
       await _settle(tester);
       expect(container.read(activeSessionIdProvider), 'session-9');
       container.read(activeSessionIdProvider.notifier).set(null);
 
       controller.add((entryId: _entryId, message: second));
       await _settle(tester);
-      await tester.tap(find.text('Open'));
+      await tester.tap(find.byType(AbToast));
       await _settle(tester);
 
       expect(container.read(activeSessionIdProvider), 'session-9');
     });
   });
 
-  // The action is offered only when the route RESOLVES, not merely when an
-  // entryId is present: a chip that opens nothing is worse than no chip.
+  // The card is tappable only when the route RESOLVES, not merely when an
+  // entryId is present: a card that opens nothing is worse than a plain one.
   testWidgets('an unroutable notification keeps the plain toast', (
     tester,
   ) async {
@@ -171,7 +172,7 @@ void main() {
     ) async {
       final toast = tester.widget<AbToast>(find.byType(AbToast));
       expect(toast.actionLabel, isNull);
-      expect(find.text('Open'), findsNothing);
+      expect(toast.onTap, isNull);
 
       // The plain toast keeps `showAbToastOverlay`'s 4s default; only the
       // actionable one is held open long enough to be reached for.

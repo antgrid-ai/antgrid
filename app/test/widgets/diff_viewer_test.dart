@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_scrollbar.dart';
 import 'package:antgrid/widgets/code_syntax.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
 
@@ -294,7 +295,7 @@ void main() {
       expect(find.text('1'), findsOneWidget);
       expect(find.text('2'), findsNWidgets(2));
 
-      final bars = tester.widgetList<RawScrollbar>(find.byType(RawScrollbar));
+      final bars = tester.widgetList<AbScrollbar>(find.byType(AbScrollbar));
       expect(bars.length, 2);
       expect(
         bars.map((b) => b.controller).toSet().length,
