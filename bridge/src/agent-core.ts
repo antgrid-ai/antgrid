@@ -2804,7 +2804,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
         const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
-        if (msg.pushToken === "") {
+        // The app re-registers on every handshake, once per warm project, so
+        // the common frame repeats what the row already holds. An upsert is a
+        // non-silent store write: the paired-phones watcher answers it with a
+        // re-advertise to every connected phone. Nothing reads `pushUpdatedAt`,
+        // so leaving it unbumped on a repeat is unobservable.
+        const clear = msg.pushToken === "";
+        const unchanged = clear
+          ? phone.pushToken === undefined && phone.pushProvider === undefined && phone.pushPubkey === undefined
+          : phone.pushToken === msg.pushToken && phone.pushProvider === msg.provider && phone.pushPubkey === msg.pushPubkey;
+        if (unchanged) {
+          log.debug("push:register for phone %s repeats its stored registration; not rewriting", phone.phoneDeviceId);
+          break;
+        }
+        if (clear) {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
             ...phone,
