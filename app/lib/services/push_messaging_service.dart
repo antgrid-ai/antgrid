@@ -57,6 +57,14 @@ class PushMessagingService {
   /// the current key.
   PushIdentity? _identity;
 
+  /// Set by [clearToken], cleared only by [resumeAfterSignIn]. While set, no
+  /// path tells an agent the token: sign-out evicts sessions one at a time and
+  /// every eviction re-runs [registerNewSessions] on the ones still open, and a
+  /// token refresh can land at any time — either would undo the empty-token
+  /// clear. [_token] is deliberately kept: the platform hands it over only at
+  /// startup or on refresh, so the next sign-in has no other way to get it.
+  bool _signedOut = false;
+
   /// `push` hands back an unsubscribe callback rather than a StreamSubscription.
   VoidCallback? _unsubscribeToken;
 
@@ -84,14 +92,14 @@ class PushMessagingService {
     // Subscribe BEFORE reading the token: on iOS the token usually arrives
     // after startup (push registers for remote notifications itself in
     // didFinishLaunchingWithOptions), and a token landing between the read and
-    // the subscribe would otherwise be missed. _setTokenAndRegister dedups, so
+    // the subscribe would otherwise be missed. setTokenAndRegister dedups, so
     // both paths firing is harmless.
     _unsubscribeToken = Push.instance.addOnNewToken((t) {
       // The callback is sync and can't propagate a rejection; the registration
       // is async, so an uncaught throw here would be an unhandled rejection.
       // Swallow (log) — a failed re-register must never crash.
       unawaited(
-        _setTokenAndRegister(t, sessions(), provider: _provider).catchError((
+        setTokenAndRegister(t, sessions(), provider: _provider).catchError((
           Object e,
         ) {
           AbLog.error(
@@ -122,7 +130,7 @@ class PushMessagingService {
       token = null;
     }
     if (token != null) {
-      await _setTokenAndRegister(token, sessions(), provider: _provider);
+      await setTokenAndRegister(token, sessions(), provider: _provider);
     }
   }
 
@@ -145,7 +153,9 @@ class PushMessagingService {
     }
   }
 
-  Future<void> _setTokenAndRegister(
+  /// What a token arriving from the platform (startup read or refresh) does.
+  @visibleForTesting
+  Future<void> setTokenAndRegister(
     String token,
     Iterable<ProjectSession> sessions, {
     String provider = 'fcm',
@@ -165,7 +175,8 @@ class PushMessagingService {
 
   /// Register the current FCM token on any warm sessions not yet told about it.
   /// Called when the warm-project set changes so a relay session that pairs
-  /// AFTER startup still gets the token. No-op until [init] has a token.
+  /// AFTER startup still gets the token. No-op until [init] has a token, and
+  /// while signed out.
   Future<void> registerNewSessions(Iterable<ProjectSession> sessions) async {
     final token = _token;
     if (token == null) return;
@@ -186,16 +197,24 @@ class PushMessagingService {
     // Record the token/provider so a deferred (register-when-ready) send reads
     // the CURRENT pair at fire time — a refresh mid-handshake then registers the
     // new token, not the one captured when the listener was attached. Callers
-    // (_setTokenAndRegister / registerNewSessions) already keep this in lockstep.
+    // (setTokenAndRegister / registerNewSessions) already keep this in lockstep.
     _token = token;
     _provider = provider;
+    if (_signedOut) return;
     _identity = pushIdentity;
+    final watched = _watched;
     final kp = await pushIdentity.ensureKeypair();
+    // A sign-out across an await here already sent the empty-token clear.
+    // Checked before the pubkey bookkeeping too: a pass outliving a sign-out
+    // and re-sign-in holds the discarded key, and must not repoint
+    // [_registeredPubkey] at it under the new identity's registrations.
+    if (!identical(watched, _watched)) return;
     if (kp.pubkeyB64 != _registeredPubkey) {
       _registered.clear();
       _registeredPubkey = kp.pubkeyB64;
     }
     for (final s in sessions) {
+      if (!identical(watched, _watched)) return;
       // Push is a relay-only concern: a local agent shares the machine, so
       // there is nothing to relay a blob through. Only register relay sessions.
       if (s.mode != ProjectSessionMode.relay) continue;
@@ -265,6 +284,9 @@ class PushMessagingService {
       if (identical(_registered[s.projectId], hello)) return;
       unawaited(() async {
         final kp = await identity.ensureKeypair();
+        // A sign-out during that await already sent the empty-token clear;
+        // registering now would undo it.
+        if (!identical(watched, _watched)) return;
         await _sendRegister(
           s,
           hello: hello,
@@ -278,8 +300,10 @@ class PushMessagingService {
   }
 
   /// On sign-out: tell each paired agent to stop pushing (empty token clears
-  /// it). Clears the local registered-set so a later re-register re-sends.
+  /// it), and register nothing more until [resumeAfterSignIn]. Clears the local
+  /// registered-set so the re-register after sign-in re-sends.
   Future<void> clearToken({required Iterable<ProjectSession> sessions}) async {
+    _signedOut = true;
     _registered.clear();
     _registeredPubkey = null;
     // Retire every handshake listener: a session that outlives sign-out must
@@ -305,6 +329,14 @@ class PushMessagingService {
         );
       }
     }
+  }
+
+  /// On sign-in: lift [clearToken]'s hold and register the kept token on the
+  /// warm [sessions]. Safe to call while never signed out — it is then just a
+  /// [registerNewSessions] pass, which dedups.
+  Future<void> resumeAfterSignIn(Iterable<ProjectSession> sessions) {
+    _signedOut = false;
+    return registerNewSessions(sessions);
   }
 
   void dispose() {
