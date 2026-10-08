@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,37 +7,13 @@ import type { HookCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
+import { cursorSupportsFlag } from "./help";
 import {
   managedCursorCommands,
   replaceManagedCursorHookEntries,
 } from "./global-hooks";
 
 const log = logger.child({ component: "agent-launch" });
-
-// Memoized once per process: cursor-agent builds predating --trust hard-exit
-// on the unknown option (commander), which would kill every spawn on that
-// machine. An inconclusive probe (binary not on PATH, empty/failed --help)
-// counts as support: current builds have the flag, and a missing binary fails
-// the spawn regardless of argv.
-let cursorTrustSupported: boolean | null = null;
-function cursorSupportsTrust(): boolean {
-  if (cursorTrustSupported !== null) return cursorTrustSupported;
-  try {
-    const bin = Bun.which("cursor-agent");
-    if (bin) {
-      const res = spawnSync(bin, ["--help"], { timeout: 3000, encoding: "utf8" });
-      const help = `${res.stdout ?? ""}\n${res.stderr ?? ""}`;
-      if (help.trim().length > 0) {
-        cursorTrustSupported = help.includes("--trust");
-        return cursorTrustSupported;
-      }
-    }
-  } catch (err) {
-    log.warn("cursor-agent --trust probe failed, assuming support: %s", err);
-  }
-  cursorTrustSupported = true;
-  return cursorTrustSupported;
-}
 
 // The user-tier file (~/.cursor/hooks.json) is cursor-agent's only workable
 // injection point: hook tiers MERGE (enterprise→team→project→user, nothing
@@ -91,7 +66,7 @@ export function inject({ cursorDir, hookCommand }: HookInjectCtx): LaunchAugment
   // headless, before any hook runs. Opening a project in the bridge IS
   // the user's trust decision, so pre-trust rather than re-asking.
   return {
-    args: cursorSupportsTrust() ? ["--trust"] : [],
+    args: cursorSupportsFlag("--trust") ? ["--trust"] : [],
     env: {},
     notificationsInjected,
   };

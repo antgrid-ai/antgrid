@@ -24,8 +24,11 @@ import * as codexHooks from "./codex/hooks";
 import * as claudeMcp from "./claude-code/mcp";
 import * as codexMcp from "./codex/mcp";
 import * as cursorHooks from "./cursor-agent/hooks";
+import * as cursorMcp from "./cursor-agent/mcp";
 import * as copilotHooks from "./github-copilot/hooks";
+import * as copilotMcp from "./github-copilot/mcp";
 import * as opencodeHooks from "./opencode/hooks";
+import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
@@ -265,6 +268,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       decodeLegacyArgs: opencodeLegacyForkSource,
     },
     hooks: opencodeHooks,
+    mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
     // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
     // requires, verified against the transcript argv below via the run's own
@@ -338,6 +342,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     initialPrompt: (p) => ["--", p],
     fork: terminalForkHandoff("Cursor"),
     hooks: cursorHooks,
+    mcp: cursorMcp,
     augmentsDefaultSpec: true,
     // No headless entry. `-p --mode ask` reads like the right argv and has
     // never been run: cursor-agent exits 1 on every invocation without an
@@ -360,6 +365,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     initialPrompt: () => [],
     fork: terminalForkHandoff("GitHub Copilot"),
     hooks: copilotHooks,
+    mcp: copilotMcp,
     augmentsDefaultSpec: true,
     resumable: ({ agentSessionId, copilotHome }) =>
       copilotSessionExistsSync(
@@ -472,6 +478,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // Kilo documents `--session <id> --fork`, but this integration does not
     // observe a Kilo-native id. Do not advertise an unreachable native path.
     fork: terminalForkHandoff("Kilo"),
+    mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },

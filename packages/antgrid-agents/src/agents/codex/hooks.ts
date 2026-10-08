@@ -12,16 +12,13 @@ import {
 } from "../../hook-command";
 import { MAX_NOTIFICATION_BODY_LEN } from "../../transcript-tail";
 import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
+import { toPosixPath } from "../launch-inject";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 const CODEX_HOOK_TIMEOUT = 600;
 
 function tomlBasicString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-export function toPosixPath(value: string): string {
-  return value.replace(/\\/g, "/");
 }
 
 export function buildCodexNotifyInjection(
