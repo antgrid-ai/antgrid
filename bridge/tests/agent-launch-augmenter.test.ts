@@ -503,6 +503,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
           env: {
             ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
             ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
+            ANTGRID_RUN_ID: "${env:ANTGRID_RUN_ID}",
           },
         },
       },
