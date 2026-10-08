@@ -154,4 +154,74 @@ void main() {
     expect(ScheduleRun.fromJson(run).missedCount, isNull);
     expect(ScheduleRun.fromJson({...run, 'missedCount': 1000}).missedCount, 1000);
   });
+
+  group('one-off schedules', () {
+    const base = {
+      'id': 's',
+      'name': 'Once',
+      'projectId': 'repo',
+      'agentId': 'claude',
+      'mode': 'terminal',
+      'prompt': 'Ship',
+      'approvalPolicy': 'default',
+      'workspace': 'shared',
+      'timezone': 'Europe/London',
+      'enabled': true,
+    };
+
+    test('a cron-less record parses and settings emit only runAt', () {
+      final schedule = AgentSchedule.fromJson({
+        ...base,
+        'runAt': 1800000000000,
+        'nextOccurrence': 1800000000000,
+      });
+      expect(schedule.cron, isNull);
+      expect(schedule.isOneOff, isTrue);
+      expect(schedule.runAt!.millisecondsSinceEpoch, 1800000000000);
+      final settings = schedule.settings();
+      expect(settings['runAt'], 1800000000000);
+      expect(settings.containsKey('cron'), isFalse);
+    });
+
+    test('a recurring record emits cron and never runAt', () {
+      final schedule = AgentSchedule.fromJson({...base, 'cron': '0 9 * * *'});
+      expect(schedule.isOneOff, isFalse);
+      final settings = schedule.settings();
+      expect(settings['cron'], '0 9 * * *');
+      expect(settings.containsKey('runAt'), isFalse);
+    });
+
+    test('author, edited-by and fired fields parse', () {
+      final schedule = AgentSchedule.fromJson({
+        ...base,
+        'runAt': 1800000000000,
+        'authorSessionId': 'sess',
+        'authorSessionName': 'Fix flake',
+        'editedBySessionName': 'Other',
+        'editedAt': 1800000001000,
+        'firedRunId': 'run-1',
+        'firedAt': 1800000002000,
+      });
+      expect(schedule.authorSessionId, 'sess');
+      expect(schedule.authorSessionName, 'Fix flake');
+      expect(schedule.editedBySessionName, 'Other');
+      expect(schedule.editedAt!.millisecondsSinceEpoch, 1800000001000);
+      expect(schedule.firedRunId, 'run-1');
+      expect(schedule.firedAt!.millisecondsSinceEpoch, 1800000002000);
+    });
+
+    test('supportsOneOff defaults to false for an older bridge', () {
+      expect(
+        SchedulerCapabilities.fromJson({'supported': true}).supportsOneOff,
+        isFalse,
+      );
+      expect(
+        SchedulerCapabilities.fromJson({
+          'supported': true,
+          'supportsOneOff': true,
+        }).supportsOneOff,
+        isTrue,
+      );
+    });
+  });
 }

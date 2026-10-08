@@ -18,6 +18,30 @@ import {
 } from "./session-bus/api";
 import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
 import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
+import {
+  SCHEDULER_AGENT_ERRORS,
+  SchedulerRefusal,
+  type SchedulerAgentMethod,
+} from "./scheduler/agent";
+
+/** One `/scheduler/*` call as the route received it. The route proves nothing
+ *  about WHO is calling: it forwards the claimed slot and run id, and the core
+ *  decides whether they name a live session. */
+export interface SchedulerCall {
+  terminalId?: string;
+  runId?: string;
+  method: SchedulerAgentMethod;
+  params: Record<string, unknown>;
+}
+
+const SCHEDULER_ROUTES: Record<string, SchedulerAgentMethod> = {
+  list: "list",
+  runs: "runs",
+  create: "create",
+  update: "update",
+  delete: "delete",
+  "run-now": "runNow",
+};
 
 /** The tree one caller of this API works in: its own `antgrid.yaml`, and the
  *  filesystem root a command it names must run against. */
@@ -113,6 +137,12 @@ export interface AgentContext {
    *  refusing the caller — which would leave an agent unable to publish with
    *  nothing saying why. */
   sessionBus?: SessionBusApi;
+  /** Answers a `/scheduler/*` call: binds the claimed slot and run id to a live
+   *  session, resolves its identity, and hands it to the host's scheduler. It
+   *  resolves to the success body and rejects with a {@link SchedulerRefusal}
+   *  (or a ZodError the route flattens). Absent means this core has no scheduler
+   *  plumbing at all, and every route answers SCHEDULER_UNAVAILABLE. */
+  scheduler?: (call: SchedulerCall) => Promise<Record<string, unknown>>;
 }
 
 const VERSION = "0.1.0";
@@ -237,6 +267,20 @@ function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => u
   const parsed = schema.safeParse(body);
   if (!parsed.success) return json({ error: "Invalid body" }, 400);
   return sessionBusJson(run(parsed.data));
+}
+
+function schedulerRefusal(code: keyof typeof SCHEDULER_AGENT_ERRORS, message: string): Response {
+  return json({ error: message, code }, SCHEDULER_AGENT_ERRORS[code]);
+}
+
+/** One sentence per offending field, so the agent that sent the call can fix it
+ *  without reading a schema dump. */
+function flattenZodError(error: z.ZodError): string {
+  const sentences = error.issues.map((issue) => {
+    const field = issue.path.join(".");
+    return field ? `${field}: ${issue.message}` : issue.message;
+  });
+  return sentences.join("; ");
 }
 
 /** A non-negative integer query param, or [fallback] for anything else. A caller
@@ -602,6 +646,43 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
+      }
+
+      // The scheduler tools. Every route is a POST with a JSON body, so a page in
+      // the user's browser cannot reach it with a simple cross-origin request, and
+      // the Host check refuses a DNS-rebound name pointing at this loopback port.
+      // `?terminalId=` is only a claim; the core binds it to a run id before it
+      // believes it.
+      if (path.startsWith("/scheduler/")) {
+        const route = path.slice("/scheduler/".length);
+        const method = req.method === "POST" && Object.hasOwn(SCHEDULER_ROUTES, route) ? SCHEDULER_ROUTES[route] : undefined;
+        if (!method) return json({ error: "Not found" }, 404);
+        if (req.headers.get("host") !== `127.0.0.1:${server.port}`) {
+          return schedulerRefusal("NOT_A_SESSION", "This request did not come from a session's Antgrid MCP server.");
+        }
+        if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+          return schedulerRefusal("NOT_A_SESSION", "This request did not come from a session's Antgrid MCP server.");
+        }
+        if (!ctx.scheduler) return schedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
+        let raw: unknown;
+        try { raw = await req.json(); } catch { raw = undefined; }
+        // An unreadable body is an absent one: it carries no run id, which is
+        // refused as NOT_A_SESSION before any argument is looked at.
+        const { runId, ...params } = (typeof raw === "object" && raw !== null && !Array.isArray(raw)
+          ? raw : {}) as Record<string, unknown>;
+        try {
+          return json(await ctx.scheduler({
+            terminalId: url.searchParams.get("terminalId") ?? undefined,
+            runId: typeof runId === "string" ? runId : undefined,
+            method,
+            params,
+          }));
+        } catch (err) {
+          if (err instanceof SchedulerRefusal) return schedulerRefusal(err.code, err.message);
+          if (err instanceof z.ZodError) return schedulerRefusal("INVALID_ARGUMENT", flattenZodError(err));
+          log.warn("scheduler %s failed: %s", method, err);
+          return schedulerRefusal("SCHEDULER_ERROR", err instanceof Error ? err.message : String(err));
+        }
       }
 
       // The session bus. Every route resolves the CALLER from `?terminalId=` —

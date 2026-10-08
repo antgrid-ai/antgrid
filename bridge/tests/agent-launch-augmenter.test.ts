@@ -338,6 +338,7 @@ describe("augmentAgentLaunch MCP injection", () => {
           env: {
             ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
             ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+            ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
           },
         },
       },
@@ -350,7 +351,7 @@ describe("augmentAgentLaunch MCP injection", () => {
     expect(a.args).toContain('mcp_servers.antgrid.args=["mcp"]');
     // Forwarded by name because codex passes none of its own environment down
     // to an MCP server, so the values resolve per PTY at spawn.
-    expect(a.args).toContain('mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID"]');
+    expect(a.args).toContain('mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]');
     for (const arg of a.args.filter((x) => x.startsWith("mcp_servers."))) {
       expect(a.args[a.args.indexOf(arg) - 1]).toBe("-c");
       expect(arg).not.toContain("\\");

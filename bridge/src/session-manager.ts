@@ -272,6 +272,13 @@ interface PersistedEntry {
    *  It is what still answers "forked from what" once the derived name below
    *  has been renamed away on either side. */
   forkedFromSessionId?: string;
+  /** The schedule whose run created this session. Set before the first flush and
+   *  never cleared, not even when the schedule is deleted: the scheduler's
+   *  read-only rule for agent callers keys on it, and a continued session is
+   *  still one a schedule launched. A fork starts without it. A value that
+   *  parses as malformed is kept as a non-empty marker, so damage reads as
+   *  "scheduled" rather than quietly lifting the restriction. */
+  launchedByScheduleId?: string;
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -279,6 +286,8 @@ interface FileShape {
   version: 1;
   sessions: PersistedEntry[];
 }
+
+const UNREADABLE_SCHEDULE_MARKER = "unreadable";
 
 // One malformed row must not drop the rest: id/name are the only hard
 // requirements; bad scalar fields fall back rather than failing the row. A
@@ -313,6 +322,9 @@ const PersistedEntrySchema = z
     forkNativeAttempted: z.boolean().optional().catch(undefined),
     conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
     forkedFromSessionId: z.string().optional().catch(undefined),
+    // Deliberately no `.catch(undefined)`: that would turn a damaged marker into
+    // "not scheduled". The transform below decides what a bad value means.
+    launchedByScheduleId: z.unknown().optional(),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -358,6 +370,9 @@ const PersistedEntrySchema = z
       forkNativeAttempted: s.forkNativeAttempted,
       conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
       forkedFromSessionId: s.forkedFromSessionId,
+      launchedByScheduleId: s.launchedByScheduleId === undefined ? undefined
+        : typeof s.launchedByScheduleId === "string" && s.launchedByScheduleId.length > 0
+          ? s.launchedByScheduleId : UNREADABLE_SCHEDULE_MARKER,
     };
   });
 
@@ -521,12 +536,53 @@ export class SessionManager {
   private runningChat = new Set<string>();
   private terminalPreparing = new Map<string, Promise<void>>();
   private terminalRunIds = new Map<string, string>();
+  /** The agent each live run was LAUNCHED as. A checkout's antgrid.yaml can be
+   *  edited under a running session (an isolated checkout's reload re-prepares
+   *  its runtime without restarting anything), so the file as it reads now is
+   *  not evidence of what is running. Set and cleared with `terminalRunIds`. */
+  private terminalRunAgents = new Map<string, string>();
   private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
   private readonly scheduleOwnedCheckouts = new Set<string>();
   private readonly setupSettlements = new Map<string, Promise<void>>();
   private hookSessionIds = new Set<string>();
 
   hookRunId(id: string): string | undefined { return this.terminalRunIds.get(id); }
+
+  /** Whether a schedule's run created this session. Read off the persisted
+   *  marker alone, so it holds after a restart and after the schedule is gone. */
+  launchedBySchedule(id: string): boolean {
+    return this.entries.get(id)?.launchedByScheduleId !== undefined;
+  }
+
+  /**
+   * Whether `runId` is the live run of the live session `id`, answered with no
+   * side effect. `acceptsHookRun` cannot stand in: it says yes to an id with no
+   * entry, and the api-server wrapper around it treats a missing run id as a
+   * lost hook channel and fails the session's observation.
+   */
+  isLiveRun(id: string, runId: string): boolean {
+    const entry = this.entries.get(id);
+    if (!entry || entry.archived) return false;
+    const active = this.terminalRunIds.get(id);
+    // `undefined === undefined` would otherwise bind a stopped session to an
+    // empty run id.
+    return active !== undefined && active === runId;
+  }
+
+  /** The agent `runId` was launched as, when it is the live run of `id`. */
+  liveRunAgent(id: string, runId: string): string | undefined {
+    return this.isLiveRun(id, runId) ? this.terminalRunAgents.get(id) : undefined;
+  }
+
+  private bindRun(id: string, runId: string, agent: string): void {
+    this.terminalRunIds.set(id, runId);
+    this.terminalRunAgents.set(id, agent);
+  }
+
+  private unbindRun(id: string): void {
+    this.terminalRunIds.delete(id);
+    this.terminalRunAgents.delete(id);
+  }
 
   acceptsHookRun(id: string, runId?: string): boolean {
     if (!this.entries.has(id)) return !this.hookSessionIds.has(id);
@@ -588,7 +644,7 @@ export class SessionManager {
     this.terminalControllers.delete(id);
     this.terminalObservations.delete(id);
     this.blindedTerminals.delete(id);
-    this.terminalRunIds.delete(id);
+    this.unbindRun(id);
     this.handlerAvailabilities.delete(id);
     const dispose = this.terminalDisposers.get(id);
     this.terminalDisposers.delete(id);
@@ -856,6 +912,7 @@ export class SessionManager {
       isolation: spec.workspace, baseBranch: spec.baseBranch, scheduleOwnerId: spec.scheduleId,
     };
     const entry = this.buildEntry(spec.name, launchSpec);
+    entry.launchedByScheduleId = spec.scheduleId;
     const reserved = { runtimeGeneration: crypto.randomUUID(), launched: false, cancelled: false, terminal: false };
     this.scheduledLaunches.set(entry.id, reserved);
     try {
@@ -1110,7 +1167,11 @@ export class SessionManager {
     // backend default. Terminal sessions and tool-less entries get nothing.
     if (entry.mode === "chat" && entry.tool) {
       const inherited = this.lastUsedConfigForTool(entry.tool);
-      if (inherited) entry.config = inherited;
+      // A schedule's permission mode comes from its approvalPolicy alone. The
+      // last-used `mode` is whatever the user picked in an unrelated chat (auto,
+      // acceptEdits), and replaying it would loosen a gated schedule's runs.
+      if (inherited && spec?.scheduleOwnerId) delete inherited.mode;
+      if (inherited && Object.keys(inherited).length > 0) entry.config = inherited;
     }
     return entry;
   }
@@ -2283,7 +2344,7 @@ export class SessionManager {
       this.runningChat.add(id);
       if (!chatAlreadyRunning) {
         const scheduled = this.scheduledLaunches.get(id);
-        this.terminalRunIds.set(id, scheduled && !scheduled.terminal ? scheduled.runtimeGeneration : crypto.randomUUID());
+        this.bindRun(id, scheduled && !scheduled.terminal ? scheduled.runtimeGeneration : crypto.randomUUID(), chatTool);
         this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
       }
       const runId = this.terminalRunIds.get(id);
@@ -2303,7 +2364,7 @@ export class SessionManager {
       }).catch((error) => {
         if (!this.acceptsHookRun(id, runId)) return;
         this.runningChat.delete(id);
-        this.terminalRunIds.delete(id);
+        this.unbindRun(id);
         this.invalidateHookObservation(id, "Agent failed to start");
         throw error;
       });
@@ -2345,7 +2406,7 @@ export class SessionManager {
     this.terminalControllers.set(id, controller);
     const scheduled = this.scheduledLaunches.get(id);
     const runId = scheduled && !scheduled.terminal ? scheduled.runtimeGeneration : crypto.randomUUID();
-    this.terminalRunIds.set(id, runId);
+    this.bindRun(id, runId, tool);
     const scope = createAgentRunScope<TerminalAgentEvent>({
       runId,
       isCurrent: () => this.terminalRunIds.get(id) === runId,

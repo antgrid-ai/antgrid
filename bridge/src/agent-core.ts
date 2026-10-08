@@ -59,6 +59,8 @@ import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
+import { resolveSchedulerCaller } from "./scheduler-caller";
+import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -594,6 +596,11 @@ export interface BuildAgentCoreOptions {
    *  would sit against the project-wide cap and evict a live session's assign.
    *  Absent for the same reason {@link queueBusLine} is. */
   forgetBusLines?: (sessionId: string) => void;
+  /** The host's scheduler entry for agent callers, with this core's catalog
+   *  project id already bound. The core proves WHICH session is calling; the host
+   *  decides what that session may do. Absent means a bare core, and every
+   *  scheduler route answers SCHEDULER_UNAVAILABLE. */
+  schedulerForAgent?: SchedulerForAgent;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -5057,6 +5064,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
+    scheduler: async ({ terminalId, runId, method, params }) => {
+      if (!opts.schedulerForAgent) {
+        throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
+      }
+      const caller = resolveSchedulerCaller({
+        session: (id) => sessions?.get(id),
+        isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+        launchedBySchedule: (id) => sessions?.launchedBySchedule(id) ?? false,
+        runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+        registryAgent: (name) => agentSpec(name),
+      }, terminalId, runId);
+      return opts.schedulerForAgent(caller, method, params);
+    },
     onHandlerEvent: (body) => {
       // What the agent is DISPLAYING is settled ahead of the chat guard, because
       // it is a fact about the agent's own screen rather than about supervision:

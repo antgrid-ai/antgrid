@@ -13,29 +13,49 @@ const scheduleFields = {
   workspace: z.enum(["shared", "worktree"]),
   baseBranch: z.string().min(1).optional(),
   cron: z.string().min(1),
+  // Epoch ms of a one-off. The host resolves wall-clock strings to this before validation.
+  runAt: z.number().int().positive(),
   timezone: z.string().min(1),
   enabled: z.boolean(),
   catchUp: z.enum(["latest", "skip"]),
 };
-export const ScheduleInputSchema = z.object({
+const exactlyOneKind = { message: "A schedule needs exactly one of cron (recurring) or runAt (one-off)" };
+const ScheduleInputBase = z.object({
   ...scheduleFields,
   approvalPolicy: scheduleFields.approvalPolicy.default("default"),
   enabled: scheduleFields.enabled.default(true),
   catchUp: scheduleFields.catchUp.default("latest"),
+  cron: scheduleFields.cron.optional(),
+  runAt: scheduleFields.runAt.optional(),
 }).strict();
+/** Field names, for callers that rebuild an input from a stored record. */
+export const SCHEDULE_INPUT_KEYS = Object.keys(ScheduleInputBase.shape) as (keyof ScheduleInput)[];
+export const ScheduleInputSchema = ScheduleInputBase.refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
 export const SchedulePatchSchema = z.object(scheduleFields).partial().extend({
   baseBranch: z.string().min(1).nullable().optional(),
-}).strict();
-export const ScheduleSchema = ScheduleInputSchema.extend({
+}).strict().refine((p) => p.cron === undefined || p.runAt === undefined, { message: "Name cron or runAt in a patch, not both" });
+export const ScheduleSchema = ScheduleInputBase.extend({
   id: z.string(),
   authorDeviceId: z.string().nullable(),
+  // Display-only provenance for schedules an agent session created or last edited.
+  authorSessionId: z.string().optional(),
+  authorSessionName: z.string().optional(),
+  editedBySessionName: z.string().optional(),
+  editedAt: z.number().optional(),
   checkoutId: z.string().optional(),
   workspaceCreated: z.boolean().default(false),
   createdAt: z.number(),
   updatedAt: z.number(),
   nextOccurrence: z.number(),
+  // Written in the claim transaction that fires or misses a one-off, so "finished" survives a restart without
+  // overloading `enabled`, which keeps meaning "the user paused it".
+  firedRunId: z.string().optional(),
+  firedAt: z.number().optional(),
+  // Set when a due one-off was handed back unconsumed: an overlapping run deferred it, or a settings change re-armed
+  // it. The occurrence fell due while the desktop was open, so the next claim runs it even under catch-up "skip".
+  deferredAt: z.number().optional(),
   deletedAt: z.number().optional(),
-});
+}).refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
 export type ScheduleInput = z.infer<typeof ScheduleInputSchema>;
 export type SchedulePatch = z.infer<typeof SchedulePatchSchema>;
 export type Schedule = z.infer<typeof ScheduleSchema>;
@@ -61,6 +81,7 @@ export const SchedulerCapabilitiesSchema = z.object({
   supported: z.boolean(), timezone: z.string(),
   supportsBaseBranchClear: z.boolean().optional(),
   supportsCatchUp: z.boolean().optional(),
+  supportsOneOff: z.boolean().optional(),
   agents: z.array(z.object({ agentId: z.string(), modes: z.array(z.enum(["terminal", "chat"])) })),
   error: z.string().optional(),
 });

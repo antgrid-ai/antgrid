@@ -11,6 +11,7 @@ runProjectIntegrationSetup({
   assetDirectory: resolveAbDir(),
   mcpEntry: { command: mcp.binary, args: mcp.preargs, env: {
     ANTGRID_API_PORT: "${ANTGRID_API_PORT}", ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+    ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
   } },
   hookCommand: resolveHookCommand({
     compiled: false, binary: process.execPath,

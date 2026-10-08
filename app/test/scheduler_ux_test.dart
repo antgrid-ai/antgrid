@@ -83,6 +83,8 @@ class Host {
   List<Map<String, dynamic>> runs = [];
   bool clearSupported = true;
   bool catchUpSupported = true;
+  bool oneOffSupported = false;
+  List<Map<String, dynamic>> oneOffs = [];
   bool agentAvailable = true;
   String timezone = 'Asia/Kolkata';
   Object? previewError;
@@ -102,6 +104,7 @@ class Host {
           'timezone': timezone,
           'supportsBaseBranchClear': clearSupported,
           'supportsCatchUp': catchUpSupported,
+          'supportsOneOff': oneOffSupported,
           'agents': [
             if (agentAvailable)
               {
@@ -113,6 +116,8 @@ class Host {
       case 'scheduler.list':
         return {
           'schedules': schedules,
+          // An older bridge sends no such key at all.
+          if (oneOffs.isNotEmpty) 'oneOffSchedules': oneOffs,
           'projects': [
             {'projectId': 'repo', 'label': 'Antgrid', 'isGitRepository': true},
           ],
@@ -131,12 +136,24 @@ class Host {
       case 'scheduler.runNow':
         return {'run': runNow};
       case 'scheduler.update':
+        final patch = params['patch'] as Map<String, dynamic>;
+        // A patch naming one kind's field clears the other, and a new runAt
+        // clears fired, as the bridge does.
+        Map<String, dynamic> apply(Map<String, dynamic> s) => {
+          for (final e in s.entries)
+            if (!(patch.containsKey('cron') && e.key == 'runAt') &&
+                !(patch.containsKey('runAt') &&
+                    const {'cron', 'firedRunId', 'firedAt'}.contains(e.key)))
+              e.key: e.value,
+          ...patch,
+        };
         schedules = [
           for (final s in schedules)
-            if (s['id'] == params['id'])
-              {...s, ...params['patch'] as Map<String, dynamic>}
-            else
-              s,
+            if (s['id'] == params['id']) apply(s) else s,
+        ];
+        oneOffs = [
+          for (final s in oneOffs)
+            if (s['id'] == params['id']) apply(s) else s,
         ];
         return {};
       case 'scheduler.stop':

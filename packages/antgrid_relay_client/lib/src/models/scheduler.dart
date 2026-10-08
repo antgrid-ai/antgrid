@@ -17,6 +17,7 @@ class SchedulerCapabilities {
   final String? error;
   final bool supportsBaseBranchClear;
   final bool supportsCatchUp;
+  final bool supportsOneOff;
   const SchedulerCapabilities({
     required this.supported,
     required this.timezone,
@@ -24,6 +25,7 @@ class SchedulerCapabilities {
     this.error,
     this.supportsBaseBranchClear = false,
     this.supportsCatchUp = false,
+    this.supportsOneOff = false,
   });
   factory SchedulerCapabilities.fromJson(Map<String, dynamic> json) =>
       SchedulerCapabilities(
@@ -35,6 +37,7 @@ class SchedulerCapabilities {
         error: json['error'] as String?,
         supportsBaseBranchClear: json['supportsBaseBranchClear'] == true,
         supportsCatchUp: json['supportsCatchUp'] == true,
+        supportsOneOff: json['supportsOneOff'] == true,
       );
 }
 
@@ -69,12 +72,20 @@ class AgentSchedule {
   final String catchUp;
   final String workspace;
   final String? baseBranch;
-  final String cron;
+  /// Exactly one of [cron] and [runAt] is set: a one-off has no cadence.
+  final String? cron;
+  final DateTime? runAt;
   final String timezone;
   final bool enabled;
   final String? checkoutId;
   final bool workspaceCreated;
   final String? authorDeviceId;
+  final String? authorSessionId;
+  final String? authorSessionName;
+  final String? editedBySessionName;
+  final DateTime? editedAt;
+  final String? firedRunId;
+  final DateTime? firedAt;
   final DateTime? createdAt;
   final DateTime? updatedAt;
   final DateTime? deletedAt;
@@ -91,12 +102,19 @@ class AgentSchedule {
     this.catchUp = 'latest',
     required this.workspace,
     this.baseBranch,
-    required this.cron,
+    this.cron,
+    this.runAt,
     required this.timezone,
     required this.enabled,
     this.checkoutId,
     this.workspaceCreated = false,
     this.authorDeviceId,
+    this.authorSessionId,
+    this.authorSessionName,
+    this.editedBySessionName,
+    this.editedAt,
+    this.firedRunId,
+    this.firedAt,
     this.createdAt,
     this.updatedAt,
     this.deletedAt,
@@ -114,18 +132,27 @@ class AgentSchedule {
     catchUp: json['catchUp'] as String? ?? 'latest',
     workspace: json['workspace'] as String,
     baseBranch: json['baseBranch'] as String?,
-    cron: json['cron'] as String,
+    cron: json['cron'] as String?,
+    runAt: schedulerDate(json['runAt']),
     timezone: json['timezone'] as String,
     enabled: json['enabled'] == true,
     checkoutId: json['checkoutId'] as String?,
     workspaceCreated: json['workspaceCreated'] == true,
     authorDeviceId: json['authorDeviceId'] as String?,
+    authorSessionId: json['authorSessionId'] as String?,
+    authorSessionName: json['authorSessionName'] as String?,
+    editedBySessionName: json['editedBySessionName'] as String?,
+    editedAt: schedulerDate(json['editedAt']),
+    firedRunId: json['firedRunId'] as String?,
+    firedAt: schedulerDate(json['firedAt']),
     createdAt: schedulerDate(json['createdAt']),
     updatedAt: schedulerDate(json['updatedAt']),
     deletedAt: schedulerDate(json['deletedAt']),
     nextOccurrence: schedulerDate(json['nextOccurrence']),
     lastResult: json['lastResult'] as String?,
   );
+  bool get isOneOff => runAt != null;
+
   /// An older bridge's strict schema rejects unknown keys, so callers pass
   /// `includeCatchUp: capabilities.supportsCatchUp`.
   Map<String, dynamic> settings({bool includeCatchUp = true}) => {
@@ -138,7 +165,8 @@ class AgentSchedule {
     if (includeCatchUp) 'catchUp': catchUp,
     'workspace': workspace,
     'baseBranch': ?baseBranch,
-    'cron': cron,
+    'cron': ?cron,
+    'runAt': ?runAt?.millisecondsSinceEpoch,
     'timezone': timezone,
     'enabled': enabled,
   };

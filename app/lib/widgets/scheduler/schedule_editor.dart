@@ -94,12 +94,37 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                   _workspace != _current!.workspace ||
                   _branch.text.trim() != (_current!.baseBranch ?? ''))));
   bool get _editable => widget.writable && !_saving;
-  String get _previewKey => '${_cron.text.trim()}\n${_timezone.trim()}';
+  bool get _once => _frequency == 'Once';
+  String? get _onceIso => schedulerWallIso(_time.text);
+  String get _previewKey => _once
+      ? 'once\n${_onceIso ?? _time.text.trim()}\n${_timezone.trim()}'
+      : '${_cron.text.trim()}\n${_timezone.trim()}';
   bool get _previewInputsReady =>
-      _cron.text.trim().isNotEmpty && _timezone.trim().isNotEmpty;
-  bool get _invalidTime =>
-      (_frequency == 'Daily' || _frequency == 'Weekdays') &&
-      schedulerPresetCron(_frequency, _time.text) == null;
+      (_once ? _onceIso != null : _cron.text.trim().isNotEmpty) &&
+      _timezone.trim().isNotEmpty;
+  bool get _invalidTime => _once
+      ? _onceIso == null
+      : (_frequency == 'Daily' || _frequency == 'Weekdays') &&
+            schedulerPresetCron(_frequency, _time.text) == null;
+
+  /// The saved instant while the wall time and zone still name it, so an
+  /// untouched one-off is never re-sent; any edit sends the wall-clock string.
+  Object get _runAtValue {
+    final saved = _draft.initialSaved;
+    final stored = saved['runAt'];
+    final iso = _onceIso;
+    if (stored is int &&
+        iso != null &&
+        _timezone == saved['timezone'] &&
+        schedulerWallTime(
+              DateTime.fromMillisecondsSinceEpoch(stored, isUtc: true),
+              _timezone,
+            ) ==
+            iso.replaceFirst('T', ' ')) {
+      return stored;
+    }
+    return iso ?? _time.text.trim();
+  }
   bool get _clearingBranch =>
       !_locked &&
       (_current?.baseBranch?.isNotEmpty ?? false) &&
@@ -137,20 +162,26 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
   @override
   void initState() {
     super.initState();
-    _draft =
-        ref.read(schedulerDraftsProvider)[_key] ??
-        SchedulerDraft.start(
-          widget.snapshot,
-          widget.schedule,
-          localTimezone: ref.read(schedulerLocalTimezoneProvider).value,
-        );
+    final retained = ref.read(schedulerDraftsProvider)[_key];
+    final current = _current;
+    _draft = retained == null
+        ? SchedulerDraft.start(
+            widget.snapshot,
+            widget.schedule,
+            localTimezone: ref.read(schedulerLocalTimezoneProvider).value,
+          )
+        : current == null
+        ? retained
+        : retained.renewOneOff(current);
     final values = _draft.values;
     _name = TextEditingController(text: values['name'] as String);
     _prompt = TextEditingController(text: values['prompt'] as String);
     _branch = TextEditingController(
       text: values['baseBranch'] as String? ?? '',
     );
-    _cron = TextEditingController(text: values['cron'] as String);
+    _cron = TextEditingController(
+      text: values['cron'] as String? ?? schedulerPresets['Daily']!,
+    );
     _timezone = values['timezone'] as String;
     if (_timezone.trim().isEmpty) {
       _timezone =
@@ -195,7 +226,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     'catchUp': _catchUp,
     'enabled': _enabled,
     if (_branch.text.trim().isNotEmpty) 'baseBranch': _branch.text.trim(),
-    'cron': _cron.text,
+    if (_once) 'runAt': _runAtValue else 'cron': _cron.text,
     'timezone': _timezone,
   };
   void _persist() {
@@ -243,9 +274,33 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
 
   void _timeChanged() {
     if (_restoring) return;
+    if (_once) {
+      _schedulePreview();
+      _changed();
+      return;
+    }
     final cron = schedulerPresetCron(_frequency, _time.text);
     if (cron != null && _frequency != 'Custom') _cron.text = cron;
     _changed();
+  }
+
+  void _selectKind(String value) {
+    if ((value == 'Once') == _once) return;
+    _restoring = true;
+    if (value == 'Once') {
+      _time.text = schedulerWallTime(
+        DateTime.now().add(const Duration(hours: 1)),
+        _timezone,
+      );
+      setState(() => _frequency = 'Once');
+    } else {
+      _time.text = schedulerPresetTime(_cron.text);
+      setState(() => _frequency = schedulerFrequency(_cron.text));
+    }
+    _restoring = false;
+    _schedulePreview();
+    _changed();
+    _persist();
   }
 
   void _selectFrequency(String value) {
@@ -290,7 +345,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     if (!_previewInputsReady) return;
     try {
       final result = await widget.request('scheduler.preview', {
-        'cron': _cron.text.trim(),
+        if (_once) 'runAt': _onceIso else 'cron': _cron.text.trim(),
         'timezone': _timezone.trim(),
       });
       final occurrences = (result['occurrences'] as List)
@@ -325,8 +380,13 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
           : '';
       setState(() {
         _validated = null;
-        _invalidPreview = code == 'SCHEDULER_INVALID_CRON';
-        _previewError = _invalidPreview
+        _invalidPreview =
+            code == 'SCHEDULER_INVALID_CRON' || code == 'INVALID_RUN_AT';
+        _previewError = code == 'INVALID_RUN_AT'
+            ? message.trim().isEmpty
+                  ? 'That date and time is not valid in this timezone.'
+                  : message
+            : _invalidPreview
             ? 'Invalid cron or timezone. ${message.trim().isEmpty ? 'Check the cron expression and schedule timezone.' : message}'
             : 'Could not validate on this machine. Retry when it is available.';
       });
@@ -341,7 +401,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     _name.text = v['name'] as String;
     _prompt.text = v['prompt'] as String;
     _branch.text = v['baseBranch'] as String? ?? '';
-    _cron.text = v['cron'] as String;
+    _cron.text = v['cron'] as String? ?? _cron.text;
     _timezone = v['timezone'] as String;
     _time.text = _draft.time;
     _restoreChoices();
@@ -409,10 +469,16 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     final settings = {
       ..._values,
       'name': _name.text.trim(),
-      'cron': _cron.text.trim(),
       'timezone': _timezone.trim(),
       if (_clearingBranch) 'baseBranch': null,
     };
+    if (_once) {
+      // A patch that names runAt counts as a new time, so an untouched instant
+      // is left out rather than restated.
+      if (settings['runAt'] is int) settings.remove('runAt');
+    } else {
+      settings['cron'] = _cron.text.trim();
+    }
     // An older bridge's strict schema rejects keys it does not know.
     if (!widget.snapshot.capabilities.supportsCatchUp) {
       settings.remove('catchUp');
@@ -660,22 +726,40 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       ),
     ]);
     final timing = _section('Timing', [
-      _field(
-        'Frequency',
-        Wrap(
-          spacing: AbTokens.space6,
-          runSpacing: AbTokens.space6,
-          children: [
-            for (final f in [...schedulerPresets.keys, 'Custom'])
-              AbChip.choice(
-                label: f,
-                selected: _frequency == f,
-                enabled: _editable,
-                onTap: () => _selectFrequency(f),
-              ),
-          ],
+      if (widget.snapshot.capabilities.supportsOneOff || _once)
+        _choices(
+          'Runs',
+          const {'Repeats': 'Repeats', 'Once': 'Once'},
+          _once ? 'Once' : 'Repeats',
+          _selectKind,
         ),
-      ),
+      if (_once)
+        _field(
+          'Date and time (yyyy-MM-dd HH:mm) · $_timezone',
+          AbTextField(
+            controller: _time,
+            enabled: _editable,
+            hintText: 'yyyy-MM-dd HH:mm',
+            autocorrect: false,
+          ),
+        )
+      else
+        _field(
+          'Frequency',
+          Wrap(
+            spacing: AbTokens.space6,
+            runSpacing: AbTokens.space6,
+            children: [
+              for (final f in [...schedulerPresets.keys, 'Custom'])
+                AbChip.choice(
+                  label: f,
+                  selected: _frequency == f,
+                  enabled: _editable,
+                  onTap: () => _selectFrequency(f),
+                ),
+            ],
+          ),
+        ),
       if (_frequency == 'Daily' || _frequency == 'Weekdays')
         _field(
           'Time (HH:mm) · $_timezone',
@@ -687,25 +771,31 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
           ),
         ),
       if (_invalidTime)
-        _notice('Enter a valid time from 00:00 to 23:59.', error: true),
-      _field(
-        'Cron (minute hour day-of-month month day-of-week)',
-        _frequency == 'Custom'
-            ? AbTextField(
-                controller: _cron,
-                focusNode: _cronFocus,
-                enabled: _editable && _frequency == 'Custom',
-                hintText: '0 9 * * 1-5',
-                autocorrect: false,
-              )
-            : Text(
-                _cron.text,
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: context.antgrid.textSecondary,
+        _notice(
+          _once
+              ? 'Enter a date and time like 2026-10-09 09:00.'
+              : 'Enter a valid time from 00:00 to 23:59.',
+          error: true,
+        ),
+      if (!_once)
+        _field(
+          'Cron (minute hour day-of-month month day-of-week)',
+          _frequency == 'Custom'
+              ? AbTextField(
+                  controller: _cron,
+                  focusNode: _cronFocus,
+                  enabled: _editable && _frequency == 'Custom',
+                  hintText: '0 9 * * 1-5',
+                  autocorrect: false,
+                )
+              : Text(
+                  _cron.text,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: context.antgrid.textSecondary,
+                  ),
                 ),
-              ),
-      ),
+        ),
       if (_frequency == 'Hourly' || _frequency == 'Custom')
         Text(
           'Timezone: $_timezone',
@@ -727,7 +817,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         ),
       if (_validated == _previewKey && _occurrences.isNotEmpty)
         _field(
-          'Next five occurrences · ${localTimezone.value == null ? 'machine time' : 'local time'}',
+          '${_once ? 'Runs at' : 'Next five occurrences'} · ${localTimezone.value == null ? 'machine time' : 'local time'}',
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             spacing: AbTokens.space6,
@@ -755,15 +845,24 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       if (widget.snapshot.capabilities.supportsCatchUp) ...[
         _choices(
           'If a run is missed',
-          const {
-            'latest': 'Run the latest missed run',
-            'skip': 'Skip missed runs',
-          },
+          _once
+              ? const {
+                  'latest': 'Run it when the desktop is next open',
+                  'skip': 'Skip it if missed',
+                }
+              : const {
+                  'latest': 'Run the latest missed run',
+                  'skip': 'Skip missed runs',
+                },
           _catchUp,
           (v) => _catchUp = v,
         ),
         Text(
-          'Runs once, for the latest missed run only, and not when the next run is due within 15 minutes. Runs need the desktop app open.',
+          _once
+              ? _catchUp == 'skip'
+                    ? 'Runs once at the chosen time, and is skipped if the desktop app is not open then.'
+                    : 'Runs once at the chosen time, however late the desktop opens. Runs need the desktop app open.'
+              : 'Runs once, for the latest missed run only, and not when the next run is due within 15 minutes. Runs need the desktop app open.',
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontSm,
             color: context.antgrid.textSecondary,

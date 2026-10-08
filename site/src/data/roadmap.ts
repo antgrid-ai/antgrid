@@ -18,6 +18,24 @@ export const LAST_REVIEWED = "2026-10-08";
 
 export const ROADMAP: readonly RoadmapEntry[] = [
   {
+    id: "agent-scheduling",
+    title: "Agents can schedule work",
+    description: "Ask the agent you are working with to set up a schedule instead of creating it by hand.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: Antgrid MCP tools that let an agent list, create, change, pause, delete and run schedules for its own project, never with more approval freedom than its own session has. Sessions launched by a schedule can only read schedules.",
+    updatedAt: "2026-10-08",
+  },
+  {
+    id: "one-off-schedules",
+    title: "One-off schedules",
+    description: "Run a prompt once at a chosen time, such as tomorrow at 9.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: a Once option in the schedule editor and for agents, with catch-up when the desktop was closed at the chosen time and a clear record of how each one-off ended.",
+    updatedAt: "2026-10-08",
+  },
+  {
     id: "scheduler-catch-up",
     title: "Scheduler catch-up",
     description: "Run the latest missed occurrence when your desktop comes back, instead of silently skipping it.",

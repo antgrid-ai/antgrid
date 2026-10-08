@@ -1,4 +1,5 @@
 import { CronExpressionParser } from "cron-parser";
+import { SchedulerRefusal } from "./agent";
 
 export const CRON_PRESETS = {
   hourly: "0 * * * *",
@@ -11,6 +12,7 @@ export class SchedulerInvalidCronError extends Error {
 }
 
 export function schedulerErrorCode(error: unknown): string {
+  if (error instanceof SchedulerRefusal) return error.code;
   return error instanceof SchedulerInvalidCronError ? error.code : "SCHEDULER_ERROR";
 }
 
@@ -92,4 +94,61 @@ export function missedOccurrences(expression: string, timezone: string, firstMis
   latest = tailLatest ?? latest;
   previous = tailPrevious ?? CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(latest) }).prev().getTime();
   return { latest, previous, count, following };
+}
+
+// One-off wall-clock resolution. Local times are mapped to instants by probing the zone's UTC offset a day either
+// side of the wall time, so no date library is needed and a transition inside the window shows up as two candidates.
+// Strict ISO-8601 only, with or without an offset. Date.parse is never used: it rolls an impossible date such as
+// Feb 30 into March and accepts non-ISO forms, which would silently schedule a different day.
+const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+const DAY_MS = 86_400_000;
+
+function zoneOffsetMs(instant: number, timezone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(new Date(instant));
+  const field = (type: string) => Number(parts.find((p) => p.type === type)!.value);
+  const wall = Date.UTC(field("year"), field("month") - 1, field("day"), field("hour"), field("minute"), field("second"));
+  return wall - Math.floor(instant / 1000) * 1000;
+}
+
+/**
+ * A number is an instant and is used as is. A string is either ISO-8601 with an offset (an instant) or a local
+ * date-time read in `timezone`. A local time inside a spring-forward gap is refused; one in a repeated fall-back hour
+ * resolves to its first instance.
+ */
+export function resolveRunAt(value: string | number, timezone: string): number {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new SchedulerRefusal("INVALID_RUN_AT", "runAt must be a positive epoch-millisecond instant");
+    return value;
+  }
+  const text = value.trim();
+  const match = DATE_TIME.exec(text);
+  if (!match) {
+    throw new SchedulerRefusal("INVALID_RUN_AT", `"${value}" is not a date and time; use a form like 2026-10-09T09:00 or 2026-10-09T09:00+02:00`);
+  }
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => (part === undefined ? 0 : Number(part)));
+  const wall = Date.UTC(year!, month! - 1, day!, hour!, minute!, second!);
+  const check = new Date(wall);
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month! - 1 || check.getUTCDate() !== day
+    || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute) {
+    throw new SchedulerRefusal("INVALID_RUN_AT", `"${value}" is not a real calendar date and time`);
+  }
+  const offset = match[7];
+  if (offset !== undefined) {
+    if (offset.toUpperCase() === "Z") return wall;
+    const digits = offset.slice(1).replace(":", "");
+    const offsetHours = Number(digits.slice(0, 2));
+    const offsetMinutes = digits.length > 2 ? Number(digits.slice(2)) : 0;
+    if (offsetHours > 23 || offsetMinutes > 59) throw new SchedulerRefusal("INVALID_RUN_AT", `"${value}" has an invalid UTC offset`);
+    return wall - (offset[0] === "-" ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
+  }
+  validateTimezone(timezone);
+  const candidates = [...new Set([zoneOffsetMs(wall - DAY_MS, timezone), zoneOffsetMs(wall + DAY_MS, timezone)])]
+    .map((offset) => ({ offset, instant: wall - offset }))
+    .filter(({ offset, instant }) => zoneOffsetMs(instant, timezone) === offset)
+    .map(({ instant }) => instant);
+  if (candidates.length === 0) {
+    throw new SchedulerRefusal("INVALID_RUN_AT", `${text} does not exist in ${timezone}: clocks skip forward over it. Choose a time after the change.`);
+  }
+  return Math.min(...candidates);
 }

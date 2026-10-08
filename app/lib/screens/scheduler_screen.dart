@@ -509,8 +509,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                   label: 'Open retained draft',
                   onTap: () => setState(() {
                     _editing = true;
+                    // A draft's runAt may be unparsed wall-clock text, and the
+                    // editor restores the time from the draft itself.
                     _editedSchedule = AgentSchedule.fromJson({
                       ...entry.value.values,
+                      'runAt': null,
                       'id': entry.key.scheduleId,
                     });
                   }),
@@ -522,16 +525,19 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     );
   }
 
-  Widget _text(String value, {bool strong = false}) => Text(
-    value,
-    style: AbTokens.sansStyle(
-      fontSize: AbTokens.fontSm,
-      fontWeight: strong ? FontWeight.w600 : FontWeight.normal,
-      color: strong
-          ? context.antgrid.textPrimary
-          : context.antgrid.textSecondary,
-    ),
-  );
+  Widget _text(String value, {bool strong = false, bool muted = false}) =>
+      Text(
+        value,
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontSm,
+          fontWeight: strong ? FontWeight.w600 : FontWeight.normal,
+          color: strong
+              ? context.antgrid.textPrimary
+              : muted
+              ? context.antgrid.textMuted
+              : context.antgrid.textSecondary,
+        ),
+      );
 
   Widget _columns(List<Widget> cells, {bool inset = true}) => Padding(
     padding: inset ? const EdgeInsets.all(AbTokens.space12) : EdgeInsets.zero,
@@ -556,6 +562,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   ) {
     final active = schedulerActiveRun(snapshot.runs, schedule.id);
     final last = schedulerLastOccurrence(snapshot.runs, schedule.id);
+    final now = DateTime.now();
+    final oneOff = schedule.isOneOff
+        ? schedulerOneOffState(schedule, now)
+        : null;
+    final provenance = schedulerProvenance(schedule);
     final identity = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       spacing: AbTokens.space6,
@@ -569,19 +580,31 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           scheduleId: schedule.id,
         )))
           _text('Editable draft retained'),
+        if (provenance != null) _text(provenance),
       ],
     );
     final timing = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       spacing: AbTokens.space6,
       children: [
-        _text(schedulerCadence(schedule.cron, schedule.timezone)),
+        if (oneOff == null)
+          _text(schedulerCadence(schedule.cron!, schedule.timezone))
+        else
+          _text(
+            schedulerOneOffSummary(schedule, snapshot.runs, now),
+            muted: oneOff == SchedulerOneOffState.finished,
+          ),
         // An older bridge has no catch-up; the parsed default would misdescribe it.
         if (snapshot.capabilities.supportsCatchUp)
-          _text(schedulerCatchUpSummary(schedule.catchUp)),
-        _text(
-          'Next: ${schedule.enabled ? schedulerLocalTime(schedule.nextOccurrence, ref.read(schedulerLocalTimezoneProvider).value ?? _snapshot?.capabilities.timezone) : 'Paused'}',
-        ),
+          _text(
+            oneOff == null
+                ? schedulerCatchUpSummary(schedule.catchUp)
+                : schedulerOneOffCatchUpSummary(schedule.catchUp),
+          ),
+        if (oneOff != SchedulerOneOffState.finished)
+          _text(
+            'Next: ${schedule.enabled ? schedulerLocalTime(schedule.nextOccurrence, ref.read(schedulerLocalTimezoneProvider).value ?? _snapshot?.capabilities.timezone) : 'Paused'}',
+          ),
       ],
     );
     final state = Column(
@@ -622,6 +645,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             () => _act('scheduler.stop', {'id': active.id}),
           ),
         ],
+        if (oneOff == SchedulerOneOffState.finished ||
+            oneOff == SchedulerOneOffState.pausedPassed)
+          _action('Set a new time', schedule.name, () async => _editSchedule(schedule)),
         Builder(
           builder: (anchor) => Semantics(
             label: 'More actions for ${schedule.name}',
@@ -667,6 +693,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         ),
       );
 
+  void _editSchedule(AgentSchedule schedule) => setState(() {
+    _editing = true;
+    _editedSchedule = schedule;
+  });
+
   Future<void> _scheduleMenu(
     BuildContext anchor,
     AgentSchedule schedule,
@@ -674,16 +705,29 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     final rect = abMenuAnchorRect(anchor);
     if (rect == null) return;
     final machine = ref.read(schedulerTargetProvider);
+    final needsNewTime =
+        schedule.isOneOff &&
+        const {
+          SchedulerOneOffState.finished,
+          SchedulerOneOffState.pausedPassed,
+        }.contains(schedulerOneOffState(schedule, DateTime.now()));
     final selected = await showAbMenu<String>(
       context: anchor,
       anchorRect: rect,
       header: schedule.name,
       entries: [
-        const AbMenuItem(label: 'Edit', value: 'edit', icon: AbIcons.edit),
         AbMenuItem(
-          label: schedule.enabled ? 'Pause' : 'Resume',
-          value: 'pause',
+          label: needsNewTime ? 'Set a new time' : 'Edit',
+          value: 'edit',
+          icon: AbIcons.edit,
         ),
+        // Resuming a one-off whose time has passed is refused by the bridge;
+        // the new-time editor is the only way back.
+        if (!needsNewTime)
+          AbMenuItem(
+            label: schedule.enabled ? 'Pause' : 'Resume',
+            value: 'pause',
+          ),
         const AbMenuItem(
           label: 'Delete',
           value: 'delete',
@@ -699,10 +743,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     }
     switch (selected) {
       case 'edit':
-        setState(() {
-          _editing = true;
-          _editedSchedule = schedule;
-        });
+        _editSchedule(schedule);
       case 'pause':
         await _act('scheduler.update', {
           'id': schedule.id,

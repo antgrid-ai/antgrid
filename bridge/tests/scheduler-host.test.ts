@@ -62,9 +62,9 @@ test("project-free loopback scheduler uses host validation for CRUD and preview"
   const scheduler = (host as unknown as { scheduler: SchedulerService }).scheduler;
   const saved = scheduler.schedules().find((s) => s.id === created.id)!;
   scheduler.store.saveSchedule({ ...saved, baseBranch: "main", workspaceCreated: true });
-  expect((await request("scheduler.update", { id: created.id, patch: { baseBranch: null } })).error.code).toBe("SCHEDULER_ERROR");
+  expect((await request("scheduler.update", { id: created.id, patch: { baseBranch: null } })).error.code).toBe("WORKSPACE_LOCKED");
   expect((await request("scheduler.update", { id: created.id, patch: { name: "Locked" } })).result.schedule.baseBranch).toBe("main");
-  expect((await request("scheduler.update", { id: "missing", patch: { name: "Unknown" } })).error.code).toBe("SCHEDULER_ERROR");
+  expect((await request("scheduler.update", { id: "missing", patch: { name: "Unknown" } })).error.code).toBe("SCHEDULE_NOT_FOUND");
   expect((await request("scheduler.update", { id: created.id, patch: { enabled: false } })).result.schedule.enabled).toBe(false);
   expect((await request("scheduler.list")).result.schedules).toHaveLength(1);
   await request("scheduler.delete", { id: created.id });
@@ -98,7 +98,7 @@ test("remote scheduler gates account, switch, safe IDs and targets the requester
   const scheduler = (host as unknown as { scheduler: SchedulerService }).scheduler;
   const saved = scheduler.schedules().find((s) => s.id === created.id)!;
   scheduler.store.saveSchedule({ ...saved, baseBranch: "main", workspaceCreated: true });
-  expect((await host.handleSchedulerRpc(rpc("scheduler.update", { id: created.id, patch: { baseBranch: null } }), "phone#machine") as any).error.code).toBe("SCHEDULER_ERROR");
+  expect((await host.handleSchedulerRpc(rpc("scheduler.update", { id: created.id, patch: { baseBranch: null } }), "phone#machine") as any).error.code).toBe("WORKSPACE_LOCKED");
   expect((await host.handleSchedulerRpc(rpc("scheduler.create", { schedule: settings("unknown") }), "phone#machine") as any).ok).toBe(false);
   const bus = new MessageBus();
   host.dispatchControlPlaneInbound(rpc("scheduler.list"), "control", bus, "phone#machine");

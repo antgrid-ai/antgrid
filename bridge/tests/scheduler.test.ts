@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { CRON_PRESETS, MISSED_COUNT_CAP, SchedulePatchSchema, missedOccurrences, nextOccurrences, validateCron, validateTimezone, SchedulerService, SchedulerStore,
-  type SchedulerOptions, type ScheduleInput, type SchedulerRun } from "../src/scheduler";
+  type SchedulerAuthor, type SchedulerOptions, type ScheduleInput, type SchedulerRun } from "../src/scheduler";
 
 const dirs: string[] = [];
 const services: SchedulerService[] = [];
@@ -18,6 +18,7 @@ afterEach(() => {
 const input: ScheduleInput = { name: "Review", projectId: "project", agentId: "claude", mode: "terminal", prompt: "Review code",
   approvalPolicy: "default", workspace: "worktree", cron: "* * * * *", timezone: "UTC", enabled: true, catchUp: "latest" };
 const DAY = 24 * 60 * 60_000;
+const dev = (deviceId: string): SchedulerAuthor => ({ kind: "device", deviceId });
 const daily: ScheduleInput = { ...input, cron: "0 9 * * *" };
 async function settle() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
 function fixture(overrides: Partial<SchedulerOptions> = {}, abDir = fresh()) {
@@ -77,7 +78,7 @@ describe("scheduler runtime", () => {
       const expected = expectedDates.map((date) => Date.parse(date));
       f.setTime(expected[0]! - 60_000);
       const schedule = await f.service.create({ ...input, cron: CRON_PRESETS.daily, timezone: "America/New_York" });
-      expect(f.service.preview(schedule.cron, schedule.timezone).slice(0, 3)).toEqual(expected);
+      expect(f.service.preview(schedule.cron!, schedule.timezone).slice(0, 3)).toEqual(expected);
       for (const occurrenceAt of expected) {
         expect(f.service.schedules()[0]!.nextOccurrence).toBe(occurrenceAt);
         f.setTime(occurrenceAt);
@@ -126,14 +127,14 @@ describe("scheduler runtime", () => {
   });
   test("author device is display metadata that execution edits replace", async () => {
     const f = fixture();
-    const schedule = await f.service.create(input, "phone");
-    expect((await f.service.update(schedule.id, { name: "Renamed" }, null)).authorDeviceId).toBe("phone");
-    expect((await f.service.update(schedule.id, { prompt: "Locally reviewed instructions" }, null)).authorDeviceId).toBeNull();
-    expect((await f.service.update(schedule.id, { name: "Remote name" }, "other-phone")).authorDeviceId).toBeNull();
-    expect((await f.service.update(schedule.id, { enabled: false }, "other-phone")).authorDeviceId).toBe("other-phone");
+    const schedule = await f.service.create(input, { author: dev("phone") });
+    expect((await f.service.update(schedule.id, { name: "Renamed" })).authorDeviceId).toBe("phone");
+    expect((await f.service.update(schedule.id, { prompt: "Locally reviewed instructions" })).authorDeviceId).toBeNull();
+    expect((await f.service.update(schedule.id, { name: "Remote name" }, { author: dev("other-phone") })).authorDeviceId).toBeNull();
+    expect((await f.service.update(schedule.id, { enabled: false }, { author: dev("other-phone") })).authorDeviceId).toBe("other-phone");
   });
   test("preview and dispatch agree and manual launch does not change timetable", async () => {
-    const f = fixture(); const expected = f.service.preview(input.cron, input.timezone)[0]!;
+    const f = fixture(); const expected = f.service.preview(input.cron!, input.timezone)[0]!;
     const schedule = await f.service.create(input);
     await f.service.runNow(schedule.id); await settle();
     expect(f.service.schedules()[0]!.nextOccurrence).toBe(expected);
@@ -209,7 +210,7 @@ describe("scheduler runtime", () => {
     expect(f.service.runs()[0]!.reason).toBe("Schedule workspace is missing. Restore it or create a new schedule.");
   });
   test("runs of a schedule whose author device is gone still dispatch", async () => {
-    const f = fixture(); const schedule = await f.service.create(input, "revoked-phone");
+    const f = fixture(); const schedule = await f.service.create(input, { author: dev("revoked-phone") });
     await f.service.runNow(schedule.id); await settle();
     expect(f.service.runs()[0]!.status).toBe("running"); expect(f.delivered).toHaveLength(1);
   });
@@ -269,7 +270,7 @@ describe("scheduler runtime", () => {
       bind(identity); await barrier; return { ...identity, deliverPrompt: async () => { deliveries++; } };
     } });
     const schedule = await f.service.create(input); await f.service.runNow(schedule.id); await settle();
-    await f.service.update(schedule.id, { prompt: "Changed execution settings" }, "other-phone");
+    await f.service.update(schedule.id, { prompt: "Changed execution settings" }, { author: dev("other-phone") });
     release(); await settle(); expect(f.service.runs()[0]!.status).toBe("skipped"); expect(deliveries).toBe(0);
   });
   test("closing host during preparation never submits uncertain prompt", async () => {
@@ -481,12 +482,12 @@ describe("scheduler durable store", () => {
     const db = new Database(store.path); db.query("INSERT INTO scheduler_owner(id,pid,token) VALUES(1,2147483647,'dead')").run(); db.close();
     const recovered = new SchedulerStore(dir); stores.push(recovered); expect(recovered.schedules()).toEqual([]);
   });
-  test("a user_version 1 database upgrades to 2 and a newer one is refused", () => {
+  test("a user_version 1 database upgrades to 3 and a newer one is refused", () => {
     const dir = fresh(); const first = new SchedulerStore(dir); first.close();
     const open = (version: number) => { const db = new Database(first.path); db.exec(`PRAGMA user_version = ${version}`); db.close(); };
     open(1); const upgraded = new SchedulerStore(dir); stores.push(upgraded); upgraded.close();
-    const db = new Database(first.path); expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2); db.close();
-    open(3); expect(() => new SchedulerStore(dir)).toThrow("requires a newer bridge");
+    const db = new Database(first.path); expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3); db.close();
+    open(4); expect(() => new SchedulerStore(dir)).toThrow("requires a newer bridge");
   });
   test("duplicate occurrence claims cannot launch twice", async () => {
     const f = fixture(); const schedule = await f.service.create(input);

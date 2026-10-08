@@ -45,6 +45,7 @@ import { createAgentRegistry } from "./create-registry";
 import type { AgentDefinition } from "../runtime";
 
 type BuiltinAgentSpec = Omit<AgentSpec, "fork" | "approvalPolicies"> & import("./types").AgentCliSpec & {
+  defaultApprovalGated: boolean;
   fork: import("./types").AgentForkSupport & { nativeForkArgs?: (id: string) => string[] };
   approvalPolicies: { bypass?: import("./types").AgentApprovalPolicy & { terminalArgs?: readonly string[] } };
   bin: string;
@@ -58,6 +59,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "claude",
     discoveryPaths: () => [join(homedir(), ".claude/local")],
     label: "Claude Code",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
     hookName: "claude",
     hookDir: "~/.claude/hooks",
@@ -163,6 +165,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "codex",
     normalizeTerminalNotification: (notice) => ({ type: "permission_request", message: notice.body ?? notice.title ?? "Codex needs approval" }),
     label: "Codex",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
@@ -249,6 +252,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   opencode: {
     bin: "opencode",
     label: "opencode",
+    defaultApprovalGated: false,
     approvalPolicies: {},
     // No `bridge hook` events: opencode's plugin runs inside its own runtime and
     // POSTs to the loopback API itself, under this name.
@@ -329,6 +333,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "cursor-agent": {
     bin: "cursor-agent",
     label: "Cursor",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "cursor",
     hookDir: null,
@@ -350,6 +355,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "github-copilot": {
     bin: "copilot",
     label: "Copilot",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "github-copilot",
     hookDir: null,
@@ -436,6 +442,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "agy",
     observeTitles: observeAntigravityTitles,
     label: "Antigravity",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
     hookName: "antigravity",
     hookDir: null,
@@ -462,6 +469,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   kilo: {
     bin: "kilo",
     label: "Kilo",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
@@ -505,6 +513,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   kimi: {
     bin: "kimi",
     label: "Kimi",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
@@ -519,6 +528,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
+    defaultApprovalGated: true,
     approvalPolicies: {},
     hookName: null,
     hookDir: null,
