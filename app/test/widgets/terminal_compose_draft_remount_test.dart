@@ -3,12 +3,10 @@
 // box's draft — and whether the box was up — must outlive that remount.
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/terminal_compose_box.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:flutter/material.dart';
@@ -18,20 +16,14 @@ import 'package:shared_preferences/shared_preferences.dart'
     show SharedPreferencesWithCache;
 
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Future<TerminalService> _makeService(
   void Function(Future<void> Function()) registerTearDown,
 ) async {
   final transport = FakeAgentTransport();
-  final cache = await CachedSessionsStore.open();
-  final session = ProjectSession(
-    projectId: 'p',
-    transport: transport,
-    mode: ProjectSessionMode.local,
-    cachedSessionsStore: cache,
-    onClose: () async => await transport.dispose(),
-  );
+  final session = await newFakeProjectSession(transport);
   final bundle = session.servicesForCheckout('main');
   registerTearDown(() async {
     await bundle.dispose();

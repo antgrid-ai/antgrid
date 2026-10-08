@@ -44,6 +44,7 @@ import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/util/terminal_links.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/clipboard.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
@@ -537,26 +538,6 @@ void main() {
       ),
       text: 'hello',
     );
-
-    List<String> captureClipboard(WidgetTester tester) {
-      final copied = <String>[];
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            copied.add((call.arguments as Map)['text'] as String);
-          }
-          return null;
-        },
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        ),
-      );
-      return copied;
-    }
 
     Future<GhosttyTerminalView> pumpSelected(
       WidgetTester tester,
@@ -2711,7 +2692,7 @@ void main() {
       expect(files.searchLine, 12);
     });
 
-    testWidgets('a path link with no workspace menu hands its tab to the shell', (
+    testWidgets('a path link with no shell mounted hands its tab over', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2724,7 +2705,7 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(TerminalViewWrapper)),
       );
-      expect(container.read(workspaceMenuControlProvider), isNull);
+      expect(container.read(revealWorkspaceViewControlProvider), isNull);
       const focused = LocalProject('p');
       container.read(selectedTargetProvider.notifier).set(focused);
 
@@ -2776,7 +2757,7 @@ void main() {
       );
     });
 
-    testWidgets('a path link reveals through the workspace menu when present', (
+    testWidgets('a path link reveals through the shell when one is mounted', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2791,8 +2772,8 @@ void main() {
       );
       final revealed = <WorkspaceView>[];
       container
-          .read(workspaceMenuControlProvider.notifier)
-          .set((active: null, reveal: revealed.add));
+          .read(revealWorkspaceViewControlProvider.notifier)
+          .set(revealed.add);
 
       unawaited(
         _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),

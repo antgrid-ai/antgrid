@@ -748,6 +748,12 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     widget.onTap!();
   }
 
+  void _openMenuAt(Offset position) => detached(
+    'FileTreeRow',
+    'row menu failed',
+    () => _showMenu(position),
+  );
+
   /// The row's context menu: right-click on desktop, long-press on touch.
   /// The path is project-relative — what an agent prompt or a terminal in the
   /// checkout wants, and the one form a remote project can answer too.
@@ -973,17 +979,9 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     // A void gesture callback discards the future it starts — see
     // util/detached.dart.
     return GestureDetector(
-      onSecondaryTapUp: (d) => detached(
-        'FileTreeRow',
-        'row menu failed',
-        () => _showMenu(d.globalPosition),
-      ),
+      onSecondaryTapUp: (d) => _openMenuAt(d.globalPosition),
       onLongPressStart: isMobilePlatform
-          ? (d) => detached(
-              'FileTreeRow',
-              'row menu failed',
-              () => _showMenu(d.globalPosition),
-            )
+          ? (d) => _openMenuAt(d.globalPosition)
           : null,
       child: row,
     );

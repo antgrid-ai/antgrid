@@ -13,6 +13,7 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/terminal_models.dart';
 import '../providers/ad_hoc_terminals.dart';
@@ -23,6 +24,7 @@ import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart';
 import 'terminal_view_wrapper.dart';
+import 'wheel_scroll.dart';
 
 /// The Terminals tab: the session's own shells, one at a time.
 ///
@@ -110,15 +112,25 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       return const AbLoading(message: 'loading terminals...');
     }
     final tabs = ref.watch(adHocTerminalsProvider);
-    final state = ref.watch(terminalStateProvider).value;
-    final attach = state?.attach ?? CheckoutAttachStatus.unknown;
+    // Only these fields: TerminalState has no ==, so watching the whole value
+    // repainted the pane on every emission.
+    final (:attach, :activeTerminalId, :checkoutPath) = ref.watch(
+      terminalStateProvider.select((s) {
+        final state = s.value;
+        return (
+          attach: state?.attach ?? CheckoutAttachStatus.unknown,
+          activeTerminalId: state?.activeTerminalId,
+          checkoutPath: state?.checkoutPath,
+        );
+      }),
+    );
 
-    var active = tabs.where((t) => t.terminalId == selectedId).firstOrNull;
+    final picked = tabs.where((t) => t.terminalId == selectedId).firstOrNull;
     // Only once the tab list is the bridge's answer: a reconnect starts a fresh
     // service whose list is empty until agent:status, and forgetting the pick
     // then would land the user on another terminal when the tabs come back.
     if (selectedId != null &&
-        active == null &&
+        picked == null &&
         key != null &&
         attach == CheckoutAttachStatus.ready) {
       // Deleted or gone from the bridge: forget it after this frame.
@@ -131,8 +143,9 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     // No pick recorded for this session (none made yet, or no session key to
     // file one under): the service's own focus, which New and a tab tap both
     // move, then the first tab.
-    active ??=
-        tabs.where((t) => t.terminalId == state?.activeTerminalId).firstOrNull ??
+    final active =
+        picked ??
+        tabs.where((t) => t.terminalId == activeTerminalId).firstOrNull ??
         tabs.firstOrNull;
 
     final atLimit = tabs.length >= _maxAdHocTerminals;
@@ -153,11 +166,11 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           if (active != null)
             _ActiveToolbar(
               // Empty from an older bridge, which does not report it.
-              path: state?.checkoutPath ?? '',
-              onClear: () => service.clearTerminal(active!.terminalId),
-              onRestart: () => service.restartTerminal(active!.terminalId),
+              path: checkoutPath ?? '',
+              onClear: () => service.clearTerminal(active.terminalId),
+              onRestart: () => service.restartTerminal(active.terminalId),
               onKill: () =>
-                  _kill(service, tabs, active!.terminalId, shown: true),
+                  _kill(service, tabs, active.terminalId, shown: true),
             ),
           Expanded(
             child: active != null
@@ -313,15 +326,7 @@ class _TabStripState extends State<_TabStrip> {
           ? atEnd
           : null;
       if (target != null) {
-        detached(
-          'TerminalTabStrip',
-          'reveal active tab failed',
-          () => _scroll.animateTo(
-            target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
-            duration: AbTokens.motionSnap,
-            curve: Curves.easeOut,
-          ),
-        );
+        _scrollTo(target, 'reveal active tab failed');
       }
     }
     _syncEdges();
@@ -332,13 +337,17 @@ class _TabStripState extends State<_TabStrip> {
   void _page(int direction) {
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
-    final target = (pos.pixels + direction * pos.viewportDimension * 0.7)
-        .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    final target = pos.pixels + direction * pos.viewportDimension * 0.7;
+    _scrollTo(target, 'page tabs failed');
+  }
+
+  void _scrollTo(double target, String what) {
+    final pos = _scroll.position;
     detached(
       'TerminalTabStrip',
-      'page tabs failed',
+      what,
       () => _scroll.animateTo(
-        target,
+        target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
         duration: AbTokens.motionSnap,
         curve: Curves.easeOut,
       ),
@@ -356,13 +365,7 @@ class _TabStripState extends State<_TabStrip> {
     if (event is! PointerScrollEvent || event.scrollDelta.dx != 0) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (e) {
       if (!_scroll.hasClients) return;
-      final pos = _scroll.position;
-      _scroll.jumpTo(
-        (pos.pixels + (e as PointerScrollEvent).scrollDelta.dy).clamp(
-          pos.minScrollExtent,
-          pos.maxScrollExtent,
-        ),
-      );
+      jumpScrollBy(_scroll, (e as PointerScrollEvent).scrollDelta.dy);
     });
   }
 
@@ -510,14 +513,7 @@ class _TerminalPillState extends State<_TerminalPill> {
                 ),
                 if (tab.unread && !widget.active) ...[
                   const SizedBox(width: AbTokens.space6),
-                  Container(
-                    width: AbTokens.dotSizeSm,
-                    height: AbTokens.dotSizeSm,
-                    decoration: BoxDecoration(
-                      color: p.unread,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
+                  const AbStatusDot(tone: AbStatusTone.unread),
                 ],
                 const SizedBox(width: AbTokens.space4),
                 AbIconButton(

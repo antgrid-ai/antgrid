@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'
-    show Clipboard, ClipboardData, LogicalKeyboardKey;
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
@@ -21,7 +20,6 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_text_field.dart';
-import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
@@ -38,6 +36,7 @@ import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
 import '../util/detached.dart';
 import '../util/relative_time.dart';
+import '../widgets/copy_path.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
 import '../widgets/file_tree_view.dart';
@@ -1247,43 +1246,33 @@ class _GitPanelBody extends ConsumerWidget {
       ],
     );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _GitBranchBar(panel: panel, counts: counts, git: git),
-        if (git.lastSyncFailure case final failure?)
-          _SyncFailureStrip(
-            failure: failure,
-            git: git,
-            fileService: panel.fileService,
-          ),
-        const AbSeparator.horizontal(),
-        Expanded(
-          // Mounted with or without changes, so the change count crossing zero
-          // keeps the chosen tab and History's scroll position.
-          child: _ChangesHistorySwitcher(
-            hasChanges: counts.hasChanges,
-            changedCount: counts.changedCount,
-            changes: counts.hasChanges
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _ChangesSectionHeader(
-                        counts: counts,
-                        fileService: fileService,
-                        collapsedPaths: git.collapsedPaths,
-                        expanded: true,
-                        onToggle: null,
-                      ),
-                      const AbSeparator.horizontal(),
-                      Expanded(child: _buildFileList(context)),
-                    ],
-                  )
-                : const SizedBox.shrink(),
-            history: history,
-          ),
-        ),
-      ],
+    return _GitPanelScaffold(
+      panel: panel,
+      counts: counts,
+      git: git,
+      // Mounted with or without changes, so the change count crossing zero
+      // keeps the chosen tab and History's scroll position.
+      body: _ChangesHistorySwitcher(
+        hasChanges: counts.hasChanges,
+        changedCount: counts.changedCount,
+        changes: counts.hasChanges
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _ChangesSectionHeader(
+                    counts: counts,
+                    fileService: fileService,
+                    collapsedPaths: git.collapsedPaths,
+                    expanded: true,
+                    onToggle: null,
+                  ),
+                  const AbSeparator.horizontal(),
+                  Expanded(child: _buildFileList(context)),
+                ],
+              )
+            : const SizedBox.shrink(),
+        history: history,
+      ),
     );
   }
 
@@ -1302,47 +1291,44 @@ class _GitPanelBody extends ConsumerWidget {
     final changesOpen = hasChanges && !panel.changesCollapsed;
     final historyOpen = !git.historyCollapsed;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _GitBranchBar(panel: panel, counts: counts, git: git),
-        if (git.lastSyncFailure case final failure?)
-          _SyncFailureStrip(
-            failure: failure,
-            git: git,
-            fileService: panel.fileService,
-          ),
-        const AbSeparator.horizontal(),
-        if (hasChanges) ...[
-          _ChangesSectionHeader(
-            counts: counts,
-            fileService: fileService,
-            collapsedPaths: git.collapsedPaths,
-            expanded: changesOpen,
-            onToggle: panel.onToggleChanges,
-          ),
-          if (changesOpen)
-            Expanded(
-              flex: historyOpen ? 3 : 1,
-              child: _buildFileList(context),
+    return _GitPanelScaffold(
+      panel: panel,
+      counts: counts,
+      git: git,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (hasChanges) ...[
+            _ChangesSectionHeader(
+              counts: counts,
+              fileService: fileService,
+              collapsedPaths: git.collapsedPaths,
+              expanded: changesOpen,
+              onToggle: panel.onToggleChanges,
             ),
-          const AbSeparator.horizontal(),
-        ],
-        _GitHistorySectionHeader(
-          fileService: fileService,
-          history: git.history,
-          collapsed: !historyOpen,
-          onToggleCollapsed: fileService.toggleHistoryCollapsed,
-        ),
-        if (historyOpen) ...[
-          const AbSeparator.horizontal(),
-          Expanded(
-            flex: changesOpen ? 2 : 1,
-            child: _HistoryList(git: git, fileService: fileService),
+            if (changesOpen)
+              Expanded(
+                flex: historyOpen ? 3 : 1,
+                child: _buildFileList(context),
+              ),
+            const AbSeparator.horizontal(),
+          ],
+          _GitHistorySectionHeader(
+            fileService: fileService,
+            history: git.history,
+            collapsed: !historyOpen,
+            onToggleCollapsed: fileService.toggleHistoryCollapsed,
           ),
-        ] else if (!changesOpen)
-          const Spacer(),
-      ],
+          if (historyOpen) ...[
+            const AbSeparator.horizontal(),
+            Expanded(
+              flex: changesOpen ? 2 : 1,
+              child: _HistoryList(git: git, fileService: fileService),
+            ),
+          ] else if (!changesOpen)
+            const Spacer(),
+        ],
+      ),
     );
   }
 
@@ -1800,10 +1786,12 @@ class _CommitHeaderRow extends StatelessWidget {
       ],
     );
     if (!context.mounted || action == null) return;
-    await Clipboard.setData(
-      ClipboardData(text: action == 'sha' ? commit.sha : commit.shortSha),
+    await copyTextWithToast(
+      context,
+      action == 'sha' ? commit.sha : commit.shortSha,
+      copied: 'Copied to clipboard',
+      failed: 'Could not copy the SHA.',
     );
-    if (context.mounted) showAbToast(context, 'Copied to clipboard');
   }
 
   @override

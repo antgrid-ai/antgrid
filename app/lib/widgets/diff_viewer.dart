@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 
@@ -16,6 +15,7 @@ import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
 import 'send_to_agent_comment.dart';
+import 'wheel_scroll.dart';
 
 /// Parsed representation of a single diff hunk.
 class _DiffHunk {
@@ -372,31 +372,6 @@ class _DiffViewerState extends State<DiffViewer> {
     );
   }
 
-  /// Sends a sideways wheel/trackpad scroll to the horizontal axis ONLY.
-  ///
-  /// A real trackpad swipe is never perfectly straight, and the vertical list
-  /// sits inside the horizontal one: left this to the framework, any sideways
-  /// scroll carrying a few pixels of drift is claimed by the innermost
-  /// interested Scrollable — the vertical one — and the diff creeps up and down
-  /// while refusing to move across. Claiming the dominant axis first is what
-  /// makes sideways stay sideways. A vertical-dominant event is left alone, so
-  /// the list keeps its own scrolling (and its fling) untouched.
-  void _onPointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final delta = event.scrollDelta;
-    if (delta.dx.abs() <= delta.dy.abs()) return;
-    if (!_horizontal.hasClients) return;
-    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
-      final position = _horizontal.position;
-      _horizontal.jumpTo(
-        (position.pixels + delta.dx).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        ),
-      );
-    });
-  }
-
   Widget _buildBody(BuildContext context) {
     // The gutter scrolls with the code rather than staying pinned, so a row's
     // tint runs the full width of the longest line: a band that stops at the
@@ -447,7 +422,7 @@ class _DiffViewerState extends State<DiffViewer> {
                     // signal goes to the FIRST registrant in hit-test order,
                     // which runs innermost-first, so only a node below the
                     // vertical Scrollable can take an event away from it. See
-                    // [_onPointerSignal].
+                    // [claimSidewaysScroll].
                     itemBuilder: (context, index) => Listener(
                       // Opaque, or the row only claims the pixels its text and
                       // gutter actually paint: the gap between them, and every
@@ -455,7 +430,7 @@ class _DiffViewerState extends State<DiffViewer> {
                       // to the vertical list, which is exactly where a sideways
                       // scroll starts creeping up and down again.
                       behavior: HitTestBehavior.opaque,
-                      onPointerSignal: _onPointerSignal,
+                      onPointerSignal: (e) => claimSidewaysScroll(e, _horizontal),
                       child: switch (_rows[index]) {
                         _HunkHeaderRow(:final text) => _buildHunkHeader(
                           context,

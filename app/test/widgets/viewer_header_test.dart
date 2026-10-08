@@ -1,11 +1,11 @@
 // app/test/widgets/viewer_header_test.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/widgets/viewer_header.dart';
 
 import '../design/test_harness.dart';
+import '../helpers/clipboard.dart';
 
 void main() {
   testWidgets('renders the path as a breadcrumb and size, fires close', (
@@ -38,22 +38,7 @@ void main() {
   testWidgets('clicking the breadcrumb offers relative and absolute copies', (
     tester,
   ) async {
-    final copied = <String>[];
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        if (call.method == 'Clipboard.setData') {
-          copied.add((call.arguments as Map)['text'] as String);
-        }
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        null,
-      ),
-    );
+    final copied = captureClipboard(tester);
     await pumpAntgrid(
       tester,
       const SizedBox(

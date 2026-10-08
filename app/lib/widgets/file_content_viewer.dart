@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:re_editor/re_editor.dart';
@@ -26,6 +25,7 @@ import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'viewer_header.dart';
 import 'viewer_support.dart';
+import 'wheel_scroll.dart';
 
 /// A widget that displays file content with syntax highlighting,
 /// loading states, and error handling.
@@ -292,27 +292,6 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     super.dispose();
   }
 
-  /// Sends a sideways-dominant scroll to the horizontal axis, whatever it
-  /// landed on. A pointer signal goes to the FIRST interested registrant in
-  /// hit-test order (innermost out), so this only works from a node below the
-  /// scrollable it is taking the event away from.
-  void _claimSidewaysScroll(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final delta = event.scrollDelta;
-    if (delta.dx.abs() <= delta.dy.abs()) return;
-    final scroller = _scrollController?.horizontalScroller;
-    if (scroller == null || !scroller.hasClients) return;
-    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
-      final position = scroller.position;
-      scroller.jumpTo(
-        (position.pixels + delta.dx).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        ),
-      );
-    });
-  }
-
   void _onPointerDown(PointerDownEvent event) {
     _dragStartSelection = _controller?.selection;
     if (_markedLine != null) setState(() => _markedLine = null);
@@ -533,9 +512,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                               // and drags the file up or down instead. This
                               // listener is a descendant of that scrollable,
                               // which is the only place a pointer signal can
-                              // be taken from it — see [_claimSidewaysScroll].
+                              // be taken from it — see [claimSidewaysScroll].
                               return Listener(
-                                onPointerSignal: _claimSidewaysScroll,
+                                onPointerSignal: (e) => claimSidewaysScroll(
+                                  e,
+                                  _scrollController?.horizontalScroller,
+                                ),
                                 child: DefaultCodeLineNumber(
                                   controller: editingController,
                                   notifier: notifier,

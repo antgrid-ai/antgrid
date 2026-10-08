@@ -14,14 +14,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
 
-/// Bounded pumps: the shell always has something animating, so it never
-/// settles.
-Future<void> _settle(WidgetTester tester) async {
-  for (var i = 0; i < 6; i++) {
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-}
-
 HandlerState _armed(String terminalId) => const HandlerState.initial()
     .copyWith(
       sessions: {
@@ -56,17 +48,19 @@ void main() {
       );
       container.read(activeSessionIdProvider.notifier).set('session-1');
       states.add(_armed('session-1'));
-      await _settle(tester);
+      await settleShell(tester);
 
-      container.read(revealHandlerTabProvider)?.call();
-      await _settle(tester);
+      container
+          .read(revealWorkspaceViewControlProvider)
+          ?.call(WorkspaceView.handler);
+      await settleShell(tester);
       expect(
         container.read(visibleWorkspaceViewProvider),
         WorkspaceView.handler,
       );
 
       states.add(const HandlerState.initial());
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(
         container.read(visibleWorkspaceViewsProvider),
@@ -76,7 +70,7 @@ void main() {
 
       // The fallback to Files must not have been saved as the user's choice.
       states.add(_armed('session-1'));
-      await _settle(tester);
+      await settleShell(tester);
       expect(
         container.read(visibleWorkspaceViewProvider),
         WorkspaceView.handler,

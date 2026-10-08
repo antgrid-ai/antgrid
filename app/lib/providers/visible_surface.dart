@@ -38,9 +38,10 @@ final visibleWorkspaceViewProvider =
 ///
 /// Also the only safe way to reveal a view in the same turn as a SESSION
 /// switch, which is why the session kebab's attention row writes here rather
-/// than calling `revealHandlerTab`: a focus change arms the shell's per-session
-/// UI restore, and that restore re-applies the target session's own saved tab
-/// after any tab the caller selected first. The drain runs after it.
+/// than calling [revealWorkspaceViewControlProvider]: a focus change arms the
+/// shell's per-session UI restore, and that restore re-applies the target
+/// session's own saved tab after any tab the caller selected first. The drain
+/// runs after it.
 ///
 /// Null is a written value, not just an absence: a location naming no view
 /// writes null so a view left pending by an earlier one is dropped rather than
@@ -82,7 +83,7 @@ final pendingAgentPageProvider =
 /// instead for the reason spelled out there.
 void revealHandlerTabNow(WidgetRef ref) {
   ref.read(pendingAgentPageProvider.notifier).set(null);
-  ref.read(revealHandlerTabProvider)?.call();
+  ref.read(revealWorkspaceViewControlProvider)?.call(WorkspaceView.handler);
 }
 
 /// A file a navigation named, waiting for the file explorer to open it.
@@ -166,17 +167,17 @@ final sessionHasBusActivityProvider =
 
 /// The workspace tabs on offer right now, in tab order.
 ///
-/// One provider rather than [WorkspaceView.values] at three call sites,
-/// because it is the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
-/// three surfaces that must never disagree (the desktop tab strip, the phone's
-/// bottom nav, the agent bar's workspace rail), and a condition written into
-/// each of them is the bug: an item that appeared on the phone and nowhere else
-/// would ship green, because nothing iterating that enum is under test.
+/// One provider rather than [WorkspaceView.values] at each of the three
+/// surfaces that render the tabs (the desktop tab strip, the phone's bottom
+/// nav, the agent bar's workspace rail): they must never disagree, and a
+/// condition written into each of them is the bug — an item that appeared on
+/// the phone and nowhere else would ship green, because nothing iterating that
+/// enum is under test.
 ///
-/// Handler is the conditional one: offered only while the focused session is
+/// Handler is the conditional view: offered only while the focused session is
 /// armed, or has a Handler question of its own still waiting. Disarming hides
-/// it at once — a pane showing it falls back to Files. Matched on
-/// the session's own id, so another session's Handler never puts the tab here.
+/// it at once — a pane showing it falls back to Files. Matched on the session's
+/// own id, so another session's Handler never puts the tab here.
 ///
 /// A Handler state that has not been [HandlerState.heard] says nothing about
 /// arming, so it keeps the last answer for the same session instead: a host
@@ -187,6 +188,14 @@ final visibleWorkspaceViewsProvider =
       _VisibleWorkspaceViews.new,
       name: 'visibleWorkspaceViews',
     );
+
+/// One shared instance, as [WorkspaceView.values] is for the other branch: a
+/// fresh list is never `==` to the last one, so a rebuild that leaves the
+/// Handler hidden would still notify every surface rendering the tabs.
+final _withoutHandler = List<WorkspaceView>.unmodifiable([
+  for (final v in WorkspaceView.values)
+    if (v != WorkspaceView.handler) v,
+]);
 
 class _VisibleWorkspaceViews extends Notifier<List<WorkspaceView>> {
   String? _answeredFor;
@@ -209,11 +218,7 @@ class _VisibleWorkspaceViews extends Notifier<List<WorkspaceView>> {
     final held = !handler.heard && _answeredFor == activeId && _handlerShown;
     _answeredFor = activeId;
     _handlerShown = handler.on || held;
-    if (_handlerShown) return WorkspaceView.values;
-    return [
-      for (final v in WorkspaceView.values)
-        if (v != WorkspaceView.handler) v,
-    ];
+    return _handlerShown ? WorkspaceView.values : _withoutHandler;
   }
 }
 
@@ -300,8 +305,8 @@ final workspaceMenuControlProvider =
 
 /// The mounted shell's own "show this tab" — selects it, opens whatever pane
 /// holds it, and on a phone swipes the workspace page forward. Published by
-/// WorkspaceShell in every layout and retracted when it deactivates, the same
-/// lifetime as `revealHandlerTabProvider`.
+/// WorkspaceShell in every layout and retracted when it deactivates, because
+/// it closes over that State.
 final revealWorkspaceViewControlProvider =
     NotifierProvider<
       ValueController<void Function(WorkspaceView)?>,
@@ -317,11 +322,6 @@ void revealWorkspaceView(WidgetRef ref, WorkspaceView view) {
   final reveal = ref.read(revealWorkspaceViewControlProvider);
   if (reveal != null) {
     reveal(view);
-    return;
-  }
-  final menu = ref.read(workspaceMenuControlProvider);
-  if (menu != null) {
-    menu.reveal(view);
     return;
   }
   ref.read(pendingWorkspaceViewProvider.notifier).set((

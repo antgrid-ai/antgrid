@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
@@ -14,6 +13,7 @@ import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
 
 import '../helpers/counting_file_node.dart';
+import '../helpers/clipboard.dart';
 import '../helpers/hover.dart';
 
 /// The rendered color of the row's name label — reads the actual [Text]
@@ -131,26 +131,6 @@ void main() {
     });
 
     group('Copy path', () {
-      List<String> captureClipboard(WidgetTester tester) {
-        final copied = <String>[];
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          (call) async {
-            if (call.method == 'Clipboard.setData') {
-              copied.add((call.arguments as Map)['text'] as String);
-            }
-            return null;
-          },
-        );
-        addTearDown(
-          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            SystemChannels.platform,
-            null,
-          ),
-        );
-        return copied;
-      }
-
       Widget themed() => MaterialApp(
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],

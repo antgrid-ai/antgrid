@@ -67,6 +67,8 @@ class TouchWheelLimiter {
   }
 
   ({bool up, bool press})? _wheel(String data) {
+    // Both report forms open with CSI; most traffic is plain keystrokes.
+    if (!data.startsWith('\x1b[')) return null;
     final sgr = _sgr.firstMatch(data);
     if (sgr != null) {
       final button = int.parse(sgr.group(1)!);

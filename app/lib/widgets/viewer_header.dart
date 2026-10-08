@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -114,10 +114,7 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    final parts = widget.path
-        .split(RegExp(r'[\\/]'))
-        .where((s) => s.isNotEmpty)
-        .toList();
+    final parts = _segments(widget.path).toList();
     final folder = AbTokens.monoStyle(color: p.textMuted);
     final file = AbTokens.monoStyle(
       color: p.textPrimary,
@@ -167,19 +164,27 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
   }
 }
 
+final _separator = RegExp(r'[\\/]');
+final _driveRoot = RegExp(r'^[A-Za-z]:');
+final _driveRootSlash = RegExp(r'^[A-Za-z]:[\\/]');
+final _trailingSeparators = RegExp(r'[\\/]+$');
+
+Iterable<String> _segments(String path) =>
+    path.split(_separator).where((s) => s.isNotEmpty);
+
 /// True for a path that already names its own root: POSIX, a Windows drive,
 /// or UNC. The viewer is handed one for an image outside the checkout
 /// (`externalImagePath`), which has no relative form to join.
 bool isAbsoluteViewerPath(String path) =>
     path.startsWith('/') ||
     path.startsWith(r'\\') ||
-    RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
+    _driveRootSlash.hasMatch(path);
 
 /// [relative] joined onto [root] in [root]'s separator style — the checkout
 /// lives on the bridge's machine, which need not share this one's OS.
 String joinCheckoutPath(String root, String relative) {
-  final windows = root.contains(r'\') || RegExp(r'^[A-Za-z]:').hasMatch(root);
-  final base = root.replaceAll(RegExp(r'[\\/]+$'), '');
-  final parts = relative.split(RegExp(r'[\\/]')).where((s) => s.isNotEmpty);
+  final windows = root.contains(r'\') || _driveRoot.hasMatch(root);
+  final base = root.replaceAll(_trailingSeparators, '');
+  final parts = _segments(relative);
   return [base, ...parts].join(windows ? r'\' : '/');
 }

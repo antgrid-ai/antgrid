@@ -22,7 +22,6 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
-import '../models/workspace_view.dart';
 import '../project/project_session.dart';
 import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
@@ -748,7 +747,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // Pinned: dispose can run after the ProviderScope is gone, and reading
     // through `ref` then throws.
     _container = ref.container;
-    _restoreComposeDraft();
+    _loadComposeDraft();
     if (!widget.isAgentSurface) return;
     // Post-frame because publishing writes a provider. Retracted in dispose,
     // not deactivate: this sits inside the GlobalKey-reparented AgentPanel, so
@@ -2161,13 +2160,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     previewService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.previewService,
-    revealView: _revealWorkspaceView,
+    revealView: (view) => revealWorkspaceView(ref, view),
     disclosed: _hoveredLink.value?.uri == uri,
     focusedTarget: () => ref.read(selectedTargetProvider),
   );
-
-  void _revealWorkspaceView(WorkspaceView view) =>
-      revealWorkspaceView(ref, view);
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.
@@ -2396,7 +2392,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final TextEditingController _composeDraft = TextEditingController();
   final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
   bool _composeOpen = false;
-  late final TerminalComposeDrafts _composeDrafts;
+  late final _composeDrafts = ref.read(terminalComposeDraftsProvider);
 
   /// Derived from [widget] on every read, never cached: [didUpdateWidget]
   /// accepts a new terminal or service, and a stale key would file one
@@ -2409,11 +2405,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   /// Reopens the box as it was left, but unfocused: raising the keyboard is
   /// the user's call, and a remount is not one.
-  void _restoreComposeDraft() {
-    _composeDrafts = ref.read(terminalComposeDraftsProvider);
-    _loadComposeDraft();
-  }
-
   void _loadComposeDraft() {
     _composeDraft.removeListener(_saveComposeDraft);
     _composeDraft.text = _composeDrafts.textFor(_composeDraftKey);

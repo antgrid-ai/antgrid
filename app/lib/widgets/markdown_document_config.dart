@@ -429,8 +429,9 @@ final MarkdownGenerator markdownDocumentGenerator = MarkdownGenerator(
 /// Joins a paragraph's soft-wrapped lines, eating the indentation a wrapped
 /// list item or quote carries on its continuation lines.
 @visibleForTesting
-String joinSoftBreaks(String text) =>
-    text.replaceAll(RegExp(r'[ \t]*\n[ \t]*'), ' ');
+String joinSoftBreaks(String text) => text.replaceAll(_softBreak, ' ');
+
+final _softBreak = RegExp(r'[ \t]*\n[ \t]*');
 
 /// Cell leading: tighter than prose, since a wrapped cell is a few lines at
 /// most and a row should not read as a paragraph.

@@ -30,15 +30,18 @@ class ZoomableImage extends StatefulWidget {
 class ZoomableImageState extends State<ZoomableImage>
     with SingleTickerProviderStateMixin {
   late final AnimationController _animation;
-  Matrix4Tween? _tween;
-  Matrix4 _matrix = Matrix4.identity();
+  late Matrix4Tween _tween;
+
+  // Only the Transform listens, so a gesture or animation tick repaints the
+  // image without rebuilding the detector or re-running the LayoutBuilder.
+  final ValueNotifier<Matrix4> _matrix = ValueNotifier(Matrix4.identity());
   Size _viewport = Size.zero;
 
   Matrix4? _gestureStartMatrix;
   Offset _gestureStartFocal = Offset.zero;
   Offset? _doubleTapAt;
 
-  double get scale => _matrix.getMaxScaleOnAxis();
+  double get scale => _matrix.value.getMaxScaleOnAxis();
   bool get isZoomed => scale > 1.01;
 
   @override
@@ -53,20 +56,16 @@ class ZoomableImageState extends State<ZoomableImage>
   @override
   void dispose() {
     _animation.dispose();
+    _matrix.dispose();
     super.dispose();
   }
 
   void _stepAnimation() {
-    final tween = _tween;
-    if (tween == null) return;
-    setState(
-      () =>
-          _matrix = tween.transform(Curves.easeOut.transform(_animation.value)),
-    );
+    _matrix.value = _tween.transform(Curves.easeOut.transform(_animation.value));
   }
 
   void _animateTo(Matrix4 target) {
-    _tween = Matrix4Tween(begin: _matrix.clone(), end: target);
+    _tween = Matrix4Tween(begin: _matrix.value.clone(), end: target);
     _animation.forward(from: 0);
   }
 
@@ -101,7 +100,7 @@ class ZoomableImageState extends State<ZoomableImage>
     final focal = at ?? _viewport.center(Offset.zero);
     _animateTo(
       _zoomed(
-        from: _matrix,
+        from: _matrix.value,
         anchor: focal,
         target: focal,
         scale: ZoomableImage.doubleTapScale,
@@ -111,20 +110,18 @@ class ZoomableImageState extends State<ZoomableImage>
 
   void _onScaleStart(ScaleStartDetails d) {
     _animation.stop();
-    _gestureStartMatrix = _matrix.clone();
+    _gestureStartMatrix = _matrix.value.clone();
     _gestureStartFocal = d.localFocalPoint;
   }
 
   void _onScaleUpdate(ScaleUpdateDetails d) {
     final start = _gestureStartMatrix;
     if (start == null) return;
-    setState(
-      () => _matrix = _zoomed(
-        from: start,
-        anchor: _gestureStartFocal,
-        target: d.localFocalPoint,
-        scale: start.getMaxScaleOnAxis() * d.scale,
-      ),
+    _matrix.value = _zoomed(
+      from: start,
+      anchor: _gestureStartFocal,
+      target: d.localFocalPoint,
+      scale: start.getMaxScaleOnAxis() * d.scale,
     );
   }
 
@@ -138,16 +135,34 @@ class ZoomableImageState extends State<ZoomableImage>
       final dy = (e as PointerScrollEvent).scrollDelta.dy;
       if (dy == 0) return;
       _animation.stop();
-      setState(
-        () => _matrix = _zoomed(
-          from: _matrix,
-          anchor: e.localPosition,
-          target: e.localPosition,
-          scale: scale * math.exp(-dy / 300),
-        ),
+      _matrix.value = _zoomed(
+        from: _matrix.value,
+        anchor: e.localPosition,
+        target: e.localPosition,
+        scale: scale * math.exp(-dy / 300),
       );
     });
   }
+
+  late final Map<Type, GestureRecognizerFactory> _gestures = {
+    _ZoomGestureRecognizer:
+        GestureRecognizerFactoryWithHandlers<_ZoomGestureRecognizer>(
+          () => _ZoomGestureRecognizer(isZoomed: () => isZoomed),
+          (r) => r
+            ..onStart = _onScaleStart
+            ..onUpdate = _onScaleUpdate
+            ..onEnd = _onScaleEnd,
+        ),
+    DoubleTapGestureRecognizer:
+        GestureRecognizerFactoryWithHandlers<DoubleTapGestureRecognizer>(
+          DoubleTapGestureRecognizer.new,
+          (r) => r
+            ..onDoubleTapDown = (d) {
+              _doubleTapAt = d.localPosition;
+            }
+            ..onDoubleTap = () => toggleZoom(_doubleTapAt),
+        ),
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -158,30 +173,12 @@ class ZoomableImageState extends State<ZoomableImage>
           onPointerSignal: _onPointerSignal,
           child: RawGestureDetector(
             behavior: HitTestBehavior.opaque,
-            gestures: {
-              _ZoomGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<_ZoomGestureRecognizer>(
-                    () => _ZoomGestureRecognizer(isZoomed: () => isZoomed),
-                    (r) => r
-                      ..onStart = _onScaleStart
-                      ..onUpdate = _onScaleUpdate
-                      ..onEnd = _onScaleEnd,
-                  ),
-              DoubleTapGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<
-                    DoubleTapGestureRecognizer
-                  >(
-                    DoubleTapGestureRecognizer.new,
-                    (r) => r
-                      ..onDoubleTapDown = (d) {
-                        _doubleTapAt = d.localPosition;
-                      }
-                      ..onDoubleTap = () => toggleZoom(_doubleTapAt),
-                  ),
-            },
+            gestures: _gestures,
             child: ClipRect(
-              child: Transform(
-                transform: _matrix,
+              child: ValueListenableBuilder<Matrix4>(
+                valueListenable: _matrix,
+                builder: (context, matrix, child) =>
+                    Transform(transform: matrix, child: child),
                 child: SizedBox.fromSize(size: _viewport, child: widget.child),
               ),
             ),
@@ -239,12 +236,6 @@ class _ZoomGestureRecognizer extends ScaleGestureRecognizer {
   void rejectGesture(int pointer) {
     _downAt.remove(pointer);
     super.rejectGesture(pointer);
-  }
-
-  @override
-  void dispose() {
-    _downAt.clear();
-    super.dispose();
   }
 
   @override

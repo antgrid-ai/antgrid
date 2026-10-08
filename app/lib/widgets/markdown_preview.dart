@@ -1,4 +1,3 @@
-
 import 'package:flutter/widgets.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 
@@ -167,7 +166,10 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(child: _buildDocument(context)),
+              // The document fills the pane, as VS Code's markdown preview
+              // does: no reading-width cap, whose leftover space only ever
+              // landed on the right and left half a maximised viewer empty.
+              Expanded(child: _document(context)),
               if (showOutline && wide) ...[
                 const AbSeparator.vertical(),
                 SizedBox(
@@ -188,11 +190,6 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
       ),
     );
   }
-
-  // The document fills the pane, as VS Code's markdown preview does: no
-  // reading-width cap, whose leftover space only ever landed on the right and
-  // left half a maximised viewer empty.
-  Widget _buildDocument(BuildContext context) => _document(context);
 
   /// The document, reused verbatim while nothing it renders from has changed.
   ///

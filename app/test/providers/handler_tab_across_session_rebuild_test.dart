@@ -3,16 +3,15 @@
 // Until its first handler:status it cannot say whether a session is armed, and
 // the Handler tab must not read that silence as a disarm.
 import 'package:antgrid/models/workspace_view.dart';
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/visible_surface.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Map<String, dynamic> _armedStatus(String terminalId) => {
@@ -51,14 +50,7 @@ void main() {
         ) async {
           final t = FakeAgentTransport();
           transports.add(t);
-          final cache = await CachedSessionsStore.open();
-          return ProjectSession(
-            projectId: projectId,
-            transport: t,
-            mode: ProjectSessionMode.local,
-            cachedSessionsStore: cache,
-            onClose: () async => await t.dispose(),
-          );
+          return newFakeProjectSession(t, projectId: projectId);
         }),
       ],
     );

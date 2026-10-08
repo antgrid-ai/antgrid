@@ -2,10 +2,9 @@
 // and the Restart and Clear it offers.
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/terminal_service.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -15,13 +14,7 @@ void main() {
 
   Future<(FakeAgentTransport, TerminalService)> boot() async {
     final t = FakeAgentTransport();
-    final session = ProjectSession(
-      projectId: 'p',
-      transport: t,
-      mode: ProjectSessionMode.local,
-      cachedSessionsStore: await CachedSessionsStore.open(),
-      onClose: () async => await t.dispose(),
-    );
+    final session = await newFakeProjectSession(t);
     final svc = TerminalService.fromSession(session);
     addTearDown(() async {
       await svc.dispose();

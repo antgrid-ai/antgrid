@@ -4,7 +4,6 @@
 import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/client_id.dart';
@@ -12,13 +11,13 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/session_workspace_state.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/app_settings_service.dart';
-import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/terminal_list_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fake_project_session.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Future<FakeAgentTransport> _pumpPanel(
@@ -29,13 +28,7 @@ Future<FakeAgentTransport> _pumpPanel(
 }) async {
   useInMemoryPrefs();
   final transport = FakeAgentTransport();
-  final session = ProjectSession(
-    projectId: 'test',
-    transport: transport,
-    mode: ProjectSessionMode.local,
-    cachedSessionsStore: await CachedSessionsStore.open(),
-    onClose: () async => await transport.dispose(),
-  );
+  final session = await newFakeProjectSession(transport, projectId: 'test');
   // Not awaited — see terminal_list_view_empty_state_test.dart.
   addTearDown(() => unawaited(session.close()));
 
