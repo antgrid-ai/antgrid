@@ -74,7 +74,7 @@ export const free: PlanCardData = {
   note: "One machine, one person · no card",
   features: [
     `${FREE_WORKERS} worker machine`,
-    "Encrypted remote control from your phone",
+    "Encrypted access from your phone",
     "Unlimited projects, terminals & sessions",
     "File explorer, git & browser preview",
     "End-to-end encrypted · zero-knowledge relay",

@@ -16,6 +16,10 @@ export type RoadmapEntry = RoadmapDetails & (
 // Review dates record an editorial check, never a build timestamp.
 export const LAST_REVIEWED = "2026-10-08";
 
+// Done shows only the most recent completions; the changelog is the full record
+// of what shipped, so the roadmap stays about direction rather than an archive.
+export const DONE_LIMIT = 5;
+
 export const ROADMAP: readonly RoadmapEntry[] = [
   {
     id: "agent-scheduling",
@@ -108,7 +112,7 @@ export function groupRoadmap(entries: readonly RoadmapEntry[]) {
     { id: "now", title: "Now", description: "Work in progress.", entries: entries.filter((entry) => entry.status === "now") },
     { id: "next", title: "Next", description: "Planned work.", entries: entries.filter((entry) => entry.status === "next") },
     { id: "exploring", title: "Exploring", description: "Ideas under consideration, not commitments.", entries: entries.filter((entry) => entry.status === "exploring") },
-    { id: "done", title: "Done", description: "The latest completed features.", entries: entries.filter((entry) => entry.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5) },
+    { id: "done", title: "Done", description: "The latest completed features.", entries: entries.filter((entry) => entry.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, DONE_LIMIT) },
   ].filter((group) => group.entries.length > 0);
 }
 
