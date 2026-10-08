@@ -1,4 +1,4 @@
-import { toPosixPath } from "./hooks";
+import { toPosixPath } from "../launch-inject";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
 // Codex does NOT pass its own environment down to an MCP server — a probe

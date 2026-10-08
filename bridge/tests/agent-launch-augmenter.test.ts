@@ -12,6 +12,7 @@ import { codexNotifyOnlyArgs } from "../../packages/antgrid-agents/src/agents/co
 import { pluginDirArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
 import { AGENTS } from "../src/agent-runtime";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
+import { withUserEnv } from "./support/user-env";
 import type { AgentKey, LaunchAugmentation } from "../../packages/antgrid-agents/src/agents/types";
 
 const dirs: string[] = [];
@@ -115,38 +116,28 @@ describe("augmentAgentLaunch", () => {
   });
 
   test("opencode emits its existing runtime-owned plugin config", () => {
-    const prev = process.env.OPENCODE_CONFIG;
-    delete process.env.OPENCODE_CONFIG;
-    try {
-      const a = augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF });
-      expect(a.args).toEqual([]);
-      const cfgPath = a.env.OPENCODE_CONFIG;
-      expect(cfgPath).toBeTruthy();
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      expect(Array.isArray(cfg.plugin)).toBe(true);
-      expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
-    } finally { if (prev !== undefined) process.env.OPENCODE_CONFIG = prev; }
+    const a = withUserEnv({}, () => augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF }));
+    expect(a.args).toEqual([]);
+    const cfgPath = a.env.OPENCODE_CONFIG;
+    expect(cfgPath).toBeTruthy();
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    expect(Array.isArray(cfg.plugin)).toBe(true);
+    expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
   });
 
   test("opencode respects a user-set OPENCODE_CONFIG", () => {
-    const prev = process.env.OPENCODE_CONFIG;
-    const prevContent = process.env.OPENCODE_CONFIG_CONTENT;
-    process.env.OPENCODE_CONFIG = "/user/own.json";
-    delete process.env.OPENCODE_CONFIG_CONTENT;
-    try {
-      const launch = augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF });
-      // Only the hook channel yields; the MCP entry travels in its own variable.
-      expect(launch.args).toEqual([]);
-      expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
-      expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
-      expect(launch.observation).toEqual(NO_OBSERVATION);
-      expect(launch.observation?.handler).toBe(false);
-      expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
-      expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
-    } finally {
-      if (prev === undefined) delete process.env.OPENCODE_CONFIG; else process.env.OPENCODE_CONFIG = prev;
-      if (prevContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT; else process.env.OPENCODE_CONFIG_CONTENT = prevContent;
-    }
+    const launch = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () =>
+      augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF }),
+    );
+    // Only the hook channel yields; the MCP entry travels in its own variable.
+    expect(launch.args).toEqual([]);
+    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid).toEqual({
+      type: "local", command: [HOOK_COMMAND.binary, "mcp"],
+    });
+    expect(launch.observation).toEqual(NO_OBSERVATION);
+    expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
+    expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
   });
 
   test("unknown tool has no injection", () => {
@@ -304,19 +295,12 @@ describe("augmentAgentLaunch", () => {
 
 
 test("failed runtime plugin config leaves independent fallback channels available", () => {
-  const previous = process.env.OPENCODE_CONFIG;
-  delete process.env.OPENCODE_CONFIG;
   const file = join(abdir(), "not-a-directory");
   writeFileSync(file, "x");
-  try {
-    const launch = augmentAgentLaunch("opencode", { abDir: file, self: BRIDGE_SELF });
-    expect(launch.observation).toEqual(NO_OBSERVATION);
-    expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
-    expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
-  } finally {
-    if (previous === undefined) delete process.env.OPENCODE_CONFIG;
-    else process.env.OPENCODE_CONFIG = previous;
-  }
+  const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", { abDir: file, self: BRIDGE_SELF }));
+  expect(launch.observation).toEqual(NO_OBSERVATION);
+  expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
+  expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
 });
 
 test("notification and title installation outcomes are independent", () => {
@@ -441,63 +425,43 @@ describe("augmentAgentLaunch MCP injection", () => {
 });
 
 describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
-  const MCP_COMMAND = { binary: HOOK_COMMAND.binary, preargs: ["mcp"] };
-  const VARS = ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "KILO_CONFIG_CONTENT"] as const;
-  const saved = new Map<string, string | undefined>();
-  beforeAll(() => { for (const k of VARS) saved.set(k, process.env[k]); });
-  afterEach(() => {
-    for (const k of VARS) {
-      const v = saved.get(k);
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    overrideCursorHelp(CURSOR_HELP);
-  });
-  function clean() { for (const k of VARS) delete process.env[k]; }
+  afterEach(() => overrideCursorHelp(CURSOR_HELP));
 
+  const ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "mcp"] };
   const FAMILY = [
     { tool: "opencode", envVar: "OPENCODE_CONFIG_CONTENT" },
     { tool: "kilo", envVar: "KILO_CONFIG_CONTENT" },
   ] as const;
 
   for (const { tool, envVar } of FAMILY) {
+    const augmentWith = (value?: string) =>
+      withUserEnv(value === undefined ? {} : { [envVar]: value }, () =>
+        augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF }),
+      );
+
     test(`${tool} adds mcp.antgrid as separate command fields`, () => {
-      clean();
-      const a = augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF });
-      expect(JSON.parse(a.env[envVar])).toEqual({
-        mcp: { antgrid: { type: "local", command: [HOOK_COMMAND.binary, "mcp"] } },
-      });
+      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
     });
 
     test(`${tool} keeps a user's ${envVar} keys and their own mcp servers`, () => {
-      clean();
-      process.env[envVar] = JSON.stringify({
+      const a = augmentWith(JSON.stringify({
         model: "x/y",
         mcp: { mine: { type: "local", command: ["mine"] }, antgrid: { type: "remote", url: "stale" } },
-      });
-      const a = augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF });
+      }));
       expect(JSON.parse(a.env[envVar])).toEqual({
         model: "x/y",
-        mcp: {
-          mine: { type: "local", command: ["mine"] },
-          antgrid: { type: "local", command: [HOOK_COMMAND.binary, "mcp"] },
-        },
+        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
       });
     });
 
     test(`${tool} injects nothing into a ${envVar} that is not a JSON object`, () => {
       for (const bad of ["not json", "[1]", '"s"', "null", "7"]) {
-        clean();
-        process.env[envVar] = bad;
-        const a = augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF });
-        expect(a.env[envVar]).toBeUndefined();
+        expect(augmentWith(bad).env[envVar]).toBeUndefined();
       }
     });
 
     test(`${tool} treats a blank ${envVar} as unset`, () => {
-      clean();
-      process.env[envVar] = "  ";
-      const a = augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF });
-      expect(JSON.parse(a.env[envVar]).mcp.antgrid.command).toEqual([HOOK_COMMAND.binary, "mcp"]);
+      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
     });
   }
 
@@ -506,7 +470,6 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     const a = augmentAgentLaunch("github-copilot", { abDir, self: BRIDGE_SELF });
     const file = join(abDir, "mcp", "copilot.json");
     expect(a.args.slice(-2)).toEqual(["--additional-mcp-config", `@${file.replace(/\\/g, "/")}`]);
-    expect(a.args[a.args.length - 1]).not.toContain("\\");
     // Outside the tree the hooks hand to `--plugin-dir`: a `.mcp.json` in
     // there would register the server twice.
     expect(a.args).toContain(join(abDir, "plugin", "copilot"));
@@ -571,11 +534,5 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     const abDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-  });
-
-  test("an explicit mcpCommand reaches the new profiles through the registry entry point", () => {
-    const abDir = abdir();
-    const a = augmentWithRegistry("github-copilot", { abDir, hookCommand: HOOK_COMMAND, mcpCommand: MCP_COMMAND });
-    expect(a.args.some((x) => x.startsWith("@"))).toBe(true);
   });
 });

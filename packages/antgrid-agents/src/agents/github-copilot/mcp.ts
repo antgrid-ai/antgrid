@@ -1,11 +1,6 @@
 import { join } from "node:path";
-import { atomicWriteFile } from "../../atomic-file";
-import { logger } from "../../host";
-import { toPosixPath } from "../codex/hooks";
-import { hasFiles, NO_INJECTION } from "../launch-inject";
+import { materializeJson, NO_INJECTION, toPosixPath } from "../launch-inject";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
-
-const log = logger.child({ component: "agent-launch" });
 
 /**
  * `--additional-mcp-config @<file>`, which augments `~/.copilot/mcp-config.json`
@@ -31,11 +26,6 @@ export function inject({ abDir, mcpCommand }: McpInjectCtx): LaunchAugmentation 
       antgrid: { type: "local", command: mcpCommand.binary, args: [...mcpCommand.preargs], tools: ["*"] },
     },
   };
-  try {
-    atomicWriteFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  } catch (err) {
-    log.warn("failed to materialize Copilot MCP config: %s", err);
-  }
-  if (!hasFiles([configPath])) return NO_INJECTION;
+  if (!materializeJson("Copilot MCP config", { [configPath]: config })) return NO_INJECTION;
   return { args: ["--additional-mcp-config", `@${toPosixPath(configPath)}`], env: {} };
 }

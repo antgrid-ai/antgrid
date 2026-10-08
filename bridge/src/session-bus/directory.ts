@@ -174,7 +174,7 @@ export function directoryRowsFor(
       lastActiveAt: entry.lastUsedAt,
       // An unknown tool is receive-only, not a peer: a session whose vendor
       // this bridge cannot name certainly does not declare an mcp profile. Only
-      // terminal launches inject the profile; chat drivers start without it.
+      // terminal launches inject the profile; `buildChatSpawnAugment` skips it.
       canReply: entry.mode !== "chat" && entry.tool !== undefined && agentSpec(entry.tool)?.mcp !== undefined,
     });
   }

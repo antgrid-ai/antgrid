@@ -697,6 +697,11 @@ export interface AgentSpec {
    * `HookProfile.portFileFallback` defuses cursor-agent's global hooks. Add an
    * entry only after measuring the agent's own MCP config against a real
    * binary.
+   *
+   * Every profile merges into the user's own servers rather than replacing
+   * them, keeps command and args as separate fields (the binary path may hold
+   * spaces), and never places its config inside a `--plugin-dir` tree the
+   * agent's hook profile already passes, where it would register twice.
    */
   mcp?: McpProfile;
   /**

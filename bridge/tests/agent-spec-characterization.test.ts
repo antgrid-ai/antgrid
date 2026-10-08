@@ -25,6 +25,7 @@ import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-pro
 import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-runtime";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
+import { withUserEnv } from "./support/user-env";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
 import { assembleContext } from "../src/handler/context";
 import { type HookCommand } from "../src/hook-command";
@@ -393,26 +394,7 @@ describe("launch augmentation", () => {
   beforeAll(() => overrideCursorHelp("--trust\n--plugin-dir <dir>"));
   afterAll(() => overrideCursorHelp(undefined));
 
-  const OWNED_ENV = ["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "KILO_CONFIG_CONTENT"] as const;
-
-  /** Runs `fn` with the given user-owned variables set (or cleared), then restores them. */
-  function withUserEnv<T>(env: Partial<Record<(typeof OWNED_ENV)[number], string>>, fn: () => T): T {
-    const prev = OWNED_ENV.map((k) => [k, process.env[k]] as const);
-    for (const k of OWNED_ENV) delete process.env[k];
-    Object.assign(process.env, env);
-    try {
-      return fn();
-    } finally {
-      for (const [k, v] of prev) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
-  }
-
   function augment(tool: string, abDir: string, cursorDir: string) {
-    // The developer's own shell may own these variables; clear them so the
-    // table describes the bridge's behavior, not the host's.
     return withUserEnv({}, () => augmentAgentLaunch(tool, { abDir, cursorDir, self: BRIDGE_SELF }));
   }
 
@@ -452,17 +434,6 @@ describe("launch augmentation", () => {
     expect(a.env.OPENCODE_CONFIG).toBe(join(abDir, "agents", "opencode-session-namer.json"));
     expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
     expect(a.notificationsInjected).toBeUndefined();
-  });
-
-  test("opencode: the hook part yields to a user-set OPENCODE_CONFIG, the MCP part does not", () => {
-    const a = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () =>
-      augmentAgentLaunch("opencode", { abDir: tmp("ab-spec-"), cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF }),
-    );
-    expect(a.args).toEqual([]);
-    // The user's own file stays theirs: nothing of ours replaces it.
-    expect(a.env.OPENCODE_CONFIG).toBeUndefined();
-    expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
-    expect(a.observation).toEqual(NO_OBSERVATION);
   });
 
   test("cursor-agent", () => {
