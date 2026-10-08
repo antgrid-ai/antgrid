@@ -179,6 +179,7 @@ export interface PrepareWorktreeArgs {
   projectId: string;
   repoPath: string;
   sessionId: string;
+  scheduleOwnerId?: string;
   sessionName?: string;
   baseBranch?: string;
   /** A bridge-resolved immutable commit. Never accepted from a client. */
@@ -293,7 +294,7 @@ export class WorktreeManager {
       const record: CheckoutRecord = {
         id: checkoutId, projectId: args.projectId, kind: "managed-worktree",
         path: canonical(worktreePath), branch, baseRef: base.ref, managed: true,
-        sessionId: args.sessionId, createdAt: this.now(),
+        sessionId: args.sessionId, scheduleOwnerId: args.scheduleOwnerId, createdAt: this.now(),
       };
       try {
         await this.verifyCreated(repoPath, record, base.commit);
@@ -404,6 +405,9 @@ export class WorktreeManager {
     const located = await this.findCheckout(args.checkoutId);
     if (!located) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer registered.");
     const { record, repoPath } = located;
+    if (record.scheduleOwnerId) {
+      throw new WorktreeError("WORKTREE_CONFLICT", "This workspace belongs to a schedule. Delete the schedule before removing its workspace.");
+    }
     if (!record.managed || !isManagedCheckoutKind(record.kind)) {
       throw new WorktreeError("WORKTREE_CONFLICT", "Antgrid does not own this checkout.");
     }
@@ -710,6 +714,10 @@ export class WorktreeManager {
     const registered = await this.registeredPaths(repoPath);
     const live = new Set<string>();
     for (const record of state.records) {
+      if (record.scheduleOwnerId) {
+        live.add(canonical(record.path));
+        continue;
+      }
       if (!record.managed) {
         live.add(canonical(record.path));
         continue;

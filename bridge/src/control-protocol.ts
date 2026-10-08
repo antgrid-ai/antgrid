@@ -6,6 +6,7 @@ import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capa
 import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
+  z.object({ id: z.string().min(1), type: z.literal("scheduler:request"), method: z.string().startsWith("scheduler."), params: z.unknown().optional() }),
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
   z.object({ id: z.string().min(1), type: z.literal("project:resolve"), folder: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("tools:list") }),
@@ -277,6 +278,7 @@ export interface ConnectInfo {
 }
 
 export type ControlResponse =
+  | { id: string; ok: true; type: "scheduler:request"; result: unknown }
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
   | {
       id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string;

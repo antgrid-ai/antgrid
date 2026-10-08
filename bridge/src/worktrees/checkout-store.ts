@@ -12,6 +12,7 @@ const RecordSchema = z.object({
   baseRef: z.string().nullable(),
   managed: z.boolean(),
   sessionId: z.string().nullable(),
+  scheduleOwnerId: z.string().min(1).optional(),
   createdAt: z.number().finite(),
   setupState: z.enum(DURABLE_SETUP_STATES).optional(),
   setupFinishedAt: z.number().finite().optional(),
@@ -149,6 +150,14 @@ export class CheckoutStore {
     return removed;
   }
 
+  async releaseScheduleOwner(scheduleId: string, checkoutId: string): Promise<void> {
+    await this.update(checkoutId, (record) => {
+      if (record.scheduleOwnerId !== scheduleId) return record;
+      const { scheduleOwnerId: _owner, ...released } = record;
+      return released;
+    });
+  }
+
   /** Serializes the read-modify-write against every other holder of this file.
    * The lock is keyed by path and static because callers mint a fresh store per
    * call (WorktreeManager.storeFor), so an instance field would guard nothing:
@@ -162,7 +171,9 @@ export class CheckoutStore {
     let failure: unknown;
     const mine = previous.then(async () => {
       try {
-        const next = apply(await this.list());
+        const state = await this.read();
+        if (!state.healthy) throw new Error("Checkout storage could not be read completely");
+        const next = apply(state.records);
         if (next) await this.write(next);
       } catch (error) { failure = error; }
     });

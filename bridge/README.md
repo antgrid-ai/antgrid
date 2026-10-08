@@ -28,5 +28,5 @@ from the root covers it.
   and `phones` (inspect/drop local phone records).
 - Requires Bun — the minimum version is checked at startup in `src/index.ts`.
 
-Deep reference for agents and contributors: `bridge/CLAUDE.md` and
+Deep reference for agents and contributors: `bridge/AGENTS.md` and
 `docs/architecture.md` at the repo root.

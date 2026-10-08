@@ -17,6 +17,16 @@ export const PushDeliverMessage = z.object({
     epk: z.string().min(1).max(256),
     box: z.string().min(1).max(8192),
   }),
+  /**
+   * Opaque per-thread key the relay passes to APNs as `apns-collapse-id`, so
+   * a newer push for a thread replaces the older one on the device. Not sent
+   * to FCM, whose four-keys-per-device cap would drop whole threads (relay
+   * fcm.ts). The bridge derives it with a key the relay never sees, so it
+   * must never carry a name, path or id in the clear; the relay learns only
+   * "same thread as before". Optional both ways: older bridges omit it and
+   * older relays strip it as an unknown key.
+   */
+  collapseKey: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
 });
 
 export type PushDeliverMessage = z.infer<typeof PushDeliverMessage>;

@@ -171,9 +171,7 @@ the app's terminal view needs, Android PTY libraries relinked to pass Play's
 static archives, which is the only link mode Flutter's iOS native-assets driver
 accepts. `portable_pty`'s prebuilt binaries are published from the fork for those
 last two reasons; `ghostty_vte`'s are byte-identical to upstream's and still come
-from `kingwill101/dart_terminal`. What diverges, and what going back would take,
-is tracked in
-[`docs/dart-terminal-fork-release.md`](docs/dart-terminal-fork-release.md).
+from `kingwill101/dart_terminal`.
 
 ### Fork resolved from git
 

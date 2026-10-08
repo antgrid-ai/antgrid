@@ -66,7 +66,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -363,6 +363,10 @@ export interface AgentCore {
    *  calls through here, since only that core's own `SessionManager` can start
    *  a session it persists. */
   startSession(id: string): void;
+  prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession>;
+  observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void;
+  stopScheduledSession(sessionId: string): Promise<void>;
+  releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void>;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
@@ -786,6 +790,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
+  const scheduledObservers = new Set<(observation: ScheduledSessionObservation & { projectId: string }) => void>();
   let namer: SessionNamer | null = null;
   let titleObservers: Array<{ stop(): void }> = [];
   // Title-generation budget per conversation, per terminal. The /session-title
@@ -2799,7 +2804,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
         const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
-        if (msg.pushToken === "") {
+        // The app re-registers on every handshake, once per warm project, so
+        // the common frame repeats what the row already holds. An upsert is a
+        // non-silent store write: the paired-phones watcher answers it with a
+        // re-advertise to every connected phone. Nothing reads `pushUpdatedAt`,
+        // so leaving it unbumped on a repeat is unobservable.
+        const clear = msg.pushToken === "";
+        const unchanged = clear
+          ? phone.pushToken === undefined && phone.pushProvider === undefined && phone.pushPubkey === undefined
+          : phone.pushToken === msg.pushToken && phone.pushProvider === msg.provider && phone.pushPubkey === msg.pushPubkey;
+        if (unchanged) {
+          log.debug("push:register for phone %s repeats its stored registration; not rewriting", phone.phoneDeviceId);
+          break;
+        }
+        if (clear) {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
             ...phone,
@@ -2926,6 +2944,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(msg);
     if (msg.type === "notification:push" && msg.origin === "agent" && msg.sessionId) {
       statusShadow?.observe(msg.sessionId, { kind: "notify", type: msg.notificationType });
+      const state = msg.notificationType === "task_complete" ? "completed"
+        : msg.notificationType === "error" ? "failed"
+        : msg.notificationType === "permission_request" || msg.notificationType === "awaiting_input" ? "needs-input" : undefined;
+      if (state && sessions?.get(msg.sessionId)?.mode === "terminal") {
+        sessions.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+          state === "failed" ? "Agent reported a turn failure" : undefined);
+      }
     }
   }
 
@@ -4379,6 +4404,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     };
     structured = new StructuredAgentManager({
       sendMessage: (msg) => {
+        if ("sessionId" in msg && typeof msg.sessionId === "string") {
+          const state = msg.type === "agent:turn-start" ? "running"
+            : msg.type === "agent:permission-request" || msg.type === "agent:question" ? "needs-input"
+            : msg.type === "agent:request-retracted" ? "running"
+            : msg.type === "agent:turn-end" ? msg.stopReason === "end_turn" ? "completed" : msg.stopReason === "cancelled" ? "interrupted" : "failed"
+            : msg.type === "agent:error" ? "failed" : undefined;
+          if (state) sessions?.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+            state === "failed" ? "Agent reported a turn failure" : state === "interrupted" ? "Agent turn was cancelled" : undefined);
+        }
         observeChatFrameForHandler(msg);
         sendAb(msg);
       },
@@ -4418,6 +4452,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
             if (run && !run.isCurrent()) return;
+            const state = evt.event === "limit_hit" ? "needs-input" : evt.event === "limit_cleared" ? "running" : "failed";
+            sessions?.observeScheduledSession(sessionId, hookRunId, state,
+              state === "failed" ? "Agent reported a turn failure" : undefined);
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
           },
@@ -4434,6 +4471,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
       agentRuntime,
+      onScheduledObservation: (observation) => {
+        for (const observer of scheduledObservers) {
+          try { observer({ ...observation, projectId: project.id }); }
+          catch { log.warn("Scheduled session observer failed for %s", observation.sessionId); }
+        }
+      },
       onAgentEvent: (sessionId, event) => {
         switch (event.type) {
           case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
@@ -5050,6 +5093,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // whatever a hook reports here instead of never arming at all.
       if (body.transcriptPath) sessions?.noteTranscriptPath(body.terminalId, body.transcriptPath);
       sessions?.confirmHookRun(body.terminalId, body.runId);
+      const scheduledState = body.event === "turn_end" ? "completed"
+        : body.event === "turn_failed" ? "failed"
+        : body.event === "question" || body.event === "awaiting_input" || body.event === "limit_hit" ? "needs-input"
+        : body.event === "prompt_answered" || body.event === "limit_cleared" ? "running" : undefined;
+      if (scheduledState) sessions?.observeScheduledSession(body.terminalId, body.runId, scheduledState,
+        scheduledState === "failed" ? "Agent reported a turn failure" : undefined);
       // The work reduction's SECOND closer: codex fires this and its Stop hook
       // independently. `turn_end` alone, never `turn_failed` — that is claude
       // parking for the Handler, which withholds its notification on purpose.
@@ -5163,6 +5212,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
+      if (terminalId) sessions?.observeScheduledSession(terminalId, sessions.hookRunId(terminalId), "running");
       opts.onTurnStart?.(terminalId);
     },
     // Deliberately does not touch openAgentPrompts: a sibling tool completing
@@ -5489,6 +5539,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const result = sessions?.start(id);
         if (result instanceof Promise) result.catch(() => {});
       } catch { /* fire-and-forget */ }
+    },
+    async prepareScheduledSession(spec, bind): Promise<PreparedScheduledSession> {
+      if (!sessions) throw new Error("Project sessions are not ready");
+      return sessions.prepareScheduledSession(spec, bind);
+    },
+    observeScheduledSessions(callback): () => void {
+      scheduledObservers.add(callback);
+      return () => { scheduledObservers.delete(callback); };
+    },
+    async stopScheduledSession(sessionId): Promise<void> {
+      await sessions?.stopScheduledSession(sessionId);
+    },
+    async releaseScheduleCheckout(scheduleId, checkoutId): Promise<void> {
+      if (sessions) await sessions.releaseScheduleCheckout(scheduleId, checkoutId);
+      else await new CheckoutStore(abDir, project.id).releaseScheduleOwner(scheduleId, checkoutId);
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;

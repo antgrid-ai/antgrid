@@ -135,7 +135,7 @@ int _job = -1;
 /// is a member of the package's Desktop AppX silo, and a silo with live members
 /// while the Store destages the package leaks the Helium registry hives —
 /// after which no launch of the package succeeds until the user signs out —
-/// the silo-leak bullet in the root CLAUDE.md has the full mechanism.
+/// the silo-leak bullet in the root AGENTS.md has the full mechanism.
 ///
 /// Measured on Windows 11 26200: a nested job inside a silo is permitted, and
 /// KILL_ON_JOB_CLOSE sweeps grandchildren (the PTY trees), leaving the silo

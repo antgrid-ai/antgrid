@@ -16,7 +16,9 @@ export type Tx = PrismaClient | Prisma.TransactionClient;
 export type SqlRunner = Tx;
 
 export function createDb(url: string): DB {
-  const adapter = new PrismaPg({ connectionString: url });
+  // The Prisma PG adapter serializes UTC dates without an offset, so every
+  // pooled connection must interpret and return timestamps in UTC.
+  const adapter = new PrismaPg({ connectionString: url, options: "-c timezone=UTC" });
   return new PrismaClient({
     adapter,
     log: ["warn", "error"],

@@ -45,6 +45,7 @@ export function fakeRemoteDeps(over: Partial<ProjectCoreRemoteDeps> = {}): {
       peerSession: () => null,
       machineDeviceId: () => MACHINE_UUID,
       sendPushDeliver: () => {},
+      accountDisowns: () => false,
       ...over,
     },
     calls,

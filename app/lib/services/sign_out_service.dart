@@ -75,8 +75,9 @@ class SignOutService {
 
   /// Tells every warm session's paired agent to stop pushing to this device
   /// (empty-token `push:register`). Must run before [closeSessions] tears down
-  /// the transports it needs to send on — a signed-out phone with no more live
-  /// sessions can't ask agents to stop later.
+  /// the transports it needs to send on. Only the fast path: a machine this
+  /// reaches no session on stops once the device revoke below drops this
+  /// identity from its authorization lease.
   final Future<void> Function()? clearPushToken;
 
   /// Tears down live relay/project transports, awaiting each eviction so the

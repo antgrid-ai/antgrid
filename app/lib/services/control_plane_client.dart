@@ -803,6 +803,11 @@ class ControlPlaneClient {
     }
   }
 
+  Future<Map<String, dynamic>> schedulerRequest(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) => transport.request(method, params: params);
+
   /// See [HostControlClient.gitRemoteState] — same verb over the relay.
   Future<BranchRemoteStatus> gitRemoteState({
     required String projectId,
