@@ -42,11 +42,18 @@ Future<void> settle(WidgetTester tester) async {
 Finder chip(String label) => find.widgetWithText(AbChip, label);
 
 String timeText(WidgetTester tester) =>
-    tester.widget<AbTextField>(field('yyyy-MM-dd HH:mm')).controller!.text;
+    '${tester.widget<AbTextField>(field('yyyy-MM-dd')).controller!.text} '
+    '${tester.widget<AbTextField>(field('HH:mm')).controller!.text}';
 
 Map<String, dynamic> lastPatch(Host host) =>
     host.calls.lastWhere((c) => c.method == 'scheduler.update').params['patch']
         as Map<String, dynamic>;
+
+Future<void> enterWhen(WidgetTester tester, String value) async {
+  final at = value.indexOf(' ');
+  await tester.enterText(field('yyyy-MM-dd'), value.substring(0, at));
+  await tester.enterText(field('HH:mm'), value.substring(at + 1));
+}
 
 Future<void> openMenu(WidgetTester tester) async {
   await tester.tap(
@@ -120,6 +127,8 @@ void main() {
       await pumpScreen(tester, container);
       await editSchedule(tester);
       expect(timeText(tester), '2001-09-09 07:16');
+      await tester.tap(find.text('Schedules'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
       host.oneOffs = [
@@ -134,7 +143,7 @@ void main() {
       final now = schedulerWallTime(DateTime.now(), 'Asia/Kolkata');
       final suggested = timeText(tester);
       expect(suggested.compareTo(now), greaterThan(0));
-      await tester.tap(find.text('Save schedule'));
+      await tester.tap(find.text('Save changes'));
       await tester.pumpAndSettle();
       final patch = lastPatch(host);
       expect(patch['runAt'], schedulerWallIso(suggested));
@@ -153,16 +162,18 @@ void main() {
       ..oneOffs = [oneOff()];
     await pumpScreen(tester, containerFor(host));
     await editSchedule(tester);
-    await tester.enterText(field('yyyy-MM-dd HH:mm'), '2100-02-02 10:00');
+    await enterWhen(tester, '2100-02-02 10:00');
     await settle(tester);
+    await tester.tap(find.text('Schedules'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('RUNS'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('SCHEDULES'));
     await tester.pumpAndSettle();
-    expect(find.text('Editable draft retained'), findsOneWidget);
+    expect(find.text('Draft'), findsOneWidget);
     await editSchedule(tester);
     expect(timeText(tester), '2100-02-02 10:00');
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();
     final patch = lastPatch(host);
     expect(patch['runAt'], '2100-02-02T10:00');
@@ -179,9 +190,9 @@ void main() {
       ..oneOffs = [oneOff()];
     await pumpScreen(tester, containerFor(host));
     await editSchedule(tester);
-    await tester.tap(chip('Repeats'));
+    await tester.tap(seg('Repeats'));
     await settle(tester);
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();
     final patch = lastPatch(host);
     expect(patch['cron'], '0 9 * * *');
@@ -195,11 +206,12 @@ void main() {
     final host = Host()..oneOffSupported = true;
     await pumpScreen(tester, containerFor(host));
     await editSchedule(tester);
-    await tester.tap(chip('Once'));
+    await tester.tap(seg('Once'));
     await tester.pumpAndSettle();
-    await tester.enterText(field('yyyy-MM-dd HH:mm'), '2100-03-04 09:15');
+    await tester.enterText(field('yyyy-MM-dd'), '2100-03-04');
+    await tester.enterText(field('HH:mm'), '09:15');
     await settle(tester);
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();
     final patch = lastPatch(host);
     expect(patch['runAt'], '2100-03-04T09:15');
@@ -216,8 +228,10 @@ void main() {
         ..oneOffs = [oneOff()];
       await pumpScreen(tester, containerFor(host));
       await editSchedule(tester);
-      await tester.enterText(field('yyyy-MM-dd HH:mm'), 'next tuesday');
+      await enterWhen(tester, 'next tuesday');
       await settle(tester);
+      await tester.tap(find.text('Schedules'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
       host.oneOffs = [];
@@ -259,7 +273,7 @@ void main() {
         expect(find.text('Pause'), findsNothing);
         await tester.tap(find.text('Set a new time').last);
         await settle(tester);
-        expect(chip('Once'), findsOneWidget);
+        expect(seg('Once'), findsOneWidget);
         final now = schedulerWallTime(DateTime.now(), 'Asia/Kolkata');
         expect(timeText(tester).compareTo(now), greaterThan(0));
       },
@@ -294,15 +308,18 @@ void main() {
     sizeView(tester);
     final host = Host()..oneOffSupported = true;
     await pumpScreen(tester, containerFor(host));
-    await tester.tap(find.text('Create schedule'));
+    await tester.tap(find.text('New schedule'));
     await tester.pumpAndSettle();
-    await tester.tap(chip('Once'));
+    await tester.tap(seg('Once'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('however late'), findsOneWidget);
-    await tester.tap(chip('Skip it if missed'));
+    await tester.ensureVisible(option('Skip'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('however late'), findsNothing);
-    expect(find.textContaining('skipped if the desktop app'), findsOneWidget);
+    await tester.tap(option('Skip'));
+    await tester.tap(option('Skip'));
+    await tester.pumpAndSettle();
+    expect(optionSelected(tester, 'Skip'), isTrue);
+    expect(optionSelected(tester, schedulerCatchUpOnceLabel), isFalse);
+    expect(find.text('Skipped if Antgrid is not open then'), findsOneWidget);
   });
 
   test('a draft of a one-off starts clean and detects edits', () async {
@@ -351,21 +368,22 @@ void main() {
   schedulerTestWidgets('Once is hidden without supportsOneOff', (tester) async {
     sizeView(tester);
     await pumpScreen(tester, containerFor(Host()));
-    await tester.tap(find.text('Create schedule'));
+    await tester.tap(find.text('New schedule'));
     await tester.pumpAndSettle();
-    expect(chip('Once'), findsNothing);
-    expect(chip('Repeats'), findsNothing);
+    expect(seg('Once'), findsNothing);
+    expect(seg('Repeats'), findsNothing);
   });
 
   schedulerTestWidgets('a Once save sends runAt and no cron', (tester) async {
     sizeView(tester);
     final host = Host()..oneOffSupported = true;
     await pumpScreen(tester, containerFor(host));
-    await tester.tap(find.text('Create schedule'));
+    await tester.tap(find.text('New schedule'));
     await tester.pumpAndSettle();
-    await tester.tap(chip('Once'));
+    await tester.tap(seg('Once'));
     await tester.pumpAndSettle();
-    await tester.enterText(field('yyyy-MM-dd HH:mm'), '2100-03-04 09:15');
+    await tester.enterText(field('yyyy-MM-dd'), '2100-03-04');
+    await tester.enterText(field('HH:mm'), '09:15');
     await settle(tester);
     expect(
       host.calls.lastWhere((c) => c.method == 'scheduler.preview').params,
@@ -374,7 +392,7 @@ void main() {
     await tester.enterText(field('Schedule name'), 'Once');
     await tester.enterText(find.byType(AbPromptField), 'Do it');
     await settle(tester);
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Create schedule'));
     await tester.pumpAndSettle();
     final saved =
         host.calls
@@ -391,16 +409,16 @@ void main() {
     sizeView(tester);
     final host = Host()..oneOffSupported = true;
     await pumpScreen(tester, containerFor(host));
-    await tester.tap(find.text('Create schedule'));
+    await tester.tap(find.text('New schedule'));
     await tester.pumpAndSettle();
-    await tester.tap(chip('Once'));
+    await tester.tap(seg('Once'));
     await tester.pumpAndSettle();
-    await tester.tap(chip('Repeats'));
+    await tester.tap(seg('Repeats'));
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Daily');
     await tester.enterText(find.byType(AbPromptField), 'Do it');
     await settle(tester);
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Create schedule'));
     await tester.pumpAndSettle();
     final saved =
         host.calls
@@ -421,10 +439,11 @@ void main() {
       ..oneOffs = [oneOff()];
     await pumpScreen(tester, containerFor(host));
     await editSchedule(tester);
-    expect(field('yyyy-MM-dd HH:mm'), findsOneWidget);
+    expect(field('yyyy-MM-dd'), findsOneWidget);
+    expect(field('HH:mm'), findsOneWidget);
     await tester.enterText(field('Schedule name'), 'Renamed');
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Save schedule'));
+    await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();
     final patch =
         host.calls
@@ -464,12 +483,13 @@ void main() {
         {...runRecord('run-f', 'completed'), 'scheduleId': 'f'},
       ];
     await pumpScreen(tester, containerFor(host));
-    expect(find.text('Once · Fri 1 Jan, 05:30'), findsOneWidget);
-    expect(find.text('Paused · once at Fri 1 Jan, 05:30'), findsOneWidget);
-    expect(find.text('Paused · time passed'), findsOneWidget);
+    expect(find.text('Once'), findsNWidgets(4));
+    expect(find.text('Fri 1 Jan'), findsNWidgets(2));
+        expect(find.text('Time passed'), findsOneWidget);
+    expect(find.text('Sun 9 Sep'), findsNWidgets(2));
     expect(find.textContaining('Ran · '), findsOneWidget);
-    expect(find.text('Created by Fix flake'), findsOneWidget);
-    expect(find.text('Edited by Other'), findsOneWidget);
+    expect(find.text('by Fix flake'), findsOneWidget);
+    expect(find.text('by Other'), findsOneWidget);
     expect(find.text('Set a new time'), findsNWidgets(2));
   });
 }

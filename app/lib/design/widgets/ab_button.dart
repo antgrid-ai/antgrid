@@ -28,6 +28,8 @@ class AbButton extends StatefulWidget {
     this.onTap,
     this.color,
     this.leading,
+    this.trailing,
+    this.maxLines,
     this.compact = false,
     this.variant = AbButtonVariant.normal,
     this.fontSize,
@@ -43,6 +45,11 @@ class AbButton extends StatefulWidget {
   /// [AbButtonVariant.primary].
   final Color? color;
   final Widget? leading;
+  final Widget? trailing;
+
+  /// Truncates the label with an ellipsis past this many lines. Meaningful
+  /// only with [wrapLabel], which is what lets the label shrink.
+  final int? maxLines;
   final bool compact;
   final AbButtonVariant variant;
 
@@ -95,6 +102,8 @@ class _AbButtonState extends State<AbButton> {
 
     Widget label = Text(
       widget.label,
+      maxLines: widget.maxLines,
+      overflow: widget.maxLines == null ? null : TextOverflow.ellipsis,
       style: AbTokens.sansStyle(
         fontSize: fontSize,
         color: textColor,
@@ -125,6 +134,10 @@ class _AbButtonState extends State<AbButton> {
             const SizedBox(width: AbTokens.space4),
           ],
           label,
+          if (widget.trailing != null) ...[
+            const SizedBox(width: AbTokens.space4),
+            widget.trailing!,
+          ],
         ],
       ),
     );

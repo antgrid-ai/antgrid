@@ -1,4 +1,3 @@
-import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
@@ -38,15 +37,23 @@ Map<String, dynamic> patchOf(Host host) =>
         as Map<String, dynamic>;
 
 Future<void> pick(WidgetTester tester, String label) async {
-  await tester.ensureVisible(chip(label));
+  final target = option(label);
+  await tester.ensureVisible(target);
   await tester.pumpAndSettle();
-  await tester.tap(chip(label));
+  await tester.tap(target);
   await tester.pumpAndSettle();
 }
 
-Future<void> save(WidgetTester tester) async {
+Future<void> pickSegment(WidgetTester tester, String label) async {
+  await tester.ensureVisible(seg(label));
+  await tester.pumpAndSettle();
+  await tester.tap(seg(label));
+  await tester.pumpAndSettle();
+}
+
+Future<void> save(WidgetTester tester, {String label = 'Save changes'}) async {
   await settle(tester);
-  await tester.tap(find.text('Save schedule'));
+  await tester.tap(find.text(label));
   await tester.pumpAndSettle();
 }
 
@@ -57,15 +64,15 @@ Map<String, dynamic> created(Host host) =>
 Future<void> startChatCreate(WidgetTester tester, Host host) async {
   sizeView(tester);
   await pumpScreen(tester, containerFor(host));
-  await tester.tap(find.text('Create schedule'));
+  await tester.tap(find.text('New schedule'));
   await tester.pumpAndSettle();
-  await pick(tester, 'Chat');
+  await pickSegment(tester, 'Chat');
 }
 
 Future<void> fillAndSave(WidgetTester tester) async {
   await tester.enterText(field('Schedule name'), 'Chatty');
   await tester.enterText(find.byType(AbPromptField), 'Do it');
-  await save(tester);
+  await save(tester, label: 'Create schedule');
 }
 
 void main() {
@@ -117,7 +124,7 @@ void main() {
     tester,
   ) async {
     await openEditor(tester, chatHost());
-    expect(find.text('Permissions'), findsOneWidget);
+    expect(find.text('Permission mode'), findsOneWidget);
     for (final label in [
       'Agent default',
       'Default',
@@ -125,9 +132,9 @@ void main() {
       'Auto',
       'Accept edits',
     ]) {
-      expect(chip(label), findsOneWidget);
+      expect(option(label), findsOneWidget);
     }
-    expect(tester.widget<AbChip>(chip('Agent default')).selected, isTrue);
+    expect(optionSelected(tester, 'Agent default'), isTrue);
   });
 
   schedulerTestWidgets('a stored "default" mode is told apart from no mode', (
@@ -135,8 +142,8 @@ void main() {
   ) async {
     final host = chatHost(chatMode: 'default');
     await openEditor(tester, host);
-    expect(tester.widget<AbChip>(chip('Default')).selected, isTrue);
-    expect(tester.widget<AbChip>(chip('Agent default')).selected, isFalse);
+    expect(optionSelected(tester, 'Default'), isTrue);
+    expect(optionSelected(tester, 'Agent default'), isFalse);
     await pick(tester, 'Agent default');
     await save(tester);
     expect(patchOf(host).containsKey('chatMode'), isTrue);
@@ -145,19 +152,19 @@ void main() {
 
   schedulerTestWidgets('the picker is hidden for terminal', (tester) async {
     await openEditor(tester, chatHost(mode: 'terminal'));
-    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Permission mode'), findsNothing);
   });
 
   schedulerTestWidgets('the picker is hidden for Bypass', (tester) async {
     await openEditor(tester, chatHost(approval: 'bypass'));
-    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Permission mode'), findsNothing);
   });
 
   schedulerTestWidgets('the picker is hidden without capabilities', (
     tester,
   ) async {
     await openEditor(tester, chatHost(listed: false));
-    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Permission mode'), findsNothing);
   });
 
   schedulerTestWidgets('choosing a mode sends it on create', (tester) async {
@@ -206,7 +213,7 @@ void main() {
     final host = chatHost(chatMode: 'build', listed: false);
     await openEditor(tester, host);
     await pick(tester, 'claude');
-    await pick(tester, 'Chat');
+    await pickSegment(tester, 'Chat');
     await tester.enterText(field('Schedule name'), 'Renamed');
     await save(tester);
     expect(patchOf(host)['chatMode'], 'build');
@@ -222,7 +229,7 @@ void main() {
       ];
     await openEditor(tester, host);
     await pick(tester, 'codex');
-    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Permission mode'), findsNothing);
     await save(tester);
     expect(patchOf(host)['agentId'], 'codex');
     expect(patchOf(host)['mode'] ?? 'chat', 'chat');
@@ -235,7 +242,7 @@ void main() {
   ) async {
     final host = chatHost(chatMode: 'build');
     await openEditor(tester, host);
-    expect(tester.widget<AbChip>(chip('build')).selected, isTrue);
+    expect(optionSelected(tester, 'build'), isTrue);
     await tester.enterText(field('Schedule name'), 'Renamed');
     await save(tester);
     expect(patchOf(host)['chatMode'], 'build');
@@ -246,7 +253,7 @@ void main() {
   ) async {
     final host = chatHost(chatMode: 'build', listed: false);
     await openEditor(tester, host);
-    expect(find.text('Permissions'), findsNothing);
+    expect(find.text('Permission mode'), findsNothing);
     await tester.enterText(field('Schedule name'), 'Renamed');
     await save(tester);
     expect(patchOf(host)['chatMode'], 'build');
@@ -255,6 +262,6 @@ void main() {
   schedulerTestWidgets('the card names the permission mode', (tester) async {
     sizeView(tester);
     await pumpScreen(tester, containerFor(chatHost(chatMode: 'auto')));
-    expect(find.text('Permissions: Auto'), findsOneWidget);
+    expect(find.text('Auto'), findsOneWidget);
   });
 }

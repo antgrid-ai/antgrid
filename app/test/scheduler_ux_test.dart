@@ -6,12 +6,14 @@ import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
+import 'package:antgrid/design/widgets/ab_tooltip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/models/agent_descriptor.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
@@ -21,6 +23,8 @@ import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
+import 'package:antgrid/widgets/scheduler/scheduler_lanes.dart';
+import 'package:antgrid/widgets/scheduler/scheduler_run_squares.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/foundation.dart';
@@ -204,6 +208,11 @@ class Host {
   Future<SchedulerSnapshot> snapshot() => SchedulerSnapshot.load(request);
 }
 
+class EmptyAgentCatalog extends AgentCatalogNotifier {
+  @override
+  Map<String, AgentDescriptor> build() => const {};
+}
+
 ProviderContainer containerFor(Host host, {Host? remote}) {
   final container = ProviderContainer(
     overrides: [
@@ -257,9 +266,10 @@ Future<void> pumpScreen(
           debugShowCheckedModeBanner: false,
           theme: buildAbTheme(),
           builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: TextScaler.linear(scale)),
+            data: MediaQuery.of(context).copyWith(
+              textScaler: TextScaler.linear(scale),
+              disableAnimations: true,
+            ),
             child: child!,
           ),
           home: Scaffold(body: child ?? const SchedulerScreen()),
@@ -270,10 +280,29 @@ Future<void> pumpScreen(
   await tester.pumpAndSettle();
 }
 
+/// AbSegmented upper-cases its labels.
+Finder seg(String label) => find.text(label.toUpperCase());
+Finder option(String title) => find.byKey(ValueKey('scheduler-option-$title'));
+bool optionSelected(WidgetTester tester, String title) =>
+    tester.widget<Semantics>(option(title)).properties.checked ?? false;
+
+Future<void> pickMachine(WidgetTester tester, String target) async {
+  final current = target == 'Laptop' ? 'Local machine' : 'Laptop';
+  await tester.tap(find.widgetWithText(AbButton, current));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(target).last);
+  await tester.pumpAndSettle();
+}
+
 Finder field(String hint) =>
     find.byWidgetPredicate((w) => w is AbTextField && w.hintText == hint);
-AbButton saveButton(WidgetTester tester) =>
-    tester.widget<AbButton>(find.widgetWithText(AbButton, 'Save schedule'));
+AbButton saveButton(WidgetTester tester) => tester.widget<AbButton>(
+  find.byWidgetPredicate(
+    (w) =>
+        w is AbButton &&
+        (w.label == 'Create schedule' || w.label == 'Save changes'),
+  ),
+);
 void schedulerTestWidgets(String description, WidgetTesterCallback callback) {
   ft.testWidgets(description, (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -286,27 +315,37 @@ void schedulerTestWidgets(String description, WidgetTesterCallback callback) {
 }
 
 Future<void> editSchedule(WidgetTester tester) async {
-  await tester.tap(
-    find.byWidgetPredicate(
-      (w) =>
-          w is AbIconButton && (w.tooltip?.startsWith('Actions for ') ?? false),
-    ),
+  final actions = find.byWidgetPredicate(
+    (w) =>
+        w is AbIconButton && (w.tooltip?.startsWith('Actions for ') ?? false),
   );
+  if (actions.evaluate().isEmpty) {
+    // Phone rows open the editor on tap; there is no kebab.
+    await tester.tap(
+      find
+          .byWidgetPredicate(
+            (w) =>
+                w.key is ValueKey<String> &&
+                (w.key! as ValueKey<String>).value.startsWith(
+                  'scheduler-schedule-',
+                ),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    return;
+  }
+  final review = find.byWidgetPredicate(
+    (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
+  );
+  await tester.tap(review.evaluate().isNotEmpty ? review : actions.first);
   await tester.pumpAndSettle();
   await tester.tap(find.text('Edit'));
   await tester.pumpAndSettle();
 }
 
 void main() {
-  test('cadence, durations, DST and unknown zones format host instants', () {
-    expect(
-      schedulerCadence('15 18 * * 1-5', 'Asia/Kolkata'),
-      'Weekdays at 18:15 · Asia/Kolkata',
-    );
-    expect(schedulerCadence('*/7 * * * *', 'UTC'), '*/7 * * * * · UTC');
-    expect(schedulerDuration(const Duration(seconds: 7199)), '1h 59m');
-    expect(schedulerDuration(const Duration(seconds: 125)), '2m 5s');
-    expect(schedulerDuration(const Duration(seconds: -5)), '0s');
+  test('unknown zones and triggers format host values', () {
     expect(
       schedulerTime(DateTime.utc(2026, 1, 1)),
       '1 Jan 2026, 00:00 · UTC (UTC)',
@@ -351,11 +390,11 @@ void main() {
           ),
         ];
       await pumpScreen(tester, containerFor(host));
-      expect(find.text('Active run: Needs input'), findsOneWidget);
-      expect(find.text('Last occurrence: Skipped'), findsOneWidget);
+      expect(find.textContaining('Needs input · waiting'), findsOneWidget);
+      expect(find.textContaining('Skipped'), findsWidgets);
       expect(find.text('Run now'), findsNothing);
       expect(find.text('Open session'), findsOneWidget);
-      expect(find.text('Stop run'), findsOneWidget);
+      expect(find.text('Stop'), findsOneWidget);
       expect(
         find.bySemanticsLabel('Open session for Daily review'),
         findsOneWidget,
@@ -371,7 +410,7 @@ void main() {
       final container = containerFor(host);
       container.read(deviceTimezoneProvider.notifier).set('America/New_York');
       await pumpScreen(tester, container);
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       expect(field('Asia/Kolkata'), findsNothing);
       expect(find.textContaining('Use local timezone'), findsNothing);
@@ -379,20 +418,22 @@ void main() {
         host.calls.lastWhere((c) => c.method == 'scheduler.preview').params,
         {'cron': '0 9 * * *', 'timezone': 'America/New_York'},
       );
-      expect(find.text('Time (HH:mm) · America/New_York'), findsOneWidget);
+      expect(find.text('America/New_York'), findsOneWidget);
       await tester.enterText(field('Schedule name'), 'Daily local review');
       await tester.enterText(find.byType(AbPromptField), 'Review open changes');
 
       container.read(deviceTimezoneProvider.notifier).set('Europe/London');
       await tester.pumpAndSettle();
+      await tester.tap(find.text('Schedules'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('SCHEDULES'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
-      expect(find.text('Time (HH:mm) · America/New_York'), findsOneWidget);
-      await tester.tap(find.text('Save schedule'));
+      expect(find.text('America/New_York'), findsOneWidget);
+      await tester.tap(find.text('Create schedule'));
       await tester.pumpAndSettle();
       final saved =
           host.calls
@@ -420,14 +461,13 @@ void main() {
           },
         ];
       await pumpScreen(tester, containerFor(host));
-      expect(
-        find.text('Next: 2 Jan 2026, 14:30 · Asia/Kolkata (IST)'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('2 Jan 14:30'), findsOneWidget);
+      expect(find.textContaining('your time'), findsOneWidget);
+      expect(find.text('UTC'), findsOneWidget);
       await editSchedule(tester);
       expect(field('Asia/Kolkata'), findsNothing);
-      expect(find.text('Time (HH:mm) · UTC'), findsOneWidget);
-      await tester.tap(find.text('Save schedule'));
+      expect(find.text('UTC'), findsOneWidget);
+      await tester.tap(find.text('Save changes'));
       await tester.pumpAndSettle();
       final patch =
           host.calls
@@ -448,11 +488,11 @@ void main() {
         final container = containerFor(host);
         container.read(deviceTimezoneProvider.notifier).set(null);
         await pumpScreen(tester, container);
-        await tester.tap(find.text('Create schedule'));
+        await tester.tap(find.text('New schedule'));
         await tester.pumpAndSettle();
         expect(field('Asia/Kolkata'), findsNothing);
         expect(find.textContaining('Use local timezone'), findsNothing);
-        expect(find.text('Time (HH:mm) · $hostZone'), findsOneWidget);
+        expect(find.text(hostZone), findsOneWidget);
         expect(
           find.textContaining('Could not detect your local timezone'),
           findsNothing,
@@ -462,17 +502,14 @@ void main() {
           host.calls.lastWhere((c) => c.method == 'scheduler.preview').params,
           {'cron': '0 9 * * *', 'timezone': hostZone},
         );
-        expect(
-          find.text('Next five occurrences · machine time'),
-          findsOneWidget,
-        );
+        expect(find.text('machine time · $hostZone'), findsOneWidget);
         expect(saveButton(tester).onTap, isNotNull);
         await tester.enterText(field('Schedule name'), 'Machine time review');
         await tester.enterText(
           find.byType(AbPromptField),
           'Review open changes',
         );
-        await tester.tap(find.text('Save schedule'));
+        await tester.tap(find.text('Create schedule'));
         await tester.pumpAndSettle();
         final saved =
             host.calls
@@ -509,9 +546,9 @@ void main() {
         ),
       );
       await pumpScreen(tester, container);
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
-      expect(find.text('Time (HH:mm) · Europe/London'), findsOneWidget);
+      expect(find.text('Europe/London'), findsOneWidget);
       expect(
         tester
             .widget<AbPromptField>(find.byType(AbPromptField))
@@ -540,20 +577,23 @@ void main() {
       await tester.tap(find.text('Run now'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
-      expect(find.text('Preparing'), findsOneWidget);
+      expect(find.text('Starting'), findsNWidgets(2));
       await tester.tap(find.text('View run').first);
       await tester.pump();
-      expect(find.text('Show all runs'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('scheduler-runs-schedule-filter')),
+          matching: find.text('Daily review'),
+        ),
+        findsOneWidget,
+      );
       final card = tester.widget<Container>(
         find.byKey(const ValueKey('scheduler-run-manual')),
       );
       final context = tester.element(
         find.byKey(const ValueKey('scheduler-run-manual')),
       );
-      expect(
-        (card.decoration as BoxDecoration).border!.top.color,
-        context.antgrid.accent,
-      );
+      expect(card.color, context.antgrid.bgSelected);
       host.history!.complete({'runs': []});
       await tester.pumpAndSettle();
       expect(
@@ -608,14 +648,23 @@ void main() {
       await pumpScreen(tester, containerFor(host));
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
-      expect(find.text('The prompt turn ended.'), findsOneWidget);
-      expect(find.textContaining('America/New_York'), findsOneWidget);
-      expect(find.textContaining('Asia/Kolkata'), findsNWidgets(2));
-      expect(find.text('Run now · Duration: 2m 5s'), findsOneWidget);
-      await tester.tap(find.text('Stop run'));
+      expect(find.text('Completed'), findsOneWidget);
+      expect(find.text('Times in Asia/Kolkata'), findsOneWidget);
+      expect(find.textContaining('America/New_York'), findsNothing);
+      expect(
+        find.text(
+          schedulerClock(
+            DateTime.fromMillisecondsSinceEpoch(1800000000000, isUtc: true),
+            'Asia/Kolkata',
+          ),
+        ),
+        findsNWidgets(2),
+      );
+      expect(find.text('2m 05s'), findsOneWidget);
+      await tester.tap(find.text('Stop'));
       await tester.pumpAndSettle();
       expect(find.text('Interrupted'), findsOneWidget);
-      expect(find.text('Stop run'), findsNothing);
+      expect(find.text('Stop'), findsNothing);
     },
   );
 
@@ -628,8 +677,10 @@ void main() {
       await pumpScreen(tester, container);
       await editSchedule(tester);
       await tester.enterText(field('Schedule name'), 'My editable title');
-      await tester.ensureVisible(find.text('Custom'));
-      await tester.tap(find.text('Custom'));
+      await tester.ensureVisible(seg('Custom'));
+      await tester.tap(seg('Custom'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Schedules'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
@@ -640,18 +691,15 @@ void main() {
         tester.widget<AbTextField>(field('Schedule name')).controller!.text,
         'My editable title',
       );
-      expect(
-        tester.widget<AbChip>(find.widgetWithText(AbChip, 'Custom')).selected,
-        isTrue,
-      );
-      await tester.tap(find.text('Laptop'));
+      expect(field('0 9 * * 1-5'), findsOneWidget);
+      await pickMachine(tester, 'Laptop');
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
         tester.widget<AbTextField>(field('Schedule name')).controller!.text,
         'Daily review',
       );
-      await tester.tap(find.text('Local machine'));
+      await pickMachine(tester, 'Local machine');
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
@@ -679,20 +727,20 @@ void main() {
       await tester.enterText(field('Schedule name'), 'Changed');
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
-      expect(find.text('Discard editable changes?'), findsOneWidget);
+      expect(find.text('Discard changes?'), findsOneWidget);
       await tester.tap(find.text('Keep editing'));
       await tester.pumpAndSettle();
       expect(
         container.read(schedulerDraftsProvider).values.single.values['name'],
         'Changed',
       );
-      await tester.tap(find.text('Save schedule'));
+      await tester.tap(find.text('Save changes'));
       await tester.pumpAndSettle();
       expect(container.read(schedulerDraftsProvider), isEmpty);
       await editSchedule(tester);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
-      expect(find.text('Discard editable changes?'), findsNothing);
+      expect(find.text('Discard changes?'), findsNothing);
       await editSchedule(tester);
       await tester.enterText(field('Schedule name'), 'Discard this');
       await tester.tap(find.text('Cancel'));
@@ -710,23 +758,23 @@ void main() {
       final host = Host();
       final container = containerFor(host);
       await pumpScreen(tester, container);
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       await tester.enterText(field('Schedule name'), 'Creation draft');
-      await tester.tap(find.text('Laptop'));
+      await pickMachine(tester, 'Laptop');
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       expect(
         tester.widget<AbTextField>(field('Schedule name')).controller!.text,
         '',
       );
-      await tester.tap(find.text('Local machine'));
+      await pickMachine(tester, 'Local machine');
       await tester.pumpAndSettle();
       host.agentAvailable = false;
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Create schedule'));
+      await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       expect(
         tester.widget<AbTextField>(field('Schedule name')).controller!.text,
@@ -734,9 +782,7 @@ void main() {
       );
       expect(saveButton(tester).onTap, isNull);
       expect(
-        find.text(
-          'Select an installed agent and a mode with observable completion.',
-        ),
+        find.text('Pick an agent installed on Local machine.'),
         findsOneWidget,
       );
       expect(
@@ -761,7 +807,7 @@ void main() {
         tester.getSemantics(field('Schedule name')).getSemanticsData().label,
         contains('Name'),
       );
-      await tester.tap(find.text('Custom'));
+      await tester.tap(seg('Custom'));
       await tester.pump();
       expect(
         tester.widget<AbTextField>(field('0 9 * * 1-5')).focusNode!.hasFocus,
@@ -800,7 +846,7 @@ void main() {
       await pumpScreen(tester, container);
       await editSchedule(tester);
       await tester.enterText(field('Schedule name'), 'My edit');
-      await tester.enterText(field('main'), 'feature');
+      await tester.enterText(field('current branch'), 'feature');
       host.schedules = [
         {
           ...settings,
@@ -813,7 +859,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(saveButton(tester).onTap, isNull);
       expect(find.text('Workspace settings locked'), findsOneWidget);
-      await tester.tap(find.text('Keep my editable changes'));
+      await tester.ensureVisible(find.text('Keep mine'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Keep mine'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(
@@ -828,6 +876,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('This schedule was deleted'), findsOneWidget);
       expect(saveButton(tester).onTap, isNull);
+      await tester.tap(find.text('Schedules'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('SCHEDULES'));
@@ -855,7 +905,7 @@ void main() {
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Reload saved settings'));
+      await tester.tap(find.text('Use saved version'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(
@@ -905,19 +955,19 @@ void main() {
         final host = Host()..clearSupported = supported;
         await pumpScreen(tester, containerFor(host));
         await editSchedule(tester);
-        await tester.enterText(field('main'), '');
+        await tester.enterText(field('current branch'), '');
         await tester.pumpAndSettle();
         if (!supported) {
           expect(saveButton(tester).onTap, isNull);
           expect(
-            find.textContaining('Upgrade the target bridge to clear'),
+            find.textContaining('Update Antgrid on Local machine to clear'),
             findsOneWidget,
           );
-          await tester.enterText(field('main'), 'main');
+          await tester.enterText(field('current branch'), 'main');
           await tester.pumpAndSettle();
           expect(saveButton(tester).onTap, isNotNull);
         } else {
-          await tester.tap(find.text('Save schedule'));
+          await tester.tap(find.text('Save changes'));
           await tester.pumpAndSettle();
           expect(
             host.calls
@@ -938,8 +988,14 @@ void main() {
         final host = Host()..catchUpSupported = supported;
         await pumpScreen(tester, containerFor(host));
         expect(find.text('Daily review'), findsOneWidget);
+        expect(find.text('Skip if missed'), findsNothing);
+        host.schedules = [
+          {...settings, 'catchUp': 'skip'},
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
         expect(
-          find.text('Catches up latest missed run'),
+          find.text('Skip if missed'),
           supported ? findsOneWidget : findsNothing,
         );
       },
@@ -955,15 +1011,22 @@ void main() {
         await pumpScreen(tester, containerFor(host));
         await editSchedule(tester);
         expect(
-          find.text('Run the latest missed run'),
+          option(schedulerCatchUpOnceLabel),
           supported ? findsOneWidget : findsNothing,
         );
         if (supported) {
-          expect(find.textContaining('within 15 minutes'), findsOneWidget);
-          await tester.tap(find.text('Skip missed runs'));
+          expect(
+            find.textContaining(
+              'Runs the latest missed time when Antgrid opens',
+            ),
+            findsOneWidget,
+          );
+          await tester.ensureVisible(option(schedulerCatchUpSkipLabel));
+          await tester.pumpAndSettle();
+          await tester.tap(option(schedulerCatchUpSkipLabel));
           await tester.pumpAndSettle();
         }
-        await tester.tap(find.text('Save schedule'));
+        await tester.tap(find.text('Save changes'));
         await tester.pumpAndSettle();
         final patch =
             host.calls
@@ -989,20 +1052,21 @@ void main() {
     expect(schedulerMissedLabel(3), 'Missed 3 runs');
     expect(schedulerMissedLabel(1000), 'Missed 1000+ runs');
     expect(schedulerMissedLabel(null), 'Missed runs');
-    expect(schedulerCatchUpSummary('skip'), 'Skips missed runs');
-    expect(schedulerCatchUpSummary('latest'), 'Catches up latest missed run');
   });
 
-  test('drafts default catchUp to latest, including drafts saved without it', () {
-    final draft = SchedulerDraft(
-      values: {'cron': '0 9 * * *'},
-      initialSaved: {'cron': '0 9 * * *'},
-      frequency: 'Daily',
-      time: '09:00',
-    );
-    expect(draft.values['catchUp'], 'latest');
-    expect(draft.dirty, isFalse);
-  });
+  test(
+    'drafts default catchUp to latest, including drafts saved without it',
+    () {
+      final draft = SchedulerDraft(
+        values: {'cron': '0 9 * * *'},
+        initialSaved: {'cron': '0 9 * * *'},
+        frequency: 'Daily',
+        time: '09:00',
+      );
+      expect(draft.values['catchUp'], 'latest');
+      expect(draft.dirty, isFalse);
+    },
+  );
 
   schedulerTestWidgets(
     'missed records show the count, interval and no duration; catch-up runs are labelled',
@@ -1022,7 +1086,10 @@ void main() {
             'trigger': 'missed',
             'missedUntil': 1799000000000,
           },
-          {...runRecord('late', 'completed', at: 1798000000000), 'trigger': 'catch-up'},
+          {
+            ...runRecord('late', 'completed', at: 1798000000000),
+            'trigger': 'catch-up',
+          },
           {
             ...runRecord('single', 'skipped', at: 1797000000000),
             'trigger': 'missed',
@@ -1033,21 +1100,50 @@ void main() {
       await pumpScreen(tester, containerFor(host));
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
-      String local(int ms) => schedulerLocalTime(
-        DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true),
-        'Asia/Kolkata',
-      );
+      for (final id in ['gap', 'old', 'single']) {
+        expect(
+          find.descendant(
+            of: find.byKey(ValueKey('scheduler-run-$id')),
+            matching: find.text('Missed'),
+          ),
+          findsWidgets,
+          reason: id,
+        );
+      }
       expect(
-        find.text('${local(1800000000000)} – ${local(1800000000000 + 86400000)}'),
+        find.descendant(
+          of: find.byKey(const ValueKey('scheduler-run-late')),
+          matching: find.text('Completed'),
+        ),
         findsOneWidget,
       );
-      expect(find.text('Missed 1 run'), findsOneWidget);
-      expect(find.textContaining('${local(1797000000000)} – '), findsNothing);
-      expect(find.text('Missed 1000+ runs'), findsOneWidget);
-      expect(find.text('Missed runs'), findsOneWidget);
+      expect(
+        find.textContaining('Missed 1000+ runs while closed'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Missed 1 run while closed'), findsOneWidget);
+      expect(find.text('Catch-up'), findsOneWidget);
+      expect(find.text('Details'), findsNWidgets(4));
+      // Missed records never ran, so no row carries a duration; the one
+      // completed catch-up run has none recorded either.
+      expect(find.text('—'), findsNWidgets(4));
+      for (final tap in find.text('Details').evaluate().toList()) {
+        await tester.ensureVisible(find.byElementPredicate((e) => e == tap));
+        await tester.tap(find.byElementPredicate((e) => e == tap));
+        await tester.pumpAndSettle();
+      }
       expect(find.text('Missed while paused'), findsOneWidget);
-      expect(find.textContaining('Catch-up · Duration'), findsOneWidget);
-      expect(find.textContaining('Missed 1000+ runs · Duration'), findsNothing);
+      expect(
+        find.text('Antgrid was not open when this was due.'),
+        findsNWidgets(2),
+      );
+      expect(
+        find.text(
+          'Antgrid opened after a missed time, so the latest one was run.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining(' to ', findRichText: true), findsOneWidget);
     },
   );
 
@@ -1062,13 +1158,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(host.calls.last.params['cron'], '15 18 * * 1-5');
-      await tester.ensureVisible(find.text('Custom'));
-      await tester.tap(find.text('Custom'));
+      await tester.ensureVisible(seg('Custom'));
+      await tester.tap(seg('Custom'));
       await tester.pump();
       final cron = tester.widget<AbTextField>(field('0 9 * * 1-5'));
       expect(cron.controller!.text, '15 18 * * 1-5');
       expect(cron.focusNode!.hasFocus, isTrue);
-      await tester.tap(find.text('Daily'));
+      await tester.tap(seg('Day'));
       await tester.pump();
       await tester.enterText(field('09:00'), '24:00');
       await tester.pumpAndSettle();
@@ -1171,19 +1267,16 @@ void main() {
       host.history = Completer();
       await tester.pump(const Duration(seconds: 5));
       await tester.pump();
-      await tester.tap(find.text('Laptop'));
+      await pickMachine(tester, 'Laptop');
       await tester.pump();
       host.history!.complete({
         'runs': [runRecord('stale', 'needs-input')],
       });
       host.history = null;
       await tester.pumpAndSettle();
-      expect(
-        tester.widget<AbChip>(find.widgetWithText(AbChip, 'Laptop')).selected,
-        isTrue,
-      );
-      expect(find.text('Active run: Needs input'), findsNothing);
-      expect(find.text('Local machine'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'Laptop'), findsOneWidget);
+      expect(find.textContaining('Needs input'), findsNothing);
+      expect(find.text('Local machine'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
@@ -1198,11 +1291,17 @@ void main() {
       final container = containerFor(host);
       await pumpScreen(tester, container, scale: 1.5);
       expect(
-        tester.getSize(find.widgetWithText(AbButton, 'Run now')).height,
+        tester.getSize(find.widgetWithText(AbButton, 'Local machine')).height,
         greaterThanOrEqualTo(48),
       );
       expect(
-        tester.getSize(find.widgetWithText(AbChip, 'Laptop')).height,
+        tester
+            .getSize(
+              find.byWidgetPredicate(
+                (w) => w is AbIconButton && w.tooltip == 'New schedule',
+              ),
+            )
+            .height,
         greaterThanOrEqualTo(48),
       );
       final tabs = find.descendant(
@@ -1223,7 +1322,7 @@ void main() {
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pumpAndSettle();
       expect(
-        tester.getBottomLeft(find.widgetWithText(AbButton, 'Save schedule')).dy,
+        tester.getBottomLeft(find.widgetWithText(AbButton, 'Save changes')).dy,
         lessThanOrEqualTo(500),
       );
       expect(
@@ -1231,6 +1330,349 @@ void main() {
         greaterThanOrEqualTo(48),
       );
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  int nowMs() => DateTime.now().millisecondsSinceEpoch;
+  const hour = 3600000;
+
+  Map<String, dynamic> laneSchedule(int i, List<int> upcoming) => {
+    ...settings,
+    'id': 'lane-$i',
+    'name': 'Lane $i',
+    'upcoming': upcoming,
+    'nextOccurrence': upcoming.first,
+  };
+
+  schedulerTestWidgets(
+    'lane strip draws a lane per schedule with runs in the next 24 hours and caps at six',
+    (tester) async {
+      sizeView(tester);
+      final now = nowMs();
+      final host = Host()
+        ..schedules = [
+          // Soonest first is the sort order, so feed them out of order.
+          for (final i in [7, 3, 0, 5, 1, 6, 2, 4])
+            laneSchedule(i, [
+              now + (i + 1) * hour ~/ 2,
+              now + (i + 1) * hour ~/ 2 + 3 * hour,
+              now + (i + 1) * hour ~/ 2 + 6 * hour,
+            ]),
+        ];
+      await pumpScreen(tester, containerFor(host));
+      final strip = find.byType(SchedulerLaneStrip);
+      expect(strip, findsOneWidget);
+      expect(
+        find.descendant(of: strip, matching: find.text('Next 24 hours')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: strip,
+          matching: find.text('Times in Asia/Kolkata'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: strip, matching: find.text('+2 more')),
+        findsOneWidget,
+      );
+      for (var i = 0; i < 6; i++) {
+        expect(
+          find.descendant(of: strip, matching: find.text('Lane $i')),
+          findsOneWidget,
+          reason: 'lane $i',
+        );
+      }
+      for (final i in [6, 7]) {
+        expect(
+          find.descendant(of: strip, matching: find.text('Lane $i')),
+          findsNothing,
+          reason: 'lane $i is behind +N more',
+        );
+      }
+      final ys = [
+        for (var i = 0; i < 6; i++)
+          tester
+              .getTopLeft(
+                find.descendant(of: strip, matching: find.text('Lane $i')),
+              )
+              .dy,
+      ];
+      expect(ys, [...ys]..sort());
+      expect(ys.toSet(), hasLength(6));
+      final dots = find.descendant(of: strip, matching: find.byType(AbTooltip));
+      expect(dots, findsNWidgets(18));
+      final box = tester.getRect(strip);
+      for (final dot in dots.evaluate()) {
+        final rect = tester.getRect(find.byElementPredicate((e) => e == dot));
+        expect(box.contains(rect.center), isTrue);
+        expect(rect.width, greaterThan(0));
+      }
+    },
+  );
+
+  schedulerTestWidgets('lane strip is hidden when nothing is upcoming', (
+    tester,
+  ) async {
+    sizeView(tester);
+    await pumpScreen(tester, containerFor(Host()));
+    expect(find.text('Daily review'), findsOneWidget);
+    expect(find.text('Next 24 hours'), findsNothing);
+    expect(find.text('Times in Asia/Kolkata'), findsOneWidget);
+  });
+
+  schedulerTestWidgets('paused schedules get no lane', (tester) async {
+    sizeView(tester);
+    final now = nowMs();
+    final host = Host()
+      ..schedules = [
+        laneSchedule(0, [now + hour]),
+        {
+          ...laneSchedule(1, [now + 2 * hour]),
+          'enabled': false,
+        },
+      ];
+    await pumpScreen(tester, containerFor(host));
+    final strip = find.byType(SchedulerLaneStrip);
+    expect(
+      find.descendant(of: strip, matching: find.text('Lane 0')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: strip, matching: find.text('Lane 1')),
+      findsNothing,
+    );
+    expect(find.text('PAUSED AND FINISHED'), findsOneWidget);
+  });
+
+  schedulerTestWidgets(
+    'recent run squares show the last ten outcomes with the last-run line',
+    (tester) async {
+      sizeView(tester);
+      final now = nowMs();
+      final statuses = [
+        'failed',
+        'completed',
+        'completed',
+        'interrupted',
+        'completed',
+        'completed',
+        'failed',
+        'completed',
+        'completed',
+        'completed',
+        'completed',
+        'completed',
+      ];
+      final host = Host()
+        ..schedules = [
+          settings,
+          {...settings, 'id': 'fresh', 'name': 'Fresh schedule'},
+        ]
+        ..runs = [
+          for (final (i, status) in statuses.indexed)
+            {
+              ...runRecord(
+                'r$i',
+                status,
+                at: now - (statuses.length - i) * hour,
+              ),
+              'trigger': 'cron',
+              'finishedAt': now - (statuses.length - i) * hour + 100000,
+            },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      final squares = find.byType(SchedulerRunSquares);
+      expect(squares, findsOneWidget, reason: 'only one schedule has runs');
+      final cells = find.descendant(
+        of: squares,
+        matching: find.byType(AbTooltip),
+      );
+      expect(cells, findsNWidgets(10));
+      for (final cell in cells.evaluate()) {
+        final size = tester.getSize(find.byElementPredicate((e) => e == cell));
+        expect(size.width, closeTo(9, 0.01));
+        expect(size.height, closeTo(9, 0.01));
+      }
+      expect(find.text('Completed 58m ago · 1m 40s'), findsOneWidget);
+      expect(find.text('No runs yet'), findsOneWidget);
+    },
+  );
+
+  schedulerTestWidgets(
+    'run squares drop the oldest runs instead of overflowing a narrow table',
+    (tester) async {
+      sizeView(tester, const Size(900, 900));
+      final now = nowMs();
+      final host = Host()
+        ..schedules = [settings]
+        ..runs = [
+          for (var i = 0; i < 10; i++)
+            {
+              ...runRecord('n$i', 'completed', at: now - (10 - i) * hour),
+              'trigger': 'cron',
+              'finishedAt': now - (10 - i) * hour + 100000,
+            },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      expect(tester.takeException(), isNull);
+      final cells = find.descendant(
+        of: find.byType(SchedulerRunSquares),
+        matching: find.byType(AbTooltip),
+      );
+      expect(cells.evaluate().length, inInclusiveRange(1, 9));
+    },
+  );
+
+  schedulerTestWidgets('a waiting run says how long it has been waiting', (
+    tester,
+  ) async {
+    sizeView(tester);
+    final host = Host()
+      ..runs = [
+        runRecord(
+          'wait',
+          'needs-input',
+          at: nowMs() - 6 * 60000 - 5000,
+          session: 'session',
+        ),
+      ];
+    await pumpScreen(tester, containerFor(host));
+    expect(find.text('Needs input · waiting 6m'), findsOneWidget);
+    expect(find.text('Open session'), findsOneWidget);
+    await tester.tap(find.text('RUNS'));
+    await tester.pumpAndSettle();
+    expect(find.text('waiting 6m'), findsOneWidget);
+  });
+
+  schedulerTestWidgets('Runs chips filter by state and show their counts', (
+    tester,
+  ) async {
+    sizeView(tester);
+    final now = nowMs();
+    final host = Host()
+      ..runs = [
+        runRecord('waiting', 'needs-input', at: now - 60000, session: 's'),
+        runRecord('bad', 'failed', at: now - 2 * hour),
+        {
+          ...runRecord('late', 'completed', at: now - 3 * hour),
+          'trigger': 'catch-up',
+        },
+        {
+          ...runRecord('gap', 'skipped', at: now - 4 * hour),
+          'trigger': 'missed',
+        },
+        runRecord('fine', 'completed', at: now - 5 * hour),
+      ];
+    await pumpScreen(tester, containerFor(host));
+    await tester.tap(find.text('RUNS'));
+    await tester.pumpAndSettle();
+    Finder chipFor(String name) =>
+        find.byKey(ValueKey('scheduler-runs-filter-$name'));
+    Finder row(String id) => find.byKey(ValueKey('scheduler-run-$id'));
+    expect(find.text('All 5'), findsOneWidget);
+    expect(find.text('Failed 1'), findsOneWidget);
+    expect(find.text('Catch-up 2'), findsOneWidget);
+    const ids = ['waiting', 'bad', 'late', 'gap', 'fine'];
+    for (final (chip, shown) in [
+      ('failed', ['bad']),
+      ('catchUp', ['late', 'gap']),
+      ('all', ids),
+    ]) {
+      await tester.tap(chipFor(chip));
+      await tester.pumpAndSettle();
+      for (final id in ids) {
+        expect(
+          row(id),
+          shown.contains(id) ? findsOneWidget : findsNothing,
+          reason: '$chip / $id',
+        );
+      }
+    }
+  });
+
+  schedulerTestWidgets(
+    'Runs group by day in the viewer zone under day headers',
+    (tester) async {
+      sizeView(tester);
+      final now = DateTime.now();
+      final today = now.millisecondsSinceEpoch - 60000;
+      final twoDays = now.millisecondsSinceEpoch - 2 * 24 * hour;
+      final host = Host()
+        ..runs = [
+          runRecord('a', 'completed', at: today),
+          runRecord('b', 'completed', at: twoDays),
+          runRecord('c', 'failed', at: twoDays - 1000),
+        ];
+      await pumpScreen(tester, containerFor(host));
+      await tester.tap(find.text('RUNS'));
+      await tester.pumpAndSettle();
+      DateTime at(int ms) =>
+          DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
+      final todayHeader = schedulerDayHeader(at(today), 'Asia/Kolkata', now);
+      final olderHeader = schedulerDayHeader(at(twoDays), 'Asia/Kolkata', now);
+      expect(todayHeader, startsWith('Today'));
+      expect(find.text(todayHeader.toUpperCase()), findsOneWidget);
+      expect(find.text(olderHeader.toUpperCase()), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text(todayHeader.toUpperCase())).dy,
+        lessThan(tester.getTopLeft(find.text(olderHeader.toUpperCase())).dy),
+      );
+      double rowTop(String id) =>
+          tester.getTopLeft(find.byKey(ValueKey('scheduler-run-$id'))).dy;
+      expect(rowTop('a'), lessThan(rowTop('b')));
+      expect(rowTop('b'), lessThan(rowTop('c')));
+      expect(find.text('Times in Asia/Kolkata'), findsOneWidget);
+    },
+  );
+
+  schedulerTestWidgets(
+    'editor footer says Create schedule for a new schedule and Save changes for an existing one',
+    (tester) async {
+      sizeView(tester);
+      await pumpScreen(tester, containerFor(Host()));
+      await tester.tap(find.text('New schedule'));
+      await tester.pumpAndSettle();
+      final create = find.widgetWithText(AbButton, 'Create schedule');
+      expect(create, findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'Save changes'), findsNothing);
+      expect(tester.getBottomLeft(create).dy, lessThanOrEqualTo(900));
+      expect(tester.getTopLeft(create).dy, greaterThan(0));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      if (find.text('Discard draft').evaluate().isNotEmpty) {
+        await tester.tap(find.text('Discard draft'));
+        await tester.pumpAndSettle();
+      }
+      await editSchedule(tester);
+      final save = find.widgetWithText(AbButton, 'Save changes');
+      expect(save, findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'Create schedule'), findsNothing);
+      expect(tester.getBottomLeft(save).dy, lessThanOrEqualTo(900));
+    },
+  );
+
+  schedulerTestWidgets(
+    'phone list counts the runs in the next 24 hours and names the next one',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(400, 850));
+      final now = nowMs();
+      final host = Host()
+        ..schedules = [
+          laneSchedule(0, [now + 42 * 60000, now + 3 * hour]),
+          laneSchedule(1, [now + 5 * hour]),
+        ];
+      await pumpScreen(tester, containerFor(host));
+      final line = find.text('3 runs in the next 24 hours');
+      expect(line, findsOneWidget);
+      final box = tester.getRect(line);
+      expect(box.left, greaterThanOrEqualTo(0));
+      expect(box.right, lessThanOrEqualTo(400));
+      expect(find.textContaining('Next: Lane 0'), findsOneWidget);
+      expect(find.byType(SchedulerLaneStrip), findsNothing);
     },
   );
 
@@ -1281,14 +1723,77 @@ void main() {
               reason: 'Approval needed to review repository changes',
             ),
             {
-              ...runRecord('previous', 'completed', at: 1799913600000),
-              'finishedAt': 1799913735000,
+              ...runRecord(
+                'previous',
+                'completed',
+                at: DateTime.now().millisecondsSinceEpoch - 18 * 60000,
+              ),
+              'finishedAt':
+                  DateTime.now().millisecondsSinceEpoch - 18 * 60000 + 100000,
             },
           ];
+        // Lanes and run squares are drawn from the live clock, so the fixture
+        // is built relative to it.
+        final base = DateTime.now().millisecondsSinceEpoch;
+        host.schedules = [
+          {
+            ...host.schedules.single,
+            'nextOccurrence': base + 42 * 60000,
+            'upcoming': [base + 42 * 60000, base + 42 * 60000 + 24 * hour],
+          },
+          {
+            ...settings,
+            'id': 'nightly',
+            'name': 'Hourly lint',
+            'cron': '0 * * * *',
+            'timezone': 'Asia/Kolkata',
+            'nextOccurrence': base + 20 * 60000,
+            'upcoming': [
+              for (var i = 0; i < 18; i++) base + 20 * 60000 + i * hour,
+            ],
+          },
+          {
+            ...settings,
+            'id': 'audit',
+            'name': 'Dependency audit',
+            'cron': '30 2 * * *',
+            'timezone': 'Europe/London',
+            'catchUp': 'skip',
+            'nextOccurrence': base + 5 * hour,
+            'upcoming': [base + 5 * hour, base + 17 * hour],
+          },
+          {
+            ...settings,
+            'id': 'notes',
+            'name': 'Release notes',
+            'cron': '0 17 * * 5',
+            'enabled': false,
+          },
+        ];
+        host.runs = [
+          ...host.runs,
+          for (var i = 0; i < 12; i++)
+            {
+              ...runRecord(
+                'hist$i',
+                i % 5 == 3
+                    ? 'failed'
+                    : (i % 7 == 4 ? 'interrupted' : 'completed'),
+                at: base - (i + 2) * 5 * hour,
+              ),
+              'trigger': 'cron',
+              'finishedAt': base - (i + 2) * 5 * hour + 100000,
+            },
+          {
+            ...runRecord('gap', 'skipped', at: base - 30 * hour),
+            'trigger': 'missed',
+            'missedCount': 3,
+            'reason': 'Antgrid was closed',
+          },
+        ];
         host.preview = (_) async => {
           'occurrences': [
-            for (final day in [15, 18, 19, 20, 21])
-              DateTime.utc(2027, 1, day, 3, 30).millisecondsSinceEpoch,
+            for (final day in [1, 2, 3, 4, 5]) base + day * 24 * hour,
           ],
         };
         final key = GlobalKey();
@@ -1321,7 +1826,16 @@ void main() {
         await editSchedule(tester);
         await capture('editor');
         if (mobile) {
-          await tester.ensureVisible(find.text('Time (HH:mm) · Asia/Kolkata'));
+          await tester.scrollUntilVisible(
+            find.text('Asia/Kolkata'),
+            300,
+            scrollable: find
+                .descendant(
+                  of: find.byType(ScheduleEditor),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          );
           await tester.pumpAndSettle();
           await capture('editor-timing');
         }

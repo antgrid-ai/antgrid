@@ -126,6 +126,10 @@ class AgentSchedule {
   final DateTime? deletedAt;
   final DateTime? nextOccurrence;
   final String? lastResult;
+
+  /// Upcoming cron occurrences, soonest first; a full bridge page (48) means
+  /// "at least that many". Empty for one-offs and older bridges.
+  final List<DateTime> upcoming;
   const AgentSchedule({
     required this.id,
     required this.name,
@@ -156,6 +160,7 @@ class AgentSchedule {
     this.deletedAt,
     this.nextOccurrence,
     this.lastResult,
+    this.upcoming = const [],
   });
   factory AgentSchedule.fromJson(Map<String, dynamic> json) => AgentSchedule(
     id: json['id'] as String,
@@ -187,6 +192,7 @@ class AgentSchedule {
     deletedAt: schedulerDate(json['deletedAt']),
     nextOccurrence: schedulerDate(json['nextOccurrence']),
     lastResult: json['lastResult'] as String?,
+    upcoming: [for (final v in json['upcoming'] as List? ?? const []) ?schedulerDate(v)],
   );
   bool get isOneOff => runAt != null;
 
