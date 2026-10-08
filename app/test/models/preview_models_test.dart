@@ -68,6 +68,7 @@ void main() {
       const tab = PreviewTab(
         port: 3000,
         scheme: 'http',
+        owner: 'p',
         localPort: 3000,
         currentUrl: 'http://localhost:3000',
       );
@@ -98,7 +99,7 @@ void main() {
 
     test('activeTab returns null when activeTabId names no open tab', () {
       const state = PreviewState(
-        tabs: [PreviewTab(port: 3000, scheme: 'http')],
+        tabs: [PreviewTab(port: 3000, scheme: 'http', owner: 'p')],
         activeTabId: 4000,
       );
       expect(state.activeTab, isNull);
@@ -110,6 +111,7 @@ void main() {
       const tab = PreviewTab(
         port: 3000,
         scheme: 'http',
+        owner: 'p',
         localPort: 8080,
       );
       final cleared = tab.copyWith(clearLocalPort: true);
@@ -121,10 +123,18 @@ void main() {
       const tab = PreviewTab(
         port: 3000,
         scheme: 'http',
+        owner: 'p',
         currentUrl: 'http://localhost:3000',
       );
       final cleared = tab.copyWith(clearCurrentUrl: true);
       expect(cleared.currentUrl, isNull);
+    });
+
+    test('copyWith keeps owner', () {
+      const tab = PreviewTab(port: 3000, scheme: 'http', owner: 'p');
+      expect(tab.copyWith(scheme: 'https').owner, 'p');
+      expect(tab.copyWith(localPort: 1).owner, 'p');
+      expect(tab.copyWith(clearCurrentUrl: true).owner, 'p');
     });
   });
 

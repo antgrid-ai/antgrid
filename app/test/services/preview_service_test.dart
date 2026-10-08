@@ -187,6 +187,7 @@ void main() {
         expect(svc.currentState.activeTabId, 3000);
         expect(svc.currentState.activeTab?.localPort, 3000);
         expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:3000');
+        expect(svc.currentState.activeTab?.owner, svc.projectId);
 
         await svc.closeTab(3000);
         expect(svc.currentState.activeTabId, isNull);
@@ -229,6 +230,7 @@ void main() {
       expect(svc.currentState.activeTab?.localPort, port);
       expect(svc.currentState.activeTab?.scheme, 'http');
       expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:$port');
+      expect(svc.currentState.activeTab?.owner, svc.projectId);
 
       await svc.closeTab(port);
       await session.close();
@@ -296,6 +298,7 @@ void main() {
       final newSession = await newFakeProjectSession(newT);
       final newSvc = PreviewService.fromSession(newSession, handoff: handoff);
       expect(newSvc.currentState.tabs.single.currentUrl, tab.currentUrl);
+      expect(newSvc.currentState.tabs.single.owner, tab.owner);
       expect(newSvc.currentState.activeTabId, port);
 
       final socket = await Socket.connect(InternetAddress.loopbackIPv4, port);
