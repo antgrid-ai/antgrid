@@ -112,10 +112,10 @@ class _AbButtonState extends State<AbButton> {
     );
     if (widget.wrapLabel) label = Flexible(child: label);
 
+    final extent = AbTouchSizing.extentOf(context);
     Widget visual = Container(
       constraints: BoxConstraints(
-        minWidth: AbTouchSizing.extentOf(context),
-        minHeight: AbTouchSizing.extentOf(context),
+        minHeight: extent == 0 ? 0 : AbTokens.rowHeightSm,
       ),
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
@@ -142,8 +142,18 @@ class _AbButtonState extends State<AbButton> {
       ),
     );
 
+    // Touch sizing reserves the full target around a box of desktop
+    // proportions, as AbChip does; a box drawn at the target's size dwarfs
+    // its label.
+    Widget sized(Widget child) => extent == 0
+        ? child
+        : ConstrainedBox(
+            constraints: BoxConstraints(minWidth: extent, minHeight: extent),
+            child: Center(widthFactor: 1, heightFactor: 1, child: child),
+          );
+
     if (!interactive) {
-      return Opacity(opacity: AbTokens.opacityDisabled, child: visual);
+      return sized(Opacity(opacity: AbTokens.opacityDisabled, child: visual));
     }
 
     return Semantics(
@@ -165,11 +175,14 @@ class _AbButtonState extends State<AbButton> {
           ),
         },
         child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: widget.onTap,
-          child: AbFocusRing(
-            focused: _focused,
-            borderRadius: AbTokens.borderRadius5,
-            child: visual,
+          child: sized(
+            AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius5,
+              child: visual,
+            ),
           ),
         ),
       ),

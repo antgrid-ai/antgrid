@@ -1282,7 +1282,7 @@ void main() {
   );
 
   schedulerTestWidgets(
-    'mobile controls reach 48px and the footer remains visible above the keyboard with large text',
+    'mobile controls keep touch-sized targets and the footer remains visible above the keyboard with large text',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -1308,10 +1308,12 @@ void main() {
         of: find.byType(AbSegmented<bool>),
         matching: find.byType(GestureDetector),
       );
+      // A segment is its own visible box, so it stops at a row height; it
+      // spans half the screen, which keeps it an easy target.
       for (final tab in tabs.evaluate()) {
         expect(
           tester.getSize(find.byElementPredicate((e) => e == tab)).height,
-          greaterThanOrEqualTo(48),
+          greaterThanOrEqualTo(AbTokens.rowHeightMd),
         );
       }
       await editSchedule(tester);

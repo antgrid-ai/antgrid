@@ -195,9 +195,13 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         : p.textMuted;
 
     Widget cell = AnimatedContainer(
+      // The cell is the visible box, so it stops at a row height rather than
+      // the full touch target, which would dwarf its small-caps label.
       constraints: BoxConstraints(
         minWidth: AbTouchSizing.extentOf(context),
-        minHeight: AbTouchSizing.extentOf(context),
+        minHeight: AbTouchSizing.extentOf(context) == 0
+            ? 0
+            : AbTokens.rowHeightMd,
       ),
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,
