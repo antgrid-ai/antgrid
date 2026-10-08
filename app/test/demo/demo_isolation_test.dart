@@ -26,16 +26,20 @@ import 'package:antgrid/providers/relay_connection.dart'
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/open_checkout.dart';
+import 'package:antgrid/providers/preview_site_data.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
+import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import '../helpers/demo_harness.dart';
+import '../helpers/fake_webview_platform.dart';
 import '../helpers/prefs_test_mock.dart';
 
 SessionEntry _entry(String id) => SessionEntry(
@@ -312,6 +316,48 @@ void main() {
     await store.write(<String>{'real-project', kDemoProjectId});
 
     expect(store.read(), <String>{'real-project'});
+  });
+
+  test('the preview origin owner store drops the demo', () async {
+    useInMemoryPrefs();
+    final store = PreviewOriginOwnerStore();
+
+    await store.replace({3000: 'real-project', 4000: kDemoProjectId});
+    await store.merge({3000: 'real-project'}, {5000: 'dev-1.$kDemoProjectId'});
+
+    expect(await store.read(), {3000: 'real-project'});
+  });
+
+  test('preview admission in demo mode neither wipes nor writes, and a manual '
+      'clear is refused', () async {
+    useInMemoryPrefs();
+    final store = PreviewOriginOwnerStore();
+    await store.replace({3000: 'real-project'});
+    final recorder = WipeRecorder();
+    final site = PreviewSiteData(
+      store: store,
+      wipe: recorder.call,
+      isDemoMode: () => true,
+    );
+
+    final outcome = await site.admit([(port: 3000, owner: 'other-project')]);
+
+    expect(outcome.status, isNull);
+    expect(await site.clearManually(), PreviewClearStatus.refused);
+    expect(recorder.calls, 0);
+    expect(await store.read(), {3000: 'real-project'});
+  });
+
+  test('the preview site data provider follows demo mode', () async {
+    final container = await demoContainer();
+    enterDemoMode(container);
+    final site = container.read(previewSiteDataProvider);
+
+    expect(await site.clearManually(), PreviewClearStatus.refused);
+
+    // Wired to false, the null-platform wipe classifies as cleared and writes.
+    await site.admit([(port: 3000, owner: 'machine.proj')]);
+    expect(await PreviewOriginOwnerStore().read(), isNull);
   });
 
   test('folding "This machine" in the demo writes nothing', () async {
