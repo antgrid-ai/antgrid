@@ -652,7 +652,7 @@ export async function callSessionBusTool(
 // approval cap, the read-only rule for scheduler-launched sessions, project
 // scope); this process offers every tool to every caller and shows the refusal.
 
-function scheduleFieldSchemas(): Record<string, unknown> {
+function scheduleFieldSchemas(update = false): Record<string, unknown> {
   return {
     name: str("Short unique name within this project. Compared trimmed and case-insensitively."),
     prompt: str("What each run is told. Each run is a NEW session that sees only this text, so it must stand alone. Results reach the user only through what the prompt makes the run do: a commit, a file, antgrid_post."),
@@ -669,6 +669,10 @@ function scheduleFieldSchemas(): Record<string, unknown> {
     enabled: { type: "boolean", description: "false creates it paused. Defaults to true." },
     agentId: str("Agent the runs use. Defaults to this session's agent; refused with the schedulable list if that is not schedulable. Runs use the project's agent defaults, not this session's model or effort."),
     mode: { type: "string", enum: ["terminal", "chat"], description: "Defaults to this session's mode." },
+    chatMode: {
+      type: update ? ["string", "null"] : "string",
+      description: `Chat schedules only: the agent's chat permission mode, e.g. claude-code default, plan, auto, acceptEdits. Omit for the default. Modes that approve tools without asking count like bypass.${update ? " null clears it." : ""}`,
+    },
     dryRun: { type: "boolean", description: "Validate and show what would be saved without saving anything. Use it when unsure about a cron or time." },
   };
 }
@@ -706,7 +710,7 @@ export const SCHEDULER_TOOLS: McpTool[] = [
     description: `Change fields of one of this project's schedules. Send only what changes; anything left out is kept. Naming runAt on a recurring schedule makes it a one-off, and naming cron on a one-off makes it recurring. A changed runAt re-arms a finished one-off. Project, workspace and base branch cannot change once the workspace exists. ${SCHEDULE_FACTS}`,
     inputSchema: {
       type: "object",
-      properties: { id: str("Schedule id from antgrid_list_schedules."), ...scheduleFieldSchemas() },
+      properties: { id: str("Schedule id from antgrid_list_schedules."), ...scheduleFieldSchemas(true) },
       required: ["id"],
     },
   },
@@ -729,7 +733,7 @@ export function isSchedulerTool(name: string): boolean {
 }
 
 const SCHEDULE_BODY_KEYS = [
-  "name", "prompt", "cron", "runAt", "timezone", "workspace", "approvalPolicy", "catchUp", "enabled", "agentId", "mode", "dryRun",
+  "name", "prompt", "cron", "runAt", "timezone", "workspace", "approvalPolicy", "catchUp", "enabled", "agentId", "mode", "chatMode", "dryRun",
 ] as const;
 
 /** A create or update body. A key the caller left out stays out, so a patch
@@ -845,6 +849,7 @@ function scheduleRow(schedule: any, machineZone: unknown, now: number): string {
   }
   const base = schedule.workspace === "worktree" ? `worktree${schedule.baseBranch ? ` from ${schedule.baseBranch}` : ""}` : "shared checkout";
   lines.push(`  runs: ${schedule.agentId}/${schedule.mode}; workspace ${base}; approval ${schedule.approvalPolicy}; catch-up ${schedule.catchUp}`);
+  if (schedule.mode === "chat" && typeof schedule.chatMode === "string") lines.push(`  permissions: ${schedule.chatMode}`);
   const who = [
     schedule.authorSessionName ? `created by session "${schedule.authorSessionName}"` : "created in the app",
     schedule.editedBySessionName

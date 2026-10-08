@@ -66,6 +66,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       _frequency,
       _timezone;
   late bool _enabled;
+  String? _chatMode;
   bool _saving = false, _restoring = false, _invalidPreview = false;
   bool _closed = false;
   late String _lastPreviewKey;
@@ -95,6 +96,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                   _branch.text.trim() != (_current!.baseBranch ?? ''))));
   bool get _editable => widget.writable && !_saving;
   bool get _once => _frequency == 'Once';
+
+  /// Bypass already launches the agent with its own bypass mode, and a
+  /// terminal run has no chat backend, so neither carries a permission mode.
+  bool get _carriesChatMode => _mode == 'chat' && _approvals != 'bypass';
+  List<SchedulerChatMode>? get _chatModes =>
+      widget.snapshot.capabilities.chatModes[_agent];
   String? get _onceIso => schedulerWallIso(_time.text);
   String get _previewKey => _once
       ? 'once\n${_onceIso ?? _time.text.trim()}\n${_timezone.trim()}'
@@ -212,6 +219,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     _approvals = v['approvalPolicy'] as String;
     _catchUp = v['catchUp'] as String? ?? 'latest';
     _enabled = v['enabled'] as bool;
+    _chatMode = v['chatMode'] as String?;
     _frequency = _draft.frequency;
   }
 
@@ -225,6 +233,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     'approvalPolicy': _approvals,
     'catchUp': _catchUp,
     'enabled': _enabled,
+    if (_carriesChatMode && _chatMode != null) 'chatMode': _chatMode,
     if (_branch.text.trim().isNotEmpty) 'baseBranch': _branch.text.trim(),
     if (_once) 'runAt': _runAtValue else 'cron': _cron.text,
     'timezone': _timezone,
@@ -483,6 +492,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     if (!widget.snapshot.capabilities.supportsCatchUp) {
       settings.remove('catchUp');
     }
+    // Omitting the key would leave the stored mode in place.
+    if (_carriesChatMode &&
+        _chatMode == null &&
+        _draft.initialSaved['chatMode'] != null) {
+      settings['chatMode'] = null;
+    }
     if (_locked) {
       for (final k in ['projectId', 'workspace', 'baseBranch']) {
         settings.remove(k);
@@ -560,6 +575,45 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       ],
     ),
   );
+  Widget _permissionsPicker() {
+    final listed = _chatModes!;
+    final stored = _chatMode;
+    // A mode the agent no longer lists (or one carried over from earlier
+    // chats) stays selectable, so saving does not silently replace it.
+    final unlisted = stored != null && !listed.any((m) => m.id == stored);
+    // Not plain "Default": claude-code lists its own mode with that name, and
+    // no mode (the agent's configured default) is a different setting.
+    final choices = {
+      '': 'Agent default',
+      for (final m in listed) m.id: m.name,
+      if (unlisted) stored: stored,
+    };
+    final selected = listed.where((m) => m.id == stored).firstOrNull;
+    final help = stored == null
+        ? "Uses the agent's own default mode."
+        : selected?.description ??
+              'Some permission modes approve tool use without asking.';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: AbTokens.space6,
+      children: [
+        _choices(
+          'Permissions',
+          choices,
+          stored ?? '',
+          (v) => _chatMode = v.isEmpty ? null : v,
+        ),
+        Text(
+          help,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontSm,
+            color: context.antgrid.textSecondary,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _section(String name, List<Widget> children) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     spacing: AbTokens.space8,
@@ -708,8 +762,13 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         {for (final a in agents) a.agentId: a.agentId},
         _agent,
         (v) {
+          // A tap on the selected chip must not clear a chat mode no picker
+          // shows (an agent without a listed set keeps its stored one).
+          if (v == _agent) return;
           _agent = v;
           _mode = agents.firstWhere((a) => a.agentId == v).modes.first;
+          // Mode ids belong to one agent's chat backend.
+          _chatMode = null;
         },
       ),
       _choices(
@@ -724,6 +783,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         _approvals,
         (v) => _approvals = v,
       ),
+      if (_carriesChatMode && _chatModes != null) _permissionsPicker(),
     ]);
     final timing = _section('Timing', [
       if (widget.snapshot.capabilities.supportsOneOff || _once)

@@ -18,6 +18,8 @@ const scheduleFields = {
   timezone: z.string().min(1),
   enabled: z.boolean(),
   catchUp: z.enum(["latest", "skip"]),
+  // The chat config `mode` id a scheduled chat run starts in; absent means the backend default.
+  chatMode: z.string().min(1),
 };
 const exactlyOneKind = { message: "A schedule needs exactly one of cron (recurring) or runAt (one-off)" };
 const ScheduleInputBase = z.object({
@@ -27,12 +29,14 @@ const ScheduleInputBase = z.object({
   catchUp: scheduleFields.catchUp.default("latest"),
   cron: scheduleFields.cron.optional(),
   runAt: scheduleFields.runAt.optional(),
+  chatMode: scheduleFields.chatMode.optional(),
 }).strict();
 /** Field names, for callers that rebuild an input from a stored record. */
 export const SCHEDULE_INPUT_KEYS = Object.keys(ScheduleInputBase.shape) as (keyof ScheduleInput)[];
 export const ScheduleInputSchema = ScheduleInputBase.refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
 export const SchedulePatchSchema = z.object(scheduleFields).partial().extend({
   baseBranch: z.string().min(1).nullable().optional(),
+  chatMode: scheduleFields.chatMode.nullable().optional(),
 }).strict().refine((p) => p.cron === undefined || p.runAt === undefined, { message: "Name cron or runAt in a patch, not both" });
 export const ScheduleSchema = ScheduleInputBase.extend({
   id: z.string(),
@@ -55,7 +59,15 @@ export const ScheduleSchema = ScheduleInputBase.extend({
   // it. The occurrence fell due while the desktop was open, so the next claim runs it even under catch-up "skip".
   deferredAt: z.number().optional(),
   deletedAt: z.number().optional(),
+  // Set once by the store migration on a chat schedule that predates `chatMode`: the mode it was effectively running
+  // in is resolved from the last-used chat config at the next start. Internal; never leaves the bridge.
+  chatModeCarryOver: z.boolean().optional(),
 }).refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
+/** A schedule as the app and agents see it: without the bridge-internal carry-over marker. */
+export function publicSchedule<T extends Schedule>(schedule: T): Omit<T, "chatModeCarryOver"> {
+  const { chatModeCarryOver: _marker, ...rest } = schedule;
+  return rest;
+}
 export type ScheduleInput = z.infer<typeof ScheduleInputSchema>;
 export type SchedulePatch = z.infer<typeof SchedulePatchSchema>;
 export type Schedule = z.infer<typeof ScheduleSchema>;
@@ -82,6 +94,8 @@ export const SchedulerCapabilitiesSchema = z.object({
   supportsBaseBranchClear: z.boolean().optional(),
   supportsCatchUp: z.boolean().optional(),
   supportsOneOff: z.boolean().optional(),
+  // Fixed chat permission modes per schedulable agent. An agent whose modes are discovered at runtime is absent.
+  chatModes: z.record(z.string(), z.array(z.object({ id: z.string(), name: z.string(), description: z.string().optional() }))).optional(),
   agents: z.array(z.object({ agentId: z.string(), modes: z.array(z.enum(["terminal", "chat"])) })),
   error: z.string().optional(),
 });

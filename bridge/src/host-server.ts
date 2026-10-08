@@ -72,7 +72,7 @@ import { isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { SchedulerService, SchedulerLaunchError, type SchedulerAuthor, type SchedulerGuard } from "./scheduler/service";
-import { ScheduleInputSchema, SchedulePatchSchema, isActiveRun, type Schedule, type ScheduleInput, type SchedulePatch, type SchedulerRun } from "./scheduler/models";
+import { ScheduleInputSchema, SchedulePatchSchema, isActiveRun, publicSchedule, type Schedule, type ScheduleInput, type SchedulePatch, type SchedulerRun } from "./scheduler/models";
 import { SchedulerRefusal, type AgentCaller, type SchedulerAgentMethod } from "./scheduler/agent";
 import { agentSpec, schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
@@ -1047,12 +1047,16 @@ export class HostServer {
           const prepared = await core.prepareScheduledSession({
             scheduleId: schedule.id, name: schedule.name, agentId: schedule.agentId,
             mode: schedule.mode, approvalPolicy: schedule.approvalPolicy, workspace: schedule.workspace,
-            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId,
+            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId, chatMode: schedule.chatMode,
           }, async (identity) => { bind(identity); });
           return { ...prepared, deliverPrompt: () => prepared.deliverPrompt(schedule.prompt) };
         },
         stop: async (run) => {
           if (run.sessionId) await this.cores.get(run.projectId)?.core.stopScheduledSession(run.sessionId);
+        },
+        resolveChatModeCarryOver: async (schedule) => {
+          if (!isSafeProjectId(schedule.projectId)) return undefined;
+          return (await SessionManager.readLastUsedChatConfig(resolveAbDir(), schedule.projectId, schedule.agentId))?.mode;
         },
         releaseWorkspace: async (schedule) => {
           const store = new CheckoutStore(resolveAbDir(), schedule.projectId);
@@ -1133,7 +1137,7 @@ export class HostServer {
         // An app that predates one-offs parses `cron` as required, so a single cron-less row in `schedules` would
         // blank its whole Scheduler screen; one-offs travel in their own key that it never reads.
         const all = this.scheduler.schedules();
-        return { schedules: all.filter((s) => s.runAt === undefined), oneOffSchedules: all.filter((s) => s.runAt !== undefined),
+        return { schedules: all.filter((s) => s.runAt === undefined).map(publicSchedule), oneOffSchedules: all.filter((s) => s.runAt !== undefined).map(publicSchedule),
           projects: await this.schedulerProjects() };
       }
       case "scheduler.runs": return { runs: this.scheduler.runs(params.scheduleId as string | undefined) };
@@ -1142,14 +1146,14 @@ export class HostServer {
       case "scheduler.create": {
         const input = ScheduleInputSchema.parse(params.schedule);
         await this.validateScheduleProject(input.projectId, input.workspace);
-        return { schedule: await this.scheduler.create(input, { author }) };
+        return { schedule: publicSchedule(await this.scheduler.create(input, { author })) };
       }
       case "scheduler.update": {
         const patch = SchedulePatchSchema.parse(params.patch);
         const current = this.scheduler.schedules().find((schedule) => schedule.id === params.id);
         if (!current) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
         await this.validateScheduleProject(patch.projectId ?? current.projectId, patch.workspace ?? current.workspace);
-        return { schedule: await this.scheduler.update(current.id, patch, { author }) };
+        return { schedule: publicSchedule(await this.scheduler.update(current.id, patch, { author })) };
       }
       case "scheduler.delete": await this.scheduler.delete(params.id as string); return {};
       case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string) };
@@ -1171,10 +1175,18 @@ export class HostServer {
   // The core proves which session is calling; every rule about what that session may do lives here and in the
   // service's guard, so the MCP process and the loopback route stay transport.
 
-  /** A schedule runs ungated when its policy is bypass or its agent's own default does not prompt before tools. */
-  private scheduleApprovalLevel(schedule: Pick<Schedule, "approvalPolicy" | "agentId">): "gated" | "ungated" {
-    if (schedule.approvalPolicy === "bypass") return "ungated";
-    return agentSpec(schedule.agentId)?.defaultApprovalGated === false ? "ungated" : "gated";
+  /** A schedule runs ungated when its policy is bypass, its agent's own default does not prompt before tools, or it is
+   *  a chat schedule pinned to a permission mode that is not known to prompt. A mode the registry does not list
+   *  (discovered at runtime, or unknown) counts as ungated, the same as an unknown agent does elsewhere. So does a chat
+   *  schedule still awaiting its carry-over: its mode is not known until the startup pass writes it, and the pass may
+   *  well write an ungated one onto an edit judged before then. */
+  private scheduleApprovalLevel(schedule: Pick<Schedule, "approvalPolicy" | "agentId" | "mode" | "chatMode" | "chatModeCarryOver">): "gated" | "ungated" {
+    const spec = agentSpec(schedule.agentId);
+    if (schedule.approvalPolicy === "bypass" || spec?.defaultApprovalGated === false) return "ungated";
+    if (schedule.mode === "chat" && schedule.chatModeCarryOver === true) return "ungated";
+    if (schedule.mode === "chat" && schedule.chatMode !== undefined
+      && !spec?.chatPermissionModes?.some((m) => m.id === schedule.chatMode && m.gated)) return "ungated";
+    return "gated";
   }
 
   /** The approval ceiling and project fence, run by the service in the synchronous window around the write. */
@@ -1187,7 +1199,7 @@ export class HostServer {
       if (caller.approvalLevel === "ungated") return;
       const ceiling = new SchedulerRefusal("APPROVAL_CEILING",
         "This session runs with approval prompts, so it cannot create, change or run a schedule that would run without them "
-        + "(approvalPolicy bypass, or an agent whose default does not prompt). It can still pause or delete such a schedule.");
+        + "(approvalPolicy bypass, an agent whose default does not prompt, or a chat permission mode that approves tools without asking). It can still pause or delete such a schedule.");
       if (original && this.scheduleApprovalLevel(original) === "ungated") {
         // Judged on the keys the caller named: an extra key that repeats a stored value is still an edit.
         if (op === "update" && patchKeys.length === 1 && patchKeys[0] === "enabled" && next.enabled === false) return;
@@ -1259,7 +1271,7 @@ export class HostServer {
         rows = scheduler.schedules().filter((s) => s.projectId === caller.projectId).map((schedule) => {
           const active = runs.find((run) => run.scheduleId === schedule.id && isActiveRun(run));
           const fired = schedule.firedRunId ? runs.find((run) => run.id === schedule.firedRunId) : undefined;
-          return { ...schedule, ...(active ? { activeRun: this.stripRun(active, names) } : {}),
+          return { ...publicSchedule(schedule), ...(active ? { activeRun: this.stripRun(active, names) } : {}),
             ...(fired ? { firedRun: this.stripRun(fired, names) } : {}) };
         });
       } catch { /* A storage fault is already reported through the header; the list is simply empty. */ }
@@ -1342,7 +1354,7 @@ export class HostServer {
           ...(baseBranch !== undefined ? { baseBranch } : {}) };
         const checked = SchedulerRequestSchemas["scheduler.create"]!.parse(this.withResolvedRunAt("scheduler.create", { schedule })) as { schedule: ScheduleInput };
         const created = await scheduler.create(checked.schedule, { author, guard, dryRun: dryRun === true, rejectDuplicateName: true });
-        return { schedule: created, echo: this.scheduleEcho(scheduler, created), saved: dryRun !== true };
+        return { schedule: publicSchedule(created), echo: this.scheduleEcho(scheduler, created), saved: dryRun !== true };
       }
       case "update": {
         const { id, dryRun, ...patch } = args;
@@ -1352,7 +1364,7 @@ export class HostServer {
         const checked = SchedulerRequestSchemas["scheduler.update"]!.parse(this.withResolvedRunAt("scheduler.update", { id: current.id, patch })) as { patch: SchedulePatch };
         await this.validateScheduleProject(current.projectId, checked.patch.workspace ?? current.workspace);
         const updated = await scheduler.update(current.id, checked.patch, { author, guard, dryRun: dryRun === true, rejectDuplicateName: true });
-        return { schedule: updated, echo: this.scheduleEcho(scheduler, updated), saved: dryRun !== true };
+        return { schedule: publicSchedule(updated), echo: this.scheduleEcho(scheduler, updated), saved: dryRun !== true };
       }
       default: throw new Error("Unknown scheduler operation");
     }

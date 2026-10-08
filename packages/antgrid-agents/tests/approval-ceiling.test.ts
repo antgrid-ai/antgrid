@@ -33,3 +33,17 @@ describe("defaultApprovalGated", () => {
     expect(agentSpec("not-an-agent")).toBeUndefined();
   });
 });
+
+describe("chatPermissionModes", () => {
+  it("pins claude-code's four modes and which of them still prompt", () => {
+    expect(agentSpec("claude-code")?.chatPermissionModes?.map((m) => [m.id, m.gated])).toEqual([
+      ["default", true], ["auto", false], ["acceptEdits", false], ["plan", true],
+    ]);
+  });
+
+  it("is left to runtime discovery for every other agent", () => {
+    for (const [id, spec] of Object.entries(AGENTS)) {
+      if (id !== "claude-code") expect(spec.chatPermissionModes, id).toBeUndefined();
+    }
+  });
+});

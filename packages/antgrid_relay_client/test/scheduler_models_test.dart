@@ -224,4 +224,55 @@ void main() {
       );
     });
   });
+
+  group('chat permission mode', () {
+    const base = {
+      'id': 's',
+      'name': 'Chat',
+      'projectId': 'repo',
+      'agentId': 'claude-code',
+      'mode': 'chat',
+      'prompt': 'Go',
+      'approvalPolicy': 'default',
+      'workspace': 'shared',
+      'cron': '0 9 * * *',
+      'timezone': 'UTC',
+      'enabled': true,
+    };
+
+    test('parses and round-trips through settings for chat', () {
+      final schedule = AgentSchedule.fromJson({...base, 'chatMode': 'auto'});
+      expect(schedule.chatMode, 'auto');
+      expect(schedule.settings()['chatMode'], 'auto');
+    });
+
+    test('is absent when unset and never emitted for terminal', () {
+      final unset = AgentSchedule.fromJson(base);
+      expect(unset.chatMode, isNull);
+      expect(unset.settings().containsKey('chatMode'), isFalse);
+      final terminal = AgentSchedule.fromJson({
+        ...base,
+        'mode': 'terminal',
+        'chatMode': 'auto',
+      });
+      expect(terminal.settings().containsKey('chatMode'), isFalse);
+    });
+
+    test('capabilities carry the per-agent mode lists', () {
+      final caps = SchedulerCapabilities.fromJson({
+        'supported': true,
+        'chatModes': {
+          'claude-code': [
+            {'id': 'default', 'name': 'Default'},
+            {'id': 'auto', 'name': 'Auto', 'description': 'No prompts.'},
+          ],
+        },
+      });
+      final modes = caps.chatModes['claude-code']!;
+      expect(modes.map((m) => m.id), ['default', 'auto']);
+      expect(modes.last.description, 'No prompts.');
+      expect(modes.first.description, isNull);
+      expect(SchedulerCapabilities.fromJson({}).chatModes, isEmpty);
+    });
+  });
 }

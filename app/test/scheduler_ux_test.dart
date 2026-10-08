@@ -84,6 +84,8 @@ class Host {
   bool clearSupported = true;
   bool catchUpSupported = true;
   bool oneOffSupported = false;
+  bool chatModesListed = false;
+  List<Map<String, dynamic>> extraAgents = [];
   List<Map<String, dynamic>> oneOffs = [];
   bool agentAvailable = true;
   String timezone = 'Asia/Kolkata';
@@ -105,12 +107,41 @@ class Host {
           'supportsBaseBranchClear': clearSupported,
           'supportsCatchUp': catchUpSupported,
           'supportsOneOff': oneOffSupported,
+          // The bridge's own names (PERMISSION_MODES in antgrid-agents),
+          // including a listed mode called "Default".
+          if (chatModesListed)
+            'chatModes': {
+              'claude': [
+                {
+                  'id': 'default',
+                  'name': 'Default',
+                  'description': 'Ask before each tool use',
+                },
+                {
+                  'id': 'auto',
+                  'name': 'Auto',
+                  'description':
+                      'Model classifier approves or denies tool prompts',
+                },
+                {
+                  'id': 'acceptEdits',
+                  'name': 'Accept edits',
+                  'description': 'Auto-approve file edits',
+                },
+                {
+                  'id': 'plan',
+                  'name': 'Plan',
+                  'description': 'Read-only planning mode',
+                },
+              ],
+            },
           'agents': [
             if (agentAvailable)
               {
                 'agentId': 'claude',
                 'modes': ['terminal', 'chat'],
               },
+            ...extraAgents,
           ],
         };
       case 'scheduler.list':

@@ -10,6 +10,9 @@ import { createMessage } from "../src/protocol";
 import { MessageBus } from "../src/message-bus";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
 import { armBodyCapture, captureBody, BODY_REDACTED_MARKER } from "../src/netwatch";
+import { Database } from "bun:sqlite";
+import { SessionManager } from "../src/session-manager";
+import { agentRuntime } from "../src/agent-runtime";
 
 let root: string;
 let previous: string | undefined;
@@ -160,4 +163,55 @@ test("dispatch refuses a stored schedule whose project left the catalog", async 
   }
   expect(run.status).toBe("failed");
   expect(run.reason).toBe("Project is unavailable. Open it from the desktop before running this schedule.");
+});
+
+test("the host launches a scheduled chat run in the schedule's own permission mode", async () => {
+  const specs: { chatMode?: string }[] = [];
+  const launch = spyOn(ProjectCore.prototype, "prepareScheduledSession").mockImplementation(async (spec, bind) => {
+    specs.push(spec);
+    const identity = { sessionId: "scheduled", checkoutId: "main", runtimeGeneration: "generation" };
+    await bind(identity);
+    return { ...identity, deliverPrompt: async () => {} };
+  });
+  try {
+    await host.startControlPlane();
+    const folder = join(root, "pinned"); mkdirSync(folder);
+    const projectId = computeProjectId(folder);
+    await host.open(projectId, folder, "local");
+    const created = await host.schedulerRequest("scheduler.create", { schedule: { ...settings(projectId), chatMode: "plan" } }) as any;
+    await host.schedulerRequest("scheduler.runNow", { id: created.schedule.id });
+    for (let attempt = 0; attempt < 50 && specs.length === 0; attempt++) await Bun.sleep(10);
+    expect(specs).toHaveLength(1);
+    expect(specs[0]!.chatMode).toBe("plan");
+  } finally { launch.mockRestore(); }
+});
+
+test("at start the host carries a pre-mode chat schedule over from the project's last-used chat mode", async () => {
+  const state = join(root, "state");
+  const folder = join(root, "carried"); mkdirSync(folder);
+  const projectId = computeProjectId(folder);
+  // A store as the previous release left it: the schedules exist, then the version is rewound so the open migrates.
+  const seeding = new SchedulerService({ abDir: state, desktopOwned: true, timezone: "UTC",
+    supportedAgents: () => [{ agentId: "claude-code", modes: ["terminal", "chat"] }],
+    prepare: async () => { throw new Error("not dispatched"); }, stop: async () => {} });
+  const carried = await seeding.create({ ...settings(projectId), mode: "chat" } as any);
+  const empty = await seeding.create({ ...settings(computeProjectId(join(root, "no-sessions"))), name: "No sessions" } as any);
+  seeding.close();
+  const db = new Database(join(state, "scheduler", "scheduler.db"));
+  try { db.exec("PRAGMA user_version = 2"); } finally { db.close(); }
+  const sessions = new SessionManager({ projectId, projectPath: folder, storeDir: state, terminalManager: {} as any,
+    agentSpec: { command: "claude", name: "claude-code" }, agentRuntime, sendMessage: () => {} });
+  const chat = sessions.create("Mine", { tool: "claude-code", mode: "chat" });
+  sessions.setSessionConfig(chat.id, "mode", "auto");
+  sessions.flushNow();
+
+  await host.startControlPlane();
+  const scheduler = (host as unknown as { scheduler: SchedulerService }).scheduler;
+  const settled = () => scheduler.schedules().every((s) => s.chatModeCarryOver === undefined);
+  for (let attempt = 0; attempt < 100 && !settled(); attempt++) await Bun.sleep(10);
+  const byId = new Map(scheduler.schedules().map((s) => [s.id, s]));
+  expect(byId.get(carried.id)).toMatchObject({ chatMode: "auto" });
+  expect(byId.get(carried.id)!.chatModeCarryOver).toBeUndefined();
+  expect(byId.get(empty.id)!.chatMode).toBeUndefined();
+  expect(byId.get(empty.id)!.chatModeCarryOver).toBeUndefined();
 });

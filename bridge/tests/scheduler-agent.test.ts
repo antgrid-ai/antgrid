@@ -373,3 +373,83 @@ describe("one-off schedules", () => {
     await expect(host.schedulerRequest("scheduler.preview", { runAt: at, cron: "0 9 * * *", timezone: "UTC" })).rejects.toThrow();
   });
 });
+
+describe("chat permission mode", () => {
+  const chatCaller = (projectId: string, over: Partial<AgentCaller> = {}) => caller(projectId, { mode: "chat", ...over });
+  let counter = 0;
+  const chat = (c: AgentCaller, over: Record<string, unknown> = {}) => create(c, { name: `Chat ${++counter}`, mode: "chat", ...over });
+
+  test("a gated caller is refused a mode that approves tools without asking, on create and update", async () => {
+    const projectId = await open(plainProject("modes"));
+    const gated = chatCaller(projectId);
+    for (const chatMode of ["auto", "acceptEdits"]) {
+      expect(await refusalCode(chat(gated, { chatMode }))).toBe("APPROVAL_CEILING");
+    }
+    const own = (await chat(gated)).schedule;
+    for (const chatMode of ["auto", "acceptEdits"]) {
+      expect(await refusalCode(call(gated, "update", { id: own.id, chatMode }))).toBe("APPROVAL_CEILING");
+    }
+    expect(scheduler().schedules()).toHaveLength(1);
+  });
+
+  test("a gated caller may pick the modes that still prompt", async () => {
+    const projectId = await open(plainProject("gated-modes"));
+    const gated = chatCaller(projectId);
+    expect((await chat(gated, { chatMode: "default" })).schedule.chatMode).toBe("default");
+    const plan = (await chat(gated, { chatMode: "plan" })).schedule;
+    expect(plan.chatMode).toBe("plan");
+    expect((await call(gated, "update", { id: plan.id, chatMode: "default" })).schedule.chatMode).toBe("default");
+    expect((await call(gated, "update", { id: plan.id, chatMode: null })).schedule.chatMode).toBeUndefined();
+  });
+
+  test("a mode the registry does not list counts as ungated", async () => {
+    const projectId = await open(plainProject("unknown-mode"));
+    expect(await refusalCode(chat(chatCaller(projectId), { chatMode: "build" }))).toBe("APPROVAL_CEILING");
+    expect((await chat(chatCaller(projectId, { approvalLevel: "ungated" }), { chatMode: "build" })).schedule.chatMode).toBe("build");
+  });
+
+  test("against a schedule pinned to an ungated mode a gated caller may only pause or delete", async () => {
+    const projectId = await open(plainProject("pinned"));
+    const made = (await chat(chatCaller(projectId, { approvalLevel: "ungated" }), { chatMode: "auto" })).schedule;
+    const gated = chatCaller(projectId);
+    expect(await refusalCode(call(gated, "update", { id: made.id, prompt: "Edited" }))).toBe("APPROVAL_CEILING");
+    expect(await refusalCode(call(gated, "update", { id: made.id, chatMode: "default" }))).toBe("APPROVAL_CEILING");
+    expect(await refusalCode(call(gated, "runNow", { id: made.id }))).toBe("APPROVAL_CEILING");
+    expect((await call(gated, "update", { id: made.id, enabled: false })).schedule.enabled).toBe(false);
+    expect(await call(gated, "delete", { id: made.id })).toEqual({ deleted: made.id });
+  });
+
+  test("a schedule still awaiting its carry-over counts as ungated", async () => {
+    // The startup pass may yet write an ungated mode onto it, so an edit judged before then must fail closed.
+    const projectId = await open(plainProject("awaiting-carry-over"));
+    const gated = chatCaller(projectId);
+    const made = (await chat(gated)).schedule;
+    scheduler().store.saveSchedule({ ...scheduler().schedules().find((s) => s.id === made.id)!, chatModeCarryOver: true });
+    expect(await refusalCode(call(gated, "update", { id: made.id, prompt: "Edited" }))).toBe("APPROVAL_CEILING");
+    expect(scheduler().schedules().find((s) => s.id === made.id)!.prompt).toBe(made.prompt);
+    expect((await call(gated, "update", { id: made.id, enabled: false })).schedule.enabled).toBe(false);
+  });
+
+  test("a terminal schedule drops the mode, so it never counts as ungated", async () => {
+    const projectId = await open(plainProject("terminal-mode"));
+    const made = (await create(caller(projectId), { chatMode: "auto" })).schedule;
+    expect(made.chatMode).toBeUndefined();
+  });
+
+  test("the carry-over marker never leaves the bridge", async () => {
+    const projectId = await open(plainProject("marker"));
+    const made = (await chat(chatCaller(projectId))).schedule;
+    scheduler().store.saveSchedule({ ...scheduler().schedules()[0]!, chatModeCarryOver: true });
+    expect(scheduler().schedules()[0]!.chatModeCarryOver).toBe(true);
+    expect(JSON.stringify(await call(chatCaller(projectId), "list"))).not.toContain("chatModeCarryOver");
+    expect(JSON.stringify(await host.schedulerRequest("scheduler.list"))).not.toContain("chatModeCarryOver");
+    const edited = await host.schedulerRequest("scheduler.update", { id: made.id, patch: { prompt: "Edited" } });
+    expect(JSON.stringify(edited)).not.toContain("chatModeCarryOver");
+  });
+
+  test("capabilities list claude-code's four modes", async () => {
+    const capabilities = await host.schedulerRequest("scheduler.capabilities") as { chatModes?: Record<string, { id: string }[]> };
+    expect(capabilities.chatModes?.["claude-code"]?.map((m) => m.id)).toEqual(["default", "auto", "acceptEdits", "plan"]);
+    expect(capabilities.chatModes?.opencode).toBeUndefined();
+  });
+});

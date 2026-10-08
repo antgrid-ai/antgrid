@@ -13,6 +13,7 @@ import { readCodexVersionJson, codexHomeDir } from "./codex/home";
 import { observeAntigravityTitles } from "./antigravity/title-watcher";
 import { isAntigravityBinary, primeAntigravityCertCache } from "./antigravity/startup";
 import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
+import { PERMISSION_MODES as CLAUDE_PERMISSION_MODES } from "./claude-code/permission-modes";
 import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
 import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
@@ -60,6 +61,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     discoveryPaths: () => [join(homedir(), ".claude/local")],
     label: "Claude Code",
     defaultApprovalGated: true,
+    chatPermissionModes: CLAUDE_PERMISSION_MODES,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
     hookName: "claude",
     hookDir: "~/.claude/hooks",

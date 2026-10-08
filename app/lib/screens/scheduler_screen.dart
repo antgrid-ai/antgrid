@@ -594,6 +594,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             schedulerOneOffSummary(schedule, snapshot.runs, now),
             muted: oneOff == SchedulerOneOffState.finished,
           ),
+        if (schedule.mode == 'chat' && schedule.chatMode != null)
+          _text(
+            'Permissions: ${snapshot.capabilities.chatModes[schedule.agentId]?.where((m) => m.id == schedule.chatMode).firstOrNull?.name ?? schedule.chatMode}',
+          ),
         // An older bridge has no catch-up; the parsed default would misdescribe it.
         if (snapshot.capabilities.supportsCatchUp)
           _text(

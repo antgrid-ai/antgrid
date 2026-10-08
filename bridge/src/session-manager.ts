@@ -72,6 +72,8 @@ export interface SessionLaunchSpec {
   baseBranch?: string;
   /** Host-internal ownership; never accepted by the session message schema. */
   scheduleOwnerId?: string;
+  /** Host-internal: the permission mode a scheduled chat run starts in. */
+  scheduledChatMode?: string;
 }
 
 export interface ScheduledSessionSpec {
@@ -83,6 +85,8 @@ export interface ScheduledSessionSpec {
   workspace: "shared" | "worktree";
   baseBranch?: string;
   checkoutId?: string;
+  /** The chat config `mode` id; absent means the backend default. Ignored for terminal runs. */
+  chatMode?: string;
 }
 
 export interface ScheduledSessionIdentity {
@@ -400,6 +404,30 @@ function parsePersistedContent(raw: string | null): PersistedEntry[] {
     log.warn("sessions.json unreadable, treating as empty: %s", err);
     return [];
   }
+}
+
+/**
+ * The config a brand-new chat session for `tool` should start from: that of the most recently used, non-archived
+ * chat session of the same tool that carries one. One function for the live manager and the schedule carry-over, so
+ * the two cannot disagree about which session "last used" means.
+ *
+ * `skipScheduled` leaves out sessions a schedule launched: a run starts in its schedule's own mode and gets
+ * `lastUsedAt = now`, so counting it would hand that mode to the user's next chat. The carry-over keeps them, because
+ * a pre-`chatMode` scheduled session carries the very mode its schedule was inheriting.
+ */
+export function lastUsedChatConfig(
+  entries: Iterable<Pick<PersistedEntry, "archived" | "mode" | "tool" | "config" | "lastUsedAt" | "launchedByScheduleId">>,
+  tool: string,
+  options: { skipScheduled?: boolean } = {},
+): Record<string, string> | undefined {
+  let best: Pick<PersistedEntry, "config" | "lastUsedAt"> | undefined;
+  for (const e of entries) {
+    if (e.archived || e.mode !== "chat" || e.tool !== tool) continue;
+    if (options.skipScheduled && e.launchedByScheduleId !== undefined) continue;
+    if (!e.config || Object.keys(e.config).length === 0) continue;
+    if (!best || e.lastUsedAt > best.lastUsedAt) best = e;
+  }
+  return best?.config ? { ...best.config } : undefined;
 }
 
 /** The ONE publish primitive for sessions.json — every writer in this file goes
@@ -827,6 +855,15 @@ export class SessionManager {
     return out;
   }
 
+  /** `lastUsedChatConfig` over a project's sessions.json with no live core. `readPersisted` cannot serve this: its wire
+   *  rows drop `config`. A missing or unreadable file reads as no config, the same as `load()` treats it. */
+  static async readLastUsedChatConfig(storeDir: string, projectId: string, tool: string): Promise<Record<string, string> | undefined> {
+    let raw: string | null = null;
+    try { raw = await readFile(join(storeDir, "agents", projectId, "sessions.json"), "utf8"); }
+    catch { return undefined; }
+    return lastUsedChatConfig(parsePersistedContent(raw), tool);
+  }
+
   /** Delete a session row from a project's persisted sessions.json WITHOUT a
    *  live core — the control-plane counterpart to readPersisted. Used only when
    *  no warm core owns the file (host-server routes warm cores to the live
@@ -864,18 +901,12 @@ export class SessionManager {
   /**
    * The config a brand-new chat session for `tool` should start from: the
    * selection of the most-recently-used, non-archived chat session of the same
-   * tool that carries one. This makes "default for a new session" == "what I last
+   * tool that carries one, among those no schedule launched. This makes "default for a new session" == "what I last
    * used for this tool" without a separate preferences store. Returns a fresh
    * copy (callers persist it as the new entry's own config).
    */
   private lastUsedConfigForTool(tool: string): Record<string, string> | undefined {
-    let best: PersistedEntry | undefined;
-    for (const e of this.entries.values()) {
-      if (e.archived || e.mode !== "chat" || e.tool !== tool) continue;
-      if (!e.config || Object.keys(e.config).length === 0) continue;
-      if (!best || e.lastUsedAt > best.lastUsedAt) best = e;
-    }
-    return best?.config ? { ...best.config } : undefined;
+    return lastUsedChatConfig(this.entries.values(), tool, { skipScheduled: true });
   }
 
   create(name?: string, spec?: SessionLaunchSpec & { isolation?: "shared" }): SessionEntry;
@@ -910,6 +941,7 @@ export class SessionManager {
     const launchSpec: SessionLaunchSpec = {
       tool: spec.agentId, mode: spec.mode, approvalPolicy: spec.approvalPolicy,
       isolation: spec.workspace, baseBranch: spec.baseBranch, scheduleOwnerId: spec.scheduleId,
+      scheduledChatMode: spec.chatMode,
     };
     const entry = this.buildEntry(spec.name, launchSpec);
     entry.launchedByScheduleId = spec.scheduleId;
@@ -1167,11 +1199,11 @@ export class SessionManager {
     // backend default. Terminal sessions and tool-less entries get nothing.
     if (entry.mode === "chat" && entry.tool) {
       const inherited = this.lastUsedConfigForTool(entry.tool);
-      // A schedule's permission mode comes from its approvalPolicy alone. The
-      // last-used `mode` is whatever the user picked in an unrelated chat (auto,
-      // acceptEdits), and replaying it would loosen a gated schedule's runs.
+      // A schedule's permission mode is its own explicit setting. The last-used `mode` is whatever the user picked in
+      // an unrelated chat (auto, acceptEdits), and replaying it would loosen a gated schedule's runs.
       if (inherited && spec?.scheduleOwnerId) delete inherited.mode;
-      if (inherited && Object.keys(inherited).length > 0) entry.config = inherited;
+      const config = spec?.scheduleOwnerId && spec.scheduledChatMode ? { ...inherited, mode: spec.scheduledChatMode } : inherited;
+      if (config && Object.keys(config).length > 0) entry.config = config;
     }
     return entry;
   }

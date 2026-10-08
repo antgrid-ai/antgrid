@@ -10,6 +10,24 @@ class SchedulerAgent {
   );
 }
 
+/// One permission mode an agent's chat backend offers a scheduled run.
+class SchedulerChatMode {
+  final String id;
+  final String name;
+  final String? description;
+  const SchedulerChatMode({
+    required this.id,
+    required this.name,
+    this.description,
+  });
+  factory SchedulerChatMode.fromJson(Map<String, dynamic> json) =>
+      SchedulerChatMode(
+        id: json['id'] as String,
+        name: json['name'] as String? ?? json['id'] as String,
+        description: json['description'] as String?,
+      );
+}
+
 class SchedulerCapabilities {
   final bool supported;
   final String timezone;
@@ -18,6 +36,10 @@ class SchedulerCapabilities {
   final bool supportsBaseBranchClear;
   final bool supportsCatchUp;
   final bool supportsOneOff;
+
+  /// Absent from an older bridge, and for agents whose modes are discovered at
+  /// run time; the editor offers a picker only for an agent listed here.
+  final Map<String, List<SchedulerChatMode>> chatModes;
   const SchedulerCapabilities({
     required this.supported,
     required this.timezone,
@@ -26,6 +48,7 @@ class SchedulerCapabilities {
     this.supportsBaseBranchClear = false,
     this.supportsCatchUp = false,
     this.supportsOneOff = false,
+    this.chatModes = const {},
   });
   factory SchedulerCapabilities.fromJson(Map<String, dynamic> json) =>
       SchedulerCapabilities(
@@ -38,6 +61,15 @@ class SchedulerCapabilities {
         supportsBaseBranchClear: json['supportsBaseBranchClear'] == true,
         supportsCatchUp: json['supportsCatchUp'] == true,
         supportsOneOff: json['supportsOneOff'] == true,
+        chatModes: switch (json['chatModes']) {
+          final Map raw => {
+            for (final e in raw.entries)
+              e.key as String: schedulerMaps(
+                e.value,
+              ).map(SchedulerChatMode.fromJson).toList(),
+          },
+          _ => const {},
+        },
       );
 }
 
@@ -70,6 +102,9 @@ class AgentSchedule {
   final String prompt;
   final String approvalPolicy;
   final String catchUp;
+
+  /// The chat backend's permission mode id; null runs in the backend default.
+  final String? chatMode;
   final String workspace;
   final String? baseBranch;
   /// Exactly one of [cron] and [runAt] is set: a one-off has no cadence.
@@ -100,6 +135,7 @@ class AgentSchedule {
     required this.prompt,
     required this.approvalPolicy,
     this.catchUp = 'latest',
+    this.chatMode,
     required this.workspace,
     this.baseBranch,
     this.cron,
@@ -130,6 +166,7 @@ class AgentSchedule {
     prompt: json['prompt'] as String,
     approvalPolicy: json['approvalPolicy'] as String,
     catchUp: json['catchUp'] as String? ?? 'latest',
+    chatMode: json['chatMode'] as String?,
     workspace: json['workspace'] as String,
     baseBranch: json['baseBranch'] as String?,
     cron: json['cron'] as String?,
@@ -163,6 +200,7 @@ class AgentSchedule {
     'prompt': prompt,
     'approvalPolicy': approvalPolicy,
     if (includeCatchUp) 'catchUp': catchUp,
+    if (mode == 'chat') 'chatMode': ?chatMode,
     'workspace': workspace,
     'baseBranch': ?baseBranch,
     'cron': ?cron,

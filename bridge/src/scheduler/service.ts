@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type MissedOccurrences, missedOccurrences, nextOccurrences, validateCron, validateTimezone } from "./cron";
 import { MISSED_COUNT_CAP, SCHEDULE_INPUT_KEYS, ScheduleInputSchema, SchedulePatchSchema, isActiveRun, type Schedule, type ScheduleInput, type SchedulePatch,
   type SchedulerCapabilities, type SchedulerRun, type RunStatus } from "./models";
+import { agentSpec } from "antgrid-agents/builtins";
 import { SchedulerRefusal } from "./agent";
 import { SchedulerStore } from "./store";
 
@@ -61,6 +62,11 @@ export interface SchedulerWriteOptions {
   rejectDuplicateName?: boolean;
 }
 const APP_AUTHOR: SchedulerAuthor = { kind: "device", deviceId: null };
+/** A chat permission mode only means something to a chat run that is not already bypassing prompts. */
+function normalizeChatMode<T extends { mode: string; approvalPolicy: string; chatMode?: string }>(input: T): T {
+  if (input.chatMode !== undefined && (input.mode !== "chat" || input.approvalPolicy === "bypass")) delete input.chatMode;
+  return input;
+}
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export interface ScheduledSessionIdentity { sessionId: string; runtimeGeneration: string; checkoutId?: string }
@@ -79,6 +85,9 @@ export interface SchedulerOptions {
     ScheduledSessionIdentity & { deliverPrompt: () => Promise<void> }>;
   stop: (run: SchedulerRun) => Promise<void>;
   releaseWorkspace?: (schedule: Schedule) => Promise<void>;
+  /** The chat `mode` a schedule marked by the migration was effectively running in, or undefined for the backend
+   *  default. Rejecting counts as undefined: the marker is cleared either way. */
+  resolveChatModeCarryOver?: (schedule: Schedule) => Promise<string | undefined>;
 }
 
 export class SchedulerService {
@@ -91,6 +100,7 @@ export class SchedulerService {
   private readonly cleanupFailures = new Set<string>();
   private readonly cancelling = new Set<string>();
   private closed = false;
+  private carryOver?: Promise<void>;
 
   constructor(private readonly options: SchedulerOptions) {
     this.now = options.now ?? Date.now;
@@ -107,8 +117,38 @@ export class SchedulerService {
   start(): void {
     if (this.timer || this.closed) return;
     void this.cleanupDeleted().catch(() => {});
+    this.carryOver ??= this.resolveCarryOver().catch(() => {});
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 1_000);
     this.timer.unref?.();
+  }
+  /**
+   * Settles every schedule the store migration marked. Idempotent and rerun at each start while a marker remains, so a
+   * crash after the migration loses nothing. tick() and runNow() wait on it: a marked schedule dispatched first would
+   * run in the backend default instead of the mode it was carried over from.
+   */
+  private async resolveCarryOver(): Promise<void> {
+    const resolve = this.options.resolveChatModeCarryOver;
+    if (!resolve) return;
+    for (const { id } of this.schedules().filter((s) => s.chatModeCarryOver)) {
+      let resolvedFor: Schedule | undefined;
+      let mode: string | undefined;
+      for (;;) {
+        // Re-read: an edit during the await wins, and a plain write keeps the author and updatedAt the user last saw.
+        const current = this.schedules().find((s) => s.id === id);
+        if (!current?.chatModeCarryOver) break;
+        // A mode read for another agent or project is meaningless here (and an id the registry does not know for this
+        // agent would make the schedule ungated), so an agent or project edit during the await resolves again.
+        if (resolvedFor?.agentId === current.agentId && resolvedFor.projectId === current.projectId) {
+          const { chatModeCarryOver: _marker, ...rest } = current;
+          const applies = mode !== undefined && current.chatMode === undefined && current.mode === "chat" && current.approvalPolicy !== "bypass";
+          this.guarded(() => this.store.saveSchedule(applies ? { ...rest, chatMode: mode } : rest));
+          break;
+        }
+        resolvedFor = current;
+        try { mode = await resolve(current); } catch { mode = undefined; }
+        if (this.closed || this.fault) return;
+      }
+    }
   }
   private guarded<T>(fn: () => T): T {
     if (this.closed) throw new Error("Scheduler is closed");
@@ -125,8 +165,13 @@ export class SchedulerService {
   }
   async capabilities(): Promise<SchedulerCapabilities> {
     const error = this.fault ?? (this.cleanupFailures.size ? OWNERSHIP_CLEANUP_ERROR : undefined);
+    const agents = await this.options.supportedAgents();
+    const chatModes = Object.fromEntries(agents.filter((a) => a.modes.includes("chat")).flatMap((a) => {
+      const modes = agentSpec(a.agentId)?.chatPermissionModes;
+      return modes ? [[a.agentId, modes.map(({ id, name, description }) => ({ id, name, ...(description ? { description } : {}) }))]] : [];
+    }));
     return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone, supportsBaseBranchClear: true, supportsCatchUp: true, supportsOneOff: true,
-            agents: await this.options.supportedAgents(), ...(error ? { error } : {}) };
+            agents, ...(Object.keys(chatModes).length ? { chatModes } : {}), ...(error ? { error } : {}) };
   }
   schedules(): Schedule[] { return this.guarded(() => this.store.schedules()); }
   runs(scheduleId?: string): SchedulerRun[] { return this.guarded(() => this.store.runs(scheduleId)); }
@@ -150,7 +195,7 @@ export class SchedulerService {
     if (clash) throw new SchedulerRefusal("SCHEDULE_EXISTS", `A schedule named "${clash.name}" already exists in this project (id ${clash.id}); update it instead.`);
   }
   private async validated(input: unknown): Promise<ScheduleInput> {
-    const parsed = ScheduleInputSchema.parse(input);
+    const parsed = normalizeChatMode(ScheduleInputSchema.parse(input));
     if (parsed.cron !== undefined) parsed.cron = validateCron(parsed.cron, parsed.timezone);
     else validateTimezone(parsed.timezone);
     this.assertSupported(await this.options.supportedAgents(), parsed.agentId, parsed.mode);
@@ -187,7 +232,8 @@ export class SchedulerService {
     // Naming one timetable kind switches the schedule to it.
     if (changes.runAt !== undefined) delete merged.cron;
     if (changes.cron !== undefined) delete merged.runAt;
-    const input = ScheduleInputSchema.parse(merged);
+    if (merged.chatMode === null) delete merged.chatMode;
+    const input = normalizeChatMode(ScheduleInputSchema.parse(merged));
     if (input.cron !== undefined) input.cron = validateCron(input.cron, input.timezone);
     else validateTimezone(input.timezone);
     this.assertSupported(agents, input.agentId, input.mode);
@@ -200,7 +246,7 @@ export class SchedulerService {
     let nextOccurrence = original.nextOccurrence;
     if (input.runAt !== undefined) nextOccurrence = input.runAt;
     else if (input.cron !== original.cron || input.timezone !== original.timezone) nextOccurrence = nextOccurrences(input.cron!, input.timezone, now, 1)[0]!;
-    const executionChanged = (["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "cron", "runAt", "timezone", "enabled", "catchUp"] as const)
+    const executionChanged = (["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "cron", "runAt", "timezone", "enabled", "catchUp", "chatMode"] as const)
       .some((key) => input[key] !== original[key]);
     const author = options.author ?? APP_AUTHOR;
     const { editedBySessionName: _by, editedAt: _at, ...base } = original;
@@ -209,6 +255,9 @@ export class SchedulerService {
       ...(author.kind === "agent" ? { editedBySessionName: author.sessionName, editedAt: now } : {}) };
     if (input.cron === undefined) delete next.cron;
     if (input.runAt === undefined) delete next.runAt;
+    if (input.chatMode === undefined) delete next.chatMode;
+    // Any decision about the mode, including clearing it, settles the carry-over.
+    if ("chatMode" in parsed) delete next.chatModeCarryOver;
     // "Set a new time": a different instant, or a switch back to a recurring timetable, makes a finished one-off pending again.
     if (runAtChanged) { delete next.firedRunId; delete next.firedAt; delete next.deferredAt; }
     options.guard?.({ op: "update", patchKeys: Object.keys(parsed), original, next });
@@ -266,6 +315,7 @@ export class SchedulerService {
   resume(): void { this.executable(); void this.tick().catch(() => {}); }
   async runNow(id: string, options: Pick<SchedulerWriteOptions, "guard"> = {}): Promise<SchedulerRun> {
     this.executable();
+    await this.carryOver;
     const schedule = this.find(id);
     options.guard?.({ op: "runNow", patchKeys: [], original: schedule, next: schedule });
     const run = this.guarded(() => this.store.claim(schedule, this.newRun(schedule, this.now(), "manual")));
@@ -304,6 +354,7 @@ export class SchedulerService {
     if (this.ticking || this.closed || this.fault || !this.options.desktopOwned) return;
     this.ticking = true;
     try {
+      await this.carryOver;
       const now = this.now();
       for (const schedule of this.schedules()) {
         if (!schedule.enabled || schedule.nextOccurrence > now || schedule.firedRunId !== undefined) continue;
@@ -341,7 +392,7 @@ export class SchedulerService {
       // A one-off occurrence is the only one it will ever have, so a time claimed under old settings is given back
       // rather than spent. A manual run was never the one-off's occurrence.
       const oneOff = schedule.runAt !== undefined && run.trigger !== "manual";
-      if ((["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", ...(oneOff ? ["runAt" as const] : [])] as const)
+      if ((["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "chatMode", ...(oneOff ? ["runAt" as const] : [])] as const)
         .some((key) => latest[key] !== schedule[key])) {
         if (oneOff) {
           this.guarded(() => this.store.rearm(run.id, "Execution settings changed during preparation; the one-off will run with the new settings", this.now()));

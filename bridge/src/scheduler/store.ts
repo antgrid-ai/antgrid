@@ -4,6 +4,18 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ScheduleSchema, SchedulerRunSchema, isActiveRun, type Schedule, type SchedulerRun } from "./models";
 
+// Before chat schedules had an explicit mode they inherited the last-used chat config, so an existing one may be running
+// hands-free only because of that. Marked rows are resolved against it once at the next start (see the service).
+// Raw JSON, not ScheduleSchema, so a row an older bridge wrote cannot make the migration itself fail.
+function markChatModeCarryOver(db: Database): void {
+  const rows = db.query("SELECT id,record FROM schedules").all() as { id: string; record: string }[];
+  for (const row of rows) {
+    const record = JSON.parse(row.record) as Record<string, unknown>;
+    if (record.deletedAt !== undefined || record.mode !== "chat" || record.approvalPolicy === "bypass") continue;
+    db.query("UPDATE schedules SET record=? WHERE id=?").run(JSON.stringify({ ...record, chatModeCarryOver: true }), row.id);
+  }
+}
+
 export class SchedulerStore {
   readonly path: string;
   private readonly owner = randomUUID();
@@ -27,6 +39,7 @@ export class SchedulerStore {
             claimKey TEXT UNIQUE, active INTEGER NOT NULL, startedAt INTEGER NOT NULL, record TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS runs_history ON runs (scheduleId, startedAt);
           PRAGMA user_version = 3;`);
+        if (version < 3) markChatModeCarryOver(db);
         const owner = db.query("SELECT pid,token FROM scheduler_owner WHERE id=1").get() as { pid: number; token: string } | null;
         if (owner) {
           if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error("Scheduler owner record is invalid");
