@@ -21,7 +21,6 @@ import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_section_header.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_switch.dart';
-import '../design/widgets/ab_touch_sizing.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_segmented.dart';
@@ -284,111 +283,109 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= kMediumBreakpoint;
-        return AbTouchSizing(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (!(_editing && !wide))
-                _header(
-                  wide: wide,
-                  machines: machines,
-                  machine: machine ?? 'local',
-                  machineName: machineName,
-                  connected: connected,
-                  onNew: _newScheduleTap(snapshot, machine, localTimezone),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!(_editing && !wide))
+              _header(
+                wide: wide,
+                machines: machines,
+                machine: machine ?? 'local',
+                machineName: machineName,
+                connected: connected,
+                onNew: _newScheduleTap(snapshot, machine, localTimezone),
+              ),
+            if (_error != null)
+              AbInlineBanner(text: _error!, color: context.antgrid.error),
+            if (!_loading && !connected && _error == null)
+              AbInlineBanner(
+                text:
+                    '$machineName is offline. Changes are paused until it reconnects.',
+                color: context.antgrid.textMuted,
+              ),
+            if (_actionError != null)
+              Semantics(
+                liveRegion: true,
+                child: AbInlineBanner(
+                  text: _actionError!,
+                  color: context.antgrid.error,
                 ),
-              if (_error != null)
-                AbInlineBanner(text: _error!, color: context.antgrid.error),
-              if (!_loading && !connected && _error == null)
-                AbInlineBanner(
-                  text:
-                      '$machineName is offline. Changes are paused until it reconnects.',
-                  color: context.antgrid.textMuted,
-                ),
-              if (_actionError != null)
-                Semantics(
-                  liveRegion: true,
-                  child: AbInlineBanner(
-                    text: _actionError!,
-                    color: context.antgrid.error,
-                  ),
-                ),
-              if (_feedbackRun case final run?)
-                Padding(
-                  padding: const EdgeInsets.all(AbTokens.space12),
-                  child: Wrap(
-                    spacing: AbTokens.space8,
-                    runSpacing: AbTokens.space8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Semantics(
-                        liveRegion: true,
-                        child: Text(
-                          run.status == 'skipped'
-                              ? 'Run skipped: ${run.reason ?? 'No reason supplied by the machine'}'
-                              : '${schedulerRunStatusWord(run.status, trigger: run.trigger)}${run.reason == null ? '' : ': ${run.reason}'}',
-                          style: AbTokens.sansStyle(
-                            color: run.status == 'skipped'
-                                ? context.antgrid.warning
-                                : context.antgrid.textPrimary,
-                          ),
+              ),
+            if (_feedbackRun case final run?)
+              Padding(
+                padding: const EdgeInsets.all(AbTokens.space12),
+                child: Wrap(
+                  spacing: AbTokens.space8,
+                  runSpacing: AbTokens.space8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Semantics(
+                      liveRegion: true,
+                      child: Text(
+                        run.status == 'skipped'
+                            ? 'Run skipped: ${run.reason ?? 'No reason supplied by the machine'}'
+                            : '${schedulerRunStatusWord(run.status, trigger: run.trigger)}${run.reason == null ? '' : ': ${run.reason}'}',
+                        style: AbTokens.sansStyle(
+                          color: run.status == 'skipped'
+                              ? context.antgrid.warning
+                              : context.antgrid.textPrimary,
                         ),
                       ),
-                      AbButton(label: 'View run', onTap: () => _viewRun(run)),
-                    ],
-                  ),
+                    ),
+                    AbButton(label: 'View run', onTap: () => _viewRun(run)),
+                  ],
                 ),
-              if (snapshot?.capabilities.error != null)
-                AbInlineBanner(
-                  text: snapshot!.capabilities.error!,
-                  color: snapshot.capabilities.supported
-                      ? context.antgrid.warning
-                      : context.antgrid.error,
-                ),
-              Expanded(
-                child: _loading
-                    ? const Center(
-                        child: AbLoading(message: 'Loading schedules…'),
-                      )
-                    : snapshot == null
-                    ? AbEmptyState(
-                        title: machines.isEmpty
-                            ? 'No connected machines'
-                            : 'Machine unavailable',
-                        subtitle: _error,
-                      )
-                    : !snapshot.capabilities.supported
-                    ? AbEmptyState(
-                        title: 'Scheduler unavailable',
-                        subtitle:
-                            'Update Antgrid on $machineName to use the scheduler.',
-                      )
-                    : _editing
-                    ? ScheduleEditor(
-                        key: ValueKey(
-                          '${machine ?? 'local'}:${_editedSchedule?.id ?? 'new'}',
-                        ),
-                        snapshot: snapshot,
-                        machineId: machine ?? 'local',
-                        schedule: _editedSchedule,
-                        request: ref.watch(schedulerRequestProvider),
-                        writable: _writable,
-                        onClose: () => setState(() => _editing = false),
-                        onSaved: () {
-                          setState(() => _editing = false);
-                          detached(
-                            'Scheduler',
-                            'refresh after save failed',
-                            _refresh,
-                          );
-                        },
-                      )
-                    : _runsTab
-                    ? _runs(snapshot, wide)
-                    : _schedules(snapshot, wide),
               ),
-            ],
-          ),
+            if (snapshot?.capabilities.error != null)
+              AbInlineBanner(
+                text: snapshot!.capabilities.error!,
+                color: snapshot.capabilities.supported
+                    ? context.antgrid.warning
+                    : context.antgrid.error,
+              ),
+            Expanded(
+              child: _loading
+                  ? const Center(
+                      child: AbLoading(message: 'Loading schedules…'),
+                    )
+                  : snapshot == null
+                  ? AbEmptyState(
+                      title: machines.isEmpty
+                          ? 'No connected machines'
+                          : 'Machine unavailable',
+                      subtitle: _error,
+                    )
+                  : !snapshot.capabilities.supported
+                  ? AbEmptyState(
+                      title: 'Scheduler unavailable',
+                      subtitle:
+                          'Update Antgrid on $machineName to use the scheduler.',
+                    )
+                  : _editing
+                  ? ScheduleEditor(
+                      key: ValueKey(
+                        '${machine ?? 'local'}:${_editedSchedule?.id ?? 'new'}',
+                      ),
+                      snapshot: snapshot,
+                      machineId: machine ?? 'local',
+                      schedule: _editedSchedule,
+                      request: ref.watch(schedulerRequestProvider),
+                      writable: _writable,
+                      onClose: () => setState(() => _editing = false),
+                      onSaved: () {
+                        setState(() => _editing = false);
+                        detached(
+                          'Scheduler',
+                          'refresh after save failed',
+                          _refresh,
+                        );
+                      },
+                    )
+                  : _runsTab
+                  ? _runs(snapshot, wide)
+                  : _schedules(snapshot, wide),
+            ),
+          ],
         );
       },
     );

@@ -1462,135 +1462,133 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         ),
       ],
     ];
-    return AbTouchSizing(
-      child: LayoutBuilder(
-        builder: (context, c) {
-          final wide = c.maxWidth >= kMediumBreakpoint && !isMobilePlatform;
-          final form = Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: AbTokens.space16,
-            children: [
-              ...notices,
-              task,
-              when,
-              if (!wide) ...[summary, nextRuns],
-              agent,
-              workspace,
-              ?catchUp,
-            ],
-          );
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _header(),
-              Expanded(
-                child: wide
-                    ? Align(
-                        alignment: Alignment.topLeft,
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          spacing: AbTokens.space24,
-                          children: [
-                            Flexible(
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth:
-                                      AbTokens.space24 * 30 + AbTokens.space24,
-                                ),
-                                child: SingleChildScrollView(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    AbTokens.space24,
-                                    AbTokens.space24,
-                                    0,
-                                    AbTokens.space24,
-                                  ),
-                                  child: form,
-                                ),
+    return LayoutBuilder(
+      builder: (context, c) {
+        final wide = c.maxWidth >= kMediumBreakpoint && !isMobilePlatform;
+        final form = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: AbTokens.space16,
+          children: [
+            ...notices,
+            task,
+            when,
+            if (!wide) ...[summary, nextRuns],
+            agent,
+            workspace,
+            ?catchUp,
+          ],
+        );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _header(),
+            Expanded(
+              child: wide
+                  ? Align(
+                      alignment: Alignment.topLeft,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        spacing: AbTokens.space24,
+                        children: [
+                          Flexible(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxWidth:
+                                    AbTokens.space24 * 30 + AbTokens.space24,
                               ),
-                            ),
-                            SizedBox(
-                              width: AbTokens.space24 * 16,
                               child: SingleChildScrollView(
                                 padding: const EdgeInsets.fromLTRB(
+                                  AbTokens.space24,
+                                  AbTokens.space24,
                                   0,
                                   AbTokens.space24,
-                                  AbTokens.space24,
-                                  AbTokens.space24,
                                 ),
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  spacing: AbTokens.space12,
-                                  children: [summary, nextRuns],
-                                ),
+                                child: form,
                               ),
                             ),
-                          ],
-                        ),
-                      )
-                    : SingleChildScrollView(
-                        padding: const EdgeInsets.all(AbTokens.space16),
-                        child: form,
-                      ),
-              ),
-              Container(
-                padding: const EdgeInsets.all(AbTokens.space12),
-                decoration: BoxDecoration(
-                  color: context.antgrid.bgSurface,
-                  border: Border(
-                    top: BorderSide(color: context.antgrid.borderDefault),
-                  ),
-                ),
-                child: SafeArea(
-                  top: false,
-                  child: Row(
-                    spacing: AbTokens.space8,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Draft kept if you leave',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontSm,
-                            color: context.antgrid.textSecondary,
                           ),
-                        ),
-                      ),
-                      AbButton(
-                        label: 'Cancel',
-                        onTap: _saving
-                            ? null
-                            : () => detached(
-                                'ScheduleEditor',
-                                'cancel failed',
-                                _cancel,
+                          SizedBox(
+                            width: AbTokens.space24 * 16,
+                            child: SingleChildScrollView(
+                              padding: const EdgeInsets.fromLTRB(
+                                0,
+                                AbTokens.space24,
+                                AbTokens.space24,
+                                AbTokens.space24,
                               ),
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
+                                spacing: AbTokens.space12,
+                                children: [summary, nextRuns],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      AbButton(
-                        label: _saving
-                            ? 'Saving…'
-                            : widget.schedule == null
-                            ? 'Create schedule'
-                            : 'Save changes',
-                        variant: AbButtonVariant.primary,
-                        onTap: _canSave
-                            ? () => detached(
-                                'ScheduleEditor',
-                                'save failed',
-                                _save,
-                              )
-                            : null,
-                      ),
-                    ],
-                  ),
+                    )
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(AbTokens.space16),
+                      child: form,
+                    ),
+            ),
+            Container(
+              padding: const EdgeInsets.all(AbTokens.space12),
+              decoration: BoxDecoration(
+                color: context.antgrid.bgSurface,
+                border: Border(
+                  top: BorderSide(color: context.antgrid.borderDefault),
                 ),
               ),
-            ],
-          );
-        },
-      ),
+              child: SafeArea(
+                top: false,
+                child: Row(
+                  spacing: AbTokens.space8,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Draft kept if you leave',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontSm,
+                          color: context.antgrid.textSecondary,
+                        ),
+                      ),
+                    ),
+                    AbButton(
+                      label: 'Cancel',
+                      onTap: _saving
+                          ? null
+                          : () => detached(
+                              'ScheduleEditor',
+                              'cancel failed',
+                              _cancel,
+                            ),
+                    ),
+                    AbButton(
+                      label: _saving
+                          ? 'Saving…'
+                          : widget.schedule == null
+                          ? 'Create schedule'
+                          : 'Save changes',
+                      variant: AbButtonVariant.primary,
+                      onTap: _canSave
+                          ? () => detached(
+                              'ScheduleEditor',
+                              'save failed',
+                              _save,
+                            )
+                          : null,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

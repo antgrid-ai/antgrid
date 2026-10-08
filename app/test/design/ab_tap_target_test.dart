@@ -208,7 +208,7 @@ void main() {
     }, variant: _mobile);
 
     testWidgets(
-      'standalone keeps the 44px floor until the scaled box exceeds it',
+      'standalone keeps the phone touch floor until the scaled box exceeds it',
       (tester) async {
         Future<double> heightAt(double scale) async {
           await pumpScaled(
@@ -222,9 +222,9 @@ void main() {
           return tester.getSize(find.byType(AbIconButton)).height;
         }
 
-        expect(await heightAt(1.0), AbTokens.tapTargetMin);
-        expect(await heightAt(1.3), AbTokens.tapTargetMin);
-        expect(await heightAt(2.0), AbTokens.iconButtonBox * 2);
+        expect(await heightAt(1.0), AbTokens.touchControlMin);
+        expect(await heightAt(1.3), AbTokens.touchControlMin);
+        expect(await heightAt(2.5), AbTokens.iconButtonBox * 2.5);
       },
       variant: _mobile,
     );

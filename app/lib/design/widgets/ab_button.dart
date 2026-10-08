@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
+import 'ab_tap_target.dart';
 import 'ab_touch_sizing.dart';
 
 /// Visual emphasis for [AbButton].
@@ -113,9 +114,15 @@ class _AbButtonState extends State<AbButton> {
     if (widget.wrapLabel) label = Flexible(child: label);
 
     final extent = AbTouchSizing.extentOf(context);
+    // Inside a compact host the row owns the height, as it does for
+    // AbTapTarget; a compact button keeps its small box and gains only the
+    // footprint.
+    final rowOwnsHeight = AbCompactTapTargets.of(context);
     Widget visual = Container(
       constraints: BoxConstraints(
-        minHeight: extent == 0 ? 0 : AbTokens.rowHeightSm,
+        minHeight: extent == 0 || widget.compact || rowOwnsHeight
+            ? 0
+            : AbTokens.rowHeightSm,
       ),
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
@@ -148,7 +155,10 @@ class _AbButtonState extends State<AbButton> {
     Widget sized(Widget child) => extent == 0
         ? child
         : ConstrainedBox(
-            constraints: BoxConstraints(minWidth: extent, minHeight: extent),
+            constraints: BoxConstraints(
+              minWidth: extent,
+              minHeight: rowOwnsHeight ? 0 : extent,
+            ),
             child: Center(widthFactor: 1, heightFactor: 1, child: child),
           );
 

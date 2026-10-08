@@ -824,13 +824,6 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final menuRow = find
-          .ancestor(
-            of: find.text('Edit'),
-            matching: find.byType(GestureDetector),
-          )
-          .first;
-      expect(tester.getSize(menuRow).height, greaterThanOrEqualTo(48));
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       expect(find.byType(ScheduleEditor), findsOneWidget);
@@ -1316,6 +1309,18 @@ void main() {
           greaterThanOrEqualTo(AbTokens.rowHeightMd),
         );
       }
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
+        ),
+      );
+      await tester.pumpAndSettle();
+      final menuRow = find
+          .ancestor(of: find.text('Edit'), matching: find.byType(GestureDetector))
+          .first;
+      expect(tester.getSize(menuRow).height, greaterThanOrEqualTo(48));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
       await editSchedule(tester);
       await tester.enterText(
         find.byType(AbPromptField),
