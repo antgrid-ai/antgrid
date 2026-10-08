@@ -130,9 +130,11 @@ export interface HookInjectCtx {
  *
  *  Deliberately carries no `apiPort` or `terminalId`: the server resolves its
  *  own session from `ANTGRID_API_PORT`/`ANTGRID_TERMINAL_ID` in the environment
- *  it is spawned with, which every PTY already stamps and the agent passes down
- *  — so one injected entry serves every terminal on the machine, and the
- *  augmenter needs values it does not have at injection time. */
+ *  the bridge stamps on every PTY after launch prep, so the values do not exist
+ *  yet at injection time. A profile makes them reach the server by inheritance,
+ *  by the agent expanding them in the entry, or by name-forwarding (codex and
+ *  cursor strip the MCP child's environment) — never by baking them in — and
+ *  one injected entry then serves every terminal on the machine. */
 export interface McpInjectCtx {
   abDir: string;
   mcpCommand: BridgeCommand;
@@ -686,12 +688,12 @@ export interface AgentSpec {
    * ever run on the machine.
    *
    * Absent = this agent gets no MCP server, and that is the honest answer
-   * rather than a default. The mechanism is per-agent (claude takes
-   * `--mcp-config`, codex takes `-c mcp_servers.*`), and for the agents that
-   * expose no per-spawn flag the only carrier is a MACHINE-GLOBAL config — a
-   * far heavier reach than the equivalent hook, because an unrelated run of
-   * that agent would then hold a live `antgrid_run_command` against whichever
-   * core started last, with no missing-env no-op to defuse it the way an absent
+   * rather than a default. The mechanism is per-agent and per-spawn (a flag, an
+   * env-carried config or a plugin dir; each profile's `mcp.ts` says which and
+   * against what version it was measured). An agent whose only carrier is a
+   * MACHINE-GLOBAL config file gets no profile: an unrelated run of that agent
+   * would hold a live `antgrid_run_command` against whichever core started
+   * last, with no missing-env no-op to defuse it the way an absent
    * `HookProfile.portFileFallback` defuses cursor-agent's global hooks. Add an
    * entry only after measuring the agent's own MCP config against a real
    * binary.
