@@ -36,6 +36,12 @@ const EnvSchema = z
       .transform((s) => s?.replace(/\\n/g, "\n")),
     // Audience of the identity tokens the native iOS and macOS apps present.
     APPLE_APP_BUNDLE_ID: z.string().min(1).default("ai.radhaai.antgrid"),
+    EMAIL_OUTBOX_KEYS: z.string().optional(),
+    EMAIL_OUTBOX_ACTIVE_KEY: z.string().optional(),
+    EMAIL_DELIVERY_PAUSED: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
+    LEGACY_NATIVE_OAUTH_ISSUANCE: z.enum(["true", "false"]).optional().transform((v) => v !== "false"),
+    LEGACY_NATIVE_OAUTH: z.enum(["true", "false"]).optional().transform((v) => v !== "false"),
+    EMAIL_REPLY_TO: z.email().default("contact@radhaai.com"),
     ZEPTOMAIL_TOKEN: z.string().optional(),
     ZEPTOMAIL_WEBHOOK_SECRET: z.string().min(16).optional(),
     // The GitHub *App's* webhook secret — unrelated to GITHUB_CLIENT_SECRET
@@ -151,6 +157,10 @@ const EnvSchema = z
     PORT: z.coerce.number().int().default(8787),
   })
   .transform((raw, ctx) => {
+    if (raw.NODE_ENV === "production" && (!raw.ZEPTOMAIL_TOKEN || !raw.EMAIL_OUTBOX_KEYS || !raw.EMAIL_OUTBOX_ACTIVE_KEY || !raw.ZEPTOMAIL_WEBHOOK_SECRET)) {
+      ctx.addIssue({ code: "custom", message: "Production authentication mail requires provider, webhook and outbox encryption configuration" });
+      return z.NEVER;
+    }
     let authUrl = raw.BETTER_AUTH_URL;
     if (!authUrl) {
       if (raw.NODE_ENV === "production" || raw.NODE_ENV === "staging") {
@@ -210,6 +220,10 @@ const EnvSchema = z
         });
         return z.NEVER;
       }
+    }
+    if (raw.NODE_ENV === "production" && !authUrl.startsWith("https://")) {
+      ctx.addIssue({ code: "custom",path: ["BETTER_AUTH_URL"],message: "Production authentication requires HTTPS" });
+      return z.NEVER;
     }
     const billing =
       raw.NODE_ENV === "test" ? {} : billingToEnvFields(resolveBillingConfig(raw.NODE_ENV));

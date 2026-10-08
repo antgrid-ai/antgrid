@@ -25,11 +25,8 @@ import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../util/detached.dart';
-import '../utils/platform_utils.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
-import '../widgets/log_files_button.dart';
-import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
 
@@ -125,9 +122,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
     if (pending == null) return;
     ref.read(pendingSettingsSectionProvider.notifier).set(null);
     if (pending.target != ref.read(selectedTargetProvider)) return;
-    // Silently does nothing for a section this build omits — BILLING and
-    // DESIGN are both conditional — which is the codec's degrade-rather-than-
-    // reject contract carried through to the destination.
+    // Absent sections retain the codec's degrade-rather-than-reject contract,
+    // including the old Help address now served by the account menu.
     final ctx = settingsSectionKey(pending.value).currentContext;
     if (ctx == null) return;
     unawaited(
@@ -422,30 +418,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen>
                         onTap: () => service.setTelemetryEnabled(
                           !settings.telemetryEnabled,
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.help,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      const HelpAboutSection(),
-                      const SizedBox(height: AbTokens.space12),
-                      Text(
-                        isMobilePlatform
-                            ? 'Share this device\'s app log — attach it when '
-                                  'reporting a connection problem.'
-                            : 'app.log and host.log live in the log folder.',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: antgrid.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      const Align(
-                        alignment: Alignment.centerLeft,
-                        child: LogFilesButton(uppercase: true),
                       ),
                     ],
                   ),

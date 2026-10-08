@@ -25,6 +25,7 @@ final agentSurfaceVisibleProvider =
 enum WorkbenchSurface {
   workspace,
   newSession,
+  scheduler,
   appSettings,
   remoteDevices,
   tasks,

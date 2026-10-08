@@ -14,6 +14,7 @@ enum SettingsSection {
   accessibility,
   files,
   privacy,
+  // Retained so existing section=help links open Settings without scrolling.
   help,
   account,
 }

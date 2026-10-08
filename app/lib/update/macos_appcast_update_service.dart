@@ -3,6 +3,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:xml/xml.dart';
 
 import '../util/ab_log.dart';
+import 'update_check_result.dart';
 import 'macos_sparkle_update_service.dart';
 
 /// Pure "would Sparkle offer this appcast item?" comparison.
@@ -34,9 +35,7 @@ bool isNewerBuild({
 /// release whose appcast step was skipped and then dead-ends in Sparkle's
 /// "error in retrieving update information" dialog, permanently.
 ///
-/// Never throws — any failure (offline, 404, malformed feed) resolves to
-/// `false`. Fail-closed is the whole point: a missing appcast is exactly the
-/// case where the row must stay dark.
+/// A failed fetch or malformed feed cannot prove the installed build is current.
 class MacosAppcastUpdateService {
   MacosAppcastUpdateService({http.Client? httpClient}) : _injected = httpClient;
 
@@ -50,7 +49,7 @@ class MacosAppcastUpdateService {
   /// next check instead of being memoized forever.
   PackageInfo? _packageInfo;
 
-  Future<bool> isUpdateAvailable() async {
+  Future<UpdateCheckResult> check() async {
     final client = _injected ?? http.Client();
     try {
       final info = _packageInfo ??= await PackageInfo.fromPlatform();
@@ -59,7 +58,7 @@ class MacosAppcastUpdateService {
           'Update',
           'PackageInfo.buildNumber is empty (check skipped)',
         );
-        return false;
+        return UpdateCheckResult.failed;
       }
       final res = await client
           .get(Uri.parse(MacosSparkleUpdateService.appcastUrl))
@@ -70,21 +69,37 @@ class MacosAppcastUpdateService {
           'appcast fetch got non-200 (ignored)',
           fields: {'status': '${res.statusCode}'},
         );
-        return false;
+        return UpdateCheckResult.failed;
       }
       final advertised = _firstItemVersion(res.body);
-      if (advertised == null) return false;
+      if (advertised == null) return UpdateCheckResult.failed;
+      if (int.tryParse(info.buildNumber.trim()) == null ||
+          int.tryParse(advertised.trim()) == null) {
+        return UpdateCheckResult.failed;
+      }
+      final item = XmlDocument.parse(res.body).findAllElements('item').first;
+      final version = item
+          .findElements('shortVersionString', namespace: '*')
+          .firstOrNull
+          ?.innerText
+          .trim();
       return isNewerBuild(
-        currentBuild: info.buildNumber,
-        appcastBuild: advertised,
-      );
+            currentBuild: info.buildNumber,
+            appcastBuild: advertised,
+          )
+          ? UpdateCheckResult(
+              UpdateCheckStatus.available,
+              version: version == null || version.isEmpty ? null : version,
+              candidateId: advertised.trim(),
+            )
+          : UpdateCheckResult.upToDate;
     } catch (e) {
       AbLog.warn(
         'Update',
-        'MacosAppcastUpdateService.isUpdateAvailable failed (ignored)',
+        'MacosAppcastUpdateService.check failed',
         fields: {'error': '$e'},
       );
-      return false;
+      return UpdateCheckResult.failed;
     } finally {
       if (_injected == null) client.close();
     }

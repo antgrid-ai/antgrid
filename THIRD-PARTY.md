@@ -121,6 +121,15 @@ MIT, BSD, Apache-2.0, OFL and CC BY — are what the rest of this file discharge
 These matter most: what builds is not the upstream release, so the modified work
 and its licence and copyright notices have to be named explicitly.
 
+### macOS updater — vendored completion patch
+
+`packages/auto_updater_macos` vendors the macOS native implementation from
+`auto_updater_macos` 1.0.0 ([leanflutter/auto_updater](https://github.com/leanflutter/auto_updater)),
+copyright © 2022–2024 LiJianying, under MIT. Its upstream licence is retained
+in `packages/auto_updater_macos/LICENSE`. The local patch forwards Sparkle cycle
+completion through an app-owned method channel; see the package's `README.md`.
+The app selects it through `app/pubspec.yaml`'s dependency override.
+
 ### Terminal engine and PTY — forks resolved from git
 
 Three Dart packages from the `kingwill101/dart_terminal` monorepo are not taken
@@ -162,9 +171,7 @@ the app's terminal view needs, Android PTY libraries relinked to pass Play's
 static archives, which is the only link mode Flutter's iOS native-assets driver
 accepts. `portable_pty`'s prebuilt binaries are published from the fork for those
 last two reasons; `ghostty_vte`'s are byte-identical to upstream's and still come
-from `kingwill101/dart_terminal`. What diverges, and what going back would take,
-is tracked in
-[`docs/dart-terminal-fork-release.md`](docs/dart-terminal-fork-release.md).
+from `kingwill101/dart_terminal`.
 
 ### Fork resolved from git
 

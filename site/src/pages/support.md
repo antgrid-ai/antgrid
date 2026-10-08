@@ -73,7 +73,7 @@ Confirm notifications are enabled for Antgrid in your device settings, and that 
 
 ## Privacy and security
 
-All traffic between your agent and your devices is **end-to-end encrypted** (QUIC with TLS 1.3 between your own devices). Our relay only forwards encrypted data — it never sees your source code, terminal output, prompts, or files. Antgrid also does **not** send your code or prompts to any AI provider; your agents connect to their providers directly, under your own accounts and API keys. For full details, see our [Privacy Policy](/privacy).
+All traffic between your agent and your devices is **end-to-end encrypted** (QUIC with TLS 1.3 between your own devices). Our central relay carries only presence, revocation and notifications. When your devices can't connect directly, our packet relay forwards the already-encrypted traffic. Neither ever sees your source code, terminal output, prompts, or files. Antgrid also does **not** send your code or prompts to any AI provider; your agents connect to their providers directly, under your own accounts and API keys. For full details, see our [Privacy Policy](/privacy).
 
 ## Delete your account and data
 

@@ -68,7 +68,7 @@ program
     // every tool use: SDK init on entry, and a transport flush before an exit
     // that is otherwise immediate. The field failure this would seem to catch
     // (a hook that never runs at all — see the MSIX `<Application>` note in
-    // CLAUDE.md) is a CreateProcess denial, which no in-process SDK can observe.
+    // AGENTS.md) is a CreateProcess denial, which no in-process SDK can observe.
     await runHookInvocation({ agent, event, payload });
     // Exit explicitly: hooks are advisory and must never linger. An agent that
     // holds this process's stdin open (copilot does) would otherwise keep the
@@ -144,6 +144,7 @@ program
     }
 
     const host = new HostServer({
+      desktopOwned: payload.ownerPid !== undefined,
       ...(payload.machine
         ? {
             remote: {

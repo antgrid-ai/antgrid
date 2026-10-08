@@ -281,6 +281,7 @@ export class TestRemoteHostConnection extends TestPeerSessionOwner implements Re
   connect(): void {}
   redialWithFreshToken(): void {}
   sendPushDeliver(): void {}
+  accountDisowns(): boolean { return false; }
   noteResume(): Promise<boolean> { return Promise.resolve(false); }
   recheckAuthorization(): void {}
 }

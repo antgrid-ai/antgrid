@@ -259,7 +259,7 @@ describe("POST /ui/team/invite/accept — acceptance proves nothing about an add
     const res = await post(app, "/ui/team/invite/accept", { id, token });
 
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Fdashboard");
     const after = await pg.db.user.findUniqueOrThrow({ where: { id: squatted.id } });
     expect(after.emailVerified).toBe(false);
     expect(await pg.db.accountMember.count({ where: { userId: squatted.id } })).toBe(0);
@@ -463,6 +463,12 @@ describe("revoke and resend", () => {
     await post(app, "/ui/team/invite", { email: "resent@example.com" }, cookie);
     const first = inviteLink(sent[0]!);
 
+    const throttled = await post(app, `/ui/team/invite/${first.id}/resend`, {}, cookie);
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect(sent).toHaveLength(1);
+    expect(inviteLink(sent[0]!)).toEqual(first);
+    await pg.db.authRateBucket.deleteMany();
     const res = await post(app, `/ui/team/invite/${first.id}/resend`, {}, cookie);
     expect(res.headers.get("location")).toBe("/team?invite=resent");
     expect(sent).toHaveLength(2);

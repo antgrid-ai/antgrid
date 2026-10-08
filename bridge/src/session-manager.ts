@@ -18,6 +18,7 @@ import { resolveApprovalPolicy } from "./agent-runtime";
 // triple) right below.
 import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
 import type { ApprovalPolicy, TerminalObservationAvailability } from "antgrid-agents/contracts";
+import { schedulingModesForAgent } from "antgrid-agents/builtins";
 import { NO_OBSERVATION } from "antgrid-agents/launch-inject";
 import { stripAnsi } from "./handler/context";
 import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
@@ -72,6 +73,38 @@ export interface SessionLaunchSpec {
   /** The task this session was launched for. Stored and echoed verbatim — the
    *  bridge never resolves it against the account. */
   taskRef?: TaskRef;
+  /** Host-internal ownership; never accepted by the session message schema. */
+  scheduleOwnerId?: string;
+}
+
+export interface ScheduledSessionSpec {
+  scheduleId: string;
+  name: string;
+  agentId: string;
+  mode: "terminal" | "chat";
+  approvalPolicy: ApprovalPolicy;
+  workspace: "shared" | "worktree";
+  baseBranch?: string;
+  checkoutId?: string;
+}
+
+export interface ScheduledSessionIdentity {
+  sessionId: string;
+  runtimeGeneration: string;
+  checkoutId: string;
+}
+
+export interface PreparedScheduledSession extends ScheduledSessionIdentity {
+  deliverPrompt(prompt: string): Promise<void>;
+}
+
+export interface ScheduledSessionObservation extends ScheduledSessionIdentity {
+  status: "running" | "needs-input" | "completed" | "failed" | "interrupted";
+  reason?: string;
+}
+
+function scheduledLaunchError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
 
 export type ForkWorkspace = "copy" | "current";
@@ -82,7 +115,7 @@ export const MAX_FORK_TRANSCRIPT_BYTES = 128 * 1024;
 
 export interface DeleteSessionOptions {
   force?: boolean;
-  /** Managed sessions own their checkout, so retaining it is forbidden. */
+  /** A session's sole ownership requires reclaiming its managed checkout. */
   removeCheckout?: boolean;
   /** Explicit opt-in; managed branches are preserved by default. */
   deleteBranch?: boolean;
@@ -91,6 +124,7 @@ export interface DeleteSessionOptions {
 export interface SessionManagerOpts {
   agentRuntime?: AgentRuntime;
   onAgentEvent?: (sessionId: string, event: TerminalAgentEvent) => void;
+  onScheduledObservation?: (observation: ScheduledSessionObservation) => void;
   projectId: string;
   storeDir: string;                  // ~/.antgrid root
   /**
@@ -477,6 +511,7 @@ export class SessionManager {
   private entries = new Map<string, PersistedEntry>();
   /** Serializes attach, promotion and member removal for one checkout. */
   private readonly withCheckoutMembership = createKeyedLock();
+  private readonly withSchedulePreparation = createKeyedLock();
   private observers = new Set<() => void>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** A debounced flush whose timer has fired but whose write is still queued on
@@ -495,6 +530,9 @@ export class SessionManager {
   private runningChat = new Set<string>();
   private terminalPreparing = new Map<string, Promise<void>>();
   private terminalRunIds = new Map<string, string>();
+  private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
+  private readonly scheduleOwnedCheckouts = new Set<string>();
+  private readonly setupSettlements = new Map<string, Promise<void>>();
   private hookSessionIds = new Set<string>();
 
   hookRunId(id: string): string | undefined { return this.terminalRunIds.get(id); }
@@ -539,6 +577,7 @@ export class SessionManager {
     if (!this.entries.has(id)) return;
     this.handlerAvailabilities.set(id, { state: "unavailable", reason });
     this.blindedTerminals.add(id);
+    this.observeScheduledSession(id, this.hookRunId(id), "failed", "Agent lifecycle monitoring was lost; repair the integration before running the schedule again");
     this.changed();
   }
 
@@ -807,6 +846,167 @@ export class SessionManager {
     return this.toWire(entry);
   }
 
+  async prepareScheduledSession(
+    spec: ScheduledSessionSpec,
+    bind: (identity: ScheduledSessionIdentity) => Promise<void>,
+  ): Promise<PreparedScheduledSession> {
+    return this.withSchedulePreparation(spec.scheduleId, () => this.prepareScheduledSessionLocked(spec, bind));
+  }
+
+  private async prepareScheduledSessionLocked(
+    spec: ScheduledSessionSpec,
+    bind: (identity: ScheduledSessionIdentity) => Promise<void>,
+  ): Promise<PreparedScheduledSession> {
+    if (!schedulingModesForAgent(spec.agentId).includes(spec.mode)) {
+      throw new Error("This agent and mode cannot deliver and observe scheduled prompts.");
+    }
+    (this.opts.agentRuntime ?? agentRuntime).resolveApprovalPolicy(spec.agentId, spec.mode, spec.approvalPolicy);
+    const launchSpec: SessionLaunchSpec = {
+      tool: spec.agentId, mode: spec.mode, approvalPolicy: spec.approvalPolicy,
+      isolation: spec.workspace, baseBranch: spec.baseBranch, scheduleOwnerId: spec.scheduleId,
+    };
+    const entry = this.buildEntry(spec.name, launchSpec);
+    const reserved = { runtimeGeneration: crypto.randomUUID(), launched: false, cancelled: false, terminal: false };
+    this.scheduledLaunches.set(entry.id, reserved);
+    try {
+      if (spec.workspace === "worktree") {
+        const state = await this.checkoutStore().read();
+        if (!state.healthy) throw scheduledLaunchError("CHECKOUT_STORE_UNAVAILABLE", "Checkout storage could not be read completely");
+        const checkout = spec.checkoutId
+          ? state.records.find((record) => record.id === spec.checkoutId)
+          : state.records.find((record) => record.scheduleOwnerId === spec.scheduleId);
+        if (spec.checkoutId && !checkout) throw new WorktreeError("WORKTREE_MISSING", "The schedule workspace is missing. Restore it or create a new schedule.");
+        if (checkout) {
+          await this.withCheckoutMembership(checkout.id, async () => {
+            if (checkout.scheduleOwnerId !== spec.scheduleId || !checkout.managed) {
+              throw new WorktreeError("WORKTREE_CONFLICT", "This workspace does not belong to the schedule.");
+            }
+            if (!existsSync(checkout.path)) throw new WorktreeError("WORKTREE_MISSING", "The schedule workspace is missing. Restore it or create a new schedule.");
+            if (this.isCheckoutDeleting(checkout.id)) throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "The schedule workspace is being deleted.");
+            await this.opts.prepareCheckoutRuntime?.(checkout);
+            const declares = this.opts.checkoutSetupPolicy?.(checkout)?.declares;
+            if (declares && checkout.setupState !== "done" && checkout.setupState !== "skipped") {
+              throw scheduledLaunchError("SETUP_FAILED", "Schedule workspace setup did not finish. Review its setup log before running again.");
+            }
+            const checkoutSpec = await this.opts.resolveAgentSpec?.(checkout.id) ?? this.agentSpec;
+            this.assertSafeWorkingDir(checkout.path, checkoutSpec.workingDir);
+            entry.checkoutId = checkout.id;
+            entry.checkoutKind = checkout.kind;
+            entry.checkoutBranch = checkout.branch;
+            this.scheduleOwnedCheckouts.add(checkout.id);
+            this.entries.set(entry.id, entry);
+            await this.flushNowOrThrow();
+            this.notifyObservers();
+            this.reannounceCheckout(checkout.id);
+          });
+        } else {
+          await this.createWorktree(spec.name, launchSpec, entry);
+          this.scheduleOwnedCheckouts.add(entry.checkoutId);
+        }
+      } else {
+        if (spec.checkoutId && spec.checkoutId !== "main") throw new Error("A shared schedule cannot use an isolated checkout.");
+        this.entries.set(entry.id, entry);
+        await this.flushNowOrThrow();
+        this.notifyObservers();
+      }
+      const identity: ScheduledSessionIdentity = {
+        sessionId: entry.id, checkoutId: entry.checkoutId, runtimeGeneration: reserved.runtimeGeneration,
+      };
+      await bind(identity);
+      await this.waitForScheduledSetup(entry.id);
+      let delivered = false;
+      return { ...identity, deliverPrompt: async (prompt) => {
+        if (delivered) throw new Error("The scheduled prompt was already dispatched.");
+        delivered = true;
+        if (!prompt.trim()) throw new Error("A scheduled prompt cannot be empty.");
+        if (reserved.cancelled || this.entries.get(entry.id) !== entry) throw new Error("Scheduled launch cancelled.");
+        try {
+          reserved.launched = true;
+          await this.start(entry.id, prompt);
+          if (reserved.cancelled) throw new Error("Scheduled launch cancelled.");
+          this.observeScheduledSession(entry.id, reserved.runtimeGeneration, "running");
+        } catch (error) {
+          reserved.terminal = true;
+          reserved.cancelled = true;
+          throw error;
+        }
+      } };
+    } catch (error) {
+      reserved.cancelled = true;
+      reserved.terminal = true;
+      const setup = this.setups.get(entry.id);
+      if (this.entries.has(entry.id) && setup?.state === "running") {
+        await this.cancelScheduledSetup(entry, setup);
+      } else {
+        await this.setupSettlements.get(entry.id);
+      }
+      this.scheduledLaunches.delete(entry.id);
+      throw error;
+    }
+  }
+
+  private async waitForScheduledSetup(sessionId: string): Promise<void> {
+    if (this.scheduledLaunches.get(sessionId)?.cancelled) throw new Error("Scheduled launch cancelled.");
+    if (this.setups.get(sessionId)?.state === "running") {
+      await new Promise<void>((resolve, reject) => {
+        const inspect = () => {
+          if (this.scheduledLaunches.get(sessionId)?.cancelled || !this.entries.has(sessionId)) {
+            unsubscribe(); reject(new Error("Scheduled launch cancelled."));
+          } else if (this.setups.get(sessionId)?.state !== "running") {
+            unsubscribe(); resolve();
+          }
+        };
+        const unsubscribe = this.onChange(inspect);
+        inspect();
+      });
+    }
+    await this.setupSettlements.get(sessionId);
+    if (this.scheduledLaunches.get(sessionId)?.cancelled) throw new Error("Scheduled launch cancelled.");
+    const setup = this.setups.get(sessionId);
+    if (setup && setup.state !== "done" && setup.state !== "skipped") {
+      throw scheduledLaunchError("SETUP_FAILED", "Schedule workspace setup did not finish. Review its setup log before running again.");
+    }
+    const entry = this.entries.get(sessionId);
+    if (setup && entry?.checkoutId !== "main") {
+      const checkout = entry && await this.checkoutStore().get(entry.checkoutId);
+      if (!checkout || checkout.setupState !== "done" && checkout.setupState !== "skipped") {
+        throw scheduledLaunchError("CHECKOUT_STORE_UNAVAILABLE", "The schedule workspace setup outcome could not be stored. Repair checkout storage before running again.");
+      }
+    }
+  }
+
+  observeScheduledSession(
+    sessionId: string, runtimeGeneration: string | undefined,
+    status: ScheduledSessionObservation["status"], reason?: string,
+  ): void {
+    const run = this.scheduledLaunches.get(sessionId);
+    const entry = this.entries.get(sessionId);
+    if (!run || !entry || run.terminal || runtimeGeneration !== run.runtimeGeneration) return;
+    if (status === "completed" || status === "failed" || status === "interrupted") run.terminal = true;
+    this.opts.onScheduledObservation?.({ sessionId, checkoutId: entry.checkoutId, runtimeGeneration: run.runtimeGeneration, status, reason });
+  }
+
+  async stopScheduledSession(sessionId: string): Promise<void> {
+    const run = this.scheduledLaunches.get(sessionId);
+    if (!run || run.terminal) return;
+    run.cancelled = true;
+    this.observeScheduledSession(sessionId, run.runtimeGeneration, "interrupted", "Stopped by user");
+    this.notifyObservers();
+    const entry = this.entries.get(sessionId);
+    const setup = this.setups.get(sessionId);
+    if (entry && setup?.state === "running") await this.cancelScheduledSetup(entry, setup);
+    await this.stopAndAwait(sessionId);
+  }
+
+  async releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void> {
+    if (checkoutId === "main") return;
+    await this.withCheckoutMembership(checkoutId, async () => {
+      await this.checkoutStore().releaseScheduleOwner(scheduleId, checkoutId);
+      if (!(await this.checkoutStore().get(checkoutId))?.scheduleOwnerId) this.scheduleOwnedCheckouts.delete(checkoutId);
+      this.notifyObservers();
+    });
+  }
+
   /** Create a fresh registry-agent conversation from bridge-owned context. */
   async fork(sourceSessionId: string, workspace: ForkWorkspace): Promise<SessionEntry> {
     const source = this.entries.get(sourceSessionId);
@@ -999,6 +1199,7 @@ export class SessionManager {
         projectId: this.opts.projectId,
         repoPath: this.projectPath,
         sessionId: entry.id,
+        scheduleOwnerId: spec.scheduleOwnerId,
         sessionName: undefined, // new session won't have a name
         baseBranch: spec.baseBranch,
         baseCommit,
@@ -1028,6 +1229,7 @@ export class SessionManager {
       // checkout path (`cachedGitBranch`), which is what the UI renders.
       entry.checkoutBranch = checkout.branch;
       entry.checkoutState = "ready";
+      if (checkout.scheduleOwnerId) this.scheduleOwnedCheckouts.add(checkout.id);
       // Seeded before the commit so the entry the create reply carries already
       // says `running` — the app must never see an isolated session that looks
       // provisioned for the frame before the first progress lands.
@@ -1319,7 +1521,10 @@ export class SessionManager {
       // both see a survivor that the first one then removes.
       return this.withCheckoutMembership(entry.checkoutId, async () => {
         if (!this.entries.has(entry.id)) return false;
-        return this.membersForCheckout(entry.checkoutId).length > 1
+        const state = await this.checkoutStore().read();
+        if (!state.healthy) throw new Error("Checkout storage could not be read completely");
+        const checkout = state.records.find((record) => record.id === entry.checkoutId);
+        return this.membersForCheckout(entry.checkoutId).length > 1 || !!checkout?.scheduleOwnerId
           ? this.deleteAttachedMemberLocked(entry)
           : this.deleteManaged(entry, options);
       });
@@ -1344,6 +1549,8 @@ export class SessionManager {
     this.hookSessionIds.add(id);
     this.tm.forget(id);
     this.entries.delete(id);
+    this.scheduledLaunches.delete(id);
+    this.setupSettlements.delete(id);
     this.resumableCache.delete(id);
     this.awaitingResumedIdentity.delete(id);
     this.setups.delete(id);
@@ -1561,6 +1768,10 @@ export class SessionManager {
 
   start(id: string, initialPrompt?: string): void | Promise<void> {
     const entry = this.entries.get(id);
+    const scheduled = this.scheduledLaunches.get(id);
+    if (scheduled && !scheduled.launched && !scheduled.terminal) {
+      return Promise.reject(new Error("The schedule is still preparing this session."));
+    }
     // The second door into a dying checkout's runtime: startCheckout would
     // re-prepare it and spawn a PTY cwd'd inside the directory the delete is
     // about to remove.
@@ -1775,9 +1986,10 @@ export class SessionManager {
     // tick the run ended, while the disk write behind them takes as long as it
     // takes.
     this.notifyObservers();
-    void this.settleSetup(entry, setup).catch((err) => {
+    const settlement = this.settleSetup(entry, setup).catch((err) => {
       log.warn(`settling setup for session ${entry.id} failed: ${err}`);
     });
+    this.setupSettlements.set(entry.id, settlement);
   }
 
   /** The tail of a finished run: release the services it held back, fire the
@@ -1825,16 +2037,27 @@ export class SessionManager {
     }
   }
 
-  /** Kill a run the user cancelled and settle it as `skipped`. */
-  private async cancelSetupRun(entry: PersistedEntry, setup: SetupRuntime): Promise<void> {
+  private cancelScheduledSetup(entry: PersistedEntry, setup: SetupRuntime): Promise<void> {
+    const settlement = this.cancelSetupRun(entry, setup, "failed");
+    this.setupSettlements.set(entry.id, settlement);
+    return settlement;
+  }
+
+  /** Schedule cancellation retains partial provisioning, which needs explicit repair. */
+  private async cancelSetupRun(entry: PersistedEntry, setup: SetupRuntime, outcome: "skipped" | "failed" = "skipped"): Promise<void> {
+    const scheduled = this.scheduledLaunches.get(entry.id);
+    if (scheduled && !scheduled.launched && !scheduled.terminal) {
+      scheduled.cancelled = true;
+      this.observeScheduledSession(entry.id, scheduled.runtimeGeneration, "interrupted", "Workspace setup was cancelled");
+    }
     // Marked BEFORE the kill, and rather than from the killed run's own dying
     // report — that one says `failed`, and a cancel the user asked for is not a
     // failure. The ordering is what keeps it: the runner reports back from
     // inside `killSetupTree`, and a state still reading `running` would let
     // `onSetupProgress` settle the run as failed and run this tail twice.
-    setup.state = "skipped";
+    setup.state = outcome;
     setup.exitCode = undefined;
-    setup.message = undefined;
+    setup.message = outcome === "failed" ? "Schedule preparation was interrupted. Rerun workspace setup before scheduling again." : undefined;
     setup.finishedAt = Date.now();
     setup.gateReleased = true;
     this.notifyObservers();
@@ -1998,6 +2221,9 @@ export class SessionManager {
       log.warn("checkout setup markers unreadable: %s", err);
       return;
     }
+    for (const record of records) {
+      if (record.scheduleOwnerId) this.scheduleOwnedCheckouts.add(record.id);
+    }
     const byCheckout = new Map(records.map((record) => [record.id, record]));
     let recovered = false;
     for (const entry of managed) {
@@ -2067,7 +2293,8 @@ export class SessionManager {
       (this.opts.agentRuntime ?? agentRuntime).resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
       this.runningChat.add(id);
       if (!chatAlreadyRunning) {
-        this.terminalRunIds.set(id, crypto.randomUUID());
+        const scheduled = this.scheduledLaunches.get(id);
+        this.terminalRunIds.set(id, scheduled && !scheduled.terminal ? scheduled.runtimeGeneration : crypto.randomUUID());
         this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
       }
       const runId = this.terminalRunIds.get(id);
@@ -2127,7 +2354,8 @@ export class SessionManager {
     const launchCheckoutId = entry.checkoutId;
     const controller = new AbortController();
     this.terminalControllers.set(id, controller);
-    const runId = crypto.randomUUID();
+    const scheduled = this.scheduledLaunches.get(id);
+    const runId = scheduled && !scheduled.terminal ? scheduled.runtimeGeneration : crypto.randomUUID();
     this.terminalRunIds.set(id, runId);
     const scope = createAgentRunScope<TerminalAgentEvent>({
       runId,
@@ -2136,6 +2364,19 @@ export class SessionManager {
         const parsed = TerminalAgentEventSchema.parse(event);
         if (parsed.type === "session-identity") this.setAgentSession(id, parsed.nativeId, parsed.transcriptPath);
         if (parsed.type === "ready") this.confirmHookRun(id, runId);
+        if (parsed.type === "turn-start") this.observeScheduledSession(id, runId, "running");
+        if (parsed.type === "notification") {
+          const state = parsed.notificationType === "task_complete" ? "completed"
+            : parsed.notificationType === "error" ? "failed"
+            : parsed.notificationType === "permission_request" || parsed.notificationType === "awaiting_input" ? "needs-input" : undefined;
+          if (state) this.observeScheduledSession(id, runId, state, state === "failed" ? "Agent reported a turn failure" : undefined);
+        }
+        if (parsed.type === "handler") {
+          const state = parsed.event === "turn_end" ? "completed"
+            : parsed.event === "turn_failed" ? "failed"
+            : parsed.event === "awaiting_input" || parsed.event === "limit_hit" ? "needs-input" : "running";
+          this.observeScheduledSession(id, runId, state, state === "failed" ? "Agent reported a turn failure" : undefined);
+        }
         this.opts.onAgentEvent?.(id, parsed);
       },
     });
@@ -2179,6 +2420,10 @@ export class SessionManager {
         const refused = () => { throw new Error("This agent cannot accept an opening prompt through its terminal invocation. Start without a prompt, then submit it after the terminal opens."); };
         if (cleanup) return cleanup.then(refused);
         refused();
+      }
+      if (scheduled && !scheduled.terminal && launch.observation?.turnEnd !== true) {
+        this.releaseTerminalPreparation(id);
+        throw scheduledLaunchError("AGENT_COMPLETION_UNAVAILABLE", "Agent completion monitoring could not be installed. Repair the agent integration before scheduling it.");
       }
       if (this.awaitingNativeForkIdentity(entry)) {
         entry.forkNativeAttempted = true;
@@ -2329,9 +2574,11 @@ export class SessionManager {
           Number(a.archived) - Number(b.archived)
           || b.lastUsedAt - a.lastUsedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
       const successor = survivors[0];
-      if (!successor) throw new Error("No checkout member remains to own this workspace.");
+      if (!successor && !(await this.checkoutStore().get(entry.checkoutId))?.scheduleOwnerId) {
+        throw new Error("No checkout member remains to own this workspace.");
+      }
       await this.checkoutStore().update(entry.checkoutId, (record) =>
-        record.sessionId === entry.id ? { ...record, sessionId: successor.id } : record,
+        record.sessionId === entry.id ? { ...record, sessionId: successor?.id ?? null } : record,
       );
       this.dropSession(entry.id);
       this.clearDeleting(entry.id);
@@ -2386,6 +2633,12 @@ export class SessionManager {
    *  slot on another runtime can wait it out (see stopAndAwait); every existing
    *  caller ignores it, exactly as before. */
   stop(id: string): void | Promise<void> {
+    const scheduled = this.scheduledLaunches.get(id);
+    if (scheduled && !scheduled.terminal) {
+      scheduled.cancelled = true;
+      this.observeScheduledSession(id, scheduled.runtimeGeneration, "interrupted", "Agent session was stopped");
+      this.notifyObservers();
+    }
     const preparationCleanup = this.releaseTerminalPreparation(id);
     const preparation = this.terminalPreparing.get(id);
     const preparationStopped = preparation
@@ -2564,6 +2817,7 @@ export class SessionManager {
 
   /** Called when the underlying PTY exits (regardless of stop() vs crash). */
   noteExited(id: string, runId?: string): void {
+    this.observeScheduledSession(id, runId, "interrupted", "Agent session exited before its turn completed");
     // A same-slot spawn reports the old exit after replacement preparation.
     if (runId === undefined || this.terminalRunIds.get(id) === runId) {
       this.releaseTerminalPreparation(id);
@@ -2675,7 +2929,7 @@ export class SessionManager {
       checkoutKind: e.checkoutKind,
       checkoutBranch: e.checkoutBranch,
       checkoutState: e.checkoutState,
-      sharedWorkspace: memberCount > 1,
+      sharedWorkspace: memberCount > 1 || this.scheduleOwnedCheckouts.has(e.checkoutId),
       // Floored at 1: `main` counts no members, and the wire schema requires a
       // positive integer.
       workspaceMemberCount: Math.max(memberCount, 1),

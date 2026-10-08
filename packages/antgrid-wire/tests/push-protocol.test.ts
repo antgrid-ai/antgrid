@@ -31,6 +31,25 @@ describe("push:deliver", () => {
     const bad = { type: "push:deliver", pushToken: "t", provider: "fcm", blob: { epk: "a" } };
     expect(PushDeliverMessage.safeParse(bad).success).toBe(false);
   });
+
+  const base = { type: "push:deliver", pushToken: "t", provider: "fcm", blob: { epk: "a", box: "b" } } as const;
+
+  it("accepts an absent collapseKey", () => {
+    expect(PushDeliverMessage.parse(base).collapseKey).toBeUndefined();
+  });
+
+  it("accepts a base64url collapseKey up to 64 chars", () => {
+    for (const key of ["a", "Ab3_-xY9Ab3_-xY9Ab3_-xY9Ab3_-xY9", "k".repeat(64)]) {
+      expect(PushDeliverMessage.parse({ ...base, collapseKey: key }).collapseKey).toBe(key);
+      expect(ClientMessage.parse({ ...base, collapseKey: key })).toMatchObject({ collapseKey: key });
+    }
+  });
+
+  it("rejects a collapseKey outside the base64url alphabet or over 64 chars", () => {
+    for (const key of ["", "a/b", "a+b", "ab==", "a b", "k".repeat(65)]) {
+      expect(PushDeliverMessage.safeParse({ ...base, collapseKey: key }).success).toBe(false);
+    }
+  });
 });
 
 describe("push:result", () => {

@@ -242,6 +242,7 @@ describe("viewer routes", () => {
       "modelwatch:arm": { id: "a", type: "modelwatch:arm", arms: ["prompts"], enabled: false },
     };
     const notArmable: Record<string, unknown> = {
+      "scheduler:request": { id: "a", type: "scheduler:request", method: "scheduler.list" },
       "project:list": { id: "a", type: "project:list" },
       "project:resolve": { id: "a", type: "project:resolve", folder: "x" },
       "tools:list": { id: "a", type: "tools:list" },

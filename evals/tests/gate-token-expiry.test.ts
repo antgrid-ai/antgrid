@@ -7,7 +7,7 @@ import { TestApp } from "../helpers/test-app";
  * is time-based, not user-driven — the next redial mints a fresh token and
  * succeeds with no re-pair (mirrors the bridge's own `LICENSE_EXPIRED`
  * handling: terminal for THAT hello, but not identity-dead — see
- * `bridge/CLAUDE.md`'s `relay-client.ts` entry).
+ * `bridge/AGENTS.md`'s `relay-client.ts` entry).
  *
  * `env.license.expireNextToken()` arms exactly the NEXT
  * `env.license.mintAppToken()` call to return an already-expired sentinel;

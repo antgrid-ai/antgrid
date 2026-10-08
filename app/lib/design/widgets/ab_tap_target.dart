@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../utils/platform_utils.dart';
 import '../ab_tokens.dart';
+import 'ab_touch_sizing.dart';
 
 /// Marks a subtree whose host already owns the vertical touch dimension — a
 /// list row that spans the full width and is tappable across its whole height.
@@ -61,11 +62,12 @@ class AbTapTarget extends StatelessWidget {
   Widget build(BuildContext context) {
     Widget result = child;
     if (isMobilePlatform) {
-      final compact = AbCompactTapTargets.of(context);
+      final extent = AbTouchSizing.extentOf(context);
+      final compact = extent == 0 && AbCompactTapTargets.of(context);
       result = ConstrainedBox(
         constraints: BoxConstraints(
-          minWidth: minSize,
-          minHeight: compact ? 0.0 : minSize,
+          minWidth: extent > minSize ? extent : minSize,
+          minHeight: compact ? 0.0 : (extent > minSize ? extent : minSize),
         ),
         // Factors force Center to shrink-wrap the child; without them Align
         // expands to fill any bounded parent, blowing up row layouts.

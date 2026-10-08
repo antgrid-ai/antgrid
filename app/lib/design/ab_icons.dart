@@ -35,6 +35,7 @@ abstract final class AbIcons {
   static const chevronDown = Codicon.chevron_down;
   static const chevronUp = Codicon.chevron_up;
   static const refresh = Codicon.refresh;
+  static const calendar = Codicon.calendar;
   static const revert = Codicon.discard;
   static const pin = Codicon.pin;
   static const unpin = Codicon.pinned;
@@ -44,6 +45,7 @@ abstract final class AbIcons {
   static const send = Codicon.arrow_right;
   static const enterKey = Codicon.newline;
   static const shield = Codicon.shield;
+  static const lock = Codicon.lock;
   static const search = Codicon.search;
   static const arrowUp = Codicon.arrow_up;
   static const arrowDown = Codicon.arrow_down;

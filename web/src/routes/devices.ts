@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { recordStage } from "../auth/flows.js";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
@@ -191,6 +192,8 @@ export function deviceRoutes(deps: {
   });
 
   r.get("/account/me", async (c) => {
+    const flows = await deps.db.authFlow.findMany({ where: { sessionId: c.get("sessionId"), state: { not: "revoked" }, journey: { userId: c.get("userId") } }, select: { id: true } });
+    for (const flow of flows) await recordStage(deps.db, flow.id, "first_client_use");
     const userId = c.get("userId");
     const email = c.get("userEmail");
     const name = c.get("userName");

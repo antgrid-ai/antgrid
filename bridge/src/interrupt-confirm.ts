@@ -5,7 +5,7 @@ import { open, type FileHandle } from "node:fs/promises";
  * Confirms a lone Esc/Ctrl+C keystroke actually interrupted a running turn by
  * watching the agent's own transcript for the marker record its `AgentSpec`
  * declares (`transcriptInterruptFor`, `antgrid-agents/builtins`) — see
- * bridge/CLAUDE.md's interrupt entry for why the key alone is ambiguous
+ * bridge/AGENTS.md's interrupt entry for why the key alone is ambiguous
  * (closes a picker, a dialog, a task view) and why the transcript is the only
  * signal left (neither Claude nor Codex fires any hook on a real interrupt).
  *

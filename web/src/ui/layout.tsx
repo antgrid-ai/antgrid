@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { tryGetContext } from "hono/context-storage";
 import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
 import { BETA } from "../billing/plans.js";
@@ -67,6 +68,8 @@ export function Layout({ title, user, section, children, analytics = true, conte
   // there is no override, and hono/jsx omits an undefined attribute, so the
   // page follows the OS through `color-scheme: light dark`.
   const theme = currentTheme();
+  const path = tryGetContext()?.req.path ?? "";
+  if (/^\/(?:login|signup|oauth|api\/auth|reset-password|forgot-password|invite)/.test(path)) analytics = false;
   return (
     <html lang="en" data-theme={theme}>
       <head>

@@ -77,7 +77,7 @@ export const free: PlanCardData = {
     "Encrypted remote control from your phone",
     "Unlimited projects, terminals & sessions",
     "File explorer, git & browser preview",
-    "E2E zero-knowledge relay",
+    "End-to-end encrypted · zero-knowledge relay",
   ],
   cta: "Start free",
   ctaFooter: "No card required · Windows, macOS & Linux",
@@ -119,8 +119,7 @@ export const proYearly: PlanCardData = {
     `Up to ${PRO_WORKERS} worker machines per person`,
     "Invite your team — every seat brings its own machines",
     `Up to ${PRO_MAX_SEATS} seats · add or remove them any time`,
-    "Shared fleet view across the team",
-    "E2E zero-knowledge relay · priority support",
+    "End-to-end encrypted · zero-knowledge relay · priority support",
   ],
   cta: "Get Pro",
   // No figure on this line while the CTA is a capture: the reader is agreeing to
@@ -138,7 +137,7 @@ export const proYearly: PlanCardData = {
 export const faq: { q: string; a: string }[] = [
   {
     q: "What counts as a seat?",
-    a: `One person on your account. Each seat signs in as themselves, gets their own worker machines, and sees the team's fleet. Pro covers up to ${PRO_MAX_SEATS} seats; past that, talk to us about Enterprise.`,
+    a: `One person on your account. Each seat signs in as themselves and gets their own worker machines, billed on the team's account. Pro covers up to ${PRO_MAX_SEATS} seats; past that, talk to us about Enterprise.`,
   },
   {
     q: "What counts as a worker machine?",
@@ -164,6 +163,6 @@ export const faq: { q: string; a: string }[] = [
   },
   {
     q: "Does antgrid see my code?",
-    a: "No. Every agent-to-app message is end-to-end encrypted, and the relay that routes them holds no decryption keys — it moves opaque blobs between your machine and your phone. That is true on every plan, including Free.",
+    a: "No. Everything between your agent and your devices is encrypted end to end between them. When they can't reach each other directly, our relay forwards the encrypted packets as they are. Our servers never see your code, prompts or terminal output, on every plan, including Free.",
   },
 ];

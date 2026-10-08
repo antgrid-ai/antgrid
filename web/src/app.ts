@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { authReviewRoutes } from "./routes/auth-review.js";
 import { Hono } from "hono";
 import { contextStorage } from "hono/context-storage";
 import { cors } from "hono/cors";
@@ -79,7 +80,7 @@ export function buildApp(deps: AppDeps) {
     "*",
     logger((message: string, ...rest: string[]) => {
       console.log(
-        message.replace(/(\/webhooks\/zeptomail\/)\S+/, "$1<redacted>"),
+        message.replace(/(\/webhooks\/zeptomail\/)\S+/, "$1<redacted>").replace(/\?[^\s]*/g, "?<redacted>").replace(/(\/reset-password\/)[^\s?]+/g, "$1<redacted>"),
         ...rest
       );
     })
@@ -136,7 +137,16 @@ export function buildApp(deps: AppDeps) {
   // without this the raw client-supplied chain would reach them untouched. No
   // peer address (no socket) means nothing here is trustworthy — drop it.
   app.use("/api/auth/*", oauthTokenRateLimit(clientIp));
+  app.use("*", async (c, next) => {
+    if (/^\/(?:login|signup|oauth|invite|reset-password|forgot-password|api\/auth|ui\/(?:login|signup|verify-email|reset-password))/.test(c.req.path)) {
+      c.header("Cache-Control", "no-store"); c.header("Referrer-Policy", "no-referrer");
+    }
+    await next();
+  });
+  app.route("/", authReviewRoutes({ auth: deps.auth, baseURL: deps.env.BETTER_AUTH_URL }));
   app.all("/api/auth/*", (c) => {
+    if (deps.env.LEGACY_NATIVE_OAUTH === false && c.req.path === "/api/auth/one-time-token/verify") return c.json({ error: "UPGRADE_REQUIRED" }, 426);
+    if ((deps.env.LEGACY_NATIVE_OAUTH === false || deps.env.LEGACY_NATIVE_OAUTH_ISSUANCE === false) && c.req.path === "/api/auth/one-time-token/generate") return c.json({ error: "UPGRADE_REQUIRED" }, 426);
     const headers = new Headers(c.req.raw.headers);
     const ip = clientIp(c);
     if (ip) headers.set("x-forwarded-for", ip);
@@ -177,8 +187,8 @@ export function buildApp(deps: AppDeps) {
     app.route("/", devBillingRoutes({ db: deps.db }));
   }
 
-  app.route("/", oauthHandoffRoutes({ auth: deps.auth }));
-  app.route("/", oauthStartRoutes({ auth: deps.auth, env: deps.env }));
+  app.route("/", oauthHandoffRoutes({ auth: deps.auth, db: deps.db, legacy: deps.env.LEGACY_NATIVE_OAUTH !== false && deps.env.LEGACY_NATIVE_OAUTH_ISSUANCE !== false !== false }));
+  app.route("/", oauthStartRoutes({ auth: deps.auth, env: deps.env, db: deps.db }));
   app.route("/", uiRoutes({
     db: deps.db,
     auth: deps.auth,
@@ -194,7 +204,7 @@ export function buildApp(deps: AppDeps) {
   // Routes that catch-and-return (e.g. billing's typed errors) bypass this;
   // they log at their own catch site.
   app.onError((err, c) => {
-    console.error(`[server] unhandled error ${c.req.method} ${c.req.path}`, err);
+    console.error("[server] unhandled request error", { method: c.req.method, type: err.name });
     // Browser-navigable routes (e.g. /oauth/start) get a readable page, not raw
     // JSON; API clients get JSON. Negotiate on Accept.
     if (c.req.header("accept")?.includes("text/html")) {

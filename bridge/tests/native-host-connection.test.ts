@@ -11,6 +11,11 @@ import {
 import { MessageBus } from "../src/message-bus";
 import { STREAM_RECORD_SLICE_BYTES } from "../src/peer/stream-records";
 import { lengthPrefix, until } from "./support/fake-bi-stream";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadPairedPhones, type PairedPhonesStore } from "../src/paired-phones";
+import * as discovery from "../src/discovery";
 
 // Every native bidi stream, the session stream included, opens with one
 // `[u32 BE len][UTF-8 JSON StreamOpen]` record before it carries anything
@@ -51,7 +56,7 @@ test("eval native bind seam accepts loopback only and is inert outside evals", (
     .toThrow("INVALID_EVAL_BIND_ADDR");
 });
 function fixture(now?: () => number, schedule?: (callback: () => void, ms: number) => () => void,
-  projectCataloged?: (projectId: string) => boolean) {
+  projectCataloged?: (projectId: string) => boolean, pairedPhones?: PairedPhonesStore) {
   let allowed = true;
   const lifecycle: { now?: () => number; schedule?: (callback: () => void, ms: number) => () => void } = {};
   if (now) lifecycle.now = now;
@@ -69,6 +74,7 @@ function fixture(now?: () => number, schedule?: (callback: () => void, ms: numbe
       getLicenseToken: () => "test-only",
       remoteAccessEnabled: () => allowed,
       ...(projectCataloged ? { projectCataloged } : {}),
+      ...(pairedPhones ? { pairedPhones } : {}),
       ...(Object.keys(lifecycle).length ? { lifecycle } : {}),
     },
   });
@@ -416,6 +422,256 @@ test("a resume whose refresh is denied retires admitted peers", async () => {
     expect(await f.client.noteResume()).toBe(false);
     expect(peer.closes()).toBe(1);
     expect(f.access.nativePeers.size).toBe(0);
+  } finally { f.client.close(); }
+});
+
+test("push revocation follows the lease: a revoked device or a stale key is disowned, no lease disowns nobody", async () => {
+  const f = fixture();
+  try {
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(await f.client.authorizeDevice(f.peerId)).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(f.client.accountDisowns(f.peerId, "a-key-the-account-never-named")).toBe(true);
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(true);
+  } finally { f.client.close(); }
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function phoneStoreFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "antgrid-prune-phones-"));
+  const store = loadPairedPhones(dir);
+  const f = fixture(undefined, undefined, undefined, store);
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const row = (phoneDeviceId: string, phonePubkey: string, lastSeenAt: string, disownedAt?: string) =>
+    ({ phoneDeviceId, phonePubkey, pairedAt: lastSeenAt, lastSeenAt, ...(disownedAt ? { disownedAt } : {}) });
+  const devices = () => store.list().map((p) => p.phoneDeviceId).sort();
+  const cleanup = () => { f.client.close(); store.close(); rmSync(dir, { recursive: true, force: true }); };
+  return { f, store, dir, ago, row, devices, cleanup };
+}
+
+test("an accepted lease removes only the rows it has left out for the whole grace period", async () => {
+  const { f, store, ago, row, devices, cleanup } = phoneStoreFixture();
+  const justLeftOut = "22222222-2222-4222-8222-222222222222";
+  const longGone = "33333333-3333-4333-8333-333333333333";
+  const staleKey = "44444444-4444-4444-8444-444444444444";
+  const unparseable = "55555555-5555-4555-8555-555555555555";
+  const recentlyMarked = "66666666-6666-4666-8666-666666666666";
+  const futureMarked = "77777777-7777-4777-8777-777777777777";
+  try {
+    // Named, with an old mark and a stale last-seen: named wins, the mark clears.
+    store.upsert(row(f.peerId, vector.devicePublic, ago(90 * DAY_MS), ago(90 * DAY_MS)));
+    // Unseen for months but only now left out: a phone living on push alone.
+    store.upsert(row(justLeftOut, `${"A".repeat(43)}=`, ago(90 * DAY_MS)));
+    store.upsert(row(longGone, `${"B".repeat(43)}=`, ago(0), ago(31 * DAY_MS)));
+    // The account names this device under a NEW key: the old-key row is unnamed.
+    store.upsert(row(staleKey, `${"D".repeat(43)}=`, ago(0), ago(31 * DAY_MS)));
+    store.upsert(row(unparseable, `${"E".repeat(43)}=`, ago(90 * DAY_MS), "not a timestamp"));
+    store.upsert(row(recentlyMarked, `${"F".repeat(43)}=`, ago(90 * DAY_MS), ago(29 * DAY_MS)));
+    // Stamped while the clock ran a year ahead.
+    store.upsert(row(futureMarked, `${"G".repeat(43)}=`, ago(90 * DAY_MS), ago(-365 * DAY_MS)));
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [
+      ...f.snapshot.peers,
+      { deviceId: staleKey, ed25519Pub: `${"C".repeat(43)}=`, endpoint: null },
+    ] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(devices()).toEqual([f.peerId, justLeftOut, unparseable, recentlyMarked, futureMarked].sort());
+    expect(store.get(vector.devicePublic)?.disownedAt).toBeUndefined();
+    // The grace clock starts now for the newly left-out, the malformed and the future mark.
+    for (const key of [`${"A".repeat(43)}=`, `${"E".repeat(43)}=`, `${"G".repeat(43)}=`]) {
+      const age = Date.now() - Date.parse(store.get(key)!.disownedAt!);
+      expect(age).toBeGreaterThanOrEqual(0);
+      expect(age).toBeLessThan(DAY_MS);
+    }
+    // Pushes stop at once even for the rows the grace period keeps.
+    expect(f.client.accountDisowns(justLeftOut, `${"A".repeat(43)}=`)).toBe(true);
+  } finally { cleanup(); }
+});
+
+test("a denied lease neither marks nor removes anything, however old the marks", async () => {
+  const { f, store, ago, row, devices, cleanup } = phoneStoreFixture();
+  const other = "22222222-2222-4222-8222-222222222222";
+  const unmarked = "33333333-3333-4333-8333-333333333333";
+  try {
+    store.upsert(row(f.peerId, vector.devicePublic, ago(90 * DAY_MS)));
+    store.upsert(row(other, `${"A".repeat(43)}=`, ago(90 * DAY_MS), ago(90 * DAY_MS)));
+    store.upsert(row(unmarked, `${"B".repeat(43)}=`, ago(90 * DAY_MS)));
+    // A denied lease is not an account that names nobody.
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, allowed: false, peers: [] });
+    await f.client.noteResume();
+    expect(devices()).toEqual([f.peerId, other, unmarked].sort());
+    expect(store.get(`${"B".repeat(43)}=`)?.disownedAt).toBeUndefined();
+  } finally { cleanup(); }
+});
+
+test("the collection removes every expired row in one store write and none when nothing expired", async () => {
+  const { f, store, ago, row, devices, cleanup } = phoneStoreFixture();
+  try {
+    store.upsert(row(f.peerId, vector.devicePublic, ago(0)));
+    store.upsert(row("22222222-2222-4222-8222-222222222222", `${"A".repeat(43)}=`, ago(0), ago(40 * DAY_MS)));
+    store.upsert(row("33333333-3333-4333-8333-333333333333", `${"B".repeat(43)}=`, ago(0), ago(40 * DAY_MS)));
+    const reconcile = spyOn(store, "reconcile");
+    const remove = spyOn(store, "remove");
+    const upsert = spyOn(store, "upsert");
+    const writes = spyOn(discovery, "atomicWriteFile");
+    try {
+      expect(await f.client.noteResume()).toBe(true);
+      expect(devices()).toEqual([f.peerId]);
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(writes).toHaveBeenCalledTimes(1);
+
+      // Nothing left to remove or mark: the next snapshot writes nothing.
+      expect(await f.client.noteResume()).toBe(true);
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(devices()).toEqual([f.peerId]);
+      expect(remove).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+    } finally { writes.mockRestore(); }
+  } finally { cleanup(); }
+});
+
+test("a phone an accepted snapshot left out stays disowned through a lease gap and a restart, until a snapshot names it again", async () => {
+  const { f, store, dir, ago, row, cleanup } = phoneStoreFixture();
+  const lost = "22222222-2222-4222-8222-222222222222";
+  const lostKey = `${"A".repeat(43)}=`;
+  const neverJudged = "33333333-3333-4333-8333-333333333333";
+  const neverJudgedKey = `${"B".repeat(43)}=`;
+  try {
+    store.upsert(row(f.peerId, vector.devicePublic, ago(0)));
+    store.upsert(row(lost, lostKey, ago(DAY_MS)));
+    expect(await f.client.noteResume()).toBe(true);
+    expect(store.get(lostKey)?.disownedAt).toBeDefined();
+    expect(store.get(vector.devicePublic)?.disownedAt).toBeUndefined();
+
+    // No lease: the marked row fails closed, the named one stays open, and a
+    // row no snapshot has judged yet stays open too.
+    store.upsert(row(neverJudged, neverJudgedKey, ago(0)));
+    f.client.peers.invalidateAuthorization();
+    expect(f.client.accountDisowns(lost, lostKey)).toBe(true);
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    expect(f.client.accountDisowns(neverJudged, neverJudgedKey)).toBe(false);
+    // The mark is the row's, not the key's alone.
+    expect(f.client.accountDisowns(neverJudged, lostKey)).toBe(false);
+
+    // The mark is on disk, so a restarted bridge with no lease yet honours it.
+    expect(loadPairedPhones(dir).get(lostKey)?.disownedAt).toBeDefined();
+
+    // Named again (a transient omission): the mark clears.
+    f.access.enrollment.authorization = async () => ({ ...f.snapshot, peers: [
+      ...f.snapshot.peers,
+      { deviceId: lost, ed25519Pub: lostKey, endpoint: null },
+      { deviceId: neverJudged, ed25519Pub: neverJudgedKey, endpoint: null },
+    ] });
+    expect(await f.client.noteResume()).toBe(true);
+    expect(store.get(lostKey)?.disownedAt).toBeUndefined();
+    f.client.peers.invalidateAuthorization();
+    expect(f.client.accountDisowns(lost, lostKey)).toBe(false);
+  } finally { cleanup(); }
+});
+
+test("a store that throws does not fail the lease refresh it runs inside", async () => {
+  const { f, store, cleanup } = phoneStoreFixture();
+  try {
+    spyOn(store, "reconcile").mockImplementation(() => { throw new Error("EPERM"); });
+    expect(await f.client.noteResume()).toBe(true);
+  } finally { cleanup(); }
+});
+
+/** Lets `accountDisowns` kick a refresh: it only does so for a ready endpoint. */
+function readyWithoutLease(f: ReturnType<typeof fixture>) {
+  (f.client.peers as unknown as { lifecycle: { state: string } }).lifecycle.state = "ready";
+}
+
+const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
+
+test("with no lease, asking whether the account disowns a phone kicks a refresh that backs off while it keeps failing", async () => {
+  let clock = 0;
+  const f = fixture(() => clock);
+  let calls = 0;
+  f.access.enrollment.authorization = async () => { calls++; throw new Error("web down"); };
+  readyWithoutLease(f);
+  try {
+    // Fail-open: no lease disowns nobody, however many asks fan out.
+    for (let i = 0; i < 20; i++) expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    await settle();
+    expect(calls).toBe(1);
+
+    // Settled and failed: the next window holds every ask, not just the in-flight one.
+    for (let i = 0; i < 20; i++) f.client.accountDisowns(f.peerId, vector.devicePublic);
+    await settle();
+    expect(calls).toBe(1);
+
+    // First window is at most the base delay; the second at most double it.
+    clock += 1_000;
+    f.client.accountDisowns(f.peerId, vector.devicePublic);
+    await settle();
+    expect(calls).toBe(2);
+    clock += 400;
+    f.client.accountDisowns(f.peerId, vector.devicePublic);
+    await settle();
+    expect(calls).toBe(2);
+    clock += 1_600;
+    f.client.accountDisowns(f.peerId, vector.devicePublic);
+    await settle();
+    expect(calls).toBe(3);
+  } finally { f.client.close(); }
+});
+
+test("the disown refresh backoff never exceeds its ceiling", async () => {
+  let clock = 0;
+  const f = fixture(() => clock);
+  let calls = 0;
+  f.access.enrollment.authorization = async () => { calls++; throw new Error("web down"); };
+  readyWithoutLease(f);
+  try {
+    for (let i = 0; i < 12; i++) {
+      f.client.accountDisowns(f.peerId, vector.devicePublic);
+      await settle();
+      clock += 60_000;
+    }
+    expect(calls).toBe(12);
+  } finally { f.client.close(); }
+});
+
+test("an accepted snapshot resets the disown refresh backoff", async () => {
+  let clock = 0;
+  const f = fixture(() => clock);
+  let calls = 0;
+  let fail = true;
+  f.access.enrollment.authorization = async () => {
+    calls++;
+    if (fail) throw new Error("web down");
+    return f.snapshot;
+  };
+  readyWithoutLease(f);
+  try {
+    // Build up a long window, and leave the clock inside it.
+    for (let i = 0; i < 6; i++) {
+      clock += 60_000;
+      f.client.accountDisowns(f.peerId, vector.devicePublic);
+      await settle();
+    }
+    expect(calls).toBe(6);
+
+    // Any accepted snapshot resets it, not only one this kick asked for.
+    fail = false;
+    expect(await f.client.noteResume()).toBe(true);
+    expect(calls).toBe(7);
+    // With a lease nothing is kicked.
+    expect(f.client.accountDisowns(f.peerId, vector.devicePublic)).toBe(false);
+    await settle();
+    expect(calls).toBe(7);
+
+    // Lease lost again with no clock movement: the next ask goes straight out.
+    fail = true;
+    f.client.peers.invalidateAuthorization();
+    readyWithoutLease(f);
+    f.client.accountDisowns(f.peerId, vector.devicePublic);
+    await settle();
+    expect(calls).toBe(8);
   } finally { f.client.close(); }
 });
 

@@ -81,6 +81,58 @@ void main() {
     },
   );
 
+  test(
+    'every agent handshake is told the token again, a status update is not, and sign-out stops it',
+    () async {
+      // The agent re-sends agent:hello on each connect. One that dropped this
+      // phone's row while it was away recreates it on readmission without a
+      // token, so a reconnect must re-register even for an unchanged token.
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.status.hydrate(_connected);
+      final svc = PushMessagingService();
+      await svc.registerToken(
+        token: 'fcm-tok',
+        pushIdentity: PushIdentity.inMemory(),
+        sessions: [session],
+      );
+      Iterable<Map<String, dynamic>> registers() =>
+          t.sent.where((m) => m['type'] == 'push:register');
+      // A new instance, as each inbound agent:hello parses to; the timestamp
+      // is what makes the status notify, as the real frame handler stamps it.
+      ProjectStatus reconnected() => ProjectStatus(
+        // ignore: prefer_const_constructors
+        agentHello: AgentHello(version: '0'),
+        lastUpdatedAt: DateTime.now(),
+      );
+      expect(registers(), hasLength(1));
+
+      // Same handshake, other status: nothing new to tell.
+      session.status.hydrate(_connected.copyWith(detectedPorts: const [3000]));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(1));
+
+      // A reconnect: a fresh agent:hello, equal in content.
+      session.status.hydrate(reconnected());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(2));
+      expect(registers().last['pushToken'], 'fcm-tok');
+
+      await svc.clearToken(sessions: const []);
+      session.status.hydrate(reconnected());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers(), hasLength(2));
+      await session.close();
+    },
+  );
+
   test('registerToken skips local sessions', () async {
     final t = FakeAgentTransport();
     final cache = await CachedSessionsStore.open();
@@ -179,6 +231,118 @@ void main() {
     final sent = t.sent.where((m) => m['type'] == 'push:register').toList();
     expect(sent.single['provider'], 'apns');
     expect(sent.single['pushToken'], 'apns-hex');
+    await session.close();
+  });
+
+  group('after sign-out', () {
+    late FakeAgentTransport t;
+    late ProjectSession session;
+    late PushMessagingService svc;
+    Iterable<Map<String, dynamic>> registers() =>
+        t.sent.where((m) => m['type'] == 'push:register');
+    ProjectStatus reconnected() => ProjectStatus(
+      // ignore: prefer_const_constructors
+      agentHello: AgentHello(version: '0'),
+      lastUpdatedAt: DateTime.now(),
+    );
+
+    setUp(() async {
+      t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.status.hydrate(_connected);
+      svc = PushMessagingService(pushIdentity: PushIdentity.inMemory());
+      await svc.setTokenAndRegister('tok', [session]);
+      expect(registers().single['pushToken'], 'tok');
+    });
+
+    tearDown(() => session.close());
+
+    test(
+      'a registry pass sends nothing to a session not yet evicted',
+      () async {
+        // Sign-out clears, then evicts sessions one at a time; each eviction
+        // re-runs registerNewSessions over the ones still open.
+        await svc.clearToken(sessions: [session]);
+        await svc.registerNewSessions([session]);
+        expect(registers().map((m) => m['pushToken']), ['tok', '']);
+      },
+    );
+
+    test('a token refresh sends nothing', () async {
+      await svc.clearToken(sessions: [session]);
+      await svc.setTokenAndRegister('tok2', [session]);
+      expect(registers().map((m) => m['pushToken']), ['tok', '']);
+    });
+
+    test('a new agent:hello sends nothing', () async {
+      session.status.hydrate(const ProjectStatus());
+      await svc.clearToken(sessions: const []);
+      // A pass that would otherwise attach a fresh handshake listener.
+      await svc.registerNewSessions([session]);
+      session.status.hydrate(reconnected());
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(registers().map((m) => m['pushToken']), ['tok']);
+    });
+
+    test('a pass already awaiting the keypair sends nothing', () async {
+      final fresh = PushMessagingService(pushIdentity: PushIdentity.inMemory());
+      t.sent.clear();
+      final inFlight = fresh.registerToken(
+        token: 'tok',
+        pushIdentity: PushIdentity.inMemory(),
+        sessions: [session],
+      );
+      await fresh.clearToken(sessions: [session]);
+      await inFlight;
+      expect(registers().map((m) => m['pushToken']), ['']);
+    });
+
+    test(
+      'sign-in resumes on warm sessions with the token refreshed while out',
+      () async {
+        await svc.clearToken(sessions: [session]);
+        await svc.setTokenAndRegister('tok2', [session]);
+        await svc.resumeAfterSignIn([session]);
+        expect(registers().map((m) => m['pushToken']), ['tok', '', 'tok2']);
+
+        // Handshake listeners are live again too.
+        session.status.hydrate(reconnected());
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(registers().map((m) => m['pushToken']), [
+          'tok',
+          '',
+          'tok2',
+          'tok2',
+        ]);
+      },
+    );
+  });
+
+  test('resumeAfterSignIn with no prior sign-out only dedups', () async {
+    final t = FakeAgentTransport();
+    final cache = await CachedSessionsStore.open();
+    final session = ProjectSession(
+      projectId: 'p',
+      transport: t,
+      mode: ProjectSessionMode.relay,
+      cachedSessionsStore: cache,
+      onClose: () async => t.dispose(),
+    );
+    session.status.hydrate(_connected);
+    final svc = PushMessagingService(pushIdentity: PushIdentity.inMemory());
+    // Startup's signed-in edge can land before init() has a token.
+    await svc.resumeAfterSignIn([session]);
+    expect(t.sent.where((m) => m['type'] == 'push:register'), isEmpty);
+    await svc.setTokenAndRegister('tok', [session]);
+    await svc.resumeAfterSignIn([session]);
+    expect(t.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
     await session.close();
   });
 }

@@ -1,8 +1,9 @@
-import { describe, it, expect } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { describe, it, expect, spyOn } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPairedPhones } from "../src/paired-phones";
+import * as discovery from "../src/discovery";
 import { __setRootForTest } from "../src/logger";
 
 /** Capture pino JSONL lines written during `fn`, bypassing the "warn" spy
@@ -129,6 +130,90 @@ describe("paired-phones store (machine-level)", () => {
     });
     store.remove("pk1");
     expect(loadPairedPhones(dir).list()).toEqual([]);
+    rmSync(dir, { recursive: true });
+  });
+});
+
+describe("paired-phones reconcile", () => {
+  const row = (phonePubkey: string, lastSeenAt = "2026-01-01T00:00:00.000Z") =>
+    ({ phonePubkey, phoneDeviceId: `d-${phonePubkey}`, pairedAt: lastSeenAt, lastSeenAt });
+
+  it("removes every selected row in one write and returns them", () => {
+    const dir = seedFile([row("pk1"), row("pk2"), row("pk3")]);
+    const store = loadPairedPhones(dir);
+    const writes = spyOn(discovery, "atomicWriteFile");
+    try {
+      const removed = store.reconcile((p) => p.phonePubkey === "pk2" ? p : null);
+      expect(removed.map((p) => p.phonePubkey).sort()).toEqual(["pk1", "pk3"]);
+      expect(writes).toHaveBeenCalledTimes(1);
+    } finally { writes.mockRestore(); }
+    expect(store.list().map((p) => p.phonePubkey)).toEqual(["pk2"]);
+    expect(loadPairedPhones(dir).list().map((p) => p.phonePubkey)).toEqual(["pk2"]);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("writes nothing when every row comes back unchanged, copied or not", () => {
+    const dir = seedFile([row("pk1"), row("pk2")]);
+    const store = loadPairedPhones(dir);
+    const writes = spyOn(discovery, "atomicWriteFile");
+    try {
+      expect(store.reconcile((p) => p.phonePubkey === "pk1" ? p : { ...p })).toEqual([]);
+      expect(writes).not.toHaveBeenCalled();
+    } finally { writes.mockRestore(); }
+    expect(store.list()).toHaveLength(2);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("updates and removes rows together in the same single write", () => {
+    const dir = seedFile([row("pk1"), row("pk2"), row("pk3")]);
+    const store = loadPairedPhones(dir);
+    const writes = spyOn(discovery, "atomicWriteFile");
+    try {
+      const removed = store.reconcile((p) =>
+        p.phonePubkey === "pk1" ? null : p.phonePubkey === "pk2" ? { ...p, disownedAt: "2026-02-01T00:00:00.000Z" } : p);
+      expect(removed.map((p) => p.phonePubkey)).toEqual(["pk1"]);
+      expect(writes).toHaveBeenCalledTimes(1);
+    } finally { writes.mockRestore(); }
+    const disk = loadPairedPhones(dir).list();
+    expect(disk.map((p) => [p.phonePubkey, p.disownedAt])).toEqual([["pk2", "2026-02-01T00:00:00.000Z"], ["pk3", undefined]]);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("judges a row by its coalesced touch, and the write carries that touch for the survivors", () => {
+    const dir = seedFile([row("pk1", "old"), row("pk2", "old")]);
+    const store = loadPairedPhones(dir, { lastSeenFlushMs: 60_000 });
+    store.touchLastSeen("pk1", "fresh");
+    const seen = new Map<string, string>();
+    store.reconcile((p) => { seen.set(p.phonePubkey, p.lastSeenAt); return p.lastSeenAt === "old" ? null : p; });
+    expect(seen.get("pk1")).toBe("fresh");
+    const disk = loadPairedPhones(dir).list();
+    expect(disk.map((p) => [p.phonePubkey, p.lastSeenAt])).toEqual([["pk1", "fresh"]]);
+    store.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("does not write back a row another process removed before the watcher reloaded", () => {
+    const dir = seedFile([row("pk1"), row("pk2"), row("pk3")]);
+    const store = loadPairedPhones(dir);
+    // `antgrid phones remove pk2` from the CLI; no watcher is running here, so
+    // the host's memory still holds pk2.
+    loadPairedPhones(dir).remove("pk2");
+    store.reconcile((p) => p.phonePubkey === "pk3" ? null : p);
+    expect(loadPairedPhones(dir).list().map((p) => p.phonePubkey)).toEqual(["pk1"]);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("drops a removed row's pending touch so it cannot age a later re-admission", () => {
+    const dir = seedFile([row("pk1")]);
+    const store = loadPairedPhones(dir, { lastSeenFlushMs: 60_000 });
+    store.touchLastSeen("pk1", "2026-02-01T00:00:00.000Z");
+    store.reconcile(() => null);
+    store.upsert(row("pk1", "2026-03-01T00:00:00.000Z"));
+    store.flushLastSeen();
+    expect(store.get("pk1")?.lastSeenAt).toBe("2026-03-01T00:00:00.000Z");
+    const raw = JSON.parse(readFileSync(join(dir, "agents", "paired-phones.json"), "utf8")) as { phones: { lastSeenAt: string }[] };
+    expect(raw.phones[0]?.lastSeenAt).toBe("2026-03-01T00:00:00.000Z");
+    store.close();
     rmSync(dir, { recursive: true });
   });
 });

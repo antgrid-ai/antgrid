@@ -20,6 +20,7 @@ import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
 import 'ui_attention_providers.dart';
+import 'scheduler.dart' show schedulerTargetProvider;
 
 /// The machine-level loopback host controller (singleton; spawns/attaches the
 /// host daemon and hands out a verified port+token via `ensureHost`).
@@ -350,6 +351,10 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // promotion/data-plane setup can settle. This also keeps a focused remote's
   // control plane available for retry and status operations after an open error.
   final focusedTarget = ref.watch(selectedTargetProvider);
+  if (ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.scheduler) {
+    final machine = ref.watch(schedulerTargetProvider);
+    if (machine != null) alive.add(machine);
+  }
   if (focusedTarget != null && !focusedTarget.isLocal) {
     alive.add(baseDeviceUuid(focusedTarget.registrationId));
   }
@@ -360,9 +365,11 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // source would otherwise hold a socket open forever. That fallback bites on
   // mobile especially, where there is no Local tab, so the default 'local'
   // selection resolves `visiblePickerSource` to the first MACHINE.
+  final surface = ref.watch(workbenchSurfaceProvider);
   final pickerVisible =
-      ref.watch(selectedRegistrationIdProvider) == null ||
-      ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
+      surface != WorkbenchSurface.scheduler &&
+      (ref.watch(selectedRegistrationIdProvider) == null ||
+          surface == WorkbenchSurface.newSession);
   if (pickerVisible) {
     // The New Session canvas shows the recent-sessions list alongside the
     // composer's machine picker, and Recents has no single "viewed" machine —

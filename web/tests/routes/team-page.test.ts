@@ -191,7 +191,7 @@ describe("GET /team — sign-in", () => {
     const res = await getTeam(app);
 
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Fteam");
   });
 });
 

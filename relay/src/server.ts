@@ -18,6 +18,7 @@ import { deviceTokenIssuer } from "./license/verify.js";
 import { handleRevoke, handleExpire, handleListConnections, handlePeerPolicy } from "./license/internal-routes.js";
 import { resolveClientIp, type ClientIpDegradation } from "antgrid-wire";
 import { SocketAdmissions } from "./socket-admissions.js";
+import type { PushSender } from "./push/delivery.js";
 
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -36,8 +37,8 @@ export interface RelayServer {
 export interface RelayServerDeps {
   licenseGate?: LicenseGate;
   licenseCache?: LicenseCache;
-  fcmSender?: { send(pushToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> };
-  apnsSender?: { send(pushToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> };
+  fcmSender?: PushSender;
+  apnsSender?: PushSender;
 }
 
 /**
@@ -412,7 +413,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
             : { type: "push:result", pushToken: msg.pushToken, ok: false, reason: r });
         };
         sender
-          .send(msg.pushToken, { epk: msg.blob.epk, box: msg.blob.box })
+          .send(
+            msg.pushToken,
+            { epk: msg.blob.epk, box: msg.blob.box },
+            msg.collapseKey ? { collapseKey: msg.collapseKey } : {},
+          )
           .then(replyPushResult)
           .catch((e) => {
             logger.warn("push:deliver send failed", { provider: msg.provider, error: String(e) });

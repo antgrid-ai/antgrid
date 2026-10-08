@@ -34,6 +34,9 @@ dependencies:
   flutter:
     sdk: flutter
   clock: ^1.1.2
+  intl: ^0.20.3
+  timezone: ^0.11.1
+  flutter_timezone: 5.1.0
   crypto: ^3.0.5
   fleather: ^1.27.0
   # Direct dep even though fleather re-exports it: ComposerController encodes
@@ -184,10 +187,13 @@ flutter_native_splash:
 # The terminal engine and PTY layer come from a fork of kingwill101/dart_terminal
 # carrying fixes upstream has not taken: an FFI colour bug, the host hooks the
 # terminal view needs, and Android PTY binaries linked to pass Play's 16 KB
-# page-alignment gate. What diverges and what it would take to go back:
-# docs/dart-terminal-fork-release.md. `ref` is a commit SHA on purpose — the fork
-# cuts no VTE release, and a branch would make every `pub get` a moving target.
+# page-alignment gate. `ref` is a commit SHA on purpose — the fork cuts no VTE
+# release, and a branch would make every `pub get` a moving target.
 dependency_overrides:
+  # Forward Sparkle cycle completion, including Remind Me Later / Skip This
+  # Version (see the vendored README).
+  auto_updater_macos:
+    path: ../packages/auto_updater_macos
   # The fork's packages need hooks 2.x, which needs meta ^1.19.0; the Flutter SDK
   # pins 1.18.0, so solving fails outright without this.
   meta: 1.19.0

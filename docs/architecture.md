@@ -1,7 +1,7 @@
 # Architecture reference
 
-Background detail pulled out of the root `CLAUDE.md`. The per-component
-`CLAUDE.md` files are the authority for their own subsystems; this file holds
+Background detail pulled out of the root `AGENTS.md`. The per-component
+`AGENTS.md` files are the authority for their own subsystems; this file holds
 only the cross-cutting shape.
 
 ## Message flow
@@ -106,7 +106,7 @@ app is the only carrier, and it forwards the frame verbatim onto the target
 machine's own relay connection. The receiving bridge answers on the one app
 session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
 broadcast, so the traffic is invisible to the human's phone by design. There is
-no separate spec document: the host-side invariants are in `bridge/CLAUDE.md`,
+no separate spec document: the host-side invariants are in `bridge/AGENTS.md`,
 and the rest is documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
@@ -414,6 +414,6 @@ the empty string, never an absent key. A step's own `env:` wins over that
 contract, which wins over the inherited environment.
 
 Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
-start gate and what survives a restart — is in `bridge/CLAUDE.md`.
+start gate and what survives a restart — is in `bridge/AGENTS.md`.
 
 Native endpoint recovery and central reconnect have separate owners. The bridge endpoint lifecycle serializes creation/retirement, retries transient listener failures with bounded backoff, and bounds concurrent admissions. Native project readiness uses host-local bindings; the central protocol has no stream registration or payload acknowledgements. On the app, `PeerRuntime` owns the enrollment endpoint and `ConnectionSupervisor` owns per-machine retry. Endpoint initialization and peer dialing have separate deadlines; neither central presence nor Iroh path transitions establishes a new session generation.
