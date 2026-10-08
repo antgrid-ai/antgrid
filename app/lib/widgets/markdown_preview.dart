@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/widgets.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 
@@ -67,7 +65,6 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
   MarkdownWidget? _cachedDocument;
   String? _cachedData;
   AbColors? _cachedColors;
-  double? _cachedGutter;
 
   @override
   void dispose() {
@@ -169,7 +166,10 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(child: _buildDocument(context)),
+              // The document fills the pane, as VS Code's markdown preview
+              // does: no reading-width cap, whose leftover space only ever
+              // landed on the right and left half a maximised viewer empty.
+              Expanded(child: _document(context)),
               if (showOutline && wide) ...[
                 const AbSeparator.vertical(),
                 SizedBox(
@@ -191,22 +191,6 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
     );
   }
 
-  Widget _buildDocument(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // The measure is capped with padding, never by boxing the document in a
-        // narrower `ConstrainedBox`: the scrollable itself has to stay as wide
-        // as the pane, or a wheel turn or drag landing in the gutter beside the
-        // text hits no `Scrollable` and the document sits still.
-        final gutter = math.max(
-          0.0,
-          constraints.maxWidth - AbTokens.documentMaxWidth,
-        );
-        return _document(context, gutter);
-      },
-    );
-  }
-
   /// The document, reused verbatim while nothing it renders from has changed.
   ///
   /// `MarkdownWidgetState.didUpdateWidget` re-parses the WHOLE file on every
@@ -216,28 +200,24 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
   /// theme rebuild from re-parsing a document nobody edited. Every argument
   /// below is part of the key: one added without a matching field here renders
   /// stale, and nothing warns.
-  MarkdownWidget _document(BuildContext context, double gutter) {
+  MarkdownWidget _document(BuildContext context) {
     final data = widget.content.content ?? '';
     final colors = context.antgrid;
     final cached = _cachedDocument;
     if (cached != null &&
         _cachedData == data &&
-        identical(_cachedColors, colors) &&
-        _cachedGutter == gutter) {
+        identical(_cachedColors, colors)) {
       return cached;
     }
     _cachedData = data;
     _cachedColors = colors;
-    _cachedGutter = gutter;
     return _cachedDocument = MarkdownWidget(
       data: data,
       tocController: _toc,
-      markdownGenerator: markdownAntgridGenerator,
-      padding: EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space16,
-        AbTokens.space16 + gutter,
-        AbTokens.space16,
+      markdownGenerator: markdownDocumentGenerator,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space24,
+        vertical: AbTokens.space16,
       ),
       config: buildMarkdownDocumentConfig(context, onLinkTap: _onLinkTap),
     );

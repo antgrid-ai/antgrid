@@ -1,7 +1,11 @@
 // Primitives shared by the per-agent `inject` implementations.
 
 import { statSync } from "node:fs";
+import { atomicWriteFile } from "../atomic-file";
+import { logger } from "../host";
 import type { LaunchAugmentation, TerminalObservationAvailability } from "./types";
+
+const log = logger.child({ component: "agent-launch" });
 
 /** A skipped or failed integration must not suppress its fallback channels. */
 export const NO_OBSERVATION: Readonly<TerminalObservationAvailability> = Object.freeze({
@@ -19,4 +23,22 @@ export function hasFiles(paths: string[]): boolean {
   } catch {
     return false;
   }
+}
+
+/** Writes each file as JSON and answers with `hasFiles` over all of them, so a
+ *  failed write drops the integration rather than the spawn — unless an
+ *  earlier run left the file in place, which is then used as it stands. */
+export function materializeJson(label: string, files: Record<string, unknown>): boolean {
+  try {
+    for (const [path, value] of Object.entries(files)) {
+      atomicWriteFile(path, `${JSON.stringify(value, null, 2)}\n`);
+    }
+  } catch (err) {
+    log.warn("failed to materialize %s: %s", label, err);
+  }
+  return hasFiles(Object.keys(files));
+}
+
+export function toPosixPath(value: string): string {
+  return value.replace(/\\/g, "/");
 }

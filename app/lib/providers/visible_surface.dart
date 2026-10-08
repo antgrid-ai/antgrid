@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
+import 'agent_transport.dart' show selectedTargetProvider;
 import 'providers.dart';
 import 'session_bus_inbox.dart';
 import 'sessions.dart' show activeSessionIdProvider;
@@ -37,9 +38,10 @@ final visibleWorkspaceViewProvider =
 ///
 /// Also the only safe way to reveal a view in the same turn as a SESSION
 /// switch, which is why the session kebab's attention row writes here rather
-/// than calling `revealHandlerTab`: a focus change arms the shell's per-session
-/// UI restore, and that restore re-applies the target session's own saved tab
-/// after any tab the caller selected first. The drain runs after it.
+/// than calling [revealWorkspaceViewControlProvider]: a focus change arms the
+/// shell's per-session UI restore, and that restore re-applies the target
+/// session's own saved tab after any tab the caller selected first. The drain
+/// runs after it.
 ///
 /// Null is a written value, not just an absence: a location naming no view
 /// writes null so a view left pending by an earlier one is dropped rather than
@@ -81,7 +83,7 @@ final pendingAgentPageProvider =
 /// instead for the reason spelled out there.
 void revealHandlerTabNow(WidgetRef ref) {
   ref.read(pendingAgentPageProvider.notifier).set(null);
-  ref.read(revealHandlerTabProvider)?.call();
+  ref.read(revealWorkspaceViewControlProvider)?.call(WorkspaceView.handler);
 }
 
 /// A file a navigation named, waiting for the file explorer to open it.
@@ -165,16 +167,60 @@ final sessionHasBusActivityProvider =
 
 /// The workspace tabs on offer right now, in tab order.
 ///
-/// Every value, since the Inbox tab became a sheet — and kept rather than
-/// inlined back to [WorkspaceView.values] at three call sites, because it is
-/// the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
-/// three surfaces that must never disagree (the desktop tab strip, the phone's
-/// bottom nav, the agent bar's workspace rail), and a condition written into
-/// each of them is the bug: an item that appeared on the phone and nowhere else
-/// would ship green, because nothing iterating that enum is under test.
-final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
-  return WorkspaceView.values;
-}, name: 'visibleWorkspaceViews');
+/// One provider rather than [WorkspaceView.values] at each of the three
+/// surfaces that render the tabs (the desktop tab strip, the phone's bottom
+/// nav, the agent bar's workspace rail): they must never disagree, and a
+/// condition written into each of them is the bug — an item that appeared on
+/// the phone and nowhere else would ship green, because nothing iterating that
+/// enum is under test.
+///
+/// Handler is the conditional view: offered only while the focused session is
+/// armed, or has a Handler question of its own still waiting. Disarming hides
+/// it at once — a pane showing it falls back to Files. Matched on the session's
+/// own id, so another session's Handler never puts the tab here.
+///
+/// A Handler state that has not been [HandlerState.heard] says nothing about
+/// arming, so it keeps the last answer for the same session instead: a host
+/// restart or a Retry builds the project a fresh, empty service, and reading
+/// that as a disarm blinks the tab away until the first status lands.
+final visibleWorkspaceViewsProvider =
+    NotifierProvider<_VisibleWorkspaceViews, List<WorkspaceView>>(
+      _VisibleWorkspaceViews.new,
+      name: 'visibleWorkspaceViews',
+    );
+
+/// One shared instance, as [WorkspaceView.values] is for the other branch: a
+/// fresh list is never `==` to the last one, so a rebuild that leaves the
+/// Handler hidden would still notify every surface rendering the tabs.
+final _withoutHandler = List<WorkspaceView>.unmodifiable([
+  for (final v in WorkspaceView.values)
+    if (v != WorkspaceView.handler) v,
+]);
+
+class _VisibleWorkspaceViews extends Notifier<List<WorkspaceView>> {
+  String? _answeredFor;
+  bool _handlerShown = false;
+
+  @override
+  List<WorkspaceView> build() {
+    final activeId = ref.watch(activeSessionIdProvider);
+    final handler = ref.watch(
+      handlerStateProvider.select((v) {
+        final s = v.value;
+        if (s == null) return (on: false, heard: false);
+        final on =
+            activeId != null &&
+            (s.sessions.containsKey(activeId) ||
+                s.escalations.any((e) => e.terminalId == activeId));
+        return (on: on, heard: s.heard);
+      }),
+    );
+    final held = !handler.heard && _answeredFor == activeId && _handlerShown;
+    _answeredFor = activeId;
+    _handlerShown = handler.on || held;
+    return _handlerShown ? WorkspaceView.values : _withoutHandler;
+  }
+}
 
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.
@@ -256,6 +302,33 @@ final workspaceMenuControlProvider =
       ValueController<WorkspaceMenuControl?>,
       WorkspaceMenuControl?
     >(() => ValueController(null));
+
+/// The mounted shell's own "show this tab" — selects it, opens whatever pane
+/// holds it, and on a phone swipes the workspace page forward. Published by
+/// WorkspaceShell in every layout and retracted when it deactivates, because
+/// it closes over that State.
+final revealWorkspaceViewControlProvider =
+    NotifierProvider<
+      ValueController<void Function(WorkspaceView)?>,
+      void Function(WorkspaceView)?
+    >(() => ValueController(null));
+
+/// Brings [view] forward from inside the workspace, for a tap the user just
+/// made. Straight through the shell when one is mounted: the pending handover
+/// below exists for navigations that land before a shell can act, and it holds
+/// a request back while a queued session id resolves, which a tap on an open
+/// workspace has no reason to wait on.
+void revealWorkspaceView(WidgetRef ref, WorkspaceView view) {
+  final reveal = ref.read(revealWorkspaceViewControlProvider);
+  if (reveal != null) {
+    reveal(view);
+    return;
+  }
+  ref.read(pendingWorkspaceViewProvider.notifier).set((
+    target: ref.read(selectedTargetProvider),
+    value: view,
+  ));
+}
 
 /// Whether the agent bar's workspace rail is up. Shared by a mouse desktop and
 /// a touch tablet, whose context panel is a docked pane beside the agent

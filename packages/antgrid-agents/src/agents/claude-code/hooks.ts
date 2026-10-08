@@ -1,13 +1,9 @@
 import { join } from "node:path";
 import { z } from "zod";
-import { atomicWriteFile } from "../../atomic-file";
 import type { HookCommand } from "../../hook-command";
-import { logger } from "../../host";
-import { hasFiles } from "../launch-inject";
+import { materializeJson } from "../launch-inject";
 import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
-
-const log = logger.child({ component: "agent-launch" });
 
 // The one tool whose whole purpose is to stop and ask the user. Claude renders
 // it through the same permission dialog as any other call, so its Notification
@@ -101,13 +97,7 @@ function materializeClaudePlugin(
       UserPromptSubmit: [{ hooks: [claudeHook(command, "user-prompt")] }],
     },
   };
-  try {
-    atomicWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    atomicWriteFile(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
-  } catch (err) {
-    log.warn("failed to materialize Claude plugin: %s", err);
-  }
-  return hasFiles([manifestPath, hooksPath]) ? targetDir : null;
+  return materializeJson("Claude plugin", { [manifestPath]: manifest, [hooksPath]: hooks }) ? targetDir : null;
 }
 
 export function inject({ abDir, hookCommand }: HookInjectCtx): LaunchAugmentation {

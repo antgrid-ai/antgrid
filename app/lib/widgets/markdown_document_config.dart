@@ -1,5 +1,8 @@
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:markdown/markdown.dart' as m;
 import 'package:markdown_widget/markdown_widget.dart';
 
 import '../design/ab_colors.dart';
@@ -7,6 +10,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import 'markdown_heading_configs.dart';
 
 /// Prose leading for a document body — the font's own (~1.2) is for labels.
@@ -58,8 +62,13 @@ MarkdownConfig buildMarkdownDocumentConfig(
       // Same size and leading as the prose around it: BoxHeightStyle.tight
       // sizes each selection rect to raw glyph metrics, so a smaller inline
       // font paints a shorter highlight box on the same line.
+      // The tint is what marks a run of code in a sentence, as on GitHub and
+      // in VS Code; the face change alone is easy to read past.
       CodeConfig(
-        style: AbTokens.monoStyle(color: c.textPrimary, height: _proseHeight),
+        style: AbTokens.monoStyle(
+          color: c.textPrimary,
+          height: _proseHeight,
+        ).copyWith(backgroundColor: c.bgSurface),
       ),
       PreConfig(
         textStyle: fence,
@@ -78,16 +87,16 @@ MarkdownConfig buildMarkdownDocumentConfig(
         wrapper: (child, code, language) =>
             _FenceFrame(code: code, child: child),
       ),
-      // Document scale (a full file, so more hierarchy than the chat
-      // transcript): explicit sizes + weight, and all six levels pinned so
-      // H4-H6 don't fall back to the package's large defaults. Headings use
-      // textSecondary (body is textPrimary) so tone plus weight, not size
-      // alone, sets them apart.
-      H1ConfigNoRule(style: _heading(c.textSecondary, AbTokens.fontXl)),
-      H2ConfigNoRule(style: _heading(c.textSecondary, AbTokens.fontLg)),
-      H3ConfigNoRule(style: _heading(c.textSecondary, AbTokens.fontBody)),
-      H4Config(style: _heading(c.textSecondary, AbTokens.fontMd)),
-      H5Config(style: _heading(c.textSecondary, AbTokens.fontSm)),
+      // GitHub's and VS Code's document scale over a 14px body — roughly 1.7,
+      // 1.3, 1.15, 1, 0.93, 0.86em — in the body's own colour, so a heading
+      // outranks the prose it heads; only H6 drops to muted, as theirs does.
+      // H1/H2 get their rule from [markdownDocumentGenerator]. All six are
+      // pinned so H4-H6 never fall back to the package's large defaults.
+      H1ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontDisplaySm)),
+      H2ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontXl)),
+      H3ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontLg)),
+      H4Config(style: _heading(c.textPrimary, AbTokens.fontBody)),
+      H5Config(style: _heading(c.textPrimary, AbTokens.fontMd)),
       H6Config(style: _heading(c.textSecondary, AbTokens.fontSm)),
       // Defaults are GitHub's light-theme greys — a #d0d7de rule beside #57606a
       // body text, which on our ground reads as a bright bar next to an
@@ -100,36 +109,9 @@ MarkdownConfig buildMarkdownDocumentConfig(
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space8),
       ),
       HrConfig(height: 1, color: c.borderDefault),
-      TableConfig(
-        // borderDefault, not borderSubtle: the grid is the only thing telling
-        // a cell from its neighbour, and borderSubtle over bgDeepest is ~1.15:1
-        // — a table that reads as unaligned columns of floating text.
-        border: TableBorder.all(color: c.borderDefault),
-        headerRowDecoration: BoxDecoration(color: c.bgSurface),
-        // A table in a repo doc is data, so it reads mono. This one style
-        // reaches the body rows too — the package resolves TBodyNode's style
-        // from `headerStyle` as well, and never from `bodyStyle` — which is why
-        // the header's prominence lives in its fill rather than its weight.
-        headerStyle: AbTokens.monoStyle(
-          fontSize: AbTokens.fontSm,
-          color: c.textPrimary,
-          height: 1.5,
-        ),
-        headPadding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space8,
-          vertical: AbTokens.space6,
-        ),
-        bodyPadding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space8,
-          vertical: AbTokens.space6,
-        ),
-        // Columns size to their content, so a wide table would otherwise run
-        // off the measure instead of scrolling.
-        wrapper: (table) => SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: table,
-        ),
-      ),
+      // Tables are built by [markdownDocumentGenerator] (`_DocTableNode`), not
+      // from a TableConfig: the package's own node centres every header,
+      // ignores column alignment, and never wraps a column.
       ListConfig(
         marginLeft: _listGutter,
         marker: (isOrdered, depth, index) =>
@@ -319,11 +301,11 @@ class _MarkdownImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (_isRemote) {
-      // The measure is the widest this can ever paint, so decoding beyond it
-      // buys nothing and costs the full source resolution in memory — a 4000px
-      // photo is ~48MB of ARGB the reader never sees a pixel of.
-      final cap = AbTokens.documentMaxWidth *
-          MediaQuery.devicePixelRatioOf(context);
+      // Decoded no wider than a comfortable reading width: the full source
+      // resolution costs memory the pane rarely shows — a 4000px photo is
+      // ~48MB of ARGB. It paints at that decoded size, never stretched.
+      final cap =
+          AbTokens.documentMaxWidth * MediaQuery.devicePixelRatioOf(context);
       return Image.network(
         url,
         width: width,
@@ -379,13 +361,224 @@ class _MarkdownImage extends StatelessWidget {
 /// The generator every Antgrid markdown surface renders with, for the one node
 /// a [MarkdownConfig] alone cannot style.
 final MarkdownGenerator markdownAntgridGenerator = MarkdownGenerator(
-  generators: [
-    SpanNodeGeneratorWithTag(
-      tag: MarkdownTag.code.name,
-      generator: (e, config, visitor) => _CodeSpan(e.textContent, config.code),
-    ),
-  ],
+  generators: [_inlineCodeGenerator],
 );
+
+final _inlineCodeGenerator = SpanNodeGeneratorWithTag(
+  tag: MarkdownTag.code.name,
+  generator: (e, config, visitor) => _CodeSpan(e.textContent, config.code),
+);
+
+/// The file viewer's generator: [markdownAntgridGenerator] plus the two things
+/// that make a repo document read the way GitHub and VS Code render it.
+///
+/// A single newline inside a paragraph is a SOFT break — the source was
+/// wrapped at 80 columns for the editor, not for the reader — so it joins the
+/// lines with a space. The package passes it through as a literal newline,
+/// which tore every hard-wrapped README into ragged half-lines. A hard break
+/// (two trailing spaces, a backslash) still arrives as its own `br` node, and a
+/// fence renders from its own raw text, so neither is touched.
+///
+/// H1 and H2 carry a rule under them, which is what tells a document's
+/// sections apart at a glance. Drawn here rather than through the package's
+/// `HeadingDivider`, which paints a Material `Divider` in the heading's own text
+/// colour — a bright bar on our ground.
+///
+/// Not used by the chat transcript: a newline in a message is meant.
+final MarkdownGenerator markdownDocumentGenerator = MarkdownGenerator(
+  generators: [
+    _inlineCodeGenerator,
+    SpanNodeGeneratorWithTag(
+      tag: MarkdownTag.h1.name,
+      generator: (e, config, visitor) => _RuledHeadingNode(config.h1, visitor),
+    ),
+    SpanNodeGeneratorWithTag(
+      tag: MarkdownTag.h2.name,
+      generator: (e, config, visitor) => _RuledHeadingNode(config.h2, visitor),
+    ),
+    SpanNodeGeneratorWithTag(
+      tag: MarkdownTag.table.name,
+      generator: (e, config, visitor) => _DocTableNode(visitor),
+    ),
+    for (final section in [MarkdownTag.thead, MarkdownTag.tbody])
+      SpanNodeGeneratorWithTag(
+        tag: section.name,
+        generator: (e, config, visitor) =>
+            _TableSectionNode(header: section == MarkdownTag.thead),
+      ),
+    for (final cell in [MarkdownTag.th, MarkdownTag.td])
+      SpanNodeGeneratorWithTag(
+        tag: cell.name,
+        generator: (e, config, visitor) => _TableCellNode(
+          align: e.attributes['align'] ?? '',
+          style: cell == MarkdownTag.th
+              ? config.p.textStyle.copyWith(
+                  fontWeight: FontWeight.w600,
+                  height: _cellHeight,
+                )
+              : config.p.textStyle.copyWith(height: _cellHeight),
+        ),
+      ),
+  ],
+  textGenerator: (node, config, visitor) =>
+      node is m.Text && node.text.contains('\n')
+      ? TextNode(text: joinSoftBreaks(node.text), style: config.p.textStyle)
+      : null,
+);
+
+/// Joins a paragraph's soft-wrapped lines, eating the indentation a wrapped
+/// list item or quote carries on its continuation lines.
+@visibleForTesting
+String joinSoftBreaks(String text) => text.replaceAll(_softBreak, ' ');
+
+final _softBreak = RegExp(r'[ \t]*\n[ \t]*');
+
+/// Cell leading: tighter than prose, since a wrapped cell is a few lines at
+/// most and a row should not read as a paragraph.
+const double _cellHeight = 1.45;
+
+/// `thead`/`tbody`. Only marks which rows it holds; the table reads them.
+class _TableSectionNode extends ElementNode {
+  _TableSectionNode({required this.header});
+
+  final bool header;
+}
+
+/// `th`/`td`, carrying the column alignment the source's `:---:` gave it and
+/// its own style — header cells bold, every cell in the body face.
+class _TableCellNode extends ElementNode {
+  _TableCellNode({required this.align, required TextStyle style})
+    : _style = style;
+
+  final String align;
+  final TextStyle _style;
+
+  @override
+  TextStyle get style => _style;
+
+  Alignment get alignment => align.contains('center')
+      ? Alignment.topCenter
+      : align.contains('right')
+      ? Alignment.topRight
+      : Alignment.topLeft;
+}
+
+/// A markdown table laid out the way GitHub and VS Code lay one out, in place
+/// of the package's node (which centres every header, ignores column
+/// alignment, and never wraps a column).
+class _DocTableNode extends ElementNode {
+  _DocTableNode(this.visitor);
+
+  final WidgetVisitor visitor;
+
+  @override
+  InlineSpan build() {
+    final rows = <({bool header, List<_TableCellNode> cells})>[];
+    for (final section in children.whereType<_TableSectionNode>()) {
+      for (final tr in section.children.whereType<ElementNode>()) {
+        rows.add((
+          header: section.header,
+          cells: tr.children.whereType<_TableCellNode>().toList(),
+        ));
+      }
+    }
+    return WidgetSpan(
+      child: _MarkdownTable(rows: rows, visitor: visitor),
+    );
+  }
+}
+
+class _MarkdownTable extends StatelessWidget {
+  const _MarkdownTable({required this.rows, required this.visitor});
+
+  final List<({bool header, List<_TableCellNode> cells})> rows;
+  final WidgetVisitor visitor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.antgrid;
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final columns = rows.map((r) => r.cells.length).reduce(math.max);
+    var bodyIndex = 0;
+    final tableRows = [
+      for (final row in rows)
+        TableRow(
+          decoration: row.header
+              ? BoxDecoration(color: c.bgSurface)
+              // Zebra rows, so a wide row can be followed across the gutter.
+              : (bodyIndex++).isOdd
+              ? BoxDecoration(color: c.bgDeep)
+              : null,
+          children: [
+            for (var i = 0; i < columns; i++)
+              i < row.cells.length
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AbTokens.space12,
+                        vertical: AbTokens.space6,
+                      ),
+                      child: Align(
+                        alignment: row.cells[i].alignment,
+                        child: ProxyRichText(
+                          row.cells[i].childrenSpan,
+                          richTextBuilder: visitor.richTextBuilder,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+          ],
+        ),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) => AbHorizontalScrollView(
+        // Capped at the pane and sized to the content beneath that cap: a
+        // table that fits keeps its natural width, and one that does not
+        // fills the pane with its columns wrapping (flex shrinks a column no
+        // narrower than its longest word). Only a table whose words alone
+        // outgrow the pane is left to scroll sideways.
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+          child: IntrinsicWidth(
+            child: Table(
+              defaultColumnWidth: const IntrinsicColumnWidth(flex: 1),
+              defaultVerticalAlignment: TableCellVerticalAlignment.top,
+              // borderDefault, not borderSubtle: the grid is the only thing
+              // telling a cell from its neighbour, and borderSubtle over
+              // bgDeepest is ~1.15:1.
+              border: TableBorder.all(color: c.borderDefault),
+              children: tableRows,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// An H1/H2 with a hairline under it, GitHub-style.
+class _RuledHeadingNode extends HeadingNode {
+  _RuledHeadingNode(super.headingConfig, super.visitor);
+
+  @override
+  InlineSpan build() => WidgetSpan(
+    child: Builder(
+      builder: (context) => Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(top: AbTokens.space8),
+        padding: const EdgeInsets.only(bottom: AbTokens.space6),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: context.antgrid.borderDefault),
+          ),
+        ),
+        child: ProxyRichText(
+          childrenSpan,
+          richTextBuilder: visitor.richTextBuilder,
+        ),
+      ),
+    ),
+  );
+}
 
 /// Inline code, put back into the mono face.
 ///
@@ -405,5 +598,8 @@ class _CodeSpan extends CodeNode {
   TextStyle get style => super.style.copyWith(
     fontFamily: codeConfig.style.fontFamily,
     fontFamilyFallback: codeConfig.style.fontFamilyFallback,
+    // Null leaves the line's own (none), so only a config that tints code —
+    // the file viewer's — paints one.
+    backgroundColor: codeConfig.style.backgroundColor,
   );
 }

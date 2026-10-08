@@ -244,7 +244,7 @@ export function buildChatSpawnAugment(
   abDir?: string,
   runId?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, { abDir });
+  const aug = augmentAgentLaunch(tool, { abDir, mcp: false });
   return {
     args: aug.args,
     env: {
@@ -3801,6 +3801,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
+        checkoutPath: runtime.checkout.path,
         git: runtime.cachedGitBranch
           ? {
               branch: runtime.cachedGitBranch,

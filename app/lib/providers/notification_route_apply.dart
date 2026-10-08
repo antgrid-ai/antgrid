@@ -300,10 +300,10 @@ bool _applyInFocusedProject(ProviderContainer ref, NavLocation loc) {
 
 /// Hands the destination surface to WorkspaceShell as pending state.
 ///
-/// Never `revealHandlerTabProvider` / `switchToAgentProvider`: those act on the
-/// frame they are called, and the per-session UI restore that a focus change
-/// arms re-applies the target session's own saved tab a frame later, silently
-/// undoing them. Called AFTER the focus write and stamped with the focus it
+/// Never `revealWorkspaceViewControlProvider` / `switchToAgentProvider`: those
+/// act on the frame they are called, and the per-session UI restore that a
+/// focus change arms re-applies the target session's own saved tab a frame
+/// later, silently undoing them. Called AFTER the focus write and stamped with the focus it
 /// leaves behind, so a drain running much later can tell it no longer applies.
 ///
 /// Both are written when null too, dropping a value an earlier navigation left

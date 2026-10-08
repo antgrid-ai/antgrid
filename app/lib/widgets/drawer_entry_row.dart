@@ -171,8 +171,8 @@ class _MachineDrawerHeaderRowState
 ///
 /// Tappable to fold every local project away ([localMachineCollapsedProvider]).
 /// Unlike a remote band the chevron discloses no fetch — the projects are
-/// already known — so the fold is purely for scanning density and is not
-/// persisted.
+/// already known — so the fold is purely for scanning density, and is
+/// remembered across launches like a project row's.
 class LocalMachineBand extends ConsumerWidget {
   const LocalMachineBand({super.key, this.showRule = true});
 
@@ -193,8 +193,7 @@ class LocalMachineBand extends ConsumerWidget {
           DrawerBand(
             label: 'This machine',
             expanded: !ref.watch(localMachineCollapsedProvider),
-            onTap: () =>
-                ref.read(localMachineCollapsedProvider.notifier).toggle(),
+            onTap: () => toggleLocalMachineCollapsed(ref),
             // No host dot under the demo: there is no bridge behind the sample
             // project, and [hostStatusProvider] answers for the REAL machine — on
             // a desktop that opened a project earlier in the session that is a
