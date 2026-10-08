@@ -77,6 +77,15 @@ class AbTapTarget extends StatelessWidget {
     return math.max(AbTouchSizing.extentOf(context), minSize);
   }
 
+  /// Run spacing for a [Wrap] of tap targets. Where each target reserves the
+  /// touch height, its footprint already separates the lines and [base] on top
+  /// would read as detached rows; inside [AbCompactTapTargets] the targets
+  /// keep their own height and still need it.
+  static double wrapRunSpacing(BuildContext context, double base) =>
+      AbTouchSizing.extentOf(context) > 0 && !AbCompactTapTargets.of(context)
+      ? 0
+      : base;
+
   @override
   Widget build(BuildContext context) {
     Widget result = child;

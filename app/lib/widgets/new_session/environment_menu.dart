@@ -9,6 +9,7 @@ import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_tooltip.dart';
+import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
 import 'picker_sources.dart';
 
@@ -584,6 +585,9 @@ class _PanelRowState extends State<PanelRow> {
         : baseIconFg;
 
     final row = Container(
+      // Same floor as AbLiveMenuRow: a panel row shares popups with menu rows
+      // and must not be the one short target among them on a phone.
+      constraints: BoxConstraints(minHeight: AbTouchSizing.extentOf(context)),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: active ? p.bgHover : null,
