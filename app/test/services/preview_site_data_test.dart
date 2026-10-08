@@ -155,6 +155,71 @@ void main() {
     expect(recorder.calls, 1);
   });
 
+  test('a retirement tracked while a wipe waits on another is waited for '
+      'too', () async {
+    final site = make();
+    final first = Completer<void>();
+    final second = Completer<void>();
+    site.trackRetirement(first.future);
+
+    final admitted = site.admit([(port: 3000, owner: 'a')]);
+    await pumpEventQueue();
+    site.trackRetirement(second.future);
+    first.complete();
+    await pumpEventQueue();
+    expect(recorder.calls, 0);
+
+    second.complete();
+    await admitted;
+    expect(recorder.calls, 1);
+  });
+
+  test('a page retired during a wipe leaves its port unsettled unless its '
+      'owner still holds it', () async {
+    await store.replace({3000: 'a'});
+    final live = {4000: 'p', 6000: 'p'};
+    final site = make()..addLiveOrigins(() => live);
+    final gate = recorder.gate = Completer<void>();
+
+    final admitted = site.admit([(port: 3000, owner: 'b')]);
+    await pumpEventQueue();
+    expect(recorder.calls, 1);
+    live.remove(4000);
+    site.trackRetirement(Future.value(), origin: (port: 4000, owner: 'p'));
+    site.trackRetirement(Future.value(), origin: (port: 6000, owner: 'p'));
+    gate.complete();
+    await admitted;
+
+    expect(await store.read(), {
+      3000: 'b',
+      4000: PreviewOriginOwnerStore.unsettled,
+      6000: 'p',
+    });
+
+    // Only the clear that ran alongside those pages accounts for them.
+    await site.clearManually();
+    expect(await store.read(), {6000: 'p'});
+  });
+
+  test('a timed-out wipe the queue stopped waiting for never writes', () async {
+    final site = make(
+      wipeTimeout: const Duration(milliseconds: 10),
+      stragglerGrace: const Duration(milliseconds: 10),
+    )..addLiveOrigins(() => {3000: 'machine-1.proj-1'});
+    final gate = recorder.gate = Completer<void>();
+
+    final outcome = await site.admit([(port: 3000, owner: 'machine-1.proj-1')]);
+    expect(outcome.status, PreviewClearStatus.failed);
+    recorder.gate = null;
+    await site.clearForSignOut();
+    expect(await store.read(), isNull);
+
+    gate.complete();
+    await pumpEventQueue();
+    expect(await store.read(), isNull);
+    expect(site.wipes.value, 0);
+  });
+
   group('a failed wipe', () {
     Future<void> expectFailedAdmit(
       PreviewSiteData site, {

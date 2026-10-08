@@ -12,6 +12,7 @@ import '../analytics/events.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_progress_rule.dart';
@@ -24,7 +25,10 @@ import '../navigation/back_intent.dart';
 import '../demo/demo_identity.dart';
 import '../providers/analytics.dart';
 import '../providers/demo_mode.dart';
+import '../providers/preview_site_data.dart';
 import '../services/preview_service.dart';
+import '../services/preview_site_data.dart';
+import '../storage/preview_origin_owner_store.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
 import '../util/detached.dart';
@@ -92,7 +96,27 @@ class _TabWebViewState {
   // start/finish rather than a real percentage — indeterminate is honest
   // about what's actually known on every platform.
   bool loading = false;
+
+  // The owner [controller] (or the pending load) was admitted under.
+  String? lastAppliedOwner;
+
+  // Owner of the last controller actually built on this state. Outlives that
+  // controller's retirement so a pending successor can tell whether a
+  // different owner's page ran on this port until moments ago.
+  String? loadedOwner;
+
+  // The loopback port the webview loads — the key site data is attributed by.
+  int originPort = 0;
+
+  // Non-null exactly while admission is in flight; the URL to load once it
+  // resolves, replaced in place when a link arrives meanwhile.
+  String? pendingLoadUrl;
+
+  // Bumped per admission so a completion for a superseded one is dropped.
+  int admission = 0;
 }
+
+typedef _Admission = ({int port, _TabWebViewState state, int ticket});
 
 /// One in-flight viewport capture request — see
 /// [_PreviewScreenState._captureScreenshot] and
@@ -118,6 +142,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       _screenshotChunkChars;
 
   final Map<int, _TabWebViewState> _tabStates = {};
+
+  late final PreviewSiteData _siteData;
+  late final VoidCallback _removeLiveOrigins;
 
   /// Port of the tab the element picker is currently armed on, or null. A
   /// single nullable port, not a per-tab map — the picker is one in-the-moment
@@ -184,8 +211,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   late final TextEditingController _addrController;
   late final FocusNode _addrFocus;
 
-  /// Anchor for the mobile compact toolbar's overflow ("hamburger") menu —
-  /// see [_openOverflowMenu].
+  /// Anchor for the overflow menu on both platforms — see
+  /// [_openOverflowMenu] and [_openDesktopMoreMenu].
   final _overflowButtonKey = GlobalKey();
 
   @override
@@ -193,6 +220,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     super.initState();
     _addrController = TextEditingController();
     _addrFocus = FocusNode();
+    _siteData = ref.read(previewSiteDataProvider);
+    _removeLiveOrigins = _siteData.addLiveOrigins(_liveOrigins);
+    _siteData.wipes.addListener(_onSiteDataWiped);
     // Discard unsubmitted edits on blur — restore the live URL.
     // (Select-all-on-focus is handled by AbUrlField.)
     _addrFocus.addListener(() {
@@ -254,7 +284,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     String initialUrl,
     Color background,
   ) {
-    return WebViewController()
+    final controller = WebViewController();
+    // Callbacks act only while this controller is the tab's current one: a
+    // retiring page must never write into its successor's state.
+    controller
       // Without this the webview paints white during page load/navigation — a
       // hard flash in a near-black UI. macOS honours it only where its WKWebView
       // version exposes a public background-color API; the ColoredBox underlay
@@ -266,50 +299,59 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // would miss the very load this controller is being built for.
       ..addJavaScriptChannel(
         'AntgridElementPicker',
-        onMessageReceived: (msg) => _onElementPicked(port, msg.message),
+        onMessageReceived: (msg) {
+          if (_stateOf(port, controller) == null) return;
+          _onElementPicked(port, msg.message);
+        },
       )
       ..addJavaScriptChannel(
         'AntgridScreenshotCapture',
-        onMessageReceived: (msg) => _onScreenshotMessage(port, msg.message),
+        onMessageReceived: (msg) {
+          if (_stateOf(port, controller) == null) return;
+          _onScreenshotMessage(port, msg.message);
+        },
       )
       ..addJavaScriptChannel(
         'AntgridContextMenu',
-        onMessageReceived: (msg) => _onContextMenuMessage(port, msg.message),
+        onMessageReceived: (msg) {
+          if (_stateOf(port, controller) == null) return;
+          _onContextMenuMessage(port, msg.message);
+        },
       )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
-            final tabState = _tabStates[port];
+            final tabState = _stateOf(port, controller);
             if (tabState != null && !tabState.loading && mounted) {
               setState(() => tabState.loading = true);
             }
           },
           onPageFinished: (_) {
+            final tabState = _stateOf(port, controller);
+            if (tabState == null) return;
             _clearPickerIfArmedOn(port);
             _refreshHistoryFlags(port);
             // Persistent (unlike the picker), so it's re-armed on every real
             // navigation rather than only while some tool is active — see
             // kContextMenuScript's doc. Touch platforms have no right-click.
             if (!isMobilePlatform) {
-              unawaited(
-                _tabStates[port]?.controller?.runJavaScript(kContextMenuScript),
-              );
+              unawaited(controller.runJavaScript(kContextMenuScript));
             }
-            final tabState = _tabStates[port];
             final shouldClearRefresh = _refreshingPort == port;
-            final shouldClearLoading = tabState?.loading ?? false;
+            final shouldClearLoading = tabState.loading;
             if (mounted && (shouldClearRefresh || shouldClearLoading)) {
               setState(() {
                 if (shouldClearRefresh) _refreshingPort = null;
-                if (shouldClearLoading) tabState!.loading = false;
+                if (shouldClearLoading) tabState.loading = false;
               });
             }
           },
           onUrlChange: (change) {
+            final tabState = _stateOf(port, controller);
+            if (tabState == null) return;
             _clearPickerIfArmedOn(port);
             final url = change.url;
-            final tabState = _tabStates[port];
-            if (tabState == null || url == null || url == tabState.currentUrl) {
+            if (url == null || url == tabState.currentUrl) {
               _refreshHistoryFlags(port);
               return;
             }
@@ -344,6 +386,57 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         ),
       )
       ..loadRequest(Uri.parse(initialUrl));
+    return controller;
+  }
+
+  /// [port]'s state, only while [c] is still its current controller.
+  _TabWebViewState? _stateOf(int port, WebViewController c) {
+    final state = _tabStates[port];
+    return identical(state?.controller, c) ? state : null;
+  }
+
+  /// Origins the screen is using right now, for [PreviewSiteData] to keep
+  /// when it rewrites the owner map. A pending tab counts as live so another
+  /// batch's rewrite cannot erase its port, but as unsettled when a different
+  /// owner's page ran on that state until moments ago, so its own admission
+  /// still clears.
+  Map<int, String> _liveOrigins() => {
+    for (final s in _tabStates.values)
+      if (s.originPort > 0 &&
+          s.lastAppliedOwner != null &&
+          (s.controller != null || s.pendingLoadUrl != null))
+        s.originPort:
+            s.controller != null ||
+                s.loadedOwner == null ||
+                s.loadedOwner == s.lastAppliedOwner
+            ? s.lastAppliedOwner!
+            : PreviewOriginOwnerStore.unsettled,
+  };
+
+  // webview_all asserts the html is non-empty, so a blank page cannot be ''.
+  static const _blankDocument = '<html></html>';
+
+  /// webview_all has no dispose, and on Windows the native WebView2 lives
+  /// until GC finalizes the controller, so a dropped page would keep running
+  /// and writing into the shared profile straight through a clear. Blanking it
+  /// is the portable way to stop it, and clears wait for the result.
+  void _retire(WebViewController c, _TabWebViewState s) {
+    final owner = s.loadedOwner;
+    _siteData.trackRetirement(
+      Future.sync(() => c.loadHtmlString(_blankDocument))
+          .timeout(const Duration(seconds: 2))
+          .then<void>(
+            (_) {},
+            onError: (Object e) => AbLog.warn(
+              'PreviewScreen',
+              'webview retire failed',
+              fields: {'error': '$e'},
+            ),
+          ),
+      origin: s.originPort > 0 && owner != null
+          ? (port: s.originPort, owner: owner)
+          : null,
+    );
   }
 
   Future<void> _refreshHistoryFlags(int port) async {
@@ -351,7 +444,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final ctrl = tabState?.controller;
     if (tabState == null || ctrl == null) return;
     final results = await Future.wait([ctrl.canGoBack(), ctrl.canGoForward()]);
-    if (!mounted) return;
+    // The controller may have been retired meanwhile; its history must not
+    // land on its successor.
+    if (!mounted || !identical(_stateOf(port, ctrl), tabState)) return;
     final back = results[0];
     final fwd = results[1];
     if (back == tabState.canGoBack && fwd == tabState.canGoForward) return;
@@ -374,6 +469,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _addrController.dispose();
     _addrFocus.dispose();
     _contextMenuFallbackTimer?.cancel();
+    _siteData.wipes.removeListener(_onSiteDataWiped);
+    _removeLiveOrigins();
+    for (final s in _tabStates.values) {
+      final c = s.controller;
+      if (c != null) _retire(c, s);
+    }
     _tabStates.clear();
     super.dispose();
   }
@@ -399,14 +500,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// guessed at as a site or searched for.
   void _navigateToInput(String input) {
     final id = ref.read(previewStateProvider).value?.activeTabId;
-    final tabState = id != null ? _tabStates[id] : null;
+    if (id == null) return;
+    final tabState = _tabStates[id];
     if (tabState == null) return;
     final trimmed = input.trim();
     if (trimmed.isEmpty) return;
 
     final parsed = Uri.tryParse(trimmed);
     if (parsed != null && parsed.hasScheme && parsed.hasAuthority) {
-      tabState.controller?.loadRequest(parsed);
+      _loadOrQueue(id, tabState, parsed);
       _addrFocus.unfocus();
       return;
     }
@@ -422,8 +524,28 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       pathAndQuery = trimmed.startsWith('/') ? trimmed : '/$trimmed';
     }
     final target = '${tabState.origin}$pathAndQuery';
-    tabState.controller?.loadRequest(Uri.parse(target));
+    _loadOrQueue(id, tabState, Uri.parse(target));
     _addrFocus.unfocus();
+  }
+
+  /// Navigates [tabState], or, while its admission is still in flight, makes
+  /// [target] the first load so the tab never loads a page it is about to
+  /// leave.
+  void _loadOrQueue(int id, _TabWebViewState tabState, Uri target) {
+    final c = tabState.controller;
+    if (c != null) {
+      c.loadRequest(target);
+    } else if (tabState.pendingLoadUrl != null) {
+      setState(() => _queuePendingLoad(id, tabState, target));
+    }
+  }
+
+  /// Does not call setState: callers either run inside build or wrap it.
+  void _queuePendingLoad(int port, _TabWebViewState s, Uri target) {
+    s.pendingLoadUrl = s.currentUrl = target.toString();
+    if (port == ref.read(previewStateProvider).value?.activeTabId) {
+      _syncAddrField(_toDisplayUrl(s, s.currentUrl));
+    }
   }
 
   /// Dispatches an address-bar submit to whichever job it means: opening a
@@ -573,7 +695,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           return;
         }
       }
-      await svc.openTab(port, scheme: scheme, path: path);
+      await svc.openTab(
+        port,
+        scheme: scheme,
+        path: path,
+        navigateExisting: navigateExisting,
+      );
       ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.previewOpened);
     } on Object catch (e) {
       // openTab binds a real socket; a failure (interface down, handles
@@ -583,6 +710,154 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       if (!mounted) return;
       showAbToast(context, 'Could not open preview on port $port: $e');
     }
+  }
+
+  /// Gates a build pass's new tabs on their ports' site data, then builds
+  /// their controllers. Nothing is awaited before the admission call, so
+  /// batches queue in build order.
+  Future<void> _admit(List<_Admission> batch) async {
+    final requests = [
+      for (final b in batch)
+        if (b.state.originPort > 0)
+          (port: b.state.originPort, owner: b.state.lastAppliedOwner!),
+    ];
+    PreviewAdmitOutcome outcome;
+    try {
+      // Awaited even when empty: this starts during build and must not call
+      // setState synchronously.
+      outcome = requests.isEmpty
+          ? await Future.value(const PreviewAdmitOutcome.none())
+          : await _siteData.admit(requests);
+    } on Object catch (e) {
+      AbLog.error(
+        'PreviewScreen',
+        'preview admission failed',
+        fields: {'error': '$e'},
+      );
+      outcome = const PreviewAdmitOutcome.none();
+    }
+    if (!mounted) return;
+    final ready = batch
+        .where(
+          (b) =>
+              identical(_tabStates[b.port], b.state) &&
+              b.state.admission == b.ticket &&
+              b.state.pendingLoadUrl != null,
+        )
+        .toList();
+    if (ready.isNotEmpty) {
+      final bg = context.antgrid.bgDeepest;
+      setState(() {
+        for (final b in ready) {
+          b.state.controller = _buildController(
+            b.port,
+            b.state.pendingLoadUrl!,
+            bg,
+          );
+          b.state.loadedOwner = b.state.lastAppliedOwner;
+          b.state.pendingLoadUrl = null;
+        }
+      });
+    }
+    if (outcome.wipe != PreviewAdmitWipe.ownerChanged) return;
+    final ports = <int>{
+      for (final b in batch)
+        if (outcome.contestedPorts.contains(b.state.originPort)) b.port,
+    }.toList()..sort();
+    if (ports.isEmpty) return;
+    final phrase = ports.length == 1
+        ? 'port ${ports.single} was'
+        : 'ports ${ports.join(', ')} were';
+    switch (outcome.status) {
+      case PreviewClearStatus.cleared:
+        showAbToast(
+          context,
+          'Preview site data cleared: $phrase last used by another project',
+        );
+      case PreviewClearStatus.partial:
+        showAbToast(
+          context,
+          'Preview site data partly cleared: $phrase last used by another '
+          'project',
+        );
+      case PreviewClearStatus.failed:
+        showAbToast(
+          context,
+          "Couldn't clear site data another project left: $phrase last used "
+          'by it',
+        );
+      case PreviewClearStatus.refused:
+      case null:
+        break;
+    }
+  }
+
+  void _onSiteDataWiped() {
+    if (!mounted) return;
+    // A cleared service worker still controls the open document until it
+    // navigates, and draw marks would not match the reloaded page.
+    for (final s in _tabStates.values) {
+      final c = s.controller;
+      if (c != null) {
+        detached('PreviewScreen', 'reload after site data clear', c.reload);
+      }
+    }
+    setState(() {
+      _pickerActiveForPort = null;
+      _drawActiveForPort = null;
+    });
+  }
+
+  Future<void> _clearSiteData() async {
+    // The clear covers the whole profile, so a clear from inside the demo
+    // would wipe the user's real preview logins.
+    if (ref.read(demoModeProvider)) {
+      showAbToast(context, kDemoRefusalText);
+      return;
+    }
+    final ok = await AbConfirmDialog.show(
+      context: context,
+      title: 'Clear site data?',
+      body:
+          'Removes cookies, storage, caches and service workers for every page '
+          'opened in Preview, across all projects and machines. You will be '
+          'signed out of those pages. Open tabs reload.',
+      confirmLabel: 'Clear',
+      destructive: true,
+    );
+    if (!ok || !mounted) return;
+    final status = await _siteData.clearManually();
+    if (!mounted) return;
+    showAbToast(
+      context,
+      switch (status) {
+        PreviewClearStatus.cleared => 'Preview site data cleared',
+        PreviewClearStatus.partial =>
+          'Preview site data partly cleared: this device keeps some of it',
+        PreviewClearStatus.failed => "Couldn't clear preview site data",
+        PreviewClearStatus.refused => kDemoRefusalText,
+      },
+    );
+  }
+
+  Future<void> _openDesktopMoreMenu() async {
+    final anchorContext = _overflowButtonKey.currentContext;
+    if (anchorContext == null) return;
+    final anchor = abMenuAnchorRect(anchorContext);
+    if (anchor == null) return;
+    await showAbMenu<void>(
+      context: anchorContext,
+      anchorRect: anchor,
+      entries: [
+        AbMenuItem(
+          label: 'Clear site data',
+          icon: AbIcons.trash,
+          danger: true,
+          onTap: () =>
+              detached('PreviewScreen', 'clear site data', _clearSiteData),
+        ),
+      ],
+    );
   }
 
   Widget _buildContent(PreviewState state) {
@@ -595,6 +870,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ref.container,
       (s) => s.previewService,
     );
+    final admissions = <_Admission>[];
     for (final tab in state.tabs) {
       final initialUrl =
           tab.currentUrl ?? 'http://localhost:${tab.localPort}';
@@ -608,7 +884,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller, or every tab would reload on every state update. Keyed
       // on the full URL (path included), not [_TabWebViewState.origin] —
       // that's deliberately path-free (see its doc) so it can't serve this.
-      if (tabState.lastAppliedUrl == initialUrl) {
+      // A project switch can present the same URL under a different owner, and
+      // reusing that controller would skip the ownership check.
+      if (tabState.lastAppliedUrl == initialUrl &&
+          tabState.lastAppliedOwner == tab.owner) {
         final controller = tabState.controller;
         if (linkTarget != null && controller != null) {
           detached(
@@ -616,6 +895,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             'navigate to link',
             () => controller.loadRequest(linkTarget),
           );
+        } else if (linkTarget != null && tabState.pendingLoadUrl != null) {
+          _queuePendingLoad(tab.port, tabState, linkTarget);
         }
         continue;
       }
@@ -632,15 +913,31 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       if (tab.port == state.activeTabId) {
         _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
       }
-      tabState.controller = _buildController(
-        tab.port,
-        loadUrl,
-        context.antgrid.bgDeepest,
-      );
+      final previous = tabState.controller;
+      if (previous != null) _retire(previous, tabState);
+      tabState.lastAppliedOwner = tab.owner;
+      tabState.originPort = Uri.tryParse(initialUrl)?.port ?? 0;
+      // The previous page must not stay mounted while admission is pending.
+      tabState.controller = null;
+      tabState.loading = false;
+      tabState.canGoBack = tabState.canGoForward = false;
+      if (_pickerActiveForPort == tab.port) _pickerActiveForPort = null;
+      if (_drawActiveForPort == tab.port) _drawActiveForPort = null;
+      tabState.pendingLoadUrl = loadUrl;
+      admissions.add((
+        port: tab.port,
+        state: tabState,
+        ticket: ++tabState.admission,
+      ));
     }
     // Drop state for tabs that closed.
     final openPorts = {for (final tab in state.tabs) tab.port};
-    _tabStates.removeWhere((port, _) => !openPorts.contains(port));
+    _tabStates.removeWhere((port, s) {
+      if (openPorts.contains(port)) return false;
+      final c = s.controller;
+      if (c != null) _retire(c, s);
+      return true;
+    });
     // A closed tab's controller is gone — neither the picker nor the draw
     // overlay can still be armed on it.
     if (_pickerActiveForPort != null &&
@@ -649,6 +946,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     }
     if (_drawActiveForPort != null && !openPorts.contains(_drawActiveForPort)) {
       _drawActiveForPort = null;
+    }
+    if (admissions.isNotEmpty) {
+      detached(
+        'PreviewScreen',
+        'admit preview origins',
+        () => _admit(admissions),
+      );
     }
     // No active tab (none open, or the last one just closed) — the address
     // bar has no live URL to show, so it must not keep displaying whatever
@@ -1260,6 +1564,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                       tooltip: 'Open a new port',
                       onTap: preview == null ? null : _startComposingNewTab,
                     ),
+                  AbIconButton(
+                    key: _overflowButtonKey,
+                    icon: AbIcons.more,
+                    tooltip: 'More',
+                    onTap: () => detached(
+                      'PreviewScreen',
+                      'open preview menu',
+                      _openDesktopMoreMenu,
+                    ),
+                  ),
                 ],
         ),
         Expanded(child: _buildBody(state)),
@@ -1329,6 +1643,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         drawArmed:
             _drawActiveForPort != null && _drawActiveForPort == activeTab?.port,
         onClosedTab: (p) => preview?.closeTab(p),
+        onClearSiteData: () =>
+            detached('PreviewScreen', 'clear site data', _clearSiteData),
       ),
     );
     if (port != null) _selectTab(port, preview);
@@ -1637,7 +1953,22 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   Widget _buildTabWebView(PreviewTab tab) {
     final tabState = _tabStates[tab.port];
     final controller = tabState?.controller;
-    if (controller == null) return const SizedBox.shrink();
+    if (controller == null) {
+      if (tabState?.pendingLoadUrl == null) return const SizedBox.shrink();
+      return ColoredBox(
+        color: context.antgrid.bgDeepest,
+        child: const Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(child: AbProgressRule(fraction: null)),
+            ),
+          ],
+        ),
+      );
+    }
     final webview = ColoredBox(
       // Dark underlay so the beat before the platform view first paints (and
       // platforms that ignore setBackgroundColor, e.g. macOS) never flashes
@@ -1718,7 +2049,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 /// popup for everything besides Back/Forward and the address bar, which stay
 /// inline in the toolbar (see [_buildPreviewView]). Every action row performs
 /// its effect then pops the route itself (`Navigator.of(context).pop()`, no
-/// value); the tab-list section below it is [PreviewTabsPanel] unmodified,
+/// value), except Clear site data, which pops first because its action pushes
+/// a dialog; the tab-list section below it is [PreviewTabsPanel] unmodified,
 /// whose rows instead pop with the picked port — the caller distinguishes the
 /// two by whether the awaited result is non-null.
 ///
@@ -1743,6 +2075,7 @@ class _PreviewOverflowPanel extends ConsumerWidget {
     required this.onDraw,
     required this.drawArmed,
     required this.onClosedTab,
+    required this.onClearSiteData,
   });
 
   final bool hasActiveTab;
@@ -1763,6 +2096,7 @@ class _PreviewOverflowPanel extends ConsumerWidget {
   /// desktop's own inline pencil does, since arming it outlives the popup.
   final bool drawArmed;
   final ValueChanged<int> onClosedTab;
+  final VoidCallback onClearSiteData;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1799,6 +2133,18 @@ class _PreviewOverflowPanel extends ConsumerWidget {
           selected: false,
           mono: false,
           onTap: hasActiveTab ? () => act(onRefresh) : null,
+        ),
+        PanelRow(
+          icon: AbIcons.trash,
+          label: 'Clear site data',
+          selected: false,
+          mono: false,
+          // Not act(): the callback pushes a confirm dialog, and act()'s pop
+          // after the action would close that dialog instead of this panel.
+          onTap: () {
+            Navigator.of(context).pop();
+            onClearSiteData();
+          },
         ),
         const PanelSectionHeader('Tabs', mono: false),
         if (hasTabs)

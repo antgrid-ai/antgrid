@@ -89,9 +89,17 @@ class PreviewSiteData {
 
   final _wipes = ValueNotifier<int>(0);
   final _sources = <Map<int, String> Function()>[];
-  final _retirements = <Future<void>>{};
+  final _retirements = <Future<void>, PreviewAdmission?>{};
   Future<void> _tail = Future<void>.value();
   Future<void>? _straggler;
+
+  // Pages the current clear could not wait for: still being retired when it
+  // started, or dropped after that. What they wrote may outlive the clear.
+  List<PreviewAdmission>? _lateRetirements;
+
+  // Moves on whenever the queue stops waiting for a timed-out clear, so that
+  // clear's eventual success cannot write the map outside the queue.
+  int _stragglerFence = 0;
 
   /// Bumps after every clear whose success live pages must react to.
   ValueListenable<int> get wipes => _wipes;
@@ -104,13 +112,15 @@ class PreviewSiteData {
   }
 
   /// Registers a dropped controller's page teardown so a native clear never
-  /// runs while that page can still write into the profile.
-  void trackRetirement(Future<void> retirement) {
+  /// runs while that page can still write into the profile. [origin] is the
+  /// port that page loaded and the owner it was admitted under.
+  void trackRetirement(Future<void> retirement, {PreviewAdmission? origin}) {
     late final Future<void> tracked;
     tracked = retirement
         .then<void>((_) {}, onError: (Object _) {})
         .whenComplete(() => _retirements.remove(tracked));
-    _retirements.add(tracked);
+    _retirements[tracked] = origin;
+    if (origin != null) _lateRetirements?.add(origin);
   }
 
   /// Never throws.
@@ -148,7 +158,7 @@ class PreviewSiteData {
               });
             }
           } else {
-            await store.replace({..._liveOwners(), ...entries});
+            await store.replace(_settled(entries));
             _wipes.value++;
           }
           return PreviewAdmitOutcome(
@@ -172,7 +182,7 @@ class PreviewSiteData {
       if (isDemoMode()) return PreviewClearStatus.refused;
       final status = await _runWipe(recordLateSuccess: true);
       if (status != PreviewClearStatus.failed) {
-        await store.replace(_liveOwners());
+        await store.replace(_settled());
         _wipes.value++;
       }
       return status;
@@ -216,25 +226,40 @@ class PreviewSiteData {
   Future<void> _drainStraggler() async {
     final straggler = _straggler;
     if (straggler == null) return;
-    await straggler.timeout(stragglerGrace, onTimeout: () {});
+    await straggler.timeout(
+      stragglerGrace,
+      onTimeout: () {
+        _stragglerFence++;
+      },
+    );
     _straggler = null;
   }
 
   Future<void> _quiesce() async {
     if (_retirements.isEmpty) return;
+    // A page can be dropped while earlier ones are still being waited for, so
+    // wait until none is outstanding.
+    Future<void> drain() async {
+      while (_retirements.isNotEmpty) {
+        await Future.wait(_retirements.keys.toList());
+      }
+    }
+
     try {
-      await Future.wait(_retirements.toList()).timeout(
+      await drain().timeout(
         wipeTimeout,
-        onTimeout: () {
-          AbLog.warn('preview', 'webview retirement timed out');
-          return <void>[];
-        },
+        onTimeout: () =>
+            AbLog.warn('preview', 'webview retirement timed out'),
       );
     } catch (_) {}
   }
 
   Future<PreviewClearStatus> _runWipe({required bool recordLateSuccess}) async {
     await _quiesce();
+    _lateRetirements = [
+      for (final origin in _retirements.values)
+        if (origin != null) origin,
+    ];
     final raw = Future.sync(wipe);
     try {
       final result = await raw.timeout(wipeTimeout);
@@ -245,6 +270,7 @@ class PreviewSiteData {
         'website data clear failed',
         fields: {'reason': 'timeout'},
       );
+      final fence = _stragglerFence;
       _straggler = raw
           .then<PreviewClearStatus>(
             _report,
@@ -254,10 +280,10 @@ class PreviewSiteData {
             },
           )
           .then((s) async {
-            if (recordLateSuccess && s != PreviewClearStatus.failed) {
-              await store.replace(_liveOwners());
-              _wipes.value++;
-            }
+            if (!recordLateSuccess || s == PreviewClearStatus.failed) return;
+            if (fence != _stragglerFence) return;
+            await store.replace(_settled());
+            _wipes.value++;
           });
       return PreviewClearStatus.failed;
     } catch (e) {
@@ -299,6 +325,21 @@ class PreviewSiteData {
       );
     }
     return status;
+  }
+
+  /// The map a successful clear leaves: live origins, then [entries]. A port a
+  /// page was retired from during the clear reads unsettled unless it is still
+  /// attributed to that page's own owner, because the clear could not wait for
+  /// that page and what it wrote may have survived.
+  Map<int, String> _settled([Map<int, String> entries = const {}]) {
+    final out = {..._liveOwners(), ...entries};
+    for (final r in _lateRetirements ?? const <PreviewAdmission>[]) {
+      if (out[r.port] != r.owner) {
+        out[r.port] = PreviewOriginOwnerStore.unsettled;
+      }
+    }
+    _lateRetirements = null;
+    return out;
   }
 
   Map<int, String> _liveOwners() {

@@ -43,13 +43,31 @@ class RecordingWebViewController extends PlatformWebViewController {
 
   int reloads = 0;
 
+  /// While set, a blank-document load does not finish until it completes, so
+  /// a test can hold a retirement open.
+  Completer<void>? retireGate;
+
+  /// While set, history queries do not answer until it completes, with its
+  /// value as canGoBack.
+  Completer<bool>? historyGate;
+
+  /// The navigation delegate the screen installed, whose callbacks a test can
+  /// fire as if this page had navigated.
+  QuietNavigationDelegate? delegate;
+
+  /// JS channels by name, for delivering a message as if this page sent it.
+  final channels = <String, void Function(JavaScriptMessage)>{};
+
   @override
   Future<void> loadRequest(LoadRequestParams params) async =>
       loadedUrls.add(params.uri.toString());
 
   @override
-  Future<void> loadHtmlString(String html, {String? baseUrl}) async =>
-      retirements++;
+  Future<void> loadHtmlString(String html, {String? baseUrl}) async {
+    retirements++;
+    final g = retireGate;
+    if (g != null) await g.future;
+  }
 
   @override
   Future<void> reload() async => reloads++;
@@ -63,15 +81,23 @@ class RecordingWebViewController extends PlatformWebViewController {
   @override
   Future<void> addJavaScriptChannel(
     JavaScriptChannelParams javaScriptChannelParams,
-  ) async {}
+  ) async {
+    channels[javaScriptChannelParams.name] =
+        javaScriptChannelParams.onMessageReceived;
+  }
 
   @override
   Future<void> setPlatformNavigationDelegate(
     PlatformNavigationDelegate handler,
-  ) async {}
+  ) async {
+    if (handler is QuietNavigationDelegate) delegate = handler;
+  }
 
   @override
-  Future<bool> canGoBack() async => false;
+  Future<bool> canGoBack() async {
+    final g = historyGate;
+    return g == null ? false : await g.future;
+  }
 
   @override
   Future<bool> canGoForward() async => false;
@@ -80,8 +106,14 @@ class RecordingWebViewController extends PlatformWebViewController {
   Future<void> runJavaScript(String javaScript) async {}
 }
 
+/// Keeps the page callbacks the screen registers so a test can fire them, and
+/// drops the rest.
 class QuietNavigationDelegate extends PlatformNavigationDelegate {
   QuietNavigationDelegate(super.params) : super.implementation();
+
+  PageEventCallback? onPageStarted;
+  PageEventCallback? onPageFinished;
+  UrlChangeCallback? onUrlChange;
 
   @override
   Future<void> setOnNavigationRequest(
@@ -89,10 +121,12 @@ class QuietNavigationDelegate extends PlatformNavigationDelegate {
   ) async {}
 
   @override
-  Future<void> setOnPageStarted(PageEventCallback onPageStarted) async {}
+  Future<void> setOnPageStarted(PageEventCallback onPageStarted) async =>
+      this.onPageStarted = onPageStarted;
 
   @override
-  Future<void> setOnPageFinished(PageEventCallback onPageFinished) async {}
+  Future<void> setOnPageFinished(PageEventCallback onPageFinished) async =>
+      this.onPageFinished = onPageFinished;
 
   @override
   Future<void> setOnHttpError(HttpResponseErrorCallback onHttpError) async {}
@@ -106,7 +140,8 @@ class QuietNavigationDelegate extends PlatformNavigationDelegate {
   ) async {}
 
   @override
-  Future<void> setOnUrlChange(UrlChangeCallback onUrlChange) async {}
+  Future<void> setOnUrlChange(UrlChangeCallback onUrlChange) async =>
+      this.onUrlChange = onUrlChange;
 
   @override
   Future<void> setOnHttpAuthRequest(
