@@ -30,7 +30,6 @@ class TerminalService {
   final Set<String> _freshScreens = {};
   final Set<String> _materialized = {};
   final Map<String, String Function(String data)> _inputTransforms = {};
-  final Map<String, TouchWheelLimiter> _touchWheel = {};
   final Map<String, TerminalFrameMessage> _visibleFrames = {};
   final Map<String, Stopwatch> _screenWaits = {};
   final Map<String, int> _lastViewed = {};
@@ -1890,6 +1889,8 @@ class TerminalService {
   void _materializeTab(TerminalTab tab) {
     final terminalId = tab.terminalId;
     if (!_materialized.add(terminalId)) return;
+    // Owned by the binding below, so it goes when the tab does.
+    final wheel = isMobilePlatform ? TouchWheelLimiter() : null;
 
     // Wire the Ghostty controller's user-input path back to the agent.
     //
@@ -1908,10 +1909,8 @@ class TerminalService {
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
         var data = utf8.decode(bytes, allowMalformed: true);
-        if (isMobilePlatform) {
-          final kept = _touchWheel
-              .putIfAbsent(terminalId, TouchWheelLimiter.new)
-              .filter(data);
+        if (wheel != null) {
+          final kept = wheel.filter(data);
           if (kept == null) return true;
           data = kept;
         }

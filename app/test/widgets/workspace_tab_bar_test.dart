@@ -12,7 +12,9 @@ Future<void> _pump(WidgetTester tester, Widget child) => pumpAntgrid(
   tester,
   ProviderScope(
     overrides: [
-      visibleWorkspaceViewsProvider.overrideWithValue(WorkspaceView.values),
+      visibleWorkspaceViewsProvider.overrideWithBuild(
+        (_, _) => WorkspaceView.values,
+      ),
     ],
     child: child,
   ),

@@ -9,6 +9,8 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/session_workspace_state.dart';
+import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/terminal_list_view.dart';
@@ -23,6 +25,7 @@ Future<FakeAgentTransport> _pumpPanel(
   WidgetTester tester, {
   int terminals = 2,
   double width = 800,
+  void Function(ProviderContainer container)? beforeStatus,
 }) async {
   useInMemoryPrefs();
   final transport = FakeAgentTransport();
@@ -66,6 +69,13 @@ Future<FakeAgentTransport> _pumpPanel(
     ),
   );
   await tester.pump();
+  if (beforeStatus != null) {
+    beforeStatus(
+      ProviderScope.containerOf(tester.element(find.byType(TerminalListView))),
+    );
+    await tester.pump();
+    await tester.pump();
+  }
 
   transport.emit('agent:status', {
     'projectId': 'test',
@@ -137,6 +147,40 @@ void main() {
 
     expect(_sent(transport, 'terminal:stop').single['terminalId'], 'terminal-2');
     expect(find.text('Terminal 2'), findsNothing);
+  });
+
+  testWidgets('Kill on a terminal shown without a recorded pick moves to its '
+      'left neighbour', (tester) async {
+    await _pumpPanel(tester, terminals: 3);
+
+    await tester.tap(find.text('Terminal 3'));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('terminal-3')), findsOneWidget);
+
+    await tester.tap(find.text('Kill'));
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('terminal-2')), findsOneWidget);
+  });
+
+  // A reconnect starts a fresh service with no tabs until agent:status; the
+  // pick must outlast that gap, not be forgotten in it.
+  testWidgets('a picked terminal survives its tab list arriving late', (
+    tester,
+  ) async {
+    const key = (entryId: 'test', sessionId: 's1');
+    await _pumpPanel(
+      tester,
+      terminals: 3,
+      beforeStatus: (container) {
+        container.read(activeSessionIdProvider.notifier).set('s1');
+        container
+            .read(sessionWorkspaceStateProvider(key).notifier)
+            .update((s) => s.copyWith(selectedTerminalId: 'terminal-2'));
+      },
+    );
+
+    expect(find.byKey(const ValueKey('terminal-2')), findsOneWidget);
   });
 
   testWidgets('Restart respawns the open terminal in place', (tester) async {

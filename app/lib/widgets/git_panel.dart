@@ -1259,11 +1259,13 @@ class _GitPanelBody extends ConsumerWidget {
           ),
         const AbSeparator.horizontal(),
         Expanded(
-          // Nothing to switch to without changes: History takes the column.
-          child: counts.hasChanges
-              ? _ChangesHistorySwitcher(
-                  changedCount: counts.changedCount,
-                  changes: Column(
+          // Mounted with or without changes, so the change count crossing zero
+          // keeps the chosen tab and History's scroll position.
+          child: _ChangesHistorySwitcher(
+            hasChanges: counts.hasChanges,
+            changedCount: counts.changedCount,
+            changes: counts.hasChanges
+                ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _ChangesSectionHeader(
@@ -1276,10 +1278,10 @@ class _GitPanelBody extends ConsumerWidget {
                       const AbSeparator.horizontal(),
                       Expanded(child: _buildFileList(context)),
                     ],
-                  ),
-                  history: history,
-                )
-              : history,
+                  )
+                : const SizedBox.shrink(),
+            history: history,
+          ),
         ),
       ],
     );
@@ -1510,11 +1512,15 @@ enum _GitCompactTab { changes, history }
 /// flipping back keeps each list's scroll position and expanded commits.
 class _ChangesHistorySwitcher extends StatefulWidget {
   const _ChangesHistorySwitcher({
+    required this.hasChanges,
     required this.changedCount,
     required this.changes,
     required this.history,
   });
 
+  /// Without changes there is nothing to switch to: the toggle hides and
+  /// History takes the column.
+  final bool hasChanges;
   final int changedCount;
   final Widget changes;
   final Widget history;
@@ -1526,41 +1532,57 @@ class _ChangesHistorySwitcher extends StatefulWidget {
 
 class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
   // Changes is what there is to act on, so it is where the tab lands.
-  _GitCompactTab _tab = _GitCompactTab.changes;
+  late _GitCompactTab _tab = widget.hasChanges
+      ? _GitCompactTab.changes
+      : _GitCompactTab.history;
+
+  @override
+  void didUpdateWidget(_ChangesHistorySwitcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The one move the user did not make: Changes is gone, so History shows,
+    // and stays shown when changes reappear rather than yanking them back.
+    if (oldWidget.hasChanges && !widget.hasChanges) {
+      _tab = _GitCompactTab.history;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AbTokens.space12,
-            vertical: AbTokens.space8,
-          ),
-          // AbSegmented hugs its content rather than sharing the row, so on
-          // the narrowest phones double-digit counts can outgrow it; scrolling
-          // absorbs that instead of a RenderFlex overflow.
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: AbSegmented<_GitCompactTab>(
-              segments: [
-                AbSegment(
-                  value: _GitCompactTab.changes,
-                  label: 'Changes · ${widget.changedCount}',
-                ),
-                AbSegment(
-                  value: _GitCompactTab.history,
-                  label: 'History',
-                ),
-              ],
-              selected: _tab,
-              onSelect: (value) => setState(() => _tab = value),
+        if (widget.hasChanges) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AbTokens.space12,
+              vertical: AbTokens.space8,
+            ),
+            // AbSegmented hugs its content rather than sharing the row, so on
+            // the narrowest phones double-digit counts can outgrow it; scrolling
+            // absorbs that instead of a RenderFlex overflow.
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: AbSegmented<_GitCompactTab>(
+                segments: [
+                  AbSegment(
+                    value: _GitCompactTab.changes,
+                    label: 'Changes · ${widget.changedCount}',
+                  ),
+                  AbSegment(
+                    value: _GitCompactTab.history,
+                    label: 'History',
+                  ),
+                ],
+                selected: _tab,
+                onSelect: (value) => setState(() => _tab = value),
+              ),
             ),
           ),
-        ),
-        const AbSeparator.horizontal(),
+          const AbSeparator.horizontal(),
+        ],
         Expanded(
+          // Keyed so the toggle row coming and going never re-parents History.
+          key: const ValueKey('git-compact-body'),
           child: IndexedStack(
             index: _tab.index,
             children: [widget.changes, widget.history],

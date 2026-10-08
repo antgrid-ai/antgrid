@@ -781,6 +781,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     }
     if (oldWidget.terminalService != widget.terminalService ||
         oldWidget.tab.terminalId != widget.tab.terminalId) {
+      // The old terminal's draft is already saved — every edit and every
+      // open/close writes through — so this only swaps the new one in.
+      if (!_composeDrafts.isOpen(_composeDraftKey)) _composeFocus.unfocus();
+      _loadComposeDraft();
       oldWidget.terminalService.setInputTransform(
         oldWidget.tab.terminalId,
         null,
@@ -2393,17 +2397,25 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
   bool _composeOpen = false;
   late final TerminalComposeDrafts _composeDrafts;
-  late final String _composeDraftKey;
+
+  /// Derived from [widget] on every read, never cached: [didUpdateWidget]
+  /// accepts a new terminal or service, and a stale key would file one
+  /// terminal's draft under another's.
+  String get _composeDraftKey => TerminalComposeDrafts.keyFor(
+    projectId: widget.terminalService.projectId,
+    checkoutId: widget.terminalService.checkoutId,
+    terminalId: widget.tab.terminalId,
+  );
 
   /// Reopens the box as it was left, but unfocused: raising the keyboard is
   /// the user's call, and a remount is not one.
   void _restoreComposeDraft() {
     _composeDrafts = ref.read(terminalComposeDraftsProvider);
-    _composeDraftKey = TerminalComposeDrafts.keyFor(
-      projectId: widget.terminalService.projectId,
-      checkoutId: widget.terminalService.checkoutId,
-      terminalId: widget.tab.terminalId,
-    );
+    _loadComposeDraft();
+  }
+
+  void _loadComposeDraft() {
+    _composeDraft.removeListener(_saveComposeDraft);
     _composeDraft.text = _composeDrafts.textFor(_composeDraftKey);
     _composeOpen = _composeDrafts.isOpen(_composeDraftKey);
     _composeDraft.addListener(_saveComposeDraft);

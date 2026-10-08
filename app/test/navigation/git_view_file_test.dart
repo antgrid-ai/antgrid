@@ -11,12 +11,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
 
-Future<void> settle(WidgetTester tester) async {
-  for (var i = 0; i < 4; i++) {
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-}
-
 void main() {
   Future<ProviderContainer> openDiff(
     WidgetTester tester, {
@@ -38,14 +32,14 @@ void main() {
         ),
       ),
     );
-    await settle(tester);
+    await settleShell(tester);
     // A phone reaches the workspace one page over; a wide layout docks it.
     if (find.byType(PageView).evaluate().isNotEmpty) {
       await tester.drag(find.byType(PageView), const Offset(-400, 0));
-      await settle(tester);
+      await settleShell(tester);
     }
     await tester.tap(find.text('Git').last);
-    await settle(tester);
+    await settleShell(tester);
     expect(c.read(visibleWorkspaceViewProvider), WorkspaceView.git);
     return c;
   }
@@ -55,7 +49,7 @@ void main() {
         ? find.byTooltip('View file')
         : find.text('View file');
     await tester.tap(viewFile.first);
-    await settle(tester);
+    await settleShell(tester);
   }
 
   testWidgets('a phone switches to the Files tab', (tester) async {
@@ -86,7 +80,7 @@ void main() {
   ) async {
     final c = await openDiff(tester, size: const Size(400, 800));
     c.read(pendingActiveSessionIdProvider.notifier).set('queued-session');
-    await settle(tester);
+    await settleShell(tester);
 
     await tapViewFile(tester);
 

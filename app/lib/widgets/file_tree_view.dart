@@ -14,12 +14,12 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
-import '../design/widgets/ab_toast.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
 import '../models/git_status_index.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
+import 'copy_path.dart';
 
 /// A widget that renders a file tree with expand/collapse, file selection,
 /// and directory-first sorting. Name filtering is no longer this widget's
@@ -762,13 +762,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
       ],
     );
     if (!mounted || action == null) return;
-    try {
-      await Clipboard.setData(ClipboardData(text: widget.node.path));
-    } catch (_) {
-      if (mounted) showAbToast(context, 'Could not copy the path.');
-      return;
-    }
-    if (mounted) showAbToast(context, 'Path copied');
+    await copyPathWithToast(context, widget.node.path);
   }
 
   @override

@@ -1,4 +1,5 @@
-import 'package:flutter/gestures.dart' show PointerScrollEvent, PointerSignalEvent;
+import 'package:flutter/gestures.dart'
+    show GestureBinding, PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,9 +26,8 @@ import 'terminal_view_wrapper.dart';
 
 /// The Terminals tab: the session's own shells, one at a time.
 ///
-/// A tab strip of terminals across the top, the active one filling the panel
-/// below a toolbar naming the folder it runs in, and — on desktop — a footer
-/// with the running count.
+/// A tab strip of terminals across the top, and the active one filling the
+/// panel below a toolbar naming the folder it runs in.
 class TerminalListView extends ConsumerStatefulWidget {
   const TerminalListView({super.key});
 
@@ -39,13 +39,6 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
   static const int _maxAdHocTerminals = 10;
 
   SessionUiKey? get _uiKey => ref.read(activeSessionUiKeyProvider);
-
-  String? get _selectedTerminalId {
-    final key = _uiKey;
-    return key == null
-        ? null
-        : ref.read(sessionWorkspaceStateProvider(key)).selectedTerminalId;
-  }
 
   void _setSelectedTerminal(String? id) {
     final key = _uiKey;
@@ -83,17 +76,25 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   /// Kills [id] and lands on its left neighbour, so closing a tab never leaves
   /// the panel blank while others are still open.
-  void _kill(TerminalService service, List<TerminalTab> tabs, String id) {
+  ///
+  /// [shown] is about the tab on screen, which is not always a recorded pick —
+  /// after a restart it is the service's focus — and killing it must move on
+  /// just the same.
+  void _kill(
+    TerminalService service,
+    List<TerminalTab> tabs,
+    String id, {
+    required bool shown,
+  }) {
     final index = tabs.indexWhere((t) => t.terminalId == id);
     final rest = [
       for (final t in tabs)
         if (t.terminalId != id) t,
     ];
-    if (_selectedTerminalId == id || rest.isEmpty) {
-      final next = rest.isEmpty
-          ? null
-          : rest[(index - 1).clamp(0, rest.length - 1)].terminalId;
-      _setSelectedTerminal(next);
+    if (rest.isEmpty) {
+      _setSelectedTerminal(null);
+    } else if (shown) {
+      _select(service, rest[(index - 1).clamp(0, rest.length - 1)].terminalId);
     }
     service.deleteTerminal(id);
   }
@@ -113,7 +114,13 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     final attach = state?.attach ?? CheckoutAttachStatus.unknown;
 
     var active = tabs.where((t) => t.terminalId == selectedId).firstOrNull;
-    if (selectedId != null && active == null && key != null) {
+    // Only once the tab list is the bridge's answer: a reconnect starts a fresh
+    // service whose list is empty until agent:status, and forgetting the pick
+    // then would land the user on another terminal when the tabs come back.
+    if (selectedId != null &&
+        active == null &&
+        key != null &&
+        attach == CheckoutAttachStatus.ready) {
       // Deleted or gone from the bridge: forget it after this frame.
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => ref
@@ -139,7 +146,8 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
             tabs: tabs,
             activeId: active?.terminalId,
             onSelect: (id) => _select(service, id),
-            onKill: (id) => _kill(service, tabs, id),
+            onKill: (id) =>
+                _kill(service, tabs, id, shown: id == active?.terminalId),
             onNew: atLimit ? null : () => _createTerminal(service, tabs),
           ),
           if (active != null)
@@ -148,7 +156,8 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
               path: state?.checkoutPath ?? '',
               onClear: () => service.clearTerminal(active!.terminalId),
               onRestart: () => service.restartTerminal(active!.terminalId),
-              onKill: () => _kill(service, tabs, active!.terminalId),
+              onKill: () =>
+                  _kill(service, tabs, active!.terminalId, shown: true),
             ),
           Expanded(
             child: active != null
@@ -338,15 +347,23 @@ class _TabStripState extends State<_TabStrip> {
 
   /// A mouse wheel only scrolls vertically; on a sideways strip that is the
   /// gesture a desktop user reaches for first.
+  ///
+  /// Sideways input is left to the strip's own Scrollable, which already
+  /// handles it — taking it here too would move the strip twice. The vertical
+  /// tick is claimed through the resolver so nothing around the strip also
+  /// scrolls on it.
   void _onPointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent || !_scroll.hasClients) return;
-    final delta = event.scrollDelta.dx != 0
-        ? event.scrollDelta.dx
-        : event.scrollDelta.dy;
-    final pos = _scroll.position;
-    _scroll.jumpTo(
-      (pos.pixels + delta).clamp(pos.minScrollExtent, pos.maxScrollExtent),
-    );
+    if (event is! PointerScrollEvent || event.scrollDelta.dx != 0) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (e) {
+      if (!_scroll.hasClients) return;
+      final pos = _scroll.position;
+      _scroll.jumpTo(
+        (pos.pixels + (e as PointerScrollEvent).scrollDelta.dy).clamp(
+          pos.minScrollExtent,
+          pos.maxScrollExtent,
+        ),
+      );
+    });
   }
 
   @override

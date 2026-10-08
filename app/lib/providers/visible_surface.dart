@@ -175,24 +175,47 @@ final sessionHasBusActivityProvider =
 ///
 /// Handler is the conditional one: offered only while the focused session is
 /// armed, or has a Handler question of its own still waiting. Disarming hides
-/// it at once — WorkspaceShell moves a pane showing it to Files. Matched on
+/// it at once — a pane showing it falls back to Files. Matched on
 /// the session's own id, so another session's Handler never puts the tab here.
-final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
-  final activeId = ref.watch(activeSessionIdProvider);
-  final handlerOn = ref.watch(
-    handlerStateProvider.select((v) {
-      final s = v.value;
-      if (s == null || activeId == null) return false;
-      return s.sessions.containsKey(activeId) ||
-          s.escalations.any((e) => e.terminalId == activeId);
-    }),
-  );
-  if (handlerOn) return WorkspaceView.values;
-  return [
-    for (final v in WorkspaceView.values)
-      if (v != WorkspaceView.handler) v,
-  ];
-}, name: 'visibleWorkspaceViews');
+///
+/// A Handler state that has not been [HandlerState.heard] says nothing about
+/// arming, so it keeps the last answer for the same session instead: a host
+/// restart or a Retry builds the project a fresh, empty service, and reading
+/// that as a disarm blinks the tab away until the first status lands.
+final visibleWorkspaceViewsProvider =
+    NotifierProvider<_VisibleWorkspaceViews, List<WorkspaceView>>(
+      _VisibleWorkspaceViews.new,
+      name: 'visibleWorkspaceViews',
+    );
+
+class _VisibleWorkspaceViews extends Notifier<List<WorkspaceView>> {
+  String? _answeredFor;
+  bool _handlerShown = false;
+
+  @override
+  List<WorkspaceView> build() {
+    final activeId = ref.watch(activeSessionIdProvider);
+    final handler = ref.watch(
+      handlerStateProvider.select((v) {
+        final s = v.value;
+        if (s == null) return (on: false, heard: false);
+        final on =
+            activeId != null &&
+            (s.sessions.containsKey(activeId) ||
+                s.escalations.any((e) => e.terminalId == activeId));
+        return (on: on, heard: s.heard);
+      }),
+    );
+    final held = !handler.heard && _answeredFor == activeId && _handlerShown;
+    _answeredFor = activeId;
+    _handlerShown = handler.on || held;
+    if (_handlerShown) return WorkspaceView.values;
+    return [
+      for (final v in WorkspaceView.values)
+        if (v != WorkspaceView.handler) v,
+    ];
+  }
+}
 
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.

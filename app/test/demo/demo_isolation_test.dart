@@ -17,6 +17,8 @@ import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/focused_tools.dart';
 import 'package:antgrid/providers/analytics.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
+import 'package:antgrid/providers/collapsed_drawer.dart';
+import 'package:antgrid/providers/drawer_expansion.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/relay_connection.dart'
@@ -310,6 +312,29 @@ void main() {
     await store.write(<String>{'real-project', kDemoProjectId});
 
     expect(store.read(), <String>{'real-project'});
+  });
+
+  test('folding "This machine" in the demo writes nothing', () async {
+    final container = await demoContainer();
+    enterDemoMode(container);
+
+    // The band's fold rides the collapsed set under an id no demo filter knows.
+    container
+        .read(collapsedDrawerIdsProvider.notifier)
+        .toggle(kLocalMachineDrawerId);
+    expect(container.read(localMachineCollapsedProvider), isTrue);
+    expect(
+      container.read(drawerCollapsedStoreProvider).read(),
+      isNot(contains(kLocalMachineDrawerId)),
+    );
+
+    exitDemoMode(container);
+    expect(container.read(localMachineCollapsedProvider), isFalse);
+    // The in-memory set is what a later real gesture persists.
+    expect(
+      container.read(collapsedDrawerIdsProvider),
+      isNot(contains(kLocalMachineDrawerId)),
+    );
   });
 
   test('the branch catalog answers from fixtures, never from a host', () async {

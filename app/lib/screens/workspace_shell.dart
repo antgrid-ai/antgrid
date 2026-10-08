@@ -384,8 +384,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   /// view [visibleWorkspaceViewsProvider] does not offer — Handler on a session
   /// that is not armed, or a view a build dropped. Left unchecked, the panel
   /// shows a body with no tab marked and nothing to switch back with.
+  ///
+  /// A display-time fallback only, so build-only: watching the offer re-runs
+  /// it when a tab goes away and comes back, and the stored choice is left
+  /// alone, so arming the Handler again shows its tab again.
   WorkspaceView _offeredOr(WorkspaceView view) =>
-      ref.read(visibleWorkspaceViewsProvider).contains(view)
+      ref.watch(visibleWorkspaceViewsProvider).contains(view)
       ? view
       : WorkspaceView.files;
 
@@ -968,19 +972,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // Both read unconditionally, never as `a != null || b != null`: a
     // short-circuited watch registers no dependency, so the second provider's
     // own write would never rebuild this route.
-    // A tab can stop being offered while it is the one on screen — Handler, on
-    // the disarm — and the pane must not stay on a body with no tab marked.
-    // Post-frame: selecting writes providers, which a listener fired during
-    // this build may not do.
-    ref.listen(visibleWorkspaceViewsProvider, (_, offered) {
-      if (offered.contains(_selectedView)) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted &&
-            !ref.read(visibleWorkspaceViewsProvider).contains(_selectedView)) {
-          _selectView(WorkspaceView.files);
-        }
-      });
-    });
     final pendingView = ref.watch(pendingWorkspaceViewProvider);
     final pendingAgentPage = ref.watch(pendingAgentPageProvider);
     // The third input to both drains, watched for the same reason even though

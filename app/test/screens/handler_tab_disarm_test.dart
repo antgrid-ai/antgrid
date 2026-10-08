@@ -1,5 +1,6 @@
 // Disarming the Handler hides its tab at once — and a pane that was showing it
-// lands on Files instead of keeping a body no tab is marked for.
+// lands on Files instead of keeping a body no tab is marked for, until the
+// Handler is armed again.
 import 'dart:async';
 
 import 'package:antgrid/models/handler_state.dart';
@@ -37,7 +38,7 @@ HandlerState _armed(String terminalId) => const HandlerState.initial()
     );
 
 void main() {
-  testWidgets('disarming while on the Handler tab moves the pane to Files', (
+  testWidgets('a disarm shows Files on the Handler tab until the arm returns', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -72,6 +73,14 @@ void main() {
         isNot(contains(WorkspaceView.handler)),
       );
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
+
+      // The fallback to Files must not have been saved as the user's choice.
+      states.add(_armed('session-1'));
+      await _settle(tester);
+      expect(
+        container.read(visibleWorkspaceViewProvider),
+        WorkspaceView.handler,
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

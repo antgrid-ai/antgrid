@@ -1632,8 +1632,8 @@ class FileService {
 
   void selectFile(String path, {int? searchLine, String? searchQuery}) {
     // Fire here, not in requestFileContent — the latter is a shared chokepoint
-    // also hit by session-restore, fragment recovery, git "view file", and
-    // refresh, none of which is a user opening a file from the explorer.
+    // also hit by session-restore, fragment recovery and refresh, none of
+    // which is a user opening a file.
     session.analytics?.track(AnalyticsEvents.fileOpened);
     final expandedWithAncestors = _expandedWithAncestorsOf(path);
     final newlyExpanded = expandedWithAncestors.difference(

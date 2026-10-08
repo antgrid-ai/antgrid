@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -8,10 +7,10 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../providers/providers.dart';
+import 'copy_path.dart';
 import 'viewer_support.dart';
 
 /// Shared header for media/preview viewers. [trailing] holds optional actions
@@ -109,13 +108,7 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
       ],
     );
     if (!mounted || pick == null || pick.isEmpty) return;
-    try {
-      await Clipboard.setData(ClipboardData(text: pick));
-    } catch (_) {
-      if (mounted) showAbToast(context, 'Could not copy the path.');
-      return;
-    }
-    if (mounted) showAbToast(context, 'Path copied');
+    await copyPathWithToast(context, pick);
   }
 
   @override

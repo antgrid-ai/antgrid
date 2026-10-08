@@ -3,23 +3,12 @@
 // real shell, whose PageView and pane flings compete for the same drags.
 import 'dart:ui' show GestureSettings;
 
-import 'package:antgrid/models/ab_message.dart' show GitFileStatusEntry;
-import 'package:antgrid/models/file_tree_models.dart';
-import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
-
-/// Bounded pumps: the shell always has something animating, so settling never
-/// terminates.
-Future<void> settle(WidgetTester tester) async {
-  for (var i = 0; i < 4; i++) {
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-}
 
 void main() {
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
@@ -43,21 +32,14 @@ void main() {
       addTearDown(tester.view.reset);
       await pumpWorkspaceShell(
         tester,
-        fileTreeStates: Stream.value(
-          FileTreeState(
-            gitFileStatuses: const {'a.dart': 'M'},
-            gitStatus: GitStatusIndex(const [
-              GitFileStatusEntry(path: 'a.dart', status: 'M', staged: false),
-            ]),
-          ),
-        ),
+        fileTreeStates: Stream.value(oneChangeTree()),
       );
-      await settle(tester);
+      await settleShell(tester);
 
       await tester.drag(find.byType(PageView), const Offset(-400, 0));
-      await settle(tester);
+      await settleShell(tester);
       await tester.tap(find.text('Git').last);
-      await settle(tester);
+      await settleShell(tester);
       expect(find.text('a.dart'), findsOneWidget);
     }
 
@@ -75,7 +57,7 @@ void main() {
         await openGitWithChange(tester);
 
         await swipeRow(tester, -120);
-        await settle(tester);
+        await settleShell(tester);
 
         expect(find.text('Stage'), findsOneWidget);
         expect(find.text('Revert'), findsOneWidget);
@@ -89,7 +71,7 @@ void main() {
         await openGitWithChange(tester);
 
         await swipeRow(tester, 250);
-        await settle(tester);
+        await settleShell(tester);
 
         expect(find.byType(AgentPanel), findsOneWidget);
         expect(find.text('a.dart'), findsNothing);
