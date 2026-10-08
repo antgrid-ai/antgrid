@@ -1136,8 +1136,9 @@ export class HostServer {
       case "scheduler.list": {
         // An app that predates one-offs parses `cron` as required, so a single cron-less row in `schedules` would
         // blank its whole Scheduler screen; one-offs travel in their own key that it never reads.
-        const all = this.scheduler.schedules();
-        return { schedules: all.filter((s) => s.runAt === undefined).map(publicSchedule), oneOffSchedules: all.filter((s) => s.runAt !== undefined).map(publicSchedule),
+        const scheduler = this.scheduler;
+        const all = scheduler.schedules();
+        return { schedules: all.filter((s) => s.runAt === undefined).map((s) => ({ ...publicSchedule(s), upcoming: scheduler.upcoming(s) })), oneOffSchedules: all.filter((s) => s.runAt !== undefined).map(publicSchedule),
           projects: await this.schedulerProjects() };
       }
       case "scheduler.runs": return { runs: this.scheduler.runs(params.scheduleId as string | undefined) };

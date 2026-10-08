@@ -176,6 +176,13 @@ export class SchedulerService {
   schedules(): Schedule[] { return this.guarded(() => this.store.schedules()); }
   runs(scheduleId?: string): SchedulerRun[] { return this.guarded(() => this.store.runs(scheduleId)); }
   preview(cron: string, timezone = this.timezone): number[] { return nextOccurrences(cron, timezone, this.now()); }
+  // Capped so a minute-level cron stays small on the wire; the app reads a full cap as "at least".
+  upcoming(schedule: Schedule, windowMs = 86_400_000, cap = 48): number[] {
+    if (!schedule.enabled || schedule.cron === undefined) return [];
+    const now = this.now();
+    try { return nextOccurrences(schedule.cron, schedule.timezone, now, cap).filter((at) => at < now + windowMs); }
+    catch { return []; }
+  }
   private find(id: string): Schedule {
     const schedule = this.schedules().find((s) => s.id === id);
     if (!schedule) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");

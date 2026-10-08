@@ -75,6 +75,29 @@ test("project-free loopback scheduler uses host validation for CRUD and preview"
   expect((await request("scheduler.runs")).result.runs).toEqual([]);
 });
 
+test("scheduler.list carries each enabled cron schedule's runs in the next day, capped", async () => {
+  const control = await host.startControlPlane();
+  const project = join(root, "upcoming"); mkdirSync(project);
+  const projectId = computeProjectId(project);
+  await host.open(projectId, project, "local");
+  const request = async (method: string, params: object = {}) => {
+    const response = await fetch(`http://127.0.0.1:${control.port}/control`, { method: "POST",
+      headers: { authorization: `Bearer ${control.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "test", type: "scheduler:request", method, params }) });
+    return await response.json() as any;
+  };
+  const hourly = (await request("scheduler.create", { schedule: { ...settings(projectId), name: "Hourly", cron: "30 * * * *" } })).result.schedule;
+  const minutely = (await request("scheduler.create", { schedule: { ...settings(projectId), name: "Minutely", cron: "* * * * *" } })).result.schedule;
+  const paused = (await request("scheduler.create", { schedule: { ...settings(projectId), name: "Paused", cron: "0 * * * *", enabled: false } })).result.schedule;
+  const before = Date.now();
+  const rows = (await request("scheduler.list")).result.schedules as { id: string; upcoming: number[] }[];
+  const upcoming = (id: string) => rows.find((row) => row.id === id)!.upcoming;
+  expect(upcoming(hourly.id)).toHaveLength(24);
+  expect(upcoming(hourly.id).every((at) => at > before - 1000 && at < before + 86_400_000 + 1000)).toBe(true);
+  expect(upcoming(minutely.id)).toHaveLength(48);
+  expect(upcoming(paused.id)).toEqual([]);
+});
+
 test("remote scheduler gates account, switch, safe IDs and targets the requester", async () => {
   await host.startControlPlane();
   let authorized = true;
