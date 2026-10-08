@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/storage_scope.dart';
@@ -61,16 +62,16 @@ class PreviewOriginOwnerStore {
     }
   }
 
-  /// Overwrites [entries] into a known map; a no-op while history is unknown.
-  Future<void> merge(Map<int, String> entries) async {
+  /// Overwrites [entries] into [current], the known map the caller just
+  /// [read]; skips the write when nothing would change.
+  Future<void> merge(Map<int, String> current, Map<int, String> entries) async {
     try {
-      final current = await read();
-      if (current == null) return;
       final next = {...current, ..._withoutDemo(entries)};
       if (next.length > maxEntries) {
         await forget();
         return;
       }
+      if (mapEquals(next, current)) return;
       await _write(next);
     } catch (e) {
       await _writeFailed(e);
@@ -86,16 +87,18 @@ class PreviewOriginOwnerStore {
     }
   }
 
-  /// Back to unknown history.
-  Future<void> forget() async {
+  /// Back to unknown history; false when the record may have survived.
+  Future<bool> forget() async {
     try {
       await _prefs.remove(key);
+      return true;
     } catch (e) {
       AbLog.warn(
         'preview',
         'origin owner forget failed',
         fields: {'error': '$e'},
       );
+      return false;
     }
   }
 

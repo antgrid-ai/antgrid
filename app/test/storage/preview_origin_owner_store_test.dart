@@ -26,15 +26,9 @@ void main() {
     }
   });
 
-  test('merge onto an absent key leaves history unknown', () async {
-    final store = PreviewOriginOwnerStore();
-    await store.merge({3000: 'a'});
-    expect(await store.read(), isNull);
-  });
-
   test('replace then merge survives a new instance', () async {
     await PreviewOriginOwnerStore().replace({3000: 'a'});
-    await PreviewOriginOwnerStore().merge({4000: 'b'});
+    await PreviewOriginOwnerStore().merge({3000: 'a'}, {4000: 'b'});
     expect(await PreviewOriginOwnerStore().read(), {3000: 'a', 4000: 'b'});
   });
 
@@ -47,7 +41,7 @@ void main() {
   test('exceeding maxEntries forgets the map', () async {
     final store = PreviewOriginOwnerStore();
     await store.replace({});
-    await store.merge({
+    await store.merge({}, {
       for (var p = 1; p <= PreviewOriginOwnerStore.maxEntries + 1; p++) p: 'a',
     });
     expect(await store.read(), isNull);
@@ -56,7 +50,7 @@ void main() {
   test('forget reads null', () async {
     final store = PreviewOriginOwnerStore();
     await store.replace({3000: 'a'});
-    await store.forget();
+    expect(await store.forget(), isTrue);
     expect(await store.read(), isNull);
   });
 
@@ -64,7 +58,10 @@ void main() {
     final store = PreviewOriginOwnerStore();
     await store.replace({3000: 'a', 3001: kDemoProjectId});
     expect(await store.read(), {3000: 'a'});
-    await store.merge({4000: 'dev-1.$kDemoProjectId', 5000: 'b'});
+    await store.merge(
+      (await store.read())!,
+      {4000: 'dev-1.$kDemoProjectId', 5000: 'b'},
+    );
     expect(await store.read(), {3000: 'a', 5000: 'b'});
   });
 }

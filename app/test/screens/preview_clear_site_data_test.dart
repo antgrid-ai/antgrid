@@ -13,7 +13,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:webview_all/webview_all.dart' show WebViewPlatform;
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
 import '../helpers/fake_webview_platform.dart';
@@ -23,22 +22,18 @@ import '../helpers/toast_host.dart';
 const _kPort = 3000;
 
 void main() {
-  late WebViewPlatform? originalPlatform;
   late RecordingWebViewPlatform platform;
   late WipeRecorder recorder;
 
   setUp(() {
     useInMemoryPrefs({PreviewOriginOwnerStore.key: '{}'});
-    originalPlatform = WebViewPlatform.instance;
-    platform = RecordingWebViewPlatform();
-    WebViewPlatform.instance = platform;
+    platform = installRecordingWebViewPlatform();
     recorder = WipeRecorder();
   });
 
   tearDown(() {
     debugDefaultTargetPlatformOverride = null;
     PreviewHandoff.shared.clear();
-    if (originalPlatform != null) WebViewPlatform.instance = originalPlatform;
   });
 
   Future<({ProviderContainer container, PreviewService preview})> boot(

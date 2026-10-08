@@ -18,7 +18,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webview_all/webview_all.dart'
-    show JavaScriptMessage, UrlChange, WebViewPlatform;
+    show JavaScriptMessage, UrlChange;
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
 import '../helpers/fake_webview_platform.dart';
@@ -43,7 +43,6 @@ final _focus = NotifierProvider<ValueController<String?>, String?>(
 );
 
 void main() {
-  late WebViewPlatform? originalPlatform;
   late RecordingWebViewPlatform platform;
   late WipeRecorder recorder;
   late List<int> controllersAtWipe;
@@ -52,9 +51,7 @@ void main() {
   setUp(() {
     // A known, empty owner map: first admissions record without clearing.
     useInMemoryPrefs({PreviewOriginOwnerStore.key: '{}'});
-    originalPlatform = WebViewPlatform.instance;
-    platform = RecordingWebViewPlatform();
-    WebViewPlatform.instance = platform;
+    platform = installRecordingWebViewPlatform();
     controllersAtWipe = [];
     retiredAtWipe = [];
     recorder = WipeRecorder()
@@ -67,9 +64,6 @@ void main() {
   tearDown(() {
     debugDefaultTargetPlatformOverride = null;
     PreviewHandoff.shared.clear();
-    // The interface's setter rejects null, so a run that started with no
-    // platform installed leaves the fake behind rather than restoring it.
-    if (originalPlatform != null) WebViewPlatform.instance = originalPlatform;
   });
 
   Future<

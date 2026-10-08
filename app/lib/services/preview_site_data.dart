@@ -15,20 +15,13 @@ typedef PreviewWebsiteDataWipe = Future<WebViewDataClearingResult?> Function();
 
 enum PreviewClearStatus { cleared, partial, failed, refused }
 
-enum PreviewAdmitWipe { none, unknownHistory, ownerChanged }
-
 class PreviewAdmitOutcome {
-  const PreviewAdmitOutcome({
-    required this.wipe,
-    this.status,
-    this.contestedPorts = const {},
-  });
+  const PreviewAdmitOutcome({this.status, this.contestedPorts = const {}});
 
-  const PreviewAdmitOutcome.none() : this(wipe: PreviewAdmitWipe.none);
+  const PreviewAdmitOutcome.none() : this();
 
-  final PreviewAdmitWipe wipe;
-
-  /// Null when [wipe] is [PreviewAdmitWipe.none].
+  /// Null when the batch needed no clear. A clear with no [contestedPorts]
+  /// was for unknown history.
   final PreviewClearStatus? status;
 
   /// Loopback ports whose recorded owner differed from the admitting one.
@@ -141,31 +134,23 @@ class PreviewSiteData {
                 if (snap.containsKey(e.key) && snap[e.key] != e.value) e.key,
           };
           if (snap != null && contested.isEmpty) {
-            await store.merge(entries);
+            await store.merge(snap, entries);
             return const PreviewAdmitOutcome.none();
           }
 
           final status = await _runWipe(recordLateSuccess: true);
-          final kind = snap == null
-              ? PreviewAdmitWipe.unknownHistory
-              : PreviewAdmitWipe.ownerChanged;
           if (status == PreviewClearStatus.failed) {
             // Unknown history stays absent, which already retries next time.
             if (snap != null) {
-              await store.merge({
+              await store.merge(snap, {
                 for (final p in entries.keys)
                   p: PreviewOriginOwnerStore.unsettled,
               });
             }
           } else {
-            await store.replace(_settled(entries));
-            _wipes.value++;
+            await _recordClear(entries);
           }
-          return PreviewAdmitOutcome(
-            wipe: kind,
-            status: status,
-            contestedPorts: contested,
-          );
+          return PreviewAdmitOutcome(status: status, contestedPorts: contested);
         } catch (e) {
           AbLog.error(
             'preview',
@@ -181,10 +166,7 @@ class PreviewSiteData {
     try {
       if (isDemoMode()) return PreviewClearStatus.refused;
       final status = await _runWipe(recordLateSuccess: true);
-      if (status != PreviewClearStatus.failed) {
-        await store.replace(_settled());
-        _wipes.value++;
-      }
+      if (status != PreviewClearStatus.failed) await _recordClear();
       return status;
     } catch (e) {
       AbLog.error(
@@ -203,8 +185,7 @@ class PreviewSiteData {
     // Pages still open at sign-out can write after the clear, so the map is
     // left unknown rather than clean and the next admission clears again. It
     // also keeps account-derived owner ids off the disk.
-    await store.forget();
-    if (await store.read() != null) {
+    if (!await store.forget()) {
       throw StateError('preview origin owners survived sign-out');
     }
     if (status == PreviewClearStatus.failed) {
@@ -235,23 +216,19 @@ class PreviewSiteData {
     _straggler = null;
   }
 
+  // A page can be dropped while earlier ones are still being waited for, so
+  // wait until none is outstanding. Tracked retirements never throw.
   Future<void> _quiesce() async {
-    if (_retirements.isEmpty) return;
-    // A page can be dropped while earlier ones are still being waited for, so
-    // wait until none is outstanding.
     Future<void> drain() async {
       while (_retirements.isNotEmpty) {
         await Future.wait(_retirements.keys.toList());
       }
     }
 
-    try {
-      await drain().timeout(
-        wipeTimeout,
-        onTimeout: () =>
-            AbLog.warn('preview', 'webview retirement timed out'),
-      );
-    } catch (_) {}
+    await drain().timeout(
+      wipeTimeout,
+      onTimeout: () => AbLog.warn('preview', 'webview retirement timed out'),
+    );
   }
 
   Future<PreviewClearStatus> _runWipe({required bool recordLateSuccess}) async {
@@ -281,8 +258,7 @@ class PreviewSiteData {
           .then((s) async {
             if (!recordLateSuccess || s == PreviewClearStatus.failed) return;
             if (fence != _stragglerFence) return;
-            await store.replace(_settled());
-            _wipes.value++;
+            await _recordClear();
           });
       return PreviewClearStatus.failed;
     } catch (e) {
@@ -326,11 +302,16 @@ class PreviewSiteData {
     return status;
   }
 
+  Future<void> _recordClear([Map<int, String> entries = const {}]) async {
+    await store.replace(_settled(entries));
+    _wipes.value++;
+  }
+
   /// The map a successful clear leaves: live origins, then [entries]. A port a
   /// page was retired from during the clear reads unsettled unless it is still
   /// attributed to that page's own owner, because the clear could not wait for
   /// that page and what it wrote may have survived.
-  Map<int, String> _settled([Map<int, String> entries = const {}]) {
+  Map<int, String> _settled(Map<int, String> entries) {
     final out = {..._liveOwners(), ...entries};
     for (final r in _lateRetirements ?? const <PreviewAdmission>[]) {
       if (out[r.port] != r.owner) {

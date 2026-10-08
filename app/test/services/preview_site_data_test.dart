@@ -40,8 +40,8 @@ void main() {
       (port: 4000, owner: 'b'),
     ]);
 
-    expect(outcome.wipe, PreviewAdmitWipe.unknownHistory);
     expect(outcome.status, PreviewClearStatus.cleared);
+    expect(outcome.contestedPorts, isEmpty);
     expect(recorder.calls, 1);
     expect(await store.read(), {3000: 'a', 4000: 'b'});
     expect(site.wipes.value, 1);
@@ -53,7 +53,7 @@ void main() {
 
     final outcome = await site.admit([(port: 3000, owner: 'a')]);
 
-    expect(outcome.wipe, PreviewAdmitWipe.none);
+    expect(outcome.status, isNull);
     expect(recorder.calls, 0);
     expect(await store.read(), {3000: 'a'});
     expect(site.wipes.value, 0);
@@ -65,7 +65,7 @@ void main() {
 
     final outcome = await site.admit([(port: 4000, owner: 'b')]);
 
-    expect(outcome.wipe, PreviewAdmitWipe.none);
+    expect(outcome.status, isNull);
     expect(recorder.calls, 0);
     expect(await store.read(), {3000: 'a', 4000: 'b'});
   });
@@ -79,7 +79,6 @@ void main() {
 
       final outcome = await site.admit([(port: 3000, owner: 'b')]);
 
-      expect(outcome.wipe, PreviewAdmitWipe.ownerChanged);
       expect(outcome.contestedPorts, {3000});
       expect(recorder.calls, 1);
       expect(await store.read(), {5000: 'c', 3000: 'b'});
@@ -96,7 +95,7 @@ void main() {
     expect((await store.read())![5000], PreviewOriginOwnerStore.unsettled);
 
     final outcome = await site.admit([(port: 5000, owner: 'c')]);
-    expect(outcome.wipe, PreviewAdmitWipe.ownerChanged);
+    expect(outcome.contestedPorts, {5000});
     expect(recorder.calls, 2);
   });
 
@@ -421,17 +420,16 @@ void main() {
     await store.replace({3000: 'a'});
 
     final demo = make(demo: true);
-    expect((await demo.admit([(port: 3000, owner: 'b')])).wipe,
-        PreviewAdmitWipe.none);
+    expect((await demo.admit([(port: 3000, owner: 'b')])).status, isNull);
 
     final real = make();
     final outcome = await real.admit([(port: 3000, owner: kDemoProjectId)]);
     expect(
-      (await real.admit([(port: 3000, owner: 'dev-1.$kDemoProjectId')])).wipe,
-      PreviewAdmitWipe.none,
+      (await real.admit([(port: 3000, owner: 'dev-1.$kDemoProjectId')])).status,
+      isNull,
     );
 
-    expect(outcome.wipe, PreviewAdmitWipe.none);
+    expect(outcome.status, isNull);
     expect(recorder.calls, 0);
     expect(await store.read(), {3000: 'a'});
   });

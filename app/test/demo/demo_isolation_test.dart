@@ -321,7 +321,7 @@ void main() {
     final store = PreviewOriginOwnerStore();
 
     await store.replace({3000: 'real-project', 4000: kDemoProjectId});
-    await store.merge({5000: 'dev-1.$kDemoProjectId'});
+    await store.merge({3000: 'real-project'}, {5000: 'dev-1.$kDemoProjectId'});
 
     expect(await store.read(), {3000: 'real-project'});
   });
@@ -340,7 +340,7 @@ void main() {
 
     final outcome = await site.admit([(port: 3000, owner: 'other-project')]);
 
-    expect(outcome.wipe, PreviewAdmitWipe.none);
+    expect(outcome.status, isNull);
     expect(await site.clearManually(), PreviewClearStatus.refused);
     expect(recorder.calls, 0);
     expect(await store.read(), {3000: 'real-project'});

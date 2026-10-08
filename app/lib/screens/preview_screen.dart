@@ -287,6 +287,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final controller = WebViewController();
     // Callbacks act only while this controller is the tab's current one: a
     // retiring page must never write into its successor's state.
+    void Function(JavaScriptMessage) whileCurrent(
+      void Function(int port, String message) handle,
+    ) => (msg) {
+      if (_stateOf(port, controller) != null) handle(port, msg.message);
+    };
     controller
       // Without this the webview paints white during page load/navigation — a
       // hard flash in a near-black UI. macOS honours it only where its WKWebView
@@ -299,24 +304,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // would miss the very load this controller is being built for.
       ..addJavaScriptChannel(
         'AntgridElementPicker',
-        onMessageReceived: (msg) {
-          if (_stateOf(port, controller) == null) return;
-          _onElementPicked(port, msg.message);
-        },
+        onMessageReceived: whileCurrent(_onElementPicked),
       )
       ..addJavaScriptChannel(
         'AntgridScreenshotCapture',
-        onMessageReceived: (msg) {
-          if (_stateOf(port, controller) == null) return;
-          _onScreenshotMessage(port, msg.message);
-        },
+        onMessageReceived: whileCurrent(_onScreenshotMessage),
       )
       ..addJavaScriptChannel(
         'AntgridContextMenu',
-        onMessageReceived: (msg) {
-          if (_stateOf(port, controller) == null) return;
-          _onContextMenuMessage(port, msg.message);
-        },
+        onMessageReceived: whileCurrent(_onContextMenuMessage),
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -402,13 +398,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// still clears.
   Map<int, String> _liveOrigins() => {
     for (final s in _tabStates.values)
+      // originPort and lastAppliedOwner are set together, and a built
+      // controller's loadedOwner is always its lastAppliedOwner.
       if (s.originPort > 0 &&
-          s.lastAppliedOwner != null &&
           (s.controller != null || s.pendingLoadUrl != null))
-        s.originPort:
-            s.controller != null ||
-                s.loadedOwner == null ||
-                s.loadedOwner == s.lastAppliedOwner
+        s.originPort: (s.loadedOwner ?? s.lastAppliedOwner) == s.lastAppliedOwner
             ? s.lastAppliedOwner!
             : PreviewOriginOwnerStore.unsettled,
   };
@@ -420,7 +414,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// until GC finalizes the controller, so a dropped page would keep running
   /// and writing into the shared profile straight through a clear. Blanking it
   /// is the portable way to stop it, and clears wait for the result.
-  void _retire(WebViewController c, _TabWebViewState s) {
+  void _retire(_TabWebViewState s) {
+    final c = s.controller;
+    if (c == null) return;
     final owner = s.loadedOwner;
     _siteData.trackRetirement(
       Future.sync(() => c.loadHtmlString(_blankDocument))
@@ -472,8 +468,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _siteData.wipes.removeListener(_onSiteDataWiped);
     _removeLiveOrigins();
     for (final s in _tabStates.values) {
-      final c = s.controller;
-      if (c != null) _retire(c, s);
+      _retire(s);
     }
     _tabStates.clear();
     super.dispose();
@@ -721,21 +716,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         if (b.state.originPort > 0)
           (port: b.state.originPort, owner: b.state.lastAppliedOwner!),
     ];
-    PreviewAdmitOutcome outcome;
-    try {
-      // Awaited even when empty: this starts during build and must not call
-      // setState synchronously.
-      outcome = requests.isEmpty
-          ? await Future.value(const PreviewAdmitOutcome.none())
-          : await _siteData.admit(requests);
-    } on Object catch (e) {
-      AbLog.error(
-        'PreviewScreen',
-        'preview admission failed',
-        fields: {'error': '$e'},
-      );
-      outcome = const PreviewAdmitOutcome.none();
-    }
+    // Awaited even when empty: this starts during build and must not call
+    // setState synchronously.
+    final outcome = requests.isEmpty
+        ? await Future.value(const PreviewAdmitOutcome.none())
+        : await _siteData.admit(requests);
     if (!mounted) return;
     final ready = batch
         .where(
@@ -759,7 +744,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         }
       });
     }
-    if (outcome.wipe != PreviewAdmitWipe.ownerChanged) return;
     final ports = <int>{
       for (final b in batch)
         if (outcome.contestedPorts.contains(b.state.originPort)) b.port,
@@ -768,28 +752,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final phrase = ports.length == 1
         ? 'port ${ports.single} was'
         : 'ports ${ports.join(', ')} were';
-    switch (outcome.status) {
-      case PreviewClearStatus.cleared:
-        showAbToast(
-          context,
-          'Preview site data cleared: $phrase last used by another project',
-        );
-      case PreviewClearStatus.partial:
-        showAbToast(
-          context,
-          'Preview site data partly cleared: $phrase last used by another '
-          'project',
-        );
-      case PreviewClearStatus.failed:
-        showAbToast(
-          context,
-          "Couldn't clear site data another project left: $phrase last used "
-          'by it',
-        );
-      case PreviewClearStatus.refused:
-      case null:
-        break;
-    }
+    final message = switch (outcome.status) {
+      PreviewClearStatus.cleared =>
+        'Preview site data cleared: $phrase last used by another project',
+      PreviewClearStatus.partial =>
+        'Preview site data partly cleared: $phrase last used by another '
+            'project',
+      PreviewClearStatus.failed =>
+        "Couldn't clear site data another project left: $phrase last used "
+            'by it',
+      PreviewClearStatus.refused || null => null,
+    };
+    if (message != null) showAbToast(context, message);
   }
 
   void _onSiteDataWiped() {
@@ -802,6 +776,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         detached('PreviewScreen', 'reload after site data clear', c.reload);
       }
     }
+    if (_pickerActiveForPort == null && _drawActiveForPort == null) return;
     setState(() {
       _pickerActiveForPort = null;
       _drawActiveForPort = null;
@@ -913,8 +888,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       if (tab.port == state.activeTabId) {
         _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
       }
-      final previous = tabState.controller;
-      if (previous != null) _retire(previous, tabState);
+      _retire(tabState);
       tabState.lastAppliedOwner = tab.owner;
       tabState.originPort = Uri.tryParse(initialUrl)?.port ?? 0;
       // The previous page must not stay mounted while admission is pending.
@@ -934,8 +908,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final openPorts = {for (final tab in state.tabs) tab.port};
     _tabStates.removeWhere((port, s) {
       if (openPorts.contains(port)) return false;
-      final c = s.controller;
-      if (c != null) _retire(c, s);
+      _retire(s);
       return true;
     });
     // A closed tab's controller is gone — neither the picker nor the draw
@@ -1950,6 +1923,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     );
   }
 
+  static const _loadingRule = Positioned(
+    top: 0,
+    left: 0,
+    right: 0,
+    child: IgnorePointer(child: AbProgressRule(fraction: null)),
+  );
+
   Widget _buildTabWebView(PreviewTab tab) {
     final tabState = _tabStates[tab.port];
     final controller = tabState?.controller;
@@ -1957,16 +1937,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       if (tabState?.pendingLoadUrl == null) return const SizedBox.shrink();
       return ColoredBox(
         color: context.antgrid.bgDeepest,
-        child: const Stack(
-          children: [
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: IgnorePointer(child: AbProgressRule(fraction: null)),
-            ),
-          ],
-        ),
+        child: const Stack(children: [_loadingRule]),
       );
     }
     final webview = ColoredBox(
@@ -2033,13 +2004,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return Stack(
       children: [
         content,
-        if (tabState?.loading ?? false)
-          const Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(child: AbProgressRule(fraction: null)),
-          ),
+        if (tabState?.loading ?? false) _loadingRule,
       ],
     );
   }

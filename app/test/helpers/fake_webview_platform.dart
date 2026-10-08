@@ -5,7 +5,21 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart' show addTearDown;
 import 'package:webview_platform_interface/webview_platform_interface.dart';
+
+/// Installs a fresh [RecordingWebViewPlatform] for the current test.
+RecordingWebViewPlatform installRecordingWebViewPlatform() {
+  final original = WebViewPlatform.instance;
+  final platform = RecordingWebViewPlatform();
+  WebViewPlatform.instance = platform;
+  // The interface's setter rejects null, so a run that started with no
+  // platform installed leaves the fake behind rather than restoring it.
+  addTearDown(() {
+    if (original != null) WebViewPlatform.instance = original;
+  });
+  return platform;
+}
 
 /// A webview platform that records every controller it creates and every load
 /// each one is asked for.
