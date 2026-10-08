@@ -1,4 +1,4 @@
-import { toPosixPath } from "./hooks";
+import { toPosixPath } from "../launch-inject";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
 // Codex does NOT pass its own environment down to an MCP server — a probe
@@ -13,7 +13,8 @@ const MCP_ENV_VARS = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID
  * forward slashes so the TOML parser never sees an escape, then `JSON.stringify`
  * — a valid TOML basic string for the command and a valid TOML array for the
  * rest. (`tomlBasicString` is for the hooks path, which hand-escapes a command
- * already rendered as a shell line.)
+ * already rendered as a shell line.) None of these keys feeds a `hooks.*`
+ * fingerprint, so every `trusted_hash` stays valid.
  */
 export function inject({ mcpCommand }: McpInjectCtx): LaunchAugmentation {
   const command = JSON.stringify(toPosixPath(mcpCommand.binary));
