@@ -102,22 +102,6 @@ void main() {
     await tester.pump();
   }
 
-  // Both checkouts are left viewing a file, so the assertion distinguishes
-  // "unwound the right one" from "unwound one of them".
-  testWidgets('back leaves the git view of the session checkout, not main', (
-    tester,
-  ) async {
-    await pumpGitPanel(tester);
-    worktree.gitViewFile('worktree.dart');
-    main.gitViewFile('main.dart');
-    await tester.pump();
-
-    expect(resolveBackIntent(c), isTrue);
-
-    expect(worktree.currentState.git.viewingPath, isNull);
-    expect(main.currentState.git.viewingPath, 'main.dart');
-  });
-
   testWidgets('back closes the diff of the session checkout, not main', (
     tester,
   ) async {

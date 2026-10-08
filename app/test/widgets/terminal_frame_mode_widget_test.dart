@@ -44,11 +44,13 @@ import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/util/terminal_links.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/clipboard.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
 import 'package:antgrid/widgets/terminal_history_view.dart';
 import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
+import 'package:antgrid/widgets/terminal_modifier_keys.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
@@ -522,6 +524,112 @@ void main() {
       // The pre-existing generic copy, still reachable, must not show
       // alongside the protocol's own reason.
       expect(find.text("couldn't load this terminal"), findsNothing);
+    });
+  });
+
+  // Ctrl+C over a selection copies it and drops it — the highlight going away
+  // is the only sign the copy happened — and nothing reaches the PTY. The
+  // touch key bar's sticky Ctrl is the same chord on a phone.
+  group('Ctrl+C over a selection', () {
+    const selected = GhosttyTerminalSelectionContent(
+      selection: GhosttyTerminalSelection(
+        base: GhosttyTerminalCellPosition(row: 0, col: 0),
+        extent: GhosttyTerminalCellPosition(row: 0, col: 4),
+      ),
+      text: 'hello',
+    );
+
+    Future<GhosttyTerminalView> pumpSelected(
+      WidgetTester tester,
+      TerminalTab tab,
+    ) async {
+      final h = await _makeService(addTearDown);
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: 300,
+            height: 400,
+            child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+          ),
+          terminalState: Stream.value(_stateWith()),
+          agentTab: tab,
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byType(GhosttyTerminalView));
+      // Past the double-tap window, so the focusing tap leaves no timer.
+      await tester.pump(kDoubleTapTimeout * 2);
+      final view = tester.widget<GhosttyTerminalView>(
+        find.byType(GhosttyTerminalView),
+      );
+      view.onSelectionContentChanged!(selected);
+      await tester.pump();
+      expect(find.byType(SendToAgentButton), findsOneWidget);
+      return view;
+    }
+
+    testWidgets('desktop: copies the selection, clears it, sends no ^C', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final copied = captureClipboard(tester);
+        final pty = <int>[];
+        final tab = _tab(id: 't1', type: 'service', pty: pty);
+        await pumpSelected(tester, tab);
+        pty.clear();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+
+        expect(copied, ['hello']);
+        expect(find.byType(SendToAgentButton), findsNothing);
+        expect(pty, isNot(contains(0x03)));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    // Cmd+C and the context menu's Copy are handled inside the view and reach
+    // the wrapper only through this callback.
+    testWidgets('the engine copy paths clear the selection too', (
+      tester,
+    ) async {
+      final copied = captureClipboard(tester);
+      final tab = _tab(id: 't1', type: 'service');
+      final view = await pumpSelected(tester, tab);
+
+      await view.onCopySelection!('hello');
+      await tester.pump();
+
+      expect(copied, ['hello']);
+      expect(find.byType(SendToAgentButton), findsNothing);
+    });
+
+    testWidgets('touch: sticky Ctrl then c copies instead of interrupting', (
+      tester,
+    ) async {
+      debugHasPhysicalKeyboardOverride = false;
+      addTearDown(() => debugHasPhysicalKeyboardOverride = null);
+      final copied = captureClipboard(tester);
+      final pty = <int>[];
+      final tab = _tab(id: 't1', type: 'service', pty: pty);
+      await pumpSelected(tester, tab);
+
+      final bar = tester.widget<TerminalQuickActionsBar>(
+        find.byType(TerminalQuickActionsBar),
+      );
+      bar.onToggleModifier(TerminalModifierKey.ctrl);
+      await tester.pump();
+      bar.onSendInput('c');
+      await tester.pump();
+
+      expect(copied, ['hello']);
+      expect(find.byType(SendToAgentButton), findsNothing);
+      // The latch is spent on the copy, so the next key types plainly.
+      expect(bar.modifiers.value.ctrl, isFalse);
     });
   });
 
@@ -2584,7 +2692,7 @@ void main() {
       expect(files.searchLine, 12);
     });
 
-    testWidgets('a path link with no workspace menu hands its tab to the shell', (
+    testWidgets('a path link with no shell mounted hands its tab over', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2597,7 +2705,7 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(TerminalViewWrapper)),
       );
-      expect(container.read(workspaceMenuControlProvider), isNull);
+      expect(container.read(revealWorkspaceViewControlProvider), isNull);
       const focused = LocalProject('p');
       container.read(selectedTargetProvider.notifier).set(focused);
 
@@ -2649,7 +2757,7 @@ void main() {
       );
     });
 
-    testWidgets('a path link reveals through the workspace menu when present', (
+    testWidgets('a path link reveals through the shell when one is mounted', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2664,8 +2772,8 @@ void main() {
       );
       final revealed = <WorkspaceView>[];
       container
-          .read(workspaceMenuControlProvider.notifier)
-          .set((active: null, reveal: revealed.add));
+          .read(revealWorkspaceViewControlProvider.notifier)
+          .set(revealed.add);
 
       unawaited(
         _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),

@@ -1,6 +1,7 @@
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/workspace_view.dart';
-import 'package:antgrid/providers/providers.dart' show preferencesServiceProvider;
+import 'package:antgrid/providers/providers.dart'
+    show preferencesServiceProvider;
 import 'package:antgrid/providers/session_workspace_state.dart';
 import 'package:antgrid/services/preferences_service.dart';
 import 'package:antgrid/storage/session_layout_store.dart';
@@ -22,7 +23,7 @@ void main() {
             initialized: true,
             selectedView: WorkspaceView.terminals,
             panelMode: 'contextHidden',
-            pushedTerminalId: 'terminal-1',
+            selectedTerminalId: 'terminal-1',
           ),
         );
 
@@ -31,7 +32,7 @@ void main() {
       WorkspaceView.terminals,
     );
     expect(
-      container.read(sessionWorkspaceStateProvider(first)).pushedTerminalId,
+      container.read(sessionWorkspaceStateProvider(first)).selectedTerminalId,
       'terminal-1',
     );
     expect(
@@ -127,47 +128,59 @@ void main() {
     // `contextExpanded` leaves no agent panel and no affordance to restore one
     // but its own toggle, so it is a choice a session makes for itself and
     // never a layout the next session inherits.
-    test('contextExpanded is downgraded on the way into a new session', () async {
-      final service = await serviceFor(
-        'project-a',
-        const ProjectPreferences(panelMode: PanelModeNames.contextExpanded),
-      );
-      final container = containerFor(service);
+    test(
+      'contextExpanded is downgraded on the way into a new session',
+      () async {
+        final service = await serviceFor(
+          'project-a',
+          const ProjectPreferences(panelMode: PanelModeNames.contextExpanded),
+        );
+        final container = containerFor(service);
 
-      expect(
-        container
-            .read(
-              sessionWorkspaceStateProvider((
-                entryId: 'project-a',
-                sessionId: 's1',
-              )),
-            )
-            .panelMode,
-        PanelModeNames.normal,
-      );
-    });
+        expect(
+          container
+              .read(
+                sessionWorkspaceStateProvider((
+                  entryId: 'project-a',
+                  sessionId: 's1',
+                )),
+              )
+              .panelMode,
+          PanelModeNames.normal,
+        );
+      },
+    );
 
     // The divider is per session, and the project value is a STARTING point
     // rather than a shared one: dragging in one session must leave every other
     // session — and the project's own seed — exactly where they were. Sharing
     // it is what made switching sessions resize the agent terminal.
-    test('a drag moves one session and neither its sibling nor the seed', () async {
-      final service = await serviceFor(
-        'project-a',
-        const ProjectPreferences(splitRatio: 0.5),
-      );
-      final container = containerFor(service);
-      const dragged = (entryId: 'project-a', sessionId: 'dragged');
-      const sibling = (entryId: 'project-a', sessionId: 'sibling');
+    test(
+      'a drag moves one session and neither its sibling nor the seed',
+      () async {
+        final service = await serviceFor(
+          'project-a',
+          const ProjectPreferences(splitRatio: 0.5),
+        );
+        final container = containerFor(service);
+        const dragged = (entryId: 'project-a', sessionId: 'dragged');
+        const sibling = (entryId: 'project-a', sessionId: 'sibling');
 
-      container
-          .read(sessionWorkspaceStateProvider(dragged).notifier)
-          .update((s) => s.copyWith(splitRatio: 0.8));
+        container
+            .read(sessionWorkspaceStateProvider(dragged).notifier)
+            .update((s) => s.copyWith(splitRatio: 0.8));
 
-      expect(container.read(sessionWorkspaceStateProvider(dragged)).splitRatio, 0.8);
-      expect(container.read(sessionWorkspaceStateProvider(sibling)).splitRatio, 0.5);
-      expect(service.current.splitRatio, 0.5);
-    });
+        expect(
+          container.read(sessionWorkspaceStateProvider(dragged)).splitRatio,
+          0.8,
+        );
+        expect(
+          container.read(sessionWorkspaceStateProvider(sibling)).splitRatio,
+          0.5,
+        );
+        expect(service.current.splitRatio, 0.5);
+      },
+    );
 
     // A remembered layout is the one the user themselves arranged, so it beats
     // the project seed outright — and it has to be readable SYNCHRONOUSLY, or
@@ -254,10 +267,7 @@ void main() {
       final container = containerFor(service);
 
       final state = container.read(
-        sessionWorkspaceStateProvider((
-          entryId: 'project-b',
-          sessionId: 's1',
-        )),
+        sessionWorkspaceStateProvider((entryId: 'project-b', sessionId: 's1')),
       );
 
       expect(state.initialized, isFalse);

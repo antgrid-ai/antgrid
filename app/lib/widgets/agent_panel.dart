@@ -268,7 +268,9 @@ class _OtherSessionsMenuItem extends ConsumerWidget {
       container.read(pendingAgentPageProvider.notifier).set(null);
       final target = waiting.target;
       if (target == null) {
-        container.read(revealHandlerTabProvider)?.call();
+        container
+            .read(revealWorkspaceViewControlProvider)
+            ?.call(WorkspaceView.handler);
         return;
       }
       container.read(activeSessionIdProvider.notifier).set(target);
@@ -278,7 +280,9 @@ class _OtherSessionsMenuItem extends ConsumerWidget {
       // and the handover below would stamp the session still in focus with a
       // destination picked for a different one.
       if (container.read(activeSessionIdProvider) != target) {
-        container.read(revealHandlerTabProvider)?.call();
+        container
+            .read(revealWorkspaceViewControlProvider)
+            ?.call(WorkspaceView.handler);
         return;
       }
       // A focus change cannot reveal the tab by calling: moving focus arms

@@ -3801,6 +3801,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
+        checkoutPath: runtime.checkout.path,
         git: runtime.cachedGitBranch
           ? {
               branch: runtime.cachedGitBranch,

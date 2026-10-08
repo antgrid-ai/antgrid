@@ -1409,6 +1409,11 @@ class HandlerState {
   /// exists precisely where no session state does.
   final HandlerEntitlement? entitlement;
 
+  /// False until this project's first `handler:status`. Before it an empty
+  /// [sessions] means "not told yet", not "nothing armed": a fresh service
+  /// starts empty, and only a status frame says which sessions are armed.
+  final bool heard;
+
   const HandlerState({
     this.defaultTool,
     this.lenses,
@@ -1422,9 +1427,10 @@ class HandlerState {
     this.pendingUndo = const {},
     this.pendingInstructions = const {},
     this.entitlement,
+    this.heard = true,
   });
 
-  const HandlerState.initial()
+  const HandlerState.initial({this.heard = true})
     : defaultTool = null,
       lenses = null,
       sessions = const {},
@@ -1564,6 +1570,7 @@ class HandlerState {
     HandlerEntitlement? entitlement,
     bool clearEntitlement = false,
     bool clearLenses = false,
+    bool? heard,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
@@ -1589,6 +1596,7 @@ class HandlerState {
       // fresh sign-in, and a gate that only ever latches on would outlive the
       // thing it describes with no frame able to correct it.
       entitlement: clearEntitlement ? null : (entitlement ?? this.entitlement),
+      heard: heard ?? this.heard,
     );
   }
 }

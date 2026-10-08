@@ -6,7 +6,7 @@
 import 'dart:async';
 
 import 'package:antgrid/design/widgets/ab_toast.dart';
-import 'package:antgrid/models/handler_state.dart' show HandlerEscalation;
+import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
@@ -62,6 +62,25 @@ Future<void> _withShell(
       tester,
       extraOverrides: [
         handlerEscalationsProvider.overrideWith((ref) => escalations),
+        // An escalation only exists for an armed session, and the Handler tab
+        // is offered only for one — so the session it came from is armed.
+        handlerStateProvider.overrideWith(
+          (ref) => Stream.value(
+            const HandlerState.initial().copyWith(
+              sessions: {
+                'session-9': HandlerSessionState(
+                  terminalId: 'session-9',
+                  runState: HandlerRunState.needsYou,
+                  pendingEscalations: 1,
+                  armedAt: 1,
+                  goal: 'goal',
+                  backlog: const [],
+                  escalations: const [],
+                ),
+              },
+            ),
+          ),
+        ),
       ],
     );
     // The applier compares the resolved target against this; the harness
@@ -91,9 +110,10 @@ void main() {
         addTearDown(sub.close);
 
         final toast = tester.widget<AbToast>(find.byType(AbToast));
-        expect(toast.actionLabel, 'Open');
+        expect(toast.actionLabel, isNull);
+        expect(toast.onTap, isNotNull);
 
-        await tester.tap(find.text('Open'));
+        await tester.tap(find.byType(AbToast));
         await _settle(tester);
 
         expect(container.read(activeSessionIdProvider), _escalation.terminalId);
@@ -138,22 +158,22 @@ void main() {
     await _withShell(tester, controller.stream, (container) async {
       controller.add((entryId: _entryId, message: _escalation));
       await _settle(tester);
-      await tester.tap(find.text('Open'));
+      await tester.tap(find.byType(AbToast));
       await _settle(tester);
       expect(container.read(activeSessionIdProvider), 'session-9');
       container.read(activeSessionIdProvider.notifier).set(null);
 
       controller.add((entryId: _entryId, message: second));
       await _settle(tester);
-      await tester.tap(find.text('Open'));
+      await tester.tap(find.byType(AbToast));
       await _settle(tester);
 
       expect(container.read(activeSessionIdProvider), 'session-9');
     });
   });
 
-  // The action is offered only when the route RESOLVES, not merely when an
-  // entryId is present: a chip that opens nothing is worse than no chip.
+  // The card is tappable only when the route RESOLVES, not merely when an
+  // entryId is present: a card that opens nothing is worse than a plain one.
   testWidgets('an unroutable notification keeps the plain toast', (
     tester,
   ) async {
@@ -171,7 +191,7 @@ void main() {
     ) async {
       final toast = tester.widget<AbToast>(find.byType(AbToast));
       expect(toast.actionLabel, isNull);
-      expect(find.text('Open'), findsNothing);
+      expect(toast.onTap, isNull);
 
       // The plain toast keeps `showAbToastOverlay`'s 4s default; only the
       // actionable one is held open long enough to be reached for.

@@ -43,25 +43,16 @@ Future<void> onIOS(Future<void> Function() body) async {
   }
 }
 
-/// Bounded pumps rather than `pumpAndSettle`: the shell always has something
-/// animating (loading indicators, the terminal cursor), so settling never
-/// terminates. Long enough to cover the 300ms page animation either way.
-Future<void> settle(WidgetTester tester) async {
-  for (var i = 0; i < 4; i++) {
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-}
-
 /// A rightward swipe across the middle of the screen — deliberately NOT from
 /// the edge, which is the whole point of the change.
 Future<void> swipeRight(WidgetTester tester) async {
   await tester.drag(find.byType(PageView), const Offset(400, 0));
-  await settle(tester);
+  await settleShell(tester);
 }
 
 Future<void> swipeLeft(WidgetTester tester) async {
   await tester.drag(find.byType(PageView), const Offset(-400, 0));
-  await settle(tester);
+  await settleShell(tester);
 }
 
 void main() {
@@ -74,7 +65,7 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     final c = await pumpWorkspaceShell(tester);
-    await settle(tester);
+    await settleShell(tester);
     return c;
   }
 
@@ -117,7 +108,7 @@ void main() {
       // Bouncing applies friction past the edge, so the drag has to be longer
       // than the equivalent Android one to clear the same threshold.
       await tester.drag(find.byType(PageView), const Offset(700, 0));
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);
     });
@@ -150,7 +141,7 @@ void main() {
           overscroll: -40,
         ).dispatch(inner);
       }
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsNothing);
     });
@@ -203,7 +194,7 @@ void main() {
       expect(c.read(visibleWorkspaceViewProvider), isNotNull);
 
       expect(resolveBackIntent(c), isTrue);
-      await settle(tester);
+      await settleShell(tester);
       expect(c.read(agentSurfaceVisibleProvider), isTrue);
 
       await swipeRight(tester);
@@ -211,7 +202,7 @@ void main() {
 
       // Back closes the drawer, mirroring the swipe that opened it.
       expect(resolveBackIntent(c), isTrue);
-      await settle(tester);
+      await settleShell(tester);
       expect(find.byType(ProjectsDrawer), findsNothing);
     });
   });
@@ -243,7 +234,7 @@ void main() {
       // ScaffoldState behind the drawer any more.
       expect(c.read(openDrawerProvider), isNotNull);
       c.read(openDrawerProvider)!();
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);
     });
@@ -259,11 +250,11 @@ void main() {
       final c = await pumpMobile(tester);
 
       c.read(openDrawerProvider)!();
-      await settle(tester);
+      await settleShell(tester);
       expect(find.byType(ProjectsDrawer), findsOneWidget);
 
       c.read(openDrawerProvider)!();
-      await settle(tester);
+      await settleShell(tester);
       expect(find.byType(ProjectsDrawer), findsNothing);
     });
   });
@@ -282,16 +273,16 @@ void main() {
       c
           .read(workbenchSurfaceProvider.notifier)
           .set(WorkbenchSurface.newSession);
-      await settle(tester);
+      await settleShell(tester);
       expect(find.byType(AgentPanel), findsNothing);
 
       c.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
-      await settle(tester);
+      await settleShell(tester);
       expect(find.byType(AgentPanel), findsOneWidget);
 
       expect(c.read(openDrawerProvider), isNotNull);
       await tester.tap(find.byTooltip('Projects'));
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);
     });
@@ -309,7 +300,7 @@ void main() {
       // is beneath the overscroll route, so only the fling detector can answer
       // it — which is what a wide terminal leaves the user with.
       await tester.fling(find.byType(AgentPanel), const Offset(44, 0), 1200);
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);
     });
@@ -327,7 +318,7 @@ void main() {
       expect(c.read(agentSurfaceVisibleProvider), isFalse);
 
       await tester.fling(find.byType(PageView), const Offset(200, 0), 1200);
-      await settle(tester);
+      await settleShell(tester);
 
       expect(c.read(agentSurfaceVisibleProvider), isTrue);
       expect(find.byType(ProjectsDrawer), findsNothing);
@@ -338,7 +329,7 @@ void main() {
   /// chain, where the PageView is covered and can no longer report a step back.
   Future<void> flingInDrawer(WidgetTester tester) async {
     await tester.fling(find.byType(ProjectsDrawer), const Offset(200, 0), 1200);
-    await settle(tester);
+    await settleShell(tester);
   }
 
   testWidgets('a fling inside the open drawer offers to close the app', (
@@ -355,7 +346,7 @@ void main() {
 
       // Declining leaves the app exactly where it was.
       await tester.tap(find.text('Cancel'));
-      await settle(tester);
+      await settleShell(tester);
       expect(find.text('Close Antgrid?'), findsNothing);
       expect(find.byType(ProjectsDrawer), findsOneWidget);
     });
@@ -375,7 +366,7 @@ void main() {
         const Offset(-200, 0),
         1200,
       );
-      await settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsNothing);
       expect(find.text('Close Antgrid?'), findsNothing);
@@ -394,7 +385,7 @@ void main() {
       await flingInDrawer(tester);
 
       await tester.tap(find.text('Close'));
-      await settle(tester);
+      await settleShell(tester);
 
       expect(exits, 1);
     });

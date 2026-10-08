@@ -967,16 +967,6 @@ final agentBarMountedProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(false),
 );
 
-/// Callback to reveal the Handler workspace tab (desktop: select the sidebar
-/// view; mobile: also swipe to the workspace page). Set by WorkspaceShell —
-/// same registration pattern as [switchToAgentProvider]. Typed VoidCallback
-/// rather than taking a `WorkspaceView`: the Handler tab is the only
-/// destination this hook exists to reach.
-final revealHandlerTabProvider =
-    NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
-      () => ValueController(null),
-    );
-
 /// Callback that resets every piece of account-derived in-memory state the
 /// always-mounted `ControlPlaneReaper` owns (agent catalog, paired/account
 /// agent lists, remote project labels/status, and the reaper's own advert

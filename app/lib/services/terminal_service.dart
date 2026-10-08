@@ -12,9 +12,11 @@ import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
 import 'terminal_screen_cache.dart';
+import 'touch_wheel_limiter.dart';
 
 class TerminalService {
   final ProjectSession session;
@@ -1836,6 +1838,9 @@ class TerminalService {
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
         needsFirstRun: msg.needsFirstRun,
+        // Carried when a frame omits it (an older bridge): a checkout's folder
+        // does not move between two status frames.
+        checkoutPath: msg.checkoutPath ?? _state.checkoutPath,
       ),
     );
     // A tab can leave the status without ever exiting — a service dropped
@@ -1884,6 +1889,8 @@ class TerminalService {
   void _materializeTab(TerminalTab tab) {
     final terminalId = tab.terminalId;
     if (!_materialized.add(terminalId)) return;
+    // Owned by the binding below, so it goes when the tab does.
+    final wheel = isMobilePlatform ? TouchWheelLimiter() : null;
 
     // Wire the Ghostty controller's user-input path back to the agent.
     //
@@ -1901,9 +1908,17 @@ class TerminalService {
         // becomes KeyEventResult.ignored, so the keystroke would escape into
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
-        final data = utf8.decode(bytes, allowMalformed: true);
+        var data = utf8.decode(bytes, allowMalformed: true);
+        if (wheel != null) {
+          final kept = wheel.filter(data);
+          if (kept == null) return true;
+          data = kept;
+        }
         final transform = _inputTransforms[terminalId];
-        sendInput(terminalId, transform == null ? data : transform(data));
+        final out = transform == null ? data : transform(data);
+        // Empty when the transform consumed the keystroke itself (a sticky
+        // Ctrl+C that copied a selection); there is nothing left to send.
+        if (out.isNotEmpty) sendInput(terminalId, out);
         return true;
       },
       onResize: null,
@@ -2168,6 +2183,29 @@ class TerminalService {
           );
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: terminalId));
     requestStart(terminalId, name: name);
+  }
+
+  /// Respawns [terminalId] in place. The bridge kills a live run under the
+  /// same id before spawning, so this is safe on a running terminal.
+  void restartTerminal(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    requestStart(terminalId, name: tab.name);
+  }
+
+  /// Clears [terminalId]'s screen by asking its shell to: the bridge's screen
+  /// is authoritative, so a local wipe would be repainted by the next frame.
+  /// cmd.exe has no clear-screen key and gets `cls`; bash, zsh, fish and
+  /// PowerShell's PSReadLine all clear on Ctrl+L.
+  bool clearTerminal(String terminalId) => sendInput(
+    terminalId,
+    clearScreenInputFor(_state.tabs[terminalId]?.shell),
+  );
+
+  /// What [clearTerminal] types into a terminal running [shell].
+  static String clearScreenInputFor(String? shell) {
+    final base = (shell ?? '').split(RegExp(r'[\\/]')).last.toLowerCase();
+    return base == 'cmd' || base == 'cmd.exe' ? 'cls\r' : '\x0c';
   }
 
   void _settlePendingTerminal(String terminalId) {

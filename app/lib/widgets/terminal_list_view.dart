@@ -1,37 +1,35 @@
+import 'package:flutter/gestures.dart'
+    show GestureBinding, PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/ab_status_tone.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
-import '../design/widgets/ab_toolbar.dart';
-import '../models/session_entry.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../models/terminal_models.dart';
-import '../navigation/back_intent.dart';
+import '../providers/ad_hoc_terminals.dart';
 import '../providers/providers.dart';
-import '../providers/sessions.dart';
 import '../providers/session_workspace_state.dart';
-import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
 import '../util/detached.dart';
-import 'terminal_detail_view.dart';
-import 'terminal_view_wrapper.dart';
-import 'workspace_tab_bar.dart';
+import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart';
+import 'terminal_view_wrapper.dart';
+import 'wheel_scroll.dart';
 
-/// List-first terminal view for non-agent terminals with pin support.
+/// The Terminals tab: the session's own shells, one at a time.
 ///
-/// Three view states:
-/// 1. **List only** (default) — all non-agent terminals with status/actions.
-/// 2. **Pinned** — pinned terminal output on top, remaining list on bottom.
-/// 3. **Push navigation** — fullscreen terminal output with back button.
+/// A tab strip of terminals across the top, and the active one filling the
+/// panel below a toolbar naming the folder it runs in.
 class TerminalListView extends ConsumerStatefulWidget {
   const TerminalListView({super.key});
 
@@ -44,68 +42,17 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   SessionUiKey? get _uiKey => ref.read(activeSessionUiKeyProvider);
 
-  SessionWorkspaceState get _uiState {
-    final key = _uiKey;
-    return key == null
-        ? const SessionWorkspaceState()
-        : ref.read(sessionWorkspaceStateProvider(key));
-  }
-
-  String? get _pinnedTerminalId => _uiState.pinnedTerminalId;
-  String? get _pushedTerminalId => _uiState.pushedTerminalId;
-
-  void _updateTerminalUi(
-    SessionWorkspaceState Function(SessionWorkspaceState) change,
-  ) {
+  void _setSelectedTerminal(String? id) {
     final key = _uiKey;
     if (key == null) return;
-    _updateTerminalUiFor(key, change);
-  }
-
-  void _updateTerminalUiFor(
-    SessionUiKey key,
-    SessionWorkspaceState Function(SessionWorkspaceState) change,
-  ) {
-    ref.read(sessionWorkspaceStateProvider(key).notifier).update(change);
-  }
-
-  void _setPinnedTerminal(String? id) => _updateTerminalUi(
-    (s) => s.copyWith(pinnedTerminalId: id, clearPinnedTerminalId: id == null),
-  );
-
-  void _setPushedTerminal(String? id) => _updateTerminalUi(
-    (s) => s.copyWith(pushedTerminalId: id, clearPushedTerminalId: id == null),
-  );
-
-  /// The PTYs carrying a checkout's `worktree.setup` transcript.
-  ///
-  /// Excluded from the list below because the ad-hoc filter selects by
-  /// EXCLUSION — a terminal typed neither `agent` nor `service` is "a user
-  /// terminal", and a setup transcript carries no type at all. Left in, a
-  /// provisioning log would list as an interactive tab the user can type into
-  /// and close, killing a live `bun install` mid-install. Named off
-  /// `SessionSetup.terminalId`, the bridge's own answer for which PTY carries
-  /// the transcript, rather than pattern-matched off the id.
-  Set<String> get _setupTerminalIds {
-    final sessions =
-        ref.watch(freshSessionsStateProvider)?.sessions ??
-        const <SessionEntry>[];
-    return {for (final s in sessions) ?s.setup?.terminalId};
-  }
-
-  List<TerminalTab> get _adHocTerminals {
-    final terminalState = ref.watch(terminalStateProvider);
-    final setupIds = _setupTerminalIds;
-    return terminalState.value?.tabs.values
-            .where(
-              (t) =>
-                  t.terminalId != 'agent' &&
-                  t.type != 'agent' &&
-                  t.type != 'service' &&
-                  !setupIds.contains(t.terminalId),
-            )
-            .toList() ??
-        [];
+    ref
+        .read(sessionWorkspaceStateProvider(key).notifier)
+        .update(
+          (s) => s.copyWith(
+            selectedTerminalId: id,
+            clearSelectedTerminalId: id == null,
+          ),
+        );
   }
 
   String _nextAdHocTerminalId(Set<String> existingIds) {
@@ -116,143 +63,159 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     return 'terminal-${DateTime.now().millisecondsSinceEpoch}';
   }
 
-  String _terminalName(String id) => 'Terminal ${id.split('-').last}';
+  void _createTerminal(TerminalService service, List<TerminalTab> tabs) {
+    if (tabs.length >= _maxAdHocTerminals) return;
+    final id = _nextAdHocTerminalId(tabs.map((t) => t.terminalId).toSet());
+    service.createAdHocTerminal(id, name: 'Terminal ${id.split('-').last}');
+    _setSelectedTerminal(id);
+  }
 
-  bool _backFromPushed() {
-    if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.terminals) {
-      return false;
+  void _select(TerminalService service, String id) {
+    // Focusing the terminal clears its unread mark.
+    service.setActiveTerminal(id);
+    _setSelectedTerminal(id);
+  }
+
+  /// Kills [id] and lands on its left neighbour, so closing a tab never leaves
+  /// the panel blank while others are still open.
+  ///
+  /// [shown] is about the tab on screen, which is not always a recorded pick —
+  /// after a restart it is the service's focus — and killing it must move on
+  /// just the same.
+  void _kill(
+    TerminalService service,
+    List<TerminalTab> tabs,
+    String id, {
+    required bool shown,
+  }) {
+    final index = tabs.indexWhere((t) => t.terminalId == id);
+    final rest = [
+      for (final t in tabs)
+        if (t.terminalId != id) t,
+    ];
+    if (rest.isEmpty) {
+      _setSelectedTerminal(null);
+    } else if (shown) {
+      _select(service, rest[(index - 1).clamp(0, rest.length - 1)].terminalId);
     }
-    if (_pushedTerminalId == null) return false;
-    _setPushedTerminal(null);
-    return true;
+    service.deleteTerminal(id);
   }
 
   @override
   Widget build(BuildContext context) {
     final key = ref.watch(activeSessionUiKeyProvider);
-    if (key != null) ref.watch(sessionWorkspaceStateProvider(key));
-    final terminalService = serviceWhenReady(ref, terminalServiceProvider);
-    if (terminalService == null) {
+    final selectedId = key == null
+        ? null
+        : ref.watch(sessionWorkspaceStateProvider(key)).selectedTerminalId;
+    final service = serviceWhenReady(ref, terminalServiceProvider);
+    if (service == null) {
       return const AbLoading(message: 'loading terminals...');
     }
-    // watch, not the `ref.read` in [_backFromPushed]: the `active` flag has to
-    // be recomputed when this tab goes on or off screen.
-    final onScreen =
-        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.terminals;
-
-    return BackHandler(
-      priority: BackPriority.pushedTerminal,
-      active: onScreen && _pushedTerminalId != null,
-      onBack: _backFromPushed,
-      child: _buildBody(terminalService, key),
+    final tabs = ref.watch(adHocTerminalsProvider);
+    // Only these fields: TerminalState has no ==, so watching the whole value
+    // repainted the pane on every emission.
+    final (:attach, :activeTerminalId, :checkoutPath) = ref.watch(
+      terminalStateProvider.select((s) {
+        final state = s.value;
+        return (
+          attach: state?.attach ?? CheckoutAttachStatus.unknown,
+          activeTerminalId: state?.activeTerminalId,
+          checkoutPath: state?.checkoutPath,
+        );
+      }),
     );
-  }
 
-  Widget _buildBody(TerminalService terminalService, SessionUiKey? key) {
-    final tabs = _adHocTerminals;
-    // `select` so the list is not rebuilt by per-terminal hydration churn on
-    // the same state object.
-    final attach = ref.watch(
-      terminalStateProvider.select(
-        (s) => s.value?.attach ?? CheckoutAttachStatus.unknown,
+    final picked = tabs.where((t) => t.terminalId == selectedId).firstOrNull;
+    // Only once the tab list is the bridge's answer: a reconnect starts a fresh
+    // service whose list is empty until agent:status, and forgetting the pick
+    // then would land the user on another terminal when the tabs come back.
+    if (selectedId != null &&
+        picked == null &&
+        key != null &&
+        attach == CheckoutAttachStatus.ready) {
+      // Deleted or gone from the bridge: forget it after this frame.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => ref
+            .read(sessionWorkspaceStateProvider(key).notifier)
+            .update((s) => s.copyWith(clearSelectedTerminalId: true)),
+      );
+    }
+    // No pick recorded for this session (none made yet, or no session key to
+    // file one under): the service's own focus, which New and a tab tap both
+    // move, then the first tab.
+    final active =
+        picked ??
+        tabs.where((t) => t.terminalId == activeTerminalId).firstOrNull ??
+        tabs.firstOrNull;
+
+    final atLimit = tabs.length >= _maxAdHocTerminals;
+
+    return ColoredBox(
+      color: context.antgrid.bgDeepest,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _TabStrip(
+            tabs: tabs,
+            activeId: active?.terminalId,
+            onSelect: (id) => _select(service, id),
+            onKill: (id) =>
+                _kill(service, tabs, id, shown: id == active?.terminalId),
+            onNew: atLimit ? null : () => _createTerminal(service, tabs),
+          ),
+          if (active != null)
+            _ActiveToolbar(
+              // Empty from an older bridge, which does not report it.
+              path: checkoutPath ?? '',
+              onClear: () => service.clearTerminal(active.terminalId),
+              onRestart: () => service.restartTerminal(active.terminalId),
+              onKill: () =>
+                  _kill(service, tabs, active.terminalId, shown: true),
+            ),
+          Expanded(
+            child: active != null
+                ? TerminalViewWrapper(
+                    // Switching tabs mounts the next terminal's own view
+                    // rather than retargeting this one's state at it.
+                    key: ValueKey(active.terminalId),
+                    tab: active,
+                    terminalService: service,
+                  )
+                : _buildEmptyOrAttaching(service, tabs, attach),
+          ),
+        ],
       ),
     );
-
-    // Push navigation — fullscreen terminal output.
-    if (_pushedTerminalId != null) {
-      final tab = tabs
-          .where((t) => t.terminalId == _pushedTerminalId)
-          .firstOrNull;
-      if (tab == null) {
-        final terminalState = ref.watch(terminalStateProvider);
-        final allTabs = terminalState.value?.tabs.values.toList() ?? [];
-        final fullTab = allTabs
-            .where((t) => t.terminalId == _pushedTerminalId)
-            .firstOrNull;
-        if (fullTab != null) {
-          return _buildPushedView(fullTab, terminalService);
-        }
-        if (key != null) {
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _updateTerminalUiFor(
-              key,
-              (s) => s.copyWith(clearPushedTerminalId: true),
-            ),
-          );
-        }
-        return const SizedBox.shrink();
-      }
-      return _buildPushedView(tab, terminalService);
-    }
-
-    // Pinned — split view.
-    if (_pinnedTerminalId != null) {
-      final pinnedTab = tabs
-          .where((t) => t.terminalId == _pinnedTerminalId)
-          .firstOrNull;
-      if (pinnedTab == null) {
-        if (key != null) {
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => _updateTerminalUiFor(
-              key,
-              (s) => s.copyWith(clearPinnedTerminalId: true),
-            ),
-          );
-        }
-        return const SizedBox.shrink();
-      }
-      final remaining = tabs
-          .where((t) => t.terminalId != _pinnedTerminalId)
-          .toList();
-      return _buildPinnedView(pinnedTab, remaining, terminalService, attach);
-    }
-
-    // List with header.
-    return Column(
-      children: [
-        _buildHeader(terminalService, tabs),
-        Expanded(
-          child: tabs.isEmpty
-              ? _buildEmptyOrAttaching(terminalService, tabs, attach)
-              : _buildList(tabs, terminalService),
-        ),
-      ],
-    );
   }
 
-  // ── Empty state ──────────────────────────────────────────────────────────
-
-  /// The nothing-to-list surface, forked on whether the checkout has actually
-  /// finished attaching.
-  ///
-  /// "No terminals" is a claim about the project, so it may only be made once
-  /// the app knows there are none; while terminals are still being attached the
-  /// same emptiness means nothing yet.
+  /// The nothing-to-show surface, forked on whether the checkout has actually
+  /// finished attaching: "No terminals" is a claim about the project, so it
+  /// may only be made once the app knows there are none.
   Widget _buildEmptyOrAttaching(
     TerminalService service,
     List<TerminalTab> tabs,
     CheckoutAttachStatus attach,
   ) {
+    final newButton = AbButton(
+      label: 'New Terminal',
+      leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
+      onTap: () => _createTerminal(service, tabs),
+    );
     switch (attach) {
       case CheckoutAttachStatus.attaching:
         return const AbEmptyState.compact(title: 'attaching terminals…');
       case CheckoutAttachStatus.failed:
         // Retry re-asks for the checkout's status, not one terminal's screen:
-        // a checkout-wide failure means no `agent:status` ever arrived, so
-        // there is no per-terminal pull to name. New Terminal stays — opening
-        // a shell works whether or not the re-ask lands.
+        // a checkout-wide failure means no `agent:status` ever arrived.
         return AbEmptyState.error(
           title: "Couldn't load terminals",
           subtitle: 'the agent has not answered yet',
-          // Wrapped, not a Row: the empty state centres its action inside the
-          // pane's own padding, and two buttons do not fit a pinned split at
-          // its narrowest.
+          // Wrapped, not a Row: two buttons do not fit a split view at its
+          // narrowest.
           action: Wrap(
             spacing: AbTokens.space8,
             alignment: WrapAlignment.center,
             children: [
-              // No in-flight label: the re-ask clears the verdict
-              // synchronously, so this arm is gone before one could paint.
               AbButton(
                 label: 'Retry',
                 color: context.antgrid.accent,
@@ -263,214 +226,516 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                 ),
                 compact: true,
               ),
-              _newTerminalButton(service, tabs),
+              newButton,
             ],
           ),
         );
       case CheckoutAttachStatus.unknown:
       case CheckoutAttachStatus.ready:
-        return _buildEmptyState(service, tabs);
+        return AbEmptyState(
+          icon: AbIcons.terminal,
+          title: 'No terminals running',
+          action: newButton,
+        );
+    }
+  }
+}
+
+/// The pills scroll sideways once they outgrow the pane: by swipe on touch,
+/// and on desktop by the wheel or the chevrons that appear at an edge with
+/// more pills past it. New stays pinned outside the scroll, so opening a
+/// terminal never means scrolling to find the button.
+class _TabStrip extends StatefulWidget {
+  const _TabStrip({
+    required this.tabs,
+    required this.activeId,
+    required this.onSelect,
+    required this.onKill,
+    required this.onNew,
+  });
+
+  final List<TerminalTab> tabs;
+  final String? activeId;
+  final ValueChanged<String> onSelect;
+  final ValueChanged<String> onKill;
+
+  /// Null at the terminal cap.
+  final VoidCallback? onNew;
+
+  @override
+  State<_TabStrip> createState() => _TabStripState();
+}
+
+class _TabStripState extends State<_TabStrip> {
+  final ScrollController _scroll = ScrollController();
+  final Map<String, GlobalKey> _pillKeys = {};
+  bool _canBack = false;
+  bool _canForward = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_syncEdges);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealActive());
+  }
+
+  @override
+  void didUpdateWidget(_TabStrip old) {
+    super.didUpdateWidget(old);
+    // A new tab lands at the end, past the edge on a crowded strip; a tab
+    // picked another way (a notification, a restored session) can be off it
+    // too. Either way the open terminal's pill should be the one on screen.
+    if (old.activeId != widget.activeId ||
+        old.tabs.length != widget.tabs.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealActive());
     }
   }
 
-  Widget _buildEmptyState(TerminalService service, List<TerminalTab> tabs) {
-    return AbEmptyState(
-      icon: AbIcons.terminal,
-      title: 'No terminals',
-      subtitle: 'Open a shell to interact with your project',
-      action: _newTerminalButton(service, tabs),
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _syncEdges() {
+    if (!mounted || !_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final back = pos.pixels > pos.minScrollExtent + 0.5;
+    final forward = pos.pixels < pos.maxScrollExtent - 0.5;
+    if (back != _canBack || forward != _canForward) {
+      setState(() {
+        _canBack = back;
+        _canForward = forward;
+      });
+    }
+  }
+
+  /// Scrolls the least distance that puts the active pill fully on screen,
+  /// and not at all when it already is.
+  void _revealActive() {
+    if (!mounted || !_scroll.hasClients) return;
+    final box = _pillKeys[widget.activeId]?.currentContext?.findRenderObject();
+    final viewport = box == null ? null : RenderAbstractViewport.maybeOf(box);
+    if (box != null && viewport != null) {
+      final pos = _scroll.position;
+      final atStart = viewport.getOffsetToReveal(box, 0).offset;
+      final atEnd = viewport.getOffsetToReveal(box, 1).offset;
+      final target = pos.pixels > atStart
+          ? atStart
+          : pos.pixels < atEnd
+          ? atEnd
+          : null;
+      if (target != null) {
+        _scrollTo(target, 'reveal active tab failed');
+      }
+    }
+    _syncEdges();
+  }
+
+  /// Moves most of a pane-width, keeping a sliver of the last view so the
+  /// eye has something to anchor on.
+  void _page(int direction) {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final target = pos.pixels + direction * pos.viewportDimension * 0.7;
+    _scrollTo(target, 'page tabs failed');
+  }
+
+  void _scrollTo(double target, String what) {
+    final pos = _scroll.position;
+    detached(
+      'TerminalTabStrip',
+      what,
+      () => _scroll.animateTo(
+        target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+        duration: AbTokens.motionSnap,
+        curve: Curves.easeOut,
+      ),
     );
   }
 
-  Widget _newTerminalButton(TerminalService service, List<TerminalTab> tabs) {
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
-    return AbButton(
-      label: 'New Terminal',
-      leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-      onTap: () {
-        final id = _nextAdHocTerminalId(existingIds);
-        final name = _terminalName(id);
-        service.createAdHocTerminal(id, name: name);
-        _setPushedTerminal(id);
+  /// A mouse wheel only scrolls vertically; on a sideways strip that is the
+  /// gesture a desktop user reaches for first.
+  ///
+  /// Sideways input is left to the strip's own Scrollable, which already
+  /// handles it — taking it here too would move the strip twice. The vertical
+  /// tick is claimed through the resolver so nothing around the strip also
+  /// scrolls on it.
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent || event.scrollDelta.dx != 0) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (e) {
+      if (!_scroll.hasClients) return;
+      jumpScrollBy(_scroll, (e as PointerScrollEvent).scrollDelta.dy);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final ids = {for (final t in widget.tabs) t.terminalId};
+    _pillKeys.removeWhere((id, _) => !ids.contains(id));
+    final desktop = !isMobilePlatform;
+
+    final pills = NotificationListener<ScrollMetricsNotification>(
+      // Fires when the content or viewport changes size (a tab added or
+      // killed, the pane resized), which the scroll listener alone misses.
+      onNotification: (_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _syncEdges());
+        return false;
       },
-    );
-  }
-
-  Widget _buildHeader(TerminalService service, List<TerminalTab> tabs) {
-    final adHocCount = tabs.length;
-    final atLimit = adHocCount >= _maxAdHocTerminals;
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
-    return AbToolbar.panel(
-      title: 'TERMINALS',
-      actions: [
-        AbIconButton(
-          icon: AbIcons.add,
-          tooltip: atLimit ? 'Max terminals reached' : 'New terminal',
-          onTap: atLimit
-              ? null
-              : () {
-                  final id = _nextAdHocTerminalId(existingIds);
-                  final name = _terminalName(id);
-                  service.createAdHocTerminal(id, name: name);
-                  _setPushedTerminal(id);
-                },
+      child: Listener(
+        onPointerSignal: desktop ? _onPointerSignal : null,
+        // Not a lazy ListView: the active pill is scrolled TO, so it has to
+        // exist while off screen, and the strip holds at most a handful.
+        child: SingleChildScrollView(
+          controller: _scroll,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
+          child: Row(
+            children: [
+              for (final t in widget.tabs) ...[
+                _TerminalPill(
+                  key: _pillKeys.putIfAbsent(t.terminalId, GlobalKey.new),
+                  tab: t,
+                  active: t.terminalId == widget.activeId,
+                  onTap: () => widget.onSelect(t.terminalId),
+                  onKill: () => widget.onKill(t.terminalId),
+                ),
+                const SizedBox(width: AbTokens.space4),
+              ],
+            ],
+          ),
         ),
-      ],
+      ),
     );
-  }
 
-  // ── List view ────────────────────────────────────────────────────────────
-
-  Widget _buildList(List<TerminalTab> tabs, TerminalService service) {
-    return ListView.builder(
-      itemCount: tabs.length,
-      itemBuilder: (context, index) => _buildTerminalItem(tabs[index], service),
-    );
-  }
-
-  Widget _buildTerminalItem(TerminalTab tab, TerminalService service) {
-    final isRunning = tab.sessionState == TerminalSessionState.running;
-    final isExited = tab.sessionState == TerminalSessionState.exited;
-    final stateText = isRunning
-        ? 'running'
-        : isExited
-        ? (tab.exitCode != null ? 'exited (${tab.exitCode})' : 'exited')
-        : 'starting';
-    return AbListRow(
-      leading: AbStatusDot(tone: sessionStateTone(tab.sessionState)),
-      title: Row(
-        mainAxisSize: MainAxisSize.min,
+    return Container(
+      height: AbTokens.rowHeightMd,
+      decoration: BoxDecoration(
+        color: p.bgDeep,
+        border: Border(bottom: BorderSide(color: p.borderSubtle)),
+      ),
+      child: Row(
         children: [
-          Flexible(child: Text(tab.name, overflow: TextOverflow.ellipsis)),
-          if (tab.unread) ...[
-            const SizedBox(width: AbTokens.space6),
-            Container(
-              width: AbTokens.space6,
-              height: AbTokens.space6,
-              decoration: BoxDecoration(
-                color: context.antgrid.accent,
-                borderRadius: AbTokens.borderRadiusFull,
-              ),
+          if (desktop && _canBack)
+            AbIconButton(
+              icon: AbIcons.chevronLeft,
+              tooltip: 'Scroll terminals left',
+              onTap: () => _page(-1),
             ),
-          ],
+          Expanded(child: pills),
+          if (desktop && _canForward)
+            AbIconButton(
+              icon: AbIcons.chevronRight,
+              tooltip: 'Scroll terminals right',
+              onTap: () => _page(1),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(
+              left: AbTokens.space4,
+              right: AbTokens.space8,
+            ),
+            child: _NewButton(onTap: widget.onNew),
+          ),
         ],
       ),
-      subtitle: Text(stateText),
-      actions: [
-        AbRowAction(
-          icon: AbIcons.pin,
-          tooltip: 'Pin',
-          onTap: () => _setPinnedTerminal(tab.terminalId),
-        ),
-        AbRowAction(
-          icon: AbIcons.trash,
-          tooltip: 'Delete',
-          tone: AbIconButtonTone.danger,
-          onTap: () {
-            if (_pinnedTerminalId == tab.terminalId) _setPinnedTerminal(null);
-            if (_pushedTerminalId == tab.terminalId) _setPushedTerminal(null);
-            service.deleteTerminal(tab.terminalId);
-          },
-        ),
-      ],
-      divider: true,
-      density: AbRowDensity.lg,
-      onTap: () {
-        // Focusing the terminal clears its unread badge.
-        service.setActiveTerminal(tab.terminalId);
-        _setPushedTerminal(tab.terminalId);
-      },
     );
   }
+}
 
-  // ── Push navigation ──────────────────────────────────────────────────────
+class _TerminalPill extends StatefulWidget {
+  const _TerminalPill({
+    super.key,
+    required this.tab,
+    required this.active,
+    required this.onTap,
+    required this.onKill,
+  });
 
-  Widget _buildPushedView(TerminalTab tab, TerminalService service) {
-    return TerminalDetailView(
-      tab: tab,
-      terminalService: service,
-      onBack: () => _setPushedTerminal(null),
-      onDelete: () {
-        final id = tab.terminalId;
-        _setPushedTerminal(null);
-        service.deleteTerminal(id);
-      },
-    );
-  }
+  final TerminalTab tab;
+  final bool active;
+  final VoidCallback onTap;
+  final VoidCallback onKill;
 
-  // ── Pinned view ──────────────────────────────────────────────────────────
+  @override
+  State<_TerminalPill> createState() => _TerminalPillState();
+}
 
-  Widget _buildPinnedView(
-    TerminalTab pinnedTab,
-    List<TerminalTab> remaining,
-    TerminalService service,
-    CheckoutAttachStatus attach,
-  ) {
-    return ColoredBox(
-      color: context.antgrid.bgDeepest,
-      child: Column(
-        children: [
-          // Top: pinned terminal (flex 3).
-          Expanded(
-            flex: 3,
-            child: Column(
+class _TerminalPillState extends State<_TerminalPill> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final tab = widget.tab;
+    return Semantics(
+      button: true,
+      selected: widget.active,
+      label: '${tab.name}, ${_stateLabel(tab)}',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            height: AbTokens.rowHeightXs,
+            padding: const EdgeInsets.only(
+              left: AbTokens.space10,
+              right: AbTokens.space4,
+            ),
+            decoration: BoxDecoration(
+              color: widget.active
+                  ? p.bgRaised
+                  : _hovered
+                  ? p.bgHover
+                  : null,
+              border: Border.all(
+                color: widget.active ? p.borderDefault : Colors.transparent,
+              ),
+              borderRadius: AbTokens.borderRadius5,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                // Header.
-                SizedBox(
-                  height: AbTokens.statusHeaderHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AbTokens.space8,
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            pinnedTab.name,
-                            style: AbTokens.monoStyle(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        AbIconButton(
-                          icon: AbIcons.unpin,
-                          tooltip: 'Unpin',
-                          onTap: () => _setPinnedTerminal(null),
-                        ),
-                        AbIconButton(
-                          icon: AbIcons.trash,
-                          tooltip: 'Delete',
-                          tone: AbIconButtonTone.danger,
-                          onTap: () {
-                            final id = pinnedTab.terminalId;
-                            _setPinnedTerminal(null);
-                            service.deleteTerminal(id);
-                          },
-                        ),
-                      ],
-                    ),
+                _RunDot(state: tab.sessionState),
+                const SizedBox(width: AbTokens.space8),
+                Text(
+                  tab.name,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    fontWeight: FontWeight.w500,
+                    color: widget.active || tab.unread
+                        ? p.textPrimary
+                        : p.textSecondary,
                   ),
                 ),
-                Expanded(
-                  child: TerminalViewWrapper(
-                    tab: pinnedTab,
-                    terminalService: service,
-                  ),
+                if (tab.unread && !widget.active) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  const AbStatusDot(tone: AbStatusTone.unread),
+                ],
+                const SizedBox(width: AbTokens.space4),
+                AbIconButton(
+                  icon: AbIcons.close,
+                  tone: AbIconButtonTone.muted,
+                  tooltip: 'Kill terminal',
+                  boxSize: 20,
+                  glyphSize: 12,
+                  onTap: widget.onKill,
                 ),
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
 
-          // Divider.
-          Container(height: 3, color: context.antgrid.borderDefault),
+String _stateLabel(TerminalTab tab) => switch (tab.sessionState) {
+  TerminalSessionState.running => 'running',
+  TerminalSessionState.starting => 'starting',
+  TerminalSessionState.exited =>
+    tab.exitCode == null ? 'exited' : 'exited (${tab.exitCode})',
+};
 
-          // Bottom: remaining list (flex 2).
-          Expanded(
-            flex: 2,
-            child: remaining.isEmpty
-                ? _buildEmptyOrAttaching(service, remaining, attach)
-                : _buildList(remaining, service),
+/// Running reads as a lit dot with a halo; anything else is a plain dot in
+/// the state's own tone.
+class _RunDot extends StatelessWidget {
+  const _RunDot({required this.state});
+
+  final TerminalSessionState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = sessionStateTone(state).color(context);
+    final running = state == TerminalSessionState.running;
+    return Container(
+      width: AbTokens.dotSizeSm + 1,
+      height: AbTokens.dotSizeSm + 1,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: running
+            ? Border.all(
+                color: color.withValues(alpha: 0.15),
+                width: 3,
+                strokeAlign: BorderSide.strokeAlignOutside,
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+class _NewButton extends StatefulWidget {
+  const _NewButton({required this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  State<_NewButton> createState() => _NewButtonState();
+}
+
+class _NewButtonState extends State<_NewButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final enabled = widget.onTap != null;
+    final lit = enabled && _hovered;
+    final color = lit ? p.accent : p.textSecondary;
+    return AbTooltip(
+      message: enabled ? 'New terminal' : 'Max terminals reached',
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: 'New terminal',
+        child: MouseRegion(
+          cursor: enabled ? SystemMouseCursors.click : MouseCursor.defer,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: Opacity(
+              opacity: enabled ? 1 : AbTokens.opacityDisabled,
+              child: Container(
+                height: AbTokens.rowHeightXs,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space10,
+                ),
+                decoration: BoxDecoration(
+                  border: Border.all(color: lit ? p.accent : p.borderDefault),
+                  borderRadius: AbTokens.borderRadius5,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AbIcon(AbIcons.add, size: 12, color: color),
+                    const SizedBox(width: AbTokens.space6),
+                    Text(
+                      'New',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: color,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ActiveToolbar extends StatelessWidget {
+  const _ActiveToolbar({
+    required this.path,
+    required this.onClear,
+    required this.onRestart,
+    required this.onKill,
+  });
+
+  final String path;
+  final VoidCallback onClear;
+  final VoidCallback onRestart;
+  final VoidCallback onKill;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      height: AbTokens.rowHeightMd,
+      padding: const EdgeInsets.only(
+        left: AbTokens.space12,
+        right: AbTokens.space8,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: p.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              path,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textMuted,
+              ),
+            ),
+          ),
+          _ToolbarAction(label: 'Clear', onTap: onClear),
+          _ToolbarAction(label: 'Restart', onTap: onRestart),
+          _ToolbarAction(label: 'Kill', onTap: onKill, danger: true),
         ],
+      ),
+    );
+  }
+}
+
+/// A borderless text action: three bordered buttons in a row would outweigh
+/// the path they sit beside.
+class _ToolbarAction extends StatefulWidget {
+  const _ToolbarAction({
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool danger;
+
+  @override
+  State<_ToolbarAction> createState() => _ToolbarActionState();
+}
+
+class _ToolbarActionState extends State<_ToolbarAction> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final rest = widget.danger ? p.error : p.textSecondary;
+    return Semantics(
+      button: true,
+      label: widget.label,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            height: AbTokens.rowHeightXs,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
+            decoration: BoxDecoration(
+              color: _hovered
+                  ? (widget.danger
+                        ? p.error.withValues(alpha: 0.12)
+                        : p.bgHover)
+                  : null,
+              borderRadius: AbTokens.borderRadius5,
+            ),
+            child: Text(
+              widget.label,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: _hovered && !widget.danger ? p.textPrimary : rest,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

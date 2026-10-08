@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 
@@ -11,10 +10,12 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
 import 'send_to_agent_comment.dart';
+import 'wheel_scroll.dart';
 
 /// Parsed representation of a single diff hunk.
 class _DiffHunk {
@@ -216,16 +217,6 @@ class _DiffViewerState extends State<DiffViewer> {
     height: kCodeFontHeight,
   );
 
-  /// Scrollbar geometry copied from re_editor's own bar (`_kScrollbarThickness`
-  /// and the `_RawScrollbar` it builds in `_code_scroll.dart`), which is what
-  /// the file viewer draws. Raw values, not tokens, because the thing they must
-  /// stay equal to is a private constant in a package — a token would drift
-  /// from it silently. The thumb colour is left at [RawScrollbar]'s default for
-  /// the same reason: re_editor never overrides it either.
-  static const double _scrollbarThickness = 8;
-  static const Radius _scrollbarRadius = Radius.circular(10);
-  static const double _scrollbarMargin = 2;
-
   final ScrollController _horizontal = ScrollController();
   final ScrollController _vertical = ScrollController();
 
@@ -381,31 +372,6 @@ class _DiffViewerState extends State<DiffViewer> {
     );
   }
 
-  /// Sends a sideways wheel/trackpad scroll to the horizontal axis ONLY.
-  ///
-  /// A real trackpad swipe is never perfectly straight, and the vertical list
-  /// sits inside the horizontal one: left this to the framework, any sideways
-  /// scroll carrying a few pixels of drift is claimed by the innermost
-  /// interested Scrollable — the vertical one — and the diff creeps up and down
-  /// while refusing to move across. Claiming the dominant axis first is what
-  /// makes sideways stay sideways. A vertical-dominant event is left alone, so
-  /// the list keeps its own scrolling (and its fling) untouched.
-  void _onPointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final delta = event.scrollDelta;
-    if (delta.dx.abs() <= delta.dy.abs()) return;
-    if (!_horizontal.hasClients) return;
-    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
-      final position = _horizontal.position;
-      _horizontal.jumpTo(
-        (position.pixels + delta.dx).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        ),
-      );
-    });
-  }
-
   Widget _buildBody(BuildContext context) {
     // The gutter scrolls with the code rather than staying pinned, so a row's
     // tint runs the full width of the longest line: a band that stops at the
@@ -425,11 +391,6 @@ class _DiffViewerState extends State<DiffViewer> {
         // its own axis: the horizontal viewport's at depth 0, the list's one
         // viewport boundary further in at depth 1.
         //
-        // Both stay visible rather than fading with use (unlike re_editor's
-        // own default pair) — a diff this wide gives no other cue that a line
-        // runs off screen, so the thumb should read as "there's more here" at
-        // a glance, not only once the pointer happens to find it.
-        //
         // SelectionArea makes every line's code text (never the gutter/marker
         // columns — see [_buildGutter]/[_buildMarker]) selectable and
         // copyable, the same as a real editor. [_buildContextMenu] is what
@@ -440,22 +401,14 @@ class _DiffViewerState extends State<DiffViewer> {
         return SelectionArea(
           contextMenuBuilder: _buildContextMenu,
           onSelectionChanged: (content) => _lastSelection = content,
-          child: RawScrollbar(
+          child: AbScrollbar(
             controller: _vertical,
             notificationPredicate: (n) => n.depth == 1,
             scrollbarOrientation: ScrollbarOrientation.right,
-            thickness: _scrollbarThickness,
-            radius: _scrollbarRadius,
-            crossAxisMargin: _scrollbarMargin,
-            thumbVisibility: true,
-            child: RawScrollbar(
+            child: AbScrollbar(
               controller: _horizontal,
               notificationPredicate: (n) => n.depth == 0,
               scrollbarOrientation: ScrollbarOrientation.bottom,
-              thickness: _scrollbarThickness,
-              radius: _scrollbarRadius,
-              crossAxisMargin: _scrollbarMargin,
-              thumbVisibility: true,
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 controller: _horizontal,
@@ -469,7 +422,7 @@ class _DiffViewerState extends State<DiffViewer> {
                     // signal goes to the FIRST registrant in hit-test order,
                     // which runs innermost-first, so only a node below the
                     // vertical Scrollable can take an event away from it. See
-                    // [_onPointerSignal].
+                    // [claimSidewaysScroll].
                     itemBuilder: (context, index) => Listener(
                       // Opaque, or the row only claims the pixels its text and
                       // gutter actually paint: the gap between them, and every
@@ -477,7 +430,7 @@ class _DiffViewerState extends State<DiffViewer> {
                       // to the vertical list, which is exactly where a sideways
                       // scroll starts creeping up and down again.
                       behavior: HitTestBehavior.opaque,
-                      onPointerSignal: _onPointerSignal,
+                      onPointerSignal: (e) => claimSidewaysScroll(e, _horizontal),
                       child: switch (_rows[index]) {
                         _HunkHeaderRow(:final text) => _buildHunkHeader(
                           context,

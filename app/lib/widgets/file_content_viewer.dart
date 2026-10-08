@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:re_editor/re_editor.dart';
@@ -14,6 +13,7 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/file_tree_models.dart';
@@ -23,7 +23,9 @@ import 'code_syntax.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+import 'viewer_header.dart';
 import 'viewer_support.dart';
+import 'wheel_scroll.dart';
 
 /// A widget that displays file content with syntax highlighting,
 /// loading states, and error handling.
@@ -290,27 +292,6 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     super.dispose();
   }
 
-  /// Sends a sideways-dominant scroll to the horizontal axis, whatever it
-  /// landed on. A pointer signal goes to the FIRST interested registrant in
-  /// hit-test order (innermost out), so this only works from a node below the
-  /// scrollable it is taking the event away from.
-  void _claimSidewaysScroll(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final delta = event.scrollDelta;
-    if (delta.dx.abs() <= delta.dy.abs()) return;
-    final scroller = _scrollController?.horizontalScroller;
-    if (scroller == null || !scroller.hasClients) return;
-    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
-      final position = scroller.position;
-      scroller.jumpTo(
-        (position.pixels + delta.dx).clamp(
-          position.minScrollExtent,
-          position.maxScrollExtent,
-        ),
-      );
-    });
-  }
-
   void _onPointerDown(PointerDownEvent event) {
     _dragStartSelection = _controller?.selection;
     if (_markedLine != null) setState(() => _markedLine = null);
@@ -442,13 +423,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       );
     }
 
-    final fileName = viewerBasename(content.path);
     final lang = codeLanguageForPath(content.path);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildHeader(fileName),
+        _buildHeader(content.path),
         if (_showSearch) _buildSearchBar(),
         if (widget.fileWasModified)
           ViewerModifiedBanner(onRefresh: widget.onRefreshContent),
@@ -477,6 +457,22 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                         readOnly: true,
                         wordWrap: false,
                         showCursorWhenReadOnly: true,
+                        // re_editor's default keeps only the vertical thumb
+                        // pinned; its horizontal one fades out, hiding that a
+                        // long line runs off screen.
+                        scrollbarBuilder: (context, child, details) {
+                          final horizontal =
+                              details.direction == AxisDirection.right;
+                          return AbScrollbar(
+                            controller: horizontal
+                                ? _scrollController!.horizontalScroller
+                                : _scrollController!.verticalScroller,
+                            scrollbarOrientation: horizontal
+                                ? ScrollbarOrientation.bottom
+                                : ScrollbarOrientation.right,
+                            child: child,
+                          );
+                        },
                         style: CodeEditorStyle(
                           fontSize: kCodeFontSize,
                           fontFamily: AbTokens.fontMono,
@@ -516,9 +512,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                               // and drags the file up or down instead. This
                               // listener is a descendant of that scrollable,
                               // which is the only place a pointer signal can
-                              // be taken from it — see [_claimSidewaysScroll].
+                              // be taken from it — see [claimSidewaysScroll].
                               return Listener(
-                                onPointerSignal: _claimSidewaysScroll,
+                                onPointerSignal: (e) => claimSidewaysScroll(
+                                  e,
+                                  _scrollController?.horizontalScroller,
+                                ),
                                 child: DefaultCodeLineNumber(
                                   controller: editingController,
                                   notifier: notifier,
@@ -556,16 +555,11 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     );
   }
 
-  Widget _buildHeader(String fileName) {
+  Widget _buildHeader(String path) {
     return AbToolbar.actions(
-      center: Text(
-        fileName,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: AbTokens.monoStyle(
-          fontWeight: FontWeight.w600,
-          fontSize: AbTokens.fontMd,
-        ),
+      center: Align(
+        alignment: Alignment.centerLeft,
+        child: ViewerPathBreadcrumb(path: path),
       ),
       trailing: [
         AbIconButton(

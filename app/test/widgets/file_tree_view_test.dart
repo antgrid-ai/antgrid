@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
@@ -12,6 +13,7 @@ import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
 
 import '../helpers/counting_file_node.dart';
+import '../helpers/clipboard.dart';
 import '../helpers/hover.dart';
 
 /// The rendered color of the row's name label — reads the actual [Text]
@@ -126,6 +128,58 @@ void main() {
 
       await tester.tap(find.text('lib'));
       expect(tappedPath, 'project/lib');
+    });
+
+    group('Copy path', () {
+      Widget themed() => MaterialApp(
+        theme: ThemeData.dark().copyWith(
+          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+        ),
+        home: Scaffold(
+          body: FileTreeView(
+            root: makeTree(),
+            expandedPaths: const {'project/lib'},
+            onToggleExpanded: (_) {},
+            onFileSelected: (_) {},
+          ),
+        ),
+      );
+
+      testWidgets('right-click copies the project-relative path', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        try {
+          final copied = captureClipboard(tester);
+          await tester.pumpWidget(themed());
+
+          await tester.tap(
+            find.text('main.dart'),
+            buttons: kSecondaryMouseButton,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Copy path'));
+          await tester.pumpAndSettle();
+
+          expect(copied, ['project/lib/main.dart']);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+
+      testWidgets('long-press offers it on touch, for folders too', (
+        tester,
+      ) async {
+        final copied = captureClipboard(tester);
+        await tester.pumpWidget(themed());
+
+        await tester.longPress(find.text('lib'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Copy path'));
+        await tester.pumpAndSettle();
+
+        expect(copied, ['project/lib']);
+      });
     });
 
     testWidgets('tapping a file calls onFileSelected', (tester) async {
