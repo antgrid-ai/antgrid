@@ -6,6 +6,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/markdown_outline.dart';
+import 'package:antgrid/widgets/markdown_document_config.dart' show joinSoftBreaks;
 import 'package:antgrid/widgets/markdown_preview.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:antgrid/widgets/viewer_support.dart';
@@ -329,5 +330,143 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.byType(Table), findsOneWidget);
+  });
+
+  // A README wrapped at 80 columns is one paragraph, as GitHub and VS Code
+  // render it — not a stack of half-lines.
+  testWidgets('soft-wrapped lines read as one paragraph', (tester) async {
+    await tester.pumpWidget(
+      host(
+        const FileContent(
+          path: 'readme.md',
+          content: 'Sample project bundled so the app has\nsomething to show.\n',
+          size: 60,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('has something to show', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a hard break (two trailing spaces) still breaks', (tester) async {
+    await tester.pumpWidget(
+      host(
+        const FileContent(
+          path: 'readme.md',
+          content: 'first line  \nsecond line\n',
+          size: 30,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('first line second line', findRichText: true),
+      findsNothing,
+    );
+  });
+
+  test('joinSoftBreaks eats the continuation indent', () {
+    expect(joinSoftBreaks('- item that\n  wraps'), '- item that wraps');
+  });
+
+  // Tables lay out as GitHub and VS Code lay them out: natural width when they
+  // fit, wrapped columns when they do not, and the source's alignment kept.
+  group('tables', () {
+    const longRow =
+        '| Part | Role |\n|---|---|\n'
+        '| Bridge | Runs on the dev machine: terminals, file watching, port '
+        'scanning and HTTP tunneling for every project it hosts |\n';
+
+    Future<void> pumpTable(
+      WidgetTester tester,
+      String content, {
+      double width = 800,
+    }) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: width,
+                  height: 600,
+                  child: MarkdownPreview(
+                    content: FileContent(
+                      path: 'readme.md',
+                      content: content,
+                      size: content.length,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Like VS Code's preview: a maximised viewer is filled, not left half
+    // empty beside a reading-width column.
+    testWidgets('prose fills a wide pane', (tester) async {
+      tester.view.physicalSize = const Size(1600, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await pumpTable(tester, 'word ' * 400, width: 1400);
+      final paragraph = find.textContaining('word word', findRichText: true);
+      expect(tester.getSize(paragraph).width, greaterThan(1300));
+    });
+
+    testWidgets('a table that fits keeps its natural width', (tester) async {
+      await pumpTable(tester, '| A | B |\n|---|---|\n| 1 | 2 |\n');
+      expect(tester.getSize(find.byType(Table)).width, lessThan(300));
+    });
+
+    testWidgets('a long column wraps inside a narrow pane instead of running '
+        'off it', (tester) async {
+      await pumpTable(tester, longRow, width: 320);
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(find.byType(Table)).width, lessThanOrEqualTo(320));
+      final cell = find.textContaining('Runs on the dev', findRichText: true);
+      // Wrapped: taller than a single line of it.
+      expect(tester.getSize(cell).height, greaterThan(40));
+    });
+
+    testWidgets('headers are bold and follow the column alignment', (
+      tester,
+    ) async {
+      await pumpTable(
+        tester,
+        '| Name | Count |\n|:---|---:|\n| bridge | 12 |\n',
+      );
+      final header = tester.widget<RichText>(
+        find.textContaining('Name', findRichText: true),
+      );
+      expect(header.text.toPlainText(), 'Name');
+      // The style the glyphs actually get: merged down the span tree to the
+      // run that holds the word.
+      TextStyle? effective(InlineSpan span, TextStyle? inherited) {
+        if (span is! TextSpan) return null;
+        final here = inherited?.merge(span.style) ?? span.style;
+        if (span.text == 'Name') return here;
+        for (final child in span.children ?? const <InlineSpan>[]) {
+          final found = effective(child, here);
+          if (found != null) return found;
+        }
+        return null;
+      }
+
+      expect(effective(header.text, null)?.fontWeight, FontWeight.w600);
+
+      // `---:` — the number sits against the right edge of its column, and
+      // the header above it does too, rather than being centred.
+      final countHeader = tester.getRect(find.text('Count', findRichText: true));
+      final number = tester.getRect(find.text('12', findRichText: true));
+      expect((countHeader.right - number.right).abs(), lessThan(1));
+    });
   });
 }

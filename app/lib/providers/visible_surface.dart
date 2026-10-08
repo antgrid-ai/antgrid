@@ -166,15 +166,32 @@ final sessionHasBusActivityProvider =
 
 /// The workspace tabs on offer right now, in tab order.
 ///
-/// Every value, since the Inbox tab became a sheet — and kept rather than
-/// inlined back to [WorkspaceView.values] at three call sites, because it is
-/// the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
+/// One provider rather than [WorkspaceView.values] at three call sites,
+/// because it is the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
 /// three surfaces that must never disagree (the desktop tab strip, the phone's
 /// bottom nav, the agent bar's workspace rail), and a condition written into
 /// each of them is the bug: an item that appeared on the phone and nowhere else
 /// would ship green, because nothing iterating that enum is under test.
+///
+/// Handler is the conditional one: offered only while the focused session is
+/// armed, or has a Handler question of its own still waiting. Disarming hides
+/// it at once — WorkspaceShell moves a pane showing it to Files. Matched on
+/// the session's own id, so another session's Handler never puts the tab here.
 final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
-  return WorkspaceView.values;
+  final activeId = ref.watch(activeSessionIdProvider);
+  final handlerOn = ref.watch(
+    handlerStateProvider.select((v) {
+      final s = v.value;
+      if (s == null || activeId == null) return false;
+      return s.sessions.containsKey(activeId) ||
+          s.escalations.any((e) => e.terminalId == activeId);
+    }),
+  );
+  if (handlerOn) return WorkspaceView.values;
+  return [
+    for (final v in WorkspaceView.values)
+      if (v != WorkspaceView.handler) v,
+  ];
 }, name: 'visibleWorkspaceViews');
 
 /// Counts the workspace views advertise on their tab: unstaged git files, and
@@ -284,9 +301,10 @@ void revealWorkspaceView(WidgetRef ref, WorkspaceView view) {
     menu.reveal(view);
     return;
   }
-  ref
-      .read(pendingWorkspaceViewProvider.notifier)
-      .set((target: ref.read(selectedTargetProvider), value: view));
+  ref.read(pendingWorkspaceViewProvider.notifier).set((
+    target: ref.read(selectedTargetProvider),
+    value: view,
+  ));
 }
 
 /// Whether the agent bar's workspace rail is up. Shared by a mouse desktop and

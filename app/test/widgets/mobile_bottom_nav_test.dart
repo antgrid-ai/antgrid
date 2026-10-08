@@ -1,8 +1,23 @@
+import 'package:antgrid/providers/visible_surface.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid/widgets/mobile_bottom_nav.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../design/test_harness.dart';
+
+/// Every tab on offer: these pin how the strip renders the tabs it is given,
+/// not which tabs a session offers (see visible_workspace_views_test.dart).
+Future<void> _pump(WidgetTester tester, Widget child) => pumpAntgrid(
+  tester,
+  ProviderScope(
+    overrides: [
+      visibleWorkspaceViewsProvider.overrideWithValue(WorkspaceView.values),
+    ],
+    child: child,
+  ),
+);
 
 void main() {
   // Mobile is the surface Handler exists for, and its `NEEDS YOU` pill lives in
@@ -10,7 +25,7 @@ void main() {
   // the desktop tab bar and had nowhere to put it here, so an unanswered
   // escalation had nothing standing for it on the page the user was looking at.
   testWidgets('a pending count renders on its tab', (tester) async {
-    await pumpAntgrid(
+    await _pump(
       tester,
       MobileBottomNav(
         selected: WorkspaceView.terminals,
@@ -22,7 +37,7 @@ void main() {
   });
 
   testWidgets('no badge is drawn for a view with no count', (tester) async {
-    await pumpAntgrid(
+    await _pump(
       tester,
       MobileBottomNav(selected: WorkspaceView.terminals, onSelected: (_) {}),
     );
@@ -35,7 +50,7 @@ void main() {
   testWidgets('a count past three digits clamps rather than widening', (
     tester,
   ) async {
-    await pumpAntgrid(
+    await _pump(
       tester,
       MobileBottomNav(
         selected: WorkspaceView.handler,
@@ -52,7 +67,7 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await pumpAntgrid(
+    await _pump(
       tester,
       MobileBottomNav(selected: WorkspaceView.handler, onSelected: (_) {}),
     );
@@ -84,7 +99,7 @@ void main() {
   // own it is a stray digit, not this tab's backlog.
   testWidgets('a badge is folded into the tab it belongs to', (tester) async {
     final handle = tester.ensureSemantics();
-    await pumpAntgrid(
+    await _pump(
       tester,
       MobileBottomNav(
         selected: WorkspaceView.terminals,

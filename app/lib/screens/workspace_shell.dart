@@ -380,11 +380,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
 
   /// Falls back to Files for a tab this session does not currently offer.
   ///
-  /// [visibleWorkspaceViewsProvider] offers every view today, but a persisted
-  /// ordinal, a per-session restore and a deep link can each still name one it
-  /// has stopped offering — a build that dropped a view, or a conditional one
-  /// added back. Left unchecked, the panel shows a body with no tab marked and
-  /// nothing to switch back with.
+  /// A persisted ordinal, a per-session restore and a deep link can each name a
+  /// view [visibleWorkspaceViewsProvider] does not offer — Handler on a session
+  /// that is not armed, or a view a build dropped. Left unchecked, the panel
+  /// shows a body with no tab marked and nothing to switch back with.
   WorkspaceView _offeredOr(WorkspaceView view) =>
       ref.read(visibleWorkspaceViewsProvider).contains(view)
       ? view
@@ -969,6 +968,19 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // Both read unconditionally, never as `a != null || b != null`: a
     // short-circuited watch registers no dependency, so the second provider's
     // own write would never rebuild this route.
+    // A tab can stop being offered while it is the one on screen — Handler, on
+    // the disarm — and the pane must not stay on a body with no tab marked.
+    // Post-frame: selecting writes providers, which a listener fired during
+    // this build may not do.
+    ref.listen(visibleWorkspaceViewsProvider, (_, offered) {
+      if (offered.contains(_selectedView)) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            !ref.read(visibleWorkspaceViewsProvider).contains(_selectedView)) {
+          _selectView(WorkspaceView.files);
+        }
+      });
+    });
     final pendingView = ref.watch(pendingWorkspaceViewProvider);
     final pendingAgentPage = ref.watch(pendingAgentPageProvider);
     // The third input to both drains, watched for the same reason even though

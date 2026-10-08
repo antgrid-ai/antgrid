@@ -24,6 +24,7 @@ import 'code_syntax.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+import 'viewer_header.dart';
 import 'viewer_support.dart';
 
 /// A widget that displays file content with syntax highlighting,
@@ -443,13 +444,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       );
     }
 
-    final fileName = viewerBasename(content.path);
     final lang = codeLanguageForPath(content.path);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildHeader(fileName),
+        _buildHeader(content.path),
         if (_showSearch) _buildSearchBar(),
         if (widget.fileWasModified)
           ViewerModifiedBanner(onRefresh: widget.onRefreshContent),
@@ -573,16 +573,11 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     );
   }
 
-  Widget _buildHeader(String fileName) {
+  Widget _buildHeader(String path) {
     return AbToolbar.actions(
-      center: Text(
-        fileName,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: AbTokens.monoStyle(
-          fontWeight: FontWeight.w600,
-          fontSize: AbTokens.fontMd,
-        ),
+      center: Align(
+        alignment: Alignment.centerLeft,
+        child: ViewerPathBreadcrumb(path: path),
       ),
       trailing: [
         AbIconButton(

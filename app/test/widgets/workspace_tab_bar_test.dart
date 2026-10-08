@@ -1,8 +1,22 @@
+import 'package:antgrid/providers/visible_surface.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../design/test_harness.dart';
+
+/// Every tab on offer: these pin how the strip renders the tabs it is given,
+/// not which tabs a session offers (see visible_workspace_views_test.dart).
+Future<void> _pump(WidgetTester tester, Widget child) => pumpAntgrid(
+  tester,
+  ProviderScope(
+    overrides: [
+      visibleWorkspaceViewsProvider.overrideWithValue(WorkspaceView.values),
+    ],
+    child: child,
+  ),
+);
 
 void main() {
   // Bare GestureDetectors announce as nothing, so a screen reader had no way to
@@ -11,7 +25,7 @@ void main() {
     tester,
   ) async {
     final handle = tester.ensureSemantics();
-    await pumpAntgrid(
+    await _pump(
       tester,
       WorkspaceTabBar(selected: WorkspaceView.handler, onSelected: (_) {}),
     );
@@ -43,7 +57,7 @@ void main() {
   // is a stray digit, not this tab's backlog.
   testWidgets('a badge is folded into the tab it belongs to', (tester) async {
     final handle = tester.ensureSemantics();
-    await pumpAntgrid(
+    await _pump(
       tester,
       WorkspaceTabBar(
         selected: WorkspaceView.terminals,
@@ -64,7 +78,7 @@ void main() {
   ) async {
     final handle = tester.ensureSemantics();
     WorkspaceView? picked;
-    await pumpAntgrid(
+    await _pump(
       tester,
       WorkspaceTabBar(
         selected: WorkspaceView.terminals,
@@ -83,7 +97,7 @@ void main() {
   // switched while every visible tab stayed unselected.
   group('WorkspaceTabBar overflow', () {
     Future<void> pumpNarrow(WidgetTester tester, WorkspaceView selected) =>
-        pumpAntgrid(
+        _pump(
           tester,
           SizedBox(
             width: 240,

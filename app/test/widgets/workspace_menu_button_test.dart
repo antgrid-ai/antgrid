@@ -40,6 +40,9 @@ Future<ProviderContainer> _pump(
     overrides: [
       workspaceMenuControlProvider.overrideWith(() => ValueController(control)),
       workspaceBadgesProvider.overrideWith((ref) => badges),
+      // Every tab on offer: these pin the menu's rows, not which tabs a
+      // session offers (see visible_workspace_views_test.dart).
+      visibleWorkspaceViewsProvider.overrideWithValue(WorkspaceView.values),
       gitDiffTotalsProvider.overrideWith((ref) => gitTotals),
       workspaceMenuOpenProvider.overrideWith(() => ValueController(true)),
     ],

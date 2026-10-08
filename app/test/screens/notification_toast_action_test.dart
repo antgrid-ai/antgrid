@@ -6,7 +6,7 @@
 import 'dart:async';
 
 import 'package:antgrid/design/widgets/ab_toast.dart';
-import 'package:antgrid/models/handler_state.dart' show HandlerEscalation;
+import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
@@ -62,6 +62,25 @@ Future<void> _withShell(
       tester,
       extraOverrides: [
         handlerEscalationsProvider.overrideWith((ref) => escalations),
+        // An escalation only exists for an armed session, and the Handler tab
+        // is offered only for one — so the session it came from is armed.
+        handlerStateProvider.overrideWith(
+          (ref) => Stream.value(
+            const HandlerState.initial().copyWith(
+              sessions: {
+                'session-9': HandlerSessionState(
+                  terminalId: 'session-9',
+                  runState: HandlerRunState.needsYou,
+                  pendingEscalations: 1,
+                  armedAt: 1,
+                  goal: 'goal',
+                  backlog: const [],
+                  escalations: const [],
+                ),
+              },
+            ),
+          ),
+        ),
       ],
     );
     // The applier compares the resolved target against this; the harness
