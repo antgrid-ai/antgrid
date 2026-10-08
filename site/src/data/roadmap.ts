@@ -14,9 +14,18 @@ export type RoadmapEntry = RoadmapDetails & (
 );
 
 // Review dates record an editorial check, never a build timestamp.
-export const LAST_REVIEWED = "2026-10-05";
+export const LAST_REVIEWED = "2026-10-08";
 
 export const ROADMAP: readonly RoadmapEntry[] = [
+  {
+    id: "scheduler-catch-up",
+    title: "Scheduler catch-up",
+    description: "Run the latest missed occurrence when your desktop comes back, instead of silently skipping it.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: a per-schedule choice to run the latest missed occurrence or skip missed runs, one consolidated record for earlier misses, and schedules that keep running after a phone signs out.",
+    updatedAt: "2026-10-08",
+  },
   {
     id: "scheduler",
     title: "Scheduled agent sessions",

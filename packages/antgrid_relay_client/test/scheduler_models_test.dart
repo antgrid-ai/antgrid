@@ -118,4 +118,40 @@ void main() {
       );
     },
   );
+
+  test('catch-up fields default for old bridges and gate settings()', () {
+    final base = {
+      'id': 's',
+      'name': 'n',
+      'projectId': 'p',
+      'agentId': 'claude',
+      'mode': 'terminal',
+      'prompt': 'x',
+      'approvalPolicy': 'bypass',
+      'workspace': 'shared',
+      'cron': '0 9 * * *',
+      'timezone': 'UTC',
+      'enabled': true,
+    };
+    final old = AgentSchedule.fromJson(base);
+    expect(old.catchUp, 'latest');
+    expect(old.settings()['catchUp'], 'latest');
+    expect(old.settings(includeCatchUp: false).containsKey('catchUp'), isFalse);
+    expect(AgentSchedule.fromJson({...base, 'catchUp': 'skip'}).catchUp, 'skip');
+    expect(SchedulerCapabilities.fromJson({}).supportsCatchUp, isFalse);
+    expect(
+      SchedulerCapabilities.fromJson({'supportsCatchUp': true}).supportsCatchUp,
+      isTrue,
+    );
+    final run = {
+      'id': 'r',
+      'scheduleId': 's',
+      'projectId': 'p',
+      'status': 'skipped',
+      'trigger': 'missed',
+      'occurrenceAt': 1000,
+    };
+    expect(ScheduleRun.fromJson(run).missedCount, isNull);
+    expect(ScheduleRun.fromJson({...run, 'missedCount': 1000}).missedCount, 1000);
+  });
 }

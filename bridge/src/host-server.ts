@@ -1025,9 +1025,10 @@ export class HostServer {
         supportedAgents: async () => (await this.buildToolsAdvertisement())
           .map((tool) => ({ agentId: tool.tool, modes: schedulingModesForAgent(tool.tool) }))
           .filter((agent) => agent.modes.length > 0),
-        authorize: (schedule) => this.authorizeSchedule(schedule),
         prepare: async (schedule, _run, bind) => {
-          const seen = this.seenProjects.get(schedule.projectId);
+          // Execution is no longer tied to a device or the remote-access switch, so the catalog is the only
+          // thing bounding which project a stored schedule may launch.
+          const seen = isSafeProjectId(schedule.projectId) ? this.seenProjects.get(schedule.projectId) : undefined;
           if (!seen || !existsSync(seen.path)) throw new SchedulerLaunchError("PROJECT_UNAVAILABLE");
           await this.open(schedule.projectId, seen.path, "local");
           const core = this.cores.get(schedule.projectId)!.core;
@@ -1061,17 +1062,6 @@ export class HostServer {
     } catch {
       this.schedulerError = "Scheduler storage is unavailable or another desktop host owns this state directory";
     }
-  }
-
-  private async authorizeSchedule(schedule: Schedule): Promise<string | null> {
-    if (!isSafeProjectId(schedule.projectId) || !this.seenProjects.has(schedule.projectId)) {
-      return "Project is no longer in this machine's catalog; open it from the desktop first";
-    }
-    if (schedule.authorDeviceId === null) return null;
-    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
-    if (!await this.controlPlaneRelay?.authorizeDevice?.(schedule.authorDeviceId)) return "The authorizing device is unavailable or no longer authorized on this account";
-    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
-    return null;
   }
 
   private async schedulerProjects(): Promise<{ projectId: string; label: string; isGitRepository: boolean }[]> {
@@ -1113,7 +1103,7 @@ export class HostServer {
         return { schedule: await this.scheduler.update(current.id, patch, authorDeviceId) };
       }
       case "scheduler.delete": await this.scheduler.delete(params.id as string); return {};
-      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string, authorDeviceId) };
+      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string) };
       case "scheduler.stop": await this.scheduler.stop(params.id as string); return {};
       default: throw new Error("Unknown scheduler operation");
     }

@@ -75,6 +75,29 @@ String schedulerCadence(String cron, String zone) {
   return '$description · $zone';
 }
 
+/// Mirrors MISSED_COUNT_CAP in the bridge's scheduler models.
+const schedulerMissedCountCap = 1000;
+
+String schedulerTrigger(String trigger) => switch (trigger) {
+  'cron' => 'Scheduled',
+  'manual' => 'Run now',
+  'missed' => 'Missed',
+  'catch-up' => 'Catch-up',
+  _ => trigger,
+};
+
+String schedulerMissedLabel(int? count) => switch (count) {
+  null => 'Missed runs',
+  1 => 'Missed 1 run',
+  final n when n >= schedulerMissedCountCap =>
+    'Missed $schedulerMissedCountCap+ runs',
+  final n => 'Missed $n runs',
+};
+
+String schedulerCatchUpSummary(String catchUp) => catchUp == 'skip'
+    ? 'Skips missed runs'
+    : 'Catches up latest missed run';
+
 String schedulerDuration(Duration? duration) {
   if (duration == null) return '—';
   if (duration.isNegative) return '0s';

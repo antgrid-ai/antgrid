@@ -82,6 +82,7 @@ class Host {
   List<Map<String, dynamic>> schedules = [settings];
   List<Map<String, dynamic>> runs = [];
   bool clearSupported = true;
+  bool catchUpSupported = true;
   bool agentAvailable = true;
   String timezone = 'Asia/Kolkata';
   Object? previewError;
@@ -100,6 +101,7 @@ class Host {
           'supported': true,
           'timezone': timezone,
           'supportsBaseBranchClear': clearSupported,
+          'supportsCatchUp': catchUpSupported,
           'agents': [
             if (agentAvailable)
               {
@@ -561,7 +563,7 @@ void main() {
       expect(find.text('The prompt turn ended.'), findsOneWidget);
       expect(find.textContaining('America/New_York'), findsOneWidget);
       expect(find.textContaining('Asia/Kolkata'), findsNWidgets(2));
-      expect(find.text('manual · Duration: 2m 5s'), findsOneWidget);
+      expect(find.text('Run now · Duration: 2m 5s'), findsOneWidget);
       await tester.tap(find.text('Stop run'));
       await tester.pumpAndSettle();
       expect(find.text('Interrupted'), findsOneWidget);
@@ -879,6 +881,127 @@ void main() {
       },
     );
   }
+
+  for (final supported in [true, false]) {
+    schedulerTestWidgets(
+      'schedule row ${supported ? 'states' : 'omits'} the catch-up policy when the bridge ${supported ? 'supports' : 'lacks'} it',
+      (tester) async {
+        sizeView(tester);
+        final host = Host()..catchUpSupported = supported;
+        await pumpScreen(tester, containerFor(host));
+        expect(find.text('Daily review'), findsOneWidget);
+        expect(
+          find.text('Catches up latest missed run'),
+          supported ? findsOneWidget : findsNothing,
+        );
+      },
+    );
+  }
+
+  for (final supported in [true, false]) {
+    schedulerTestWidgets(
+      'catch-up choice is ${supported ? 'sent' : 'hidden and omitted'} when the bridge ${supported ? 'supports' : 'lacks'} it',
+      (tester) async {
+        sizeView(tester);
+        final host = Host()..catchUpSupported = supported;
+        await pumpScreen(tester, containerFor(host));
+        await editSchedule(tester);
+        expect(
+          find.text('Run the latest missed run'),
+          supported ? findsOneWidget : findsNothing,
+        );
+        if (supported) {
+          expect(find.textContaining('within 15 minutes'), findsOneWidget);
+          await tester.tap(find.text('Skip missed runs'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.text('Save schedule'));
+        await tester.pumpAndSettle();
+        final patch =
+            host.calls
+                    .lastWhere((c) => c.method == 'scheduler.update')
+                    .params['patch']
+                as Map;
+        if (supported) {
+          expect(patch['catchUp'], 'skip');
+        } else {
+          expect(patch.containsKey('catchUp'), isFalse);
+        }
+      },
+    );
+  }
+
+  test('trigger labels, missed counts and catch-up summaries', () {
+    expect(schedulerTrigger('cron'), 'Scheduled');
+    expect(schedulerTrigger('manual'), 'Run now');
+    expect(schedulerTrigger('missed'), 'Missed');
+    expect(schedulerTrigger('catch-up'), 'Catch-up');
+    expect(schedulerTrigger('future'), 'future');
+    expect(schedulerMissedLabel(1), 'Missed 1 run');
+    expect(schedulerMissedLabel(3), 'Missed 3 runs');
+    expect(schedulerMissedLabel(1000), 'Missed 1000+ runs');
+    expect(schedulerMissedLabel(null), 'Missed runs');
+    expect(schedulerCatchUpSummary('skip'), 'Skips missed runs');
+    expect(schedulerCatchUpSummary('latest'), 'Catches up latest missed run');
+  });
+
+  test('drafts default catchUp to latest, including drafts saved without it', () {
+    final draft = SchedulerDraft(
+      values: {'cron': '0 9 * * *'},
+      initialSaved: {'cron': '0 9 * * *'},
+      frequency: 'Daily',
+      time: '09:00',
+    );
+    expect(draft.values['catchUp'], 'latest');
+    expect(draft.dirty, isFalse);
+  });
+
+  schedulerTestWidgets(
+    'missed records show the count, interval and no duration; catch-up runs are labelled',
+    (tester) async {
+      sizeView(tester);
+      final host = Host()
+        ..schedules = []
+        ..runs = [
+          {
+            ...runRecord('gap', 'skipped', reason: 'Missed while paused'),
+            'trigger': 'missed',
+            'missedCount': 1000,
+            'missedUntil': 1800000000000 + 86400000,
+          },
+          {
+            ...runRecord('old', 'skipped', at: 1799000000000),
+            'trigger': 'missed',
+            'missedUntil': 1799000000000,
+          },
+          {...runRecord('late', 'completed', at: 1798000000000), 'trigger': 'catch-up'},
+          {
+            ...runRecord('single', 'skipped', at: 1797000000000),
+            'trigger': 'missed',
+            'missedCount': 1,
+            'missedUntil': 1797000000000,
+          },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      await tester.tap(find.text('RUNS'));
+      await tester.pumpAndSettle();
+      String local(int ms) => schedulerLocalTime(
+        DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true),
+        'Asia/Kolkata',
+      );
+      expect(
+        find.text('${local(1800000000000)} – ${local(1800000000000 + 86400000)}'),
+        findsOneWidget,
+      );
+      expect(find.text('Missed 1 run'), findsOneWidget);
+      expect(find.textContaining('${local(1797000000000)} – '), findsNothing);
+      expect(find.text('Missed 1000+ runs'), findsOneWidget);
+      expect(find.text('Missed runs'), findsOneWidget);
+      expect(find.text('Missed while paused'), findsOneWidget);
+      expect(find.textContaining('Catch-up · Duration'), findsOneWidget);
+      expect(find.textContaining('Missed 1000+ runs · Duration'), findsNothing);
+    },
+  );
 
   schedulerTestWidgets(
     'Custom preserves cron and focuses it; preset times reject invalid input',

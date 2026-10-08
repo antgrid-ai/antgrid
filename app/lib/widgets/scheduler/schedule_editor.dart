@@ -62,6 +62,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       _mode,
       _workspace,
       _approvals,
+      _catchUp,
       _frequency,
       _timezone;
   late bool _enabled;
@@ -178,6 +179,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     _mode = v['mode'] as String;
     _workspace = v['workspace'] as String;
     _approvals = v['approvalPolicy'] as String;
+    _catchUp = v['catchUp'] as String? ?? 'latest';
     _enabled = v['enabled'] as bool;
     _frequency = _draft.frequency;
   }
@@ -190,6 +192,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     'mode': _mode,
     'workspace': _workspace,
     'approvalPolicy': _approvals,
+    'catchUp': _catchUp,
     'enabled': _enabled,
     if (_branch.text.trim().isNotEmpty) 'baseBranch': _branch.text.trim(),
     'cron': _cron.text,
@@ -410,6 +413,10 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       'timezone': _timezone.trim(),
       if (_clearingBranch) 'baseBranch': null,
     };
+    // An older bridge's strict schema rejects keys it does not know.
+    if (!widget.snapshot.capabilities.supportsCatchUp) {
+      settings.remove('catchUp');
+    }
     if (_locked) {
       for (final k in ['projectId', 'workspace', 'baseBranch']) {
         settings.remove(k);
@@ -745,6 +752,24 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
             ],
           ),
         ),
+      if (widget.snapshot.capabilities.supportsCatchUp) ...[
+        _choices(
+          'If a run is missed',
+          const {
+            'latest': 'Run the latest missed run',
+            'skip': 'Skip missed runs',
+          },
+          _catchUp,
+          (v) => _catchUp = v,
+        ),
+        Text(
+          'Runs once, for the latest missed run only, and not when the next run is due within 15 minutes. Runs need the desktop app open.',
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontSm,
+            color: context.antgrid.textSecondary,
+          ),
+        ),
+      ],
       _choices(
         'Schedule state',
         const {'enabled': 'Enabled', 'paused': 'Paused'},

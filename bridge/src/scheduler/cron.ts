@@ -41,3 +41,55 @@ export function nextOccurrences(expression: string, timezone: string, after: num
   const interval = CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(after) });
   return interval.take(count).map((date) => date.getTime());
 }
+
+export interface MissedOccurrences {
+  /** Last occurrence at or before `now`. */
+  latest: number;
+  /** The occurrence before `latest`, present only when `count > 1`. */
+  previous?: number;
+  /** Occurrences in [firstMissed, now], stopping at `cap`. */
+  count: number;
+  /** First occurrence after `now` on the same timetable. */
+  following: number;
+}
+
+const FALLBACK_ANCHOR_MS = 3 * 60 * 60_000;
+
+/**
+ * Walks the forward `next()` timetable from `firstMissed`, which must itself be an instant that timetable produced
+ * (a stored nextOccurrence). Every answer comes off that one chain because cron-parser's `next()` and `prev()`
+ * disagree around DST: on a spring-forward day `next()` shifts a nonexistent 02:30 to 03:30 while `prev()` never
+ * yields that day, and `next()` started inside the gap skips it too; in a repeated hour `prev()` yields the second
+ * instance, which `next()` never emits for a fixed-hour cron.
+ */
+export function missedOccurrences(expression: string, timezone: string, firstMissed: number, now: number, cap: number): MissedOccurrences | null {
+  const cron = validateCron(expression, timezone);
+  if (firstMissed > now) return null;
+  const forward = CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(firstMissed) });
+  let latest = firstMissed;
+  let previous: number | undefined;
+  let count = 1;
+  let following = forward.next().getTime();
+  while (following <= now && count < cap) {
+    previous = latest;
+    latest = following;
+    count++;
+    following = forward.next().getTime();
+  }
+  if (following > now) return { latest, count, following, ...(previous !== undefined ? { previous } : {}) };
+  // Past the cap the chain is too long to walk, so re-seed it shortly before `now`: three occurrences back via
+  // prev(), and at least a few hours back so a DST transition just before `now` is walked forward, not via prev().
+  let anchor = now + 1;
+  for (let i = 0; i < 3; i++) anchor = CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(anchor) }).prev().getTime();
+  const tail = CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(Math.min(anchor, now - FALLBACK_ANCHOR_MS) - 1) });
+  let tailLatest: number | undefined;
+  let tailPrevious: number | undefined;
+  for (let t = tail.next().getTime(); ; t = tail.next().getTime()) {
+    if (t > now) { following = t; break; }
+    tailPrevious = tailLatest;
+    tailLatest = t;
+  }
+  latest = tailLatest ?? latest;
+  previous = tailPrevious ?? CronExpressionParser.parse(cron, { tz: timezone, currentDate: new Date(latest) }).prev().getTime();
+  return { latest, previous, count, following };
+}

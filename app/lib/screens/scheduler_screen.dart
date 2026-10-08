@@ -576,6 +576,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       spacing: AbTokens.space6,
       children: [
         _text(schedulerCadence(schedule.cron, schedule.timezone)),
+        // An older bridge has no catch-up; the parsed default would misdescribe it.
+        if (snapshot.capabilities.supportsCatchUp)
+          _text(schedulerCatchUpSummary(schedule.catchUp)),
         _text(
           'Next: ${schedule.enabled ? schedulerLocalTime(schedule.nextOccurrence, ref.read(schedulerLocalTimezoneProvider).value ?? _snapshot?.capabilities.timezone) : 'Paused'}',
         ),
@@ -806,7 +809,17 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         if (zone != localZone)
           _text('Schedule time: ${schedulerTime(run.occurrenceAt, zone)}'),
         _text('UTC: ${schedulerTime(run.occurrenceAt)}'),
-        _text('${run.trigger} · Duration: ${schedulerDuration(run.duration)}'),
+        if (run.trigger == 'missed') ...[
+          _text(schedulerMissedLabel(run.missedCount)),
+          // A one-occurrence record's interval is a single instant, already shown above.
+          if (run.missedUntil != null && run.missedUntil != run.occurrenceAt)
+            _text(
+              '${schedulerLocalTime(run.occurrenceAt, localZone)} – ${schedulerLocalTime(run.missedUntil, localZone)}',
+            ),
+        ] else
+          _text(
+            '${schedulerTrigger(run.trigger)} · Duration: ${schedulerDuration(run.duration)}',
+          ),
         if (run.status == 'completed') _text('The prompt turn ended.'),
         if (run.reason != null) _text(run.reason!),
         Wrap(

@@ -1,21 +1,31 @@
 import { z } from "zod";
 
-export const ScheduleInputSchema = z.object({
+// Fields carry no defaults here: the patch schema is built from them, and a Zod 4
+// `.partial()` over a defaulted field would re-apply the default to an absent key,
+// so a pause (`{enabled:false}`) would silently reset approvalPolicy and catchUp.
+const scheduleFields = {
   name: z.string().trim().min(1).max(160),
   projectId: z.string().min(1),
   agentId: z.string().min(1),
   mode: z.enum(["terminal", "chat"]),
   prompt: z.string().min(1).max(100_000),
-  approvalPolicy: z.enum(["default", "bypass"]).default("default"),
+  approvalPolicy: z.enum(["default", "bypass"]),
   workspace: z.enum(["shared", "worktree"]),
   baseBranch: z.string().min(1).optional(),
   cron: z.string().min(1),
   timezone: z.string().min(1),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean(),
+  catchUp: z.enum(["latest", "skip"]),
+};
+export const ScheduleInputSchema = z.object({
+  ...scheduleFields,
+  approvalPolicy: scheduleFields.approvalPolicy.default("default"),
+  enabled: scheduleFields.enabled.default(true),
+  catchUp: scheduleFields.catchUp.default("latest"),
 }).strict();
-export const SchedulePatchSchema = ScheduleInputSchema.partial().extend({
+export const SchedulePatchSchema = z.object(scheduleFields).partial().extend({
   baseBranch: z.string().min(1).nullable().optional(),
-});
+}).strict();
 export const ScheduleSchema = ScheduleInputSchema.extend({
   id: z.string(),
   authorDeviceId: z.string().nullable(),
@@ -33,12 +43,15 @@ export type Schedule = z.infer<typeof ScheduleSchema>;
 export const RunStatusSchema = z.enum(["preparing", "running", "needs-input", "completed", "failed", "interrupted", "skipped"]);
 export const SchedulerRunSchema = z.object({
   id: z.string(), scheduleId: z.string(), scheduleName: z.string(), projectId: z.string(),
-  occurrenceAt: z.number(), trigger: z.enum(["cron", "manual", "missed"]),
+  occurrenceAt: z.number(), trigger: z.enum(["cron", "manual", "missed", "catch-up"]),
   timezone: z.string().optional(),
   status: RunStatusSchema, startedAt: z.number(), finishedAt: z.number().optional(),
   reason: z.string().optional(), missedUntil: z.number().optional(),
+  missedCount: z.number().int().positive().optional(),
   sessionId: z.string().optional(), runtimeGeneration: z.string().optional(), checkoutId: z.string().optional(),
 });
+// Mirrored by hand in the app; a consolidated record stores this when the true count is larger.
+export const MISSED_COUNT_CAP = 1000;
 export type SchedulerRun = z.infer<typeof SchedulerRunSchema>;
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["preparing", "running", "needs-input"];
@@ -47,6 +60,7 @@ export function isActiveRun(run: SchedulerRun): boolean { return ACTIVE_RUN_STAT
 export const SchedulerCapabilitiesSchema = z.object({
   supported: z.boolean(), timezone: z.string(),
   supportsBaseBranchClear: z.boolean().optional(),
+  supportsCatchUp: z.boolean().optional(),
   agents: z.array(z.object({ agentId: z.string(), modes: z.array(z.enum(["terminal", "chat"])) })),
   error: z.string().optional(),
 });

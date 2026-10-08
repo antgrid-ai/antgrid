@@ -16,12 +16,14 @@ class SchedulerCapabilities {
   final List<SchedulerAgent> agents;
   final String? error;
   final bool supportsBaseBranchClear;
+  final bool supportsCatchUp;
   const SchedulerCapabilities({
     required this.supported,
     required this.timezone,
     required this.agents,
     this.error,
     this.supportsBaseBranchClear = false,
+    this.supportsCatchUp = false,
   });
   factory SchedulerCapabilities.fromJson(Map<String, dynamic> json) =>
       SchedulerCapabilities(
@@ -32,6 +34,7 @@ class SchedulerCapabilities {
         ).map(SchedulerAgent.fromJson).toList(),
         error: json['error'] as String?,
         supportsBaseBranchClear: json['supportsBaseBranchClear'] == true,
+        supportsCatchUp: json['supportsCatchUp'] == true,
       );
 }
 
@@ -63,6 +66,7 @@ class AgentSchedule {
   final String mode;
   final String prompt;
   final String approvalPolicy;
+  final String catchUp;
   final String workspace;
   final String? baseBranch;
   final String cron;
@@ -84,6 +88,7 @@ class AgentSchedule {
     required this.mode,
     required this.prompt,
     required this.approvalPolicy,
+    this.catchUp = 'latest',
     required this.workspace,
     this.baseBranch,
     required this.cron,
@@ -106,6 +111,7 @@ class AgentSchedule {
     mode: json['mode'] as String,
     prompt: json['prompt'] as String,
     approvalPolicy: json['approvalPolicy'] as String,
+    catchUp: json['catchUp'] as String? ?? 'latest',
     workspace: json['workspace'] as String,
     baseBranch: json['baseBranch'] as String?,
     cron: json['cron'] as String,
@@ -120,13 +126,16 @@ class AgentSchedule {
     nextOccurrence: schedulerDate(json['nextOccurrence']),
     lastResult: json['lastResult'] as String?,
   );
-  Map<String, dynamic> settings() => {
+  /// An older bridge's strict schema rejects unknown keys, so callers pass
+  /// `includeCatchUp: capabilities.supportsCatchUp`.
+  Map<String, dynamic> settings({bool includeCatchUp = true}) => {
     'name': name,
     'projectId': projectId,
     'agentId': agentId,
     'mode': mode,
     'prompt': prompt,
     'approvalPolicy': approvalPolicy,
+    if (includeCatchUp) 'catchUp': catchUp,
     'workspace': workspace,
     'baseBranch': ?baseBranch,
     'cron': cron,
@@ -151,6 +160,7 @@ class ScheduleRun {
   final String? runtimeGeneration;
   final String? checkoutId;
   final DateTime? missedUntil;
+  final int? missedCount;
   const ScheduleRun({
     this.timezone,
     required this.id,
@@ -167,6 +177,7 @@ class ScheduleRun {
     this.runtimeGeneration,
     this.checkoutId,
     this.missedUntil,
+    this.missedCount,
   });
   bool get active =>
       const {'preparing', 'running', 'needs-input'}.contains(status);
@@ -189,6 +200,7 @@ class ScheduleRun {
     runtimeGeneration: json['runtimeGeneration'] as String?,
     checkoutId: json['checkoutId'] as String?,
     missedUntil: schedulerDate(json['missedUntil']),
+    missedCount: (json['missedCount'] as num?)?.toInt(),
   );
 }
 

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { CRON_PRESETS, nextOccurrences, validateCron, validateTimezone, SchedulerService, SchedulerStore,
+import { CRON_PRESETS, MISSED_COUNT_CAP, SchedulePatchSchema, missedOccurrences, nextOccurrences, validateCron, validateTimezone, SchedulerService, SchedulerStore,
   type SchedulerOptions, type ScheduleInput, type SchedulerRun } from "../src/scheduler";
 
 const dirs: string[] = [];
@@ -16,7 +16,9 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const input: ScheduleInput = { name: "Review", projectId: "project", agentId: "claude", mode: "terminal", prompt: "Review code",
-  approvalPolicy: "default", workspace: "worktree", cron: "* * * * *", timezone: "UTC", enabled: true };
+  approvalPolicy: "default", workspace: "worktree", cron: "* * * * *", timezone: "UTC", enabled: true, catchUp: "latest" };
+const DAY = 24 * 60 * 60_000;
+const daily: ScheduleInput = { ...input, cron: "0 9 * * *" };
 async function settle() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
 function fixture(overrides: Partial<SchedulerOptions> = {}, abDir = fresh()) {
   let time = Date.parse("2026-01-01T00:00:00Z");
@@ -25,7 +27,7 @@ function fixture(overrides: Partial<SchedulerOptions> = {}, abDir = fresh()) {
   const prepared: { checkoutId?: string }[] = [];
   const options: SchedulerOptions = {
     abDir, desktopOwned: true, now: () => time, timezone: "UTC", supportedAgents: () => [{ agentId: "claude", modes: ["terminal", "chat"] }],
-    authorize: () => null, stop: async () => {},
+    stop: async () => {},
     prepare: async (schedule, run, bind) => {
       prepared.push(schedule);
       const identity = { sessionId: `session-${++sequence}`, runtimeGeneration: `generation-${sequence}`, checkoutId: schedule.checkoutId ?? "checkout" };
@@ -122,7 +124,7 @@ describe("scheduler runtime", () => {
     expect(f.service.runs()[0]!.timezone).toBe("America/New_York");
     expect((await f.service.runNow(schedule.id)).timezone).toBe("Asia/Kolkata");
   });
-  test("renaming preserves execution authorization while execution edits replace it", async () => {
+  test("author device is display metadata that execution edits replace", async () => {
     const f = fixture();
     const schedule = await f.service.create(input, "phone");
     expect((await f.service.update(schedule.id, { name: "Renamed" }, null)).authorDeviceId).toBe("phone");
@@ -139,12 +141,13 @@ describe("scheduler runtime", () => {
     expect(f.service.runs().find((r) => r.trigger === "cron")?.occurrenceAt).toBe(expected);
     expect(f.service.runs().find((r) => r.trigger === "cron")?.status).toBe("skipped");
   });
-  test("enforces overlap and capacity without queueing", async () => {
-    const f = fixture(); const a = await f.service.create(input); const b = await f.service.create({ ...input, name: "Second" }); const c = await f.service.create({ ...input, name: "Third" });
-    await f.service.runNow(a.id); await f.service.runNow(b.id); await settle();
+  test("overlap skips the same schedule but never caps distinct schedules", async () => {
+    const f = fixture();
+    const [a, b, c] = [await f.service.create(input), await f.service.create({ ...input, name: "Second" }), await f.service.create({ ...input, name: "Third" })];
+    for (const schedule of [a, b, c]) await f.service.runNow(schedule.id);
+    await settle();
     expect((await f.service.runNow(a.id)).reason).toContain("still active");
-    expect((await f.service.runNow(c.id)).reason).toContain("two active");
-    await settle(); expect(f.delivered).toHaveLength(2);
+    expect(f.delivered).toHaveLength(3);
   });
   test("pause and resume consolidate missed interval and skip replay", async () => {
     const f = fixture(); const schedule = await f.service.create(input);
@@ -156,13 +159,15 @@ describe("scheduler runtime", () => {
     expect(f.service.runs()[0]!.trigger).toBe("missed");
     expect(f.delivered).toHaveLength(0);
   });
-  test("restart interrupts uncertain launches and consolidates missed interval", async () => {
-    const dir = fresh(); const f = fixture({}, dir); const schedule = await f.service.create(input);
+  test("restart records nothing until the first tick, never replays an interrupted run, then catches up", async () => {
+    const dir = fresh(); const f = fixture({}, dir); const schedule = await f.service.create(daily);
     await f.service.runNow(schedule.id); await settle(); f.service.close();
-    const time = f.now() + 7 * 24 * 60 * 60_000;
+    const time = f.now() + 7 * DAY + 12 * 3_600_000;
     const next = fixture({ now: () => time }, dir);
-    expect(next.service.runs().map((r) => r.status).sort()).toEqual(["interrupted", "skipped"]);
-    await next.service.tick(); await settle(); expect(next.delivered).toHaveLength(0);
+    expect(next.service.runs().map((r) => r.status)).toEqual(["interrupted"]);
+    await next.service.tick(); await settle();
+    expect(next.service.runs().map((r) => r.trigger).sort()).toEqual(["catch-up", "manual", "missed"]);
+    expect(next.delivered).toHaveLength(1);
   });
   test("subsequent runs share persisted checkout across restart", async () => {
     const dir = fresh(); const f = fixture({}, dir); const schedule = await f.service.create(input);
@@ -203,20 +208,10 @@ describe("scheduler runtime", () => {
     const schedule = await f.service.create(input); await f.service.runNow(schedule.id); await settle();
     expect(f.service.runs()[0]!.reason).toBe("Schedule workspace is missing. Restore it or create a new schedule.");
   });
-  test("rechecks authorization after preparation before prompt delivery", async () => {
-    let checks = 0;
-    const stopped: string[] = [];
-    const f = fixture({ authorize: () => ++checks === 1 ? null : "Remote access was disabled", stop: async (run) => { stopped.push(run.sessionId!); } });
-    const schedule = await f.service.create(input, "phone"); await f.service.runNow(schedule.id); await settle();
-    expect(f.service.runs()[0]!.status).toBe("skipped"); expect(f.delivered).toHaveLength(0);
-    expect(stopped).toEqual(["session-1"]);
-  });
-  test("remote manual run of a local schedule rechecks the initiating device", async () => {
-    let remoteChecks = 0;
-    const f = fixture({ authorize: (schedule) => schedule.authorDeviceId === "phone" && ++remoteChecks > 1 ? "Remote access revoked" : null });
-    const schedule = await f.service.create(input); await f.service.runNow(schedule.id, "phone"); await settle();
-    expect(f.service.runs()[0]!.status).toBe("skipped"); expect(f.delivered).toHaveLength(0);
-    expect(f.service.schedules()[0]!.authorDeviceId).toBeNull();
+  test("runs of a schedule whose author device is gone still dispatch", async () => {
+    const f = fixture(); const schedule = await f.service.create(input, "revoked-phone");
+    await f.service.runNow(schedule.id); await settle();
+    expect(f.service.runs()[0]!.status).toBe("running"); expect(f.delivered).toHaveLength(1);
   });
   test("explicit project shutdown interrupts all active runs", async () => {
     const f = fixture(); const schedule = await f.service.create(input); await f.service.runNow(schedule.id); await settle();
@@ -315,10 +310,154 @@ describe("scheduler runtime", () => {
     const released: string[] = []; const next = fixture({ releaseWorkspace: async (s) => { released.push(s.id); } }, dir);
     next.service.start(); await settle(); expect(released).toEqual([schedule.id]); expect(next.service.schedules()).toHaveLength(0);
   });
-  test("long suspend records one missed interval without replay", async () => {
-    const f = fixture(); await f.service.create(input); f.advance(365 * 24 * 60 * 60_000);
-    await f.service.tick(); await settle(); expect(f.service.runs()).toHaveLength(1);
-    expect(f.service.runs()[0]!.trigger).toBe("missed"); expect(f.delivered).toHaveLength(0);
+  test("daily schedule asleep from 08:00 to 18:00 catches up the 09:00 occurrence", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z"));
+    const schedule = await f.service.create(daily);
+    f.setTime(Date.parse("2026-01-01T18:00:00Z")); await f.service.tick(); await settle();
+    expect(f.service.runs()).toHaveLength(1);
+    expect(f.service.runs()[0]).toMatchObject({ trigger: "catch-up", status: "running", occurrenceAt: Date.parse("2026-01-01T09:00:00Z") });
+    expect(f.delivered).toHaveLength(1);
+    expect(f.service.schedules().find((s) => s.id === schedule.id)!.nextOccurrence).toBe(Date.parse("2026-01-02T09:00:00Z"));
+  });
+  test("several missed occurrences: latest runs and earlier ones consolidate; skip policy runs nothing", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z"));
+    await f.service.create(daily); await f.service.create({ ...daily, name: "Skipper", catchUp: "skip" });
+    f.setTime(Date.parse("2026-01-04T12:00:00Z")); await f.service.tick(); await settle();
+    const runs = f.service.runs();
+    const latest = runs.filter((r) => r.scheduleName === "Review"); const skipper = runs.filter((r) => r.scheduleName === "Skipper");
+    expect(latest.map((r) => r.trigger).sort()).toEqual(["catch-up", "missed"]);
+    expect(latest.find((r) => r.trigger === "catch-up")!.occurrenceAt).toBe(Date.parse("2026-01-04T09:00:00Z"));
+    expect(latest.find((r) => r.trigger === "missed")).toMatchObject({ status: "skipped", missedCount: 3, occurrenceAt: Date.parse("2026-01-01T09:00:00Z"),
+      missedUntil: Date.parse("2026-01-03T09:00:00Z"), reason: expect.stringContaining("only the latest missed run is caught up") });
+    expect(skipper).toHaveLength(1);
+    expect(skipper[0]).toMatchObject({ trigger: "missed", status: "skipped", missedCount: 4, missedUntil: Date.parse("2026-01-04T09:00:00Z"),
+      reason: "Missed while the desktop app was closed or the computer was asleep" });
+    expect(f.delivered).toHaveLength(1);
+  });
+  test("no catch-up when the next occurrence is within 15 minutes", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z"));
+    await f.service.create({ ...input, cron: "*/5 * * * *" });
+    f.setTime(Date.parse("2026-01-11T08:02:00Z")); await f.service.tick(); await settle();
+    const runs = f.service.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ trigger: "missed", status: "skipped", missedCount: MISSED_COUNT_CAP });
+    expect(runs[0]!.reason).toContain("15 minutes"); expect(f.delivered).toHaveLength(0);
+  });
+  test("minutely schedule after a long gap runs only the on-time occurrence and caps the missed count", async () => {
+    const f = fixture(); await f.service.create(input); f.advance(365 * DAY + 30_000);
+    await f.service.tick(); await settle();
+    const runs = f.service.runs();
+    expect(runs.some((r) => r.trigger === "catch-up")).toBe(false);
+    expect(runs.find((r) => r.trigger === "missed")).toMatchObject({ missedCount: MISSED_COUNT_CAP });
+    expect(runs.filter((r) => r.trigger === "cron")).toHaveLength(1);
+  });
+  test("a tick 30s late still runs as cron while 61s late runs as catch-up", async () => {
+    const at = Date.parse("2026-01-01T09:00:00Z");
+    for (const [late, trigger] of [[30_000, "cron"], [61_000, "catch-up"]] as const) {
+      const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z")); await f.service.create(daily);
+      f.setTime(at + late); await f.service.tick(); await settle();
+      expect(f.service.runs()).toHaveLength(1);
+      expect(f.service.runs()[0]).toMatchObject({ trigger, status: "running", occurrenceAt: at });
+    }
+  });
+  test("resume during the on-time window runs the due occurrence instead of skipping it", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z")); await f.service.create(daily);
+    f.setTime(Date.parse("2026-01-01T09:00:10Z")); f.service.resume(); await settle();
+    expect(f.service.runs()).toHaveLength(1); expect(f.service.runs()[0]).toMatchObject({ trigger: "cron", status: "running" });
+  });
+  test("re-enabling a paused schedule records the paused interval and never catches up", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-01-01T08:00:00Z"));
+    const schedule = await f.service.create(daily); await f.service.update(schedule.id, { enabled: false });
+    f.setTime(Date.parse("2026-01-05T12:00:00Z")); await f.service.update(schedule.id, { enabled: true }); await settle();
+    expect(f.service.runs()).toHaveLength(1);
+    expect(f.service.runs()[0]).toMatchObject({ trigger: "missed", missedCount: 5, reason: "Missed while the schedule was paused" });
+    expect(f.delivered).toHaveLength(0);
+  });
+  test("patches carry no defaults: pause, resume and rename keep stored settings", async () => {
+    expect(SchedulePatchSchema.parse({ name: "x" })).toEqual({ name: "x" });
+    expect(() => SchedulePatchSchema.parse({ unknown: 1 })).toThrow();
+    const f = fixture(); const schedule = await f.service.create({ ...input, approvalPolicy: "bypass", catchUp: "skip" });
+    await f.service.update(schedule.id, { enabled: false });
+    expect(f.service.schedules()[0]).toMatchObject({ approvalPolicy: "bypass", catchUp: "skip", enabled: false });
+    await f.service.update(schedule.id, { name: "Renamed" });
+    expect(f.service.schedules()[0]).toMatchObject({ enabled: false, name: "Renamed", approvalPolicy: "bypass" });
+    await f.service.update(schedule.id, { enabled: true });
+    expect(f.service.schedules()[0]).toMatchObject({ approvalPolicy: "bypass", catchUp: "skip", enabled: true });
+  });
+  test("missed-occurrence helper counts inclusively, caps, and is DST-safe", () => {
+    const first = Date.parse("2026-03-07T14:00:00Z");
+    const result = missedOccurrences("0 9 * * *", "America/New_York", first, Date.parse("2026-03-09T13:00:00Z"), 100)!;
+    expect(result.count).toBe(3);
+    expect(new Date(result.latest).toISOString()).toBe("2026-03-09T13:00:00.000Z");
+    expect(new Date(result.previous!).toISOString()).toBe("2026-03-08T13:00:00.000Z");
+    expect(missedOccurrences("* * * * *", "UTC", 0, 10 * 60_000, 5)!.count).toBe(5);
+    expect(missedOccurrences("0 9 * * *", "UTC", Date.parse("2026-01-01T09:00:00Z"), Date.parse("2026-01-01T08:00:00Z"), 5)).toBeNull();
+  });
+  test("missed-occurrence helper walks the forward timetable through DST gaps and repeated hours", () => {
+    const at = (iso: string) => Date.parse(iso);
+    const show = (r: ReturnType<typeof missedOccurrences>) => r && { count: r.count, latest: new Date(r.latest).toISOString(),
+      previous: r.previous === undefined ? undefined : new Date(r.previous).toISOString(), following: new Date(r.following).toISOString() };
+    // Spring forward: next() shifts the nonexistent 02:30 EST to 03:30 EDT (07:30Z); prev() never yields that day.
+    expect(show(missedOccurrences("30 2 * * *", "America/New_York", at("2026-03-08T07:30:00Z"), at("2026-03-08T07:30:01Z"), 10)))
+      .toEqual({ count: 1, latest: "2026-03-08T07:30:00.000Z", previous: undefined, following: "2026-03-09T06:30:00.000Z" });
+    expect(show(missedOccurrences("30 2 * * *", "America/New_York", at("2026-03-07T07:30:00Z"), at("2026-03-09T12:00:00Z"), 10)))
+      .toEqual({ count: 3, latest: "2026-03-09T06:30:00.000Z", previous: "2026-03-08T07:30:00.000Z", following: "2026-03-10T06:30:00.000Z" });
+    // Waking inside the shifted hour: next() from `now` would skip to tomorrow, but the stored timetable still owes 07:30Z.
+    expect(show(missedOccurrences("30 2 * * *", "America/New_York", at("2026-03-07T07:30:00Z"), at("2026-03-08T07:15:00Z"), 10))!.following)
+      .toBe("2026-03-08T07:30:00.000Z");
+    // Fall back: prev() would answer the second 01:30 (06:30Z), which next() never emits for this cron.
+    expect(show(missedOccurrences("30 1 * * *", "America/New_York", at("2026-11-01T05:30:00Z"), at("2026-11-01T06:30:20Z"), 10)))
+      .toEqual({ count: 1, latest: "2026-11-01T05:30:00.000Z", previous: undefined, following: "2026-11-02T06:30:00.000Z" });
+    // Past the cap the tail is re-seeded; it must still agree with the uncapped forward walk.
+    for (const now of [at("2026-03-08T07:10:00Z"), at("2026-11-01T06:35:00Z"), at("2026-11-01T05:55:00Z")]) {
+      const full = show(missedOccurrences("*/10 * * * *", "America/New_York", at("2026-03-01T00:00:00Z"), now, 1_000_000))!;
+      const capped = show(missedOccurrences("*/10 * * * *", "America/New_York", at("2026-03-01T00:00:00Z"), now, 5))!;
+      expect({ ...capped, count: full.count }).toEqual(full);
+      expect(capped.count).toBe(5);
+    }
+  });
+  test("a spring-forward gap-day occurrence runs on time, catches up, or is recorded, never silently dropped", async () => {
+    const nightly: ScheduleInput = { ...input, cron: "30 2 * * *", timezone: "America/New_York" };
+    const gapDay = Date.parse("2026-03-08T07:30:00Z");
+    const tomorrow = Date.parse("2026-03-09T06:30:00Z");
+    const onTime = fixture(); onTime.setTime(Date.parse("2026-03-07T12:00:00Z"));
+    const a = await onTime.service.create(nightly);
+    expect(a.nextOccurrence).toBe(gapDay);
+    onTime.setTime(gapDay + 1_000); await onTime.service.tick(); await settle();
+    expect(onTime.service.runs()).toHaveLength(1);
+    expect(onTime.service.runs()[0]).toMatchObject({ trigger: "cron", status: "running", occurrenceAt: gapDay });
+    expect(onTime.delivered).toHaveLength(1);
+    expect(onTime.service.schedules()[0]!.nextOccurrence).toBe(tomorrow);
+
+    const late = fixture(); late.setTime(Date.parse("2026-03-07T12:00:00Z")); await late.service.create(nightly);
+    late.setTime(Date.parse("2026-03-08T12:00:00Z")); await late.service.tick(); await settle();
+    expect(late.service.runs()).toHaveLength(1);
+    expect(late.service.runs()[0]).toMatchObject({ trigger: "catch-up", occurrenceAt: gapDay });
+    expect(late.service.schedules()[0]!.nextOccurrence).toBe(tomorrow);
+
+    const paused = fixture(); paused.setTime(Date.parse("2026-03-07T12:00:00Z"));
+    const p = await paused.service.create(nightly); await paused.service.update(p.id, { enabled: false });
+    paused.setTime(Date.parse("2026-03-08T12:00:00Z")); await paused.service.update(p.id, { enabled: true }); await settle();
+    expect(paused.service.runs()).toHaveLength(1);
+    expect(paused.service.runs()[0]).toMatchObject({ trigger: "missed", missedCount: 1, occurrenceAt: gapDay, missedUntil: gapDay });
+    expect(paused.service.schedules()[0]!.nextOccurrence).toBe(tomorrow);
+
+    // Waking on the 9th: the gap day is the earlier of two misses and is recorded, ending no earlier than it starts.
+    const twoDays = fixture(); twoDays.setTime(Date.parse("2026-03-07T12:00:00Z")); await twoDays.service.create(nightly);
+    twoDays.setTime(Date.parse("2026-03-09T12:00:00Z")); await twoDays.service.tick(); await settle();
+    const runs = twoDays.service.runs();
+    expect(runs.find((r) => r.trigger === "catch-up")).toMatchObject({ occurrenceAt: tomorrow });
+    expect(runs.find((r) => r.trigger === "missed")).toMatchObject({ missedCount: 1, occurrenceAt: gapDay, missedUntil: gapDay });
+  });
+  test("a machine asleep through the first 01:30 of a fall-back day does not run the repeated 01:30 as on time", async () => {
+    const f = fixture(); f.setTime(Date.parse("2026-10-31T12:00:00Z"));
+    await f.service.create({ ...input, cron: "30 1 * * *", timezone: "America/New_York", catchUp: "skip" });
+    expect(f.service.schedules()[0]!.nextOccurrence).toBe(Date.parse("2026-11-01T05:30:00Z"));
+    f.setTime(Date.parse("2026-11-01T06:30:20Z")); await f.service.tick(); await settle();
+    expect(f.service.runs()).toHaveLength(1);
+    expect(f.service.runs()[0]).toMatchObject({ trigger: "missed", status: "skipped", missedCount: 1,
+      occurrenceAt: Date.parse("2026-11-01T05:30:00Z"), missedUntil: Date.parse("2026-11-01T05:30:00Z") });
+    expect(f.delivered).toHaveLength(0);
   });
   test("async capability validation cannot resurrect a concurrently deleted schedule", async () => {
     let hold = false;
@@ -341,6 +480,13 @@ describe("scheduler durable store", () => {
     expect(() => new SchedulerStore(dir)).toThrow("Another desktop host"); store.close();
     const db = new Database(store.path); db.query("INSERT INTO scheduler_owner(id,pid,token) VALUES(1,2147483647,'dead')").run(); db.close();
     const recovered = new SchedulerStore(dir); stores.push(recovered); expect(recovered.schedules()).toEqual([]);
+  });
+  test("a user_version 1 database upgrades to 2 and a newer one is refused", () => {
+    const dir = fresh(); const first = new SchedulerStore(dir); first.close();
+    const open = (version: number) => { const db = new Database(first.path); db.exec(`PRAGMA user_version = ${version}`); db.close(); };
+    open(1); const upgraded = new SchedulerStore(dir); stores.push(upgraded); upgraded.close();
+    const db = new Database(first.path); expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2); db.close();
+    open(3); expect(() => new SchedulerStore(dir)).toThrow("requires a newer bridge");
   });
   test("duplicate occurrence claims cannot launch twice", async () => {
     const f = fixture(); const schedule = await f.service.create(input);

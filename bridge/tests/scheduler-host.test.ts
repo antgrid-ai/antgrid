@@ -29,7 +29,7 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 const settings = (projectId: string) => ({ name: "Daily review", projectId, agentId: "claude-code", mode: "chat",
-  prompt: "Review changes", approvalPolicy: "default", workspace: "shared", cron: "0 9 * * 1-5", timezone: "UTC", enabled: true });
+  prompt: "Review changes", approvalPolicy: "default", workspace: "shared", cron: "0 9 * * 1-5", timezone: "UTC", enabled: true, catchUp: "latest" });
 
 test("project-free loopback scheduler uses host validation for CRUD and preview", async () => {
   const control = await host.startControlPlane();
@@ -45,6 +45,7 @@ test("project-free loopback scheduler uses host validation for CRUD and preview"
   const capability = await request("scheduler.capabilities");
   expect(capability.result.supported).toBe(true);
   expect(capability.result.supportsBaseBranchClear).toBe(true);
+  expect(capability.result.supportsCatchUp).toBe(true);
   expect(capability.result.projects[0]).toMatchObject({ projectId, isGitRepository: false });
   expect((await request("scheduler.preview", { cron: "0 9 * * 1-5", timezone: "UTC" })).result.occurrences).toHaveLength(5);
   for (const params of [{ cron: "@daily", timezone: "UTC" }, { cron: "", timezone: "UTC" },
@@ -141,4 +142,22 @@ test("active scheduled projects survive LRU eviction and explicit project stop r
     const history = await host.schedulerRequest("scheduler.runs") as any;
     expect(history.runs.find((r: any) => r.id === started.run.id).status).toBe("interrupted");
   } finally { launch.mockRestore(); }
+});
+
+test("dispatch refuses a stored schedule whose project left the catalog", async () => {
+  await host.startControlPlane();
+  const folder = join(root, "gone"); mkdirSync(folder);
+  const projectId = computeProjectId(folder);
+  await host.open(projectId, folder, "local");
+  const created = await host.schedulerRequest("scheduler.create", { schedule: settings(projectId) }) as any;
+  (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(projectId);
+  const started = await host.schedulerRequest("scheduler.runNow", { id: created.schedule.id }) as any;
+  let run: any;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    run = ((await host.schedulerRequest("scheduler.runs")) as any).runs.find((r: any) => r.id === started.run.id);
+    if (run.status === "failed") break;
+    await Bun.sleep(10);
+  }
+  expect(run.status).toBe("failed");
+  expect(run.reason).toBe("Project is unavailable. Open it from the desktop before running this schedule.");
 });

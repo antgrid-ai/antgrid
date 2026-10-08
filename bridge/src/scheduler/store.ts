@@ -18,13 +18,15 @@ export class SchedulerStore {
       db.exec("PRAGMA busy_timeout = 250; PRAGMA journal_mode = WAL;");
       db.transaction(() => {
         const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-        if (version !== 0 && version !== 1) throw new Error("Scheduler database requires a newer bridge");
+        // v2 adds a run trigger and record fields that an older bridge's closed schemas would fail to parse,
+        // so the bump makes it refuse the database up front instead.
+        if (version < 0 || version > 2) throw new Error("Scheduler database requires a newer bridge");
         db.exec(`CREATE TABLE IF NOT EXISTS scheduler_owner (id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,token TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY, record TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, scheduleId TEXT NOT NULL,
             claimKey TEXT UNIQUE, active INTEGER NOT NULL, startedAt INTEGER NOT NULL, record TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS runs_history ON runs (scheduleId, startedAt);
-          PRAGMA user_version = 1;`);
+          PRAGMA user_version = 2;`);
         const owner = db.query("SELECT pid,token FROM scheduler_owner WHERE id=1").get() as { pid: number; token: string } | null;
         if (owner) {
           if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error("Scheduler owner record is invalid");
@@ -76,19 +78,23 @@ export class SchedulerStore {
       .run(run.id, run.scheduleId, claimKey ?? null, isActiveRun(run) ? 1 : 0, run.startedAt, JSON.stringify(SchedulerRunSchema.parse(run)));
   }
 
-  claim(schedule: Schedule, run: SchedulerRun, nextOccurrence?: number): SchedulerRun | null {
+  /** `missed` is a consolidated terminal record written in the same transaction, under its own claim key. */
+  claim(schedule: Schedule, run: SchedulerRun, nextOccurrence?: number, missed?: SchedulerRun): SchedulerRun | null {
     return this.withDb((db) => db.transaction(() => {
       const current = this.readSchedules(db).find((s) => s.id === schedule.id);
       if (!current || current.deletedAt !== undefined) return null;
-      const key = run.trigger === "manual" ? undefined : `${schedule.id}:${run.occurrenceAt}`;
+      const keyOf = (r: SchedulerRun) => r.trigger === "manual" ? undefined : `${schedule.id}:${r.occurrenceAt}`;
+      const key = keyOf(run);
       if (key && db.query("SELECT id FROM runs WHERE claimKey=?").get(key)) return null;
-      const active = this.readRuns(db).filter(isActiveRun);
       if (run.status === "preparing") {
-        const reason = active.some((r) => r.scheduleId === schedule.id) ? "An occurrence of this schedule is still active"
-          : active.length >= 2 ? "This machine already has two active scheduled runs" : undefined;
-        if (reason) run = { ...run, status: "skipped", reason, finishedAt: run.startedAt };
+        const active = this.readRuns(db).filter(isActiveRun);
+        if (active.some((r) => r.scheduleId === schedule.id)) {
+          run = { ...run, status: "skipped", reason: "An occurrence of this schedule is still active", finishedAt: run.startedAt };
+        }
       }
       if (nextOccurrence !== undefined) this.writeSchedule(db, { ...current, nextOccurrence });
+      const missedKey = missed && keyOf(missed);
+      if (missed && !(missedKey && db.query("SELECT id FROM runs WHERE claimKey=?").get(missedKey))) this.writeRun(db, missed, missedKey);
       this.writeRun(db, run, key);
       this.prune(db, run.scheduleId);
       return run;

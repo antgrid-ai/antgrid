@@ -16,8 +16,8 @@ class SchedulerDraft {
     required this.time,
     this.workspaceCreated = false,
     this.checkoutId,
-  }) : values = Map.unmodifiable(values),
-       initialSaved = Map.unmodifiable(initialSaved);
+  }) : values = Map.unmodifiable({'catchUp': 'latest', ...values}),
+       initialSaved = Map.unmodifiable({'catchUp': 'latest', ...initialSaved});
 
   final Map<String, dynamic> values;
   final Map<String, dynamic> initialSaved;
@@ -73,6 +73,7 @@ class SchedulerDraft {
               ? 'worktree'
               : 'shared',
           'approvalPolicy': 'default',
+          'catchUp': 'latest',
           'enabled': true,
           'cron': '0 9 * * *',
           'timezone': localTimezone ?? snapshot.capabilities.timezone,
