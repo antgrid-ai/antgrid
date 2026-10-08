@@ -13,8 +13,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:webview_platform_interface/webview_platform_interface.dart'
-    show WebViewPlatform;
+import 'package:webview_all/webview_all.dart' show WebViewPlatform;
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
 import '../helpers/fake_webview_platform.dart';

@@ -257,8 +257,7 @@ class PreviewSiteData {
   Future<PreviewClearStatus> _runWipe({required bool recordLateSuccess}) async {
     await _quiesce();
     _lateRetirements = [
-      for (final origin in _retirements.values)
-        if (origin != null) origin,
+      for (final origin in _retirements.values) ?origin,
     ];
     final raw = Future.sync(wipe);
     try {

@@ -15,10 +15,9 @@ import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/widgets/preview_draw_overlay.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:webview_platform_interface/webview_platform_interface.dart'
+import 'package:webview_all/webview_all.dart'
     show JavaScriptMessage, UrlChange, WebViewPlatform;
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
