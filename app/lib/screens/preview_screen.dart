@@ -529,7 +529,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   void _loadOrQueue(int id, _TabWebViewState tabState, Uri target) {
     final c = tabState.controller;
     if (c != null) {
-      c.loadRequest(target);
+      detached('PreviewScreen', 'navigate', () => c.loadRequest(target));
     } else if (tabState.pendingLoadUrl != null) {
       setState(() => _queuePendingLoad(id, tabState, target));
     }

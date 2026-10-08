@@ -84,15 +84,15 @@ class PreviewSiteData {
   final _sources = <Map<int, String> Function()>[];
   final _retirements = <Future<void>, PreviewAdmission?>{};
   Future<void> _tail = Future<void>.value();
-  Future<void>? _straggler;
+
+  // A timed-out clear still running natively, and whether its late success
+  // should be recorded. Only [_drainStraggler] records it, so the record runs
+  // inside the queue rather than racing the task that started the clear.
+  ({Future<PreviewClearStatus> result, bool record})? _straggler;
 
   // Pages the current clear could not wait for: still being retired when it
   // started, or dropped after that. What they wrote may outlive the clear.
   List<PreviewAdmission>? _lateRetirements;
-
-  // Moves on whenever the queue stops waiting for a timed-out clear, so that
-  // clear's eventual success cannot write the map outside the queue.
-  int _stragglerFence = 0;
 
   /// Bumps after every clear whose success live pages must react to.
   ValueListenable<int> get wipes => _wipes;
@@ -207,13 +207,21 @@ class PreviewSiteData {
   Future<void> _drainStraggler() async {
     final straggler = _straggler;
     if (straggler == null) return;
-    await straggler.timeout(
-      stragglerGrace,
-      onTimeout: () {
-        _stragglerFence++;
-      },
-    );
     _straggler = null;
+    final status = await straggler.result
+        .then<PreviewClearStatus?>((s) => s)
+        .timeout(stragglerGrace, onTimeout: () => null);
+    if (!straggler.record ||
+        status == null ||
+        status == PreviewClearStatus.failed) {
+      return;
+    }
+    try {
+      await _recordClear();
+    } catch (e) {
+      // The queue's tail must never fail, or every later task is skipped.
+      _logFailure(e);
+    }
   }
 
   // A page can be dropped while earlier ones are still being waited for, so
@@ -246,20 +254,16 @@ class PreviewSiteData {
         'website data clear failed',
         fields: {'reason': 'timeout'},
       );
-      final fence = _stragglerFence;
-      _straggler = raw
-          .then<PreviewClearStatus>(
-            _report,
-            onError: (Object e) {
-              _logFailure(e);
-              return PreviewClearStatus.failed;
-            },
-          )
-          .then((s) async {
-            if (!recordLateSuccess || s == PreviewClearStatus.failed) return;
-            if (fence != _stragglerFence) return;
-            await _recordClear();
-          });
+      _straggler = (
+        result: raw.then<PreviewClearStatus>(
+          _report,
+          onError: (Object e) {
+            _logFailure(e);
+            return PreviewClearStatus.failed;
+          },
+        ),
+        record: recordLateSuccess,
+      );
       return PreviewClearStatus.failed;
     } catch (e) {
       _logFailure(e);
