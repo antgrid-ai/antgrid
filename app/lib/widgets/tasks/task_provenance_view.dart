@@ -3,7 +3,6 @@ import 'package:flutter/widgets.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/task.dart';
@@ -173,74 +172,24 @@ class TaskProvenanceBlock extends StatelessWidget {
         AbTokens.space6,
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // A `Wrap`, not a `Row` with `Spacer`: the block sits at whatever
-          // width the pane is, and a spacer stretched the button to the far
-          // edge, leaving a dead gap that fought the density this app is
-          // built around. Grouped tight on a wide pane, wrapped to its own
-          // line on a narrow one — never flung to an edge either way.
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: AbTokens.space8,
-            runSpacing: AbTokens.space6,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AbIcon(
-                    AbIcons.openExternal,
-                    size: AbTokens.iconButtonGlyph,
-                    color: palette.iconMuted,
-                  ),
-                  const SizedBox(width: AbTokens.space6),
-                  Text(
-                    'Imported from ${taskProviderLabel(task)}',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: palette.textSecondary,
-                    ),
-                  ),
-                  // `externalKey`, never `externalId`: the id is the
-                  // provider's opaque handle and reads as line noise. An
-                  // account service older than that field sends neither, and
-                  // no key is better than the wrong one.
-                  if (task.externalKey != null) ...[
-                    const SizedBox(width: AbTokens.space8),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: _keyMaxWidth),
-                      child: Text(
-                        task.externalKey!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AbTokens.monoStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: palette.textMuted,
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              // Absent, never disabled: a task can be linked to a provider
-              // whose issue URL the import never carried, and a dead button
-              // reads as a broken one.
-              if (url != null)
-                AbButton(
-                  label: 'Open issue',
-                  compact: true,
-                  leading: AbIcon(
-                    AbIcons.openExternal,
-                    size: AbTokens.iconButtonGlyph,
-                    color: palette.textSecondary,
-                  ),
-                  onTap: () =>
+          _IssueCard(
+            title: '${taskProviderLabel(task)} issue',
+            // `externalKey`, never `externalId`: the id is the provider's
+            // opaque handle and reads as line noise. An account service older
+            // than that field sends neither, and no key is better than the
+            // wrong one.
+            detail: task.externalKey,
+            // Inert, never disabled-looking: a task can be linked to a
+            // provider whose issue URL the import never carried.
+            onTap: url == null
+                ? null
+                : () =>
                       detached('tasks', 'open issue', () => open(context, url)),
-                ),
-            ],
           ),
           if (sync != null) ...[
-            const SizedBox(height: AbTokens.space6),
+            const SizedBox(height: AbTokens.space8),
             Text(
               sync,
               style: AbTokens.sansStyle(
@@ -251,15 +200,102 @@ class TaskProvenanceBlock extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: AbTokens.space6),
+          const SizedBox(height: AbTokens.space8),
           Text(
-            'The description below was written outside your account.',
+            'Imported from ${taskProviderLabel(task)}. Its description was '
+            'written outside your account.',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXxs,
               color: palette.textMuted,
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The issue as a link: the whole card opens it.
+class _IssueCard extends StatefulWidget {
+  const _IssueCard({required this.title, this.detail, this.onTap});
+
+  final String title;
+  final String? detail;
+  final VoidCallback? onTap;
+
+  @override
+  State<_IssueCard> createState() => _IssueCardState();
+}
+
+class _IssueCardState extends State<_IssueCard> {
+  var _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    final onTap = widget.onTap;
+    final detail = widget.detail;
+    final hot = onTap != null && _hovered;
+    final card = Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space10,
+      ),
+      decoration: BoxDecoration(
+        color: hot ? palette.bgHover : null,
+        borderRadius: AbTokens.borderRadius5,
+        border: Border.all(
+          color: hot ? palette.borderStrong : palette.borderDefault,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: palette.textPrimary,
+                  ),
+                ),
+              ),
+              if (onTap != null)
+                AbIcon(
+                  AbIcons.openExternal,
+                  size: AbTokens.iconButtonGlyph,
+                  color: palette.iconMuted,
+                ),
+            ],
+          ),
+          if (detail != null) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              detail,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: palette.textMuted,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+    if (onTap == null) return card;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AbTooltip(message: 'Open issue', child: card),
       ),
     );
   }
@@ -303,7 +339,3 @@ class TaskProvenanceNotice extends StatelessWidget {
     );
   }
 }
-
-/// Long enough for a real repo slug + issue number, short enough that a
-/// pathological one still ellipsizes instead of stretching the header row.
-const _keyMaxWidth = 220.0;

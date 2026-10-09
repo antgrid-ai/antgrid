@@ -1,5 +1,7 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../constants/breakpoints.dart';
 import '../../util/detached.dart';
 import '../ab_colors.dart';
 import '../ab_icons.dart';
@@ -9,7 +11,9 @@ import 'ab_button.dart';
 import 'ab_empty_state.dart';
 import 'ab_icon.dart';
 import 'ab_icon_button.dart';
+import 'ab_kbd.dart';
 import 'ab_list_row.dart';
+import 'ab_menu.dart';
 import 'ab_search_field.dart';
 import 'ab_separator.dart';
 
@@ -65,7 +69,13 @@ class AbSelectOption<T> {
 ///
 /// Presentation comes from [showAbAdaptiveSheet], so this is a bottom sheet on
 /// a phone (padded for the keyboard, closed by system back) and a centred
-/// dialog on desktop, sharing one results list.
+/// dialog on desktop, sharing one results list. Given an [anchor] (overlay
+/// coordinates, see [abMenuAnchorRect]), a wide layout drops it as a popover
+/// under the field that opened it instead; a phone still gets the sheet, where
+/// a popover would lose its list to the keyboard.
+///
+/// [shortcut] names the key that opened the picker, shown beside the title so
+/// the binding is learnable from the surface it opens.
 ///
 /// Returns the chosen values, or null when the sheet was dismissed — which is
 /// NOT the same as an empty set, and callers must not collapse the two: empty
@@ -80,21 +90,33 @@ Future<Set<T>?> showAbSelect<T>(
   String filterHint = 'Filter…',
   String? createTooltip,
   Future<T?> Function(BuildContext context)? onCreateNew,
+  Rect? anchor,
+  String? shortcut,
 }) {
-  return showAbAdaptiveSheet<Set<T>>(
-    context,
-    child: _AbSelectSheet<T>(
-      title: title,
-      options: options,
-      initialSelection: selected,
-      single: single,
-      emptyMessage: emptyMessage,
-      filterHint: filterHint,
-      createTooltip: createTooltip,
-      onCreateNew: onCreateNew,
-    ),
+  final sheet = _AbSelectSheet<T>(
+    title: title,
+    options: options,
+    initialSelection: selected,
+    single: single,
+    emptyMessage: emptyMessage,
+    filterHint: filterHint,
+    createTooltip: createTooltip,
+    onCreateNew: onCreateNew,
+    shortcut: shortcut,
   );
+  if (anchor != null &&
+      MediaQuery.sizeOf(context).width >= kCompactBreakpoint) {
+    return showAbPanel<Set<T>>(
+      context: context,
+      anchorRect: anchor,
+      width: _popoverWidth,
+      builder: (_) => sheet,
+    );
+  }
+  return showAbAdaptiveSheet<Set<T>>(context, child: sheet);
 }
+
+const _popoverWidth = 290.0;
 
 class _AbSelectSheet<T> extends StatefulWidget {
   const _AbSelectSheet({
@@ -106,9 +128,11 @@ class _AbSelectSheet<T> extends StatefulWidget {
     this.emptyMessage,
     this.createTooltip,
     this.onCreateNew,
+    this.shortcut,
   });
 
   final String title;
+  final String? shortcut;
   final List<AbSelectOption<T>> options;
   final Set<T> initialSelection;
   final bool single;
@@ -133,6 +157,10 @@ class _AbSelectSheet<T> extends StatefulWidget {
 class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
   late Set<T> _selected = {...widget.initialSelection};
   String _query = '';
+
+  /// The row Enter takes. Starts on the current choice in single-select, so
+  /// opening and pressing Enter keeps it rather than changing it.
+  int _active = 0;
 
   /// Rows whose [AbSelectOption.onDelete] returned true this session — held
   /// here rather than mutating [widget.options], which the caller owns.
@@ -174,12 +202,55 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    if (widget.single) {
+      final i = widget.options.indexWhere(
+        (o) => widget.initialSelection.contains(o.value),
+      );
+      if (i >= 0) _active = i;
+    }
+  }
+
+  List<AbSelectOption<T>> get _visible => widget.options
+      .where((o) => !_removed.contains(o.value) && o.matches(_query))
+      .toList(growable: false);
+
+  void _move(int delta) {
+    final count = _visible.length;
+    if (count == 0) return;
+    setState(() => _active = (_active + delta).clamp(0, count - 1));
+  }
+
+  void _takeActive() {
+    final visible = _visible;
+    if (_active < visible.length) _toggle(visible[_active].value);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final palette = context.antgrid;
-    final visible = widget.options
-        .where((o) => !_removed.contains(o.value) && o.matches(_query))
-        .toList(growable: false);
+    final visible = _visible;
+    final shortcut = widget.shortcut;
 
+    // Above the filter field, so the arrows and Enter reach the list before
+    // the field's own caret and submit handling.
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () => _move(1),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () => _move(-1),
+        const SingleActivator(LogicalKeyboardKey.enter): _takeActive,
+      },
+      child: _content(context, palette, visible, shortcut),
+    );
+  }
+
+  Widget _content(
+    BuildContext context,
+    AbColors palette,
+    List<AbSelectOption<T>> visible,
+    String? shortcut,
+  ) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -202,6 +273,10 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
                   ),
                 ),
               ),
+              if (shortcut != null) ...[
+                AbKbd(shortcut),
+                const SizedBox(width: AbTokens.space4),
+              ],
               if (widget.onCreateNew != null) ...[
                 AbIconButton(
                   icon: AbIcons.add,
@@ -225,7 +300,10 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
             autofocus: true,
             height: AbTokens.rowHeightSm,
             debounce: null,
-            onChanged: (v) => setState(() => _query = v),
+            onChanged: (v) => setState(() {
+              _query = v;
+              _active = 0;
+            }),
           ),
         ),
         const SizedBox(height: AbTokens.space8),
@@ -250,7 +328,7 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
                 return AbListRow(
                   density: AbRowDensity.md,
                   hoverable: true,
-                  selected: isSelected,
+                  selected: isSelected || i == _active,
                   selectionStyle: AbRowSelection.surface,
                   onTap: () => _toggle(option.value),
                   leading: SizedBox(
@@ -270,9 +348,7 @@ class _AbSelectSheetState<T> extends State<_AbSelectSheet<T>> {
                       Flexible(child: Text(option.label)),
                     ],
                   ),
-                  subtitle: option.detail == null
-                      ? null
-                      : Text(option.detail!),
+                  subtitle: option.detail == null ? null : Text(option.detail!),
                   trailing: option.onDelete == null
                       ? null
                       : AbIconButton(

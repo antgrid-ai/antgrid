@@ -165,6 +165,142 @@ abstract final class MarkdownFormat {
     );
   }
 
+  /// Flips the [index]th task-list box in [source] (`[ ]` ↔ `[x]`), counting
+  /// in document order, or null when there is no such box.
+  ///
+  /// A rendered box knows only its position among the boxes, so this must
+  /// count exactly the boxes the renderer draws: fenced code is skipped, since
+  /// a `- [ ]` inside a fence is text, not a box, and so are HTML comments,
+  /// which are never rendered as markdown (see [splitComments]).
+  static String? toggleTask(String source, int index) {
+    final at = _taskBoxes(source).elementAtOrNull(index);
+    if (at == null) return null;
+    final flipped = source[at] == ' ' ? 'x' : ' ';
+    return source.replaceRange(at, at + 1, flipped);
+  }
+
+  /// How many boxes [toggleTask] can reach in [source].
+  static int taskCount(String source) => _taskBoxes(source).length;
+
+  /// Offsets of each box's mark character, in document order.
+  static List<int> _taskBoxes(String source) {
+    // Same length as [source], so an offset found here is one there.
+    final masked = _maskComments(source);
+    final boxes = <int>[];
+    var offset = 0;
+    String? fence;
+    for (final line in masked.split('\n')) {
+      final fenceMatch = _fence.firstMatch(line);
+      if (fenceMatch != null) {
+        final marker = fenceMatch.group(1)!;
+        if (fence == null) {
+          fence = marker;
+        } else if (marker[0] == fence[0] && marker.length >= fence.length) {
+          fence = null;
+        }
+      } else if (fence == null) {
+        final task = _taskItem.firstMatch(line);
+        if (task != null) boxes.add(offset + task.group(1)!.length + 1);
+      }
+      offset += line.length + 1;
+    }
+    return boxes;
+  }
+
+  /// [source] cut into prose and the HTML comments between it, in order.
+  ///
+  /// Issue templates carry their guidance as `<!-- -->` comments, which
+  /// GitHub hides; rendered as markdown they show up as raw markup. A comment
+  /// inside fenced code is code, not guidance, and stays in its prose. An
+  /// unterminated comment runs to the end, as it does in HTML.
+  static List<MarkdownSegment> splitComments(String source) {
+    final segments = <MarkdownSegment>[];
+    var from = 0;
+    for (final (start, end) in _commentRanges(source)) {
+      if (start > from) {
+        segments.add(MarkdownSegment(source.substring(from, start)));
+      }
+      final inner = source.substring(start + 4, end);
+      segments.add(
+        MarkdownSegment(
+          (inner.endsWith('-->') ? inner.substring(0, inner.length - 3) : inner)
+              .trim(),
+          isComment: true,
+        ),
+      );
+      from = end;
+    }
+    if (from < source.length) {
+      segments.add(MarkdownSegment(source.substring(from)));
+    }
+    return segments;
+  }
+
+  static String _maskComments(String source) {
+    final ranges = _commentRanges(source);
+    if (ranges.isEmpty) return source;
+    final out = StringBuffer();
+    var from = 0;
+    for (final (start, end) in ranges) {
+      out.write(source.substring(from, start));
+      out.write(source.substring(start, end).replaceAll(RegExp(r'[^\n]'), ' '));
+      from = end;
+    }
+    out.write(source.substring(from));
+    return out.toString();
+  }
+
+  /// `[start, end)` of each `<!-- … -->` outside fenced code.
+  static List<(int, int)> _commentRanges(String source) {
+    final ranges = <(int, int)>[];
+    var offset = 0;
+    int? open;
+    String? fence;
+    for (final line in source.split('\n')) {
+      if (open == null) {
+        final fenceMatch = _fence.firstMatch(line);
+        if (fenceMatch != null) {
+          final marker = fenceMatch.group(1)!;
+          if (fence == null) {
+            fence = marker;
+          } else if (marker[0] == fence[0] && marker.length >= fence.length) {
+            fence = null;
+          }
+          offset += line.length + 1;
+          continue;
+        }
+      }
+      if (fence == null) {
+        var i = 0;
+        while (true) {
+          if (open == null) {
+            final at = line.indexOf('<!--', i);
+            if (at < 0) break;
+            open = offset + at;
+            i = at + 4;
+          } else {
+            final at = line.indexOf('-->', i);
+            if (at < 0) break;
+            ranges.add((open, offset + at + 3));
+            open = null;
+            i = at + 3;
+          }
+        }
+      }
+      offset += line.length + 1;
+    }
+    if (open != null) ranges.add((open, source.length));
+    return ranges;
+  }
+
+  static final _fence = RegExp(r'^ {0,3}(`{3,}|~{3,})');
+
+  /// A list item — bullet or ordered, optionally inside block quotes — whose
+  /// text opens with a box. Group 1 ends right before the `[`.
+  static final _taskItem = RegExp(
+    r'^((?:\s*>)*\s*(?:[-*+]|\d{1,9}[.)])\s+)\[[ xX]\](?=\s|$)',
+  );
+
   static bool _isSpace(String c) => c.trim().isEmpty;
 
   /// A selection the field has never placed (offset -1) reads as a caret at
@@ -174,4 +310,12 @@ abstract final class MarkdownFormat {
     if (!sel.isValid) return TextSelection.collapsed(offset: value.text.length);
     return TextSelection(baseOffset: sel.start, extentOffset: sel.end);
   }
+}
+
+/// One run of a markdown source: prose, or the text of an HTML comment.
+class MarkdownSegment {
+  const MarkdownSegment(this.text, {this.isComment = false});
+
+  final String text;
+  final bool isComment;
 }

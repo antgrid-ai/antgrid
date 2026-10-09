@@ -28,6 +28,9 @@ Future<int?> showTaskCreateSheet(BuildContext context) {
   return showAbAdaptiveSheet<int>(
     context,
     maxWidth: 960,
+    // A half-written brief is too costly to lose to a stray click beside the
+    // dialog; Cancel and the close button are the ways out.
+    dismissible: false,
     child: const _TaskCreateSheet(),
   );
 }

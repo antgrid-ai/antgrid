@@ -1,4 +1,5 @@
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/widgets/markdown_document_config.dart';
 import 'package:antgrid/widgets/tasks/markdown_format.dart';
 import 'package:antgrid/widgets/tasks/task_body_editor.dart';
 import 'package:flutter/material.dart';
@@ -50,6 +51,76 @@ void main() {
         '**',
       );
       expect(out.text, 'end**text**');
+    });
+  });
+
+  group('toggleTask', () {
+    test('flips the indexed box and leaves the others', () {
+      const src = '- [ ] one\n- [x] two\n- [ ] three';
+      expect(
+        MarkdownFormat.toggleTask(src, 0),
+        '- [x] one\n- [x] two\n- [ ] three',
+      );
+      expect(
+        MarkdownFormat.toggleTask(src, 1),
+        '- [ ] one\n- [ ] two\n- [ ] three',
+      );
+    });
+
+    test('counts ordered, nested and quoted items like the renderer', () {
+      const src = '1. [ ] a\n  * [ ] b\n> - [X] c';
+      expect(
+        MarkdownFormat.toggleTask(src, 2),
+        '1. [ ] a\n  * [ ] b\n> - [ ] c',
+      );
+    });
+
+    test('skips boxes inside fenced code and plain bullets', () {
+      const src = '- plain\n```\n- [ ] code\n```\n- [ ] real';
+      expect(
+        MarkdownFormat.toggleTask(src, 0),
+        '- plain\n```\n- [ ] code\n```\n- [x] real',
+      );
+    });
+
+    test('an index past the last box changes nothing', () {
+      expect(MarkdownFormat.toggleTask('- [ ] only', 1), isNull);
+    });
+  });
+
+  group('comments', () {
+    test('splits prose from template comments, in order', () {
+      final parts = MarkdownFormat.splitComments(
+        '<!-- read this -->\n## Bug\n<!-- describe it -->\nIt breaks.',
+      );
+      expect(parts.map((p) => (p.text.trim(), p.isComment)).toList(), [
+        ('read this', true),
+        ('## Bug', false),
+        ('describe it', true),
+        ('It breaks.', false),
+      ]);
+    });
+
+    test('a comment inside fenced code stays code', () {
+      const src = '```html\n<!-- keep -->\n```';
+      final parts = MarkdownFormat.splitComments(src);
+      expect(parts, hasLength(1));
+      expect(parts.single.isComment, isFalse);
+    });
+
+    test('an unterminated comment runs to the end', () {
+      final parts = MarkdownFormat.splitComments('Hi\n<!-- open');
+      expect(parts.last.isComment, isTrue);
+      expect(parts.last.text, 'open');
+    });
+
+    test('boxes inside a comment are not counted', () {
+      const src = '<!--\n- [ ] hidden\n-->\n- [ ] shown';
+      expect(MarkdownFormat.taskCount(src), 1);
+      expect(
+        MarkdownFormat.toggleTask(src, 0),
+        '<!--\n- [ ] hidden\n-->\n- [x] shown',
+      );
     });
   });
 
@@ -121,5 +192,72 @@ void main() {
     await tester.tap(find.text('WRITE'));
     await tester.pumpAndSettle();
     expect(find.byType(TextField), findsOneWidget);
+  });
+
+  testWidgets('a long Preview scrolls inside the box instead of growing it', (
+    tester,
+  ) async {
+    final controller = TextEditingController(
+      text: [for (var i = 0; i < 80; i++) '- [ ] Item $i'].join('\n'),
+    );
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: buildAbTheme(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TaskBodyEditor(controller: controller),
+            ),
+          ),
+        ),
+      ),
+    );
+    final writeHeight = tester.getSize(find.byType(TaskBodyEditor)).height;
+
+    await tester.tap(find.text('PREVIEW'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byType(TaskBodyEditor)).height,
+      lessThanOrEqualTo(writeHeight + 1),
+    );
+    expect(
+      find.descendant(
+        of: find.byType(TaskBodyEditor),
+        matching: find.byWidgetPredicate(
+          (w) =>
+              w is SingleChildScrollView && w.scrollDirection == Axis.vertical,
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('tapping a box in Preview checks it in the source', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: '- [ ] Design\n- [ ] Build');
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: buildAbTheme(),
+          home: Scaffold(body: TaskBodyEditor(controller: controller)),
+        ),
+      ),
+    );
+    await tester.tap(find.text('PREVIEW'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(MarkdownTaskMarker).at(1));
+    await tester.pumpAndSettle();
+    expect(controller.text, '- [ ] Design\n- [x] Build');
+
+    // Still the second box after the rebuild: the index count restarts.
+    await tester.tap(find.byType(MarkdownTaskMarker).at(1));
+    await tester.pumpAndSettle();
+    expect(controller.text, '- [ ] Design\n- [ ] Build');
   });
 }

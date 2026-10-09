@@ -298,7 +298,7 @@ class _ViewPanel extends ConsumerWidget {
         const PanelSectionHeader('View'),
         for (final s in TaskScope.values)
           PanelRow(
-            icon: AbIcons.tasks,
+            icon: _scopeIcon(s),
             label: s.label,
             mono: false,
             selected: s == scope,
@@ -309,6 +309,14 @@ class _ViewPanel extends ConsumerWidget {
     );
   }
 }
+
+String _scopeIcon(TaskScope scope) => switch (scope) {
+  TaskScope.mine => AbIcons.account,
+  TaskScope.running => AbIcons.start,
+  TaskScope.unassigned => AbIcons.unassigned,
+  TaskScope.allOpen => AbIcons.circle,
+  TaskScope.done => AbIcons.circleCheck,
+};
 
 class _FilterBar extends ConsumerWidget {
   const _FilterBar();

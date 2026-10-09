@@ -568,6 +568,48 @@ void main() {
     expect(listCalls, 1);
   });
 
+  testWidgets('several picked labels show tasks carrying any of them', (
+    tester,
+  ) async {
+    const bug = {'id': 'l-1', 'name': 'bug', 'color': 'd73a4a'};
+    const docs = {'id': 'l-2', 'name': 'docs', 'color': '0075ca'};
+    final container = _container(
+      client: _serving(
+        labels: const [bug, docs],
+        tasks: [
+          _task(
+            number: 1,
+            title: 'Crash',
+            assignee: const {'kind': 'member', 'userId': 'u-1'},
+            labels: const [bug],
+          ),
+          _task(
+            number: 2,
+            title: 'Readme',
+            assignee: const {'kind': 'member', 'userId': 'u-1'},
+            labels: const [docs],
+          ),
+          _task(
+            number: 3,
+            title: 'Bare',
+            assignee: const {'kind': 'member', 'userId': 'u-1'},
+          ),
+        ],
+      ),
+    );
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    container.read(taskFilterProvider.notifier)
+      ..toggleLabel('l-1')
+      ..toggleLabel('l-2');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Crash'), findsOneWidget);
+    expect(find.text('Readme'), findsOneWidget);
+    expect(find.text('Bare'), findsNothing);
+  });
+
   testWidgets(
     'the header is one view menu plus repo and label menus, and a row label does not filter',
     (tester) async {

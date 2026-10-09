@@ -19,11 +19,21 @@ import '../markdown_heading_configs.dart';
 /// config — so a document and a message render the same markdown alike.
 class TranscriptMarkdown extends ConsumerWidget {
   final String data;
-  const TranscriptMarkdown({super.key, required this.data});
+
+  /// Called with a tapped task-list box's position among the boxes, in
+  /// document order (see `MarkdownFormat.toggleTask`). Null keeps them
+  /// read-only — an agent's message is not the reader's to edit.
+  final ValueChanged<int>? onToggleTask;
+
+  const TranscriptMarkdown({super.key, required this.data, this.onToggleTask});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.antgrid;
+    // The package hands the builder nothing but `checked`, and builds every
+    // node synchronously in document order inside `MarkdownBlock.build`, so a
+    // count reset per build is each box's index.
+    var taskIndex = 0;
     return MarkdownBlock(
       data: data,
       selectable: false,
@@ -157,6 +167,17 @@ class TranscriptMarkdown extends ConsumerWidget {
               fontWeight: FontWeight.w600,
               height: 1.35,
             ),
+          ),
+          CheckBoxConfig(
+            builder: (checked) {
+              final index = taskIndex++;
+              final toggle = onToggleTask;
+              return MarkdownTaskMarker(
+                checked: checked,
+                fontSize: AbTokens.fontMd,
+                onTap: toggle == null ? null : () => toggle(index),
+              );
+            },
           ),
         ],
       ),

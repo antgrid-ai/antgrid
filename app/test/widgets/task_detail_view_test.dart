@@ -13,7 +13,9 @@ import 'package:antgrid/models/task.dart';
 import 'package:antgrid/widgets/tasks/task_detail_view.dart';
 import 'package:antgrid/widgets/tasks/task_provenance_view.dart';
 import 'package:antgrid/widgets/tasks/task_status_view.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -232,59 +234,213 @@ void main() {
     expect(find.text('ANT-42'), findsOneWidget);
     expect(find.text('Fix the drawer'), findsOneWidget);
     expect(find.byType(TaskStatusPill), findsOneWidget);
-    expect(find.text('In progress'), findsOneWidget);
+    // The header pill and the Status field.
+    expect(find.text('In progress'), findsNWidgets(2));
     expect(find.text('bug'), findsOneWidget);
     expect(find.textContaining('It jitters on resize.'), findsOneWidget);
+  });
+
+  testWidgets('fields name their value, or what tapping them does', (
+    tester,
+  ) async {
+    final container = _container(_serving(_task(labels: const [])));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    expect(find.text('High'), findsOneWidget);
+    expect(find.text('Add label'), findsOneWidget);
+    expect(find.text('None'), findsNothing);
+  });
+
+  testWidgets('a field letter opens its picker under the field', (
+    tester,
+  ) async {
+    _tall(tester);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Urgent'), findsOneWidget);
+    // The picker's own chip naming the key that opened it.
+    expect(find.text('P'), findsOneWidget);
+    final field = tester.getRect(find.text('High').first);
+    expect(tester.getTopLeft(find.text('Urgent')).dy, greaterThan(field.top));
+  });
+
+  testWidgets('template comments stay hidden until asked for', (tester) async {
+    _tall(tester);
+    final container = _container(
+      _serving(
+        _task(
+          body:
+              '<!-- Search open issues first. -->\n'
+              '## Request\n'
+              '<!-- Summarise what is missing. -->',
+        ),
+      ),
+    );
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('<!--'), findsNothing);
+    expect(find.textContaining('Search open issues first.'), findsNothing);
+    expect(find.text('Template has no content filled in yet.'), findsOneWidget);
+
+    await tester.tap(find.text('Show 2 template comments'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Search open issues first.'), findsOneWidget);
+    expect(find.text('Summarise what is missing.'), findsOneWidget);
+    expect(find.textContaining('<!--'), findsNothing);
+    expect(find.text('Hide template comments'), findsOneWidget);
+  });
+
+  testWidgets('S opens the status picker from the Status field', (
+    tester,
+  ) async {
+    _tall(tester);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Blocked'), findsOneWidget);
+    expect(find.text('S'), findsOneWidget);
+  });
+
+  testWidgets('a wide pane puts Properties beside the description', (
+    tester,
+  ) async {
+    _tall(tester);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    final description = tester.getTopLeft(find.text('DESCRIPTION'));
+    final properties = tester.getTopLeft(find.text('PROPERTIES'));
+    expect(properties.dx, greaterThan(description.dx));
+    expect(properties.dy, lessThan(description.dy));
+  });
+
+  testWidgets('a narrow pane drops Properties under the description', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.getTopLeft(find.text('PROPERTIES')).dy,
+      greaterThan(tester.getTopLeft(find.text('DESCRIPTION')).dy),
+    );
+  });
+
+  testWidgets('a field shows its chevron on hover and while its picker is up', (
+    tester,
+  ) async {
+    _tall(tester);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    // The priority field's own chevron, not another field's.
+    final chevron = find
+        .descendant(
+          of: find
+              .ancestor(
+                of: find.text('High'),
+                matching: find.byType(MouseRegion),
+              )
+              .first,
+          matching: find.byType(AnimatedOpacity),
+        )
+        .first;
+    double chevronOpacity() => tester.widget<AnimatedOpacity>(chevron).opacity;
+
+    expect(chevronOpacity(), 0);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.text('High')));
+    await tester.pumpAndSettle();
+    expect(chevronOpacity(), 1);
+
+    await tester.tap(find.text('High'));
+    await mouse.moveTo(Offset.zero);
+    await tester.pumpAndSettle();
+    expect(find.text('Urgent'), findsOneWidget);
+    expect(chevronOpacity(), 1);
+  });
+
+  testWidgets('a field letter typed into the title stays in the title', (
+    tester,
+  ) async {
+    _tall(tester);
+    final container = _container(_serving(_task()));
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Fix the drawer'));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Urgent'), findsNothing);
   });
 
   // `task_list_view.dart`'s own banner hides itself whenever the failing task
   // is the one open in a sibling detail pane, on the assumption this view
   // already shows that exact failure — true only if this view filters by its
   // own task number rather than rendering any failure in the provider.
-  testWidgets(
-    'a mutation failure on a different task is not shown here',
-    (tester) async {
-      final container = _container(
-        MockClient((req) async {
-          if (req.url.path == '/labels') {
-            return http.Response('{"labels":[]}', 200);
-          }
-          if (req.url.path == '/tasks/publish-targets') {
-            return http.Response('{"targets":[]}', 200);
-          }
-          if (req.method == 'PATCH') {
-            return http.Response('{"error":"INVALID_TITLE"}', 400);
-          }
-          if (req.method == 'GET' && req.url.path == '/tasks') {
-            return http.Response(
-              jsonEncode({
-                'tasks': [_task(), _task(number: 43, title: 'Other')],
-              }),
-              200,
-            );
-          }
-          return http.Response(jsonEncode({'task': _task()}), 200);
-        }),
-      );
-      await _pump(tester, container);
-      await tester.pumpAndSettle();
+  testWidgets('a mutation failure on a different task is not shown here', (
+    tester,
+  ) async {
+    final container = _container(
+      MockClient((req) async {
+        if (req.url.path == '/labels') {
+          return http.Response('{"labels":[]}', 200);
+        }
+        if (req.url.path == '/tasks/publish-targets') {
+          return http.Response('{"targets":[]}', 200);
+        }
+        if (req.method == 'PATCH') {
+          return http.Response('{"error":"INVALID_TITLE"}', 400);
+        }
+        if (req.method == 'GET' && req.url.path == '/tasks') {
+          return http.Response(
+            jsonEncode({
+              'tasks': [_task(), _task(number: 43, title: 'Other')],
+            }),
+            200,
+          );
+        }
+        return http.Response(jsonEncode({'task': _task()}), 200);
+      }),
+    );
+    await _pump(tester, container);
+    await tester.pumpAndSettle();
 
-      final notifier = container.read(taskListProvider.notifier);
-      await notifier.setTitle(43, 'Other renamed');
-      await tester.pumpAndSettle();
+    final notifier = container.read(taskListProvider.notifier);
+    await notifier.setTitle(43, 'Other renamed');
+    await tester.pumpAndSettle();
 
-      // Task 42 (the one this view shows) is untouched by task 43's refusal.
-      expect(
-        find.textContaining('A task needs a title'),
-        findsNothing,
-      );
+    // Task 42 (the one this view shows) is untouched by task 43's refusal.
+    expect(find.textContaining('A task needs a title'), findsNothing);
 
-      await notifier.setTitle(42, 'Renamed');
-      await tester.pumpAndSettle();
+    await notifier.setTitle(42, 'Renamed');
+    await tester.pumpAndSettle();
 
-      expect(find.textContaining('A task needs a title'), findsOneWidget);
-    },
-  );
+    expect(find.textContaining('A task needs a title'), findsOneWidget);
+  });
 
   testWidgets('a blocked agent is spelled out above the brief', (tester) async {
     final container = _container(
@@ -372,14 +528,17 @@ void main() {
     await _pump(tester, container);
     await tester.pumpAndSettle();
 
-    expect(find.text('Imported from GitHub'), findsOneWidget);
+    expect(find.text('GitHub issue'), findsOneWidget);
     expect(find.text('o/r#88'), findsOneWidget);
     // The opaque provider handle is the one thing on this block that must
     // never reach the user.
     expect(find.text('I_kwDOB1x2y3z4'), findsNothing);
-    expect(find.text('Open issue'), findsOneWidget);
+    expect(find.byTooltip('Open issue'), findsOneWidget);
     expect(
-      find.text('The description below was written outside your account.'),
+      find.text(
+        'Imported from GitHub. Its description was written outside your '
+        'account.',
+      ),
       findsOneWidget,
     );
   });
@@ -394,8 +553,8 @@ void main() {
     await _pump(tester, container);
     await tester.pumpAndSettle();
 
-    expect(find.text('Imported from GitHub'), findsOneWidget);
-    expect(find.text('Open issue'), findsNothing);
+    expect(find.text('GitHub issue'), findsOneWidget);
+    expect(find.byTooltip('Open issue'), findsNothing);
   });
 
   testWidgets('a task written in Antgrid gets no source block', (tester) async {
@@ -456,7 +615,7 @@ void main() {
     expect(find.text('https://github.com/o/r/issues/88'), findsNothing);
   });
 
-  testWidgets('Open issue hands the URL to the browser', (tester) async {
+  testWidgets('the issue card hands the URL to the browser', (tester) async {
     String? opened;
     final task = Task.fromJson(
       _task(
@@ -478,7 +637,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Open issue'));
+    await tester.tap(find.text('GitHub issue'));
     await tester.pumpAndSettle();
 
     expect(opened, 'https://github.com/o/r/issues/88');
@@ -597,9 +756,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Closed as not planned'), findsOneWidget);
-      // Two "Open" on screen would be the header pill and this value; the
-      // header shows the Antgrid status, this shows the provider's.
-      expect(find.text('Open'), findsNWidgets(2));
+      // The header pill and the Status field show the Antgrid status; the
+      // third is this value, the provider's.
+      expect(find.text('Open'), findsNWidgets(3));
       expect(find.textContaining('stateReason'), findsNothing);
       expect(find.text('@octocat'), findsOneWidget);
       // A remote null is a value: that side unassigned the task.
@@ -1086,10 +1245,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Published to GitHub'), findsOneWidget);
-      expect(
-        find.textContaining('are sent to this issue'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('are sent to this issue'), findsOneWidget);
       expect(find.text('GitHub disconnected'), findsNothing);
     });
 
@@ -1116,10 +1272,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('GitHub disconnected'), findsOneWidget);
-        expect(
-          find.textContaining('not reaching the issue'),
-          findsOneWidget,
-        );
+        expect(find.textContaining('not reaching the issue'), findsOneWidget);
         expect(find.text('Published to GitHub'), findsNothing);
         // Still resolvable: the identity and the way out to the issue are
         // both still there, disconnected or not.

@@ -485,4 +485,20 @@ void main() {
       expect(find.text('angular-main'), findsOneWidget);
     });
   });
+
+  testWidgets('a click beside the dialog keeps the draft; Cancel closes it', (
+    tester,
+  ) async {
+    await _open(tester, _container(_serving(const [])));
+    await tester.enterText(find.byType(EditableText).first, 'Half a brief');
+    await tester.pumpAndSettle();
+
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    expect(find.text('Half a brief'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(AbButton, 'Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Half a brief'), findsNothing);
+  });
 }

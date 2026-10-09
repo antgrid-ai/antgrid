@@ -120,42 +120,43 @@ class _TaskProjectMissingState extends ConsumerState<TaskProjectMissing> {
     }
 
     final canClone = widget.source.cloneUrl != null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    final error = _error;
+    final message = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          '$name is not open on this machine. Open an existing folder'
-          '${canClone ? ' or clone it' : ''} to start a session.',
+          'Repository not on this machine',
           style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXxs,
-            color: palette.textMuted,
+            fontSize: AbTokens.fontSm,
+            fontWeight: FontWeight.w500,
+            color: palette.textPrimary,
           ),
         ),
-        const SizedBox(height: AbTokens.space8),
-        Row(
-          children: [
-            AbButton(
-              label: 'Open folder…',
-              onTap: _busy
-                  ? null
-                  : () => detached('tasks', 'open folder', _open),
-            ),
-            if (canClone) ...[
-              const SizedBox(width: AbTokens.space8),
-              AbButton(
-                label: _busy ? 'Working…' : 'Clone…',
-                variant: AbButtonVariant.primary,
-                onTap: _busy
-                    ? null
-                    : () => detached('tasks', 'clone project', _clone),
+        const SizedBox(height: AbTokens.space4),
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: name,
+                style: AbTokens.monoStyle(fontSize: AbTokens.fontXs),
+              ),
+              TextSpan(
+                text: canClone
+                    ? ' needs to be cloned or opened before you can start a '
+                          'session.'
+                    : ' needs to be opened before you can start a session.',
               ),
             ],
-          ],
+          ),
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: palette.textSecondary,
+          ),
         ),
-        if (_error != null) ...[
-          const SizedBox(height: AbTokens.space8),
+        if (error != null) ...[
+          const SizedBox(height: AbTokens.space6),
           Text(
-            _error!,
+            error,
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXxs,
               color: palette.error,
@@ -164,5 +165,64 @@ class _TaskProjectMissingState extends ConsumerState<TaskProjectMissing> {
         ],
       ],
     );
+    final buttons = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbButton(
+          label: 'Open folder…',
+          onTap: _busy ? null : () => detached('tasks', 'open folder', _open),
+        ),
+        if (canClone) ...[
+          const SizedBox(width: AbTokens.space8),
+          AbButton(
+            label: _busy ? 'Working…' : 'Clone repo',
+            variant: AbButtonVariant.primary,
+            onTap: _busy
+                ? null
+                : () => detached('tasks', 'clone project', _clone),
+          ),
+        ],
+      ],
+    );
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space16,
+        vertical: AbTokens.space14,
+      ),
+      decoration: BoxDecoration(
+        // Warning-tinted rather than an error: nothing failed, there is a step
+        // to take first.
+        color: palette.warning.withValues(alpha: _tintAlpha),
+        borderRadius: AbTokens.borderRadius8,
+        border: Border.all(
+          color: palette.warning.withValues(alpha: _edgeAlpha),
+        ),
+      ),
+      // Side by side while the buttons fit beside the message; stacked under
+      // it otherwise, so the message never squeezes to a word per line.
+      child: LayoutBuilder(
+        builder: (context, constraints) =>
+            constraints.maxWidth >= _sideBySideMinWidth
+            ? Row(
+                children: [
+                  Expanded(child: message),
+                  const SizedBox(width: AbTokens.space16),
+                  buttons,
+                ],
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  message,
+                  const SizedBox(height: AbTokens.space12),
+                  buttons,
+                ],
+              ),
+      ),
+    );
   }
 }
+
+const _tintAlpha = 0.08;
+const _edgeAlpha = 0.3;
+const _sideBySideMinWidth = 520.0;

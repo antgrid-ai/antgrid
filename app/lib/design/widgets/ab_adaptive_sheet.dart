@@ -10,16 +10,23 @@ import '../ab_colors.dart';
 /// (read from the sheet's own builder context, not the caller's); the desktop
 /// dialog is width-capped at [maxWidth]. Returns the value the content pops
 /// the route with, or null on dismiss.
+///
+/// [dismissible] false ignores a tap on the scrim and, on mobile, a drag down —
+/// for a sheet holding a draft a stray tap would throw away. The content must
+/// then offer its own way out.
 Future<T?> showAbAdaptiveSheet<T>(
   BuildContext context, {
   required Widget child,
   double maxWidth = 460,
+  bool dismissible = true,
 }) {
   final isMobile = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
   if (isMobile) {
     return showModalBottomSheet<T>(
       context: context,
       isScrollControlled: true,
+      isDismissible: dismissible,
+      enableDrag: dismissible,
       backgroundColor: context.antgrid.bgSurface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(4)),
@@ -34,6 +41,7 @@ Future<T?> showAbAdaptiveSheet<T>(
   }
   return showDialog<T>(
     context: context,
+    barrierDismissible: dismissible,
     // The BUILDER's context, not the caller's: the dialog rebuilds for as long
     // as it is open, and the screen that opened it can be replaced underneath
     // (focusing a project swaps the shell), which leaves the caller's context

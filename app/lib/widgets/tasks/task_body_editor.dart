@@ -7,6 +7,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_control_box.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_scrollbar.dart';
 import '../../design/widgets/ab_segmented.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../transcript/markdown_body.dart';
@@ -45,6 +46,7 @@ class _TaskBodyEditorState extends State<TaskBodyEditor> {
   late FocusNode _focus;
   bool _ownsFocus = false;
   var _preview = false;
+  final _previewScroll = ScrollController();
 
   @override
   void initState() {
@@ -70,6 +72,7 @@ class _TaskBodyEditorState extends State<TaskBodyEditor> {
   void dispose() {
     _focus.removeListener(_onFocus);
     if (_ownsFocus) _focus.dispose();
+    _previewScroll.dispose();
     super.dispose();
   }
 
@@ -79,6 +82,12 @@ class _TaskBodyEditorState extends State<TaskBodyEditor> {
     if (_preview) return;
     widget.controller.value = edit(widget.controller.value);
     _focus.requestFocus();
+  }
+
+  void _toggleTask(int index) {
+    final next = MarkdownFormat.toggleTask(widget.controller.text, index);
+    if (next == null) return;
+    setState(() => widget.controller.text = next);
   }
 
   void _setPreview(bool preview) {
@@ -184,16 +193,27 @@ class _TaskBodyEditorState extends State<TaskBodyEditor> {
     final Widget body;
     if (_preview) {
       final text = widget.controller.text;
+      // Capped at the height Write's field stops growing at and scrolled
+      // inside, so a long body never stretches the sheet around it and the
+      // box keeps its size when switching between the two.
+      const padding = AbTokens.space12 * 2;
       body = ConstrainedBox(
-        constraints: BoxConstraints(minHeight: bodyMinHeight),
-        child: Padding(
-          padding: const EdgeInsets.all(AbTokens.space12),
-          child: text.trim().isEmpty
-              ? Text(
-                  'Nothing to preview',
-                  style: style.copyWith(color: palette.textMuted),
-                )
-              : TranscriptMarkdown(data: text),
+        constraints: BoxConstraints(
+          minHeight: bodyMinHeight + padding,
+          maxHeight: widget.maxLines * lineHeight + padding,
+        ),
+        child: AbScrollbar(
+          controller: _previewScroll,
+          child: SingleChildScrollView(
+            controller: _previewScroll,
+            padding: const EdgeInsets.all(AbTokens.space12),
+            child: text.trim().isEmpty
+                ? Text(
+                    'Nothing to preview',
+                    style: style.copyWith(color: palette.textMuted),
+                  )
+                : TranscriptMarkdown(data: text, onToggleTask: _toggleTask),
+          ),
         ),
       );
     } else {

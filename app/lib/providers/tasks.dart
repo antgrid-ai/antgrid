@@ -93,8 +93,9 @@ class TaskFilter {
   final String? projectId;
   final String? assignee;
 
-  /// Multiple labels are ANDed, matching GitHub — which is what anyone who has
-  /// filtered issues expects.
+  /// Multiple labels are ORed: the menu is a multi-select whose counts say how
+  /// many rows each pick adds, and ANDing tasks that rarely carry two labels
+  /// emptied the list on the second pick.
   final Set<String> labelIds;
 
   /// The in-view text filter. Applied on the client: the list route has no
@@ -657,7 +658,7 @@ final taskMutationErrorProvider =
     );
 
 /// The rows actually rendered: the fetched set narrowed by everything the
-/// server could not answer — the unassigned scope, label ANDing, the in-view
+/// server could not answer — the unassigned scope, label matching, the in-view
 /// text filter, and whether a run is live.
 final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
   final tasks = ref.watch(taskListProvider);
@@ -703,9 +704,9 @@ final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
               !_assignedTo(task, explicitAssignee)) {
             return false;
           }
-          if (filter.labelIds.isNotEmpty) {
-            final ids = task.labels.map((l) => l.id).toSet();
-            if (!ids.containsAll(filter.labelIds)) return false;
+          if (filter.labelIds.isNotEmpty &&
+              !task.labels.any((l) => filter.labelIds.contains(l.id))) {
+            return false;
           }
           if (query.isNotEmpty) {
             final haystack =

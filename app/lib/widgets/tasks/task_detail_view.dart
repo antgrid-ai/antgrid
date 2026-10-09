@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart'
     show MaterialPageRoute, Navigator, Scaffold;
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,10 +16,12 @@ import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_inline_banner.dart';
 import '../../design/widgets/ab_label_chip.dart';
 import '../../design/widgets/ab_loading.dart';
+import '../../design/widgets/ab_menu.dart' show abMenuAnchorRect;
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
+import '../../design/widgets/ab_tooltip.dart';
 import '../../models/task.dart';
 import '../../navigation/nav_controller.dart' show recordProjectFocus;
 import '../../providers/agent_transport.dart'
@@ -39,6 +42,7 @@ import '../file_tree_view.dart';
 import '../file_viewer_router.dart';
 import '../send_capture_to_agent.dart';
 import '../transcript/markdown_body.dart';
+import 'markdown_format.dart';
 import 'task_body_editor.dart';
 import 'task_launch_sheet.dart';
 import 'task_project_missing.dart';
@@ -149,6 +153,10 @@ class _LoadedState extends ConsumerState<_Loaded> {
   var _editingTitle = false;
   var _editingBody = false;
 
+  /// Issue-template guidance in the description, hidden the way the
+  /// provider hides it until asked for.
+  var _showComments = false;
+
   /// Conflict fields with a resolve in flight, keyed by wire name. Per field,
   /// not one flag: settling the title must not disable the description's pair,
   /// and taking a side is not idempotent — the second call answers
@@ -168,6 +176,22 @@ class _LoadedState extends ConsumerState<_Loaded> {
   /// Same shape as [_publishing]. A second unlink answers `NOT_LINKED` and
   /// would replace the reply with a refusal banner.
   var _unlinking = false;
+
+  final _paneFocus = FocusNode(debugLabel: 'task detail');
+
+  // Focused by hand when editing starts: `autofocus` only takes when nothing
+  // in the scope has focus, and the pane always does.
+  final _titleFocus = FocusNode(debugLabel: 'task title');
+  final _bodyFocus = FocusNode(debugLabel: 'task body');
+
+  /// The fields a keyboard shortcut opens; the key finds where to anchor it.
+  final _statusField = GlobalKey();
+  final _assigneeField = GlobalKey();
+  final _labelsField = GlobalKey();
+  final _priorityField = GlobalKey();
+
+  /// Which field's picker is up — its chevron stays shown until it closes.
+  String? _openFieldId;
 
   @override
   void initState() {
@@ -198,6 +222,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
   void dispose() {
     _title.dispose();
     _body.dispose();
+    _paneFocus.dispose();
+    _titleFocus.dispose();
+    _bodyFocus.dispose();
     super.dispose();
   }
 
@@ -273,6 +300,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
   void _beginTitle() {
     _title.text = _task.title;
     setState(() => _editingTitle = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _titleFocus.requestFocus();
+    });
   }
 
   Future<void> _commitTitle() async {
@@ -285,6 +315,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
   void _beginBody() {
     _body.text = _task.body;
     setState(() => _editingBody = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _bodyFocus.requestFocus();
+    });
   }
 
   Future<void> _commitBody() async {
@@ -294,7 +327,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
     await ref.read(taskListProvider.notifier).setBody(_task.number, next);
   }
 
-  Future<void> _pickStatus() async {
+  void _toggleTask(int index) {
+    final next = MarkdownFormat.toggleTask(_task.body, index);
+    if (next == null) return;
+    final tasks = ref.read(taskListProvider.notifier);
+    final number = _task.number;
+    detached('tasks', 'toggle task item', () => tasks.setBody(number, next));
+  }
+
+  Future<void> _pickStatus([Rect? anchor]) async {
     // Captured before the sheet: a list refresh under it can retire this
     // widget, and reading `ref` on a dead element throws.
     final container = ref.container;
@@ -302,6 +343,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
       context,
       title: 'Status',
       single: true,
+      anchor: anchor,
+      shortcut: _statusKey,
       options: [
         for (final status in TaskStatus.selectable)
           AbSelectOption(
@@ -320,7 +363,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
     }
   }
 
-  Future<void> _pickAssignee() async {
+  Future<void> _pickAssignee([Rect? anchor]) async {
     final container = ref.container;
     final candidates = container.read(taskAssigneeCandidatesProvider);
     final current = _task.assignee;
@@ -331,6 +374,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
       context,
       title: 'Assignee',
       single: true,
+      anchor: anchor,
+      shortcut: _assigneeKey,
       emptyMessage: 'Nobody else in this account can be assigned yet',
       options: [
         const AbSelectOption(value: '', label: 'Unassigned'),
@@ -353,18 +398,27 @@ class _LoadedState extends ConsumerState<_Loaded> {
         );
   }
 
-  Future<void> _pickPriority() async {
+  Future<void> _pickPriority([Rect? anchor]) async {
     final container = ref.container;
     final picked = await showAbSelect<int>(
       context,
       title: 'Priority',
       single: true,
-      options: const [
-        AbSelectOption(value: -1, label: 'None'),
-        AbSelectOption(value: 0, label: 'P0 — drop everything'),
-        AbSelectOption(value: 1, label: 'P1 — next'),
-        AbSelectOption(value: 2, label: 'P2 — soon'),
-        AbSelectOption(value: 3, label: 'P3 — someday'),
+      anchor: anchor,
+      shortcut: _priorityKey,
+      options: [
+        AbSelectOption(
+          value: -1,
+          label: _priorityLabel(null),
+          leading: const _PriorityDot(priority: null),
+        ),
+        for (var p = 0; p < _priorityNames.length; p++)
+          AbSelectOption(
+            value: p,
+            label: _priorityLabel(p),
+            leading: _PriorityDot(priority: p),
+            keywords: ['P$p'],
+          ),
       ],
       selected: {_task.priority ?? -1},
     );
@@ -375,13 +429,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
         .setPriority(_task.number, choice < 0 ? null : choice);
   }
 
-  Future<void> _pickProject() async {
+  Future<void> _pickProject([Rect? anchor]) async {
     final container = ref.container;
     final names = container.read(taskProjectNamesProvider);
     final picked = await showAbSelect<String>(
       context,
       title: 'Project',
       single: true,
+      anchor: anchor,
       options: [
         const AbSelectOption(value: '', label: 'No project'),
         for (final entry in names.entries)
@@ -502,10 +557,190 @@ class _LoadedState extends ConsumerState<_Loaded> {
         : ref.watch(taskPublishTargetsProvider(projectId)).value ??
               const <TaskPublishTarget>[];
 
-    return Column(
+    final segments = MarkdownFormat.splitComments(_task.body);
+    final commentCount = segments.where((s) => s.isComment).length;
+
+    final main = <Widget>[
+      _lead(context),
+      if (run != null) ...[_sectionHeader('Run'), _runBlock(context, run)],
+      // Right after the run: a checkout is only resolvable while a
+      // session is actually attached to this task, so the two either
+      // show together or not at all.
+      if (run != null && session != null && registrationId != null) ...[
+        _sectionHeader('Changes'),
+        _TaskChangesSection(
+          registrationId: registrationId,
+          checkoutId: session.checkoutId,
+        ),
+      ],
+      if (_task.push != null) _pushStatusBlock(context),
+      // Above the description: the description is one of the things that
+      // may have been overwritten.
+      if (conflict != null) ...[
+        _sectionHeader('Unsettled changes'),
+        _conflictBlock(context, conflict),
+      ],
+      // Beside the conflict block, because the two are halves of the same
+      // question: that one is what came in and overwrote a value, this one
+      // is what never went out.
+      if (pushBlock != null) ...[
+        _sectionHeader('Stopped syncing'),
+        _pushBlockBlock(context, pushBlock),
+      ],
+      _sectionHeader(
+        'Description',
+        trailing: Expanded(
+          child: Row(
+            children: [
+              // The Source block sits in the side column, so the header
+              // itself says whose words follow.
+              if (!_task.isLocal)
+                Flexible(
+                  child: Text(
+                    'written on ${taskProviderLabel(_task)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: palette.textMuted,
+                    ),
+                  ),
+                ),
+              const Spacer(),
+              if (commentCount > 0 && !_editingBody)
+                Flexible(
+                  flex: _toggleFlex,
+                  child: AbButton(
+                    label: _showComments
+                        ? 'Hide template comments'
+                        : commentCount == 1
+                        ? 'Show 1 template comment'
+                        : 'Show $commentCount template comments',
+                    compact: true,
+                    wrapLabel: true,
+                    onTap: () => setState(() => _showComments = !_showComments),
+                  ),
+                ),
+              if (!_editingBody) ...[
+                const SizedBox(width: AbTokens.space4),
+                AbIconButton(
+                  icon: AbIcons.edit,
+                  tooltip: 'Edit description',
+                  onTap: _beginBody,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AbTokens.space12,
+          AbTokens.space4,
+          AbTokens.space12,
+          AbTokens.space12,
+        ),
+        child: _bodyBlock(context, segments),
+      ),
+    ];
+
+    final side = <Widget>[
+      _sectionHeader('Properties'),
+      _attributes(context),
+      if (!_task.isLocal) ...[
+        _sideRule(),
+        _sectionHeader('Source'),
+        TaskProvenanceBlock(task: _task),
+      ]
+      // A task published FROM here keeps `source: local` — the column
+      // records where it was born, not where it now lives — so the Source
+      // block above stays absent and this is the only place its issue is
+      // ever named.
+      else if (_task.syncState != null) ...[
+        _sideRule(),
+        _sectionHeader('GitHub'),
+        _publishedBlock(context),
+      ],
+      _sideRule(),
+      _sectionHeader('Activity'),
+      _metadata(context),
+    ];
+    final actions = _actions(context, targets);
+
+    final body = LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < _twoColumnMinWidth) {
+          return ListView(
+            padding: const EdgeInsets.only(bottom: AbTokens.space24),
+            children: [
+              ...main,
+              const AbSeparator.horizontal(),
+              const SizedBox(height: AbTokens.space8),
+              ...side,
+              actions,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(
+                  AbTokens.space12,
+                  AbTokens.space8,
+                  AbTokens.space12,
+                  AbTokens.space24,
+                ),
+                children: [
+                  // Prose past this measure stops being readable; the rest of
+                  // a wide pane stays empty rather than stretching it.
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _mainMaxWidth,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: main,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const AbSeparator.vertical(),
+            SizedBox(
+              width: _sideWidth,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AbTokens.space4,
+                        vertical: AbTokens.space8,
+                      ),
+                      children: side,
+                    ),
+                  ),
+                  // Pinned under the column, not scrolled with it: the
+                  // destructive pair is always where the eye last left it.
+                  const AbSeparator.horizontal(),
+                  actions,
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _header(context),
+        _topBar(context),
         const AbSeparator.horizontal(),
         // Scoped to THIS task's number: `task_list_view.dart`'s own banner
         // hides itself whenever the failing task is the one open here, on the
@@ -526,125 +761,140 @@ class _LoadedState extends ConsumerState<_Loaded> {
                         detached('tasks', 'retry mutation', failure.retry!),
                   ),
           ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.only(bottom: AbTokens.space24),
-            children: [
-              _attributes(context),
-              if (run != null) ...[
-                const AbSectionHeader(label: 'Run'),
-                _runBlock(context, run),
-              ],
-              // Right after the run: a checkout is only resolvable while a
-              // session is actually attached to this task, so the two either
-              // show together or not at all.
-              if (run != null && session != null && registrationId != null) ...[
-                const AbSectionHeader(label: 'Changes'),
-                _TaskChangesSection(
-                  registrationId: registrationId,
-                  checkoutId: session.checkoutId,
-                ),
-              ],
-              // Above the description, never below it: it says whose words
-              // the next block is.
-              if (!_task.isLocal) ...[
-                const AbSectionHeader(label: 'Source'),
-                TaskProvenanceBlock(task: _task),
-              ],
-              // A task published FROM here keeps `source: local` — the column
-              // records where it was born, not where it now lives — so the
-              // Source block above stays absent and this is the only place its
-              // issue is ever named.
-              if (_task.isLocal && _task.syncState != null) ...[
-                const AbSectionHeader(label: 'GitHub'),
-                _publishedBlock(context),
-              ],
-              if (_task.push != null) _pushStatusBlock(context),
-              // Under Source, above the description: the description is one of
-              // the things that may have been overwritten, and the block above
-              // is what says whose words replaced whose.
-              if (conflict != null) ...[
-                const AbSectionHeader(label: 'Unsettled changes'),
-                _conflictBlock(context, conflict),
-              ],
-              // Beside the conflict block, because the two are halves of the
-              // same question: that one is what came in and overwrote a value,
-              // this one is what never went out. Both sit above the description
-              // for the same reason — it is one of the values in question.
-              if (pushBlock != null) ...[
-                const AbSectionHeader(label: 'Stopped syncing'),
-                _pushBlockBlock(context, pushBlock),
-              ],
-              AbSectionHeader(
-                label: 'Description',
-                trailing: _editingBody
-                    ? null
-                    : AbIconButton(
-                        icon: AbIcons.edit,
-                        tooltip: 'Edit description',
-                        onTap: _beginBody,
-                      ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AbTokens.space12,
-                  AbTokens.space4,
-                  AbTokens.space12,
-                  AbTokens.space12,
-                ),
-                child: _bodyBlock(context),
-              ),
-              const AbSectionHeader(label: 'Details'),
-              _metadata(context),
-              Padding(
-                padding: const EdgeInsets.all(AbTokens.space12),
-                child: Wrap(
-                  spacing: AbTokens.space8,
-                  runSpacing: AbTokens.space8,
-                  children: [
-                    // Never the primary action: the primary action on a task
-                    // is Start session, and publishing is not what this
-                    // product is for.
-                    if (_task.isPublishable && targets.isNotEmpty)
-                      AbButton(
-                        label: _publishing
-                            ? 'Publishing…'
-                            : _task.hasUnlinkedIdentity
-                            // Says what it does rather than reading like a way
-                            // to restore the link that was dropped.
-                            ? 'Publish to GitHub (new issue)'
-                            : 'Publish to GitHub',
-                        onTap: _publishing
-                            ? null
-                            : () => detached(
-                                'tasks',
-                                'publish task',
-                                () => _publish(targets),
-                              ),
-                      ),
-                    if (_task.isLinked)
-                      AbButton(
-                        label: _unlinking ? 'Unlinking…' : 'Unlink from GitHub',
-                        onTap: _unlinking
-                            ? null
-                            : () => detached('tasks', 'unlink task', _unlink),
-                      ),
-                    AbButton(
-                      label: 'Delete task',
-                      color: palette.error,
-                      onTap: () => detached('tasks', 'delete task', _delete),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+        Expanded(child: body),
       ],
+    );
+
+    // A click anywhere in the pane hands it focus, so the field shortcuts work
+    // without a tab stop — unless something inside (a title being edited)
+    // already has it, which a pointer-down must not steal mid-selection.
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
+        if (!_paneFocus.hasFocus) _paneFocus.requestFocus();
+      },
+      child: Focus(
+        focusNode: _paneFocus,
+        autofocus: true,
+        onKeyEvent: _onPaneKey,
+        child: content,
+      ),
     );
   }
 
-  Widget _header(BuildContext context) {
+  /// The task's id and state, and the ways out of it. Status is set from its
+  /// field in Properties; the pill here only reports it.
+  Widget _topBar(BuildContext context) {
+    final palette = context.antgrid;
+    final url = _task.externalUrl;
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space6,
+      ),
+      child: Row(
+        children: [
+          Text(
+            _task.ref,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontXs,
+              color: palette.textMuted,
+            ),
+          ),
+          const SizedBox(width: AbTokens.space8),
+          TaskStatusPill(status: _task.status),
+          const Spacer(),
+          if (url != null)
+            AbButton(
+              label: 'View on ${taskProviderLabel(_task)}',
+              compact: true,
+              leading: AbIcon(
+                AbIcons.openExternal,
+                size: AbTokens.iconButtonGlyph,
+                color: palette.textSecondary,
+              ),
+              onTap: () => detached(
+                'tasks',
+                'open issue',
+                () => openExternalUrl(context, url),
+              ),
+            ),
+          if (widget.onClose != null) ...[
+            const SizedBox(width: AbTokens.space4),
+            AbIconButton(
+              icon: AbIcons.close,
+              tooltip: 'Close task',
+              onTap: widget.onClose!,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String label, {Widget? trailing}) =>
+      AbSectionHeader(label: label, mono: true, trailing: trailing);
+
+  Widget _sideRule() => const Padding(
+    padding: EdgeInsets.symmetric(
+      horizontal: AbTokens.space12,
+      vertical: AbTokens.space10,
+    ),
+    child: AbSeparator.horizontal(),
+  );
+
+  /// Stacked full-width: the side column is too narrow to fit two of these
+  /// side by side without wrapping their labels mid-word.
+  Widget _actions(BuildContext context, List<TaskPublishTarget> targets) {
+    final palette = context.antgrid;
+    final buttons = <Widget>[
+      // Never the primary action: the primary action on a task is Start
+      // session, and publishing is not what this product is for.
+      if (_task.isPublishable && targets.isNotEmpty)
+        AbButton(
+          label: _publishing
+              ? 'Publishing…'
+              : _task.hasUnlinkedIdentity
+              // Says what it does rather than reading like a way to restore
+              // the link that was dropped.
+              ? 'Publish to GitHub (new issue)'
+              : 'Publish to GitHub',
+          expand: true,
+          wrapLabel: true,
+          onTap: _publishing
+              ? null
+              : () =>
+                    detached('tasks', 'publish task', () => _publish(targets)),
+        ),
+      if (_task.isLinked)
+        AbButton(
+          label: _unlinking ? 'Unlinking…' : 'Unlink from GitHub',
+          expand: true,
+          wrapLabel: true,
+          onTap: _unlinking
+              ? null
+              : () => detached('tasks', 'unlink task', _unlink),
+        ),
+      AbButton(
+        label: 'Delete task',
+        color: palette.error,
+        expand: true,
+        wrapLabel: true,
+        onTap: () => detached('tasks', 'delete task', _delete),
+      ),
+    ];
+    return Padding(
+      padding: const EdgeInsets.all(AbTokens.space12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: AbTokens.space8,
+        children: buttons,
+      ),
+    );
+  }
+
+  /// The title, and what it takes to start work on it.
+  Widget _lead(BuildContext context) {
     final palette = context.antgrid;
     final launcher = ref.watch(taskLauncherProvider);
     // The task's repository is known but no opened folder is it: the fix is
@@ -688,36 +938,10 @@ class _LoadedState extends ConsumerState<_Loaded> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Text(
-                _task.ref,
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: palette.textMuted,
-                ),
-              ),
-              const SizedBox(width: AbTokens.space8),
-              TaskStatusPill(status: _task.status),
-              const Spacer(),
-              AbIconButton(
-                icon: AbIcons.edit,
-                tooltip: 'Change status',
-                onTap: () => detached('tasks', 'change status', _pickStatus),
-              ),
-              if (widget.onClose != null)
-                AbIconButton(
-                  icon: AbIcons.close,
-                  tooltip: 'Close task',
-                  onTap: widget.onClose!,
-                ),
-            ],
-          ),
-          const SizedBox(height: AbTokens.space8),
           if (_editingTitle)
             AbTextField(
               controller: _title,
-              autofocus: true,
+              focusNode: _titleFocus,
               hintText: 'Title',
               onSubmitted: (_) => detached('tasks', 'save title', _commitTitle),
             )
@@ -727,13 +951,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
               child: Text(
                 _task.title,
                 style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontLg,
+                  fontSize: AbTokens.fontDisplaySm,
                   fontWeight: FontWeight.w600,
                   color: palette.textPrimary,
+                  height: _titleLineHeight,
                 ),
               ),
             ),
-          const SizedBox(height: AbTokens.space12),
+          const SizedBox(height: AbTokens.space16),
           if (projectMissing)
             TaskProjectMissing(source: source)
           else
@@ -821,22 +1046,76 @@ class _LoadedState extends ConsumerState<_Loaded> {
         ? null
         : ref.watch(taskProjectNamesProvider)[_task.projectId];
 
+    final priority = _task.priority;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space12,
-        AbTokens.space8,
+        AbTokens.space10,
         AbTokens.space12,
-        AbTokens.space8,
+        AbTokens.space14,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _attribute(
             context,
+            'Status',
+            fieldKey: _statusField,
+            tooltip: 'Change status',
+            shortcut: _statusKey,
+            open: _openFieldId == 'status',
+            onTap: _openStatus,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TaskStatusDot(status: _task.status),
+                const SizedBox(width: AbTokens.space6),
+                Flexible(
+                  child: Text(
+                    _task.status.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _attribute(
+            context,
+            'Priority',
+            fieldKey: _priorityField,
+            tooltip: 'Set priority',
+            shortcut: _priorityKey,
+            open: _openFieldId == 'priority',
+            onTap: _openPriority,
+            child: priority == null
+                ? _placeholder(context, 'Set priority')
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _PriorityDot(priority: priority),
+                      const SizedBox(width: AbTokens.space6),
+                      Flexible(
+                        child: Text(
+                          _priorityLabel(priority),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+          _attribute(
+            context,
             'Assignee',
-            onTap: assignee is TaskExternalAssignee
-                ? null
-                : () => detached('tasks', 'pick assignee', _pickAssignee),
+            fieldKey: _assigneeField,
+            tooltip: 'Change assignee',
+            shortcut: _assigneeKey,
+            open: _openFieldId == 'assignee',
+            onTap: assignee is TaskExternalAssignee ? null : _openAssignee,
             child: _assigneeValue(context, assignee),
           ),
           // Outside the attribute row on purpose: the row is the reassign tap
@@ -847,21 +1126,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
           _attribute(
             context,
             'Labels',
-            onTap: () => detached(
-              'tasks',
-              'edit labels',
-              () => editTaskLabels(context, ref, _task),
-            ),
+            fieldKey: _labelsField,
+            tooltip: 'Edit labels',
+            shortcut: _labelsKey,
+            open: _openFieldId == 'labels',
+            onTap: _openLabels,
             child: _task.labels.isEmpty
-                ? Text(
-                    'None',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: palette.textMuted,
-                    ),
-                  )
+                ? _placeholder(context, 'Add label')
                 : Wrap(
-                    spacing: AbTokens.space4,
+                    spacing: AbTokens.space6,
                     runSpacing: AbTokens.space4,
                     children: [
                       for (final label in _task.labels)
@@ -871,36 +1144,15 @@ class _LoadedState extends ConsumerState<_Loaded> {
           ),
           _attribute(
             context,
-            'Priority',
-            onTap: () => detached('tasks', 'pick priority', _pickPriority),
-            child: Text(
-              _task.priority == null ? 'None' : 'P${_task.priority}',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: _task.priority == null
-                    ? palette.textMuted
-                    : palette.textSecondary,
-              ),
-            ),
-          ),
-          _attribute(
-            context,
             'Project',
             // Once a task is filed against a project, that project is where
             // its checkout, sessions and provenance all live — reassigning it
             // here would orphan those without moving them, so the field is
             // set-once: editable only while still unset.
-            onTap: _task.projectId == null
-                ? () => detached('tasks', 'pick project', _pickProject)
-                : null,
+            open: _openFieldId == 'project',
+            onTap: _task.projectId == null ? _openProject : null,
             child: _task.projectId == null
-                ? Text(
-                    'None',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: palette.textMuted,
-                    ),
-                  )
+                ? _placeholder(context, 'Set project')
                 : Text(
                     projectName ?? _task.projectId!,
                     maxLines: 1,
@@ -910,11 +1162,35 @@ class _LoadedState extends ConsumerState<_Loaded> {
                             fontSize: AbTokens.fontXxs,
                             color: palette.textMuted,
                           )
-                        : AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+                        : AbTokens.monoStyle(fontSize: AbTokens.fontXs),
                   ),
           ),
         ],
       ),
+    );
+  }
+
+  /// An empty field's own call to action, rather than "None": the row is the
+  /// control, so its empty state says what tapping it does.
+  Widget _placeholder(BuildContext context, String text) {
+    final palette = context.antgrid;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbIcon(AbIcons.add, size: AbTokens.fontSm, color: palette.textMuted),
+        const SizedBox(width: AbTokens.space6),
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontSm,
+              color: palette.textMuted,
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -936,9 +1212,13 @@ class _LoadedState extends ConsumerState<_Loaded> {
         children: [
           AbAvatar(name: assignee.userId, size: _avatarSize),
           const SizedBox(width: AbTokens.space6),
-          Text(
-            _displayNameFor(assignee.userId),
-            style: AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+          Flexible(
+            child: Text(
+              _displayNameFor(assignee.userId),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.sansStyle(fontSize: AbTokens.fontXs),
+            ),
           ),
         ],
       ),
@@ -946,6 +1226,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
       // Antgrid account to edit.
       TaskExternalAssignee() => Text(
         '@${assignee.login}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: AbTokens.monoStyle(
           fontSize: AbTokens.fontXs,
           color: palette.textSecondary,
@@ -960,7 +1242,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
     final palette = context.antgrid;
     return Padding(
       padding: const EdgeInsets.only(
-        left: _attributeLabelWidth,
+        left: _fieldLabelWidth,
         bottom: AbTokens.space6,
       ),
       child: Column(
@@ -1006,40 +1288,127 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
   }
 
+  /// One labelled field. The value is the control: tapping it opens its
+  /// picker anchored beneath it, so the popover reads as dropping out of the
+  /// field it edits.
   Widget _attribute(
     BuildContext context,
     String label, {
     required Widget child,
-    VoidCallback? onTap,
+    void Function(Rect? anchor)? onTap,
+    GlobalKey? fieldKey,
+    String? tooltip,
+    String? shortcut,
+    bool open = false,
   }) {
     final palette = context.antgrid;
-    final row = Padding(
-      padding: const EdgeInsets.symmetric(vertical: AbTokens.space6),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space2),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: _attributeLabelWidth,
+            width: _fieldLabelWidth - _fieldInset,
             child: Text(
               label,
               style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXxs,
+                fontSize: AbTokens.fontXs,
                 color: palette.textMuted,
               ),
             ),
           ),
-          Expanded(child: child),
-          if (onTap != null)
-            AbIcon(
-              AbIcons.chevronRight,
-              size: AbTokens.iconButtonGlyph,
-              color: palette.iconMuted,
+          Flexible(
+            child: _AttributeField(
+              key: fieldKey,
+              tooltip: tooltip == null
+                  ? null
+                  : shortcut == null
+                  ? tooltip
+                  : '$tooltip  ($shortcut)',
+              onTap: onTap,
+              open: open,
+              child: child,
             ),
+          ),
         ],
       ),
     );
-    if (onTap == null) return row;
-    return GestureDetector(onTap: onTap, child: row);
+  }
+
+  /// Opens the field's picker from the keyboard, anchored where a click on
+  /// the field would have anchored it.
+  void _openFromKey(GlobalKey field, void Function(Rect? anchor) open) {
+    final fieldContext = field.currentContext;
+    open(fieldContext == null ? null : abMenuAnchorRect(fieldContext));
+  }
+
+  /// Holds [field]'s chevron up for as long as its picker is open, so the
+  /// popover stays visibly tied to the field it dropped from.
+  void _openField(String field, String what, Future<void> Function() open) {
+    detached('tasks', what, () async {
+      setState(() => _openFieldId = field);
+      try {
+        await open();
+      } finally {
+        if (mounted && _openFieldId == field) {
+          setState(() => _openFieldId = null);
+        }
+      }
+    });
+  }
+
+  void _openStatus(Rect? anchor) =>
+      _openField('status', 'change status', () => _pickStatus(anchor));
+
+  void _openAssignee(Rect? anchor) =>
+      _openField('assignee', 'pick assignee', () => _pickAssignee(anchor));
+
+  void _openLabels(Rect? anchor) => _openField(
+    'labels',
+    'edit labels',
+    () => editTaskLabels(
+      context,
+      ref,
+      _task,
+      anchor: anchor,
+      shortcut: _labelsKey,
+    ),
+  );
+
+  void _openPriority(Rect? anchor) =>
+      _openField('priority', 'pick priority', () => _pickPriority(anchor));
+
+  void _openProject(Rect? anchor) =>
+      _openField('project', 'pick project', () => _pickProject(anchor));
+
+  /// Plain-letter shortcuts, honoured only while the pane ITSELF holds focus.
+  /// Not a `CallbackShortcuts`: that marks the key handled even when its
+  /// callback bails, and a handled key never reaches text input — the title
+  /// and description editors would lose every s, a, l and p typed into them.
+  KeyEventResult _onPaneKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || FocusManager.instance.primaryFocus != node) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isMetaPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.keyS) {
+      _openFromKey(_statusField, _openStatus);
+    } else if (key == LogicalKeyboardKey.keyA) {
+      if (_task.assignee is TaskExternalAssignee) return KeyEventResult.ignored;
+      _openFromKey(_assigneeField, _openAssignee);
+    } else if (key == LogicalKeyboardKey.keyL) {
+      _openFromKey(_labelsField, _openLabels);
+    } else if (key == LogicalKeyboardKey.keyP) {
+      _openFromKey(_priorityField, _openPriority);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    return KeyEventResult.handled;
   }
 
   /// What the last sync could not reconcile, and the two ways out of each one.
@@ -1429,21 +1798,27 @@ class _LoadedState extends ConsumerState<_Loaded> {
                 color: disconnected ? palette.warning : palette.iconMuted,
               ),
               const SizedBox(width: AbTokens.space6),
-              Text(
-                pending
-                    ? 'Creating the issue…'
-                    : unlinked
-                    ? 'No longer syncing'
-                    : disconnected
-                    ? (_task.pushReason == TaskPushReason.pushOff
-                          ? 'Not pushing to GitHub'
-                          : _task.pushReason == TaskPushReason.repoRemoved
-                          ? 'Repository removed'
-                          : 'GitHub disconnected')
-                    : 'Published to GitHub',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: disconnected ? palette.warning : palette.textSecondary,
+              Flexible(
+                child: Text(
+                  pending
+                      ? 'Creating the issue…'
+                      : unlinked
+                      ? 'No longer syncing'
+                      : disconnected
+                      ? (_task.pushReason == TaskPushReason.pushOff
+                            ? 'Not pushing to GitHub'
+                            : _task.pushReason == TaskPushReason.repoRemoved
+                            ? 'Repository removed'
+                            : 'GitHub disconnected')
+                      : 'Published to GitHub',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: disconnected
+                        ? palette.warning
+                        : palette.textSecondary,
+                  ),
                 ),
               ),
               if (key != null) ...[
@@ -1460,22 +1835,6 @@ class _LoadedState extends ConsumerState<_Loaded> {
                   ),
                 ),
               ],
-              const Spacer(),
-              if (url != null)
-                AbButton(
-                  label: 'Open issue',
-                  compact: true,
-                  leading: AbIcon(
-                    AbIcons.openExternal,
-                    size: AbTokens.iconButtonGlyph,
-                    color: palette.textSecondary,
-                  ),
-                  onTap: () => detached(
-                    'tasks',
-                    'open issue',
-                    () => openExternalUrl(context, url),
-                  ),
-                ),
             ],
           ),
           const SizedBox(height: AbTokens.space6),
@@ -1494,6 +1853,23 @@ class _LoadedState extends ConsumerState<_Loaded> {
               color: disconnected ? palette.warning : palette.textMuted,
             ),
           ),
+          if (url != null) ...[
+            const SizedBox(height: AbTokens.space8),
+            AbButton(
+              label: 'Open issue',
+              compact: true,
+              leading: AbIcon(
+                AbIcons.openExternal,
+                size: AbTokens.iconButtonGlyph,
+                color: palette.textSecondary,
+              ),
+              onTap: () => detached(
+                'tasks',
+                'open issue',
+                () => openExternalUrl(context, url),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1593,13 +1969,13 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
   }
 
-  Widget _bodyBlock(BuildContext context) {
+  Widget _bodyBlock(BuildContext context, List<MarkdownSegment> segments) {
     final palette = context.antgrid;
     if (_editingBody) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TaskBodyEditor(controller: _body, autofocus: true, minLines: 8),
+          TaskBodyEditor(controller: _body, focusNode: _bodyFocus, minLines: 8),
           const SizedBox(height: AbTokens.space8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
@@ -1631,7 +2007,67 @@ class _LoadedState extends ConsumerState<_Loaded> {
         ),
       );
     }
-    return TranscriptMarkdown(data: _task.body);
+    return _description(context, segments);
+  }
+
+  /// The body as markdown, with its template comments hidden or set apart.
+  ///
+  /// Box indices stay document-wide across the pieces: [MarkdownFormat]
+  /// counts boxes outside comments only, which is exactly what is rendered.
+  Widget _description(BuildContext context, List<MarkdownSegment> segments) {
+    final palette = context.antgrid;
+    final prose = segments.where((s) => !s.isComment).map((s) => s.text);
+    final hasComments = prose.length != segments.length;
+    if (!hasComments) {
+      return TranscriptMarkdown(data: _task.body, onToggleTask: _toggleTask);
+    }
+    if (!_showComments) {
+      final text = prose.join();
+      // Headings with nothing under them are the template's own skeleton.
+      final filledIn = text
+          .split('\n')
+          .any((l) => l.trim().isNotEmpty && !l.trimLeft().startsWith('#'));
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (text.trim().isNotEmpty)
+            TranscriptMarkdown(data: text, onToggleTask: _toggleTask),
+          if (!filledIn) ...[
+            if (text.trim().isNotEmpty) const SizedBox(height: AbTokens.space8),
+            Text(
+              'Template has no content filled in yet.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: palette.textMuted,
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+    final children = <Widget>[];
+    var boxes = 0;
+    for (final segment in segments) {
+      if (segment.isComment) {
+        if (segment.text.isEmpty) continue;
+        children.add(_TemplateComment(text: segment.text));
+        continue;
+      }
+      if (segment.text.trim().isEmpty) continue;
+      final first = boxes;
+      children.add(
+        TranscriptMarkdown(
+          data: segment.text,
+          onToggleTask: (i) => _toggleTask(first + i),
+        ),
+      );
+      boxes += MarkdownFormat.taskCount(segment.text);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: AbTokens.space10,
+      children: children,
+    );
   }
 
   Widget _metadata(BuildContext context) {
@@ -2013,8 +2449,225 @@ String? _providerStateLabel(Object? value) {
 /// field — it has no `localValue`, and only `remote` is accepted.
 const _labelsConflictField = 'labels';
 
+/// Below this the side column drops under the description instead of
+/// squeezing it: the description is the part that needs the width.
+const _twoColumnMinWidth = 700.0;
+
+/// Against the header's spacer: the toggle takes what it needs first and
+/// wraps only when the header truly cannot fit it.
+const _toggleFlex = 8;
+const _sideWidth = 320.0;
+const _mainMaxWidth = 760.0;
+const _titleLineHeight = 1.3;
+
 const _attributeLabelWidth = 72.0;
 const _avatarSize = 18.0;
+
+/// Wider than [_attributeLabelWidth]: the editable fields carry a hover box
+/// whose padding would otherwise crowd the label.
+const _fieldLabelWidth = 88.0;
+
+/// How far a field box reaches left of its value: the label column gives
+/// this back, so values line up with [_fieldLabelWidth] whatever their box.
+const _fieldInset = AbTokens.space8 + 1;
+
+/// [AbTokens.rowHeightXs] less the field box's 1px border and vertical padding.
+const _fieldInnerMinHeight = AbTokens.rowHeightXs - 2 * AbTokens.space2 - 2;
+
+const _statusKey = 'S';
+const _assigneeKey = 'A';
+const _labelsKey = 'L';
+const _priorityKey = 'P';
+
+/// Indexed by the stored priority: 0 is the most urgent.
+const _priorityNames = ['Urgent', 'High', 'Medium', 'Low'];
+
+String _priorityLabel(int? priority) =>
+    priority == null || priority < 0 || priority >= _priorityNames.length
+    ? (priority == null ? 'No priority' : 'P$priority')
+    : _priorityNames[priority];
+
+/// Filled for a set priority, hollow for none — the same mark in the field
+/// and in its picker.
+class _PriorityDot extends StatelessWidget {
+  const _PriorityDot({required this.priority});
+
+  final int? priority;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    final color = switch (priority) {
+      0 => palette.error,
+      1 => palette.warning,
+      2 => palette.statusThinking,
+      3 => palette.accent,
+      _ => palette.iconMuted,
+    };
+    final filled = priority != null;
+    return Container(
+      width: AbTokens.dotSizeSm,
+      height: AbTokens.dotSizeSm,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: filled ? color : null,
+        border: filled ? null : Border.all(color: color, width: 1.5),
+      ),
+    );
+  }
+}
+
+/// A field value that is its own control: flat at rest, boxed on hover. The
+/// chevron saying it opens a list shows only on hover or while its picker is
+/// up, so a column of fields reads as values rather than a stack of
+/// dropdowns. Read-only values ([onTap] null) render bare, so an uneditable
+/// field never looks like a dead button.
+class _AttributeField extends StatefulWidget {
+  const _AttributeField({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.tooltip,
+    this.open = false,
+  });
+
+  final Widget child;
+
+  /// Receives this field's rect in overlay coordinates, for anchoring.
+  final void Function(Rect? anchor)? onTap;
+  final String? tooltip;
+
+  /// This field's picker is showing.
+  final bool open;
+
+  @override
+  State<_AttributeField> createState() => _AttributeFieldState();
+}
+
+class _AttributeFieldState extends State<_AttributeField> {
+  var _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    final onTap = widget.onTap;
+    final boxed = onTap != null && _hovered;
+    final showChevron = boxed || widget.open;
+    // Hugs its value: the box and the chevron grow with what the field holds.
+    final content = Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space2,
+      ),
+      decoration: BoxDecoration(
+        color: boxed ? palette.bgHover : null,
+        borderRadius: AbTokens.borderRadius5,
+        border: Border.all(
+          color: boxed ? palette.borderDefault : const Color(0x00000000),
+        ),
+      ),
+      child: ConstrainedBox(
+        // The row, not the box, carries the height floor: a Row stretched to
+        // a minimum centres its children, a Container would top-align them.
+        constraints: const BoxConstraints(minHeight: _fieldInnerMinHeight),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(child: widget.child),
+            if (onTap != null) ...[
+              const SizedBox(width: AbTokens.space8),
+              AnimatedOpacity(
+                opacity: showChevron ? 1 : 0,
+                duration: AbTokens.motionSnap,
+                child: AbIcon(
+                  AbIcons.chevronDown,
+                  size: AbTokens.fontSm,
+                  color: palette.textMuted,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (onTap == null) return content;
+    final tooltip = widget.tooltip;
+    final control = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onTap(abMenuAnchorRect(context)),
+        child: content,
+      ),
+    );
+    return tooltip == null
+        ? control
+        : AbTooltip(message: tooltip, child: control);
+  }
+}
+
+/// A template's guidance comment, set apart from what the author wrote:
+/// dashed and muted, because it is the form's text rather than the issue's.
+class _TemplateComment extends StatelessWidget {
+  const _TemplateComment({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    return CustomPaint(
+      painter: _DashedBorder(color: palette.borderDefault),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space12,
+          vertical: AbTokens.space8,
+        ),
+        child: Text(
+          text,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: palette.textMuted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedBorder extends CustomPainter {
+  const _DashedBorder({required this.color});
+
+  final Color color;
+
+  static const _dash = 4.0;
+  static const _gap = 3.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    final path = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(
+          Offset.zero & size,
+          const Radius.circular(AbTokens.radius5),
+        ).deflate(0.5),
+      );
+    for (final metric in path.computeMetrics()) {
+      for (var d = 0.0; d < metric.length; d += _dash + _gap) {
+        canvas.drawPath(metric.extractPath(d, d + _dash), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedBorder old) => old.color != color;
+}
 
 /// Tall enough for a few lines of a description, short enough that two of them
 /// plus the actions still fit a phone. Longer values scroll in place.

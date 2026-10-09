@@ -355,7 +355,8 @@ describe("scheduler durable store", () => {
     }
     expect(f.service.runs()).toHaveLength(500);
     await f.service.runNow(schedule.id); await settle(); expect(f.service.runs()).toHaveLength(501);
-  });
+  // 505 separate durable claims sit right at bun's 5s default on Windows.
+  }, 30_000);
   test("storage disappearance latches fault and never recreates or dispatches", async () => {
     const f = fixture(); const schedule = await f.service.create(input); unlinkSync(f.service.store.path);
     expect(() => f.service.runs()).toThrow(); await expect(f.service.runNow(schedule.id)).rejects.toThrow("storage failed");

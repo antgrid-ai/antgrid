@@ -122,8 +122,10 @@ Future<bool> showTaskDeleteConfirm(BuildContext context, Task task) {
 Future<void> editTaskLabels(
   BuildContext context,
   WidgetRef ref,
-  Task task,
-) async {
+  Task task, {
+  Rect? anchor,
+  String? shortcut,
+}) async {
   // Captured before the first await: the sheet this opens under can outlive
   // the row that triggered it, and reading `ref` on a dead element throws.
   final container = ref.container;
@@ -148,6 +150,8 @@ Future<void> editTaskLabels(
         ),
     ],
     selected: task.labels.map((l) => l.id).toSet(),
+    anchor: anchor,
+    shortcut: shortcut,
     createTooltip: 'New label',
     onCreateNew: (ctx) async {
       final created = await showCreateLabelDialog(ctx);
