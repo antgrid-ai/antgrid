@@ -20,6 +20,9 @@ void main() {
       AuthStatusPill(_user(tier: 'pro', promotional: true)),
     );
     expect(find.byType(AbChip), findsNothing);
+    // Any tier word here, in any widget, is what App Store review rejected.
+    expect(find.text('BETA'), findsNothing);
+    expect(find.text('PRO'), findsNothing);
   });
 
   testWidgets('a real pro subscription reads PRO', (tester) async {
