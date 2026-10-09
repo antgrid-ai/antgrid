@@ -26,6 +26,7 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
+import '../providers/auth.dart' show currentUserProvider;
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/drawer_entries.dart';
@@ -36,6 +37,7 @@ import '../providers/new_session_action.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../providers/tasks.dart' show openTaskCountProvider;
 import '../services/control_plane_client.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -55,7 +57,7 @@ import 'drawer_dismiss.dart';
 import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'session_row.dart';
-import 'tasks_nav_row.dart';
+import 'tasks/tasks_surface.dart' show openTasks;
 import 'update_row.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
@@ -234,6 +236,9 @@ class _NavActions extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final surface = ref.watch(workbenchSurfaceProvider);
     final schedulerEnabled = !ref.watch(demoModeProvider);
+    // Tasks are account data: the row is absent signed out, not disabled.
+    final signedIn = ref.watch(currentUserProvider).value != null;
+    final openTaskCount = signedIn ? ref.watch(openTaskCountProvider) ?? 0 : 0;
     void openScheduler() {
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -250,6 +255,7 @@ class _NavActions extends ConsumerWidget {
       required bool selected,
       required VoidCallback onTap,
       bool enabled = true,
+      Widget? trailing,
     }) {
       Widget row = AbListRow(
         title: Text(label, style: AbTokens.sansStyle()),
@@ -258,6 +264,7 @@ class _NavActions extends ConsumerWidget {
           size: AbTokens.iconButtonGlyph,
           color: context.antgrid.textSecondary,
         ),
+        trailing: trailing,
         density: AbRowDensity.sm,
         horizontalPadding: AbTokens.space8,
         selected: selected,
@@ -303,6 +310,26 @@ class _NavActions extends ConsumerWidget {
               enabled: schedulerEnabled,
               onTap: openScheduler,
             ),
+            if (signedIn) ...[
+              const SizedBox(height: AbTokens.space4),
+              navigationRow(
+                label: 'Tasks',
+                icon: AbIcons.tasks,
+                selected: surface == WorkbenchSurface.tasks,
+                // Open tasks across the whole account — the scope the surface
+                // itself opens onto.
+                trailing: openTaskCount > 0
+                    ? Text(
+                        '$openTaskCount',
+                        style: AbTokens.monoStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: context.antgrid.textMuted,
+                        ),
+                      )
+                    : null,
+                onTap: () => openTasks(context, ref),
+              ),
+            ],
           ],
         ),
       ),
@@ -441,19 +468,7 @@ class _Body extends ConsumerWidget {
   }
 
   Widget _list(BuildContext context, WidgetRef ref) {
-    // Tasks is account-level, not a property of any machine, so it heads the
-    // drawer in every layout: above the "This machine" band on desktop, and the
-    // only way in on a mobile/remote-only client that has no local band at all.
-    final body = entries.isEmpty
-        ? _emptyState(context)
-        : _entriesList(context, ref);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const TasksNavRow(),
-        Expanded(child: body),
-      ],
-    );
+    return entries.isEmpty ? _emptyState(context) : _entriesList(context, ref);
   }
 
   Widget _emptyState(BuildContext context) {

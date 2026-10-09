@@ -30,11 +30,7 @@ import '../../util/detached.dart';
 /// the project's client-asserted remote — so this is what the user is
 /// approving, not a label that merely resembles it.
 class TaskPublishDestination extends StatelessWidget {
-  const TaskPublishDestination({
-    super.key,
-    required this.target,
-    this.tone,
-  });
+  const TaskPublishDestination({super.key, required this.target, this.tone});
 
   final TaskPublishTarget target;
 
@@ -218,9 +214,7 @@ class _TaskPublishConfirmSheetState extends State<_TaskPublishConfirmSheet> {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: AbButton(
-                      label: target == null
-                          ? 'Choose a repo'
-                          : 'Change repo',
+                      label: target == null ? 'Choose a repo' : 'Change repo',
                       compact: true,
                       onTap: () =>
                           detached('tasks', 'pick publish repo', _pick),

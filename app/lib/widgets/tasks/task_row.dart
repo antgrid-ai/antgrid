@@ -25,7 +25,6 @@ class TaskRow extends ConsumerWidget {
     this.selected = false,
     this.onTap,
     this.onLongPress,
-    this.onLabelTap,
     this.showStatusLabel = false,
     this.showProject = true,
     this.twoLine = false,
@@ -35,10 +34,6 @@ class TaskRow extends ConsumerWidget {
   final bool selected;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
-
-  /// Tapping a label chip filters the list by it — the only route to the label
-  /// filter that doesn't first need the label to be active already.
-  final ValueChanged<TaskLabel>? onLabelTap;
 
   /// The labelled pill instead of the leading dot. Worth ~80px, so it belongs
   /// only where the status is actually carrying information — the unscoped list
@@ -125,11 +120,7 @@ class TaskRow extends ConsumerWidget {
         const SizedBox(width: AbTokens.space6),
         ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
-          child: AbLabelChip(
-            label: label.name,
-            colorHex: label.color,
-            onTap: onLabelTap == null ? null : () => onLabelTap!(label),
-          ),
+          child: AbLabelChip(label: label.name, colorHex: label.color),
         ),
       ],
       if (overflow > 0) ...[
@@ -151,18 +142,8 @@ class TaskRow extends ConsumerWidget {
         const SizedBox(width: AbTokens.space6),
         TaskSyncBrokenMark(task: task),
       ],
-      // Unassigned is a fact ABOUT the task, same standing as its provenance —
-      // not an answer to "who is this for" that belongs on the line built for
-      // that question. `_assignee` still renders it there for the wide
-      // desktop row, which has no second line to split it onto.
-      if (task.assignee == null) ...[
-        const SizedBox(width: AbTokens.space6),
-        AbIcon(
-          AbIcons.unassigned,
-          size: AbTokens.iconButtonGlyph,
-          color: palette.iconMuted,
-        ),
-      ],
+      // No unassigned glyph here: a second line with no avatar already says
+      // nobody has it, and the list has an Unassigned view for finding them.
     ];
   }
 
@@ -200,11 +181,7 @@ class TaskRow extends ConsumerWidget {
           for (final label in shown) ...[
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: _labelChipMaxWidth),
-              child: AbLabelChip(
-                label: label.name,
-                colorHex: label.color,
-                onTap: onLabelTap == null ? null : () => onLabelTap!(label),
-              ),
+              child: AbLabelChip(label: label.name, colorHex: label.color),
             ),
             const SizedBox(width: AbTokens.space4),
           ],
@@ -260,7 +237,9 @@ class TaskRow extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: AbTokens.space6),
-          ] else
+          ] else if (!twoLine)
+            // On the two-line row nothing precedes the project when the task
+            // is unassigned, so a gap there would only indent it.
             const SizedBox(width: AbTokens.space8),
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: _projectMaxWidth),

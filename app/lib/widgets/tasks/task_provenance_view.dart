@@ -43,8 +43,7 @@ String? taskSyncSentence(Task task) {
     // Says only what happened. Which side won, and the way out, belong to the
     // conflict block directly under this one — saying it twice in two
     // paragraphs reads as two different facts.
-    TaskSyncState.conflict =>
-      'Edited here and on $provider at the same time.',
+    TaskSyncState.conflict => 'Edited here and on $provider at the same time.',
     TaskSyncState.unlinked => 'No longer linked to $provider.',
     TaskSyncState.pending => 'Waiting to sync with $provider.',
     TaskSyncState.synced || null => null,
@@ -209,9 +208,7 @@ class TaskProvenanceBlock extends StatelessWidget {
                   if (task.externalKey != null) ...[
                     const SizedBox(width: AbTokens.space8),
                     ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        maxWidth: _keyMaxWidth,
-                      ),
+                      constraints: const BoxConstraints(maxWidth: _keyMaxWidth),
                       child: Text(
                         task.externalKey!,
                         maxLines: 1,
@@ -237,11 +234,8 @@ class TaskProvenanceBlock extends StatelessWidget {
                     size: AbTokens.iconButtonGlyph,
                     color: palette.textSecondary,
                   ),
-                  onTap: () => detached(
-                    'tasks',
-                    'open issue',
-                    () => open(context, url),
-                  ),
+                  onTap: () =>
+                      detached('tasks', 'open issue', () => open(context, url)),
                 ),
             ],
           ),

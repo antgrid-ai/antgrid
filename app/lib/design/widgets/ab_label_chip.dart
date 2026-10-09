@@ -53,7 +53,6 @@ class _AbLabelChipState extends State<AbLabelChip> {
   @override
   Widget build(BuildContext context) {
     final palette = context.antgrid;
-    final dot = abLabelColor(widget.colorHex) ?? palette.textMuted;
     final chip = Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AbTokens.space6,
@@ -69,15 +68,7 @@ class _AbLabelChipState extends State<AbLabelChip> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: AbTokens.dotSizeSm,
-            height: AbTokens.dotSizeSm,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: dot,
-              border: Border.all(color: palette.borderStrong),
-            ),
-          ),
+          AbLabelDot(colorHex: widget.colorHex),
           const SizedBox(width: AbTokens.space4),
           Flexible(
             child: Text(
@@ -127,6 +118,29 @@ class _AbLabelChipState extends State<AbLabelChip> {
             child: chip,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// A label's colour mark on its own, for places that name a label without
+/// drawing the whole chip (a picker row) — so the label carries the same mark
+/// everywhere it appears.
+class AbLabelDot extends StatelessWidget {
+  const AbLabelDot({super.key, this.colorHex});
+
+  final String? colorHex;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    return Container(
+      width: AbTokens.dotSizeSm,
+      height: AbTokens.dotSizeSm,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: abLabelColor(colorHex) ?? palette.textMuted,
+        border: Border.all(color: palette.borderStrong),
       ),
     );
   }

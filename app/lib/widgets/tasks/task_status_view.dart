@@ -53,7 +53,15 @@ class TaskStatusDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => AbStatusDot(
-    tone: taskStatusTone(status),
+    // The dot is read at a glance down a list, so the one status that means
+    // "work is happening" is the one that stands out in amber; blocked stays a
+    // plain filled dot. The labelled pill keeps [taskStatusTone], where the
+    // word carries the meaning.
+    tone: switch (status) {
+      TaskStatus.inProgress => AbStatusTone.warning,
+      TaskStatus.blocked => AbStatusTone.neutral,
+      _ => taskStatusTone(status),
+    },
     size: AbDotSize.sm,
     style: status == TaskStatus.open ? AbDotStyle.hollow : AbDotStyle.filled,
   );

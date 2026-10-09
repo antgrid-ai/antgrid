@@ -164,4 +164,15 @@ abstract final class AbIcons {
   // credential the user supplies, not a state of being secured.
   static const password = Codicon.key;
   static const github = Codicon.github;
+
+  // Markdown editor toolbar. Codicons has no heading or strikethrough glyph.
+  static const mdHeading = Mdi.format_header_pound;
+  static const mdBold = Codicon.bold;
+  static const mdItalic = Codicon.italic;
+  static const mdStrikethrough = Mdi.format_strikethrough_variant;
+  static const mdQuote = Codicon.quote;
+  static const mdBulletList = Codicon.list_unordered;
+  static const mdNumberedList = Codicon.list_ordered;
+  static const mdTaskList = Codicon.checklist;
+  static const markdown = Codicon.markdown;
 }

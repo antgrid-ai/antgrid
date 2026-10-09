@@ -8,7 +8,6 @@ import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_label_chip.dart';
-import '../../design/widgets/ab_multiline_field.dart';
 import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_switch.dart';
@@ -18,13 +17,24 @@ import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart' show TaskApiException;
 import '../../util/detached.dart';
 import 'create_label_dialog.dart';
+import 'task_body_editor.dart';
 import 'task_publish_sheet.dart';
 
 /// The create form. Returns the new task's number, or null if nothing was
 /// created.
 Future<int?> showTaskCreateSheet(BuildContext context) {
-  return showAbAdaptiveSheet<int>(context, child: const _TaskCreateSheet());
+  // Sized for writing a brief, not a one-liner: a body editor and a metadata
+  // sidebar side by side, the shape of GitHub's new-issue page.
+  return showAbAdaptiveSheet<int>(
+    context,
+    maxWidth: 960,
+    child: const _TaskCreateSheet(),
+  );
 }
+
+/// Below this the metadata sidebar folds under the editor.
+const _sidebarBreakpoint = 680.0;
+const _sidebarWidth = 220.0;
 
 class _TaskCreateSheet extends ConsumerStatefulWidget {
   const _TaskCreateSheet();
@@ -296,6 +306,138 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
               const <TaskPublishTarget>[];
     final publish = _publishOn(targets);
     final palette = context.antgrid;
+
+    final main = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        AbTextField(
+          controller: _title,
+          hintText: 'Title',
+          autofocus: true,
+          // Enter moves on to the description: creating here would file a
+          // public issue from a half-written task when publish is on by
+          // default.
+          onSubmitted: (_) => _bodyFocus.requestFocus(),
+        ),
+        const SizedBox(height: AbTokens.space12),
+        TaskBodyEditor(controller: _body, focusNode: _bodyFocus),
+        for (final error in [_submitError, _projectError])
+          if (error != null) ...[
+            const SizedBox(height: AbTokens.space8),
+            Text(
+              error,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: palette.error,
+              ),
+            ),
+          ],
+        // The form IS the confirm step: the title and body are on screen
+        // being typed, next to the repo they would land in. A second sheet on
+        // submit would be a confirmation of a confirmation, and those get
+        // clicked through.
+        if (targets.isNotEmpty) ...[
+          const SizedBox(height: AbTokens.space12),
+          _publishBlock(context, targets, publish),
+        ],
+      ],
+    );
+
+    final sidebar = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (candidates.isNotEmpty)
+          _SidebarField(
+            label: 'Assignee',
+            onTap: () => setState(
+              () => _assignee = _assignee == null
+                  ? TaskMemberAssignee(candidates.first.userId)
+                  : null,
+            ),
+            tooltip: _assignee == null ? 'Assign yourself' : 'Unassign',
+            child: _sidebarValue(
+              context,
+              _assignee == null
+                  ? 'No one — assign yourself'
+                  : candidates.first.displayName,
+              muted: _assignee == null,
+            ),
+          ),
+        _SidebarField(
+          label: 'Labels',
+          tooltip: 'Edit labels',
+          onTap: () => detached('tasks', 'pick labels', _pickLabels),
+          child: _labels.isEmpty
+              ? _sidebarValue(context, 'None yet', muted: true)
+              : Wrap(
+                  spacing: AbTokens.space4,
+                  runSpacing: AbTokens.space4,
+                  children: [
+                    for (final label in _labels)
+                      AbLabelChip(label: label.name, colorHex: label.color),
+                  ],
+                ),
+        ),
+        // Absent where the app cannot name a single project: an empty picker
+        // is a dead end, and a task with no project is the state this form
+        // has always produced.
+        if (projectNames.isNotEmpty || unlinkedRepos.isNotEmpty)
+          _SidebarField(
+            label: 'Project',
+            tooltip: 'Choose project',
+            onTap: _creatingProject
+                ? null
+                : () => detached(
+                    'tasks',
+                    'pick project',
+                    () => _pickProject(projectNames, unlinkedRepos),
+                  ),
+            child: _sidebarValue(
+              context,
+              _creatingProject
+                  ? 'Setting up…'
+                  : projectId == null
+                  ? 'No project'
+                  : projectNames[projectId] ?? 'Project',
+              muted: projectId == null && !_creatingProject,
+            ),
+          ),
+      ],
+    );
+
+    final footer = Padding(
+      padding: const EdgeInsets.all(AbTokens.space12),
+      child: Row(
+        children: [
+          Expanded(
+            child: publish
+                ? const SizedBox.shrink()
+                : Text(
+                    'Stays in this Antgrid account.',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: palette.textMuted,
+                    ),
+                  ),
+          ),
+          AbButton(label: 'Cancel', onTap: () => Navigator.of(context).pop()),
+          const SizedBox(width: AbTokens.space8),
+          AbButton(
+            label: _submitting
+                ? 'Creating…'
+                : publish
+                ? 'Create task and issue'
+                : 'Create task',
+            variant: AbButtonVariant.primary,
+            onTap: _submitting || _creatingProject || _titleBlank
+                ? null
+                : () =>
+                      detached('tasks', 'create task', () => _submit(targets)),
+          ),
+        ],
+      ),
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -327,154 +469,54 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
           ),
         ),
         const AbSeparator.horizontal(),
-        Padding(
-          padding: const EdgeInsets.all(AbTokens.space12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              AbTextField(
-                controller: _title,
-                hintText: 'Title',
-                autofocus: true,
-                // Enter moves on to the description: creating here would file a
-                // public issue from a half-written task when publish is on by
-                // default.
-                onSubmitted: (_) => _bodyFocus.requestFocus(),
-              ),
-              const SizedBox(height: AbTokens.space8),
-              AbMultilineField(
-                controller: _body,
-                focusNode: _bodyFocus,
-                hintText: 'Describe the work. This becomes the agent’s brief.',
-                minLines: 3,
-                maxLines: 8,
-              ),
-              const SizedBox(height: AbTokens.space8),
-              Row(
-                children: [
-                  AbButton(
-                    label: _labels.isEmpty
-                        ? 'Labels'
-                        : '${_labels.length} labels',
-                    compact: true,
-                    onTap: () => detached('tasks', 'pick labels', _pickLabels),
-                  ),
-                  const SizedBox(width: AbTokens.space8),
-                  if (candidates.isNotEmpty)
-                    AbButton(
-                      label: _assignee == null
-                          ? 'Unassigned'
-                          : 'Assigned to me',
-                      compact: true,
-                      onTap: () => setState(
-                        () => _assignee = _assignee == null
-                            ? TaskMemberAssignee(candidates.first.userId)
-                            : null,
-                      ),
-                    ),
-                  // Absent where the app cannot name a single project: an
-                  // empty picker is a dead end, and a task with no project is
-                  // the state this form has always produced.
-                  if (projectNames.isNotEmpty || unlinkedRepos.isNotEmpty) ...[
-                    const SizedBox(width: AbTokens.space8),
-                    AbButton(
-                      label: _creatingProject
-                          ? 'Setting up…'
-                          : projectId == null
-                          ? 'No project'
-                          : projectNames[projectId] ?? 'Project',
-                      compact: true,
-                      onTap: _creatingProject
-                          ? null
-                          : () => detached(
-                              'tasks',
-                              'pick project',
-                              () => _pickProject(projectNames, unlinkedRepos),
-                            ),
-                    ),
-                  ],
-                ],
-              ),
-              if (_submitError != null) ...[
-                const SizedBox(height: AbTokens.space8),
-                Text(
-                  _submitError!,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXxs,
-                    color: palette.error,
-                  ),
-                ),
-              ],
-              if (_projectError != null) ...[
-                const SizedBox(height: AbTokens.space8),
-                Text(
-                  _projectError!,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXxs,
-                    color: palette.error,
-                  ),
-                ),
-              ],
-              if (_labels.isNotEmpty) ...[
-                const SizedBox(height: AbTokens.space8),
-                Wrap(
-                  spacing: AbTokens.space4,
-                  runSpacing: AbTokens.space4,
+        // Flexible + scroll: the editor is tall, and a short window or a phone
+        // with the keyboard up must scroll the form rather than overflow it.
+        Flexible(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(AbTokens.space12),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                if (constraints.maxWidth < _sidebarBreakpoint) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      main,
+                      const SizedBox(height: AbTokens.space12),
+                      sidebar,
+                    ],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    for (final label in _labels)
-                      AbLabelChip(label: label.name, colorHex: label.color),
+                    Expanded(child: main),
+                    const SizedBox(width: AbTokens.space16),
+                    SizedBox(width: _sidebarWidth, child: sidebar),
                   ],
-                ),
-              ],
-              // The form IS the confirm step: the title and body are on screen
-              // being typed, next to the repo they would land in. A second
-              // sheet on submit would be a confirmation of a confirmation, and
-              // those get clicked through.
-              if (targets.isNotEmpty) ...[
-                const SizedBox(height: AbTokens.space12),
-                _publishBlock(context, targets, publish),
-              ],
-              const SizedBox(height: AbTokens.space12),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: publish
-                        ? const SizedBox.shrink()
-                        : Text(
-                            'Stays in this Antgrid account.',
-                            style: AbTokens.sansStyle(
-                              fontSize: AbTokens.fontXxs,
-                              color: palette.textMuted,
-                            ),
-                          ),
-                  ),
-                  AbButton(
-                    label: 'Cancel',
-                    onTap: () => Navigator.of(context).pop(),
-                  ),
-                  const SizedBox(width: AbTokens.space8),
-                  AbButton(
-                    label: _submitting
-                        ? 'Creating…'
-                        : publish
-                        ? 'Create task and issue'
-                        : 'Create task',
-                    variant: AbButtonVariant.primary,
-                    onTap: _submitting || _creatingProject || _titleBlank
-                        ? null
-                        : () => detached(
-                            'tasks',
-                            'create task',
-                            () => _submit(targets),
-                          ),
-                  ),
-                ],
-              ),
-            ],
+                );
+              },
+            ),
           ),
         ),
+        const AbSeparator.horizontal(),
+        footer,
       ],
+    );
+  }
+
+  Widget _sidebarValue(
+    BuildContext context,
+    String text, {
+    bool muted = false,
+  }) {
+    final palette = context.antgrid;
+    return Text(
+      text,
+      overflow: TextOverflow.ellipsis,
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontXs,
+        color: muted ? palette.textMuted : palette.textSecondary,
+      ),
     );
   }
 
@@ -577,6 +619,66 @@ class _TaskCreateSheetState extends ConsumerState<_TaskCreateSheet> {
             ],
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// One metadata block in the create form's sidebar: a label with an edit
+/// affordance over its current value, the way GitHub's issue sidebar lists
+/// assignees, labels and project. The whole block is the tap target.
+class _SidebarField extends StatelessWidget {
+  const _SidebarField({
+    required this.label,
+    required this.tooltip,
+    required this.onTap,
+    required this.child,
+  });
+
+  final String label;
+  final String tooltip;
+  final VoidCallback? onTap;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    return MouseRegion(
+      cursor: onTap == null ? MouseCursor.defer : SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: AbTokens.space12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        fontWeight: FontWeight.w600,
+                        color: palette.textSecondary,
+                      ),
+                    ),
+                  ),
+                  AbIconButton(
+                    icon: AbIcons.edit,
+                    tooltip: tooltip,
+                    onTap: onTap,
+                  ),
+                ],
+              ),
+              const SizedBox(height: AbTokens.space4),
+              child,
+              const SizedBox(height: AbTokens.space12),
+              const AbSeparator.horizontal(),
+            ],
+          ),
+        ),
       ),
     );
   }

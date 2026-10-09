@@ -109,7 +109,8 @@ Future<bool> showTaskDeleteConfirm(BuildContext context, Task task) {
   return AbConfirmDialog.show(
     context: context,
     title: 'Delete ${task.ref}?',
-    body: 'This removes the task from the account. It cannot be undone from '
+    body:
+        'This removes the task from the account. It cannot be undone from '
         'the app.',
     confirmLabel: 'Delete task',
     destructive: true,
@@ -243,7 +244,12 @@ class _TaskRowActionsSheet extends StatelessWidget {
         const AbSeparator.horizontal(),
         _action(context, AbIcons.circle, 'Change status', _RowAction.status),
         if (task.assignee == null)
-          _action(context, AbIcons.account, 'Assign to me', _RowAction.assignToMe)
+          _action(
+            context,
+            AbIcons.account,
+            'Assign to me',
+            _RowAction.assignToMe,
+          )
         else
           _action(context, AbIcons.unassigned, 'Unassign', _RowAction.unassign),
         _action(context, AbIcons.tag, 'Edit labels', _RowAction.labels),

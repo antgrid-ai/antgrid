@@ -61,7 +61,8 @@ Future<bool> confirmDeleteLabel(
   final confirmed = await AbConfirmDialog.show(
     context: context,
     title: 'Delete "${label.name}"?',
-    body: 'This removes the label from every task that has it. It cannot be '
+    body:
+        'This removes the label from every task that has it. It cannot be '
         'undone.',
     confirmLabel: 'Delete label',
     destructive: true,

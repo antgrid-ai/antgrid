@@ -183,6 +183,9 @@ const TerminalStartCommand = BaseMessage.extend({
 const TerminalStopCommand = BaseMessage.extend({
   type: z.literal("terminal:stop"),
   terminalId: z.string(),
+  // A delete, not a stop: also drops the terminal's archived history, which
+  // `getStatus` would otherwise keep reporting as an exited tab after restart.
+  forget: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

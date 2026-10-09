@@ -19,7 +19,6 @@ import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
-import '../../design/widgets/ab_multiline_field.dart';
 import '../../models/task.dart';
 import '../../navigation/nav_controller.dart' show recordProjectFocus;
 import '../../providers/agent_transport.dart'
@@ -40,6 +39,7 @@ import '../file_tree_view.dart';
 import '../file_viewer_router.dart';
 import '../send_capture_to_agent.dart';
 import '../transcript/markdown_body.dart';
+import 'task_body_editor.dart';
 import 'task_launch_sheet.dart';
 import 'task_project_missing.dart';
 import 'task_provenance_view.dart';
@@ -1599,13 +1599,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AbMultilineField(
-            controller: _body,
-            autofocus: true,
-            minLines: 6,
-            maxLines: 20,
-            hintText: 'Describe the work. This becomes the agent’s brief.',
-          ),
+          TaskBodyEditor(controller: _body, autofocus: true, minLines: 8),
           const SizedBox(height: AbTokens.space8),
           Row(
             mainAxisAlignment: MainAxisAlignment.end,

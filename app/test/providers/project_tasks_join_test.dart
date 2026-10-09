@@ -55,7 +55,7 @@ void main() {
       }
     });
 
-    test('a closed chip widens the fetch, and only while it is held', () {
+    test('the Done scope widens the fetch, and only while it is picked', () {
       // Task history is unbounded — it must never be pulled by default.
       expect(
         const TaskFilter().serverQuery.statuses.contains(TaskStatus.done),
@@ -251,26 +251,6 @@ void main() {
       },
     );
 
-    test(
-      'a status chip narrows the rendered list, not just the fetch',
-      () async {
-        final container = surfaceWith([
-          _task(number: 1, status: 'open', sortKey: 'a'),
-          _task(number: 2, status: 'in_progress', sortKey: 'b'),
-        ]);
-        await container.read(currentUserProvider.future);
-        await container.read(taskListProvider.future);
-
-        container
-            .read(taskFilterProvider.notifier)
-            .toggleStatus(TaskStatus.inProgress);
-        expect(
-          container.read(visibleTasksProvider).value!.map((t) => t.number),
-          [2],
-        );
-      },
-    );
-
     test('a project filter narrows the rendered list', () async {
       final container = surfaceWith([
         _task(number: 1, projectId: 'p-1', sortKey: 'a'),
@@ -283,6 +263,40 @@ void main() {
       expect(container.read(visibleTasksProvider).value!.map((t) => t.number), [
         2,
       ]);
+    });
+
+    test('each view count matches the rows that view renders', () async {
+      final container = surfaceWith([
+        _task(
+          number: 1,
+          projectId: 'p-1',
+          assignee: {'kind': 'member', 'userId': 'u-me'},
+        ),
+        _task(number: 2, projectId: 'p-1'),
+        _task(number: 3, projectId: 'p-2', status: 'blocked'),
+        _task(number: 4, projectId: 'p-2', status: 'done'),
+      ]);
+      await container.read(currentUserProvider.future);
+      await container.read(taskListProvider.future);
+
+      for (final scope in TaskScope.values) {
+        container.read(taskFilterProvider.notifier).setScope(scope);
+        // Done widens the fetch, so the list reloads before it can be counted.
+        await container.read(taskListProvider.future);
+        expect(
+          container.read(taskFacetCountsProvider).byScope[scope] ?? 0,
+          container.read(visibleTasksProvider).value!.length,
+          reason: 'the $scope count must equal the rows it shows',
+        );
+      }
+
+      // Repo counts are within the current view, before the repo filter.
+      container.read(taskFilterProvider.notifier).setScope(TaskScope.allOpen);
+      container.read(taskFilterProvider.notifier).setProject('p-1');
+      expect(container.read(taskFacetCountsProvider).byProject, {
+        'p-1': 2,
+        'p-2': 1,
+      });
     });
   });
 
@@ -332,10 +346,9 @@ void main() {
 
         await container.read(currentUserProvider.future);
         await container.read(taskListProvider.future);
-        expect(
-          container.read(taskListProvider).value!.map((t) => t.number),
-          [1],
-        );
+        expect(container.read(taskListProvider).value!.map((t) => t.number), [
+          1,
+        ]);
 
         // Switch accounts, and make the new account's own fetch fail.
         userId = 'u-b';

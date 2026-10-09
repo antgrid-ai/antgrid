@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_label_chip.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/task.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/tasks.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/tasks_api.dart';
+import 'package:antgrid/widgets/new_session/environment_menu.dart'
+    show PanelRow;
 import 'package:antgrid/widgets/tasks/task_list_view.dart';
 import 'package:antgrid/widgets/tasks/task_provenance_view.dart';
 import 'package:antgrid/widgets/tasks/task_row.dart';
@@ -411,7 +414,9 @@ void main() {
       expect(find.byType(TaskProvenanceMark), findsNothing);
       expect(find.byType(TaskSyncBrokenMark), findsOneWidget);
       expect(
-        find.byTooltip('GitHub disconnected · edits here are not reaching the issue'),
+        find.byTooltip(
+          'GitHub disconnected · edits here are not reaching the issue',
+        ),
         findsOneWidget,
       );
     },
@@ -562,6 +567,69 @@ void main() {
     expect(find.text('Bare'), findsNothing);
     expect(listCalls, 1);
   });
+
+  testWidgets(
+    'the header is one view menu plus repo and label menus, and a row label does not filter',
+    (tester) async {
+      const bug = {'id': 'l-1', 'name': 'bug', 'color': 'd73a4a'};
+      final container = _container(
+        client: _serving(
+          labels: const [bug],
+          tasks: [
+            _task(
+              number: 1,
+              title: 'Labelled',
+              assignee: const {'kind': 'member', 'userId': 'u-1'},
+              labels: const [bug],
+            ),
+            _task(
+              number: 2,
+              title: 'Bare',
+              assignee: const {'kind': 'member', 'userId': 'u-1'},
+            ),
+          ],
+        ),
+      );
+      await _pump(tester, container, child: const TaskListView(compact: true));
+      await tester.pumpAndSettle();
+
+      expect(find.text('BLOCKED'), findsNothing);
+      expect(find.text('VIEW'), findsOneWidget);
+      expect(find.text('ALL OPEN'), findsOneWidget);
+      expect(find.text('ALL REPOS'), findsOneWidget);
+      expect(find.text('ALL LABELS'), findsOneWidget);
+
+      await tester.tap(
+        find.descendant(of: find.byType(TaskRow), matching: find.text('bug')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(container.read(taskFilterProvider).labelIds, isEmpty);
+      expect(find.text('Bare'), findsOneWidget);
+
+      // The label filter's picker marks each label with its own colour dot,
+      // the same mark its chip carries, not a generic glyph.
+      await tester.tap(find.text('ALL LABELS'));
+      await tester.pumpAndSettle();
+      final row = find.ancestor(
+        of: find.text('bug').last,
+        matching: find.byType(PanelRow),
+      );
+      expect(
+        find.descendant(of: row, matching: find.byType(AbLabelDot)),
+        findsOneWidget,
+      );
+
+      // Several labels can be held, so a pick toggles in place and the menu
+      // stays open; the trigger then names the selection.
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(container.read(taskFilterProvider).labelIds, {'l-1'});
+      expect(find.text('Clear labels'), findsOneWidget);
+      expect(find.text('Bare'), findsNothing);
+      expect(find.text('BUG'), findsOneWidget);
+    },
+  );
 
   testWidgets('a mutation refusal reverts and says why, with a retry', (
     tester,

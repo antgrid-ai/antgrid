@@ -80,18 +80,16 @@ class TaskQuery {
 class TaskFilter {
   const TaskFilter({
     this.scope = TaskScope.allOpen,
-    this.statuses = const {},
     this.projectId,
     this.assignee,
     this.labelIds = const {},
     this.query = '',
   });
 
+  /// The only status control. Separate status chips layered over it used to
+  /// duplicate the tabs (a Done chip beside a Done tab) and, outside the
+  /// scope, silently replaced it.
   final TaskScope scope;
-
-  /// Status chips layered on top of the scope. Empty means "whatever the scope
-  /// implies".
-  final Set<TaskStatus> statuses;
   final String? projectId;
   final String? assignee;
 
@@ -104,13 +102,12 @@ class TaskFilter {
   final String query;
 
   bool get hasNarrowingFilters =>
-      statuses.isNotEmpty ||
       projectId != null ||
       assignee != null ||
       labelIds.isNotEmpty ||
       query.trim().isNotEmpty;
 
-  /// Statuses the scope itself implies, before any chip narrows them.
+  /// The statuses a row must hold to survive this filter.
   Set<TaskStatus> get scopeStatuses => switch (scope) {
     TaskScope.mine => kOpenStatuses,
     // The server has no notion of a live run, so the widest honest query is
@@ -122,15 +119,6 @@ class TaskFilter {
     TaskScope.done => const {TaskStatus.done, TaskStatus.cancelled},
   };
 
-  /// The statuses a row must hold to survive this filter, once the scope and
-  /// any chips laid over it are both applied. Chips that fall entirely outside
-  /// the scope replace it rather than emptying the list.
-  Set<TaskStatus> get effectiveStatuses => statuses.isEmpty
-      ? scopeStatuses
-      : statuses.intersection(scopeStatuses).isEmpty
-      ? statuses
-      : statuses.intersection(scopeStatuses);
-
   /// Deliberately WIDER than this filter: the fetched list is a single shared
   /// store, and the drawer's per-project task nodes partition the same rows.
   /// A query narrowed to the surface's scope would empty every one of those
@@ -138,21 +126,19 @@ class TaskFilter {
   /// fetched, and scope, assignee and project narrowing all run on the client
   /// in [visibleTasksProvider] instead.
   ///
-  /// Only a CLOSED status widens it beyond the open set, and only while such a
-  /// chip is held: task history is unbounded and must not be pulled by default.
+  /// Only the Done scope widens it beyond the open set, and only while it is
+  /// picked: task history is unbounded and must not be pulled by default.
   TaskQuery get serverQuery =>
-      TaskQuery(statuses: {...kOpenStatuses, ...effectiveStatuses});
+      TaskQuery(statuses: {...kOpenStatuses, ...scopeStatuses});
 
   TaskFilter copyWith({
     TaskScope? scope,
-    Set<TaskStatus>? statuses,
     Object? projectId = kUnset,
     Object? assignee = kUnset,
     Set<String>? labelIds,
     String? query,
   }) => TaskFilter(
     scope: scope ?? this.scope,
-    statuses: statuses ?? this.statuses,
     projectId: identical(projectId, kUnset)
         ? this.projectId
         : projectId as String?,
@@ -169,17 +155,7 @@ class TaskFilterController extends Notifier<TaskFilter> {
     return const TaskFilter();
   }
 
-  /// Switching scope drops the status chips: they were narrowing a different
-  /// set, and carrying them across is how a scope lands empty for no visible
-  /// reason.
-  void setScope(TaskScope scope) =>
-      state = state.copyWith(scope: scope, statuses: const {});
-
-  void toggleStatus(TaskStatus status) {
-    final next = {...state.statuses};
-    if (!next.add(status)) next.remove(status);
-    state = state.copyWith(statuses: next);
-  }
+  void setScope(TaskScope scope) => state = state.copyWith(scope: scope);
 
   void toggleLabel(String labelId) {
     final next = {...state.labelIds};
@@ -196,6 +172,12 @@ class TaskFilterController extends Notifier<TaskFilter> {
   void setQuery(String query) => state = state.copyWith(query: query);
 
   void clearFilters() => state = TaskFilter(scope: state.scope);
+
+  void clearLabels() => state = state.copyWith(labelIds: const {});
+
+  /// Back to the default view with nothing narrowing it — the way out of a
+  /// list the current view and filters together have emptied.
+  void resetAll() => state = const TaskFilter();
 }
 
 final taskFilterProvider = NotifierProvider<TaskFilterController, TaskFilter>(
@@ -636,7 +618,11 @@ class TaskListController extends AsyncNotifier<List<Task>> {
     ref
         .read(taskMutationErrorProvider.notifier)
         .set(
-          TaskMutationFailure(error: error, retry: retry, taskNumber: taskNumber),
+          TaskMutationFailure(
+            error: error,
+            retry: retry,
+            taskNumber: taskNumber,
+          ),
         );
   }
 
@@ -695,27 +681,26 @@ final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
   return tasks.whenData((list) {
     if (mineUnresolved) return const <Task>[];
     final query = filter.query.trim().toLowerCase();
-    final statuses = filter.effectiveStatuses;
     return list
         .where((task) {
           // Status, project and assignee moved here when the store's query was
           // widened to keep the drawer's per-project nodes whole — see
           // [TaskFilter.serverQuery]. The server no longer narrows any of them.
-          if (!statuses.contains(task.status)) return false;
+          // An explicit assignee replaces the one "mine" implies.
+          if (!_inScope(
+            task,
+            filter.scope,
+            myUserId: myUserId,
+            runs: runs,
+            checkMine: explicitAssignee == null,
+          )) {
+            return false;
+          }
           if (filter.projectId != null && task.projectId != filter.projectId) {
             return false;
           }
-          if (wantedAssignee != null) {
-            final a = task.assignee;
-            if (a is! TaskMemberAssignee || a.userId != wantedAssignee) {
-              return false;
-            }
-          }
-          if (filter.scope == TaskScope.unassigned && task.assignee != null) {
-            return false;
-          }
-          if (filter.scope == TaskScope.running &&
-              !runs.containsKey(task.number)) {
+          if (explicitAssignee != null &&
+              !_assignedTo(task, explicitAssignee)) {
             return false;
           }
           if (filter.labelIds.isNotEmpty) {
@@ -733,6 +718,93 @@ final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
         .toList(growable: false)
       ..sort(_bySortKey);
   });
+});
+
+/// Whether [task] belongs to [scope] — the one definition both the rendered
+/// list and the view counts read, so a count can never promise rows the list
+/// then doesn't show.
+bool _inScope(
+  Task task,
+  TaskScope scope, {
+  required String? myUserId,
+  required Map<int, TaskRunPresence> runs,
+  bool checkMine = true,
+}) {
+  if (!TaskFilter(scope: scope).scopeStatuses.contains(task.status)) {
+    return false;
+  }
+  return switch (scope) {
+    // Until the signed-in id is known "mine" matches nothing, never everyone.
+    TaskScope.mine =>
+      !checkMine || (myUserId != null && _assignedTo(task, myUserId)),
+    TaskScope.unassigned => task.assignee == null,
+    TaskScope.running => runs.containsKey(task.number),
+    TaskScope.allOpen || TaskScope.done => true,
+  };
+}
+
+bool _assignedTo(Task task, String userId) {
+  final a = task.assignee;
+  return a is TaskMemberAssignee && a.userId == userId;
+}
+
+/// Row counts behind the list's view, repo and label menus.
+///
+/// [byScope] counts each view on its own. [byProject] and [byLabel] count
+/// within the CURRENT view only, ignoring the repo, label and text filters —
+/// so each menu says how many rows picking that entry would add, not how many
+/// survive the filters already applied.
+class TaskFacetCounts {
+  const TaskFacetCounts({
+    this.byScope = const {},
+    this.byProject = const {},
+    this.byLabel = const {},
+  });
+
+  /// Missing a key when that view's rows are not loaded — never read that as
+  /// zero.
+  final Map<TaskScope, int> byScope;
+  final Map<String, int> byProject;
+  final Map<String, int> byLabel;
+}
+
+final taskFacetCountsProvider = Provider<TaskFacetCounts>((ref) {
+  final list = ref.watch(taskListProvider).value;
+  if (list == null) return const TaskFacetCounts();
+  final scope = ref.watch(taskFilterProvider.select((f) => f.scope));
+  final runs = ref.watch(taskRunPresenceProvider);
+  final myUserId = ref.watch(currentUserProvider).value?.userId;
+
+  final byScope = <TaskScope, int>{
+    for (final s in TaskScope.values)
+      if (s != TaskScope.done || scope == TaskScope.done) s: 0,
+  };
+  final byProject = <String, int>{};
+  final byLabel = <String, int>{};
+  for (final task in list) {
+    for (final s in TaskScope.values) {
+      // Closed tasks are only fetched while Done is the view (see
+      // [TaskFilter.serverQuery]), so from any other view a Done count would
+      // be a confident zero. Absent reads as unknown.
+      if (s == TaskScope.done && scope != TaskScope.done) continue;
+      if (_inScope(task, s, myUserId: myUserId, runs: runs)) {
+        byScope[s] = (byScope[s] ?? 0) + 1;
+      }
+    }
+    if (!_inScope(task, scope, myUserId: myUserId, runs: runs)) continue;
+    final projectId = task.projectId;
+    if (projectId != null) {
+      byProject[projectId] = (byProject[projectId] ?? 0) + 1;
+    }
+    for (final label in task.labels) {
+      byLabel[label.id] = (byLabel[label.id] ?? 0) + 1;
+    }
+  }
+  return TaskFacetCounts(
+    byScope: byScope,
+    byProject: byProject,
+    byLabel: byLabel,
+  );
 });
 
 /// `sortKey` is a fractional-index string, so lexicographic order IS list
