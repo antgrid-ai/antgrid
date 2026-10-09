@@ -10,18 +10,45 @@ class SchedulerAgent {
   );
 }
 
+/// One permission mode an agent's chat backend offers a scheduled run.
+class SchedulerChatMode {
+  final String id;
+  final String name;
+  final String? description;
+  const SchedulerChatMode({
+    required this.id,
+    required this.name,
+    this.description,
+  });
+  factory SchedulerChatMode.fromJson(Map<String, dynamic> json) =>
+      SchedulerChatMode(
+        id: json['id'] as String,
+        name: json['name'] as String? ?? json['id'] as String,
+        description: json['description'] as String?,
+      );
+}
+
 class SchedulerCapabilities {
   final bool supported;
   final String timezone;
   final List<SchedulerAgent> agents;
   final String? error;
   final bool supportsBaseBranchClear;
+  final bool supportsCatchUp;
+  final bool supportsOneOff;
+
+  /// Absent from an older bridge, and for agents whose modes are discovered at
+  /// run time; the editor offers a picker only for an agent listed here.
+  final Map<String, List<SchedulerChatMode>> chatModes;
   const SchedulerCapabilities({
     required this.supported,
     required this.timezone,
     required this.agents,
     this.error,
     this.supportsBaseBranchClear = false,
+    this.supportsCatchUp = false,
+    this.supportsOneOff = false,
+    this.chatModes = const {},
   });
   factory SchedulerCapabilities.fromJson(Map<String, dynamic> json) =>
       SchedulerCapabilities(
@@ -32,6 +59,17 @@ class SchedulerCapabilities {
         ).map(SchedulerAgent.fromJson).toList(),
         error: json['error'] as String?,
         supportsBaseBranchClear: json['supportsBaseBranchClear'] == true,
+        supportsCatchUp: json['supportsCatchUp'] == true,
+        supportsOneOff: json['supportsOneOff'] == true,
+        chatModes: switch (json['chatModes']) {
+          final Map raw => {
+            for (final e in raw.entries)
+              e.key as String: schedulerMaps(
+                e.value,
+              ).map(SchedulerChatMode.fromJson).toList(),
+          },
+          _ => const {},
+        },
       );
 }
 
@@ -63,19 +101,35 @@ class AgentSchedule {
   final String mode;
   final String prompt;
   final String approvalPolicy;
+  final String catchUp;
+
+  /// The chat backend's permission mode id; null runs in the backend default.
+  final String? chatMode;
   final String workspace;
   final String? baseBranch;
-  final String cron;
+  /// Exactly one of [cron] and [runAt] is set: a one-off has no cadence.
+  final String? cron;
+  final DateTime? runAt;
   final String timezone;
   final bool enabled;
   final String? checkoutId;
   final bool workspaceCreated;
   final String? authorDeviceId;
+  final String? authorSessionId;
+  final String? authorSessionName;
+  final String? editedBySessionName;
+  final DateTime? editedAt;
+  final String? firedRunId;
+  final DateTime? firedAt;
   final DateTime? createdAt;
   final DateTime? updatedAt;
   final DateTime? deletedAt;
   final DateTime? nextOccurrence;
   final String? lastResult;
+
+  /// Upcoming cron occurrences, soonest first; a full bridge page (48) means
+  /// "at least that many". Empty for one-offs and older bridges.
+  final List<DateTime> upcoming;
   const AgentSchedule({
     required this.id,
     required this.name,
@@ -84,19 +138,29 @@ class AgentSchedule {
     required this.mode,
     required this.prompt,
     required this.approvalPolicy,
+    this.catchUp = 'latest',
+    this.chatMode,
     required this.workspace,
     this.baseBranch,
-    required this.cron,
+    this.cron,
+    this.runAt,
     required this.timezone,
     required this.enabled,
     this.checkoutId,
     this.workspaceCreated = false,
     this.authorDeviceId,
+    this.authorSessionId,
+    this.authorSessionName,
+    this.editedBySessionName,
+    this.editedAt,
+    this.firedRunId,
+    this.firedAt,
     this.createdAt,
     this.updatedAt,
     this.deletedAt,
     this.nextOccurrence,
     this.lastResult,
+    this.upcoming = const [],
   });
   factory AgentSchedule.fromJson(Map<String, dynamic> json) => AgentSchedule(
     id: json['id'] as String,
@@ -106,30 +170,47 @@ class AgentSchedule {
     mode: json['mode'] as String,
     prompt: json['prompt'] as String,
     approvalPolicy: json['approvalPolicy'] as String,
+    catchUp: json['catchUp'] as String? ?? 'latest',
+    chatMode: json['chatMode'] as String?,
     workspace: json['workspace'] as String,
     baseBranch: json['baseBranch'] as String?,
-    cron: json['cron'] as String,
+    cron: json['cron'] as String?,
+    runAt: schedulerDate(json['runAt']),
     timezone: json['timezone'] as String,
     enabled: json['enabled'] == true,
     checkoutId: json['checkoutId'] as String?,
     workspaceCreated: json['workspaceCreated'] == true,
     authorDeviceId: json['authorDeviceId'] as String?,
+    authorSessionId: json['authorSessionId'] as String?,
+    authorSessionName: json['authorSessionName'] as String?,
+    editedBySessionName: json['editedBySessionName'] as String?,
+    editedAt: schedulerDate(json['editedAt']),
+    firedRunId: json['firedRunId'] as String?,
+    firedAt: schedulerDate(json['firedAt']),
     createdAt: schedulerDate(json['createdAt']),
     updatedAt: schedulerDate(json['updatedAt']),
     deletedAt: schedulerDate(json['deletedAt']),
     nextOccurrence: schedulerDate(json['nextOccurrence']),
     lastResult: json['lastResult'] as String?,
+    upcoming: [for (final v in json['upcoming'] as List? ?? const []) ?schedulerDate(v)],
   );
-  Map<String, dynamic> settings() => {
+  bool get isOneOff => runAt != null;
+
+  /// An older bridge's strict schema rejects unknown keys, so callers pass
+  /// `includeCatchUp: capabilities.supportsCatchUp`.
+  Map<String, dynamic> settings({bool includeCatchUp = true}) => {
     'name': name,
     'projectId': projectId,
     'agentId': agentId,
     'mode': mode,
     'prompt': prompt,
     'approvalPolicy': approvalPolicy,
+    if (includeCatchUp) 'catchUp': catchUp,
+    if (mode == 'chat') 'chatMode': ?chatMode,
     'workspace': workspace,
     'baseBranch': ?baseBranch,
-    'cron': cron,
+    'cron': ?cron,
+    'runAt': ?runAt?.millisecondsSinceEpoch,
     'timezone': timezone,
     'enabled': enabled,
   };
@@ -151,6 +232,7 @@ class ScheduleRun {
   final String? runtimeGeneration;
   final String? checkoutId;
   final DateTime? missedUntil;
+  final int? missedCount;
   const ScheduleRun({
     this.timezone,
     required this.id,
@@ -167,6 +249,7 @@ class ScheduleRun {
     this.runtimeGeneration,
     this.checkoutId,
     this.missedUntil,
+    this.missedCount,
   });
   bool get active =>
       const {'preparing', 'running', 'needs-input'}.contains(status);
@@ -189,6 +272,7 @@ class ScheduleRun {
     runtimeGeneration: json['runtimeGeneration'] as String?,
     checkoutId: json['checkoutId'] as String?,
     missedUntil: schedulerDate(json['missedUntil']),
+    missedCount: (json['missedCount'] as num?)?.toInt(),
   );
 }
 

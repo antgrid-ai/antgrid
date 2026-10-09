@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart' show Tooltip;
 import 'package:flutter/widgets.dart';
 
-import '../../utils/platform_utils.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
@@ -24,7 +23,7 @@ enum AbIconButtonTone { normal, muted, accent, danger, success }
 /// the mobile terminal quick-actions bar); keep chrome on the defaults. The
 /// overrides scale too — they are base sizes, not final pixel values.
 ///
-/// On mobile the hit area is inflated to [AbTokens.tapTargetMin] via
+/// On mobile the hit area is inflated to [AbTapTarget.minExtent] via
 /// [AbTapTarget] while the visual box keeps its own size; desktop is
 /// untouched. Inside [AbCompactTapTargets] only the width is inflated — the
 /// host row owns the vertical dimension — so there the scaled box is what
@@ -81,17 +80,15 @@ class AbIconButton extends StatefulWidget {
 
   /// Width a button occupies in [context], tap inflation included.
   ///
-  /// [AbTapTarget] raises minWidth to [AbTokens.tapTargetMin] on mobile
+  /// [AbTapTarget] raises minWidth to [AbTapTarget.minExtent] on mobile
   /// unconditionally (`compact` gates only minHeight), and that floor does not
-  /// scale — so above ~1.84x the box overtakes it and the mobile width changes
-  /// character. Both regimes are in the max.
+  /// scale — so at large text scales the box overtakes it and the mobile width
+  /// changes character. Both regimes are in the max.
   static double footprintWidth(BuildContext context, {double? boxSize}) =>
-      isMobilePlatform
-      ? math.max(
-          AbTokens.tapTargetMin,
-          boxExtent(context, boxSize: boxSize),
-        )
-      : boxExtent(context, boxSize: boxSize);
+      math.max(
+        AbTapTarget.minExtent(context),
+        boxExtent(context, boxSize: boxSize),
+      );
 
   @override
   State<AbIconButton> createState() => _AbIconButtonState();

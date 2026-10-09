@@ -289,7 +289,7 @@ class MobileFirstRunChecklist extends ConsumerWidget {
                 children: [
                   // Balance the trailing dismiss button so the title stays
                   // visually centered under the icon.
-                  const SizedBox(width: AbTokens.iconButtonBox),
+                  SizedBox(width: AbIconButton.footprintWidth(context)),
                   Expanded(
                     child: Text(
                       // Not "No machines yet": a machine may exist

@@ -47,7 +47,7 @@ const relayNeverHolds = [
 const gaps = [
   {
     title: "No second factor.",
-    body: "Sign-in is single factor: an emailed magic link, GitHub, Google, or email and password. There is no TOTP, no passkey and no hardware-key support. The primary path is the magic link, which has no password to steal, and a password set on an unverified address is dropped as soon as someone proves that address another way.",
+    body: "Sign-in is single factor: an emailed magic link, GitHub, Google, Apple, or email and password. There is no TOTP, no passkey and no hardware-key support. The primary path is the magic link, which has no password to steal, and a password set on an unverified address is dropped as soon as someone proves that address another way.",
   },
   {
     title: "No audit, no penetration test, no certification.",
@@ -229,7 +229,7 @@ const sources = [
       <Eyebrow class="mb-5">Remote access</Eyebrow>
       <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Three things have to be true before a phone can drive a machine.</h2>
       <p class="mb-8 max-w-2xl text-lede text-muted">
-        They are independent and they are checked together. Any one of them false and the command does not run.
+        They are independent and they are checked together, each time a phone asks. Any one of them false and the command does not run. A schedule is checked when a phone saves it, not when it runs — see Schedules, below.
       </p>
 
       <div class="mb-8 grid gap-3.5 md:grid-cols-3">
@@ -260,6 +260,19 @@ const sources = [
         With the switch off, a remote device sees nothing: every inbound verb is dropped at a single chokepoint, the preview and HTTP tunnel is gated separately because it bypasses that path, and outbound streaming stops at the send.
       </p>
 
+      <div class="mb-8 max-w-2xl border-l-2 border-edge-emph pl-4">
+        <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Schedules</p>
+        <p class="mb-3 text-note leading-relaxed text-muted2">
+          A phone needs all three to save or change a schedule, including one that bypasses approvals. Once saved, the schedule belongs to the machine: when it runs, the only access check is that its project is still in that machine's catalog. Revoking the phone that made it, or turning the switch off, stops neither the schedule nor a run already under way. Pausing or deleting the schedule stops its future runs, and a live run is stopped on its own; both work from the desktop app or from a phone that passes the three checks above.
+        </p>
+        <p class="mb-3 text-note leading-relaxed text-muted2">
+          An agent can manage its own project's schedules over MCP, but a session that asks before using tools cannot create, change or run one that does not. A session a schedule launched can only read them.
+        </p>
+        <p class="text-note leading-relaxed text-muted2">
+          Runs happen only while the desktop app is open on that machine. A run still going when the app closes is recorded as interrupted and not restarted; the schedule carries on, and by default the latest run it missed is made up when the app reopens, unless the next one is due within 15 minutes. A run stops at its first approval prompt and waits for you, unless the schedule bypasses approvals, uses an agent that does not ask by default (opencode), or is a chat schedule in a mode that skips some prompts (Claude Code's Auto or Accept edits).
+        </p>
+      </div>
+
       <div class="grid gap-x-10 gap-y-5 md:grid-cols-3">
         <div class="border-l-2 border-edge-emph pl-4">
           <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Not per-project permissions</p>
@@ -270,7 +283,7 @@ const sources = [
         <div class="border-l-2 border-edge-emph pl-4">
           <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">A known device is identity, not permission</p>
           <p class="text-note leading-relaxed text-muted2">
-            The machine's phone list holds labels, push routing and last-seen. Removing a phone from it revokes nothing. Revocation is deleting the device on your account — which closes its live relay sockets immediately — or turning the machine's switch off.
+            The machine's phone list holds labels, push routing and last-seen. Removing a phone from it revokes nothing. Revocation is deleting the device on your account — which closes its live relay sockets immediately — or turning the machine's switch off. Neither stops a schedule that phone already saved.
           </p>
         </div>
         <div class="border-l-2 border-edge-emph pl-4">

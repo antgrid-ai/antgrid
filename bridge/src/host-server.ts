@@ -71,12 +71,13 @@ import { CheckoutStore } from "./worktrees/checkout-store";
 import { isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
-import { SchedulerService, SchedulerLaunchError } from "./scheduler/service";
-import { ScheduleInputSchema, SchedulePatchSchema, type Schedule } from "./scheduler/models";
-import { schedulingModesForAgent } from "antgrid-agents/builtins";
+import { SchedulerService, SchedulerLaunchError, type SchedulerAuthor, type SchedulerGuard } from "./scheduler/service";
+import { ScheduleInputSchema, SchedulePatchSchema, isActiveRun, publicSchedule, type Schedule, type ScheduleInput, type SchedulePatch, type SchedulerRun } from "./scheduler/models";
+import { SchedulerRefusal, type AgentCaller, type SchedulerAgentMethod } from "./scheduler/agent";
+import { agentSpec, schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
-import { schedulerErrorCode } from "./scheduler/cron";
+import { SchedulerInvalidCronError, nextOccurrences, resolveRunAt, schedulerErrorCode } from "./scheduler/cron";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -269,6 +270,12 @@ const CONTEXT_CAPTURE_MAX_TTL_MS = 300_000;
  *  applied to one capture and forgotten on the next one added beside it. */
 function clampCaptureTtl(ttlMs: number): number {
   return Math.min(ttlMs, CAPTURE_MAX_TTL_MS);
+}
+
+/** `dryRun` is taken off the agent's args before schema validation, so its type is checked here: a string "true"
+ *  read as false would turn a preview into a real write. */
+function assertDryRunFlag(dryRun: unknown): void {
+  if (dryRun !== undefined && typeof dryRun !== "boolean") throw new SchedulerRefusal("INVALID_ARGUMENT", "dryRun: expected a boolean");
 }
 
 /**
@@ -1025,9 +1032,10 @@ export class HostServer {
         supportedAgents: async () => (await this.buildToolsAdvertisement())
           .map((tool) => ({ agentId: tool.tool, modes: schedulingModesForAgent(tool.tool) }))
           .filter((agent) => agent.modes.length > 0),
-        authorize: (schedule) => this.authorizeSchedule(schedule),
         prepare: async (schedule, _run, bind) => {
-          const seen = this.seenProjects.get(schedule.projectId);
+          // Execution is no longer tied to a device or the remote-access switch, so the catalog is the only
+          // thing bounding which project a stored schedule may launch.
+          const seen = isSafeProjectId(schedule.projectId) ? this.seenProjects.get(schedule.projectId) : undefined;
           if (!seen || !existsSync(seen.path)) throw new SchedulerLaunchError("PROJECT_UNAVAILABLE");
           await this.open(schedule.projectId, seen.path, "local");
           const core = this.cores.get(schedule.projectId)!.core;
@@ -1039,12 +1047,16 @@ export class HostServer {
           const prepared = await core.prepareScheduledSession({
             scheduleId: schedule.id, name: schedule.name, agentId: schedule.agentId,
             mode: schedule.mode, approvalPolicy: schedule.approvalPolicy, workspace: schedule.workspace,
-            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId,
+            baseBranch: schedule.baseBranch, checkoutId: schedule.checkoutId, chatMode: schedule.chatMode,
           }, async (identity) => { bind(identity); });
           return { ...prepared, deliverPrompt: () => prepared.deliverPrompt(schedule.prompt) };
         },
         stop: async (run) => {
           if (run.sessionId) await this.cores.get(run.projectId)?.core.stopScheduledSession(run.sessionId);
+        },
+        resolveChatModeCarryOver: async (schedule) => {
+          if (!isSafeProjectId(schedule.projectId)) return undefined;
+          return (await SessionManager.readLastUsedChatConfig(resolveAbDir(), schedule.projectId, schedule.agentId))?.mode;
         },
         releaseWorkspace: async (schedule) => {
           const store = new CheckoutStore(resolveAbDir(), schedule.projectId);
@@ -1063,17 +1075,6 @@ export class HostServer {
     }
   }
 
-  private async authorizeSchedule(schedule: Schedule): Promise<string | null> {
-    if (!isSafeProjectId(schedule.projectId) || !this.seenProjects.has(schedule.projectId)) {
-      return "Project is no longer in this machine's catalog; open it from the desktop first";
-    }
-    if (schedule.authorDeviceId === null) return null;
-    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
-    if (!await this.controlPlaneRelay?.authorizeDevice?.(schedule.authorDeviceId)) return "The authorizing device is unavailable or no longer authorized on this account";
-    if (!this.remoteAccessPolicy.isEnabled()) return "Remote access is disabled on this machine";
-    return null;
-  }
-
   private async schedulerProjects(): Promise<{ projectId: string; label: string; isGitRepository: boolean }[]> {
     const projects = [];
     for (const [projectId, seen] of this.seenProjects) {
@@ -1084,10 +1085,45 @@ export class HostServer {
     return projects;
   }
 
-  async schedulerRequest(method: string, rawParams?: unknown, authorDeviceId: string | null = null): Promise<unknown> {
+  /** Rewrites a wall-clock `runAt` in a scheduler request to epoch ms, in the zone the schedule is read in. */
+  private withResolvedRunAt(method: string, raw: unknown): unknown {
+    if (!raw || typeof raw !== "object") return raw;
+    const params = raw as Record<string, unknown>;
+    const resolve = (value: unknown, timezone: unknown) =>
+      typeof value === "string" || typeof value === "number" ? resolveRunAt(value, typeof timezone === "string" ? timezone : "") : value;
+    switch (method) {
+      case "scheduler.preview": return "runAt" in params ? { ...params, runAt: resolve(params.runAt, params.timezone) } : params;
+      case "scheduler.create": {
+        const schedule = params.schedule;
+        return schedule && typeof schedule === "object" && "runAt" in schedule
+          ? { ...params, schedule: { ...schedule, runAt: resolve((schedule as Record<string, unknown>).runAt, (schedule as Record<string, unknown>).timezone) } }
+          : params;
+      }
+      case "scheduler.update": {
+        const patch = params.patch;
+        if (!patch || typeof patch !== "object" || !("runAt" in patch)) return params;
+        const fields = patch as Record<string, unknown>;
+        let timezone = fields.timezone;
+        if (typeof timezone !== "string") {
+          const stored = this.scheduler?.schedules().find((schedule) => schedule.id === params.id);
+          if (this.scheduler && !stored) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
+          timezone = stored?.timezone;
+        }
+        return { ...params, patch: { ...fields, runAt: resolve(fields.runAt, timezone) } };
+      }
+      default: return params;
+    }
+  }
+
+  private schedulerUnavailable(): SchedulerRefusal {
+    return new SchedulerRefusal("SCHEDULER_UNAVAILABLE",
+      this.schedulerError ?? "Scheduling requires a desktop-owned host; upgrade and open the target desktop app");
+  }
+
+  async schedulerRequest(method: string, rawParams?: unknown, author: SchedulerAuthor = { kind: "device", deviceId: null }): Promise<unknown> {
     const schema = SchedulerRequestSchemas[method];
     if (!schema) throw new Error("Unknown scheduler operation; upgrade the target bridge");
-    const params = schema.parse(rawParams ?? {}) as Record<string, unknown>;
+    const params = schema.parse(this.withResolvedRunAt(method, rawParams ?? {})) as Record<string, unknown>;
     if (method === "scheduler.capabilities") {
       const capabilities = this.scheduler ? await this.scheduler.capabilities() : {
         supported: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, agents: [],
@@ -1095,25 +1131,33 @@ export class HostServer {
       };
       return { ...capabilities, projects: await this.schedulerProjects() };
     }
-    if (!this.scheduler) throw new Error(this.schedulerError ?? "Scheduling requires a desktop-owned host; upgrade and open the target desktop app");
+    if (!this.scheduler) throw this.schedulerUnavailable();
     switch (method) {
-      case "scheduler.list": return { schedules: this.scheduler.schedules(), projects: await this.schedulerProjects() };
+      case "scheduler.list": {
+        // An app that predates one-offs parses `cron` as required, so a single cron-less row in `schedules` would
+        // blank its whole Scheduler screen; one-offs travel in their own key that it never reads.
+        const scheduler = this.scheduler;
+        const all = scheduler.schedules();
+        return { schedules: all.filter((s) => s.runAt === undefined).map((s) => ({ ...publicSchedule(s), upcoming: scheduler.upcoming(s) })), oneOffSchedules: all.filter((s) => s.runAt !== undefined).map(publicSchedule),
+          projects: await this.schedulerProjects() };
+      }
       case "scheduler.runs": return { runs: this.scheduler.runs(params.scheduleId as string | undefined) };
-      case "scheduler.preview": return { occurrences: this.scheduler.preview(params.cron as string, params.timezone as string) };
+      case "scheduler.preview":
+        return { occurrences: "runAt" in params ? [params.runAt as number] : this.scheduler.preview(params.cron as string, params.timezone as string) };
       case "scheduler.create": {
         const input = ScheduleInputSchema.parse(params.schedule);
         await this.validateScheduleProject(input.projectId, input.workspace);
-        return { schedule: await this.scheduler.create(input, authorDeviceId) };
+        return { schedule: publicSchedule(await this.scheduler.create(input, { author })) };
       }
       case "scheduler.update": {
         const patch = SchedulePatchSchema.parse(params.patch);
         const current = this.scheduler.schedules().find((schedule) => schedule.id === params.id);
-        if (!current) throw new Error("Schedule no longer exists");
+        if (!current) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
         await this.validateScheduleProject(patch.projectId ?? current.projectId, patch.workspace ?? current.workspace);
-        return { schedule: await this.scheduler.update(current.id, patch, authorDeviceId) };
+        return { schedule: publicSchedule(await this.scheduler.update(current.id, patch, { author })) };
       }
       case "scheduler.delete": await this.scheduler.delete(params.id as string); return {};
-      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string, authorDeviceId) };
+      case "scheduler.runNow": return { run: await this.scheduler.runNow(params.id as string) };
       case "scheduler.stop": await this.scheduler.stop(params.id as string); return {};
       default: throw new Error("Unknown scheduler operation");
     }
@@ -1123,7 +1167,208 @@ export class HostServer {
     const seen = this.seenProjects.get(projectId);
     if (!isSafeProjectId(projectId) || !seen || !existsSync(seen.path)) throw new Error("Project is unavailable; open it from the desktop first");
     const project = await resolveProject(seen.path);
-    if (workspace === "worktree" && (!project.isGitRepository || !WORKTREE_SESSIONS_SUPPORTED)) throw new Error("This project does not support isolated worktrees; choose the shared workspace");
+    if (workspace === "worktree" && (!project.isGitRepository || !WORKTREE_SESSIONS_SUPPORTED)) {
+      throw new SchedulerRefusal("WORKTREE_UNSUPPORTED", "This project does not support isolated worktrees; choose the shared workspace");
+    }
+  }
+
+  // ---- Agent-facing scheduler -------------------------------------------------------------------------------
+  // The core proves which session is calling; every rule about what that session may do lives here and in the
+  // service's guard, so the MCP process and the loopback route stay transport.
+
+  /** A schedule runs ungated when its policy is bypass, its agent's own default does not prompt before tools, or it is
+   *  a chat schedule pinned to a permission mode that is not known to prompt. A mode the registry does not list
+   *  (discovered at runtime, or unknown) counts as ungated, the same as an unknown agent does elsewhere. So does a chat
+   *  schedule still awaiting its carry-over: its mode is not known until the startup pass writes it, and the pass may
+   *  well write an ungated one onto an edit judged before then. */
+  private scheduleApprovalLevel(schedule: Pick<Schedule, "approvalPolicy" | "agentId" | "mode" | "chatMode" | "chatModeCarryOver">): "gated" | "ungated" {
+    const spec = agentSpec(schedule.agentId);
+    if (schedule.approvalPolicy === "bypass" || spec?.defaultApprovalGated === false) return "ungated";
+    if (schedule.mode === "chat" && schedule.chatModeCarryOver === true) return "ungated";
+    if (schedule.mode === "chat" && schedule.chatMode !== undefined
+      && !spec?.chatPermissionModes?.some((m) => m.id === schedule.chatMode && m.gated)) return "ungated";
+    return "gated";
+  }
+
+  /** The approval ceiling and project fence, run by the service in the synchronous window around the write. */
+  private agentSchedulerGuard(caller: AgentCaller): SchedulerGuard {
+    return ({ op, patchKeys, original, next }) => {
+      // Re-asserted here because an app edit can move a schedule between projects while this request is awaiting.
+      if ((original && original.projectId !== caller.projectId) || next.projectId !== caller.projectId) {
+        throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "No schedule with that id in this project");
+      }
+      if (caller.approvalLevel === "ungated") return;
+      const ceiling = new SchedulerRefusal("APPROVAL_CEILING",
+        "This session runs with approval prompts, so it cannot create, change or run a schedule that would run without them "
+        + "(approvalPolicy bypass, an agent whose default does not prompt, or a chat permission mode that approves tools without asking). It can still pause or delete such a schedule.");
+      if (original && this.scheduleApprovalLevel(original) === "ungated") {
+        // Judged on the keys the caller named: an extra key that repeats a stored value is still an edit.
+        if (op === "update" && patchKeys.length === 1 && patchKeys[0] === "enabled" && next.enabled === false) return;
+        throw ceiling;
+      }
+      if (this.scheduleApprovalLevel(next) === "ungated") throw ceiling;
+    };
+  }
+
+  private stripRun(run: SchedulerRun, sessionNames: Map<string, string>): Record<string, unknown> {
+    // A scheduled run's runtimeGeneration is its session's hook run id, which the hook endpoints accept.
+    const { runtimeGeneration: _generation, checkoutId: _checkout, ...rest } = run;
+    const name = run.sessionId ? sessionNames.get(run.sessionId) : undefined;
+    return { ...rest, ...(name ? { sessionName: name } : {}) };
+  }
+
+  private sessionNamesFor(projectId: string): Map<string, string> {
+    const names = new Map<string, string>();
+    for (const entry of this.cores.get(projectId)?.core.listSessions(true) ?? []) names.set(entry.id, entry.name);
+    return names;
+  }
+
+  private scheduleEcho(scheduler: SchedulerService, schedule: Schedule): Record<string, unknown> {
+    let occurrences: number[];
+    let perDay: number | undefined;
+    if (schedule.runAt !== undefined) occurrences = [schedule.runAt];
+    else {
+      const upcoming = scheduler.preview(schedule.cron!, schedule.timezone);
+      occurrences = upcoming.slice(0, 3);
+      const gap = Math.min(...upcoming.slice(1).map((at, i) => at - upcoming[i]!));
+      if (gap < 3_600_000) {
+        // Counted rather than derived from the gap, since a list such as "0,5 * * * *" is uneven.
+        const first = upcoming[0]!;
+        perDay = nextOccurrences(schedule.cron!, schedule.timezone, first - 1, 1500).filter((at) => at < first + 86_400_000).length;
+      }
+    }
+    return { ...(schedule.workspace === "worktree" && schedule.baseBranch ? { resolvedBaseBranch: schedule.baseBranch } : {}),
+      occurrences, machineTimezone: scheduler.timezone, ...(perDay !== undefined ? { perDay } : {}) };
+  }
+
+  async schedulerRequestForAgent(caller: AgentCaller, method: SchedulerAgentMethod, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    try {
+      return await this.runSchedulerForAgent(caller, method, params);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const fields = error.issues.map((issue) => {
+          const path = issue.path.filter((part) => part !== "schedule" && part !== "patch").join(".");
+          return path ? `${path}: ${issue.message}` : issue.message;
+        });
+        throw new SchedulerRefusal("INVALID_ARGUMENT", [...new Set(fields)].join("; "));
+      }
+      if (error instanceof SchedulerInvalidCronError) throw new SchedulerRefusal("SCHEDULER_INVALID_CRON", error.message);
+      throw error;
+    }
+  }
+
+  private async runSchedulerForAgent(caller: AgentCaller, method: SchedulerAgentMethod, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const scheduler = this.scheduler;
+    if (method === "list") {
+      if (!scheduler) {
+        return { header: { available: false, reason: this.schedulerError ?? "Scheduled execution requires the desktop app to remain open",
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, agents: [] }, schedules: [] };
+      }
+      const capabilities = await scheduler.capabilities();
+      let rows: Record<string, unknown>[] = [];
+      try {
+        const runs = scheduler.runs().filter((run) => run.projectId === caller.projectId);
+        const names = this.sessionNamesFor(caller.projectId);
+        rows = scheduler.schedules().filter((s) => s.projectId === caller.projectId).map((schedule) => {
+          const active = runs.find((run) => run.scheduleId === schedule.id && isActiveRun(run));
+          const fired = schedule.firedRunId ? runs.find((run) => run.id === schedule.firedRunId) : undefined;
+          return { ...publicSchedule(schedule), ...(active ? { activeRun: this.stripRun(active, names) } : {}),
+            ...(fired ? { firedRun: this.stripRun(fired, names) } : {}) };
+        });
+      } catch { /* A storage fault is already reported through the header; the list is simply empty. */ }
+      const reason = capabilities.error ?? (capabilities.supported ? undefined : "Scheduled execution requires the desktop app to remain open");
+      return { header: { available: capabilities.supported, ...(reason ? { reason } : {}), timezone: capabilities.timezone, agents: capabilities.agents },
+        schedules: rows };
+    }
+    if (!scheduler) throw this.schedulerUnavailable();
+    const mutation = method !== "runs";
+    if (mutation) {
+      const launched = caller.scheduled
+        || scheduler.runs().some((run) => run.sessionId === caller.sessionId && run.projectId === caller.projectId);
+      if (launched) {
+        throw new SchedulerRefusal("SCHEDULED_SESSION_READ_ONLY",
+          "This session was launched by a schedule, so it can list schedules and runs but not change them.");
+      }
+    }
+    const notFound = () => new SchedulerRefusal("SCHEDULE_NOT_FOUND", "No schedule with that id in this project");
+    // Before any service call: delete releases the workspace, so a foreign id must never get that far.
+    const owned = (id: unknown, includeDeleted = false): Schedule => {
+      const found = typeof id === "string"
+        ? (includeDeleted ? scheduler.store.schedules(true) : scheduler.schedules()).find((s) => s.id === id) : undefined;
+      if (!found || found.projectId !== caller.projectId) throw notFound();
+      return found;
+    };
+    const author: SchedulerAuthor = { kind: "agent", sessionId: caller.sessionId, sessionName: caller.sessionName };
+    const guard = this.agentSchedulerGuard(caller);
+    const { runId: _runId, ...args } = params;
+
+    switch (method) {
+      case "runs": {
+        const scheduleId = args.scheduleId === undefined ? undefined : owned(args.scheduleId, true).id;
+        const all = scheduler.runs(scheduleId).filter((run) => run.projectId === caller.projectId);
+        const names = this.sessionNamesFor(caller.projectId);
+        return { runs: all.slice(0, 20).map((run) => this.stripRun(run, names)), more: Math.max(0, all.length - 20) };
+      }
+      case "delete": {
+        const schedule = owned(args.id);
+        await scheduler.delete(schedule.id);
+        return { deleted: schedule.id };
+      }
+      case "runNow": {
+        const schedule = owned(args.id);
+        const run = await scheduler.runNow(schedule.id, { guard });
+        return { run: this.stripRun(run, this.sessionNamesFor(caller.projectId)) };
+      }
+      case "create": {
+        const { dryRun, ...fields } = args;
+        assertDryRunFlag(dryRun);
+        if (fields.projectId !== undefined && fields.projectId !== caller.projectId) {
+          throw new SchedulerRefusal("INVALID_ARGUMENT", "projectId: schedules are always created in the calling session's project");
+        }
+        const capabilities = await scheduler.capabilities();
+        const agentId = (fields.agentId as string | undefined) ?? caller.agentId;
+        const mode = (fields.mode as "terminal" | "chat" | undefined) ?? caller.mode;
+        const schedulable = capabilities.agents.map((agent) => `${agent.agentId} (${agent.modes.join(", ")})`).join("; ") || "none";
+        // Never substituted: running a different agent than the caller's would be a silent change of authority.
+        if (agentId === undefined) {
+          throw new SchedulerRefusal("AGENT_NOT_SCHEDULABLE", `This session does not run a registry agent, so name one. Schedulable: ${schedulable}`);
+        }
+        if (!capabilities.agents.some((agent) => agent.agentId === agentId && agent.modes.includes(mode))) {
+          throw new SchedulerRefusal("AGENT_NOT_SCHEDULABLE", `${agentId} in ${mode} mode cannot be scheduled. Schedulable: ${schedulable}`);
+        }
+        const seen = this.seenProjects.get(caller.projectId);
+        if (!isSafeProjectId(caller.projectId) || !seen || !existsSync(seen.path)) throw new Error("Project is unavailable; open it from the desktop first");
+        const project = await resolveProject(seen.path);
+        const workspace = (fields.workspace as "shared" | "worktree" | undefined)
+          ?? (project.isGitRepository && WORKTREE_SESSIONS_SUPPORTED ? "worktree" : "shared");
+        await this.validateScheduleProject(caller.projectId, workspace);
+        let baseBranch = fields.baseBranch;
+        if (workspace === "worktree" && baseBranch === undefined) {
+          baseBranch = (await listLocalBranches(project.repoPath)).current ?? undefined;
+          if (baseBranch === undefined) {
+            throw new SchedulerRefusal("INVALID_ARGUMENT",
+              "baseBranch: the project's main checkout is on a detached HEAD, so there is no branch to start the worktree from; pass baseBranch");
+          }
+        }
+        const schedule = { ...fields, projectId: caller.projectId, agentId, mode, workspace, approvalPolicy: fields.approvalPolicy ?? "default",
+          timezone: fields.timezone ?? capabilities.timezone, catchUp: fields.catchUp ?? "latest", enabled: fields.enabled ?? true,
+          ...(baseBranch !== undefined ? { baseBranch } : {}) };
+        const checked = SchedulerRequestSchemas["scheduler.create"]!.parse(this.withResolvedRunAt("scheduler.create", { schedule })) as { schedule: ScheduleInput };
+        const created = await scheduler.create(checked.schedule, { author, guard, dryRun: dryRun === true, rejectDuplicateName: true });
+        return { schedule: publicSchedule(created), echo: this.scheduleEcho(scheduler, created), saved: dryRun !== true };
+      }
+      case "update": {
+        const { id, dryRun, ...patch } = args;
+        assertDryRunFlag(dryRun);
+        if ("projectId" in patch) throw new SchedulerRefusal("INVALID_ARGUMENT", "projectId: a schedule cannot move to another project");
+        const current = owned(id);
+        const checked = SchedulerRequestSchemas["scheduler.update"]!.parse(this.withResolvedRunAt("scheduler.update", { id: current.id, patch })) as { patch: SchedulePatch };
+        await this.validateScheduleProject(current.projectId, checked.patch.workspace ?? current.workspace);
+        const updated = await scheduler.update(current.id, checked.patch, { author, guard, dryRun: dryRun === true, rejectDuplicateName: true });
+        return { schedule: publicSchedule(updated), echo: this.scheduleEcho(scheduler, updated), saved: dryRun !== true };
+      }
+      default: throw new Error("Unknown scheduler operation");
+    }
   }
 
   async handleSchedulerRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
@@ -1133,7 +1378,7 @@ export class HostServer {
       const deviceId = baseSlotDeviceId(peerId);
       if (!await this.controlPlaneRelay.authorizeDevice?.(deviceId)) throw new Error("Device account authorization is unavailable");
       if (!this.remoteAccessPolicy.isEnabled()) throw new Error("Remote access is disabled on this machine");
-      return createMessage("response", { requestId: req.requestId, ok: true, result: await this.schedulerRequest(req.method, req.params, deviceId) });
+      return createMessage("response", { requestId: req.requestId, ok: true, result: await this.schedulerRequest(req.method, req.params, { kind: "device", deviceId }) });
     } catch (error) {
       return createMessage("response", { requestId: req.requestId, ok: false,
         error: { code: schedulerErrorCode(error), message: error instanceof Error ? error.message : "Scheduler request failed" } });
@@ -2422,6 +2667,8 @@ export class HostServer {
       // `deliverLocal` does, so it only ever starts a session this host
       // already holds warm — a cold project is not brought up over a notify.
       startSession: (sessionId) => this.startLocalSession(sessionId),
+      // Binds the catalog key rather than the core's computed id: schedules are stored under the key.
+      schedulerForAgent: (identity, method, params) => this.schedulerRequestForAgent({ ...identity, projectId }, method, params),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();

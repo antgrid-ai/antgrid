@@ -19,6 +19,7 @@ import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_escalation_row.dart';
+import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -629,4 +630,34 @@ void main() {
     expect(find.text('bun or vitest?'), findsOneWidget);
     expect(tester.widget<AbListRow>(_row).onTap, isNull);
   });
+
+  testWidgets('on a phone the collapsed strip is exactly the reserved band', (
+    tester,
+  ) async {
+    // The terminal gives up this band and no more; a strip whose chevron or
+    // "+N more" chip inflated its height would cover the last terminal row.
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+
+    await _pump(
+      tester,
+      sessions: {'t1': _armed('t1')},
+      escalations: [
+        _escalation('e1', terminalId: 't1', question: 'proceed?'),
+        _escalation('e2', terminalId: 't1', question: 'and then?', at: 2),
+      ],
+    );
+    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.pump();
+
+    final strip = find
+        .ancestor(of: find.text('proceed?'), matching: find.byType(GestureDetector))
+        .first;
+    expect(find.text('+1 more'), findsOneWidget);
+    expect(
+      tester.getSize(strip).height,
+      handlerEscalationCollapsedHeight(tester.element(strip)),
+    );
+  }, variant: const TargetPlatformVariant({TargetPlatform.android}));
 }

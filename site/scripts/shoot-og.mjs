@@ -17,9 +17,7 @@ await page.goto(url, { waitUntil: "networkidle" });
 await page.evaluate(() => document.fonts.ready);
 // animations: "disabled" or the shot is not reproducible -- the readout's
 // "watching" dot pulses forever, so two runs of an unchanged card differ by a few
-// bytes and every recut lands as a noisy binary diff. It also fast-forwards the
-// ProofCard's finite reveals to their end state, which is the state worth
-// shipping: the card should show the run resolved, not caught mid-populate.
+// bytes and every recut lands as a noisy binary diff.
 await page
   .locator("#og")
   .screenshot({ path: "public/og/control-plane.png", animations: "disabled" });

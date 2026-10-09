@@ -624,6 +624,18 @@ export interface AgentSpec {
   label: string;
   /** Explicit per-mode support. An empty object means bypass is unsupported. */
   approvalPolicies: { bypass?: AgentApprovalPolicy };
+  /** True when a session launched with the default policy stops to ask before
+   *  running tools. The scheduler's approval ceiling reads it: a caller that is
+   *  gated can never cause an ungated run. Only an explicit `false` counts as
+   *  ungated; a third-party adapter that omits it is treated as gated, and the
+   *  built-in registry makes it mandatory per agent so a new agent cannot take
+   *  either answer by omission. */
+  defaultApprovalGated?: boolean;
+  /** The chat permission modes this agent offers when they are a fixed list. The
+   *  scheduler reads `gated` to decide whether a chat schedule pinned to a mode
+   *  still prompts. Agents whose modes are discovered at runtime omit it, and a
+   *  mode the list does not name counts as ungated. */
+  chatPermissionModes?: readonly { id: string; name: string; description?: string; gated: boolean }[];
   /**
    * Name this agent identifies itself by in `bridge hook <name> <event>` and in
    * the `agent` field of its loopback posts. Deliberately NOT `AgentKey`: the

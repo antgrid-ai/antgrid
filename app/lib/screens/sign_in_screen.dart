@@ -19,6 +19,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_password_field.dart';
 import '../design/widgets/ab_text_field.dart';
+import '../design/widgets/ab_touch_sizing.dart';
 import '../project/limits.dart';
 import '../analytics/events.dart';
 import '../providers/analytics.dart';
@@ -1581,6 +1582,7 @@ class _SignInButtonState extends State<_SignInButton> {
         ? antgrid.accentForeground
         : antgrid.textPrimary;
     final visual = Container(
+      constraints: BoxConstraints(minHeight: AbTouchSizing.extentOf(context)),
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
         color: fill,
