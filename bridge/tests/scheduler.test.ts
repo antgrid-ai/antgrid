@@ -496,12 +496,20 @@ describe("scheduler durable store", () => {
   });
   test("latest 500 terminal records retained without pruning active entries", async () => {
     const f = fixture(); const schedule = await f.service.create(input);
-    for (let i = 0; i < 505; i++) {
-      f.service.store.claim(schedule, { id: `r${i}`, scheduleId: schedule.id, scheduleName: schedule.name, projectId: schedule.projectId,
-        occurrenceAt: i, trigger: "manual", status: "completed", startedAt: i, finishedAt: i });
-    }
-    expect(f.service.runs()).toHaveLength(500);
-    await f.service.runNow(schedule.id); await settle(); expect(f.service.runs()).toHaveLength(501);
+    // Seeded in one transaction: a claim per record is a full-sync commit each, slow enough to time out on a busy runner.
+    const db = new Database(f.service.store.path);
+    const insert = db.query("INSERT INTO runs(id,scheduleId,claimKey,active,startedAt,record) VALUES(?,?,NULL,0,?,?)");
+    db.transaction(() => {
+      for (let i = 0; i < 505; i++) {
+        const run: SchedulerRun = { id: `r${i}`, scheduleId: schedule.id, scheduleName: schedule.name, projectId: schedule.projectId,
+          occurrenceAt: i, trigger: "manual", status: "completed", startedAt: i, finishedAt: i };
+        insert.run(run.id, run.scheduleId, run.startedAt, JSON.stringify(run));
+      }
+    })();
+    db.close();
+    await f.service.runNow(schedule.id); await settle();
+    const ids = f.service.runs().map((r) => r.id);
+    expect(ids).toHaveLength(501); expect(ids).not.toContain("r4"); expect(ids).toContain("r5");
   });
   test("storage disappearance latches fault and never recreates or dispatches", async () => {
     const f = fixture(); const schedule = await f.service.create(input); unlinkSync(f.service.store.path);
