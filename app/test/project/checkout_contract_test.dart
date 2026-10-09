@@ -16,6 +16,31 @@ void main() {
       r'"([a-z][a-z0-9:-]+)"',
     ).allMatches(block).map((match) => match.group(1)!).toSet();
 
+    expect(block, contains('...CLIPBOARD_MESSAGE_TYPES'));
+    final clipboard = File(
+      '../bridge/src/terminal-clipboard/protocol.ts',
+    ).readAsStringSync();
+    final registry = RegExp(
+      r'export const clipboardMessages = \[([\s\S]*?)\] as const;',
+    ).firstMatch(clipboard);
+    expect(registry, isNotNull);
+    expect(
+      clipboard,
+      contains(
+        'CLIPBOARD_MESSAGE_TYPES = clipboardMessages.map((schema) => schema.shape.type.value)',
+      ),
+    );
+    for (final schema in RegExp(
+      r'\bTerminalClipboard\w+Message\b',
+    ).allMatches(registry!.group(1)!)) {
+      final declaration = RegExp(
+        'export const ${schema.group(0)} = context\\.extend\\(\\{'
+        r'\s*type:\s*z\.literal\("([^"]+)"\)',
+      ).firstMatch(clipboard);
+      expect(declaration, isNotNull, reason: schema.group(0));
+      bridgeTypes.add(declaration!.group(1)!);
+    }
+
     expect(kCheckoutVariableMessageTypes, bridgeTypes);
   });
 
