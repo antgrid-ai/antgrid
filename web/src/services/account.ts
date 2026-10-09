@@ -65,14 +65,31 @@ export async function hasRenewingPaidSubscription(db: DB, userId: string): Promi
  * blocked only after typing DELETE.
  */
 export async function isBlockedByTeamMembers(db: DB, userId: string): Promise<boolean> {
-  const owned = await findProductAccountByUserId(db, userId);
-  if (!owned) return false;
-  // Keyed on the account they OWN — the one this deletion tombstones — not the
-  // one they bill against. A member is blocked by nobody: their own account holds
-  // no other members. An owner who has since joined someone else's team still
-  // owns theirs, and deleting would tombstone it under its members.
-  return (await countOtherActiveMembers(db, owned.id, userId)) > 0;
+  return ((await ownedTeam(db, userId))?.otherMembers ?? 0) > 0;
 }
+
+/** The account `userId` owns and how many other people are active on it.
+ *
+ *  Keyed on the account they OWN — the one deletion tombstones — not the one
+ *  they bill against. A member is blocked by nobody: their own account holds no
+ *  other members. An owner who has since joined someone else's team still owns
+ *  theirs, and deleting would tombstone it under its members; `/team` shows
+ *  that owner the other team, so it asks this too. */
+export async function ownedTeam(
+  db: DB,
+  userId: string
+): Promise<{ accountId: string; otherMembers: number } | null> {
+  const owned = await findProductAccountByUserId(db, userId);
+  if (!owned) return null;
+  return { accountId: owned.id, otherMembers: await countOtherActiveMembers(db, owned.id, userId) };
+}
+
+/** What a team-blocked deletion is told, on `/account` and in the 409 body the
+ *  app shows verbatim, so the two cannot drift. Plain text: the app renders it
+ *  in a dialog that cannot follow a link. */
+export const TEAM_HAS_MEMBERS_MESSAGE =
+  "Your account still has team members. Remove them on the Team page, or contact " +
+  "support to transfer ownership, before deleting your account.";
 
 /**
  * Immediately and irreversibly delete `userId`'s account.

@@ -15,8 +15,9 @@ import Rail from "./Rail.astro";
 // bordered cards, and `Needs you` is the app's own label for the `attention`
 // work status (models/agent_work_status.dart, recent_sessions_summary.dart).
 //
-// home.spec.ts pins "studio-workstation" and the needs-you task string, so
-// those travel with the picture rather than being restated underneath it.
+// Nothing derives the rail or the composer chips from `machines`: the host
+// names and the needs-you title are repeated there by hand, so a rename has to
+// reach every copy.
 type Row = { title: string; project: string; time: string; needs?: boolean; done?: boolean };
 type Machine = { host: string; rows: Row[] };
 

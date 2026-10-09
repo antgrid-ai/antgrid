@@ -20,6 +20,12 @@ export interface PairedPhone {
   pushToken?: string;
   pushProvider?: "fcm" | "apns";
   pushUpdatedAt?: string;
+  /** When an accepted authorization snapshot first left this row out; cleared
+   *  by the next one that names it again, and the row is collected once it is
+   *  old enough. Persisted, not held in memory, so a restart neither resets
+   *  that clock nor reopens pushes to a phone the account revoked before its
+   *  first snapshot lands (see `accountDisowns`). */
+  disownedAt?: string;
 }
 
 export interface PairedPhonesStore {
@@ -28,6 +34,15 @@ export interface PairedPhonesStore {
   get(phonePubkey: string): PairedPhone | undefined;
   upsert(phone: PairedPhone): void;
   remove(phonePubkey: string): void;
+  /** Rewrite every row through `next` in ONE file write: return the row to
+   *  keep it (a changed copy to update it), `null` to remove it. Returns the
+   *  removed rows. No write at all when nothing changes, so a caller sweeping
+   *  on a timer never trips the watcher's re-advertise for a no-op. `next`
+   *  judges the rows on disk with this process's coalesced `touchLastSeen`
+   *  stamps applied, so a phone admitted moments ago is never judged on the
+   *  `last seen` its file row still carries. `next` must be pure: it may run
+   *  more than once per row. */
+  reconcile(next: (phone: PairedPhone) => PairedPhone | null): PairedPhone[];
   /** Record a fresh admission for `phonePubkey` WITHOUT writing to disk.
    *  Every session establishment re-runs admission, so a phone that
    *  reconnects often would, with a straight `upsert` here, rewrite (and
@@ -83,19 +98,51 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
   // the file before our touch landed — can't roll `last seen` backwards.
   const pendingTouches = new Map<string, string>();
   let touchTimer: ReturnType<typeof setTimeout> | null = null;
-  // Exact bytes of our last touch-only write, for the watcher's silence check.
-  let touchWriteRaw: string | null = null;
+  // Exact bytes memory already reflects AND no one still needs to hear about:
+  // our own touch-only write, or what the watcher last reloaded. A watcher fire
+  // on them is silent — a touch must not re-advertise, and macOS delivers one
+  // burst of writes as batches ~50ms apart, so a straggler can fire after the
+  // debounce on bytes already handled.
+  let knownRaw: string | null = null;
 
   function flush(silent = false) {
     const data: FileShape = { version: 1, phones };
     const raw = JSON.stringify(data, null, 2);
-    // Cleared BEFORE the write, armed only after one lands. Any write carrying
-    // more than touches MUST still notify, and a snapshot left armed by a write
-    // that threw would silence a later external edit that happens to match it.
+    // Cleared BEFORE the write, set only after one lands. Any write carrying
+    // more than touches MUST still notify, and bytes left known by a write
+    // that threw would silence a later external edit that happens to match them.
     // Re-notifying costs a re-advertise; under-notifying costs correctness.
-    touchWriteRaw = null;
+    knownRaw = null;
     atomicWriteFile(path, raw, { fileMode: 0o600 });
-    if (silent) touchWriteRaw = raw;
+    if (silent) knownRaw = raw;
+  }
+
+  // For a write that runs off a background timer rather than a store caller:
+  // merge onto the on-disk rows instead of writing our in-memory array. Such a
+  // write can land in the window between a CLI `phones remove` writing the
+  // file and our watcher debounce reloading it, putting the removed row
+  // straight back — and the reload then reads our bytes, not the CLI's, so
+  // nothing ever corrects it. Disk is authoritative here because
+  // all other mutators flush synchronously; pending touches are the only state
+  // memory legitimately holds ahead of it.
+  //
+  // Adopt only a SUCCESSFUL read. A row-count guard would take `phones remove
+  // <last phone>` for a failure and write the removed row straight back; an
+  // existence guard has the mirror failure, adopting the zero rows a torn
+  // concurrent write or malformed JSON yields and flushing the whole store
+  // away. `readFile` separates the two: null = could not read, [] = a
+  // well-formed empty file.
+  function adoptDisk() {
+    const disk = readFile(path);
+    if (disk) phones = disk;
+    applyPendingTouches();
+  }
+
+  function applyPendingTouches() {
+    for (const [pk, at] of pendingTouches) {
+      const phone = phones.find((p) => p.phonePubkey === pk);
+      if (phone) phone.lastSeenAt = at;
+    }
   }
 
   function flushLastSeen() {
@@ -104,27 +151,8 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
       touchTimer = null;
     }
     if (pendingTouches.size === 0) return;
-    // Merge onto the on-disk rows rather than writing our in-memory array.
-    // Unlike every other flush this one fires on a background timer, so it can
-    // land in the window between a CLI `phones remove` writing the file and our
-    // watcher debounce reloading it — and the self-write check below would then
-    // hide the resurrected row entirely. Disk is authoritative here because all
-    // other mutators flush synchronously; pending touches are the only state
-    // memory legitimately holds ahead of it.
-    //
-    // Adopt only a SUCCESSFUL read. A row-count guard would take `phones remove
-    // <last phone>` for a failure and write the removed row straight back; an
-    // existence guard has the mirror failure, adopting the zero rows a torn
-    // concurrent write or malformed JSON yields and flushing the whole store
-    // away. `readFile` separates the two: null = could not read, [] = a
-    // well-formed empty file.
     const before = JSON.stringify(phones);
-    const disk = readFile(path);
-    if (disk) phones = disk;
-    for (const [pk, at] of pendingTouches) {
-      const phone = phones.find((p) => p.phonePubkey === pk);
-      if (phone) phone.lastSeenAt = at;
-    }
+    adoptDisk();
     // Silent only when the write carries nothing but our own touches. When we
     // absorbed a concurrent external edit, the watcher event our write triggers
     // is the ONLY notification that edit will ever get — suppressing it strands
@@ -155,6 +183,37 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     remove: (pk) => {
       phones = phones.filter((p) => p.phonePubkey !== pk);
       flush();
+    },
+    reconcile: (next) => {
+      const judge = () => {
+        let changed = false;
+        const removed: PairedPhone[] = [];
+        const kept: PairedPhone[] = [];
+        for (const phone of phones) {
+          const row = next({ ...phone });
+          if (row === null) {
+            removed.push(phone);
+            changed = true;
+            continue;
+          }
+          if (!changed && JSON.stringify(row) !== JSON.stringify(phone)) changed = true;
+          kept.push({ ...row });
+        }
+        return changed ? { removed, kept } : null;
+      };
+      // Memory already carries every touch, so it answers "anything to do?"
+      // without the file read a sweep on every lease refresh would cost.
+      if (!judge()) return [];
+      adoptDisk();
+      const verdict = judge();
+      if (!verdict) return [];
+      const { removed, kept } = verdict;
+      phones = kept;
+      // A stamp left pending for a removed key would land on the row a later
+      // re-admission of that key creates, rolling its fresh `last seen` back.
+      for (const p of removed) pendingTouches.delete(p.phonePubkey);
+      flush();
+      return removed.map((p) => ({ ...p }));
     },
     touchLastSeen: (pk, at) => {
       const phone = phones.find((p) => p.phonePubkey === pk);
@@ -195,26 +254,18 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
           const raw = readRaw(path);
-          // Resolve the touch-write snapshot on EVERY fire, not only a matching
-          // one: an external write landing inside the debounce makes our own
-          // event read someone else's bytes, and a snapshot left armed past
-          // that would silence a LATER external edit that happens to restore it
-          // byte-for-byte, stranding the running host on rows it no longer has.
-          // Re-notifying costs a re-advertise; under-notifying costs correctness.
-          const armed = touchWriteRaw;
-          touchWriteRaw = null;
-          // Our own touch flush: memory already holds it, and re-advertising on
-          // it would put every reconnect back on the wire indirectly.
-          if (armed !== null && raw === armed) return;
+          if (raw !== null && raw === knownRaw) return;
           // A failed read is a write in flight, not an emptied store — keep
           // memory and wait for the completing write's own event.
-          const next = readFile(path);
+          const next = parsePhones(raw);
           if (!next) return;
+          // Replacing the known bytes on every reload is what keeps a touch
+          // snapshot from outliving an external write that landed inside the
+          // debounce: left in place, it would silence a LATER edit restoring
+          // those bytes, stranding the host on rows it no longer has.
+          knownRaw = raw;
           phones = next;
-          for (const [pk, at] of pendingTouches) {
-            const phone = phones.find((p) => p.phonePubkey === pk);
-            if (phone) phone.lastSeenAt = at;
-          }
+          applyPendingTouches();
           onChange();
         }, 50);
       });
@@ -242,9 +293,12 @@ function readRaw(path: string): string | null {
  * store and flushing it back wipes every phone's label and push routing.
  */
 function readFile(path: string): PairedPhone[] | null {
-  if (!existsSync(path)) return null;
+  return parsePhones(readRaw(path));
+}
+
+function parsePhones(raw: string | null): PairedPhone[] | null {
+  if (raw === null) return null;
   try {
-    const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as FileShape;
     if (parsed.version !== 1 || !Array.isArray(parsed.phones)) return null;
     // Destructure off the stale keys older builds left on disk — `admission`

@@ -39,7 +39,13 @@ export interface ProjectCoreRemoteDeps {
    *  supplier ship unroutable pushes and still compile. */
   machineDeviceId(): string;
   /** Blind FCM/APNs push forward over the central control socket. */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string }; collapseKey?: string }): void;
+  /** Whether the account's current authorization lease leaves out this device
+   *  or this identity key. Sign-out revokes the device and wipes its keys, but
+   *  the push row it registered survives on every machine it could not reach in
+   *  that moment; this, not the row, is what stops a signed-out phone being
+   *  pushed to. False when there is no lease to ask. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean;
 }
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
@@ -514,6 +520,10 @@ export class ProjectCore {
       // with no host (evals, most of this file's own test callers) offers no
       // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
+      // Forwarded by name for the same reason: dropped here, the core would
+      // answer every scheduler tool SCHEDULER_UNAVAILABLE on a real bridge while
+      // a test that builds the core directly stays green.
+      ...(this.deps.schedulerForAgent ? { schedulerForAgent: this.deps.schedulerForAgent } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,
@@ -753,7 +763,10 @@ export class ProjectCore {
             .map((p) => p.peerPubkey),
         );
         const paired = core.pairedPhones.list();
-        const candidates = paired.filter((p) => !inBand.has(p.phonePubkey));
+        // Key too: a re-sign-in keeps the device id but mints a fresh key.
+        const candidates = paired.filter(
+          (p) => !inBand.has(p.phonePubkey) && !remote.accountDisowns(p.phoneDeviceId, p.phonePubkey),
+        );
         const targets = candidates.flatMap((p) =>
           p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
@@ -764,16 +777,17 @@ export class ProjectCore {
           // pruned token and no phone at all are indistinguishable in host.log
           // without this.
           log.warn(
-            "push: no eligible phone for project %s (in band: %d, paired: %d) — need a registered phone with a push token",
+            "push: no eligible phone for project %s (in band: %d, paired: %d, away and not revoked: %d) — need a registered phone with a push token",
             core.projectId,
             inBand.size,
             paired.length,
+            candidates.length,
           );
         }
         return targets;
       },
       seal: (json, pubkey) => sealPush(json, pubkey),
-      deliver: (token, provider, blob) => remote.sendPushDeliver({ pushToken: token, provider, blob }),
+      deliver: (token, provider, blob, collapseKey) => remote.sendPushDeliver({ pushToken: token, provider, blob, collapseKey }),
     });
     const unsubscribePush = bus.subscribe({
       deliver: (msg) => {

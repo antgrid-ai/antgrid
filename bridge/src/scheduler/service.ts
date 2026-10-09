@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { nextOccurrences, validateCron, validateTimezone } from "./cron";
-import { ScheduleInputSchema, SchedulePatchSchema, isActiveRun, type Schedule, type ScheduleInput, type SchedulePatch,
+import { type MissedOccurrences, missedOccurrences, nextOccurrences, validateCron, validateTimezone } from "./cron";
+import { MISSED_COUNT_CAP, SCHEDULE_INPUT_KEYS, ScheduleInputSchema, SchedulePatchSchema, isActiveRun, type Schedule, type ScheduleInput, type SchedulePatch,
   type SchedulerCapabilities, type SchedulerRun, type RunStatus } from "./models";
+import { agentSpec } from "antgrid-agents/builtins";
+import { SchedulerRefusal } from "./agent";
 import { SchedulerStore } from "./store";
 
 const LAUNCH_FAILURE_REASONS = {
@@ -25,7 +27,47 @@ function launchFailureReason(error: unknown): string {
     ? LAUNCH_FAILURE_REASONS[code as keyof typeof LAUNCH_FAILURE_REASONS]
     : "Could not prepare or deliver the scheduled prompt; check the project, workspace, agent, and setup log";
 }
+// An occurrence this recent is simply due, not missed: tick granularity and a slow wake should still run it as "cron".
+const ON_TIME_MS = 60_000;
+// A one-off must be at least this far ahead when it is created, re-timed or resumed, so the tick that claims it cannot
+// race the write that stored it.
+export const ONE_OFF_FLOOR_MS = 60_000;
+export const CATCH_UP_MIN_LEAD_MS = 15 * 60_000;
+const UNAVAILABLE_REASON = "Missed while the desktop app was closed or the computer was asleep";
+const MISSED_REASONS = {
+  unavailable: UNAVAILABLE_REASON,
+  paused: "Missed while the schedule was paused",
+  superseded: `${UNAVAILABLE_REASON}; only the latest missed run is caught up`,
+  shortLead: `${UNAVAILABLE_REASON}; not caught up because the next run is due within 15 minutes`,
+} as const;
 const OWNERSHIP_CLEANUP_ERROR = "A deleted schedule still owns its workspace. Restore checkout metadata and reopen the desktop app to retry ownership release.";
+
+export type SchedulerAuthor =
+  | { kind: "device"; deviceId: string | null }
+  | { kind: "agent"; sessionId: string; sessionName: string };
+export interface SchedulerGuardInput {
+  op: "create" | "update" | "runNow";
+  /** The keys the caller named, before they were merged over the stored record. */
+  patchKeys: readonly string[];
+  original?: Schedule;
+  next: Schedule;
+}
+/** Runs synchronously in the same window as the write it authorizes, and throws a {@link SchedulerRefusal} to refuse. */
+export type SchedulerGuard = (input: SchedulerGuardInput) => void;
+export interface SchedulerWriteOptions {
+  author?: SchedulerAuthor;
+  guard?: SchedulerGuard;
+  /** Validates and returns the record that would be saved, writing nothing. */
+  dryRun?: boolean;
+  rejectDuplicateName?: boolean;
+}
+const APP_AUTHOR: SchedulerAuthor = { kind: "device", deviceId: null };
+/** A chat permission mode only means something to a chat run that is not already bypassing prompts. */
+function normalizeChatMode<T extends { mode: string; approvalPolicy: string; chatMode?: string }>(input: T): T {
+  if (input.chatMode !== undefined && (input.mode !== "chat" || input.approvalPolicy === "bypass")) delete input.chatMode;
+  return input;
+}
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export interface ScheduledSessionIdentity { sessionId: string; runtimeGeneration: string; checkoutId?: string }
 export interface SchedulerObservation extends ScheduledSessionIdentity {
@@ -39,11 +81,13 @@ export interface SchedulerOptions {
   timezone?: string;
   now?: () => number;
   supportedAgents: () => SchedulerCapabilities["agents"] | Promise<SchedulerCapabilities["agents"]>;
-  authorize: (schedule: Schedule) => string | null | Promise<string | null>;
   prepare: (schedule: Schedule, run: SchedulerRun, bind: (identity: ScheduledSessionIdentity) => void) => Promise<
     ScheduledSessionIdentity & { deliverPrompt: () => Promise<void> }>;
   stop: (run: SchedulerRun) => Promise<void>;
   releaseWorkspace?: (schedule: Schedule) => Promise<void>;
+  /** The chat `mode` a schedule marked by the migration was effectively running in, or undefined for the backend
+   *  default. Rejecting counts as undefined: the marker is cleared either way. */
+  resolveChatModeCarryOver?: (schedule: Schedule) => Promise<string | undefined>;
 }
 
 export class SchedulerService {
@@ -56,6 +100,7 @@ export class SchedulerService {
   private readonly cleanupFailures = new Set<string>();
   private readonly cancelling = new Set<string>();
   private closed = false;
+  private carryOver?: Promise<void>;
 
   constructor(private readonly options: SchedulerOptions) {
     this.now = options.now ?? Date.now;
@@ -66,15 +111,44 @@ export class SchedulerService {
         this.store.updateRun(run.id, (r) => ({ ...r, status: "interrupted", finishedAt: this.now(),
           reason: "Desktop host restarted; uncertain prompt delivery will not be replayed" }));
       }
-      this.skipMissed();
     } catch (error) { this.store.close(); throw error; }
   }
 
   start(): void {
     if (this.timer || this.closed) return;
     void this.cleanupDeleted().catch(() => {});
+    this.carryOver ??= this.resolveCarryOver().catch(() => {});
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 1_000);
     this.timer.unref?.();
+  }
+  /**
+   * Settles every schedule the store migration marked. Idempotent and rerun at each start while a marker remains, so a
+   * crash after the migration loses nothing. tick() and runNow() wait on it: a marked schedule dispatched first would
+   * run in the backend default instead of the mode it was carried over from.
+   */
+  private async resolveCarryOver(): Promise<void> {
+    const resolve = this.options.resolveChatModeCarryOver;
+    if (!resolve) return;
+    for (const { id } of this.schedules().filter((s) => s.chatModeCarryOver)) {
+      let resolvedFor: Schedule | undefined;
+      let mode: string | undefined;
+      for (;;) {
+        // Re-read: an edit during the await wins, and a plain write keeps the author and updatedAt the user last saw.
+        const current = this.schedules().find((s) => s.id === id);
+        if (!current?.chatModeCarryOver) break;
+        // A mode read for another agent or project is meaningless here (and an id the registry does not know for this
+        // agent would make the schedule ungated), so an agent or project edit during the await resolves again.
+        if (resolvedFor?.agentId === current.agentId && resolvedFor.projectId === current.projectId) {
+          const { chatModeCarryOver: _marker, ...rest } = current;
+          const applies = mode !== undefined && current.chatMode === undefined && current.mode === "chat" && current.approvalPolicy !== "bypass";
+          this.guarded(() => this.store.saveSchedule(applies ? { ...rest, chatMode: mode } : rest));
+          break;
+        }
+        resolvedFor = current;
+        try { mode = await resolve(current); } catch { mode = undefined; }
+        if (this.closed || this.fault) return;
+      }
+    }
   }
   private guarded<T>(fn: () => T): T {
     if (this.closed) throw new Error("Scheduler is closed");
@@ -86,41 +160,72 @@ export class SchedulerService {
     }
   }
   private executable(): void {
-    if (!this.options.desktopOwned) throw new Error("Scheduled execution requires the target desktop app to remain open");
-    if (this.closed || this.fault) throw new Error(this.fault ?? "Scheduler is closed");
+    if (!this.options.desktopOwned) throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "Scheduled execution requires the target desktop app to remain open");
+    if (this.closed || this.fault) throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", this.fault ?? "Scheduler is closed");
   }
   async capabilities(): Promise<SchedulerCapabilities> {
     const error = this.fault ?? (this.cleanupFailures.size ? OWNERSHIP_CLEANUP_ERROR : undefined);
-    return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone, supportsBaseBranchClear: true,
-      agents: await this.options.supportedAgents(), ...(error ? { error } : {}) };
+    const agents = await this.options.supportedAgents();
+    const chatModes = Object.fromEntries(agents.filter((a) => a.modes.includes("chat")).flatMap((a) => {
+      const modes = agentSpec(a.agentId)?.chatPermissionModes;
+      return modes ? [[a.agentId, modes.map(({ id, name, description }) => ({ id, name, ...(description ? { description } : {}) }))]] : [];
+    }));
+    return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone, supportsBaseBranchClear: true, supportsCatchUp: true, supportsOneOff: true,
+            agents, ...(Object.keys(chatModes).length ? { chatModes } : {}), ...(error ? { error } : {}) };
   }
   schedules(): Schedule[] { return this.guarded(() => this.store.schedules()); }
   runs(scheduleId?: string): SchedulerRun[] { return this.guarded(() => this.store.runs(scheduleId)); }
   preview(cron: string, timezone = this.timezone): number[] { return nextOccurrences(cron, timezone, this.now()); }
+  // Capped so a minute-level cron stays small on the wire; the app reads a full cap as "at least".
+  upcoming(schedule: Schedule, windowMs = 86_400_000, cap = 48): number[] {
+    if (!schedule.enabled || schedule.cron === undefined) return [];
+    const now = this.now();
+    try { return nextOccurrences(schedule.cron, schedule.timezone, now, cap).filter((at) => at < now + windowMs); }
+    catch { return []; }
+  }
   private find(id: string): Schedule {
     const schedule = this.schedules().find((s) => s.id === id);
-    if (!schedule) throw new Error("Schedule no longer exists");
+    if (!schedule) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
     return schedule;
   }
+  private assertSupported(agents: SchedulerCapabilities["agents"], agentId: string, mode: string): void {
+    if (agents.some((agent) => agent.agentId === agentId && agent.modes.includes(mode as "terminal" | "chat"))) return;
+    const list = agents.map((agent) => `${agent.agentId} (${agent.modes.join(", ")})`).join("; ") || "none";
+    throw new SchedulerRefusal("AGENT_NOT_SCHEDULABLE",
+      `This installed agent and mode do not support opening prompts and observable turn completion. Schedulable: ${list}`);
+  }
+  private assertRunAtFloor(runAt: number, now: number): void {
+    if (runAt < now + ONE_OFF_FLOOR_MS) throw new SchedulerRefusal("INVALID_RUN_AT", "The one-off time has already passed; set a new time.");
+  }
+  private assertNameFree(projectId: string, name: string, exceptId?: string): void {
+    const clash = this.guarded(() => this.store.schedules()).find((s) => s.projectId === projectId && s.id !== exceptId && sameName(s.name, name));
+    if (clash) throw new SchedulerRefusal("SCHEDULE_EXISTS", `A schedule named "${clash.name}" already exists in this project (id ${clash.id}); update it instead.`);
+  }
   private async validated(input: unknown): Promise<ScheduleInput> {
-    const parsed = ScheduleInputSchema.parse(input);
-    parsed.cron = validateCron(parsed.cron, parsed.timezone);
-    const agents = await this.options.supportedAgents();
-    if (!agents.some((agent) => agent.agentId === parsed.agentId && agent.modes.includes(parsed.mode))) {
-      throw new Error("This installed agent and mode do not support opening prompts and observable turn completion");
-    }
+    const parsed = normalizeChatMode(ScheduleInputSchema.parse(input));
+    if (parsed.cron !== undefined) parsed.cron = validateCron(parsed.cron, parsed.timezone);
+    else validateTimezone(parsed.timezone);
+    this.assertSupported(await this.options.supportedAgents(), parsed.agentId, parsed.mode);
     return parsed;
   }
-  async create(input: unknown, authorDeviceId: string | null = null): Promise<Schedule> {
+  async create(input: unknown, options: SchedulerWriteOptions = {}): Promise<Schedule> {
     this.executable();
     const parsed = await this.validated(input);
     const now = this.now();
-    const schedule: Schedule = { ...parsed, id: randomUUID(), authorDeviceId, workspaceCreated: false,
-      createdAt: now, updatedAt: now, nextOccurrence: nextOccurrences(parsed.cron, parsed.timezone, now, 1)[0]! };
+    if (parsed.runAt !== undefined) this.assertRunAtFloor(parsed.runAt, now);
+    const author = options.author ?? APP_AUTHOR;
+    const schedule: Schedule = { ...parsed, id: randomUUID(), authorDeviceId: author.kind === "device" ? author.deviceId : null,
+      ...(author.kind === "agent" ? { authorSessionId: author.sessionId, authorSessionName: author.sessionName } : {}),
+      workspaceCreated: false, createdAt: now, updatedAt: now,
+      nextOccurrence: parsed.runAt ?? nextOccurrences(parsed.cron!, parsed.timezone, now, 1)[0]! };
+    // From here to the write nothing awaits, so the checks below cannot be invalidated by another request.
+    options.guard?.({ op: "create", patchKeys: [], next: schedule });
+    if (options.rejectDuplicateName) this.assertNameFree(schedule.projectId, schedule.name);
+    if (options.dryRun) return schedule;
     this.guarded(() => this.store.saveSchedule(schedule));
     return schedule;
   }
-  async update(id: string, patch: unknown, authorDeviceId: string | null = null): Promise<Schedule> {
+  async update(id: string, patch: unknown, options: SchedulerWriteOptions = {}): Promise<Schedule> {
     this.executable();
     const parsed: SchedulePatch = SchedulePatchSchema.parse(patch);
     const changes = { ...parsed, ...(parsed.baseBranch === null ? { baseBranch: undefined } : {}) };
@@ -128,31 +233,53 @@ export class SchedulerService {
     const original = this.find(id);
     if ((original.workspaceCreated || this.runs(id).some(isActiveRun)) && (["projectId", "workspace", "baseBranch"] as const)
       .some((key) => key in changes && changes[key] !== original[key])) {
-      throw new Error("Project, workspace, and base branch cannot change after the schedule workspace is created");
+      throw new SchedulerRefusal("WORKSPACE_LOCKED", "Project, workspace, and base branch cannot change after the schedule workspace is created");
     }
-    const originalInput = Object.fromEntries(Object.keys(ScheduleInputSchema.shape).map((key) => [key, original[key as keyof Schedule]]));
-    const input = ScheduleInputSchema.parse({ ...originalInput, ...changes });
-    input.cron = validateCron(input.cron, input.timezone);
-    if (!agents.some((agent) => agent.agentId === input.agentId && agent.modes.includes(input.mode))) {
-      throw new Error("This installed agent and mode do not support opening prompts and observable turn completion");
-    }
+    const merged: Record<string, unknown> = { ...Object.fromEntries(SCHEDULE_INPUT_KEYS.map((key) => [key, original[key]])), ...changes };
+    // Naming one timetable kind switches the schedule to it.
+    if (changes.runAt !== undefined) delete merged.cron;
+    if (changes.cron !== undefined) delete merged.runAt;
+    if (merged.chatMode === null) delete merged.chatMode;
+    const input = normalizeChatMode(ScheduleInputSchema.parse(merged));
+    if (input.cron !== undefined) input.cron = validateCron(input.cron, input.timezone);
+    else validateTimezone(input.timezone);
+    this.assertSupported(agents, input.agentId, input.mode);
     const now = this.now();
-    let nextOccurrence = original.nextOccurrence;
-    if (input.cron !== original.cron || input.timezone !== original.timezone) nextOccurrence = nextOccurrences(input.cron, input.timezone, now, 1)[0]!;
-    if (!original.enabled && input.enabled && nextOccurrence <= now) {
-      this.recordMissed(original, now);
-      nextOccurrence = nextOccurrences(input.cron, input.timezone, now, 1)[0]!;
+    const runAtChanged = input.runAt !== original.runAt;
+    // An unchanged time is never re-checked, so renaming or re-prompting a pending one-off still works as it nears.
+    if (input.runAt !== undefined && (runAtChanged || (!original.enabled && input.enabled && original.firedRunId === undefined))) {
+      this.assertRunAtFloor(input.runAt, now);
     }
-    const executionChanged = (["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "cron", "timezone", "enabled"] as const)
+    let nextOccurrence = original.nextOccurrence;
+    if (input.runAt !== undefined) nextOccurrence = input.runAt;
+    else if (input.cron !== original.cron || input.timezone !== original.timezone) nextOccurrence = nextOccurrences(input.cron!, input.timezone, now, 1)[0]!;
+    const executionChanged = (["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "cron", "runAt", "timezone", "enabled", "catchUp", "chatMode"] as const)
       .some((key) => input[key] !== original[key]);
-    const next = { ...original, ...input, authorDeviceId: executionChanged ? authorDeviceId : original.authorDeviceId, updatedAt: now, nextOccurrence };
+    const author = options.author ?? APP_AUTHOR;
+    const { editedBySessionName: _by, editedAt: _at, ...base } = original;
+    const next: Schedule = { ...base, ...input, updatedAt: now, nextOccurrence,
+      authorDeviceId: author.kind === "device" && executionChanged ? author.deviceId : original.authorDeviceId,
+      ...(author.kind === "agent" ? { editedBySessionName: author.sessionName, editedAt: now } : {}) };
+    if (input.cron === undefined) delete next.cron;
+    if (input.runAt === undefined) delete next.runAt;
+    if (input.chatMode === undefined) delete next.chatMode;
+    // Any decision about the mode, including clearing it, settles the carry-over.
+    if ("chatMode" in parsed) delete next.chatModeCarryOver;
+    // "Set a new time": a different instant, or a switch back to a recurring timetable, makes a finished one-off pending again.
+    if (runAtChanged) { delete next.firedRunId; delete next.firedAt; delete next.deferredAt; }
+    options.guard?.({ op: "update", patchKeys: Object.keys(parsed), original, next });
+    if (options.rejectDuplicateName && !sameName(input.name, original.name)) this.assertNameFree(next.projectId, next.name, id);
+    // Only reachable with the timetable unchanged, so the paused interval's own continuation is the next occurrence.
+    const resumed = input.cron !== undefined && !original.enabled && input.enabled && nextOccurrence <= now;
+    if (options.dryRun) return resumed ? { ...next, nextOccurrence: this.missedSince(original, now).following } : next;
+    if (resumed) next.nextOccurrence = this.recordMissed(original, now, "paused");
     this.guarded(() => this.store.saveSchedule(next));
     return next;
   }
   async delete(id: string): Promise<void> {
     this.executable();
     const schedule = this.guarded(() => this.store.schedules(true)).find((s) => s.id === id);
-    if (!schedule) throw new Error("Schedule no longer exists");
+    if (!schedule) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
     const deleted = schedule.deletedAt === undefined ? { ...schedule, enabled: false, deletedAt: this.now(), updatedAt: this.now() } : schedule;
     if (schedule.deletedAt === undefined) this.guarded(() => this.store.saveSchedule(deleted));
     await this.releaseDeleted(deleted);
@@ -176,35 +303,72 @@ export class SchedulerService {
     return { id: randomUUID(), scheduleId: schedule.id, scheduleName: schedule.name, projectId: schedule.projectId,
       occurrenceAt, timezone: schedule.timezone, trigger, status: "preparing", startedAt: this.now() };
   }
-  private recordMissed(schedule: Schedule, now: number): void {
-    const run = { ...this.newRun(schedule, schedule.nextOccurrence, "missed"), status: "skipped" as const,
-      reason: "Missed while the desktop host was unavailable or the schedule was paused", finishedAt: now, missedUntil: now };
-    this.guarded(() => this.store.claim(schedule, run, nextOccurrences(schedule.cron, schedule.timezone, now, 1)[0]!));
+  private missedRecord(schedule: Schedule, count: number, until: number, reason: string, now: number): SchedulerRun {
+    return { ...this.newRun(schedule, schedule.nextOccurrence, "missed"), status: "skipped", reason, finishedAt: now,
+      missedUntil: until, missedCount: Math.min(count, MISSED_COUNT_CAP) };
   }
-  private skipMissed(): void {
-    const now = this.now();
-    for (const schedule of this.schedules()) if (schedule.enabled && schedule.nextOccurrence <= now) this.recordMissed(schedule, now);
+  /** Records every occurrence due since `schedule.nextOccurrence` as one skipped interval; never runs anything. */
+  private recordMissed(schedule: Schedule, now: number, reason: keyof typeof MISSED_REASONS): number {
+    const missed = this.missedSince(schedule, now);
+    this.guarded(() => this.store.claim(schedule, this.missedRecord(schedule, missed.count, missed.latest, MISSED_REASONS[reason], now), missed.following));
+    return missed.following;
   }
-  resume(): void { this.executable(); this.skipMissed(); }
-  async runNow(id: string, requestingDeviceId?: string | null): Promise<SchedulerRun> {
+  /** Callers guarantee `nextOccurrence <= now`, so the stored occurrence is always at least the first one missed. */
+  private missedSince(schedule: Schedule, now: number): MissedOccurrences {
+    if (schedule.cron === undefined) throw new Error("A one-off schedule has no recurring timetable");
+    // One extra so a count above the cap is distinguishable from exactly the cap.
+    return missedOccurrences(schedule.cron, schedule.timezone, schedule.nextOccurrence, now, MISSED_COUNT_CAP + 1)!;
+  }
+  resume(): void { this.executable(); void this.tick().catch(() => {}); }
+  async runNow(id: string, options: Pick<SchedulerWriteOptions, "guard"> = {}): Promise<SchedulerRun> {
     this.executable();
+    await this.carryOver;
     const schedule = this.find(id);
+    options.guard?.({ op: "runNow", patchKeys: [], original: schedule, next: schedule });
     const run = this.guarded(() => this.store.claim(schedule, this.newRun(schedule, this.now(), "manual")));
     if (!run) throw new Error("Schedule was deleted");
-    if (isActiveRun(run)) void this.dispatch(schedule, run, requestingDeviceId ?? undefined).catch(() => {});
+    if (isActiveRun(run)) void this.dispatch(schedule, run).catch(() => {});
     return run;
+  }
+  /** A one-off has one occurrence and no timetable, so it never reaches the missed-interval arithmetic. */
+  private reconcileOneOff(schedule: Schedule, runAt: number, now: number): void {
+    const onTime = now - runAt < ON_TIME_MS;
+    // "skip" writes off an occurrence the desktop missed. One handed back by an overlap or a re-arm fell due while the
+    // desktop was open, and it is late only because it waited, so it runs.
+    const skipped = !onTime && schedule.catchUp === "skip" && schedule.deferredAt === undefined;
+    // However late, "latest" still runs it: with no next occurrence there is no lead rule to apply.
+    const run = skipped ? this.missedRecord(schedule, 1, runAt, MISSED_REASONS.unavailable, now)
+      : this.newRun(schedule, runAt, onTime ? "cron" : "catch-up");
+    const claimed = this.guarded(() => this.store.claim(schedule, run, undefined, undefined, true));
+    if (claimed && isActiveRun(claimed)) void this.dispatch(schedule, claimed).catch(() => {});
+  }
+  private reconcile(schedule: Schedule, now: number): void {
+    if (schedule.runAt !== undefined) return this.reconcileOneOff(schedule, schedule.runAt, now);
+    const { latest, count, previous, following: next } = this.missedSince(schedule, now);
+    const onTime = now - latest < ON_TIME_MS;
+    const catchUp = !onTime && schedule.catchUp === "latest" && next - now >= CATCH_UP_MIN_LEAD_MS;
+    if (!onTime && !catchUp) {
+      const reason = schedule.catchUp === "latest" ? MISSED_REASONS.shortLead : MISSED_REASONS.unavailable;
+      this.guarded(() => this.store.claim(schedule, this.missedRecord(schedule, count, latest, reason, now), next));
+      return;
+    }
+    const earlier = count > 1
+      ? this.missedRecord(schedule, count - 1, previous!, catchUp ? MISSED_REASONS.superseded : MISSED_REASONS.unavailable, now) : undefined;
+    const run = this.guarded(() => this.store.claim(schedule, this.newRun(schedule, latest, catchUp ? "catch-up" : "cron"), next, earlier));
+    if (run && isActiveRun(run)) void this.dispatch(schedule, run).catch(() => {});
   }
   async tick(): Promise<void> {
     if (this.ticking || this.closed || this.fault || !this.options.desktopOwned) return;
     this.ticking = true;
     try {
+      await this.carryOver;
       const now = this.now();
       for (const schedule of this.schedules()) {
-        if (!schedule.enabled || schedule.nextOccurrence > now) continue;
-        const next = nextOccurrences(schedule.cron, schedule.timezone, schedule.nextOccurrence, 1)[0]!;
-        if (next <= now) { this.recordMissed(schedule, now); continue; }
-        const run = this.guarded(() => this.store.claim(schedule, this.newRun(schedule, schedule.nextOccurrence, "cron"), next));
-        if (run && isActiveRun(run)) void this.dispatch(schedule, run).catch(() => {});
+        if (!schedule.enabled || schedule.nextOccurrence > now || schedule.firedRunId !== undefined) continue;
+        // One unreconcilable record must not starve the schedules after it. A storage fault latches in guarded()
+        // and is checked here so it still stops the sweep.
+        try { this.reconcile(schedule, now); }
+        catch { if (this.fault || this.closed) return; }
       }
     } finally { this.ticking = false; }
   }
@@ -213,17 +377,10 @@ export class SchedulerService {
       ? { ...r, status, ...(reason ? { reason } : {}), ...(status === "running" || status === "needs-input" ? {} : { finishedAt: this.now() }) }
       : r));
   }
-  private async dispatch(schedule: Schedule, run: SchedulerRun, requestingDeviceId?: string): Promise<void> {
+  private async dispatch(schedule: Schedule, run: SchedulerRun): Promise<void> {
     let reservation: SchedulerRun | undefined;
     let delivered = false;
-    const authorize = async () => {
-      const authorRefusal = await this.options.authorize(schedule);
-      if (authorRefusal || !requestingDeviceId || requestingDeviceId === schedule.authorDeviceId) return authorRefusal;
-      return this.options.authorize({ ...schedule, authorDeviceId: requestingDeviceId });
-    };
     try {
-      const refusal = await authorize();
-      if (refusal) { this.finish(run.id, "skipped", refusal); return; }
       const supported = await this.options.supportedAgents();
       if (!supported.some((a) => a.agentId === schedule.agentId && a.modes.includes(schedule.mode))) {
         this.finish(run.id, "failed", "Scheduled agent or mode is no longer available; edit the schedule to choose an installed agent"); return;
@@ -235,14 +392,22 @@ export class SchedulerService {
       });
       reservation = { ...run, sessionId: prepared.sessionId, runtimeGeneration: prepared.runtimeGeneration, checkoutId: prepared.checkoutId };
       this.executable();
-      const latest = this.guarded(() => this.store.schedules(true)).find((s) => s.id === schedule.id)!;
-      if ((["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "authorDeviceId"] as const)
-        .some((key) => latest[key] !== schedule[key])) {
-        this.finish(run.id, "skipped", "Execution settings changed during preparation; the new settings apply to the next occurrence"); return;
-      }
-      const revoked = await authorize();
-      if (revoked) { this.finish(run.id, "skipped", revoked); return; }
+      // Ahead of the settings check: a run stopped or failed during preparation has spent its occurrence, and must
+      // not be handed back to run again.
       if (this.cancelling.has(run.id) || !this.guarded(() => this.store.runs()).some((r) => r.id === run.id && isActiveRun(r))) return;
+      const latest = this.guarded(() => this.store.schedules(true)).find((s) => s.id === schedule.id)!;
+      // A one-off occurrence is the only one it will ever have, so a time claimed under old settings is given back
+      // rather than spent. A manual run was never the one-off's occurrence.
+      const oneOff = schedule.runAt !== undefined && run.trigger !== "manual";
+      if ((["projectId", "agentId", "mode", "prompt", "approvalPolicy", "workspace", "baseBranch", "chatMode", ...(oneOff ? ["runAt" as const] : [])] as const)
+        .some((key) => latest[key] !== schedule[key])) {
+        if (oneOff) {
+          this.guarded(() => this.store.rearm(run.id, "Execution settings changed during preparation; the one-off will run with the new settings", this.now()));
+        } else {
+          this.finish(run.id, "skipped", "Execution settings changed during preparation; the new settings apply to the next occurrence");
+        }
+        return;
+      }
       const bound = this.guarded(() => this.store.runs()).find((r) => r.id === run.id);
       if (!bound?.sessionId || !bound.runtimeGeneration) throw new Error("Scheduled launch did not durably associate its session before prompt delivery");
       await prepared.deliverPrompt();

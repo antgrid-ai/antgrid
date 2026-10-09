@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
+import 'ab_touch_sizing.dart';
 
 /// Canonical row primitive. Three named constructors enforce a consistent
 /// height, padding, and baseline alignment for every toolbar/header/action
@@ -116,15 +117,19 @@ class AbToolbar extends StatelessWidget {
             ? Border(bottom: BorderSide(color: context.antgrid.borderSubtle))
             : null,
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.max,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: switch (_variant) {
-          _ToolbarVariant.panel => _panelChildren(context),
-          _ToolbarVariant.actions => _actionsChildren(),
-          _ToolbarVariant.tabs => _tabsChildren(),
-          _ToolbarVariant.custom => _customChildren(),
-        },
+      // The bar's height is the design: a phone-sized button or segment would
+      // fill it edge to edge, and the bar caps the target anyway.
+      child: AbTouchSizing.suppress(
+        child: Row(
+          mainAxisSize: MainAxisSize.max,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: switch (_variant) {
+            _ToolbarVariant.panel => _panelChildren(context),
+            _ToolbarVariant.actions => _actionsChildren(),
+            _ToolbarVariant.tabs => _tabsChildren(),
+            _ToolbarVariant.custom => _customChildren(),
+          },
+        ),
       ),
     );
   }

@@ -13,6 +13,7 @@ import { readCodexVersionJson, codexHomeDir } from "./codex/home";
 import { observeAntigravityTitles } from "./antigravity/title-watcher";
 import { isAntigravityBinary, primeAntigravityCertCache } from "./antigravity/startup";
 import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
+import { PERMISSION_MODES as CLAUDE_PERMISSION_MODES } from "./claude-code/permission-modes";
 import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
 import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
@@ -24,8 +25,11 @@ import * as codexHooks from "./codex/hooks";
 import * as claudeMcp from "./claude-code/mcp";
 import * as codexMcp from "./codex/mcp";
 import * as cursorHooks from "./cursor-agent/hooks";
+import * as cursorMcp from "./cursor-agent/mcp";
 import * as copilotHooks from "./github-copilot/hooks";
+import * as copilotMcp from "./github-copilot/mcp";
 import * as opencodeHooks from "./opencode/hooks";
+import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
@@ -45,6 +49,7 @@ import { createAgentRegistry } from "./create-registry";
 import type { AgentDefinition } from "../runtime";
 
 type BuiltinAgentSpec = Omit<AgentSpec, "fork" | "approvalPolicies"> & import("./types").AgentCliSpec & {
+  defaultApprovalGated: boolean;
   fork: import("./types").AgentForkSupport & { nativeForkArgs?: (id: string) => string[] };
   approvalPolicies: { bypass?: import("./types").AgentApprovalPolicy & { terminalArgs?: readonly string[] } };
   bin: string;
@@ -58,6 +63,8 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "claude",
     discoveryPaths: () => [join(homedir(), ".claude/local")],
     label: "Claude Code",
+    defaultApprovalGated: true,
+    chatPermissionModes: CLAUDE_PERMISSION_MODES,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
     hookName: "claude",
     hookDir: "~/.claude/hooks",
@@ -163,6 +170,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "codex",
     normalizeTerminalNotification: (notice) => ({ type: "permission_request", message: notice.body ?? notice.title ?? "Codex needs approval" }),
     label: "Codex",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
@@ -249,6 +257,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   opencode: {
     bin: "opencode",
     label: "opencode",
+    defaultApprovalGated: false,
     approvalPolicies: {},
     // No `bridge hook` events: opencode's plugin runs inside its own runtime and
     // POSTs to the loopback API itself, under this name.
@@ -265,6 +274,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       decodeLegacyArgs: opencodeLegacyForkSource,
     },
     hooks: opencodeHooks,
+    mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
     // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
     // requires, verified against the transcript argv below via the run's own
@@ -329,6 +339,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "cursor-agent": {
     bin: "cursor-agent",
     label: "Cursor",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "cursor",
     hookDir: null,
@@ -338,6 +349,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     initialPrompt: (p) => ["--", p],
     fork: terminalForkHandoff("Cursor"),
     hooks: cursorHooks,
+    mcp: cursorMcp,
     augmentsDefaultSpec: true,
     // No headless entry. `-p --mode ask` reads like the right argv and has
     // never been run: cursor-agent exits 1 on every invocation without an
@@ -350,6 +362,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "github-copilot": {
     bin: "copilot",
     label: "Copilot",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "github-copilot",
     hookDir: null,
@@ -360,6 +373,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     initialPrompt: () => [],
     fork: terminalForkHandoff("GitHub Copilot"),
     hooks: copilotHooks,
+    mcp: copilotMcp,
     augmentsDefaultSpec: true,
     resumable: ({ agentSessionId, copilotHome }) =>
       copilotSessionExistsSync(
@@ -436,6 +450,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "agy",
     observeTitles: observeAntigravityTitles,
     label: "Antigravity",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
     hookName: "antigravity",
     hookDir: null,
@@ -462,6 +477,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   kilo: {
     bin: "kilo",
     label: "Kilo",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
@@ -472,6 +488,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // Kilo documents `--session <id> --fork`, but this integration does not
     // observe a Kilo-native id. Do not advertise an unreachable native path.
     fork: terminalForkHandoff("Kilo"),
+    mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
@@ -505,6 +522,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   kimi: {
     bin: "kimi",
     label: "Kimi",
+    defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
@@ -519,6 +537,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
+    defaultApprovalGated: true,
     approvalPolicies: {},
     hookName: null,
     hookDir: null,

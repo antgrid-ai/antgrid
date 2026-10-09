@@ -114,7 +114,7 @@ void main() {
 
     test('inventory agent deduped when recent agentDeviceId is compound '
         '<deviceUuid>.<projectId> (QR-paired)', () {
-      // QR-paired agents persist the compound registrationId, per CLAUDE.md.
+      // QR-paired agents persist the compound registrationId, per AGENTS.md.
       // Inventory returns the bare deviceUuid. Without normalization the same
       // agent would appear twice in the drawer.
       final rAgent = RecentAgent(

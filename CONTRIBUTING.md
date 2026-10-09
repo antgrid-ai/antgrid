@@ -19,8 +19,8 @@ Please read the [Code of Conduct](CODE_OF_CONDUCT.md) first.
 
 ## Contracts no test will catch
 
-[CLAUDE.md](CLAUDE.md) is the authoritative list, and each component has its own
-(`bridge/CLAUDE.md`, `app/CLAUDE.md`, …). Read the one you are touching. A green
+[AGENTS.md](AGENTS.md) is the authoritative list, and each component has its own
+(`bridge/AGENTS.md`, `app/AGENTS.md`, …). Read the one you are touching. A green
 test run will not tell you that:
 
 - **A new message type touches five places** — the schema, `AbMessageSchema` and

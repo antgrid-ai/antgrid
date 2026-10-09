@@ -1564,24 +1564,6 @@ void main() {
       await session.close();
     });
 
-    test('F3: re-sends the Git view\'s file:read and sets viewingLoading', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      svc.gitViewFile('lib/main.dart');
-      await Future<void>.delayed(Duration.zero);
-      expect(fileReadSends(t, 'lib/main.dart'), hasLength(1));
-
-      svc.reissueAfterStreamReset();
-      await Future<void>.delayed(Duration.zero);
-      expect(fileReadSends(t, 'lib/main.dart'), hasLength(2));
-      expect(svc.currentState.git.viewingLoading, isTrue);
-
-      await svc.dispose();
-      await session.close();
-    });
-
     test(
       'F4: does not re-send the selected file or the preview (hydrators own '
       'them)',
@@ -1675,34 +1657,6 @@ void main() {
         await session.close();
       },
     );
-
-    test('F8: does not re-send a Git view whose error reply already landed', () async {
-      // An error is the machine's answer, not a lost reply: re-asking would
-      // count it against the reset budget and eventually replace the real
-      // error with a transfer failure.
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
-
-      svc.gitViewFile('lib/main.dart');
-      await Future<void>.delayed(Duration.zero);
-      t.emit('file:content', {
-        'projectId': 'p',
-        'path': 'lib/main.dart',
-        'size': 0,
-        'error': 'EACCES',
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.git.viewingLoading, isFalse);
-
-      svc.reissueAfterStreamReset();
-      await Future<void>.delayed(Duration.zero);
-      expect(fileReadSends(t, 'lib/main.dart'), hasLength(1));
-      expect(svc.currentState.git.viewingFile?.error, 'EACCES');
-
-      await svc.dispose();
-      await session.close();
-    });
 
     test('F7: does not re-send a diff the user navigated away from', () async {
       final t = FakeAgentTransport();

@@ -327,6 +327,14 @@ class _AbSwipeActionsState extends State<AbSwipeActions>
                 GestureRecognizerFactoryWithHandlers<_LeftwardDragRecognizer>(
                   _LeftwardDragRecognizer.new,
                   (r) => r
+                    // The device's slop, as GestureDetector and the PageView's
+                    // Scrollable both read it. Without it this row waits out
+                    // the framework's 18px default while the page accepts at
+                    // the device's (~8dp on Android), so every leftward swipe
+                    // became a page drag and the tray never opened.
+                    ..gestureSettings = MediaQuery.maybeGestureSettingsOf(
+                      context,
+                    )
                     // From the touch, not from where the slop was crossed: the
                     // row follows the whole of the finger's travel instead of
                     // losing its first ~18dp, which is most of a short swipe.
@@ -418,7 +426,8 @@ class _LeftwardDragRecognizer extends HorizontalDragGestureRecognizer {
     if (event is PointerMoveEvent && !claimsRightward()) {
       final startX = _downX[event.pointer];
       // Under the touch slop, so the row gives way before it could ever accept.
-      if (startX != null && event.position.dx - startX > kTouchSlop / 2) {
+      final giveWayAt = computeHitSlop(event.kind, gestureSettings) / 2;
+      if (startX != null && event.position.dx - startX > giveWayAt) {
         _downX.remove(event.pointer);
         resolvePointer(event.pointer, GestureDisposition.rejected);
         return;

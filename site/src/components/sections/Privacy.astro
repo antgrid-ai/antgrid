@@ -9,7 +9,7 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
     <div class="mb-10 grid gap-x-16 gap-y-4 md:grid-cols-2 md:items-end">
       <h2 class="font-display text-title font-bold text-ink">The relay can't read your session.</h2>
       <p class="text-lede text-muted md:max-w-md">
-        Terminal output, prompts and file contents are encrypted between your machine and your connected devices. The relay forwards them without the keys to read them.
+        Terminal output, prompts and file contents travel inside an encrypted connection between your machine and your connected devices. No relay holds a key to it. When there's no direct route, a relay forwards the encrypted packets as they are.
       </p>
     </div>
 
@@ -23,7 +23,7 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
         </div>
         <pre class="mt-3 overflow-x-auto font-mono text-row text-ink2"><span class="text-faint">studio-workstation · </span><span class="text-signal">Claude Code</span>
 <span class="text-muted2">02:14</span>  Editing <span class="text-signal2">auth/session.ts</span>
-       <span class="text-ok">+</span> verifyPairApproval(sig, uuid)
+       <span class="text-ok">+</span> issueSessionToken(user, ttl)
 <span class="text-ok">✓</span> 142 files typechecked
 <span class="text-amber">?</span> approve destructive migration?</pre>
       </div>

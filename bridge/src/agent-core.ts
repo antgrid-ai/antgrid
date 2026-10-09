@@ -59,6 +59,8 @@ import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
+import { resolveSchedulerCaller } from "./scheduler-caller";
+import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -244,7 +246,7 @@ export function buildChatSpawnAugment(
   abDir?: string,
   runId?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, { abDir });
+  const aug = augmentAgentLaunch(tool, { abDir, mcp: false });
   return {
     args: aug.args,
     env: {
@@ -594,6 +596,11 @@ export interface BuildAgentCoreOptions {
    *  would sit against the project-wide cap and evict a live session's assign.
    *  Absent for the same reason {@link queueBusLine} is. */
   forgetBusLines?: (sessionId: string) => void;
+  /** The host's scheduler entry for agent callers, with this core's catalog
+   *  project id already bound. The core proves WHICH session is calling; the host
+   *  decides what that session may do. Absent means a bare core, and every
+   *  scheduler route answers SCHEDULER_UNAVAILABLE. */
+  schedulerForAgent?: SchedulerForAgent;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -2804,7 +2811,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
         const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
-        if (msg.pushToken === "") {
+        // The app re-registers on every handshake, once per warm project, so
+        // the common frame repeats what the row already holds. An upsert is a
+        // non-silent store write: the paired-phones watcher answers it with a
+        // re-advertise to every connected phone. Nothing reads `pushUpdatedAt`,
+        // so leaving it unbumped on a repeat is unobservable.
+        const clear = msg.pushToken === "";
+        const unchanged = clear
+          ? phone.pushToken === undefined && phone.pushProvider === undefined && phone.pushPubkey === undefined
+          : phone.pushToken === msg.pushToken && phone.pushProvider === msg.provider && phone.pushPubkey === msg.pushPubkey;
+        if (unchanged) {
+          log.debug("push:register for phone %s repeats its stored registration; not rewriting", phone.phoneDeviceId);
+          break;
+        }
+        if (clear) {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
             ...phone,
@@ -3788,6 +3808,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
+        checkoutPath: runtime.checkout.path,
         git: runtime.cachedGitBranch
           ? {
               branch: runtime.cachedGitBranch,
@@ -5044,6 +5065,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
+    scheduler: async ({ terminalId, runId, method, params }) => {
+      if (!opts.schedulerForAgent) {
+        throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
+      }
+      const caller = resolveSchedulerCaller({
+        session: (id) => sessions?.get(id),
+        isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+        launchedBySchedule: (id) => sessions?.launchedBySchedule(id) ?? false,
+        runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+        registryAgent: (name) => agentSpec(name),
+      }, terminalId, runId);
+      return opts.schedulerForAgent(caller, method, params);
+    },
     onHandlerEvent: (body) => {
       // What the agent is DISPLAYING is settled ahead of the chat guard, because
       // it is a fact about the agent's own screen rather than about supervision:

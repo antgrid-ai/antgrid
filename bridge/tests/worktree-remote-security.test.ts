@@ -7,7 +7,7 @@ import { createHostPolicyFixture } from "./host-policy-fixture";
 // `sessions.create` control-plane verb); the path/branch gates live inside
 // WorktreeManager. Both halves are asserted here.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
@@ -43,9 +43,10 @@ describe("remote isolated-session security", () => {
 
   beforeEach(async () => {
     prevAbDir = process.env.ANTGRID_DIR;
-    abDir = mkdtempSync(join(tmpdir(), "antgrid-wt-sec-"));
+    // Canonical: checkout paths come back realpath'd and gate 4 compares them to abDir.
+    abDir = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-wt-sec-")));
     process.env.ANTGRID_DIR = abDir;
-    repo = mkdtempSync(join(tmpdir(), "antgrid-wt-sec-repo-"));
+    repo = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-wt-sec-repo-")));
     await git(repo, ["init"]);
     await git(repo, ["config", "user.email", "test@antgrid.local"]);
     await git(repo, ["config", "user.name", "Test"]);

@@ -4,6 +4,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/ab_colors.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/agent_event.dart';
 
@@ -156,7 +157,7 @@ class _PendingPromptPanelState extends State<PendingPromptPanel> {
         const SizedBox(height: AbTokens.space8),
         Wrap(
           spacing: AbTokens.space8,
-          runSpacing: AbTokens.space8,
+          runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space8),
           children: [
             for (final option in options)
               AbButton(
@@ -234,7 +235,7 @@ class _PendingPromptPanelState extends State<PendingPromptPanel> {
         const SizedBox(height: AbTokens.space8),
         Wrap(
           spacing: AbTokens.space8,
-          runSpacing: AbTokens.space8,
+          runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space8),
           children: [
             for (final option in question.options)
               AbButton(
@@ -263,7 +264,7 @@ class _PendingPromptPanelState extends State<PendingPromptPanel> {
         const SizedBox(height: AbTokens.space8),
         Wrap(
           spacing: AbTokens.space8,
-          runSpacing: AbTokens.space8,
+          runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space8),
           children: [
             for (final option in question.options)
               AbChip.toggle(

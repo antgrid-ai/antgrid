@@ -32,7 +32,7 @@ void _latchAndMaybeComplete(WidgetRef ref, List<FirstRunStep> steps) {
   final allDone = steps.every((s) => s.done);
   if (newlyDone.isEmpty && !(allDone && !state.checklistCompleted)) return;
   // Capture the container, not ref: the microtask may outlive the widget
-  // (same hazard as carrying a WidgetRef across an await — see app/CLAUDE.md).
+  // (same hazard as carrying a WidgetRef across an await — see app/AGENTS.md).
   final container = ref.container;
   Future.microtask(() {
     final n = container.read(firstRunProvider.notifier);
@@ -176,7 +176,7 @@ class FirstRunSetupSection extends ConsumerWidget {
               leading: AbDisclosureChevron(expanded: !collapsed),
               // Same treatment as the drawer's PROJECTS label — this is the
               // second group header in one column, and a section header is
-              // chrome, so sans (see the font rule in app/CLAUDE.md).
+              // chrome, so sans (see the font rule in app/AGENTS.md).
               title: Text(
                 'SETUP · $doneCount/${steps.length}',
                 style: AbTokens.sansStyle(
@@ -289,7 +289,7 @@ class MobileFirstRunChecklist extends ConsumerWidget {
                 children: [
                   // Balance the trailing dismiss button so the title stays
                   // visually centered under the icon.
-                  const SizedBox(width: AbTokens.iconButtonBox),
+                  SizedBox(width: AbIconButton.footprintWidth(context)),
                   Expanded(
                     child: Text(
                       // Not "No machines yet": a machine may exist

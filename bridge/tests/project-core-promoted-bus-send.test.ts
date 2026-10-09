@@ -50,6 +50,7 @@ function peerStreamStub() {
     establishedPeers: () => [peerView({ peerId: PEER })],
     peerSession: (peerId: string) => (peerId === PEER ? peerView({ peerId }) : null),
     sendPushDeliver: () => {},
+    accountDisowns: () => false,
     machineDeviceId: () => "machine-uuid",
   };
   return { deps, sent };

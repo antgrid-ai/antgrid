@@ -9,11 +9,15 @@ import 'scoped_prefs.dart';
 /// One session's persisted workspace layout.
 ///
 /// Deliberately only the geometry a user arranges by hand. Runtime state
-/// (`pinnedTerminalId`, `pushedTerminalId`) names things that may not exist on
+/// (`selectedTerminalId`) names a terminal that may not exist on
 /// the next launch, and restoring it would point the panel at a terminal the
 /// bridge has forgotten.
 class SessionLayout {
-  const SessionLayout({this.panelMode, this.splitRatio, this.workspaceViewIndex});
+  const SessionLayout({
+    this.panelMode,
+    this.splitRatio,
+    this.workspaceViewIndex,
+  });
 
   final String? panelMode;
   final double? splitRatio;
@@ -157,9 +161,7 @@ class SessionLayoutStore {
     final flush = _saveQueue.then(
       (_) => prefs.setString(
         _key,
-        jsonEncode({
-          for (final e in _mem.entries) e.key: e.value.toJson(),
-        }),
+        jsonEncode({for (final e in _mem.entries) e.key: e.value.toJson()}),
       ),
     );
     // The queue must not inherit a failure, or one rejected flush poisons every

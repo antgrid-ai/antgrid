@@ -2,6 +2,7 @@ import { describe, it, expect, setSystemTime } from "bun:test";
 import { ClaudeDriver, prettyModelName } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
 import type { ClaudeQueryLike, PromptStreamController } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
 import type { AbMessage } from "../src/protocol";
+import { agentSpec } from "antgrid-agents/builtins";
 
 describe("prettyModelName", () => {
   it("folds the resolvedModel version into a bare display name", () => {
@@ -829,6 +830,19 @@ describe("ClaudeDriver effort", () => {
 });
 
 describe("ClaudeDriver permission modes", () => {
+  it("advertises exactly the modes the registry classifies for the scheduler's approval cap", async () => {
+    // A mode the chat offers but the registry does not list would be unclassified, and a listed one it never offers
+    // could not be picked; the cap is only sound while the two lists are the same.
+    const { driver, sent } = makeDriver();
+    await driver.start();
+    await flush();
+    const caps = sent.filter((m) => m.type === "agent:capabilities").at(-1);
+    expect(caps?.type).toBe("agent:capabilities");
+    if (caps?.type === "agent:capabilities") {
+      expect(caps.modes?.map((m: any) => m.id)).toEqual(agentSpec("claude-code")?.chatPermissionModes?.map((m) => m.id));
+    }
+  });
+
   it("advertises the \"auto\" permission mode and applies it via setPermissionMode", async () => {
     // Give eager discovery a real catalog so the config gate opens at start()
     // (the real binary always returns one) — mirrors production, where a mode

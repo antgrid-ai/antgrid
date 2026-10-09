@@ -28,7 +28,8 @@ const FREE_FEATURES = [
   "Remote control from your phone",
   "Unlimited terminal sessions",
   "File explorer & git viewer",
-  "E2E encrypted — zero-knowledge relay",
+  "Browser preview tunneling",
+  "End-to-end encrypted · zero-knowledge relay",
 ] as const;
 
 const PRO_YEARLY_FEATURES = [
@@ -37,7 +38,7 @@ const PRO_YEARLY_FEATURES = [
   "Unlimited terminal sessions",
   "File explorer & git viewer",
   "Browser preview tunneling",
-  "E2E encrypted — zero-knowledge relay",
+  "End-to-end encrypted · zero-knowledge relay",
   "Priority support",
 ] as const;
 

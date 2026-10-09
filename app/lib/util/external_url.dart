@@ -167,6 +167,51 @@ String? terminalFilePath(String uri) {
   return path;
 }
 
+/// A scheme of two or more letters. One letter is a Windows drive (`C:\x`).
+final _uriScheme = RegExp(r'^[A-Za-z][A-Za-z0-9+.\-]+:');
+final _pathLineSuffix = RegExp(r'(?:#L(\d+)(?:-L?\d+)?|:(\d+)(?::\d+)?)$');
+
+/// The path, and the line if one is appended, that a terminal hyperlink names
+/// when its target has no scheme; null when it has one.
+///
+/// opencode writes a markdown link's target into OSC 8 as written, so
+/// `[notes](docs/a.md)` arrives as `docs/a.md`. Like [terminalFilePath] this
+/// unwraps and never validates: the bridge resolves the path against the
+/// checkout root and refuses what does not belong there.
+///
+/// The line forms are `:12`, `:12:5` and GitHub's `#L12`; any other fragment
+/// is a heading anchor, and is dropped so the file still opens.
+({String path, int? line})? terminalBarePath(String uri) {
+  var path = uri.trim();
+  if (path.isEmpty || path.length > kMaxPrintedPathChars) return null;
+  int? line;
+  final suffix = _pathLineSuffix.firstMatch(path);
+  if (suffix != null) {
+    final value = int.tryParse(suffix.group(1) ?? suffix.group(2)!);
+    if (value != null && value >= 1 && value <= kMaxPrintedLine) line = value;
+    path = path.substring(0, suffix.start);
+  }
+  // Checked after the line comes off: `.` is a scheme character, so
+  // `README.md:12` would otherwise read as the scheme `readme.md`. `//host/x`
+  // is a scheme-relative URL, and `?`/`#` alone name no file.
+  if (_uriScheme.hasMatch(path) ||
+      path.startsWith('//') ||
+      path.startsWith('?') ||
+      path.startsWith('#')) {
+    return null;
+  }
+  final fragment = path.indexOf('#');
+  if (fragment >= 0) path = path.substring(0, fragment);
+  try {
+    path = Uri.decodeFull(path);
+  } on ArgumentError {
+    // A `%` that starts no escape: the path was written unencoded.
+  } on FormatException {
+    // Escapes that are not UTF-8; the raw text is still the best guess.
+  }
+  return path.isEmpty ? null : (path: path, line: line);
+}
+
 /// Whether [host] is a dev server's address rather than an external site's —
 /// `localhost`, or any literal IPv4/IPv6 address (loopback, LAN, or a raw
 /// public IP typed straight at a box). A link that names a real external
@@ -184,7 +229,8 @@ bool isLocalDevHost(String host) {
 /// the destinations agree everywhere the app shows a link:
 ///
 ///  * `file://...` → the Files tab, resolved via [fileService] against
-///    whichever checkout the caller means (never assumed here).
+///    whichever checkout the caller means (never assumed here). From a
+///    terminal, so does a target with no scheme ([terminalBarePath]).
 ///  * `http(s)://` to `localhost` or a literal IP ([isLocalDevHost]) → the
 ///    Preview tab via [previewService], in-app on every device — desktop
 ///    dials it directly, a phone tunnels it over the relay — rather than an
@@ -238,6 +284,19 @@ Future<void> openContentLink(
       fileService,
       revealView,
       focusedTarget,
+    );
+    return;
+  }
+  final bare = terminalId == null ? null : terminalBarePath(uri);
+  if (bare != null) {
+    await _resolveAndShow(
+      context,
+      fileService,
+      revealView,
+      focusedTarget,
+      bare.line,
+      'open path link failed',
+      (service) => service.resolveTerminalPath(bare.path),
     );
     return;
   }

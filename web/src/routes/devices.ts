@@ -15,7 +15,7 @@ import {
   type DeviceKind,
 } from "../models/device.js";
 import { revokeUserDevice } from "../services/device.js";
-import { deleteUserAccount } from "../services/account.js";
+import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../services/account.js";
 import {
   activeSubscriptionForUser,
   provisionProductAccountForUser,
@@ -245,7 +245,7 @@ export function deviceRoutes(deps: {
       return c.json({ error: "SUBSCRIPTION_ACTIVE" }, 409);
     }
     if (result === "blocked_team") {
-      return c.json({ error: "TEAM_HAS_MEMBERS" }, 409);
+      return c.json({ error: "TEAM_HAS_MEMBERS", message: TEAM_HAS_MEMBERS_MESSAGE }, 409);
     }
     return c.json({ ok: true });
   });

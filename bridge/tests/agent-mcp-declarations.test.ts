@@ -19,29 +19,27 @@ type PerAgent<T> = Record<AgentKey, T>;
 describe("mcp profile declarations", () => {
   test("only the agents with a measured per-spawn mechanism declare mcp", () => {
     const declares: PerAgent<boolean> = {
-      // `--mcp-config`, measured against the installed CLI.
+      // `--mcp-config=<file>`, measured against the installed CLI.
       "claude-code": true,
       // `-c mcp_servers.*`, measured via `codex mcp get antgrid --json`.
       codex: true,
-      // Its config injection could plausibly carry an `mcp` block, but the CLI
-      // could not be run to verify the schema, and injection is conditional on
-      // the user not owning OPENCODE_CONFIG.
-      opencode: false,
-      // Hooks are machine-global (`~/.cursor/hooks.json`) and safe only because
-      // an unrelated run arrives with no ANTGRID_API_PORT and no-ops. A global
-      // MCP entry has the same reach and no such no-op.
-      "cursor-agent": false,
-      // `--additional-mcp-config` exists, but copilot is the one agent whose
-      // plugin host is known to drop our env — identity is exactly what would
-      // fail, and nobody has run the probe.
-      "github-copilot": false,
-      // No per-spawn flag at all; its `mcpServers` live in the same global
-      // config its hooks do, with the cursor-agent hazard.
+      // `OPENCODE_CONFIG_CONTENT` is deep-merged over every user layer and the
+      // child inherits our env (measured, opencode 1.18.35).
+      opencode: true,
+      // `--plugin-dir` with a `.mcp.json` plugin; cursor strips the child's env
+      // but expands `${env:VAR}` in the entry (measured, 2026.10.01).
+      "cursor-agent": true,
+      // `--additional-mcp-config @<file>`, session-only (measured, 1.0.93).
+      "github-copilot": true,
+      // Its only carrier is the machine-global `mcp_config.json`: an unrelated
+      // run would hold a live server against whichever core started last.
       antigravity: false,
-      // An opencode fork down to the env-var names, so it inherits opencode's
-      // unverified status.
-      kilo: false,
+      // Same mechanism as opencode, under `KILO_CONFIG_CONTENT` (measured, 7.8.8).
+      kilo: true,
+      // Only carrier is the machine-global `~/.kimi/mcp.json`, same hazard.
       kimi: false,
+      // Inherits no env into MCP children and expands no variables, so the
+      // server could not learn its caller; the only carrier is also global.
       "mistral-vibe": false,
     };
     for (const key of AGENT_KEYS) {

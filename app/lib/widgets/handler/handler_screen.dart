@@ -774,16 +774,21 @@ class _SnapshotRow extends StatelessWidget {
   /// Never an interactive-looking chip over an undo that would do nothing —
   /// a spent entry says so instead. A failed attempt keeps its tap because the
   /// bridge retries it; the reason it failed rides in the subtitle.
+  ///
+  /// The chips carry no `onTap` of their own: the row is the target, and an
+  /// interactive chip would reserve a touch footprint on phones that its
+  /// non-interactive twin ('Undoing…') does not, so the row would jump on tap
+  /// and the pill would sit off the meta line's right edge.
   Widget _affordance() {
     if (pending) return AbChip.label(label: 'Undoing…', color: p.textMuted);
     if (snapshot.undone) {
       return AbChip.label(label: 'Undone', color: p.textMuted);
     }
     if (snapshot.state == 'failed') {
-      return AbChip.label(label: 'Retry undo', color: p.warning, onTap: onUndo);
+      return AbChip.label(label: 'Retry undo', color: p.warning);
     }
     if (snapshot.state == 'available') {
-      return AbChip.label(label: 'Undo', color: p.accent, onTap: onUndo);
+      return AbChip.label(label: 'Undo', color: p.accent);
     }
     return AbChip.label(label: snapshot.state, color: p.textMuted);
   }

@@ -22,11 +22,11 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
-import '../models/workspace_view.dart';
 import '../project/project_session.dart';
 import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
+import '../providers/terminal_compose_drafts.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
@@ -51,6 +51,7 @@ import '../providers/ui_attention_providers.dart';
 import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
+import 'terminal_scroll_physics.dart';
 import 'terminal_upload_button.dart';
 import 'terminal_upload_strip.dart';
 
@@ -344,7 +345,60 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// input transform so it also reaches IME keystrokes, which go straight from
   /// the engine to the wire without passing through this widget.
   final TerminalModifierLatch _modifiers = TerminalModifierLatch();
-  late final String Function(String) _modifierTransform = _modifiers.apply;
+  late final String Function(String) _modifierTransform = _transformInput;
+
+  /// The touch key bar's sticky modifiers, applied to every keystroke the pane
+  /// sends — plus the one chord they can mean instead of a keystroke: an armed
+  /// Ctrl and a `c` over a selection copies it, exactly as the hardware chord
+  /// does in [_handleEarlyKey], rather than interrupting whatever is running.
+  String _transformInput(String data) {
+    final m = _modifiers.value;
+    if (m.ctrl && !m.alt && (data == 'c' || data == 'C') && _hasSelection) {
+      _modifiers.clear();
+      _copySelectionAndClear();
+      return '';
+    }
+    return _modifiers.apply(data);
+  }
+
+  /// Copies the selection and drops it, so the highlight going away is the
+  /// confirmation that the copy happened. Clears the engine's selection too:
+  /// the mirror alone would be repopulated by the view's next notify.
+  void _copySelectionAndClear() {
+    final selection = _selectedText;
+    if (selection == null || selection.isEmpty) return;
+    detached(
+      'TerminalView',
+      'clipboard copy failed',
+      () => Clipboard.setData(ClipboardData(text: selection)),
+    );
+    _dropSelection();
+  }
+
+  /// The engine's own copy paths — Cmd+C on macOS (Ctrl chords never reach the
+  /// view: [_handleEarlyKey] takes them first) and the selection context menu.
+  /// Routed here so they drop the selection the same way.
+  ///
+  /// Never throws: the view starts this unawaited, so a clipboard the platform
+  /// refuses would otherwise surface as an unattributed fatal. The selection
+  /// stays put then, so the user can try again.
+  Future<void> _onEngineCopy(String text) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+    } catch (_) {
+      return;
+    }
+    _dropSelection();
+  }
+
+  void _dropSelection() {
+    if (!mounted) return;
+    setState(() {
+      _selectedText = null;
+      _selectedAnchors = null;
+    });
+    _selectionController.clear();
+  }
 
   /// The engine's own selection, dropped on every frame that replaces
   /// the screen its row/col anchors point into. The view cannot do this
@@ -611,7 +665,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// Returning live is shared by asynchronous uploads and immediate inputs.
   bool _typeIntoTerminal(String text) {
     if (_historyOpen) _closeHistory();
-    final data = _modifiers.apply(text);
+    final data = _transformInput(text);
+    if (data.isEmpty) return true;
     if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
       return true;
     }
@@ -692,6 +747,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // Pinned: dispose can run after the ProviderScope is gone, and reading
     // through `ref` then throws.
     _container = ref.container;
+    _loadComposeDraft();
     if (!widget.isAgentSurface) return;
     // Post-frame because publishing writes a provider. Retracted in dispose,
     // not deactivate: this sits inside the GlobalKey-reparented AgentPanel, so
@@ -724,6 +780,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     }
     if (oldWidget.terminalService != widget.terminalService ||
         oldWidget.tab.terminalId != widget.tab.terminalId) {
+      // The old terminal's draft is already saved — every edit and every
+      // open/close writes through — so this only swaps the new one in.
+      if (!_composeDrafts.isOpen(_composeDraftKey)) _composeFocus.unfocus();
+      _loadComposeDraft();
       oldWidget.terminalService.setInputTransform(
         oldWidget.tab.terminalId,
         null,
@@ -807,6 +867,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       replacing: _modifierTransform,
     );
     _modifiers.dispose();
+    _composeDraft.removeListener(_saveComposeDraft);
     _composeDraft.dispose();
     _composeFocus.dispose();
     _connectionSub?.cancel();
@@ -1114,19 +1175,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
     // Ctrl+C (Ctrl-gated on every platform; Cmd+C stays with Ghostty's
     // native copy on macOS):
-    //   selection → copy + swallow (Windows Terminal-style)
+    //   selection → copy, clear it + swallow (Windows Terminal-style)
     //   no selection, agent running → swallow (don't SIGINT the agent)
     //   otherwise → fall through so the PTY gets ^C
     if (event.logicalKey == LogicalKeyboardKey.keyC && ctrl && !alt) {
       // Same one-shot spend as the paste chord above — see its comment.
       _realModifierState.clear();
-      final selection = _selectedText;
-      if (selection != null && selection.isNotEmpty) {
-        detached(
-          'TerminalView',
-          'clipboard copy failed',
-          () => Clipboard.setData(ClipboardData(text: selection)),
-        );
+      if (_hasSelection) {
+        _copySelectionAndClear();
         return KeyEventResult.handled;
       }
       final agentRunning =
@@ -1601,6 +1657,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       showKeyboardOnInteraction: _hasPhysicalKeyboard,
       softKeyboardController: _softKeyboardController,
       selectionController: _selectionController,
+      onCopySelection: _onEngineCopy,
       fontSize: terminalFontSize,
       // The bundled mono face, so the cell grid measures identically on every
       // platform. Never hardcode a family here: an earlier 'Cascadia Mono'
@@ -1711,6 +1768,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // holds the frame-mode and has-an-archive conditions, and is idempotent
       // because this fires once per clamped step while the user keeps pushing.
       onScrollPastTop: _openHistory,
+      scrollPhysics: terminalScrollPhysics,
       onZoomUpdate: _onZoomUpdate,
       onZoomEnd: _onZoomEnd,
     );
@@ -2102,24 +2160,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     previewService: () => widget.terminalService.session
         .existingServicesForCheckout(widget.terminalService.checkoutId)
         ?.previewService,
-    revealView: _revealWorkspaceView,
+    revealView: (view) => revealWorkspaceView(ref, view),
     disclosed: _hoveredLink.value?.uri == uri,
     focusedTarget: () => ref.read(selectedTargetProvider),
   );
-
-  void _revealWorkspaceView(WorkspaceView view) {
-    final menu = ref.read(workspaceMenuControlProvider);
-    if (menu != null) {
-      menu.reveal(view);
-      return;
-    }
-    // Phone width publishes no menu control, and a tapped link is the only
-    // affordance touch has, so the shell's own handover is what brings the tab
-    // and its page forward.
-    ref
-        .read(pendingWorkspaceViewProvider.notifier)
-        .set((target: ref.read(selectedTargetProvider), value: view));
-  }
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.
@@ -2343,10 +2387,36 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     });
   }
 
-  /// Held across openings so a closed box keeps what was typed.
+  /// Held across openings so a closed box keeps what was typed, and mirrored
+  /// into [terminalComposeDraftsProvider] so a remount keeps it too.
   final TextEditingController _composeDraft = TextEditingController();
   final FocusNode _composeFocus = FocusNode(debugLabel: 'TerminalCompose');
   bool _composeOpen = false;
+  late final _composeDrafts = ref.read(terminalComposeDraftsProvider);
+
+  /// Derived from [widget] on every read, never cached: [didUpdateWidget]
+  /// accepts a new terminal or service, and a stale key would file one
+  /// terminal's draft under another's.
+  String get _composeDraftKey => TerminalComposeDrafts.keyFor(
+    projectId: widget.terminalService.projectId,
+    checkoutId: widget.terminalService.checkoutId,
+    terminalId: widget.tab.terminalId,
+  );
+
+  /// Reopens the box as it was left, but unfocused: raising the keyboard is
+  /// the user's call, and a remount is not one.
+  void _loadComposeDraft() {
+    _composeDraft.removeListener(_saveComposeDraft);
+    _composeDraft.text = _composeDrafts.textFor(_composeDraftKey);
+    _composeOpen = _composeDrafts.isOpen(_composeDraftKey);
+    _composeDraft.addListener(_saveComposeDraft);
+  }
+
+  void _saveComposeDraft() => _composeDrafts.save(
+    _composeDraftKey,
+    text: _composeDraft.text,
+    open: _composeOpen,
+  );
 
   void _toggleCompose() => _composeOpen ? _closeCompose() : _openCompose();
 
@@ -2356,6 +2426,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _softKeyboardController.hide();
     if (_historyOpen) _closeHistory();
     setState(() => _composeOpen = true);
+    _saveComposeDraft();
     // Explicit, not the field's `autofocus`: that only claims focus when its
     // scope holds none, and the terminal already does — the box opened with no
     // keyboard and needed a second tap.
@@ -2367,6 +2438,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   void _closeCompose() {
     _composeFocus.unfocus();
     setState(() => _composeOpen = false);
+    _saveComposeDraft();
   }
 
   void _composeSend(String text) {

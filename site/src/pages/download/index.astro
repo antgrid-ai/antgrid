@@ -35,7 +35,7 @@ const STEPS = [
   {
     n: "01",
     title: "Install and sign in",
-    body: "Email magic link, GitHub or Google. That account is what links your devices together — there is nothing else to set up.",
+    body: "Email magic link, GitHub or Google — or Apple on a Mac. That account is what links your devices together.",
     href: `${links.getStarted}#install`,
   },
   {
@@ -47,7 +47,7 @@ const STEPS = [
   {
     n: "03",
     title: "Connect your phone",
-    body: "Sign in on mobile with the same account and your computer appears on its own. No pairing step, no QR code.",
+    body: "Sign in on mobile with the same account, then turn on Remote in the computer's title bar — it's off by default. No pairing step, no QR code.",
     href: `${links.getStarted}#phone`,
   },
 ];
@@ -318,7 +318,7 @@ const STEPS = [
         <span class="min-w-0 flex-1">
           <span class="block text-note font-medium text-ink">Star antgrid on GitHub</span>
           <span class="mt-1 block text-meta leading-relaxed text-muted">
-            The bridge and both apps are MPL-2.0; the relay service is ELv2. Every release links to its exact source. Stars are how the next person finds it.
+            antgrid's own code is MPL-2.0, except the relay and web services, which are ELv2. Every release links to its exact source. Stars are how the next person finds it.
           </span>
         </span>
         <span class="hidden shrink-0 items-center gap-1.5 text-meta text-muted2 transition-colors duration-200 motion-reduce:transition-none group-hover:text-signal2 sm:inline-flex">

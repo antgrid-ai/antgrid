@@ -844,7 +844,7 @@ describe("handler:answer", () => {
     // 1. the schema, 2. the exported type.
     expect(protocol).toContain('type: z.literal("handler:answer")');
     expect(protocol).toContain("export type HandlerAnswerMsg =");
-    // 3. the handler. CLAUDE.md still calls it "the index.ts switch"; the inbound
+    // 3. the handler. AGENTS.md still calls it "the index.ts switch"; the inbound
     // switch itself lives in agent-core.ts.
     const core = readFileSync(join(import.meta.dir, "../../src/agent-core.ts"), "utf8");
     expect(core).toContain('case "handler:answer"');

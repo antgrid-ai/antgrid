@@ -9,6 +9,7 @@ import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_tooltip.dart';
+import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
 import 'picker_sources.dart';
 
@@ -503,7 +504,7 @@ class PanelSectionHeader extends StatelessWidget {
 
   /// False for a panel of navigational chrome (e.g. the workspace menu's
   /// "Workspace" header) rather than a picker over identifiers — sans is the
-  /// font-token rule for chrome, mono for data (see app/CLAUDE.md's Design
+  /// font-token rule for chrome, mono for data (see app/AGENTS.md's Design
   /// Rules). Defaults true: every existing caller here is an
   /// environment/branch/project picker, where the rows below ARE identifiers.
   final bool mono;
@@ -584,6 +585,9 @@ class _PanelRowState extends State<PanelRow> {
         : baseIconFg;
 
     final row = Container(
+      // Same floor as AbLiveMenuRow: a panel row shares popups with menu rows
+      // and must not be the one short target among them on a phone.
+      constraints: BoxConstraints(minHeight: AbTouchSizing.extentOf(context)),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: active ? p.bgHover : null,
