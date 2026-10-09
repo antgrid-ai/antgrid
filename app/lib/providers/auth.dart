@@ -83,7 +83,8 @@ const bool kRemoteAccessFreeDuringBeta = true;
 bool requiresProForRemote(String? tier) =>
     !kRemoteAccessFreeDuringBeta && (tier == null || tier == 'free');
 
-/// Open the web account page, which owns setting and changing a password.
+/// Open a page of the web account, `/account` unless [path] names another.
+/// `/account` owns setting and changing a password.
 ///
 /// Deliberately a browser hand-off rather than an in-app form: a password write
 /// is the one account action that has to re-authenticate, revoke the user's
@@ -97,13 +98,16 @@ bool requiresProForRemote(String? tier) =>
 /// and App Review rejects sending sign-in out to Safari (guideline 4). The web
 /// sign-in offers Apple beside GitHub and Google only while the server has
 /// Apple configured, and guideline 4.8 needs it to.
-Future<void> openAccountInBrowser(ProviderContainer ref) async {
+Future<void> openAccountInBrowser(
+  ProviderContainer ref, {
+  String path = '/account',
+}) async {
   final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
   final onIos = defaultTargetPlatform == TargetPlatform.iOS;
   // hidePricing strips every path to a web purchase from the sheet, which App
   // Store guideline 3.1.1 would otherwise reject (web/src/ui/pricing-visibility.ts).
   await launchUrl(
-    Uri.parse(onIos ? '$base/account?hidePricing=1' : '$base/account'),
+    Uri.parse(onIos ? '$base$path?hidePricing=1' : '$base$path'),
     mode: onIos ? LaunchMode.inAppBrowserView : LaunchMode.externalApplication,
   );
 }

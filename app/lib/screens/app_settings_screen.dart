@@ -140,6 +140,18 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         );
         if (!mounted) return;
         if (go) await openManageSubscription(ref.container);
+      case DeleteAccountResult.blockedByTeam:
+        final go = await AbConfirmDialog.show(
+          context: context,
+          title: 'Remove your team members first',
+          body:
+              'Your account still has team members. Remove them on the team '
+              'page, or contact support to transfer ownership, before deleting '
+              'your account.',
+          confirmLabel: 'Manage team',
+        );
+        if (!mounted) return;
+        if (go) await openAccountInBrowser(ref.container, path: '/team');
       case DeleteAccountResult.error:
         showAbToast(
           context,

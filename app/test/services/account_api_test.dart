@@ -24,7 +24,7 @@ void main() {
     expect(seen.headers['cookie'], 'better-auth.session_token=abc');
   });
 
-  test('409 → blockedBySubscription', () async {
+  test('409 SUBSCRIPTION_ACTIVE → blockedBySubscription', () async {
     final api = _api(
       MockClient(
         (_) async => http.Response('{"error":"SUBSCRIPTION_ACTIVE"}', 409),
@@ -34,6 +34,22 @@ void main() {
       await api.deleteAccount(),
       DeleteAccountResult.blockedBySubscription,
     );
+  });
+
+  test('409 TEAM_HAS_MEMBERS → blockedByTeam', () async {
+    final api = _api(
+      MockClient(
+        (_) async => http.Response('{"error":"TEAM_HAS_MEMBERS"}', 409),
+      ),
+    );
+    expect(await api.deleteAccount(), DeleteAccountResult.blockedByTeam);
+  });
+
+  test('409 with an unknown or unreadable body → error', () async {
+    for (final body in ['{"error":"SOMETHING_NEW"}', 'conflict', '']) {
+      final api = _api(MockClient((_) async => http.Response(body, 409)));
+      expect(await api.deleteAccount(), DeleteAccountResult.error, reason: body);
+    }
   });
 
   test('500 → error', () async {
