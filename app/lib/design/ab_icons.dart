@@ -79,6 +79,12 @@ abstract final class AbIcons {
   static const drawEllipse = Mdi.ellipse_outline;
   static const drawText = Mdi.format_text;
   static const previewTabs = Codicon.multiple_windows;
+  // Two edits met and neither won outright. The merge glyph, not [warning], so
+  // a sync conflict never wears the same triangle as an agent waiting on a
+  // person — the two can sit on the same row.
+  static const syncConflict = Codicon.git_merge;
+  // The tombstone left when a task stops being linked to its issue.
+  static const syncOff = Codicon.sync_ignored;
   static const add = Codicon.add;
   static const trash = Codicon.trash;
   // Alias mirroring `add`; semantic for git's stage-changes action.
@@ -93,6 +99,13 @@ abstract final class AbIcons {
   static const menu = Codicon.menu;
   static const more = Codicon.kebab_vertical;
   static const list = Codicon.list_unordered;
+  static const tasks = Codicon.checklist;
+  static const tag = Codicon.tag;
+  static const filter = Codicon.filter;
+  // Partner to [account], which is the assignee glyph: a crossed circle rather
+  // than a greyed person, so "nobody" reads as a state and not as a disabled
+  // avatar.
+  static const unassigned = Codicon.circle_slash;
   // A list with a tick struck through its first row. [list] is four bullets and
   // four bars, which at chrome sizes is the hamburger `menu` glyph with dots —
   // it says "a list exists", where a queue that reports what is done and what
@@ -151,4 +164,15 @@ abstract final class AbIcons {
   // credential the user supplies, not a state of being secured.
   static const password = Codicon.key;
   static const github = Codicon.github;
+
+  // Markdown editor toolbar. Codicons has no heading or strikethrough glyph.
+  static const mdHeading = Mdi.format_header_pound;
+  static const mdBold = Codicon.bold;
+  static const mdItalic = Codicon.italic;
+  static const mdStrikethrough = Mdi.format_strikethrough_variant;
+  static const mdQuote = Codicon.quote;
+  static const mdBulletList = Codicon.list_unordered;
+  static const mdNumberedList = Codicon.list_ordered;
+  static const mdTaskList = Codicon.checklist;
+  static const markdown = Codicon.markdown;
 }

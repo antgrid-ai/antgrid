@@ -150,4 +150,45 @@ void main() {
       });
     });
   });
+
+  group('repoKey', () {
+    final now = DateTime.parse('2026-08-01T10:00:00.000Z');
+
+    AbProject project({String? repoKey}) => AbProject(
+      projectId: 'p',
+      folder: '/f',
+      displayName: 'P',
+      hostDeviceUuid: 'device-a',
+      hostMachineName: 'laptop',
+      lastOpenedAt: now,
+      repoKey: repoKey,
+    );
+
+    test('round-trips, and is the join key for the drawer task node', () {
+      final restored = AbProject.fromJson(
+        project(repoKey: 'github.com/acme/site').toJson(),
+      );
+      expect(restored.repoKey, 'github.com/acme/site');
+    });
+
+    test('is omitted when absent rather than written as null', () {
+      // Persisted per open; an explicit null on every keyless folder is noise
+      // in a store that is one JSON blob.
+      expect(project().toJson().containsKey('repoKey'), isFalse);
+    });
+
+    test('is null for a project stored before the field existed', () {
+      // The whole point of persisting it: a folder never opened since this
+      // landed has no key, which means "nothing to join to" — not "no tasks".
+      final legacy = AbProject.fromJson({
+        'projectId': 'p',
+        'folder': '/f',
+        'displayName': 'P',
+        'hostDeviceUuid': 'device-a',
+        'hostMachineName': 'laptop',
+        'lastOpenedAt': now.toIso8601String(),
+      });
+      expect(legacy.repoKey, isNull);
+    });
+  });
 }

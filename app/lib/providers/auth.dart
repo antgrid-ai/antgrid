@@ -44,6 +44,16 @@ final currentUserProvider = FutureProvider<CurrentUser?>((ref) async {
   return ref.watch(authServiceProvider).fetchCurrentUser();
 }, retry: noProviderRetry);
 
+/// [currentUserProvider]'s id alone, behind `.select` so an identity-only
+/// consumer rebuilds on the id changing and nothing else `CurrentUser`
+/// carries. Watching this from a plain `Provider` doubles as the reset for
+/// per-account state: Riverpod rebuilds that provider from scratch the
+/// moment the id changes, so state built under one account never survives
+/// into another's.
+final currentUserIdProvider = Provider<String?>((ref) {
+  return ref.watch(currentUserProvider.select((u) => u.value?.userId));
+});
+
 /// Stored-cookie presence — a synchronous, network-free signal that we *think*
 /// we're signed in. Used as the optimistic fallback when [currentUserProvider]
 /// is loading (cold start) or errored (offline) so we don't bounce signed-in
@@ -132,6 +142,30 @@ Future<void> openManageSubscription(ProviderContainer ref) async {
         ? LaunchMode.inAppBrowserView
         : LaunchMode.externalApplication,
   );
+}
+
+/// Open the web GitHub connect flow directly, skipping the Integrations
+/// overview page — Connect GitHub is the only reason the app links here.
+///
+/// Browser hand-off for the same reason as [openAccountInBrowser]: the app's
+/// session cookie can't be lent to the browser, so the user may have to sign
+/// in there. [appUserEmail] (the app's own signed-in user, when known) rides
+/// along as `asEmail` so the web side can tell a browser that is ALREADY
+/// signed in, just as someone else, from one with no session at all — see
+/// `requireMatchingAccount` in `web/src/auth/middleware.ts`. Without it the
+/// GitHub installation would silently bind to whichever Antgrid account the
+/// browser happened to be signed into.
+Future<void> openGitHubIntegrationsInBrowser(
+  ProviderContainer ref, {
+  String? appUserEmail,
+}) async {
+  final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
+  final uri = Uri.parse('$base/integrations/connect').replace(
+    queryParameters: (appUserEmail == null || appUserEmail.isEmpty)
+        ? null
+        : {'asEmail': appUserEmail},
+  );
+  await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
 Future<void> openUpgradeInBrowser(

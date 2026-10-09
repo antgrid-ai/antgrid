@@ -540,10 +540,15 @@ class PanelRow extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.trailing,
+    this.leading,
     this.mono = true,
   });
 
   final String icon;
+
+  /// Drawn in place of [icon] when the row names something with its own mark
+  /// (a label's colour dot), so it looks the same here as everywhere else.
+  final Widget? leading;
   final String label;
   final bool selected;
 
@@ -593,7 +598,8 @@ class _PanelRowState extends State<PanelRow> {
         children: [
           Padding(
             padding: const EdgeInsets.only(right: 9),
-            child: AbIcon(widget.icon, size: 13, color: iconFg),
+            child:
+                widget.leading ?? AbIcon(widget.icon, size: 13, color: iconFg),
           ),
           Expanded(
             child: Text(

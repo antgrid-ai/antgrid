@@ -44,7 +44,7 @@ async function request(options: {
     env: { BETTER_AUTH_URL: "https://account.example", EXTRA_TOKEN_AUDIENCES: [] } as unknown as Env }));
   app.get("/", (c) => c.json(c.get("deviceAuthorization")));
   const token = await new SignJWT({ uid: "owner", deviceUuid: deviceId,
-    azp: "credential", pk: publicKey.toString("base64"), ...options.claims })
+    azp: "credential", pk: publicKey.toString("base64"), scope: "agent", ...options.claims })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer(issuer)
     .setAudience(options.audience ?? issuer).setIssuedAt().setExpirationTime("1m")
     .sign(keys.privateKey);

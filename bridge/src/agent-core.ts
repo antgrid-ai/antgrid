@@ -2070,7 +2070,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Budgeted, not promised: `gracefulBudget` answers 0 for a service or
         // an ad-hoc terminal, and a user terminal someone is running an agent
         // in is the case the budget exists for.
-        manager.kill(internalTerminalId(runtime, msg.terminalId), AGENT_GRACE_MS);
+        const stopId = internalTerminalId(runtime, msg.terminalId);
+        manager.kill(stopId, AGENT_GRACE_MS);
+        // A configured service or setup transcript is the checkout's to
+        // release, never a user delete's.
+        const isService = (runtime.config.services ?? []).some((s) => s.name === msg.terminalId);
+        if (msg.forget && !isService && !setupTerminalIds.has(stopId)) manager.forget(stopId);
         sendStatus();
         break;
       }
@@ -2476,6 +2481,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               approvalPolicy: msg.approvalPolicy ?? "default",
               isolation: msg.isolation ?? "shared",
               baseBranch: msg.baseBranch,
+              taskRef: msg.taskRef,
             });
             sendAb(createMessage("session:result", {
               requestId: msg.requestId, ok: true, session: created, checkoutId: created.checkoutId,

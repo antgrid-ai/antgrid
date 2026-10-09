@@ -2,6 +2,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -25,6 +26,7 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
+import '../providers/auth.dart' show currentUserProvider;
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/drawer_entries.dart';
@@ -35,6 +37,7 @@ import '../providers/new_session_action.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../providers/tasks.dart' show openTaskCountProvider;
 import '../services/control_plane_client.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -50,9 +53,11 @@ import 'drawer_entry_row.dart'
         LocalMachineBand,
         MachineDrawerHeaderRow,
         drawerProjectTitleStyle;
+import 'drawer_dismiss.dart';
 import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'session_row.dart';
+import 'tasks/tasks_surface.dart' show openTasks;
 import 'update_row.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
@@ -224,16 +229,6 @@ class _SetupDock extends ConsumerWidget {
   }
 }
 
-/// Mobile: the drawer is a slide-in overlay, so an action that navigates
-/// elsewhere must dismiss it or the destination stays hidden behind it. No-op on
-/// desktop, where the drawer is always-on chrome rather than a route.
-void closeDrawerIfOverlay(BuildContext context) {
-  final scaffold = Scaffold.maybeOf(context);
-  if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
-    Navigator.of(context).pop();
-  }
-}
-
 class _NavActions extends ConsumerWidget {
   const _NavActions();
 
@@ -241,6 +236,9 @@ class _NavActions extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final surface = ref.watch(workbenchSurfaceProvider);
     final schedulerEnabled = !ref.watch(demoModeProvider);
+    // Tasks are account data: the row is absent signed out, not disabled.
+    final signedIn = ref.watch(currentUserProvider).value != null;
+    final openTaskCount = signedIn ? ref.watch(openTaskCountProvider) ?? 0 : 0;
     void openScheduler() {
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -257,6 +255,7 @@ class _NavActions extends ConsumerWidget {
       required bool selected,
       required VoidCallback onTap,
       bool enabled = true,
+      Widget? trailing,
     }) {
       Widget row = AbListRow(
         title: Text(label, style: AbTokens.sansStyle()),
@@ -265,6 +264,7 @@ class _NavActions extends ConsumerWidget {
           size: AbTokens.iconButtonGlyph,
           color: context.antgrid.textSecondary,
         ),
+        trailing: trailing,
         density: AbRowDensity.sm,
         horizontalPadding: AbTokens.space8,
         selected: selected,
@@ -310,6 +310,26 @@ class _NavActions extends ConsumerWidget {
               enabled: schedulerEnabled,
               onTap: openScheduler,
             ),
+            if (signedIn) ...[
+              const SizedBox(height: AbTokens.space4),
+              navigationRow(
+                label: 'Tasks',
+                icon: AbIcons.tasks,
+                selected: surface == WorkbenchSurface.tasks,
+                // Open tasks across the whole account — the scope the surface
+                // itself opens onto.
+                trailing: openTaskCount > 0
+                    ? Text(
+                        '$openTaskCount',
+                        style: AbTokens.monoStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: context.antgrid.textMuted,
+                        ),
+                      )
+                    : null,
+                onTap: () => openTasks(context, ref),
+              ),
+            ],
           ],
         ),
       ),
@@ -406,6 +426,8 @@ class _Footer extends ConsumerWidget {
   }
 }
 
+const double _drawerCacheExtent = 4000;
+
 class _Body extends ConsumerWidget {
   final List<DrawerEntry> entries;
 
@@ -446,39 +468,44 @@ class _Body extends ConsumerWidget {
   }
 
   Widget _list(BuildContext context, WidgetRef ref) {
-    if (entries.isEmpty) {
-      // Point at the real entry points rather than a nonexistent "[+]". On
-      // desktop the New Session canvas (with its "Open local folder" / "Pair
-      // remote project" cards) sits right beside this drawer, so steer there;
-      // local folders aren't supported on mobile, so name only pairing.
-      //
-      // A scrollable (not a bare Center) so the pull-to-refresh gesture works
-      // with zero rows — overscroll needs something scrollable to grab.
-      return ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
-            child:
-                // Mobile has no local folders — this drawer fills from machines
-                // on the account, so point there (the New Session canvas
-                // carries the full connect steps).
-                isMobilePlatform
-                ? const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Connect a machine to see its projects here.',
-                  )
-                // Desktop's real entry point is a local folder; offer it
-                // in place instead of describing where else to find it.
-                : const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Open a folder to get started.',
-                    action: OpenFolderButton(),
-                  ),
-          ),
-        ],
-      );
-    }
+    return entries.isEmpty ? _emptyState(context) : _entriesList(context, ref);
+  }
+
+  Widget _emptyState(BuildContext context) {
+    // Point at the real entry points rather than a nonexistent "[+]". On
+    // desktop the New Session canvas (with its "Open local folder" / "Pair
+    // remote project" cards) sits right beside this drawer, so steer there;
+    // local folders aren't supported on mobile, so name only pairing.
+    //
+    // A scrollable (not a bare Center) so the pull-to-refresh gesture works
+    // with zero rows — overscroll needs something scrollable to grab.
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
+          child:
+              // Mobile has no local folders — this drawer fills from machines
+              // on the account, so point there (the New Session canvas
+              // carries the full connect steps).
+              isMobilePlatform
+              ? const AbEmptyState(
+                  title: 'No projects yet',
+                  subtitle: 'Connect a machine to see its projects here.',
+                )
+              // Desktop's real entry point is a local folder; offer it
+              // in place instead of describing where else to find it.
+              : const AbEmptyState(
+                  title: 'No projects yet',
+                  subtitle: 'Open a folder to get started.',
+                  action: OpenFolderButton(),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _entriesList(BuildContext context, WidgetRef ref) {
     // The band names ONE machine, so it is emitted once for the whole list —
     // at the first local project, wherever the persisted order happens to put
     // it. Derived from the list rather than from each row's neighbour: an
@@ -489,6 +516,11 @@ class _Body extends ConsumerWidget {
     return ReorderableListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AbTokens.space4),
+      // Generous, so the focused session's row is built even while it is well
+      // off screen: a row can only scroll itself into view (SessionRow's
+      // reveal) once it exists, and the default extent leaves a far one
+      // unbuilt until the user scrolls to it by hand.
+      scrollCacheExtent: const ScrollCacheExtent.pixels(_drawerCacheExtent),
       buildDefaultDragHandles: false,
       itemCount: entries.length,
       proxyDecorator: (child, _, _) =>
@@ -588,6 +620,7 @@ class _EntryWithSessions extends ConsumerWidget {
     // what opens the machine's control-plane socket. A local project (or a
     // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
     // collapse in [collapsedDrawerIdsProvider].
+    final entry = this.entry;
     // A folded "This machine" keeps only its band (on the first local row);
     // every other local row folds to nothing but keeps its keyed slot so the
     // reorder indices stay valid.
