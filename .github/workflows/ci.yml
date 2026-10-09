@@ -44,6 +44,9 @@ jobs:
       - name: Check licence map
         run: bun run check:licenses
 
+      - name: Test SPDX artifact generation
+        run: bun run test:spdx-sbom
+
       - name: Cache Bun install cache
         uses: actions/cache@v6
         with:
