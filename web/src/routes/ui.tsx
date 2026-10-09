@@ -91,6 +91,7 @@ import {
   deleteUserAccount,
   hasRenewingPaidSubscription,
   isBlockedByTeamMembers,
+  ownedTeam,
 } from "../services/account.js";
 import {
   AccountMemberRoleSchema,
@@ -1061,13 +1062,19 @@ export function uiRoutes(deps: {
     // Ahead of every read, as on /account and /dashboard: this page reports an
     // account's entitlement, and provisioning is what guarantees there is one.
     await provisionProductAccountForUser(deps.db, userId);
-    const [accountId, isOwner] = await Promise.all([
+    const [accountId, isOwner, owned] = await Promise.all([
       resolveBillingAccountId(deps.db, userId),
       isBillingAccountOwner(deps.db, userId),
+      ownedTeam(deps.db, userId),
     ]);
     if (!accountId) return c.redirect("/login");
     const user = layoutUser(c);
     const notice = parseTeamNotice(c.req.query("invite"));
+    // Joining another team leaves the account you own, members and all, and
+    // this page then shows the team you joined. Its people block your account's
+    // deletion and none of the verbs here can reach them, so say where they are.
+    const hiddenTeamMembers =
+      owned && owned.accountId !== accountId ? owned.otherMembers : 0;
 
     if (!isOwner) {
       const [membership, account, otherOwners] = await Promise.all([
@@ -1082,6 +1089,7 @@ export function uiRoutes(deps: {
         <TeamPage
           user={user}
           notice={notice}
+          hiddenTeamMembers={hiddenTeamMembers}
           view={{
             kind: "member",
             ownerEmail: account?.user.email ?? null,
@@ -1115,6 +1123,7 @@ export function uiRoutes(deps: {
       <TeamPage
         user={user}
         notice={notice}
+        hiddenTeamMembers={hiddenTeamMembers}
         view={{
           kind: "owner",
           seatsPurchased: sub?.seats ?? null,

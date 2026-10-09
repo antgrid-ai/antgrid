@@ -7,7 +7,7 @@ import { buildTestApp } from "../helpers/app.js";
 import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember } from "../helpers/fixtures.js";
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender } from "../../src/auth/email.js";
-import { deleteUserAccount } from "../../src/services/account.js";
+import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../../src/services/account.js";
 import { ensureFreeSubscription, provisionProductAccountForUser } from "../../src/models/subscription.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
 import { createOutboxSender, EmailKeyring } from "../../src/auth/email-outbox.js";
@@ -417,7 +417,10 @@ describe("DELETE /account/me", () => {
     expect(res.status).toBe(409);
     // Distinct from SUBSCRIPTION_ACTIVE: the owner cannot clear this one by
     // cancelling, so the client must be able to tell the two refusals apart.
-    expect(await res.json()).toEqual({ error: "TEAM_HAS_MEMBERS" });
+    expect(await res.json()).toEqual({
+      error: "TEAM_HAS_MEMBERS",
+      message: TEAM_HAS_MEMBERS_MESSAGE,
+    });
   });
 
   test("a member's own DELETE /account/me succeeds while the team bills on", async () => {

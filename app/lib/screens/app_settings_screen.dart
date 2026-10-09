@@ -121,7 +121,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
   Future<void> _deleteAccount() async {
     final confirmed = await DeleteAccountDialog.show(context);
     if (!confirmed || !mounted) return;
-    final result = await ref.read(accountApiProvider).deleteAccount();
+    final (:result, :message) = await ref
+        .read(accountApiProvider)
+        .deleteAccount();
     if (!mounted) return;
     switch (result) {
       case DeleteAccountResult.ok:
@@ -145,7 +147,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           context: context,
           title: 'Remove your team members first',
           body:
-              'Your account still has team members. Remove them on the team '
+              message ??
+              'Your account still has team members. Remove them on the Team '
               'page, or contact support to transfer ownership, before deleting '
               'your account.',
           confirmLabel: 'Manage team',
@@ -159,6 +162,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           context: context,
           title: "Account can't be deleted yet",
           body:
+              message ??
               'Something on your account has to be resolved first. Your '
               'account page says what it is.',
           confirmLabel: 'Open account',
