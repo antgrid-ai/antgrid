@@ -391,6 +391,7 @@ class PreviewService {
         PreviewTab(
           port: port,
           scheme: scheme,
+          owner: session.projectId,
           localPort: port,
           currentUrl: '$scheme://localhost:$port$suffix',
         ),
@@ -469,6 +470,7 @@ class PreviewService {
       PreviewTab(
         port: port,
         scheme: tabScheme,
+        owner: session.projectId,
         localPort: localPort,
         currentUrl: '$tabScheme://localhost:$localPort$suffix',
       ),

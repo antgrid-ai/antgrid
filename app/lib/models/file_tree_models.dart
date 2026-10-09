@@ -365,16 +365,14 @@ class GitHistoryState {
 
 /// Per-tab right-pane state for the Git tab.
 ///
-/// Mutated only by Git-tab actions (requestDiff, clearDiff, gitViewFile,
-/// gitClearViewing). Reading these fields from the Files tab is a leak.
+/// Mutated only by Git-tab actions (requestDiff, clearDiff). Reading these
+/// fields from the Files tab is a leak.
 ///
 /// [diffPath]/[diffContent]/[diffLoading] back the DiffViewer — for a working
 /// -tree diff when [diffCommitSha] is null, or for that commit's diff of
 /// [diffPath] when it is set. One shared slot rather than a second copy under
 /// [GitHistoryState]: only one diff is ever open regardless of which tab it
 /// was opened from, and the viewer itself renders the same either way.
-/// [viewingPath]/[viewingFile]/[viewingLoading] back the "View File from diff"
-/// mode that renders a FileContentViewer inside the Git pane.
 class GitPaneState {
   final String? diffPath;
   final String? diffContent;
@@ -386,10 +384,6 @@ class GitPaneState {
   /// working tree — the History tab's file list opens a diff the same way the
   /// Changes tab does, just scoped to a commit instead of HEAD.
   final String? diffCommitSha;
-
-  final String? viewingPath;
-  final FileContent? viewingFile;
-  final bool viewingLoading;
 
   /// The History tab's own state — commit list, pagination, and expanded
   /// per-commit file lists. See [GitHistoryState].
@@ -442,9 +436,6 @@ class GitPaneState {
     this.diffDeletions,
     this.diffLoading = false,
     this.diffCommitSha,
-    this.viewingPath,
-    this.viewingFile,
-    this.viewingLoading = false,
     this.collapsedPaths = const {},
     this.historyCollapsed = false,
     this.changesCollapsed = false,
@@ -465,10 +456,6 @@ class GitPaneState {
     String? diffCommitSha,
     bool clearDiffCommitSha = false,
     bool clearDiff = false,
-    String? viewingPath,
-    FileContent? viewingFile,
-    bool? viewingLoading,
-    bool clearViewing = false,
     Set<String>? collapsedPaths,
     bool? historyCollapsed,
     bool? changesCollapsed,
@@ -488,12 +475,7 @@ class GitPaneState {
       diffCommitSha: (clearDiff || clearDiffCommitSha)
           ? null
           : (diffCommitSha ?? this.diffCommitSha),
-      viewingPath: clearViewing ? null : (viewingPath ?? this.viewingPath),
-      viewingFile: clearViewing ? null : (viewingFile ?? this.viewingFile),
-      viewingLoading: clearViewing
-          ? false
-          : (viewingLoading ?? this.viewingLoading),
-      // Survives clearDiff/clearViewing: closing a diff is not a reason to
+      // Survives clearDiff: closing a diff is not a reason to
       // reopen every folder the user shut to find it.
       collapsedPaths: collapsedPaths ?? this.collapsedPaths,
       historyCollapsed: historyCollapsed ?? this.historyCollapsed,

@@ -1,13 +1,9 @@
 import { join } from "node:path";
 import { z } from "zod";
-import { atomicWriteFile } from "../../atomic-file";
 import { hookShellCommand, type HookCommand } from "../../hook-command";
-import { logger } from "../../host";
-import { hasFiles, NO_INJECTION } from "../launch-inject";
+import { materializeJson, NO_INJECTION } from "../launch-inject";
 import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
-
-const log = logger.child({ component: "agent-launch" });
 
 function materializeCopilotPlugin(
   abDir: string,
@@ -36,12 +32,7 @@ function materializeCopilotPlugin(
       ],
     },
   };
-  try {
-    atomicWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  } catch (err) {
-    log.warn("failed to materialize bundled Copilot plugin: %s", err);
-  }
-  return hasFiles([manifestPath]) ? targetDir : null;
+  return materializeJson("bundled Copilot plugin", { [manifestPath]: manifest }) ? targetDir : null;
 }
 
 export function inject({ abDir, hookCommand }: HookInjectCtx): LaunchAugmentation {

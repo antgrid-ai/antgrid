@@ -12,6 +12,7 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/widgets/agent_work_status_dot.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_session_row_widget.dart';
+import 'package:antgrid/widgets/recent_sessions/recent_sessions_summary.dart';
 
 /// A catalog notifier seeded with a fixed map, bypassing the disk hydration —
 /// stands in for "a bridge has already described these agents".
@@ -57,6 +58,41 @@ Widget _wrap(Widget child, {Map<String, String> catalog = _catalogSeed}) {
 }
 
 void main() {
+  group('recentOriginText drops what the group header names', () {
+    const remote = RecentOrigin(
+      isLocal: false,
+      registrationId: 'm.p',
+      projectId: 'p',
+      machineUuid: 'm',
+      projectName: 'api',
+      deviceName: 'buildbox',
+    );
+    const local = RecentOrigin(
+      isLocal: true,
+      registrationId: 'p',
+      projectId: 'p',
+      machineUuid: null,
+      projectName: 'api',
+      deviceName: 'This device',
+    );
+
+    test('ungrouped and by status show both for a remote row', () {
+      expect(recentOriginText(remote, null), 'buildbox · api');
+      expect(recentOriginText(remote, RecentGroupBy.status), 'buildbox · api');
+      expect(recentOriginText(local, RecentGroupBy.status), 'api');
+    });
+
+    test('by machine shows the project alone', () {
+      expect(recentOriginText(remote, RecentGroupBy.machine), 'api');
+      expect(recentOriginText(local, RecentGroupBy.machine), 'api');
+    });
+
+    test('by project shows the machine alone, nothing for local', () {
+      expect(recentOriginText(remote, RecentGroupBy.project), 'buildbox');
+      expect(recentOriginText(local, RecentGroupBy.project), isEmpty);
+    });
+  });
+
   testWidgets('renders session name, agent mark, and project in order', (
     tester,
   ) async {

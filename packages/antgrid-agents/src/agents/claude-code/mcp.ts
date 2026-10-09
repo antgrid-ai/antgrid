@@ -1,11 +1,7 @@
 import { join } from "node:path";
-import { atomicWriteFile } from "../../atomic-file";
 import type { BridgeCommand } from "../../hook-command";
-import { logger } from "../../host";
-import { hasFiles, NO_INJECTION } from "../launch-inject";
+import { materializeJson, NO_INJECTION } from "../launch-inject";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
-
-const log = logger.child({ component: "agent-launch" });
 
 // Claude expands `${VAR}` in an MCP entry's `env` against its OWN environment
 // at spawn time, so the port and terminal id stay symbolic here and one file
@@ -26,7 +22,7 @@ function materializeClaudeMcpConfig(
   const configPath = join(abDir, "mcp", "claude.json");
   const config = {
     mcpServers: {
-      // The same server key `plugin/setup.ts` writes, so the two entries a user
+      // The same server key `project-integrations.ts` writes, so the two entries a user
       // with both can end up holding are argv-identical rather than rival.
       antgrid: {
         type: "stdio",
@@ -36,12 +32,7 @@ function materializeClaudeMcpConfig(
       },
     },
   };
-  try {
-    atomicWriteFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  } catch (err) {
-    log.warn("failed to materialize Claude MCP config: %s", err);
-  }
-  return hasFiles([configPath]) ? configPath : null;
+  return materializeJson("Claude MCP config", { [configPath]: config }) ? configPath : null;
 }
 
 // `--mcp-config` and never `--strict-mcp-config`: the strict form would drop

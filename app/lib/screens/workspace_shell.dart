@@ -172,7 +172,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   /// a session opens on the agent alone, full width; the pane only appears
   /// once the user actually asks for it, by picking a view from the agent
   /// bar's workspace popup (see [_openContextPanel] and
-  /// [_revealWorkspaceView]) — the workspace button itself only ever
+  /// [revealView]) — the workspace button itself only ever
   /// shows/hides that popup, never this flag directly (see
   /// `WorkspaceMenuButton`'s own doc). No swipe reaches this flag in either
   /// direction, deliberately; [_tabletFlingLeftward] holds the reason.
@@ -263,7 +263,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(switchToAgentProvider.notifier).set(switchToAgentPage);
-      ref.read(revealHandlerTabProvider.notifier).set(revealHandlerTab);
+      ref.read(revealWorkspaceViewControlProvider.notifier).set(revealView);
       ref.read(openDrawerProvider.notifier).set(_publishedToggleDrawer);
       if (ref.read(selectedRegistrationIdProvider) != null) {
         detached(
@@ -296,11 +296,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // The reveal callback closes over this State (setState + _pageController),
     // so leaving it published would let the session kebab's attention row call
     // into a disposed shell after a project switch.
-    final revealNotifier = ref.read(revealHandlerTabProvider.notifier);
+    final revealViewNotifier = ref.read(
+      revealWorkspaceViewControlProvider.notifier,
+    );
     // Same lifetime again: a stale tab left published here would let a back
     // press dispatch into handlers this route no longer has.
     final visibleViewNotifier = ref.read(visibleWorkspaceViewProvider.notifier);
-    // Closes over this State via `_revealWorkspaceView`, so the same rule as
+    // Closes over this State via `revealView`, so the same rule as
     // the reveal callback above: left published, the agent bar's workspace menu
     // would call setState on a disposed shell.
     final menuNotifier = ref.read(workspaceMenuControlProvider.notifier);
@@ -333,7 +335,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
           sidebarNotifier.set(null);
         }
         agentBarNotifier.set(false);
-        revealNotifier.set(null);
+        revealViewNotifier.set(null);
         visibleViewNotifier.set(null);
         menuNotifier.set(null);
         agentSurfaceNotifier.set(false);
@@ -376,13 +378,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
 
   /// Falls back to Files for a tab this session does not currently offer.
   ///
-  /// [visibleWorkspaceViewsProvider] offers every view today, but a persisted
-  /// ordinal, a per-session restore and a deep link can each still name one it
-  /// has stopped offering — a build that dropped a view, or a conditional one
-  /// added back. Left unchecked, the panel shows a body with no tab marked and
-  /// nothing to switch back with.
+  /// A persisted ordinal, a per-session restore and a deep link can each name a
+  /// view [visibleWorkspaceViewsProvider] does not offer — Handler on a session
+  /// that is not armed, or a view a build dropped. Left unchecked, the panel
+  /// shows a body with no tab marked and nothing to switch back with.
+  ///
+  /// A display-time fallback only, so build-only: watching the offer re-runs
+  /// it when a tab goes away and comes back, and the stored choice is left
+  /// alone, so arming the Handler again shows its tab again.
   WorkspaceView _offeredOr(WorkspaceView view) =>
-      ref.read(visibleWorkspaceViewsProvider).contains(view)
+      ref.watch(visibleWorkspaceViewsProvider).contains(view)
       ? view
       : WorkspaceView.files;
 
@@ -732,14 +737,17 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
 
   void switchToAgentPage() => _goToPage(_MobilePage.agent);
 
-  /// Reveal the Handler workspace tab from anywhere (e.g. the session kebab's
-  /// attention row). Desktop: selects the sidebar view, un-hiding the panel
-  /// first if the user had it closed — a row that selected a tab nobody can
-  /// see would answer a call to action with nothing at all. Mobile: also swipes
-  /// to the workspace page.
-  void revealHandlerTab() {
+  /// Put [view] in front of the user from anywhere — the session kebab's
+  /// attention row, the agent bar's workspace menu, a drained navigation.
+  /// Published as [revealWorkspaceViewControlProvider].
+  ///
+  /// Desktop un-hides the context panel first if the user had it closed: each
+  /// of those callers is reachable while the panel is off screen, and a view
+  /// selected where nobody can see it would answer them with nothing at all.
+  /// Mobile swipes to the workspace page instead.
+  void revealView(WorkspaceView view) {
     _openContextPanel();
-    _selectView(WorkspaceView.handler);
+    _selectView(view);
     _goToPage(_MobilePage.workspace);
   }
 
@@ -1041,7 +1049,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
                 : _selectedView);
       final menu = surfaceChild != null
           ? null
-          : (active: visibleView, reveal: _revealWorkspaceView);
+          : (active: visibleView, reveal: revealView);
       // Whether [_agentPanel] is actually mounted/on screen: false behind a
       // workbench surface (settings/new-session); on a mouse desktop, also
       // false in [_PanelMode.contextExpanded] (only the workspace panel
@@ -1417,22 +1425,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     }
   }
 
-  /// Put [view] in front of the user in the docked context panel, un-hiding it
-  /// first if the user had it closed — the same recovery [revealHandlerTab]
-  /// gives the kebab's attention row, since the menu is reachable from panel
-  /// modes where the context panel is off screen entirely.
-  ///
-  /// The entry point for every caller that names a view from outside the tab
-  /// strip: the agent bar's workspace menu.
-  ///
-  /// Mobile never gets here (the menu is desktop-only, see
-  /// [workspaceMenuControlProvider]), but falls back to the ordinary tab
-  /// switch, which is a no-op past the guard above.
-  void _revealWorkspaceView(WorkspaceView view) {
-    _openContextPanel();
-    _selectView(view);
-  }
-
   /// Show the view a navigation left in [pendingWorkspaceViewProvider].
   ///
   /// Spent only once it has actually been honoured, so a route that cannot show
@@ -1452,23 +1444,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // reason. This is the drain a handler route uses, so the cross-project
     // escalation tap is the flow that needs it most.
     if (ref.read(pendingActiveSessionIdProvider) != null) return;
-    final mobile = _isMobileLayout;
     // Mobile needs the PageView, which does not exist until a build past the
     // boot gate — and a tab switched behind the page the user is looking at
     // reads as a no-op, so the move is half the request, not a flourish.
-    if (mobile && !_pageController.hasClients) return;
+    if (_isMobileLayout && !_pageController.hasClients) return;
     notifier.set(null);
-    if (mobile) {
-      // [_revealWorkspaceView] already degrades to the tab here, but leaves
-      // the PageView on the agent page.
-      _selectView(pending.value);
-      _goToPage(_MobilePage.workspace);
-      return;
-    }
-    // Desktop un-hides the docked context panel and selects the view there —
-    // same recovery [revealHandlerTab] gives the kebab's attention row, since
-    // a navigation can land while the panel is off screen entirely.
-    _revealWorkspaceView(pending.value);
+    revealView(pending.value);
   }
 
   /// Show the agent transcript a navigation left in [pendingAgentPageProvider].

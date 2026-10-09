@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../storage/drawer_collapsed_store.dart';
 import 'agent_transport.dart';
+import 'demo_mode.dart';
 
 /// Synchronous handle to the on-disk collapsed-ids store. Opened eagerly in
 /// `main()` and injected via a Riverpod override; reading without the override
@@ -40,7 +41,9 @@ final drawerCollapsedStoreProvider = Provider<DrawerCollapsedStore>((_) {
 ///     elsewhere makes the previous project's stored collapse reassert
 ///     automatically — the overlay is a single slot, not an accumulating set.
 class CollapsedDrawerIdsNotifier extends Notifier<Set<String>> {
-  late final DrawerCollapsedStore _store;
+  // Not final: build() re-runs on this same instance whenever the demo
+  // switch flips.
+  late DrawerCollapsedStore _store;
 
   /// Persisted truth — the only thing [_persist] ever writes.
   late Set<String> _collapsed;
@@ -49,10 +52,16 @@ class CollapsedDrawerIdsNotifier extends Notifier<Set<String>> {
   /// selected; holds at most one id (the active project).
   String? _selected;
 
+  /// The demo folds from nothing and never persists: nothing about it may
+  /// reach disk. Watching the switch rebuilds from the store on the way out,
+  /// so a fold made in the sample project does not greet the real app.
+  late bool _demo;
+
   @override
   Set<String> build() {
     _store = ref.watch(drawerCollapsedStoreProvider);
-    _collapsed = Set.unmodifiable(_store.read());
+    _demo = ref.watch(demoModeProvider);
+    _collapsed = _demo ? const <String>{} : Set.unmodifiable(_store.read());
     // Seed the selection overlay with a ONE-SHOT read, then listen WITHOUT
     // fireImmediately. A fireImmediately listener fires synchronously during
     // build(); its callback (expandForSelection → _emit) writes `state`, which
@@ -124,7 +133,10 @@ class CollapsedDrawerIdsNotifier extends Notifier<Set<String>> {
 
   // Fire-and-forget, matching DrawerOrderNotifier: in-memory state updates
   // synchronously, the SharedPreferences write is best-effort.
-  void _persist() => unawaited(_store.write(_collapsed));
+  void _persist() {
+    if (_demo) return;
+    unawaited(_store.write(_collapsed));
+  }
 }
 
 final collapsedDrawerIdsProvider =

@@ -147,6 +147,9 @@ class AgentStatusMessage {
   final GitInfo? git;
   final bool? needsFirstRun;
 
+  /// The folder this checkout's ad-hoc terminals start in.
+  final String? checkoutPath;
+
   const AgentStatusMessage({
     required this.id,
     required this.timestamp,
@@ -159,6 +162,7 @@ class AgentStatusMessage {
     this.proxies,
     this.git,
     this.needsFirstRun,
+    this.checkoutPath,
   });
 }
 
@@ -1447,6 +1451,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         proxies: proxies.isEmpty ? null : proxies,
         git: git,
         needsFirstRun: json['needsFirstRun'] as bool?,
+        checkoutPath: json['checkoutPath'] as String?,
       );
 
     case 'terminal:output':

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
@@ -11,10 +11,16 @@ import { cursorHookCommand } from "../../packages/antgrid-agents/src/agents/curs
 import { codexNotifyOnlyArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
 import { pluginDirArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
 import { AGENTS } from "../src/agent-runtime";
+import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
+import { withUserEnv } from "./support/user-env";
 import type { AgentKey, LaunchAugmentation } from "../../packages/antgrid-agents/src/agents/types";
 
 const dirs: string[] = [];
 function abdir() { const d = mkdtempSync(join(tmpdir(), "ab-aug-")); dirs.push(d); return d; }
+// A stand-in for `cursor-agent --help`: no test spawns the developer's binary.
+const CURSOR_HELP = "--trust\n--plugin-dir <dir>";
+beforeAll(() => overrideCursorHelp(CURSOR_HELP));
+afterAll(() => overrideCursorHelp(undefined));
 afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
 
 const HOOK_COMMAND: HookCommand = {
@@ -110,31 +116,28 @@ describe("augmentAgentLaunch", () => {
   });
 
   test("opencode emits its existing runtime-owned plugin config", () => {
-    const prev = process.env.OPENCODE_CONFIG;
-    delete process.env.OPENCODE_CONFIG;
-    try {
-      const a = augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF });
-      expect(a.args).toEqual([]);
-      const cfgPath = a.env.OPENCODE_CONFIG;
-      expect(cfgPath).toBeTruthy();
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      expect(Array.isArray(cfg.plugin)).toBe(true);
-      expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
-    } finally { if (prev !== undefined) process.env.OPENCODE_CONFIG = prev; }
+    const a = withUserEnv({}, () => augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF }));
+    expect(a.args).toEqual([]);
+    const cfgPath = a.env.OPENCODE_CONFIG;
+    expect(cfgPath).toBeTruthy();
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    expect(Array.isArray(cfg.plugin)).toBe(true);
+    expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
   });
 
   test("opencode respects a user-set OPENCODE_CONFIG", () => {
-    const prev = process.env.OPENCODE_CONFIG;
-    process.env.OPENCODE_CONFIG = "/user/own.json";
-    try {
-      const launch = augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF });
-      expect(launch).toEqual(NO_INJECTION);
-      expect(launch.observation?.handler).toBe(false);
-      expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
-      expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
-    } finally {
-      if (prev === undefined) delete process.env.OPENCODE_CONFIG; else process.env.OPENCODE_CONFIG = prev;
-    }
+    const launch = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () =>
+      augmentAgentLaunch("opencode", { abDir: abdir(), self: BRIDGE_SELF }),
+    );
+    // Only the hook channel yields; the MCP entry travels in its own variable.
+    expect(launch.args).toEqual([]);
+    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid).toEqual({
+      type: "local", command: [HOOK_COMMAND.binary, "mcp"],
+    });
+    expect(launch.observation).toEqual(NO_OBSERVATION);
+    expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
+    expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
   });
 
   test("unknown tool has no injection", () => {
@@ -145,7 +148,7 @@ describe("augmentAgentLaunch", () => {
     const abDir = abdir();
     const cursorDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir, self: BRIDGE_SELF });
-    expect(a.args).toEqual(["--trust"]);
+    expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
 
@@ -193,7 +196,12 @@ describe("augmentAgentLaunch", () => {
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: cursorDirAsFile, self: BRIDGE_SELF });
     // --trust survives the failed write: workspace trust is independent of the
     // hooks channel, and the spawn must not regress to a trust prompt.
-    expect(a).toEqual({ args: ["--trust"], env: {}, notificationsInjected: false, observation: NO_OBSERVATION });
+    expect(a).toEqual({
+      args: ["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")],
+      env: {},
+      notificationsInjected: false,
+      observation: NO_OBSERVATION,
+    });
   });
 
   test("claude launches without plugin-dir and enables OSC fallback when materialization fails", () => {
@@ -287,19 +295,12 @@ describe("augmentAgentLaunch", () => {
 
 
 test("failed runtime plugin config leaves independent fallback channels available", () => {
-  const previous = process.env.OPENCODE_CONFIG;
-  delete process.env.OPENCODE_CONFIG;
   const file = join(abdir(), "not-a-directory");
   writeFileSync(file, "x");
-  try {
-    const launch = augmentAgentLaunch("opencode", { abDir: file, self: BRIDGE_SELF });
-    expect(launch.observation).toEqual(NO_OBSERVATION);
-    expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
-    expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
-  } finally {
-    if (previous === undefined) delete process.env.OPENCODE_CONFIG;
-    else process.env.OPENCODE_CONFIG = previous;
-  }
+  const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", { abDir: file, self: BRIDGE_SELF }));
+  expect(launch.observation).toEqual(NO_OBSERVATION);
+  expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
+  expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
 });
 
 test("notification and title installation outcomes are independent", () => {
@@ -420,5 +421,118 @@ describe("augmentAgentLaunch MCP injection", () => {
     }, () => ({ ...spec, mcp: { inject() { throw new Error("boom"); } } }));
     expect(a.args).toEqual(["--plugin-dir", join(abDir, "plugin", "claude")]);
     expect(a.notificationsInjected).toBe(true);
+  });
+});
+
+describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
+  afterEach(() => overrideCursorHelp(CURSOR_HELP));
+
+  const ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "mcp"] };
+  const FAMILY = [
+    { tool: "opencode", envVar: "OPENCODE_CONFIG_CONTENT" },
+    { tool: "kilo", envVar: "KILO_CONFIG_CONTENT" },
+  ] as const;
+
+  for (const { tool, envVar } of FAMILY) {
+    const augmentWith = (value?: string) =>
+      withUserEnv(value === undefined ? {} : { [envVar]: value }, () =>
+        augmentAgentLaunch(tool, { abDir: abdir(), self: BRIDGE_SELF }),
+      );
+
+    test(`${tool} adds mcp.antgrid as separate command fields`, () => {
+      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
+    });
+
+    test(`${tool} keeps a user's ${envVar} keys and their own mcp servers`, () => {
+      const a = augmentWith(JSON.stringify({
+        model: "x/y",
+        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: { type: "remote", url: "stale" } },
+      }));
+      expect(JSON.parse(a.env[envVar])).toEqual({
+        model: "x/y",
+        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
+      });
+    });
+
+    test(`${tool} injects nothing into a ${envVar} that is not a JSON object`, () => {
+      for (const bad of ["not json", "[1]", '"s"', "null", "7"]) {
+        expect(augmentWith(bad).env[envVar]).toBeUndefined();
+      }
+    });
+
+    test(`${tool} treats a blank ${envVar} as unset`, () => {
+      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
+    });
+  }
+
+  test("github-copilot writes the allowlisted entry and names it by an @ forward-slash path", () => {
+    const abDir = abdir();
+    const a = augmentAgentLaunch("github-copilot", { abDir, self: BRIDGE_SELF });
+    const file = join(abDir, "mcp", "copilot.json");
+    expect(a.args.slice(-2)).toEqual(["--additional-mcp-config", `@${file.replace(/\\/g, "/")}`]);
+    // Outside the tree the hooks hand to `--plugin-dir`: a `.mcp.json` in
+    // there would register the server twice.
+    expect(a.args).toContain(join(abDir, "plugin", "copilot"));
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      mcpServers: { antgrid: { type: "local", command: HOOK_COMMAND.binary, args: ["mcp"], tools: ["*"] } },
+    });
+  });
+
+  test("github-copilot drops only the MCP flag when its file cannot be written", () => {
+    const abDir = abdir();
+    writeFileSync(join(abDir, "mcp"), "");
+    const a = augmentAgentLaunch("github-copilot", { abDir, self: BRIDGE_SELF });
+    expect(a.args).toEqual(["--plugin-dir", join(abDir, "plugin", "copilot")]);
+  });
+
+  test("cursor-agent materializes a plugin whose server expands its identity from cursor's env", () => {
+    const abDir = abdir();
+    const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
+    const pluginDir = join(abDir, "plugin", "cursor");
+    expect(a.args).toEqual(["--trust", "--plugin-dir", pluginDir]);
+    const manifest = JSON.parse(readFileSync(join(pluginDir, ".cursor-plugin", "plugin.json"), "utf8"));
+    expect(manifest.name).toBeTruthy();
+    expect(manifest.version).toBeTruthy();
+    expect(manifest.description).toBeTruthy();
+    expect(JSON.parse(readFileSync(join(pluginDir, ".mcp.json"), "utf8"))).toEqual({
+      mcpServers: {
+        antgrid: {
+          command: HOOK_COMMAND.binary,
+          args: ["mcp"],
+          env: {
+            ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
+            ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
+          },
+        },
+      },
+    });
+  });
+
+  test("cursor-agent keeps --trust and drops --plugin-dir when the plugin cannot be written", () => {
+    const abDir = abdir();
+    writeFileSync(join(abDir, "plugin"), "");
+    const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
+    expect(a.args).toEqual(["--trust"]);
+  });
+
+  test("cursor-agent omits --plugin-dir, and writes nothing, when --help does not list it", () => {
+    overrideCursorHelp("Options:\n  --trust  trust the workspace");
+    const abDir = abdir();
+    const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
+    expect(a.args).toEqual(["--trust"]);
+    expect(existsSync(join(abDir, "plugin", "cursor"))).toBe(false);
+  });
+
+  test("cursor-agent passes neither flag an old build does not list", () => {
+    overrideCursorHelp("Options:\n  --print");
+    const a = augmentAgentLaunch("cursor-agent", { abDir: abdir(), cursorDir: abdir(), self: BRIDGE_SELF });
+    expect(a.args).toEqual([]);
+  });
+
+  test("cursor-agent treats an inconclusive --help probe as support", () => {
+    overrideCursorHelp(null);
+    const abDir = abdir();
+    const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
+    expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
   });
 });

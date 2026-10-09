@@ -28,6 +28,7 @@ import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_loading.dart';
 import '../models/ab_message.dart';
 import '../models/terminal_history_model.dart';
+import 'terminal_scroll_physics.dart';
 
 /// The SGR a cell with no attributes at all serializes to (`xterm-adapter.ts`
 /// always opens with `0`), and so the only style whose trailing blanks are
@@ -1034,6 +1035,7 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
       softKeyboardController: widget.softKeyboardController,
       scrollController: _scrollController,
       onScrollPastTop: _onScrollPastTop,
+      scrollPhysics: terminalScrollPhysics,
       // [_focusNode] is what takes the keyboard, for the reason on its own
       // declaration. The navigation map still sees the keys the engine
       // declines once a click has moved focus into the transcript: it is an

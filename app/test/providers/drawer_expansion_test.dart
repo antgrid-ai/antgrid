@@ -4,11 +4,17 @@
 // remote machine's row is what keeps its control-plane socket alive.
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/drawer_expansion.dart';
+import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/prefs_test_mock.dart';
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   ProviderContainer makeContainer() {
     final c = ProviderContainer();
     addTearDown(c.dispose);
@@ -60,9 +66,24 @@ void main() {
     expect(c.read(expandedDrawerIdsProvider), isEmpty);
   });
 
-  test('focusing a local project unfolds the This machine band', () {
-    final c = makeContainer();
-    c.read(localMachineCollapsedProvider.notifier).toggle();
+  // The band's fold lives in the persisted collapsed set, so these need a store.
+  Future<ProviderContainer> makeBandContainer() async {
+    useInMemoryPrefs();
+    final store = await DrawerCollapsedStore.open();
+    final c = ProviderContainer(
+      overrides: [drawerCollapsedStoreProvider.overrideWithValue(store)],
+    );
+    addTearDown(c.dispose);
+    return c;
+  }
+
+  void foldBand(ProviderContainer c) => c
+      .read(collapsedDrawerIdsProvider.notifier)
+      .toggle(kLocalMachineDrawerId);
+
+  test('focusing a local project unfolds the This machine band', () async {
+    final c = await makeBandContainer();
+    foldBand(c);
     expect(c.read(localMachineCollapsedProvider), isTrue);
 
     c.read(selectedTargetProvider.notifier).set(const LocalProject('p1'));
@@ -70,9 +91,10 @@ void main() {
     expect(c.read(localMachineCollapsedProvider), isFalse);
   });
 
-  test('focusing a remote project leaves the This machine band folded', () {
-    final c = makeContainer();
-    c.read(localMachineCollapsedProvider.notifier).toggle();
+  test('focusing a remote project leaves the This machine band folded', () async {
+    final c = await makeBandContainer();
+    foldBand(c);
+    expect(c.read(localMachineCollapsedProvider), isTrue);
 
     c
         .read(selectedTargetProvider.notifier)

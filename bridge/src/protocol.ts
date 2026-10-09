@@ -251,6 +251,9 @@ const AgentStatusMessage = BaseMessage.extend({
   services: z.array(ServiceStatusInfo).optional(),
   commands: z.array(CommandInfo).optional(),
   ports: z.array(PortInfo).optional(),
+  // Where this checkout's ad-hoc terminals start — the folder the Terminals
+  // panel names. Optional so an older bridge still parses.
+  checkoutPath: z.string().optional(),
   // Counts are LOCAL (against the upstream ref), so they are as fresh as the
   // last fetch — see [readSyncState] in git-sync.ts for why nothing here may
   // reach the network. All three are optional so an older bridge still parses.

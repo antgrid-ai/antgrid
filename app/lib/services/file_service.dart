@@ -157,12 +157,8 @@ class FileService {
   /// exactly what [reissueAfterStreamReset] needs to re-send.
   ({String path, String? sha})? _inflightDiff;
 
-  /// The Git view pane's in-flight [requestFileContent], set by [gitViewFile]
-  /// and cleared the same way as [_inflightDiff].
-  String? _inflightGitView;
-
-  /// Keyed `'diff <sha?> <path>'` / `'view <path>'`, cleared on the matching
-  /// reply alongside [_inflightDiff]/[_inflightGitView].
+  /// Keyed `'diff <sha?> <path>'`, cleared on the matching reply alongside
+  /// [_inflightDiff].
   final Map<String, int> _resetReissues = {};
 
   /// Bounds a `git:log` page fetch the same way [_diffLatch] bounds
@@ -1197,8 +1193,8 @@ class FileService {
   }
 
   void _handleFileContent(FileContentMessage msg) {
-    // A single file:read response can target the Files pane, the Git "View
-    // File from diff" pane, or both — route by path-match per pane.
+    // A single file:read response can target the Files pane, the preview
+    // pane, or both — route by path-match per pane.
     final content = FileContent(
       path: msg.path,
       content: msg.content,
@@ -1207,10 +1203,6 @@ class FileService {
       encoding: msg.encoding,
       mimeType: msg.mimeType,
     );
-    if (msg.path == _inflightGitView) {
-      _inflightGitView = null;
-      _resetReissues.remove('view ${msg.path}');
-    }
     final files = msg.path == _state.files.selectedFilePath
         ? _state.files.copyWith(
             viewingFile: content,
@@ -1218,18 +1210,13 @@ class FileService {
             fileModifiedExternally: false,
           )
         : _state.files;
-    final git = msg.path == _state.git.viewingPath
-        ? _state.git.copyWith(viewingFile: content, viewingLoading: false)
-        : _state.git;
     final preview = msg.path == _state.preview.path
         ? _state.preview.copyWith(content: content, isLoading: false)
         : _state.preview;
-    if (identical(files, _state.files) &&
-        identical(git, _state.git) &&
-        identical(preview, _state.preview)) {
+    if (identical(files, _state.files) && identical(preview, _state.preview)) {
       return;
     }
-    _setState(_state.copyWith(files: files, git: git, preview: preview));
+    _setState(_state.copyWith(files: files, preview: preview));
   }
 
   void _handleGitStatus(GitStatusMessage msg) {
@@ -1242,18 +1229,15 @@ class FileService {
     for (final f in msg.files) {
       statuses[f.path] = f.status;
     }
-    final openPath = _state.git.diffPath ?? _state.git.viewingPath;
+    final openPath = _state.git.diffPath;
     final clearStaleGit = openPath != null && !statuses.containsKey(openPath);
-    if (clearStaleGit) {
-      _inflightDiff = null;
-      _inflightGitView = null;
-    }
+    if (clearStaleGit) _inflightDiff = null;
     _setState(
       _state.copyWith(
         gitFileStatuses: statuses,
         gitStatus: GitStatusIndex(msg.files),
         git: clearStaleGit
-            ? _state.git.copyWith(clearDiff: true, clearViewing: true)
+            ? _state.git.copyWith(clearDiff: true)
             : _state.git,
       ),
     );
@@ -1390,34 +1374,6 @@ class FileService {
     );
   }
 
-  void _failFileContent(String path) {
-    final errored = FileContent(
-      path: path,
-      size: 0,
-      error:
-          'Transfer failed — the connection to the machine reset while loading.',
-    );
-    final files = path == _state.files.selectedFilePath
-        ? _state.files.copyWith(
-            viewingFile: errored,
-            isLoading: false,
-            fileModifiedExternally: false,
-          )
-        : _state.files;
-    final git = path == _state.git.viewingPath
-        ? _state.git.copyWith(viewingFile: errored, viewingLoading: false)
-        : _state.git;
-    final preview = path == _state.preview.path
-        ? _state.preview.copyWith(content: errored, isLoading: false)
-        : _state.preview;
-    if (identical(files, _state.files) &&
-        identical(git, _state.git) &&
-        identical(preview, _state.preview)) {
-      return;
-    }
-    _setState(_state.copyWith(files: files, git: git, preview: preview));
-  }
-
   void _failDiff(String path) {
     if (path != _state.git.diffPath) return;
     _diffLatch?.settle();
@@ -1448,23 +1404,6 @@ class FileService {
         } else {
           requestCommitDiff(sha, diff.path);
         }
-      }
-    }
-
-    final view = _inflightGitView;
-    if (view != null && _state.git.viewingPath == view) {
-      final key = 'view $view';
-      final attempts = (_resetReissues[key] ?? 0) + 1;
-      if (attempts > kMaxStreamResetReissues) {
-        _inflightGitView = null;
-        _resetReissues.remove(key);
-        _failFileContent(view);
-      } else {
-        _resetReissues[key] = attempts;
-        _setState(
-          _state.copyWith(git: _state.git.copyWith(viewingLoading: true)),
-        );
-        requestFileContent(view);
       }
     }
   }
@@ -1693,8 +1632,8 @@ class FileService {
 
   void selectFile(String path, {int? searchLine, String? searchQuery}) {
     // Fire here, not in requestFileContent — the latter is a shared chokepoint
-    // also hit by session-restore, fragment recovery, git "view file", and
-    // refresh, none of which is a user opening a file from the explorer.
+    // also hit by session-restore, fragment recovery and refresh, none of
+    // which is a user opening a file.
     session.analytics?.track(AnalyticsEvents.fileOpened);
     final expandedWithAncestors = _expandedWithAncestorsOf(path);
     final newlyExpanded = expandedWithAncestors.difference(
@@ -1953,14 +1892,12 @@ class FileService {
   }
 
   void requestDiff(String path) {
-    _inflightGitView = null;
     _inflightDiff = (path: path, sha: null);
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
           diffPath: path,
           diffLoading: true,
-          clearViewing: true,
           // A prior commit diff for the same path must not linger: the reply
           // handler keys on diffCommitSha being unset to accept this one.
           clearDiffCommitSha: true,
@@ -2167,6 +2104,15 @@ class FileService {
     );
   }
 
+  /// Clears the failure strip — but only while [failure] is still the one on
+  /// screen, so a dismissal racing a newer push/pull can't swallow its result.
+  void dismissSyncFailure(GitSyncFailure failure) {
+    if (!identical(_state.git.lastSyncFailure, failure)) return;
+    _setState(
+      _state.copyWith(git: _state.git.copyWith(clearSyncFailure: true)),
+    );
+  }
+
   /// History tab: fold every expanded commit's file list shut without
   /// dropping the cached files — the same "Collapse All" the Changes tab's
   /// folder toggle offers, applied to expanded commits instead of folders.
@@ -2210,7 +2156,6 @@ class FileService {
   /// [requestDiff] opens for the working tree, distinguished on screen by
   /// [GitPaneState.diffCommitSha].
   void requestCommitDiff(String sha, String path) {
-    _inflightGitView = null;
     _inflightDiff = (path: path, sha: sha);
     _setState(
       _state.copyWith(
@@ -2218,7 +2163,6 @@ class FileService {
           diffPath: path,
           diffCommitSha: sha,
           diffLoading: true,
-          clearViewing: true,
         ),
       ),
     );
@@ -2279,31 +2223,6 @@ class FileService {
     _diffLatch = null;
     _inflightDiff = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearDiff: true)));
-  }
-
-  /// Git pane: enter "View File from diff" mode. Clears the diff and starts
-  /// loading the file's content into the Git pane (separate from any file the
-  /// Files tab may have selected).
-  void gitViewFile(String path) {
-    _inflightDiff = null;
-    _inflightGitView = path;
-    _setState(
-      _state.copyWith(
-        git: _state.git.copyWith(
-          clearDiff: true,
-          viewingPath: path,
-          viewingLoading: true,
-        ),
-      ),
-    );
-    requestFileContent(path);
-  }
-
-  /// Git pane: exit "View File from diff" mode, returning to the changed-files
-  /// list (or the active diff, if one is still set).
-  void clearGitViewing() {
-    _inflightGitView = null;
-    _setState(_state.copyWith(git: _state.git.copyWith(clearViewing: true)));
   }
 
   Future<void> dispose() async {

@@ -62,8 +62,7 @@ class TranscriptMarkdown extends ConsumerWidget {
                 ref.container,
                 (s) => s.previewService,
               ),
-              revealView: (view) =>
-                  ref.read(workspaceMenuControlProvider)?.reveal(view),
+              revealView: (view) => revealWorkspaceView(ref, view),
             ),
           ),
           CodeConfig(

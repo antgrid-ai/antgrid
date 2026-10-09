@@ -19,6 +19,7 @@ import 'recent_agents.dart';
 import 'relay_connection.dart';
 import 'peer_runtime.dart';
 import 'subscription.dart';
+import 'terminal_compose_drafts.dart';
 import 'value_controller.dart';
 
 final signOutCleanupErrorProvider =
@@ -136,6 +137,7 @@ Future<void> _performHardSignOut(ProviderContainer ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
   ref.read(signOutCleanupErrorProvider.notifier).set(null);
   ref.read(chatComposerDraftsProvider).clear();
+  ref.read(terminalComposeDraftsProvider).clear();
   ref.invalidate(peerRuntimeProvider);
   ref.invalidate(peerRuntimeOwnerProvider);
   ref.invalidate(relayConnectionManagerProvider);

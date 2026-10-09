@@ -53,9 +53,14 @@ class PreviewTab {
   /// URL the webview should load, on [localPort].
   final String? currentUrl;
 
+  /// Machine+project that opened the tab ([ProjectSession.projectId]). Preview
+  /// website data on [localPort] is attributed to it.
+  final String owner;
+
   const PreviewTab({
     required this.port,
     required this.scheme,
+    required this.owner,
     this.localPort,
     this.currentUrl,
   });
@@ -70,6 +75,7 @@ class PreviewTab {
     return PreviewTab(
       port: port,
       scheme: scheme ?? this.scheme,
+      owner: owner,
       localPort: clearLocalPort
           ? null
           : (localPort ?? this.localPort),

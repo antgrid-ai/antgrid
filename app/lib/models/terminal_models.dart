@@ -277,6 +277,9 @@ class TerminalState {
   /// it is a property of the transport and not of any one terminal.
   final bool inputPaused;
 
+  /// Where this checkout's ad-hoc terminals start, from `agent:status`.
+  final String? checkoutPath;
+
   const TerminalState({
     this.tabs = const {},
     this.activeTerminalId,
@@ -293,6 +296,7 @@ class TerminalState {
     this.hydration = const {},
     this.attach = CheckoutAttachStatus.unknown,
     this.inputPaused = false,
+    this.checkoutPath,
   });
 
   TerminalTab? get activeTab =>
@@ -324,6 +328,7 @@ class TerminalState {
     Map<String, TerminalHydration>? hydration,
     CheckoutAttachStatus? attach,
     bool? inputPaused,
+    String? checkoutPath,
   }) {
     return TerminalState(
       tabs: tabs ?? this.tabs,
@@ -343,6 +348,7 @@ class TerminalState {
       hydration: hydration ?? this.hydration,
       attach: attach ?? this.attach,
       inputPaused: inputPaused ?? this.inputPaused,
+      checkoutPath: checkoutPath ?? this.checkoutPath,
     );
   }
 }
