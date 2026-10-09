@@ -106,8 +106,13 @@ Future<void> openAccountInBrowser(
   final onIos = defaultTargetPlatform == TargetPlatform.iOS;
   // hidePricing strips every path to a web purchase from the sheet, which App
   // Store guideline 3.1.1 would otherwise reject (web/src/ui/pricing-visibility.ts).
+  final page = Uri.parse('$base$path');
   await launchUrl(
-    Uri.parse(onIos ? '$base$path?hidePricing=1' : '$base$path'),
+    onIos
+        ? page.replace(
+            queryParameters: {...page.queryParameters, 'hidePricing': '1'},
+          )
+        : page,
     mode: onIos ? LaunchMode.inAppBrowserView : LaunchMode.externalApplication,
   );
 }

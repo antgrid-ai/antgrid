@@ -45,10 +45,14 @@ void main() {
     expect(await api.deleteAccount(), DeleteAccountResult.blockedByTeam);
   });
 
-  test('409 with an unknown or unreadable body → error', () async {
+  test('409 with an unknown or unreadable body → blocked', () async {
     for (final body in ['{"error":"SOMETHING_NEW"}', 'conflict', '']) {
       final api = _api(MockClient((_) async => http.Response(body, 409)));
-      expect(await api.deleteAccount(), DeleteAccountResult.error, reason: body);
+      expect(
+        await api.deleteAccount(),
+        DeleteAccountResult.blocked,
+        reason: body,
+      );
     }
   });
 

@@ -152,6 +152,19 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         );
         if (!mounted) return;
         if (go) await openAccountInBrowser(ref.container, path: '/team');
+      case DeleteAccountResult.blocked:
+        // The web account page renders every block the server knows, including
+        // ones newer than this build.
+        final go = await AbConfirmDialog.show(
+          context: context,
+          title: "Account can't be deleted yet",
+          body:
+              'Something on your account has to be resolved first. Your '
+              'account page says what it is.',
+          confirmLabel: 'Open account',
+        );
+        if (!mounted) return;
+        if (go) await openAccountInBrowser(ref.container);
       case DeleteAccountResult.error:
         showAbToast(
           context,
