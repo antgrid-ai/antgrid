@@ -77,6 +77,15 @@ const kLocalMachineDrawerId = '@this-machine';
 /// view-only overlay would refold the band the moment focus moved to a remote
 /// project, hiding the row the user just used.
 final localMachineCollapsedProvider = Provider<bool>((ref) {
+  ref.watch(_unfoldBandOnLocalFocusProvider);
+  return ref.watch(collapsedDrawerIdsProvider).contains(kLocalMachineDrawerId);
+});
+
+/// The focus listener behind [localMachineCollapsedProvider], in a provider of
+/// its own because that one rebuilds on every fold: a listener re-registered
+/// by the rebuild starts from the CURRENT focus, so a focus change landing in
+/// the same flush as a fold would never reach it.
+final _unfoldBandOnLocalFocusProvider = Provider<void>((ref) {
   // Not fireImmediately: writing another provider from inside build() throws.
   ref.listen<String?>(selectedRegistrationIdProvider, (_, next) {
     if (next != null && baseDeviceUuid(next) == next) {
@@ -85,7 +94,6 @@ final localMachineCollapsedProvider = Provider<bool>((ref) {
           .expand(kLocalMachineDrawerId);
     }
   });
-  return ref.watch(collapsedDrawerIdsProvider).contains(kLocalMachineDrawerId);
 });
 
 void toggleLocalMachineCollapsed(WidgetRef ref) =>

@@ -74,12 +74,14 @@ void main() {
       overrides: [drawerCollapsedStoreProvider.overrideWithValue(store)],
     );
     addTearDown(c.dispose);
+    // The drawer watches the band; without a listener Riverpod pauses the
+    // provider and its focus listener never fires.
+    c.listen(localMachineCollapsedProvider, (_, _) {});
     return c;
   }
 
-  void foldBand(ProviderContainer c) => c
-      .read(collapsedDrawerIdsProvider.notifier)
-      .toggle(kLocalMachineDrawerId);
+  void foldBand(ProviderContainer c) =>
+      c.read(collapsedDrawerIdsProvider.notifier).toggle(kLocalMachineDrawerId);
 
   test('focusing a local project unfolds the This machine band', () async {
     final c = await makeBandContainer();
@@ -87,19 +89,25 @@ void main() {
     expect(c.read(localMachineCollapsedProvider), isTrue);
 
     c.read(selectedTargetProvider.notifier).set(const LocalProject('p1'));
+    // The focus reaches the band's listener on Riverpod's next flush.
+    await Future<void>.delayed(Duration.zero);
 
     expect(c.read(localMachineCollapsedProvider), isFalse);
   });
 
-  test('focusing a remote project leaves the This machine band folded', () async {
-    final c = await makeBandContainer();
-    foldBand(c);
-    expect(c.read(localMachineCollapsedProvider), isTrue);
+  test(
+    'focusing a remote project leaves the This machine band folded',
+    () async {
+      final c = await makeBandContainer();
+      foldBand(c);
+      expect(c.read(localMachineCollapsedProvider), isTrue);
 
-    c
-        .read(selectedTargetProvider.notifier)
-        .set(const RemoteProject(machineUuid: 'm1', projectId: 'p1'));
+      c
+          .read(selectedTargetProvider.notifier)
+          .set(const RemoteProject(machineUuid: 'm1', projectId: 'p1'));
+      await Future<void>.delayed(Duration.zero);
 
-    expect(c.read(localMachineCollapsedProvider), isTrue);
-  });
+      expect(c.read(localMachineCollapsedProvider), isTrue);
+    },
+  );
 }

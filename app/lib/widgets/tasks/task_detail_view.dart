@@ -1443,9 +1443,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
                     : 'Published to GitHub',
                 style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontXs,
-                  color: disconnected
-                      ? palette.warning
-                      : palette.textSecondary,
+                  color: disconnected ? palette.warning : palette.textSecondary,
                 ),
               ),
               if (key != null) ...[
@@ -1877,58 +1875,70 @@ Future<void> _openTaskFileDiff(
   );
   if (fileService == null) return Future.value();
   fileService.requestDiff(path);
+  // "View file" swaps this route from the diff to the file. The Git pane no
+  // longer has a file mode of its own, so the file loads through the
+  // checkout's Files pane — the workspace tab it would otherwise reveal is not
+  // on screen behind a pushed route.
+  var showingFile = false;
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
       builder: (routeContext) => Scaffold(
         backgroundColor: routeContext.antgrid.bgDeepest,
         body: SafeArea(
-          child: Consumer(
-            builder: (consumerContext, consumerRef, _) {
-              final state = consumerRef
-                  .watch(
-                    taskCheckoutFileTreeStateProvider((
-                      registrationId: registrationId,
-                      checkoutId: checkoutId,
-                    )),
-                  )
-                  .value;
-              final git = state?.git;
-              if (git?.viewingPath == path) {
-                return FileViewerRouter(
-                  fileContent: git!.viewingFile,
-                  isLoading: git.viewingLoading,
-                  selectedFilePath: path,
-                  fileWasModified: false,
-                  onRefreshContent: () => fileService.requestFileContent(path),
+          child: StatefulBuilder(
+            builder: (_, setRouteState) => Consumer(
+              builder: (consumerContext, consumerRef, _) {
+                final state = consumerRef
+                    .watch(
+                      taskCheckoutFileTreeStateProvider((
+                        registrationId: registrationId,
+                        checkoutId: checkoutId,
+                      )),
+                    )
+                    .value;
+                final git = state?.git;
+                final files = state?.files;
+                if (showingFile && files?.selectedFilePath == path) {
+                  return FileViewerRouter(
+                    fileContent: files!.viewingFile,
+                    isLoading: files.isLoading,
+                    selectedFilePath: path,
+                    fileWasModified: files.fileModifiedExternally,
+                    onRefreshContent: () =>
+                        fileService.requestFileContent(path),
+                    onClose: () {
+                      fileService.clearDiff();
+                      Navigator.of(consumerContext).pop();
+                    },
+                  );
+                }
+                if (git == null ||
+                    git.diffPath != path ||
+                    git.diffContent == null) {
+                  return const AbLoading();
+                }
+                return DiffViewer(
+                  path: path,
+                  gitStatus: state!.gitFileStatuses[path],
+                  diff: git.diffContent!,
+                  additions: git.diffAdditions ?? 0,
+                  deletions: git.diffDeletions ?? 0,
+                  onViewFile: () {
+                    fileService.selectFile(path);
+                    setRouteState(() => showingFile = true);
+                  },
                   onClose: () {
-                    fileService.clearGitViewing();
+                    fileService.clearDiff();
                     Navigator.of(consumerContext).pop();
                   },
+                  onSendToAgent: (sendContext, message) => sendCaptureToAgent(
+                    context: sendContext,
+                    container: consumerRef.container,
+                    text: message,
+                  ),
                 );
-              }
-              if (git == null ||
-                  git.diffPath != path ||
-                  git.diffContent == null) {
-                return const AbLoading();
-              }
-              return DiffViewer(
-                path: path,
-                gitStatus: state!.gitFileStatuses[path],
-                diff: git.diffContent!,
-                additions: git.diffAdditions ?? 0,
-                deletions: git.diffDeletions ?? 0,
-                onViewFile: () => fileService.gitViewFile(path),
-                onClose: () {
-                  fileService.clearDiff();
-                  Navigator.of(consumerContext).pop();
-                },
-                onSendToAgent: (sendContext, message) => sendCaptureToAgent(
-                  context: sendContext,
-                  container: consumerRef.container,
-                  text: message,
-                ),
-              );
-            },
+              },
+            ),
           ),
         ),
       ),

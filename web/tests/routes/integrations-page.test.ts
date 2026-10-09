@@ -240,7 +240,7 @@ describe("GET /integrations/switch-account", () => {
   test("an unauthenticated browser is sent to sign in first", async () => {
     const app = build();
     const res = await app.request("/integrations/switch-account?asEmail=x@example.com");
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Fintegrations%2Fswitch-account");
   });
 });
 
