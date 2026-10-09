@@ -421,6 +421,15 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     body: [
                       const SizedBox(height: AbTokens.space8),
                       _ToggleRow(
+                        title: 'Allow terminal programs to copy text',
+                        caption:
+                            'Applies to this device. Explicit copy and paste remain available.',
+                        enabled: settings.terminalProgramCopies,
+                        onTap: () => service.setTerminalProgramCopies(
+                          !settings.terminalProgramCopies,
+                        ),
+                      ),
+                      _ToggleRow(
                         title: 'Anonymous usage analytics',
                         caption:
                             'No code, files, or prompts — ever. Opt out anytime.',

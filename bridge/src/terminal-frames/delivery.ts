@@ -53,6 +53,7 @@ interface Run {
   detach: () => void;
 }
 interface Attachment {
+  clipboardVersion?: 1;
   id: string;
   run: Run;
   controller: AbortController;
@@ -295,7 +296,14 @@ export class TerminalViewerConnection {
    *  set after its own release is never cleared. */
   hasAttachment(attachmentId: string): boolean { return this.attachments.has(attachmentId); }
 
-  async subscribe(address: TerminalAddress, version: number, requestId: string): Promise<string | undefined> {
+  clipboardEligible(address: TerminalAddress, runId: string, attachmentId: string): boolean {
+    const attachment = this.attachments.get(attachmentId);
+    return !!attachment && attachment.ready && attachment.clipboardVersion === 1 &&
+      attachment.run.runId === runId && key(attachment.run.address) === key(address) &&
+      attachment.run.finalRevision === undefined && this.transport.authorized(address);
+  }
+
+  async subscribe(address: TerminalAddress, version: number, requestId: string, clipboardVersion?: number): Promise<string | undefined> {
     if (this.closed || !this.transport.authorized(address)) return;
     if (version !== TERMINAL_PROTOCOL_VERSION) {
       // Best-effort notice: there is no attachment yet to retire, and the
@@ -320,6 +328,7 @@ export class TerminalViewerConnection {
       if (key(attachment.run.address) === key(address)) this.retire(attachment);
     }
     const attachment: Attachment = {
+      clipboardVersion: Number.isSafeInteger(clipboardVersion) && clipboardVersion! >= 1 ? 1 : undefined,
       id: crypto.randomUUID(), run, controller: new AbortController(), ready: false,
       sequence: 0, acknowledged: 0, revision: -1, bytes: 0, progressAt: this.now(),
       lastSent: -Infinity, pending: new Map(), ended: false, oversizeNotified: false,
@@ -329,6 +338,7 @@ export class TerminalViewerConnection {
       await this.transport.send(createMessage("terminal:subscribed", {
         ...wireAddress(address), requestId, runId: run.runId, attachmentId: attachment.id,
         version: TERMINAL_PROTOCOL_VERSION,
+        ...(attachment.clipboardVersion ? { clipboardVersion: attachment.clipboardVersion } : {}),
       }), attachment.controller.signal);
       if (!this.attachments.has(attachment.id)) return;
       attachment.ready = true;

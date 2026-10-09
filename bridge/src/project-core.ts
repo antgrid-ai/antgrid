@@ -365,6 +365,8 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
+  revokeClipboardAccess(): void { this.core?.revokeClipboardAccess(); }
+
   /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
    *  now rather than wait on a Stop hook the CLI may never fire for a manual
    *  interrupt. See {@link closeInterruptedTurn}.

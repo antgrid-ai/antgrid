@@ -15,12 +15,34 @@ import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
+import 'terminal_clipboard_client.dart';
+import '../models/terminal_clipboard_message.dart';
 import 'terminal_screen_cache.dart';
 import 'touch_wheel_limiter.dart';
 
 class TerminalService {
   final ProjectSession session;
   final String checkoutId;
+  late final _clipboard = TerminalClipboardClient(
+    send: _send,
+    connected: () => !_disposed && session.transport.isEstablished,
+  );
+
+  void setClipboardForeground(
+    Object owner,
+    String? terminalId, {
+    bool programCopies = true,
+    void Function()? onCopied,
+  }) => _clipboard.foreground(
+    owner,
+    terminalId,
+    programCopies: programCopies,
+    onCopied: onCopied,
+  );
+  bool supportsHostClipboard(String terminalId) =>
+      _clipboard.contexts.containsKey(terminalId);
+  Future<bool> copyHostClipboard(String terminalId) =>
+      _clipboard.readHost(terminalId);
 
   StreamSubscription<InboundFrame>? _heavySub;
   StreamSubscription<InboundFrame>? _statusSub;
@@ -56,6 +78,7 @@ class TerminalService {
       _displayOwners[owner] == id;
 
   void suspendDisplay() {
+    _clipboard.dispose();
     _cancelPendingMouseMotion();
     _finishPrefetch();
     for (final id in _resizeTimers.keys.toList()) {
@@ -172,6 +195,7 @@ class TerminalService {
         tabs[id] = tab.copyWith(ghostty: replacement.ghostty);
         replacement.history.dispose();
         replacement.replaceEpoch.dispose();
+        replacement.latestFrame.dispose();
         tab.ghostty.dispose();
         _framePaintedIds.remove(id);
         _state = _state.copyWith(tabs: tabs);
@@ -481,7 +505,9 @@ class TerminalService {
 
     // Routed through the focus-gated router status stream so all dispatch goes
     // through one path.
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
+    _statusSub = session
+        .checkoutStatusStream(checkoutId)
+        .listen(_onStatusFrame);
   }
 
   static const _frameHydratorKey = 'terminal:frames';
@@ -734,7 +760,10 @@ class TerminalService {
     final paused = !session.transport.isEstablished;
     if (paused == _inputPaused) return;
     _inputPaused = paused;
-    if (paused) _cancelPendingMouseMotion();
+    if (paused) {
+      _cancelPendingMouseMotion();
+      _clipboard.dispose();
+    }
     _publishHydration();
   }
 
@@ -891,6 +920,7 @@ class TerminalService {
     tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
     // Every cell a live selection's row/col anchors pointed at was
     // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
+    tab.latestFrame.value = msg;
     tab.replaceEpoch.value++;
     final firstPaint = _framePaintedIds.add(msg.terminalId);
     final recovered = _frameFailedIds.remove(msg.terminalId);
@@ -1057,6 +1087,8 @@ class TerminalService {
   /// attachment, short of whether it has ever painted (see
   /// [_framePaintedIds]'s own doc comment for why that survives this).
   void _resetFrameTracking(String terminalId) {
+    _clipboard.remove(terminalId);
+    _state.tabs[terminalId]?.latestFrame.value = null;
     _screenWaits.remove(terminalId);
     _freshScreens.remove(terminalId);
     _endedHistoryAttachment.remove(terminalId);
@@ -1128,6 +1160,7 @@ class TerminalService {
         createAbMessage('terminal:subscribe', {
           'terminalId': terminalId,
           'version': kTerminalFrameProtocolVersion,
+          'clipboardVersion': 1,
           'requestId': requestId,
         }),
       ),
@@ -1170,6 +1203,7 @@ class TerminalService {
   /// dropped send here costs nothing but a slightly later bridge-side
   /// cleanup.
   void _unsubscribeFrame(String terminalId) {
+    _clipboard.remove(terminalId);
     final handle = _attachmentHandles[terminalId];
     final attachment = _frameAttachment.remove(terminalId);
     if (handle == null && attachment == null) return;
@@ -1347,7 +1381,9 @@ class TerminalService {
     // terminal:frame and terminal:history:page are heavy-tier and dispatched
     // via _onHeavyFrame; they never reach this status-tier handler. agent:hello
     // is consumed by ProjectStatusNotifier, not here.
-    if (message is TerminalStartedMessage) {
+    if (message is TerminalClipboardMessage) {
+      _clipboard.handle(message);
+    } else if (message is TerminalStartedMessage) {
       _handleTerminalStarted(message);
     } else if (message is TerminalExitedMessage) {
       _handleTerminalExited(message);
@@ -1410,6 +1446,15 @@ class TerminalService {
       runId: msg.runId,
       attachmentId: msg.attachmentId,
     );
+    _clipboard.remove(terminalId);
+    if (msg.clipboardVersion == 1) {
+      _clipboard.contexts[terminalId] = (
+        checkoutId: checkoutId,
+        terminalId: terminalId,
+        runId: msg.runId,
+        attachmentId: msg.attachmentId,
+      );
+    }
     _frameHighestSequence[terminalId] = 0;
     if (_visible(terminalId)) {
       _frameSubscribeDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
@@ -2010,6 +2055,7 @@ class TerminalService {
       checkoutId: checkoutId,
       terminalId: terminalId,
     );
+    _clipboard.beforeInput(terminalId, data);
     _send(
       createAbMessage('terminal:input', {
         'terminalId': terminalId,
@@ -2304,9 +2350,7 @@ class TerminalService {
       createAbMessage('git:list-branches', {'projectId': _state.projectId}),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _branchesLatch != latch) return;
         _branchesLatch = null;
         // Surface the drop, symmetric with checkoutBranch's timeout: an empty
@@ -2331,9 +2375,7 @@ class TerminalService {
       }),
     );
     unawaited(
-      latch.done.timeout(gitActionTimeout).catchError((
-        _,
-      ) {
+      latch.done.timeout(gitActionTimeout).catchError((_) {
         if (_disposed || _checkoutLatch != latch) return;
         _checkoutLatch = null;
         _setState(_state.copyWith(gitBranchesLoading: false));
@@ -2386,6 +2428,7 @@ class TerminalService {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    _clipboard.dispose();
     _finishPrefetch();
     _displayServices.remove(this);
     hiddenScreens.removeOwner(this);

@@ -19,6 +19,7 @@
     "test:evals:terminal": "bun test scenarios/terminal/",
     "test:evals:session-bus": "bun test tests/gate-session-bus.test.ts",
     "test:evals:terminal-frames": "bun test tests/gate-terminal-frames.test.ts",
+    "test:evals:terminal-clipboard": "bun test tests/gate-terminal-clipboard.test.ts",
     "test:evals:file-explorer": "bun test scenarios/file-explorer/",
     "test:evals:connection": "bun test scenarios/connection/",
     "test:evals:dart-client-e2e": "bun test scenarios/dart-client-e2e/",

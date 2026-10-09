@@ -1,3 +1,5 @@
+import { clipboardMessages, CLIPBOARD_MESSAGE_TYPES, TerminalClipboardMessageSchema } from "./terminal-clipboard/protocol";
+export * from "./terminal-clipboard/protocol";
 import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
@@ -2020,6 +2022,7 @@ const ClientFocusStateMessage = BaseMessage.extend({
 
 const TerminalSubscribeMessage = BaseMessage.extend({
   type: z.literal("terminal:subscribe"),
+  clipboardVersion: z.number().int().positive().optional(),
   terminalId: z.string(),
   // The highest frame protocol version the app can render. Deliberately a plain
   // int and not a literal: a version this bridge cannot serve is answered with
@@ -2032,6 +2035,7 @@ const TerminalSubscribeMessage = BaseMessage.extend({
 
 const TerminalSubscribedMessage = BaseMessage.extend({
   type: z.literal("terminal:subscribed"),
+  clipboardVersion: z.literal(1).optional(),
   terminalId: z.string(),
   runId: z.string().uuid(),
   attachmentId: z.string().uuid(),
@@ -2645,6 +2649,7 @@ const NetwatchEventsMessage = BaseMessage.extend({
 });
 
 export const AbMessageSchema = z.discriminatedUnion("type", [
+  ...clipboardMessages,
   AgentHelloMessage,
   PortDetectedMessage,
   TerminalOutputMessage,
@@ -3009,6 +3014,7 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * Add a type here in the same commit that gives it a secret-bearing field.
  */
 export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  ...CLIPBOARD_MESSAGE_TYPES,
   "agent:question-resolve",
   "terminal:input",
   // Rendered screen content, which is the same secret class `terminal:input` is
@@ -3022,6 +3028,7 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
+  ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
@@ -3126,6 +3133,7 @@ export function createTranscriptReplay(sessionId: string, frames: AbMessage[]): 
 export function parseMessage(raw: string): AbMessage | null {
   try {
     const json = JSON.parse(raw);
+    if (typeof json?.type === "string" && json.type.startsWith("terminal:clipboard:") && Buffer.byteLength(raw, "utf8") > 140 * 1024) return null;
     const result = AbMessageSchema.safeParse(json);
     return result.success ? result.data : null;
   } catch {
@@ -3135,10 +3143,12 @@ export function parseMessage(raw: string): AbMessage | null {
 
 /**
  * Fast-path parser for trusted (already-decrypted) messages.
- * Skips full Zod validation — only checks that `type` is a known string.
+ * Checks the type alone except for clipboard records, which require complete
+ * bounded validation even on an authenticated connection.
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
+  ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong",
@@ -3199,6 +3209,11 @@ export function parseMessageFast(raw: string): AbMessage | null {
     const json = JSON.parse(raw);
     if (typeof json !== "object" || json === null) return null;
     if (!KNOWN_TYPES.has(json.type)) return null;
+    if (json.type.startsWith("terminal:clipboard:")) {
+      if (Buffer.byteLength(raw, "utf8") > 140 * 1024) return null;
+      const parsed = TerminalClipboardMessageSchema.safeParse(json);
+      return parsed.success ? parsed.data : null;
+    }
     return json as AbMessage;
   } catch {
     return null;

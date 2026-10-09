@@ -1554,6 +1554,7 @@ export class HostServer {
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) {
+          for (const entry of this.cores.values()) entry.core.revokeClipboardAccess();
           this.controlPlaneRelay?.recheckAuthorization();
           // The mirror deliberately SURVIVES this: it holds what peers
           // offered about themselves, and turning this machine's own door

@@ -12,6 +12,8 @@ const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./path-probe";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
+import { TerminalClipboardScanner } from "./terminal-clipboard/scanner";
+import type { ClipboardOwner } from "./terminal-clipboard/router";
 import { ANTGRID_QUERY_COLORS, VtCapabilityResponder } from "./vt-capability-responder";
 import { padBareVerb, PtySubmitQueue } from "./pty-submit";
 import {
@@ -24,7 +26,7 @@ import {
 
 /**
  * When ANTGRID_DEBUG_PTY_LOG is set, every PTY output chunk is appended to that
- * file path verbatim (raw bytes, including escape sequences). Used for
+ * file path after clipboard commands are removed (including split commands). Used for
  * diagnosing terminal-emulator divergences against native terminals (e.g.
  * the opencode popup-shrink bg-attribute leak in kterm/Ghostty vs WT).
  *
@@ -350,6 +352,8 @@ const DEFAULT_KEYSTROKES: readonly string[] = [ETX];
 const DEFAULT_KEYSTROKE_GAP_MS = 300;
 
 export interface TerminalSessionOptions {
+  captureClipboardOwner?: () => ClipboardOwner | undefined;
+  onClipboardWrite?: (owner: ClipboardOwner, text: string) => void;
   terminalId?: string;
   name?: string;
   shell?: string;
@@ -561,7 +565,7 @@ export class TerminalSession {
     }
   }
 
-  constructor(opts: TerminalSessionOptions) {
+  constructor(private readonly opts: TerminalSessionOptions) {
     this.terminalId = opts.terminalId ?? "default";
     this._cols = opts.cols ?? 80;
     this._rows = opts.rows ?? 24;
@@ -694,8 +698,20 @@ export class TerminalSession {
       })
     );
 
+    const clipboardScanner = new TerminalClipboardScanner(this.opts.captureClipboardOwner);
+    this.disposables.push({ dispose: () => clipboardScanner.dispose() });
     this.disposables.push(
-      this.pty.onData((data) => {
+      this.pty.onData((raw) => {
+        const scanned = clipboardScanner.feed(raw);
+        const data = scanned.output;
+        for (const reply of scanned.replies) {
+          try { this.pty?.write(reply); } catch { /* An exiting PTY cannot answer a query. */ }
+        }
+        for (const event of scanned.writes) {
+          if (event.owner) {
+            try { this.opts.onClipboardWrite?.(event.owner, event.text); } catch { /* Clipboard delivery cannot stop rendering. */ }
+          }
+        }
         logPtyChunk(this.terminalId, data);
         this.respondToCapabilityQueries(data);
         try {
