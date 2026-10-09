@@ -29,6 +29,7 @@ export const ROADMAP: readonly RoadmapEntry[] = [
     status: "done",
     update: "Completed: Antgrid MCP tools that let an agent list, create, change, pause, delete and run schedules for its own project, never with more approval freedom than its own session has. Sessions launched by a schedule can only read schedules.",
     updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
   },
   {
     id: "one-off-schedules",
@@ -38,6 +39,7 @@ export const ROADMAP: readonly RoadmapEntry[] = [
     status: "done",
     update: "Completed: a Once option in the schedule editor and for agents, with catch-up when the desktop was closed at the chosen time and a clear record of how each one-off ended.",
     updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
   },
   {
     id: "scheduler-catch-up",
@@ -47,6 +49,7 @@ export const ROADMAP: readonly RoadmapEntry[] = [
     status: "done",
     update: "Completed: a per-schedule choice to run the latest missed occurrence or skip missed runs, one consolidated record for earlier misses, and schedules that keep running after a phone signs out.",
     updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
   },
   {
     id: "scheduler",
