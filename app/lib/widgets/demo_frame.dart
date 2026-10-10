@@ -113,10 +113,10 @@ class _DemoBanner extends ConsumerWidget {
       // style, which `Text.style` merges with rather than replaces.
       style: Theme.of(context).textTheme.bodyMedium ?? const TextStyle(),
       child: AbInlineBanner(
-        text: 'Demo — sample data, not a real machine. Nothing is connected.',
-        color: colors.warning,
+        text: 'Sample project. Connect your computer to work on your own code.',
+        color: colors.accent,
         trailing: AbButton(
-          label: 'Exit demo',
+          label: 'Exit sample',
           compact: true,
           leading: AbIcon(
             AbIcons.close,

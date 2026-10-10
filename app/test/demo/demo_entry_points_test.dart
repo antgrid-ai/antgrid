@@ -27,7 +27,7 @@ import '../helpers/prefs_test_mock.dart';
 
 const String _kDemoLink = 'Explore a sample project';
 const String _kDemoBanner =
-    'Demo — sample data, not a real machine. Nothing is connected.';
+    'Sample project. Connect your computer to work on your own code.';
 
 /// The empty Recent list, pumped on its own: the two affordances there sit
 /// behind provider state the full app would have to be talked into, and this
@@ -160,14 +160,14 @@ void main() {
 
       expect(find.byType(DemoHome), findsOneWidget);
       expect(find.text(_kDemoBanner), findsOneWidget);
-      expect(find.text('Exit demo'), findsOneWidget);
+      expect(find.text('Exit sample'), findsOneWidget);
     });
 
-    testWidgets('Exit demo hands the app back', (tester) async {
+    testWidgets('Exit sample hands the app back', (tester) async {
       final container = await pumpDemoApp(tester, enterDemo: true);
       await tester.pump(const Duration(milliseconds: 100));
 
-      await tester.tap(find.text('Exit demo'));
+      await tester.tap(find.text('Exit sample'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 

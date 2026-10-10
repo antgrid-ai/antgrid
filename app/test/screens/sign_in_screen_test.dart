@@ -406,7 +406,7 @@ void main() {
       // leads anywhere at all.
       expect(find.text(kDemoEntryLabel), findsOneWidget);
       expect(
-        find.text('No account needed. Sample data, nothing is connected.'),
+        find.text('No account needed. Try every screen on a built-in project.'),
         findsOneWidget,
         reason:
             'the caveat rides with the offer, not as an orphan line below '

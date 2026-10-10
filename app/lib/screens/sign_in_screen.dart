@@ -1867,7 +1867,7 @@ class _DemoCardState extends State<_DemoCard> {
                 ),
                 const SizedBox(height: AbTokens.space2),
                 Text(
-                  'No account needed. Sample data, nothing is connected.',
+                  'No account needed. Try every screen on a built-in project.',
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXs,
                     color: antgrid.textMuted,
