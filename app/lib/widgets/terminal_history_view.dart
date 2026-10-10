@@ -24,10 +24,14 @@ import '../design/ab_tokens.dart';
 import '../design/ansi_palette.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_loading.dart';
 import '../models/ab_message.dart';
 import '../models/terminal_history_model.dart';
+import '../services/terminal_clipboard_coordinator.dart';
+import '../util/detached.dart';
+import '../design/widgets/ab_toast.dart';
 import 'terminal_scroll_physics.dart';
 
 /// The SGR a cell with no attributes at all serializes to (`xterm-adapter.ts`
@@ -151,7 +155,11 @@ int _lowerBoundByRowId(List<TerminalHistoryRow> rows, int rowId) {
       terminal.writeBytes(bytes);
       out.add(bytes);
     }
-    return (bytes: out.takeBytes(), rowStarts: starts, lines: terminal.totalRows);
+    return (
+      bytes: out.takeBytes(),
+      rowStarts: starts,
+      lines: terminal.totalRows,
+    );
   } finally {
     terminal.close();
   }
@@ -307,6 +315,27 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
   int? _prefetchedCursor;
   final _selectionController = GhosttyTerminalSelectionController();
   bool _hasSelection = false;
+  String? _selectedText;
+  GhosttyTerminalSelection? _selectedAnchors;
+  int _selectionGeneration = 0;
+
+  bool copySelection() {
+    final text = _selectedText;
+    if (text == null || text.isEmpty) return false;
+    detached('TerminalHistory', 'clipboard copy failed', () => _copy(text));
+    return true;
+  }
+
+  Future<void> _copy(String text) async {
+    final generation = _selectionGeneration;
+    final copied = await TerminalClipboardCoordinator.instance.copyExplicit(
+      text,
+    );
+    if (!mounted || generation != _selectionGeneration) return;
+    if (copied) _selectionController.clear();
+    showAbToast(context, copied ? 'Copied' : 'Copy failed. Try again.');
+  }
+
   int? _measuredCols;
   int _measuredLines = 0;
 
@@ -592,12 +621,15 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
               widget.model.rows.last.rowId >= boundary - 1))
         ...widget.screenRows,
     ];
-    assert(() {
-      for (var i = 1; i < candidates.length; i++) {
-        if (candidates[i].rowId < candidates[i - 1].rowId) return false;
-      }
-      return true;
-    }(), 'render candidates must be sorted by rowId: the row-id binary searches depend on it');
+    assert(
+      () {
+        for (var i = 1; i < candidates.length; i++) {
+          if (candidates[i].rowId < candidates[i - 1].rowId) return false;
+        }
+        return true;
+      }(),
+      'render candidates must be sorted by rowId: the row-id binary searches depend on it',
+    );
     final rows = _renderWindow(candidates);
     final signature = rows.isEmpty
         ? null
@@ -651,10 +683,11 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
   /// exactly its measured start, and only that one logical line is re-counted.
   int _evictedLineCount(int lastKeptRowId) {
     final kept = _lowerBoundByRowId(_renderedRows, lastKeptRowId + 1);
-    if (_lineStartsCols == _controller.cols &&
-        kept < _renderedRows.length) {
+    if (_lineStartsCols == _controller.cols && kept < _renderedRows.length) {
       if (kept == 0) return _measuredLines;
-      if (!_renderedRows[kept].wrapped) return _measuredLines - _lineStarts[kept];
+      if (!_renderedRows[kept].wrapped) {
+        return _measuredLines - _lineStarts[kept];
+      }
       var j = kept - 1;
       while (j > 0 && _renderedRows[j].wrapped) {
         j--;
@@ -715,7 +748,8 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
         _restoreTarget();
         if (anchor != null) {
           final i = _lowerBoundByRowId(_renderedRows, anchor);
-          final index = i < _renderedRows.length && _renderedRows[i].rowId == anchor
+          final index =
+              i < _renderedRows.length && _renderedRows[i].rowId == anchor
               ? i
               : -1;
           final bar = _controller.viewportScrollbar;
@@ -984,6 +1018,16 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
                     ),
                   ),
                 ),
+              if (_hasSelection)
+                Positioned(
+                  bottom: AbTokens.space8,
+                  right: AbTokens.space24,
+                  child: AbButton(
+                    label: 'Copy',
+                    compact: true,
+                    onTap: copySelection,
+                  ),
+                ),
             ],
           ),
         ),
@@ -1023,12 +1067,23 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
       key: _viewKey,
       controller: _controller,
       selectionController: _selectionController,
+      showSelectionContextMenu: false,
+      onCopySelection: _copy,
       onSelectionContentChanged: (content) {
+        if (content?.text != _selectedText ||
+            content?.selection != _selectedAnchors) {
+          _selectionGeneration++;
+        }
+        _selectedText = content?.text;
+        _selectedAnchors = content?.selection;
         final hadSelection = _hasSelection;
         _hasSelection = content != null && content.text.isNotEmpty;
-        if (hadSelection && !_hasSelection) {
+        if (hadSelection != _hasSelection) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) setState(_syncEngine);
+            if (!mounted) return;
+            setState(() {
+              if (!_hasSelection) _syncEngine();
+            });
           });
         }
       },

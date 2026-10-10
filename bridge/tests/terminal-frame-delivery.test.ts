@@ -124,6 +124,34 @@ function statuses(t: { sent: (TerminalFrame | TerminalDisplayStatus | AbMessage)
 }
 
 describe("hub", () => {
+  test("clipboard eligibility requires negotiated capability, current context, and live authorization", async () => {
+    const hub = new TerminalFrameHub(() => 0);
+    const runId = crypto.randomUUID();
+    hub.register(addr(), source(), runId);
+    const transport = new FakeTransport();
+    const connection = hub.connect(transport);
+    try {
+      const legacy = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID()))!;
+      expect(connection.clipboardEligible(addr(), runId, legacy)).toBe(false);
+      expect(transport.sent.find((m) => m.type === "terminal:subscribed")).not.toHaveProperty("clipboardVersion");
+      const current = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID(), 1))!;
+      expect(connection.clipboardEligible(addr(), runId, current)).toBe(true);
+      expect(connection.clipboardEligible(addr(), runId, legacy)).toBe(false);
+      for (const field of ["projectId", "checkoutId", "terminalId"] as const) {
+        expect(connection.clipboardEligible({ ...addr(), [field]: "forged" }, runId, current)).toBe(false);
+      }
+      expect(connection.clipboardEligible(addr(), crypto.randomUUID(), current)).toBe(false);
+      transport.allowed = false;
+      expect(connection.clipboardEligible(addr(), runId, current)).toBe(false);
+      transport.allowed = true;
+      connection.unsubscribe(addr(), runId, current);
+      expect(connection.clipboardEligible(addr(), runId, current)).toBe(false);
+      const next = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID(), 1))!;
+      await hub.finish(addr(), runId, 0);
+      expect(connection.clipboardEligible(addr(), runId, next)).toBe(false);
+    } finally { hub.dispose(); }
+  });
+
   test("a final synchronized erase is delivered after the throttle without more output", async () => {
     let now = 0;
     const hub = new TerminalFrameHub(() => now);

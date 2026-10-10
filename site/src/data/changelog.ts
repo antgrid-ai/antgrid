@@ -87,6 +87,13 @@ export type Note = {
  * typo'd tag would otherwise cost someone their writing with no error anywhere.
  */
 export const NOTES: Record<string, Note> = {
+  "v1.20732.1032": {
+    lines: [
+      ["new", "We've added scheduled prompts for supported agents while the desktop app is open. You can manage schedules from connected devices, review each run and open its session when it needs your input."],
+      ["fixed", "Resending a sign-in link no longer loses the new attempt when an expiry response for the old link arrives during the resend. We also show the server's resend cooldown."],
+      ["new", "The site has a public roadmap, so you can see what we're building and what's still under consideration."],
+    ],
+  },
   "v1.20731.1031": {
     lines: [
       ["new", "Help lives in the main menu now, with support, logs, version information and a way to check for updates yourself."],
