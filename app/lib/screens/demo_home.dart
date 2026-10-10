@@ -20,7 +20,7 @@ import 'workspace_shell.dart';
 ///
 /// Deliberately NOT [AppShell]: its `initState` kicks the eager relay dials and
 /// the device-revoked check, which read the keychain and open sockets — the two
-/// things the demo may never do. The "sample data" strip and, on desktop, the
+/// things the demo may never do. The sample-project strip and, on desktop, the
 /// window chrome AppShell would have drawn come from `DemoFrame` in the app
 /// builder.
 ///
