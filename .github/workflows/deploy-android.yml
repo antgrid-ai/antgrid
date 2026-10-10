@@ -19,7 +19,8 @@ name: Deploy — Android (Play Store)
 # `schedule` only ever fires on the DEFAULT branch, so the nightly RUNS on
 # development and CHECKS OUT main — main is what reaches the internal track
 # (promote to alpha/beta/production by hand from the Play Console). A merge to
-# main publishes nothing by itself; the next cron picks it up. Shipping any
+# main publishes nothing by itself; the next cron picks it up, or a manual
+# workflow_dispatch from main ships it now under `production`. Shipping any
 # other branch is a manual workflow_dispatch from it, which builds that branch
 # and lands under `staging`.
 
@@ -73,12 +74,13 @@ jobs:
     timeout-minutes: 45
     env:
       ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-r28
-    # Keyed on the EVENT, not the branch. The nightly IS the release build — it
-    # is what reaches the Play internal track and what testers install,
-    # so it carries production's SENTRY_DSN; a manual dispatch is an ad-hoc
-    # build and gets staging's. A ref_name test cannot express this: `schedule`
-    # only ever fires on the default branch, so it could never select production.
-    environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
+    # A build of main is a release build — it is what reaches the Play internal
+    # track and what testers install — so it carries production's SENTRY_DSN,
+    # whether the nightly built it or someone dispatched main by hand. Any other
+    # branch is an ad-hoc build and gets staging's. The event test is still
+    # needed: `schedule` only ever fires on the default branch, so ref_name alone
+    # never names main there.
+    environment: ${{ (github.event_name == 'schedule' || github.ref_name == 'main') && 'production' || 'staging' }}
 
     steps:
       # The deployed ref, not the ref this run fired on. Note the split that
