@@ -23,17 +23,22 @@ Uri supportChatUri(String baseUrl, CurrentUser? user) {
   return target.replace(fragment: Uri(queryParameters: identity).query);
 }
 
-Future<void> openSupportChat(BuildContext context, WidgetRef ref) async {
+Future<void> openSupportChat(
+  BuildContext context,
+  WidgetRef ref, {
+  Future<void> Function(BuildContext, String) open = openExternalUrl,
+}) async {
   CurrentUser? user;
-  // The sample project runs without an account, so chat opens anonymous there
-  // rather than fetching one.
+  // Anonymous in the sample project even for a signed-in user (it is entered
+  // from Recent and the setup checklist too): fetching the user reads the
+  // stored session and calls the account service, which the demo never does.
   if (!ref.read(demoModeProvider)) {
     try {
       user = await ref.read(currentUserProvider.future);
     } catch (_) {}
   }
   if (context.mounted) {
-    await openExternalUrl(
+    await open(
       context,
       supportChatUri(AppEnvironment.salesIqSupportUrl, user).toString(),
     );

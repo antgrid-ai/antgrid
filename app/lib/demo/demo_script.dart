@@ -34,10 +34,11 @@ final List<DemoBeat> kDemoScript = <DemoBeat>[
 
 /// What the demo answers a typed prompt with.
 ///
-/// The text says plainly that nothing ran, because the alternative — a canned
-/// answer that reads like a real one — is the exact confusion the demo banner
-/// exists to prevent. It still arrives as deltas so the streaming transcript,
-/// the working indicator and the stop button all behave as they do live.
+/// The text says plainly that the message went nowhere, because the
+/// alternative — a canned answer that reads like a real one — is the exact
+/// confusion the demo banner exists to prevent. It still arrives as deltas so
+/// the streaming transcript, the working indicator and the stop button all
+/// behave as they do live.
 const List<String> _kReplyChunks = <String>[
   'This is the built-in sample project, ',
   'so your message stayed on this device.\n\n',

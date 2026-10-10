@@ -71,7 +71,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.byType(DemoFrame), findsOneWidget);
-      expect(find.textContaining('sample data'), findsNothing);
+      expect(find.textContaining('Sample project.'), findsNothing);
       expect(find.text('Exit sample'), findsNothing);
     });
   });

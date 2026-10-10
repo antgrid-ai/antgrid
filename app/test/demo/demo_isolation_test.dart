@@ -16,6 +16,8 @@ import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/focused_tools.dart';
 import 'package:antgrid/providers/analytics.dart';
+import 'package:antgrid/providers/auth.dart' show currentUserProvider;
+import 'package:antgrid/providers/support_chat.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/drawer_expansion.dart';
@@ -34,6 +36,8 @@ import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/storage/project_store.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -207,6 +211,48 @@ void main() {
 
     exitDemoMode(container);
     expect(allowed(), isTrue);
+  });
+
+  testWidgets('support chat opens anonymous, without fetching the user', (
+    tester,
+  ) async {
+    var fetched = false;
+    final container = ProviderContainer(
+      overrides: [
+        currentUserProvider.overrideWith((ref) async {
+          fetched = true;
+          return null;
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(demoModeProvider.notifier).set(true);
+
+    late BuildContext context;
+    late WidgetRef widgetRef;
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: Consumer(
+          builder: (ctx, ref, _) {
+            context = ctx;
+            widgetRef = ref;
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+
+    String? opened;
+    await openSupportChat(
+      context,
+      widgetRef,
+      open: (_, url) async => opened = url,
+    );
+
+    expect(fetched, isFalse);
+    expect(opened, isNotNull);
+    expect(Uri.parse(opened!).fragment, isEmpty);
   });
 
   test('the drawer is the sample project and nothing else', () async {
