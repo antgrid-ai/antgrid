@@ -5,7 +5,7 @@ import type { LaunchAugmentation, McpInjectCtx } from "../types";
 // spawned from `codex exec` saw 21 keys and none of ours — so the identity the
 // server needs is forwarded by name rather than inherited. Values stay live and
 // per-PTY, which is what keeps this override identical for every terminal.
-const MCP_ENV_VARS = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID"] as const;
+const MCP_ENV_VARS = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID"] as const;
 
 /**
  * `-c mcp_servers.antgrid.*`, which MERGES with the user's own servers rather

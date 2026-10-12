@@ -386,6 +386,8 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
+  revokeClipboardAccess(): void { this.core?.revokeClipboardAccess(); }
+
   /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
    *  now rather than wait on a Stop hook the CLI may never fire for a manual
    *  interrupt. See {@link closeInterruptedTurn}.
@@ -541,6 +543,10 @@ export class ProjectCore {
       // with no host (evals, most of this file's own test callers) offers no
       // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
+      // Forwarded by name for the same reason: dropped here, the core would
+      // answer every scheduler tool SCHEDULER_UNAVAILABLE on a real bridge while
+      // a test that builds the core directly stays green.
+      ...(this.deps.schedulerForAgent ? { schedulerForAgent: this.deps.schedulerForAgent } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,

@@ -181,6 +181,73 @@ describe("GET /team — a member's view", () => {
     expect(text).not.toContain("Seats used");
     expect(text).not.toContain("Pending invites");
     expect(text).not.toContain("pending@example.com");
+    // They own no team of their own with anyone on it.
+    expect(text).not.toContain("You also own another team");
+  });
+
+  test("an owner who joined another team is told their own team is still there", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const mine = await ownerWithSeats(3);
+    const stayed = await createTestUser(pg.db, "stayed@example.com");
+    await addTestMember(pg.db, mine.accountId, stayed.id);
+    const theirs = await ownerWithSeats(3);
+    // The real join closes the joiner's owner membership and leaves their
+    // members where they were; the fixture does the same.
+    await addTestMember(pg.db, theirs.accountId, mine.owner.id);
+
+    const text = readable(await (await getTeam(app, mine.cookie)).text());
+
+    // The page is about the team they joined…
+    expect(text).toContain(theirs.owner.email);
+    expect(text).not.toContain("stayed@example.com");
+    // …so the people blocking their account's deletion are named as elsewhere.
+    expect(text).toContain("You also own another team, which still has 1 member.");
+  });
+});
+
+describe("GET /team — in the iOS app's sheet", () => {
+  test("an over-subscribed owner is not told to buy seats", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const { accountId, cookie } = await ownerWithSeats(1);
+    await addTestMember(pg.db, accountId, (await createTestUser(pg.db)).id);
+
+    const plain = readable(await (await getTeam(app, cookie)).text());
+    const hidden = readable(
+      await (await app.request("/team?hidePricing=1", { headers: { cookie } })).text()
+    );
+
+    expect(plain).toContain("Buy seats");
+    expect(hidden).toContain("Remove someone before inviting anyone else.");
+    expect(hidden).not.toMatch(/buy/i);
+  });
+
+  test("a seat-cap notice drops its purchase advice", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const { cookie } = await ownerWithSeats(1);
+
+    const hidden = readable(
+      await (
+        await app.request("/team?invite=seat_cap&hidePricing=1", { headers: { cookie } })
+      ).text()
+    );
+
+    expect(hidden).toContain("Every seat is taken or promised to an invitation. Withdraw one first.");
+    expect(hidden).not.toMatch(/buy/i);
+  });
+
+  test("a member is not told the owner can buy seats", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const { accountId } = await ownerWithSeats(3);
+    const member = await createTestUser(pg.db);
+    await addTestMember(pg.db, accountId, member.id);
+    const { cookie } = await createTestSession(pg.db, member.id);
+
+    const hidden = readable(
+      await (await app.request("/team?hidePricing=1", { headers: { cookie } })).text()
+    );
+
+    expect(hidden).toContain("Only the owner can change the subscription or invite people.");
+    expect(hidden).not.toMatch(/buy/i);
   });
 });
 

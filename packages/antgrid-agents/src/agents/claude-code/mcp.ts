@@ -10,6 +10,7 @@ import type { LaunchAugmentation, McpInjectCtx } from "../types";
 const MCP_ENV = {
   ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
   ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+  ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
 } as const;
 
 // Deliberately NOT under `<abDir>/plugin/claude`: `--plugin-dir` also loads a

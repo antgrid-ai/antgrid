@@ -34,20 +34,21 @@ Your agent's live output, files, and sessions appear once a project is running. 
 
 ## Signing in
 
-Antgrid supports four sign-in options:
+Antgrid supports five sign-in options:
 
 - **Email magic link** — enter your email, open the link we send you, then press **"Approve sign-in"** on the page it opens.
 - **GitHub**
 - **Google**
+- **Sign in with Apple** — in the iPhone, iPad and Mac apps, and on the website. The Windows, Linux and Android apps don't offer it.
 - **Email and password** — available once you have set a password on your account; verify the address first.
 
 **Didn't get your magic-link email?** Check your spam folder and request a new link from the app. Links are single-use and expire after **10 minutes**.
 
 ## Plans and billing
 
-**Antgrid is currently free while in beta** — every feature is included, Handler and remote control alike, on the house. Paid plans activate when the beta ends; the prices on [Pricing](/pricing) are founding prices, below the list price at launch.
+**Antgrid is currently free while in beta** — every feature is included, Handler and phone access alike, on the house. Paid plans activate when the beta ends; the prices on [Pricing](/pricing) are founding prices, below the list price at launch.
 
-Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **remote control**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** to guide your agent through the remaining work and ask you when needed, and priority support. Pro includes a **7-day free trial** and covers up to **25 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
+Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **access from your phone**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** to guide your agent through the remaining work and ask you when needed, and priority support. Pro includes a **7-day free trial** and covers up to **25 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
 
 **Manage or cancel your subscription:**
 
@@ -63,7 +64,7 @@ For the full cancellation and refund terms — including the trial and store-spe
 You need a computer running the Antgrid desktop app, signed in to the same account, with a project running. Once that's the case, your sessions and terminal output appear automatically.
 
 **Remote access is blocked.**
-Remote control is free during the beta on every plan, but each computer has a remote-access switch that is **off by default**. Turn it on in Antgrid on that computer — the **Remote** chip in the title bar — to allow your other devices to connect.
+Remote access is free during the beta on every plan, but each computer has a remote-access switch that is **off by default**. Turn it on in Antgrid on that computer — the **Remote** chip in the title bar — to allow your other devices to connect.
 
 **My computer doesn't show up / "agent offline."**
 Make sure Antgrid is running on the computer, you're signed in to the **same account** on both devices, the project is started, and both devices have a working internet connection.
@@ -77,9 +78,11 @@ All traffic between your agent and your devices is **end-to-end encrypted** (QUI
 
 ## Delete your account and data
 
-You can request deletion of your account and associated personal data at any time. Email **[contact@radhaai.com](mailto:contact@radhaai.com)** with the subject **"Account Deletion Request"** from your registered email address. We action verified requests within **30 days**, except where retention is required by law (for example, tax records).
+You can delete your account yourself at any time: in the app under **Settings → Account → Delete account**, or on the web at [app.antgrid.ai/account](https://app.antgrid.ai/account). Deletion is immediate and cannot be undone. It removes your account, sessions, connected devices and sign-in credentials. Billing records required for tax compliance are kept, detached from your identity.
 
-If you subscribed through the App Store or Google Play, cancel any active subscription through that store before requesting deletion.
+Deletion is blocked while a paid subscription is still set to renew — cancel it first. If you subscribed through the App Store or Google Play, cancel it through that store. If you own a team that still has members, remove them first, or email us to transfer ownership.
+
+If you can't sign in, email **[contact@radhaai.com](mailto:contact@radhaai.com)** with the subject **"Account Deletion Request"** from your registered email address. We action verified requests within **30 days**, except where retention is required by law (for example, tax records).
 
 ## More
 

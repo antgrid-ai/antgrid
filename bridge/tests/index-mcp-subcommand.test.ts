@@ -100,6 +100,12 @@ test("mcp subcommand serves the antgrid tools over stdio against the stamped cor
       "antgrid_reply",
       "antgrid_inbox",
       "antgrid_thread",
+      "antgrid_list_schedules",
+      "antgrid_schedule_runs",
+      "antgrid_create_schedule",
+      "antgrid_update_schedule",
+      "antgrid_delete_schedule",
+      "antgrid_run_schedule_now",
     ]);
 
     const called = await rpc.call(3, "tools/call", {

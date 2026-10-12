@@ -105,6 +105,19 @@ test("a tree request naming the current revision is answered without a listing",
     const last = listings[listings.length - 1];
     seq = last?.type === "file:tree:children" ? last.seq : 0;
   }
+  // The probes churn the watcher into its widened flush window, so the last
+  // probe can still flush after `seq` was read and move the revision the next
+  // request names. Re-read until it holds across longer than that window.
+  for (let settled = false; !settled; ) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const listings = countOf(sent, "file:tree:children");
+    bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+    await waitFor(() => countOf(sent, "file:tree:children") > listings, "a settling listing");
+    const last = sent.filter((m) => m.type === "file:tree:children").at(-1);
+    const next = last?.type === "file:tree:children" ? last.seq : 0;
+    settled = next === seq;
+    seq = next;
+  }
   const listingsBefore = countOf(sent, "file:tree:children");
 
   bus.dispatchInbound(
@@ -118,7 +131,7 @@ test("a tree request naming the current revision is answered without a listing",
   expect(unchanged?.type === "file:tree:unchanged" ? unchanged.seq : -1).toBe(seq);
   // The point of the whole exchange: no listing crossed for the second ask.
   expect(countOf(sent, "file:tree:children")).toBe(listingsBefore);
-});
+}, 20_000);
 
 test("a tree request naming an unrecognised revision still gets a listing", async () => {
   const { bus, sent } = await bootCore();

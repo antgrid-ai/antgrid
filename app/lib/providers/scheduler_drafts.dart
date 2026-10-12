@@ -16,8 +16,8 @@ class SchedulerDraft {
     required this.time,
     this.workspaceCreated = false,
     this.checkoutId,
-  }) : values = Map.unmodifiable(values),
-       initialSaved = Map.unmodifiable(initialSaved);
+  }) : values = Map.unmodifiable({'catchUp': 'latest', ...values}),
+       initialSaved = Map.unmodifiable({'catchUp': 'latest', ...initialSaved});
 
   final Map<String, dynamic> values;
   final Map<String, dynamic> initialSaved;
@@ -27,8 +27,8 @@ class SchedulerDraft {
   final String? checkoutId;
   bool get dirty =>
       !mapEquals(values, initialSaved) ||
-      frequency != schedulerFrequency(initialSaved['cron'] as String) ||
-      time != schedulerPresetTime(initialSaved['cron'] as String);
+      frequency != schedulerSavedFrequency(initialSaved) ||
+      time != schedulerSavedTime(initialSaved);
   bool changedSince(AgentSchedule schedule) =>
       !mapEquals(initialSaved, schedule.settings()) ||
       workspaceCreated != schedule.workspaceCreated ||
@@ -60,6 +60,7 @@ class SchedulerDraft {
     SchedulerSnapshot snapshot,
     AgentSchedule? schedule, {
     String? localTimezone,
+    DateTime? now,
   }) {
     final values =
         schedule?.settings() ??
@@ -73,17 +74,47 @@ class SchedulerDraft {
               ? 'worktree'
               : 'shared',
           'approvalPolicy': 'default',
+          'catchUp': 'latest',
           'enabled': true,
           'cron': '0 9 * * *',
           'timezone': localTimezone ?? snapshot.capabilities.timezone,
         };
-    return SchedulerDraft(
+    final draft = SchedulerDraft(
       values: values,
       initialSaved: values,
-      frequency: schedulerFrequency(values['cron'] as String),
-      time: schedulerPresetTime(values['cron'] as String),
+      frequency: schedulerSavedFrequency(values),
+      time: schedulerSavedTime(values),
       workspaceCreated: schedule?.workspaceCreated ?? false,
       checkoutId: schedule?.checkoutId,
+    );
+    return schedule == null ? draft : draft.renewOneOff(schedule, now: now);
+  }
+
+  /// A one-off that fired, or whose paused time passed, opens on a usable
+  /// suggestion, enabled. The bridge clears "finished" only for a CHANGED
+  /// runAt, so a draft still naming the stored instant — fresh, or retained
+  /// from before the fire — would save as a silent no-op. A draft whose time
+  /// the user already changed is theirs and is kept.
+  SchedulerDraft renewOneOff(AgentSchedule schedule, {DateTime? now}) {
+    final stored = schedule.runAt;
+    if (stored == null ||
+        frequency != 'Once' ||
+        values['runAt'] != stored.millisecondsSinceEpoch) {
+      return this;
+    }
+    final instant = now ?? DateTime.now();
+    if (schedulerOneOffState(schedule, instant)
+        case SchedulerOneOffState.pending || SchedulerOneOffState.paused) {
+      return this;
+    }
+    final suggested = schedulerWallTime(
+      instant.add(const Duration(hours: 1)),
+      schedule.timezone,
+    );
+    return edit(
+      {...values, 'runAt': schedulerWallIso(suggested), 'enabled': true},
+      frequency,
+      suggested,
     );
   }
 }
@@ -114,9 +145,12 @@ class SchedulerDrafts extends Notifier<Map<SchedulerDraftKey, SchedulerDraft>> {
     AgentSchedule? schedule,
   ) {
     final existing = state[key];
-    if (existing != null) return existing;
-    final draft = SchedulerDraft.start(snapshot, schedule);
-    put(key, draft);
+    final draft = existing == null
+        ? SchedulerDraft.start(snapshot, schedule)
+        : schedule == null
+        ? existing
+        : existing.renewOneOff(schedule);
+    if (!identical(draft, existing)) put(key, draft);
     return draft;
   }
 

@@ -14,9 +14,43 @@ export type RoadmapEntry = RoadmapDetails & (
 );
 
 // Review dates record an editorial check, never a build timestamp.
-export const LAST_REVIEWED = "2026-10-05";
+export const LAST_REVIEWED = "2026-10-08";
+
+// Done shows only the most recent completions; the changelog is the full record
+// of what shipped, so the roadmap stays about direction rather than an archive.
+export const DONE_LIMIT = 5;
 
 export const ROADMAP: readonly RoadmapEntry[] = [
+  {
+    id: "agent-scheduling",
+    title: "Agents can schedule work",
+    description: "Ask the agent you are working with to set up a schedule instead of creating it by hand.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: Antgrid MCP tools that let an agent list, create, change, pause, delete and run schedules for its own project, never with more approval freedom than its own session has. Sessions launched by a schedule can only read schedules.",
+    updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
+  },
+  {
+    id: "one-off-schedules",
+    title: "One-off schedules",
+    description: "Run a prompt once at a chosen time, such as tomorrow at 9.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: a Once option in the schedule editor and for agents, with catch-up when the desktop was closed at the chosen time and a clear record of how each one-off ended.",
+    updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
+  },
+  {
+    id: "scheduler-catch-up",
+    title: "Scheduler catch-up",
+    description: "Run the latest missed occurrence when your desktop comes back, instead of silently skipping it.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: a per-schedule choice to run the latest missed occurrence or skip missed runs, one consolidated record for earlier misses, and schedules that keep running after a phone signs out.",
+    updatedAt: "2026-10-08",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/225",
+  },
   {
     id: "scheduler",
     title: "Scheduled agent sessions",
@@ -81,7 +115,7 @@ export function groupRoadmap(entries: readonly RoadmapEntry[]) {
     { id: "now", title: "Now", description: "Work in progress.", entries: entries.filter((entry) => entry.status === "now") },
     { id: "next", title: "Next", description: "Planned work.", entries: entries.filter((entry) => entry.status === "next") },
     { id: "exploring", title: "Exploring", description: "Ideas under consideration, not commitments.", entries: entries.filter((entry) => entry.status === "exploring") },
-    { id: "done", title: "Done", description: "The latest completed features.", entries: entries.filter((entry) => entry.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5) },
+    { id: "done", title: "Done", description: "The latest completed features.", entries: entries.filter((entry) => entry.status === "done").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, DONE_LIMIT) },
   ].filter((group) => group.entries.length > 0);
 }
 

@@ -333,8 +333,8 @@ test('sums line totals', () => {
 # demo-shop
 
 Sample project bundled with Antgrid so the app has something to show before
-you connect a machine. Nothing here runs — the files, git status and terminal
-output are canned.
+you connect your computer. The files, Git status and terminal output are
+examples; connect it to work on your own projects.
 ''',
   'package.json': '''
 {

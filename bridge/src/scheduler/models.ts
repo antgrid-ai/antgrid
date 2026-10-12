@@ -1,31 +1,73 @@
 import { z } from "zod";
 
-export const ScheduleInputSchema = z.object({
+// Fields carry no defaults here: the patch schema is built from them, and a Zod 4
+// `.partial()` over a defaulted field would re-apply the default to an absent key,
+// so a pause (`{enabled:false}`) would silently reset approvalPolicy and catchUp.
+const scheduleFields = {
   name: z.string().trim().min(1).max(160),
   projectId: z.string().min(1),
   agentId: z.string().min(1),
   mode: z.enum(["terminal", "chat"]),
   prompt: z.string().min(1).max(100_000),
-  approvalPolicy: z.enum(["default", "bypass"]).default("default"),
+  approvalPolicy: z.enum(["default", "bypass"]),
   workspace: z.enum(["shared", "worktree"]),
   baseBranch: z.string().min(1).optional(),
   cron: z.string().min(1),
+  // Epoch ms of a one-off. The host resolves wall-clock strings to this before validation.
+  runAt: z.number().int().positive(),
   timezone: z.string().min(1),
-  enabled: z.boolean().default(true),
+  enabled: z.boolean(),
+  catchUp: z.enum(["latest", "skip"]),
+  // The chat config `mode` id a scheduled chat run starts in; absent means the backend default.
+  chatMode: z.string().min(1),
+};
+const exactlyOneKind = { message: "A schedule needs exactly one of cron (recurring) or runAt (one-off)" };
+const ScheduleInputBase = z.object({
+  ...scheduleFields,
+  approvalPolicy: scheduleFields.approvalPolicy.default("default"),
+  enabled: scheduleFields.enabled.default(true),
+  catchUp: scheduleFields.catchUp.default("latest"),
+  cron: scheduleFields.cron.optional(),
+  runAt: scheduleFields.runAt.optional(),
+  chatMode: scheduleFields.chatMode.optional(),
 }).strict();
-export const SchedulePatchSchema = ScheduleInputSchema.partial().extend({
+/** Field names, for callers that rebuild an input from a stored record. */
+export const SCHEDULE_INPUT_KEYS = Object.keys(ScheduleInputBase.shape) as (keyof ScheduleInput)[];
+export const ScheduleInputSchema = ScheduleInputBase.refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
+export const SchedulePatchSchema = z.object(scheduleFields).partial().extend({
   baseBranch: z.string().min(1).nullable().optional(),
-});
-export const ScheduleSchema = ScheduleInputSchema.extend({
+  chatMode: scheduleFields.chatMode.nullable().optional(),
+}).strict().refine((p) => p.cron === undefined || p.runAt === undefined, { message: "Name cron or runAt in a patch, not both" });
+export const ScheduleSchema = ScheduleInputBase.extend({
   id: z.string(),
   authorDeviceId: z.string().nullable(),
+  // Display-only provenance for schedules an agent session created or last edited.
+  authorSessionId: z.string().optional(),
+  authorSessionName: z.string().optional(),
+  editedBySessionName: z.string().optional(),
+  editedAt: z.number().optional(),
   checkoutId: z.string().optional(),
   workspaceCreated: z.boolean().default(false),
   createdAt: z.number(),
   updatedAt: z.number(),
   nextOccurrence: z.number(),
+  // Written in the claim transaction that fires or misses a one-off, so "finished" survives a restart without
+  // overloading `enabled`, which keeps meaning "the user paused it".
+  firedRunId: z.string().optional(),
+  firedAt: z.number().optional(),
+  // Set when a due one-off was handed back unconsumed: an overlapping run deferred it, or a settings change re-armed
+  // it. The occurrence fell due while the desktop was open, so the next claim runs it even under catch-up "skip".
+  deferredAt: z.number().optional(),
   deletedAt: z.number().optional(),
-});
+  // Set once by the store migration on a chat schedule that predates `chatMode`: the mode it was effectively running
+  // in is resolved from the last-used chat config at the next start. Internal; never leaves the bridge.
+  chatModeCarryOver: z.boolean().optional(),
+}).refine((s) => (s.cron === undefined) !== (s.runAt === undefined), exactlyOneKind);
+/** A schedule as the app and agents see it: without the bridge-internal carry-over marker. */
+export function publicSchedule<T extends Schedule>(schedule: T): Omit<T, "chatModeCarryOver"> {
+  const { chatModeCarryOver: _marker, ...rest } = schedule;
+  return rest;
+}
 export type ScheduleInput = z.infer<typeof ScheduleInputSchema>;
 export type SchedulePatch = z.infer<typeof SchedulePatchSchema>;
 export type Schedule = z.infer<typeof ScheduleSchema>;
@@ -33,12 +75,15 @@ export type Schedule = z.infer<typeof ScheduleSchema>;
 export const RunStatusSchema = z.enum(["preparing", "running", "needs-input", "completed", "failed", "interrupted", "skipped"]);
 export const SchedulerRunSchema = z.object({
   id: z.string(), scheduleId: z.string(), scheduleName: z.string(), projectId: z.string(),
-  occurrenceAt: z.number(), trigger: z.enum(["cron", "manual", "missed"]),
+  occurrenceAt: z.number(), trigger: z.enum(["cron", "manual", "missed", "catch-up"]),
   timezone: z.string().optional(),
   status: RunStatusSchema, startedAt: z.number(), finishedAt: z.number().optional(),
   reason: z.string().optional(), missedUntil: z.number().optional(),
+  missedCount: z.number().int().positive().optional(),
   sessionId: z.string().optional(), runtimeGeneration: z.string().optional(), checkoutId: z.string().optional(),
 });
+// Mirrored by hand in the app; a consolidated record stores this when the true count is larger.
+export const MISSED_COUNT_CAP = 1000;
 export type SchedulerRun = z.infer<typeof SchedulerRunSchema>;
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["preparing", "running", "needs-input"];
@@ -47,6 +92,10 @@ export function isActiveRun(run: SchedulerRun): boolean { return ACTIVE_RUN_STAT
 export const SchedulerCapabilitiesSchema = z.object({
   supported: z.boolean(), timezone: z.string(),
   supportsBaseBranchClear: z.boolean().optional(),
+  supportsCatchUp: z.boolean().optional(),
+  supportsOneOff: z.boolean().optional(),
+  // Fixed chat permission modes per schedulable agent. An agent whose modes are discovered at runtime is absent.
+  chatModes: z.record(z.string(), z.array(z.object({ id: z.string(), name: z.string(), description: z.string().optional() }))).optional(),
   agents: z.array(z.object({ agentId: z.string(), modes: z.array(z.enum(["terminal", "chat"])) })),
   error: z.string().optional(),
 });

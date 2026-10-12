@@ -363,7 +363,8 @@ body {
    the copy rather than beside it — a warm block fading in and out under muted
    body text reads as a rendering fault, not as a machine waking up. The static
    field stays; liveness is carried in the same viewport by the beta pill and by
-   the ProofCard's own loop, which says it far better than a background can. */
+   the hero window's terminal caret, which say it far better than a background
+   can. */
 @media (max-width: 47.999rem) {
   .live-cells {
     display: none;
@@ -422,43 +423,6 @@ html.js .reveal.in {
   transform: none;
 }
 
-/* Staggered load-in for the hero proof card (scoped so the OG shot stays static). */
-@keyframes rise-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-.pc-animate .pc-row {
-  opacity: 0;
-  animation: rise-in 0.5s ease forwards;
-  animation-delay: var(--pc-delay, 0s);
-}
-
-/* Story-loop mode: the ProofCard script upgrades the one-shot stagger to a
-   looping state machine. `.pc-loop` retires the keyframe stagger (the script
-   owns visibility via `.pc-off`), and hidden rows keep their box so the card
-   never changes height mid-loop. Must sit AFTER the .pc-animate rule — equal
-   specificity, order decides. */
-.pc-loop .pc-row {
-  opacity: 1;
-  animation: none;
-  transition: opacity 0.45s ease, transform 0.45s ease;
-}
-.pc-loop .pc-row.pc-off {
-  opacity: 0;
-  transform: translateY(8px);
-}
-
-/* Typing caret for the instruction chip while the script is typing. */
-@keyframes caret-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-.pc-caret::after {
-  content: "▍";
-  margin-left: 1px;
-  color: var(--color-signal);
-  animation: caret-blink 0.9s step-end infinite;
-}
 
 /* Section eyebrow caret (Eyebrow.astro): two blinks, then it rests. The
    looping carets above mean "a session is live"; eighteen of these blinking
@@ -504,14 +468,9 @@ html.js .reveal:not(.in) .eb-caret {
     transform: none;
     transition: none;
   }
-  .pc-animate .pc-row {
-    opacity: 1;
-    animation: none;
-  }
   .animate-pulse-dot,
   .cipher-scroll,
-  .eb-caret,
-  .pc-caret::after {
+  .eb-caret {
     animation: none;
   }
   /* Not opacity:1 on every cell — that lights the whole rack, which reads as
@@ -521,11 +480,6 @@ html.js .reveal:not(.in) .eb-caret {
   }
   .live-cells rect:nth-child(4n + 1) {
     opacity: 1;
-  }
-  /* The loop script never starts under reduced motion, but if the preference
-     flips mid-session the rows must not keep transitioning. */
-  .pc-loop .pc-row {
-    transition: none;
   }
 }
 

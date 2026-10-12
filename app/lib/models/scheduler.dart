@@ -4,5 +4,6 @@ export 'package:antgrid_relay_client/antgrid_relay_client.dart'
         ScheduleRun,
         SchedulerAgent,
         SchedulerCapabilities,
+        SchedulerChatMode,
         SchedulerProject,
         schedulerMaps;

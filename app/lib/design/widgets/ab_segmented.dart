@@ -59,6 +59,7 @@ class AbSegmented<T> extends StatelessWidget {
     this.onDisabledTap,
     this.iconOnly = false,
     this.inactive = false,
+    this.expand = false,
   });
 
   final List<AbSegment<T>> segments;
@@ -83,6 +84,10 @@ class AbSegmented<T> extends StatelessWidget {
   /// separates this from `AbSegment.enabled: false`, which refuses the choice
   /// outright and says nothing about whether the chosen one is in force.
   final bool inactive;
+
+  /// Splits the incoming width evenly between the cells, for a control that
+  /// spans its row (a phone's view switcher) instead of hugging its labels.
+  final bool expand;
 
   /// Tap on a disabled cell. Defaults to surfacing [AbSegment.disabledReason]
   /// as a toast — hover can't be relied on for the reason (touch
@@ -109,19 +114,21 @@ class AbSegmented<T> extends StatelessWidget {
         borderRadius: AbTokens.borderRadius3,
         child: IntrinsicHeight(
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               for (var i = 0; i < segments.length; i++) ...[
                 if (i > 0) Container(width: 1, color: p.borderDefault),
-                _SegmentCell<T>(
-                  key: segments[i].key,
-                  segment: segments[i],
-                  selected: segments[i].value == selected,
-                  onSelect: onSelect,
-                  onDisabledTap: onDisabledTap,
-                  iconOnly: iconOnly,
-                  inactive: inactive,
+                _expanded(
+                  _SegmentCell<T>(
+                    key: segments[i].key,
+                    segment: segments[i],
+                    selected: segments[i].value == selected,
+                    onSelect: onSelect,
+                    onDisabledTap: onDisabledTap,
+                    iconOnly: iconOnly,
+                    inactive: inactive,
+                  ),
                 ),
               ],
             ],
@@ -130,6 +137,8 @@ class AbSegmented<T> extends StatelessWidget {
       ),
     );
   }
+
+  Widget _expanded(Widget cell) => expand ? Expanded(child: cell) : cell;
 }
 
 class _SegmentCell<T> extends StatefulWidget {
@@ -186,9 +195,13 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         : p.textMuted;
 
     Widget cell = AnimatedContainer(
+      // The cell is the visible box, so it stops at a row height rather than
+      // the full touch target, which would dwarf its small-caps label.
       constraints: BoxConstraints(
         minWidth: AbTouchSizing.extentOf(context),
-        minHeight: AbTouchSizing.extentOf(context),
+        minHeight: AbTouchSizing.extentOf(context) == 0
+            ? 0
+            : AbTokens.rowHeightMd,
       ),
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,

@@ -30,6 +30,7 @@ import '../providers/terminal_compose_drafts.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
+import '../services/terminal_clipboard_coordinator.dart';
 import '../util/detached.dart';
 import '../util/wrapped_url.dart';
 import '../util/external_url.dart';
@@ -51,6 +52,7 @@ import '../providers/ui_attention_providers.dart';
 import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
+import 'terminal_presentation_controller.dart';
 import 'terminal_scroll_physics.dart';
 import 'terminal_upload_button.dart';
 import 'terminal_upload_strip.dart';
@@ -153,11 +155,142 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
       _TerminalViewWrapperState();
 }
 
-class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
+class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
+    with WidgetsBindingObserver {
+  late TerminalPresentationController _presentation;
+  int _selectionGeneration = 0;
+  bool _appForeground = true;
+  bool _surfaceVisible = true;
+  bool _touchSelection = false;
+
+  void _onGuestPointer() {
+    if (!_appForeground ||
+        !_surfaceVisible ||
+        _historyOpen ||
+        _presentation.selecting) {
+      return;
+    }
+    widget.terminalService.setClipboardForeground(
+      this,
+      widget.tab.terminalId,
+      onCopied: () {
+        if (mounted) showAbToast(context, 'Copied');
+      },
+    );
+  }
+
+  void _beforeSurfaceInput() {
+    if (_presentation.selecting) _returnToLive();
+    _syncClipboardForeground();
+  }
+
+  bool get _canCopyHostClipboard =>
+      widget.terminalService.session.mode == ProjectSessionMode.relay &&
+      widget.terminalService.supportsHostClipboard(widget.tab.terminalId);
+
+  void _copyHostClipboard() {
+    if (!_appForeground || !_surfaceVisible) return;
+    final service = widget.terminalService;
+    final terminalId = widget.tab.terminalId;
+    final presentation = _presentation;
+    _liveFocusNode.requestFocus();
+    service.setClipboardForeground(
+      this,
+      terminalId,
+      programCopies: !_historyOpen && !_presentation.selecting,
+      onCopied: () {
+        if (mounted) showAbToast(context, 'Copied');
+      },
+    );
+    detached('TerminalView', 'host clipboard copy failed', () async {
+      final copied = await service.copyHostClipboard(terminalId);
+      if (mounted &&
+          identical(presentation, _presentation) &&
+          identical(service, widget.terminalService) &&
+          terminalId == widget.tab.terminalId &&
+          _appForeground &&
+          _focusScope.hasFocus) {
+        showAbToast(
+          context,
+          copied ? 'Copied' : 'Host clipboard could not be copied',
+        );
+      }
+    });
+  }
+
+  void _selectText({bool touch = true}) {
+    if (touch && !_touchSelection) {
+      // Ghostty captures supported pointer devices when creating recognizers.
+      // Explicit entry happens before a gesture; mouse-down must retain them.
+      _touchSelection = true;
+      _viewKey = GlobalKey();
+    }
+    _presentation.freeze();
+    _selectionGeneration++;
+    _syncClipboardForeground();
+    setState(() {});
+  }
+
+  void _returnToLive() {
+    _dropSelection();
+    _resetTouchSelection();
+    _presentation.returnToLive();
+    _syncClipboardForeground();
+    if (mounted) setState(() {});
+  }
+
+  void _resetTouchSelection() {
+    if (!_touchSelection) return;
+    _touchSelection = false;
+    _viewKey = GlobalKey();
+  }
+
+  void _syncClipboardForeground() {
+    widget.terminalService.setClipboardForeground(
+      this,
+      _appForeground && _surfaceVisible && _focusScope.hasFocus
+          ? widget.tab.terminalId
+          : null,
+      programCopies: !_historyOpen && !_presentation.selecting,
+      onCopied: () {
+        if (mounted) showAbToast(context, 'Copied');
+      },
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appForeground = state == AppLifecycleState.resumed;
+    if (state != AppLifecycleState.resumed) {
+      _returnToLive();
+      widget.terminalService.setClipboardForeground(this, null);
+    } else {
+      _syncClipboardForeground();
+    }
+  }
+
+  void _onSelectionPointerDown(PointerDownEvent event) {
+    if (_historyOpen || event.buttons != kPrimaryMouseButton) return;
+    if (event.kind != PointerDeviceKind.mouse) return;
+    final terminal = _presentation.engine.terminal;
+    final guestMouse =
+        terminal.getMode(VtModes.x10Mouse) ||
+        terminal.getMode(VtModes.normalMouse) ||
+        terminal.getMode(VtModes.buttonMouse) ||
+        terminal.getMode(VtModes.anyMouse);
+    if (_presentation.selecting ||
+        HardwareKeyboard.instance.isShiftPressed ||
+        !guestMouse) {
+      _selectText(touch: false);
+    }
+  }
+
   TerminalService? _displayService;
   int _displayUpdate = 0;
 
   void _syncDisplay(bool visible) {
+    _surfaceVisible = visible;
+    _syncClipboardForeground();
     final service = widget.terminalService;
     final id = widget.tab.terminalId;
     final update = ++_displayUpdate;
@@ -345,7 +478,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// input transform so it also reaches IME keystrokes, which go straight from
   /// the engine to the wire without passing through this widget.
   final TerminalModifierLatch _modifiers = TerminalModifierLatch();
-  late final String Function(String) _modifierTransform = _transformInput;
 
   /// The touch key bar's sticky modifiers, applied to every keystroke the pane
   /// sends — plus the one chord they can mean instead of a keystroke: an armed
@@ -370,9 +502,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     detached(
       'TerminalView',
       'clipboard copy failed',
-      () => Clipboard.setData(ClipboardData(text: selection)),
+      () => _onEngineCopy(selection),
     );
-    _dropSelection();
   }
 
   /// The engine's own copy paths — Cmd+C on macOS (Ctrl chords never reach the
@@ -383,16 +514,27 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// refuses would otherwise surface as an unattributed fatal. The selection
   /// stays put then, so the user can try again.
   Future<void> _onEngineCopy(String text) async {
-    try {
-      await Clipboard.setData(ClipboardData(text: text));
-    } catch (_) {
+    final generation = _selectionGeneration;
+    final presentationGeneration = _presentation.generation;
+    final copied = await TerminalClipboardCoordinator.instance.copyExplicit(
+      text,
+    );
+    if (!mounted ||
+        generation != _selectionGeneration ||
+        presentationGeneration != _presentation.generation) {
       return;
     }
-    _dropSelection();
+    if (copied) {
+      _returnToLive();
+      showAbToast(context, 'Copied');
+    } else {
+      showAbToast(context, 'Copy failed. Try again.');
+    }
   }
 
   void _dropSelection() {
     if (!mounted) return;
+    _selectionGeneration++;
     setState(() {
       _selectedText = null;
       _selectedAnchors = null;
@@ -400,12 +542,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _selectionController.clear();
   }
 
-  /// The engine's own selection, dropped on every frame that replaces
-  /// the screen its row/col anchors point into. The view cannot do this
-  /// itself -- a frame is ordinary output to it -- and until it does, its
-  /// highlight stays painted over glyphs nobody chose and its native copy
-  /// paths (the selection context menu, the platform copy chord) resolve
-  /// their text from those anchors at copy time.
+  /// The view owns its anchors independently of the text mirror. Clear both
+  /// when leaving the frozen surface so later frames cannot retarget a copy.
   final GhosttyTerminalSelectionController _selectionController =
       GhosttyTerminalSelectionController();
 
@@ -505,7 +643,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// or widget-level key throws "Multiple widgets used the same GlobalKey" the
   /// moment two wrappers are mounted at once, e.g. during the mobile
   /// list-and-detail route transition.
-  final GlobalKey _viewKey = GlobalKey();
+  GlobalKey _viewKey = GlobalKey();
 
   Timer? _takeoverTimer;
   StreamSubscription<Object?>? _connectionSub;
@@ -518,7 +656,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           if (!mounted) return;
           if (!widget.terminalService.session.transport.isEstablished) {
             _cancelTakeover();
-            widget.tab.ghostty.cancelPendingMouseMotion();
+            _presentation.engine.cancelPendingMouseMotion();
           }
           setState(() {});
         });
@@ -667,6 +805,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (_historyOpen) _closeHistory();
     final data = _transformInput(text);
     if (data.isEmpty) return true;
+    if (_presentation.selecting) _returnToLive();
     if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
       return true;
     }
@@ -696,6 +835,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _presentation = TerminalPresentationController(
+      widget.tab,
+      onInput: _beforeSurfaceInput,
+      transformInput: _transformInput,
+      onGuestPointer: _onGuestPointer,
+    );
     _uploader = TerminalAttachmentUploader(
       // `existingServicesForCheckout`, not `servicesForCheckout` — the latter
       // creates and broadcasts a bundle as a side effect.
@@ -736,10 +882,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // this early in the lifecycle. See `TerminalService.primeDisplay` for why
     // the restore cannot wait for `_syncDisplay`'s post-frame pass.
     widget.terminalService.primeDisplay(widget.tab.terminalId);
-    widget.terminalService.setInputTransform(
-      widget.tab.terminalId,
-      _modifierTransform,
-    );
     widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     widget.tab.history.addListener(_onHistoryChanged);
     _hasArchivedRows = widget.tab.history.hasHistory;
@@ -762,6 +904,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void didUpdateWidget(TerminalViewWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.tab.latestFrame, widget.tab.latestFrame) ||
+        !identical(oldWidget.tab.ghostty, widget.tab.ghostty)) {
+      oldWidget.terminalService.setClipboardForeground(this, null);
+      _presentation.dispose();
+      _presentation = TerminalPresentationController(
+        widget.tab,
+        onInput: _beforeSurfaceInput,
+        transformInput: _transformInput,
+        onGuestPointer: _onGuestPointer,
+      );
+      _resetTouchSelection();
+      _dropSelection();
+    }
     final myClientId = ref.read(clientIdProvider).value;
     final wasDriver =
         oldWidget.tab.driverClientId == null ||
@@ -784,15 +939,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // open/close writes through — so this only swaps the new one in.
       if (!_composeDrafts.isOpen(_composeDraftKey)) _composeFocus.unfocus();
       _loadComposeDraft();
-      oldWidget.terminalService.setInputTransform(
-        oldWidget.tab.terminalId,
-        null,
-        replacing: _modifierTransform,
-      );
-      widget.terminalService.setInputTransform(
-        widget.tab.terminalId,
-        _modifierTransform,
-      );
       _modifiers.clear();
     }
     if (oldWidget.tab.terminalId != widget.tab.terminalId ||
@@ -860,12 +1006,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.terminalService.setClipboardForeground(this, null);
+    _presentation.dispose();
     _cancelTakeover();
-    widget.terminalService.setInputTransform(
-      widget.tab.terminalId,
-      null,
-      replacing: _modifierTransform,
-    );
     _modifiers.dispose();
     _composeDraft.removeListener(_saveComposeDraft);
     _composeDraft.dispose();
@@ -901,29 +1045,23 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   void _onFocusChange() {
     _realModifierState.clear();
+    if (!_focusScope.hasFocus && _presentation.selecting) _returnToLive();
+    _syncClipboardForeground();
   }
 
-  /// Fires whenever [TerminalTab.replaceEpoch] bumps -- an applied frame
-  /// just replaced the whole screen this selection's row/col anchors point
-  /// into. Ctrl+C and [SendToAgentButton] both read [_selectedText], so a
-  /// stale mirror hands the user a copy of glyphs the screen no longer shows;
-  /// dropping it is strictly better than a selection that silently retargets
-  /// itself.
-  ///
-  /// The mirror alone is not enough: the engine holds the same anchors,
-  /// paints a highlight from them, and copies from them. [_selectionController]
-  /// drops all three, and is called AFTER the mirror is cleared so the null
-  /// content it reports back finds the mirror already empty -- see
-  /// [_invalidatedAnchors] for what that null then disarms.
-  ///
-  /// Guarded on an existing selection so a live frame stream (up to 20/s)
-  /// costs a rebuild only on the one frame that actually invalidates a
-  /// selection, never on every frame -- see `_TerminalGridFreeze`'s own doc
-  /// comment for why a rebuild storm here would matter.
+  /// Frozen anchors still name their original cells. Once a new run releases
+  /// that freeze, neither those anchors nor touch selection mode may survive.
+  /// Unselected live frames need no wrapper rebuild.
   void _onFrameReplaced() {
     if (!mounted) return;
+    if (_presentation.selecting) return;
+    if (_touchSelection) {
+      _returnToLive();
+      return;
+    }
     final anchors = _selectedAnchors;
     if (anchors == null && _selectedText == null) return;
+    _selectionGeneration++;
     setState(() {
       _selectedText = null;
       _selectedAnchors = null;
@@ -971,7 +1109,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// every one of them.
   void _openHistory() {
     if (_historyOpen || !_frameOwnsPane || !_hasArchivedRows) return;
-    widget.tab.ghostty.cancelPendingMouseMotion();
+    if (_presentation.selecting) _returnToLive();
+    widget.terminalService.setClipboardForeground(
+      this,
+      widget.tab.terminalId,
+      programCopies: false,
+    );
+    _presentation.engine.cancelPendingMouseMotion();
     // The card names a link in the live pane and is laid out against a
     // position in it. The reader is about to cover both.
     _pendingHoverUri = null;
@@ -984,7 +1128,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final boundary = widget.tab.history.boundary!;
     _historyEndRow = boundary.nextRowId;
     _historyScreen = captureTerminalHistoryScreen(
-      widget.tab.ghostty,
+      _presentation.engine,
       boundary.nextRowId,
     );
     _historyRow.value = math.max(boundary.firstRowId, boundary.nextRowId - 3);
@@ -1011,6 +1155,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       _historyOpen = false;
       _historyScreen = const [];
     });
+    _syncClipboardForeground();
     if (restoreKeyboard) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && !_historyOpen) _softKeyboardController.show();
@@ -1067,6 +1212,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
+    if (_presentation.selecting &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      _returnToLive();
+      return KeyEventResult.handled;
+    }
     if (!_historyOpen &&
         event.logicalKey == LogicalKeyboardKey.pageUp &&
         HardwareKeyboard.instance.isShiftPressed) {
@@ -1077,6 +1227,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (wasBrowsing) {
       final key = event.logicalKey;
       final modifiers = GhosttyTerminalModifierState.fromHardwareKeyboard();
+      if (key == LogicalKeyboardKey.keyC &&
+          !modifiers.altPressed &&
+          (modifiers.controlPressed || modifiers.metaPressed) &&
+          (_historyKey.currentState?.copySelection() ?? false)) {
+        return KeyEventResult.handled;
+      }
       if (_modifierKeys.contains(key)) return KeyEventResult.ignored;
       if (key == LogicalKeyboardKey.escape && !_readerScope.hasFocus) {
         _closeHistory();
@@ -1091,17 +1247,23 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         return _historyKey.currentState?.navigate(event) ??
             KeyEventResult.handled;
       }
-      if (key == LogicalKeyboardKey.escape ||
-          ghosttyTerminalMatchesCopyShortcut(
-            key,
-            modifiers: modifiers,
-            platform: defaultTargetPlatform,
-          ) ||
-          ghosttyTerminalMatchesSelectAllShortcut(
-            key,
-            modifiers: modifiers,
-            platform: defaultTargetPlatform,
-          )) {
+      final forwardCopyChord =
+          key == LogicalKeyboardKey.keyC &&
+          modifiers.controlPressed &&
+          modifiers.shiftPressed &&
+          !modifiers.altPressed;
+      if (!forwardCopyChord &&
+          (key == LogicalKeyboardKey.escape ||
+              ghosttyTerminalMatchesCopyShortcut(
+                key,
+                modifiers: modifiers,
+                platform: defaultTargetPlatform,
+              ) ||
+              ghosttyTerminalMatchesSelectAllShortcut(
+                key,
+                modifiers: modifiers,
+                platform: defaultTargetPlatform,
+              ))) {
         return KeyEventResult.ignored;
       }
       if (!_hasPhysicalKeyboard &&
@@ -1122,6 +1284,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // AltGr surfaces as Ctrl+Alt on Windows — the `!ctrl` guards below are what
     // keep AltGr+C (→ ć on some intl layouts) reaching the PTY untouched.
     final alt = keyboard.isAltPressed;
+    if (event.logicalKey == LogicalKeyboardKey.keyC &&
+        meta &&
+        !alt &&
+        _hasSelection) {
+      _copySelectionAndClear();
+      return KeyEventResult.handled;
+    }
 
     // The paste chord per platform, matching what each one's terminals use:
     // Cmd+V on macOS/iOS, Ctrl+V on Windows, Ctrl+Shift+V on Linux (GNOME
@@ -1188,7 +1357,22 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       final agentRunning =
           widget.tab.isAgent &&
           widget.tab.sessionState != TerminalSessionState.exited;
-      if (agentRunning) return KeyEventResult.handled;
+      if (agentRunning && !shift) return KeyEventResult.handled;
+      if (shift) {
+        if (_presentation.selecting) _returnToLive();
+        _presentation.engine.sendKey(
+          key: GhosttyKey.GHOSTTY_KEY_C,
+          action: GhosttyKeyAction.GHOSTTY_KEY_ACTION_PRESS,
+          mods: GhosttyModsMask.ctrl | GhosttyModsMask.shift,
+          utf8Text: 'C',
+          unshiftedCodepoint: 0x63,
+        );
+        return KeyEventResult.handled;
+      }
+    }
+
+    if (_presentation.selecting && !_modifierKeys.contains(event.logicalKey)) {
+      _returnToLive();
     }
 
     // A numpad key the platform gave no character for — NumLock is off, so the
@@ -1199,7 +1383,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (!ctrl && !alt && !meta && (event.character ?? '').isEmpty) {
       final numpad = _numpadKeys[event.logicalKey];
       if (numpad != null) {
-        final sent = widget.tab.ghostty.sendKey(
+        final sent = _presentation.engine.sendKey(
           key: numpad,
           action: event is KeyRepeatEvent
               ? GhosttyKeyAction.GHOSTTY_KEY_ACTION_REPEAT
@@ -1230,7 +1414,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (alt && !ctrl && !meta && altChordPlatform) {
       final chord = _altChordText(event, shift: shift);
       if (chord != null) {
-        widget.tab.ghostty.writeBytes([0x1B, ...utf8.encode(chord)]);
+        _presentation.engine.writeBytes([0x1B, ...utf8.encode(chord)]);
         return KeyEventResult.handled;
       }
     }
@@ -1239,7 +1423,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       final modifiers = GhosttyTerminalModifierState.fromHardwareKeyboard();
       final key = ghosttyTerminalLogicalKey(event.logicalKey);
       if (key != null) {
-        widget.tab.ghostty.sendKey(
+        _presentation.engine.sendKey(
           key: key,
           mods: modifiers.ghosttyMask,
           action: event is KeyRepeatEvent
@@ -1250,7 +1434,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         final text = ghosttyTerminalPrintableText(event, modifiers: modifiers);
         final control = ghosttyTerminalControlText(event, modifiers: modifiers);
         final value = text.isNotEmpty ? text : control;
-        if (value != null && value.isNotEmpty) widget.tab.ghostty.write(value);
+        if (value != null && value.isNotEmpty) {
+          _presentation.engine.write(value);
+        }
       }
       return KeyEventResult.handled;
     }
@@ -1298,6 +1484,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// a file path it has to open with a read tool. Only when the clipboard and
   /// the agent are on different machines does the image have no way across.
   Future<void> _paste() async {
+    if (_presentation.selecting) _returnToLive();
     if (widget.terminalService.session.mode == ProjectSessionMode.relay) {
       final image = await widget.readImage();
       if (!mounted) return;
@@ -1320,7 +1507,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (_historyOpen) _closeHistory();
     final text = data?.text;
     if (text == null || text.isEmpty) return;
-    widget.tab.ghostty.writeBytes(utf8.encode(_sanitizePaste(text)));
+    _presentation.engine.writeBytes(utf8.encode(_sanitizePaste(text)));
   }
 
   /// Text an Alt-modified key should carry after the ESC prefix, or null when
@@ -1645,11 +1832,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         _measureCellCached(terminalFontSize, terminalFontWeight, dpr);
 
     final terminalView = GhosttyTerminalView(
-      interactionPolicy: _shiftScroll
+      interactionPolicy: _shiftScroll || _presentation.selecting
           ? GhosttyTerminalInteractionPolicy.selectionFirst
           : GhosttyTerminalInteractionPolicy.auto,
       key: _viewKey,
-      controller: tab.ghostty,
+      controller: _presentation.engine,
+      touchDragBehavior: _touchSelection
+          ? GhosttyTerminalTouchDragBehavior.selection
+          : GhosttyTerminalTouchDragBehavior.scroll,
+      showSelectionContextMenu: false,
       autofocus: true,
       focusNode: _liveFocusNode,
       // Mobile: taps scroll/read; the IME comes only from the Keyboard
@@ -1755,6 +1946,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         if (anchors == _invalidatedAnchors) return;
         final text = content?.text;
         if (text == _selectedText && anchors == _selectedAnchors) return;
+        _selectionGeneration++;
         setState(() {
           _selectedText = text;
           _selectedAnchors = anchors;
@@ -1780,6 +1972,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // hides this.
     return Listener(
       behavior: HitTestBehavior.translucent,
+      onPointerDown: _onSelectionPointerDown,
       onPointerSignal: (event) {
         if (!_historyOpen &&
             event is PointerScrollEvent &&
@@ -1836,12 +2029,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       // Both viewers paint the frame's grid. Driver arbitration
                       // still derives PTY resize requests from the local viewport.
                       final authWidth = gridExtentFor(
-                        cells: tab.cols,
+                        cells: _presentation.cols,
                         metric: cell.charWidth,
                         padding: _hPad,
                       );
                       final authHeight = gridExtentFor(
-                        cells: tab.rows,
+                        cells: _presentation.rows,
                         metric: cell.linePixels,
                         padding: _hPad,
                       );
@@ -1916,6 +2109,47 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       'TerminalView',
                       'send to agent failed',
                       _onSendToAgent,
+                    ),
+                  ),
+                if (!_historyOpen)
+                  Positioned(
+                    top: AbTokens.space4,
+                    right: AbTokens.space4,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_presentation.selecting) ...[
+                          AbButton(
+                            label: 'Copy',
+                            compact: true,
+                            onTap: _hasSelection
+                                ? _copySelectionAndClear
+                                : null,
+                          ),
+                          AbButton(
+                            label: 'Return to live',
+                            compact: true,
+                            onTap: _returnToLive,
+                          ),
+                        ] else if (_hasPhysicalKeyboard)
+                          AbButton(
+                            label: 'Select text',
+                            compact: true,
+                            onTap: _selectText,
+                          ),
+                      ],
+                    ),
+                  ),
+                if (!_historyOpen &&
+                    _hasPhysicalKeyboard &&
+                    _canCopyHostClipboard)
+                  Positioned(
+                    bottom: AbTokens.space4,
+                    right: AbTokens.space4,
+                    child: AbButton(
+                      label: 'Copy host clipboard to this device',
+                      compact: true,
+                      onTap: _copyHostClipboard,
                     ),
                   ),
                 if (_historyOpen)
@@ -2144,8 +2378,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         ? detected
         : extendWrappedUrl(
             detected,
-            widget.tab.ghostty.lines,
-            widget.tab.ghostty.cols,
+            _presentation.engine.lines,
+            _presentation.engine.cols,
           );
     return _openContentLink(uri);
   }
@@ -2363,6 +2597,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       composeOpen: _composeOpen,
       onToggleCompose: _toggleCompose,
       onDirectInput: _toggleDirectInput,
+      onSelectText: _selectText,
+      onPaste: () => detached('TerminalView', 'clipboard paste failed', _paste),
+      onCopyHostClipboard: _canCopyHostClipboard ? _copyHostClipboard : null,
     );
     return bar;
   }

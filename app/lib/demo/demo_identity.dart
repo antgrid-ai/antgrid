@@ -39,7 +39,7 @@ bool isDemoEntryId(String? entryId) =>
 /// port list, say) must decline in the same words.
 const String kDemoRefusalCode = 'E_DEMO_UNSUPPORTED';
 const String kDemoRefusalText =
-    'This is the sample project — connect a machine to do that for real.';
+    'The sample project has no computer attached. Connect yours to do this.';
 
 /// Label on every affordance that opens the demo (sign-in, the desktop setup
 /// checklist, the Recent tab's empty state). One definition because it is the

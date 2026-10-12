@@ -71,13 +71,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.byType(DemoFrame), findsOneWidget);
-      expect(find.textContaining('sample data'), findsNothing);
-      expect(find.text('Exit demo'), findsNothing);
+      expect(find.textContaining('Sample project.'), findsNothing);
+      expect(find.text('Exit sample'), findsNothing);
     });
   });
 
   group('a route pushed inside the demo', () {
-    testWidgets('does not outlive Exit demo', (tester) async {
+    testWidgets('does not outlive Exit sample', (tester) async {
       final container = await pumpDemoApp(tester, enterDemo: true);
       await tester.pump(const Duration(milliseconds: 100));
 

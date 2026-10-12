@@ -14,6 +14,7 @@ import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../models/agent_event.dart';
 import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
@@ -490,7 +491,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
           // know, so they keep their casing and a size that can be read.
           child: Wrap(
             spacing: AbTokens.space6,
-            runSpacing: AbTokens.space6,
+            runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space6),
             children: [for (final (label, id) in offered) chip(label, id)],
           ),
         ),
@@ -1095,25 +1096,29 @@ class _SettingsSheetState extends ConsumerState<_SettingsSheet> {
     setState(() => _value = next);
   }
 
+  // Scrolls so the sheet outgrowing a short phone (touch-sized controls,
+  // keyboard up) cannot push its lower controls off screen.
   @override
-  Widget build(BuildContext context) => Column(
-    mainAxisSize: MainAxisSize.min,
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Padding(
-        padding: abDialogTitlePadding,
-        child: abDialogTitle(
-          'Handler settings',
-          onClose: () => Navigator.of(context).maybePop(),
+  Widget build(BuildContext context) => SingleChildScrollView(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            'Handler settings',
+            onClose: () => Navigator.of(context).maybePop(),
+          ),
         ),
-      ),
-      HandlerSessionSettings(
-        terminalId: widget.terminalId,
-        value: _current,
-        onChanged: _commit,
-        appliesNextPass: true,
-      ),
-      const SizedBox(height: AbTokens.space16),
-    ],
+        HandlerSessionSettings(
+          terminalId: widget.terminalId,
+          value: _current,
+          onChanged: _commit,
+          appliesNextPass: true,
+        ),
+        const SizedBox(height: AbTokens.space16),
+      ],
+    ),
   );
 }

@@ -84,6 +84,7 @@ describe("GET /account", () => {
     const res = await app.request("/account", { headers: { cookie } });
     const html = await res.text();
     expect(html).toContain("still has team members");
+    expect(html).toContain('href="/team"');
     expect(html).not.toContain('name="confirm"');
   });
 

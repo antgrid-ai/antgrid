@@ -118,4 +118,161 @@ void main() {
       );
     },
   );
+
+  test('catch-up fields default for old bridges and gate settings()', () {
+    final base = {
+      'id': 's',
+      'name': 'n',
+      'projectId': 'p',
+      'agentId': 'claude',
+      'mode': 'terminal',
+      'prompt': 'x',
+      'approvalPolicy': 'bypass',
+      'workspace': 'shared',
+      'cron': '0 9 * * *',
+      'timezone': 'UTC',
+      'enabled': true,
+    };
+    final old = AgentSchedule.fromJson(base);
+    expect(old.catchUp, 'latest');
+    expect(old.settings()['catchUp'], 'latest');
+    expect(old.settings(includeCatchUp: false).containsKey('catchUp'), isFalse);
+    expect(AgentSchedule.fromJson({...base, 'catchUp': 'skip'}).catchUp, 'skip');
+    expect(SchedulerCapabilities.fromJson({}).supportsCatchUp, isFalse);
+    expect(
+      SchedulerCapabilities.fromJson({'supportsCatchUp': true}).supportsCatchUp,
+      isTrue,
+    );
+    final run = {
+      'id': 'r',
+      'scheduleId': 's',
+      'projectId': 'p',
+      'status': 'skipped',
+      'trigger': 'missed',
+      'occurrenceAt': 1000,
+    };
+    expect(ScheduleRun.fromJson(run).missedCount, isNull);
+    expect(ScheduleRun.fromJson({...run, 'missedCount': 1000}).missedCount, 1000);
+  });
+
+  group('one-off schedules', () {
+    const base = {
+      'id': 's',
+      'name': 'Once',
+      'projectId': 'repo',
+      'agentId': 'claude',
+      'mode': 'terminal',
+      'prompt': 'Ship',
+      'approvalPolicy': 'default',
+      'workspace': 'shared',
+      'timezone': 'Europe/London',
+      'enabled': true,
+    };
+
+    test('a cron-less record parses and settings emit only runAt', () {
+      final schedule = AgentSchedule.fromJson({
+        ...base,
+        'runAt': 1800000000000,
+        'nextOccurrence': 1800000000000,
+      });
+      expect(schedule.cron, isNull);
+      expect(schedule.isOneOff, isTrue);
+      expect(schedule.runAt!.millisecondsSinceEpoch, 1800000000000);
+      final settings = schedule.settings();
+      expect(settings['runAt'], 1800000000000);
+      expect(settings.containsKey('cron'), isFalse);
+    });
+
+    test('a recurring record emits cron and never runAt', () {
+      final schedule = AgentSchedule.fromJson({...base, 'cron': '0 9 * * *'});
+      expect(schedule.isOneOff, isFalse);
+      final settings = schedule.settings();
+      expect(settings['cron'], '0 9 * * *');
+      expect(settings.containsKey('runAt'), isFalse);
+    });
+
+    test('author, edited-by and fired fields parse', () {
+      final schedule = AgentSchedule.fromJson({
+        ...base,
+        'runAt': 1800000000000,
+        'authorSessionId': 'sess',
+        'authorSessionName': 'Fix flake',
+        'editedBySessionName': 'Other',
+        'editedAt': 1800000001000,
+        'firedRunId': 'run-1',
+        'firedAt': 1800000002000,
+      });
+      expect(schedule.authorSessionId, 'sess');
+      expect(schedule.authorSessionName, 'Fix flake');
+      expect(schedule.editedBySessionName, 'Other');
+      expect(schedule.editedAt!.millisecondsSinceEpoch, 1800000001000);
+      expect(schedule.firedRunId, 'run-1');
+      expect(schedule.firedAt!.millisecondsSinceEpoch, 1800000002000);
+    });
+
+    test('supportsOneOff defaults to false for an older bridge', () {
+      expect(
+        SchedulerCapabilities.fromJson({'supported': true}).supportsOneOff,
+        isFalse,
+      );
+      expect(
+        SchedulerCapabilities.fromJson({
+          'supported': true,
+          'supportsOneOff': true,
+        }).supportsOneOff,
+        isTrue,
+      );
+    });
+  });
+
+  group('chat permission mode', () {
+    const base = {
+      'id': 's',
+      'name': 'Chat',
+      'projectId': 'repo',
+      'agentId': 'claude-code',
+      'mode': 'chat',
+      'prompt': 'Go',
+      'approvalPolicy': 'default',
+      'workspace': 'shared',
+      'cron': '0 9 * * *',
+      'timezone': 'UTC',
+      'enabled': true,
+    };
+
+    test('parses and round-trips through settings for chat', () {
+      final schedule = AgentSchedule.fromJson({...base, 'chatMode': 'auto'});
+      expect(schedule.chatMode, 'auto');
+      expect(schedule.settings()['chatMode'], 'auto');
+    });
+
+    test('is absent when unset and never emitted for terminal', () {
+      final unset = AgentSchedule.fromJson(base);
+      expect(unset.chatMode, isNull);
+      expect(unset.settings().containsKey('chatMode'), isFalse);
+      final terminal = AgentSchedule.fromJson({
+        ...base,
+        'mode': 'terminal',
+        'chatMode': 'auto',
+      });
+      expect(terminal.settings().containsKey('chatMode'), isFalse);
+    });
+
+    test('capabilities carry the per-agent mode lists', () {
+      final caps = SchedulerCapabilities.fromJson({
+        'supported': true,
+        'chatModes': {
+          'claude-code': [
+            {'id': 'default', 'name': 'Default'},
+            {'id': 'auto', 'name': 'Auto', 'description': 'No prompts.'},
+          ],
+        },
+      });
+      final modes = caps.chatModes['claude-code']!;
+      expect(modes.map((m) => m.id), ['default', 'auto']);
+      expect(modes.last.description, 'No prompts.');
+      expect(modes.first.description, isNull);
+      expect(SchedulerCapabilities.fromJson({}).chatModes, isEmpty);
+    });
+  });
 }

@@ -360,7 +360,7 @@ const CODEX_NOTIFY_ARG = `notify=["${BIN}","hook","codex","after-agent"]`;
 // The MCP overrides are a `mcp_servers.*` block, so they feed none of the
 // `hooks.*` fingerprints above and adding them leaves every trusted_hash
 // untouched. `env_vars` rather than `env` because codex passes NOTHING of its
-// own environment down to an MCP server; these two are forwarded by name and
+// own environment down to an MCP server; these are forwarded by name and
 // resolve per PTY.
 const CODEX_MCP_INJECTION: string[] = [
   "-c",
@@ -368,7 +368,7 @@ const CODEX_MCP_INJECTION: string[] = [
   "-c",
   `mcp_servers.antgrid.args=["mcp"]`,
   "-c",
-  `mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID"]`,
+  `mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
 ];
 
 describe("codex hook trust", () => {

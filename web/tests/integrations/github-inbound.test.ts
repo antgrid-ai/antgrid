@@ -88,15 +88,15 @@ async function linkGithubOauth(userId: string, externalUserId: string) {
   });
 }
 
+// Through the route's own insert, not `webhookEvent.create`: Prisma stamps
+// `@default(now())` from the JS clock, the drain compares Postgres's `now()`, and
+// a JS clock a few ms ahead leaves a just-recorded row not yet due.
 async function record(type: string, body: unknown, provider = "github") {
-  return pg.db.webhookEvent.create({
-    data: {
-      provider,
-      providerEventId: randomUUID(),
-      type,
-      payload: { deliveryId: `d-${randomUUID()}`, body } as never,
-    },
-    select: { id: true },
+  return recordDelivery(pg.db, {
+    provider,
+    providerEventId: randomUUID(),
+    type,
+    payload: { deliveryId: `d-${randomUUID()}`, body },
   });
 }
 

@@ -333,6 +333,9 @@ class AbLiveMenuRow extends StatelessWidget {
         onTap: activate,
         child: Container(
           padding: _menuRowPadding,
+          constraints: BoxConstraints(
+            minHeight: AbTouchSizing.extentOf(context),
+          ),
           child: Row(
             children: [
               if (icon != null) ...[
@@ -893,7 +896,9 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
             },
           ),
         },
-        child: menu,
+        // Touch-sized rows make a short list outgrow a landscape phone; the
+        // layout delegate only clamps position, so the menu scrolls instead.
+        child: SingleChildScrollView(child: menu),
       ),
     );
     return CustomSingleChildLayout(

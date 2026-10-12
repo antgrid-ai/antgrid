@@ -3,6 +3,7 @@
 
 import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
+import { TEAM_HAS_MEMBERS_MESSAGE } from "../services/account.js";
 
 export type AccountPageProps = {
   user: LayoutUser;
@@ -42,8 +43,8 @@ export function AccountPage(props: AccountPageProps) {
             {props.blockedByTeam ? (
               <div class="alert alert-warning text-sm mt-2" role="status">
                 <span>
-                  Your account still has team members. Remove them, or contact
-                  support to transfer ownership, before deleting your account.
+                  {TEAM_HAS_MEMBERS_MESSAGE}{" "}
+                  <a class="link" href="/team">Open the Team page</a>
                 </span>
               </div>
             ) : props.blockedBySubscription ? (

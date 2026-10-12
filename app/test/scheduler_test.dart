@@ -10,6 +10,7 @@ import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/navigation/nav_serialization.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
@@ -20,6 +21,7 @@ import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
+import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/material.dart';
@@ -28,6 +30,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'helpers/demo_harness.dart';
+import 'scheduler_ux_test.dart' show EmptyAgentCatalog;
 import 'helpers/fake_agent_transport.dart';
 
 final _connection = NotifierProvider<ValueController<bool>, bool>(
@@ -196,7 +199,7 @@ void main() {
       });
       expect(run.active, isTrue);
       expect(run.occurrenceAt.isUtc, isTrue);
-      expect(schedulerStatus(run.status), 'Needs input');
+      expect(schedulerRunStatusWord(run.status), 'Needs input');
       expect(
         AgentSchedule.fromJson(
           _settings,
@@ -282,6 +285,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          agentCatalogProvider.overrideWith(EmptyAgentCatalog.new),
           currentUserProvider.overrideWith((ref) async => null),
           schedulerLocalTimezoneProvider.overrideWith(
             (ref) async => 'Asia/Kolkata',
@@ -298,6 +302,10 @@ void main() {
         ],
         child: MaterialApp(
           theme: buildAbTheme(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!,
+          ),
           home: const Scaffold(body: SchedulerScreen()),
         ),
       ),
@@ -331,9 +339,10 @@ void main() {
     );
     await tester.tap(find.text('RUNS'));
     await tester.pumpAndSettle();
-    expect(find.text('Permission required'), findsOneWidget);
-    expect(find.text('Stop run'), findsOneWidget);
-    await tester.tap(find.text('Stop run'));
+    expect(find.textContaining('Permission required'), findsOneWidget);
+    expect(find.textContaining('Needs input'), findsWidgets);
+    expect(find.text('Stop'), findsOneWidget);
+    await tester.tap(find.text('Stop'));
     await tester.pumpAndSettle();
     expect(
       host.calls.any(
@@ -351,10 +360,12 @@ void main() {
       host.offline = true;
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      final runNow = tester.widget<AbButton>(
-        find.widgetWithText(AbButton, 'Run now'),
+      final add = tester.widget<AbIconButton>(
+        find.byWidgetPredicate(
+          (w) => w is AbIconButton && w.tooltip == 'New schedule',
+        ),
       );
-      expect(runNow.onTap, isNull);
+      expect(add.onTap, isNull);
       expect(find.textContaining('Disconnected'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
@@ -375,7 +386,9 @@ void main() {
       isNull,
     );
     expect(
-      find.text('Machine disconnected. Writes are disabled.'),
+      find.text(
+        'Local machine is offline. Changes are paused until it reconnects.',
+      ),
       findsOneWidget,
     );
   });
@@ -402,7 +415,7 @@ void main() {
       (method, [params = const {}]) async =>
           throw RpcException('E_UNKNOWN_METHOD', 'Unknown method'),
     );
-    expect(find.textContaining('Upgrade the target bridge'), findsWidgets);
+    expect(find.textContaining('Update Antgrid on'), findsWidgets);
   });
 
   testWidgets(
@@ -426,6 +439,12 @@ void main() {
       var saved = false;
       await tester.pumpWidget(
         ProviderScope(
+          overrides: [
+            agentCatalogProvider.overrideWith(EmptyAgentCatalog.new),
+            schedulerMachinesProvider.overrideWithValue(const {
+              'local': 'Local machine',
+            }),
+          ],
           child: MaterialApp(
             theme: buildAbTheme(),
             home: Scaffold(
@@ -445,12 +464,12 @@ void main() {
       expect(find.text('Workspace settings locked'), findsOneWidget);
       expect(find.byType(AbPromptField), findsOneWidget);
       expect(find.text('main'), findsOneWidget);
-      await tester.tap(find.text('Weekdays'));
+      await tester.tap(find.text('WEEKDAY'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(host.calls.last.params['cron'], schedulerPresets['Weekdays']);
-      await tester.ensureVisible(find.text('Save schedule'));
-      await tester.tap(find.text('Save schedule'));
+      await tester.ensureVisible(find.text('Save changes'));
+      await tester.tap(find.text('Save changes'));
       await tester.pumpAndSettle();
       expect(saved, isTrue);
       final patch = host.calls.last.params['patch'] as Map;

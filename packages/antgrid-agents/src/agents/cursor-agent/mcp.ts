@@ -10,6 +10,7 @@ import { cursorSupportsFlag } from "./help";
 const MCP_ENV = {
   ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
   ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
+  ANTGRID_RUN_ID: "${env:ANTGRID_RUN_ID}",
 } as const;
 
 /**

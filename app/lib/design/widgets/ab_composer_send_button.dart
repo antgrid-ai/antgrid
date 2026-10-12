@@ -6,6 +6,8 @@ import '../ab_tokens.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
 import 'ab_loading.dart';
+import 'ab_tap_target.dart';
+import 'ab_touch_sizing.dart';
 
 /// Filled accent send key — a composer's one solid-fill element, so the
 /// primary action outranks the ghost chips and icon buttons around it.
@@ -49,6 +51,12 @@ class _ComposerSendButtonState extends State<ComposerSendButton> {
     final live = enabled || widget.busy;
     final fill = widget.color ?? p.accent;
     final hoverFill = widget.color ?? p.accentHighlight;
+    // Only a phone reserves the touch footprint. Elsewhere a minSize equal to
+    // the key's own box keeps it at its drawn size, where the default would
+    // grow it on a tablet.
+    final targetSize = AbTouchSizing.extentOf(context) > 0
+        ? AbTokens.touchControlMin
+        : AbTokens.iconButtonBox;
 
     final Widget visual = AnimatedContainer(
       duration: AbTokens.motionSnap,
@@ -71,9 +79,14 @@ class _ComposerSendButtonState extends State<ComposerSendButton> {
 
     if (!enabled) {
       // Busy keeps full opacity — the fill + dot read as "working", not off.
-      return widget.busy
-          ? visual
-          : Opacity(opacity: AbTokens.opacityDisabled, child: visual);
+      // The footprint is reserved while inert so the key doesn't resize the
+      // row when it toggles between send and disabled.
+      return AbTapTarget(
+        minSize: targetSize,
+        child: widget.busy
+            ? visual
+            : Opacity(opacity: AbTokens.opacityDisabled, child: visual),
+      );
     }
 
     return FocusableActionDetector(
@@ -92,7 +105,10 @@ class _ComposerSendButtonState extends State<ComposerSendButton> {
           },
         ),
       },
-      child: GestureDetector(
+      // The tap surface wraps the footprint so the touch margin around the
+      // visual claims hits on phones.
+      child: AbTapTarget(
+        minSize: targetSize,
         onTap: widget.onTap,
         child: AbFocusRing(
           focused: _focused,

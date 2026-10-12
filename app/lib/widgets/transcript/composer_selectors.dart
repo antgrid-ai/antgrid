@@ -5,6 +5,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../models/agent_event.dart';
 
 /// MODEL / EFFORT / MODE selector pills for the transcript composer. Each pill
@@ -91,7 +92,7 @@ class ComposerSelectors extends StatelessWidget {
     // control strip (agent_transcript_view), which owns the insets.
     return Wrap(
       spacing: AbTokens.space4,
-      runSpacing: AbTokens.space4,
+      runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space4),
       crossAxisAlignment: WrapCrossAlignment.center,
       children: children,
     );

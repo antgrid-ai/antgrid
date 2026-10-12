@@ -6,6 +6,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_separator.dart';
+import '../design/widgets/ab_button.dart';
 import 'pane_swipe_exclusion.dart';
 import 'terminal_modifier_keys.dart';
 import 'terminal_upload_button.dart';
@@ -34,6 +35,9 @@ class TerminalQuickActionsBar extends StatelessWidget {
     required this.composeOpen,
     required this.onToggleCompose,
     required this.onDirectInput,
+    this.onSelectText,
+    this.onPaste,
+    this.onCopyHostClipboard,
   });
 
   /// Sticky Ctrl/Alt/Shift, armed here and spent by the next keystroke from
@@ -52,6 +56,9 @@ class TerminalQuickActionsBar extends StatelessWidget {
   /// letter for an armed Ctrl or Alt to land on, no tab completion, no
   /// single-key TUI.
   final VoidCallback onDirectInput;
+  final VoidCallback? onSelectText;
+  final VoidCallback? onPaste;
+  final VoidCallback? onCopyHostClipboard;
   final Future<PickedUpload?> Function() onPick;
   final Future<void> Function(PickedUpload picked) onPicked;
 
@@ -88,6 +95,20 @@ class TerminalQuickActionsBar extends StatelessWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
+                  if (onSelectText != null)
+                    AbButton(
+                      label: 'Select text',
+                      compact: true,
+                      onTap: onSelectText,
+                    ),
+                  if (onPaste != null)
+                    AbButton(label: 'Paste', compact: true, onTap: onPaste),
+                  if (onCopyHostClipboard != null)
+                    AbButton(
+                      label: 'Copy host clipboard to this device',
+                      compact: true,
+                      onTap: onCopyHostClipboard,
+                    ),
                   TerminalUploadButton(
                     pick: onPick,
                     onPicked: onPicked,

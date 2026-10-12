@@ -128,9 +128,12 @@ class SchedulerSnapshot {
       projects: schedulerMaps(
         listed['projects'],
       ).map(SchedulerProject.fromJson).toList(),
-      schedules: schedulerMaps(
-        listed['schedules'],
-      ).map(AgentSchedule.fromJson).toList(),
+      // One-offs travel in their own key so a bridge-side one-off never reaches
+      // an older app's cron-required parser through 'schedules'.
+      schedules: [
+        ...schedulerMaps(listed['schedules']),
+        ...schedulerMaps(listed['oneOffSchedules']),
+      ].map(AgentSchedule.fromJson).toList(),
       runs: schedulerMaps(history['runs']).map(ScheduleRun.fromJson).toList(),
     );
   }

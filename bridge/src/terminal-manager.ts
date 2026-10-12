@@ -198,6 +198,8 @@ interface StoppedTerminalInfo {
 
 export interface TerminalManagerCallbacks {
   onTerminalOutput?: (terminalId: string, data: string) => void;
+  captureClipboardOwner?: (terminalId: string) => import("./terminal-clipboard/router").ClipboardOwner | undefined;
+  onClipboardWrite?: (owner: import("./terminal-clipboard/router").ClipboardOwner, text: string) => void;
   onTerminalExited?: (terminalId: string, runId?: string) => void;
   onTerminalNotification?: (terminalId: string) => void;
   onTerminalTitle?: (terminalId: string, title: string) => void;
@@ -418,7 +420,9 @@ export class TerminalManager {
     const apiPort = this.getApiPort?.();
     const env = buildSpawnEnv(terminalId, apiPort, config.env ?? {});
 
-    const session = new TerminalSession({
+    const session: TerminalSession = new TerminalSession({
+      captureClipboardOwner: () => this.sessions.get(terminalId) === session ? this.callbacks.captureClipboardOwner?.(terminalId) : undefined,
+      onClipboardWrite: (owner, text) => this.callbacks.onClipboardWrite?.(owner, text),
       terminalId,
       name: config.name,
       command: config.command,

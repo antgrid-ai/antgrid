@@ -440,6 +440,43 @@ void main() {
     await closeHost(tester);
   });
 
+  testWidgets('a hyperlink with no scheme opens as a checkout path', (
+    tester,
+  ) async {
+    await pumpHost(tester);
+    await open(
+      tester,
+      'marketing/comparisons/a.md#L3',
+      reply: {'relPath': 'marketing/comparisons/a.md', 'exists': true},
+    );
+
+    final request = resolveRequest();
+    expect(request['path'], 'marketing/comparisons/a.md');
+    expect(request.containsKey('base'), isFalse);
+    final files = session.fileService.currentState.files;
+    expect(files.selectedFilePath, 'marketing/comparisons/a.md');
+    expect(files.searchLine, 3);
+    expect(revealed, [WorkspaceView.files]);
+    await closeHost(tester);
+  });
+
+  testWidgets('without a terminal a path with no scheme is refused', (
+    tester,
+  ) async {
+    await pumpHost(tester);
+    await open(tester, 'docs/a.md', terminalId: null);
+
+    expect(
+      find.text('Only http and https links open from the terminal.'),
+      findsOneWidget,
+    );
+    expect(
+      transport.sent.where((m) => m['type'] == 'file:resolve-path'),
+      isEmpty,
+    );
+    await closeHost(tester);
+  });
+
   testWidgets('without a terminal the path scheme is refused', (tester) async {
     await pumpHost(tester);
     await open(tester, _pathUri, terminalId: null);

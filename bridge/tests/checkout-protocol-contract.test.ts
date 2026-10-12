@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, parseMessage } from "../src/protocol";
+import { clipboardMessages } from "../src/terminal-clipboard/protocol";
 
 /** The text of one top-level `const NAME = ...;` declaration, so a registration
  *  assertion pins the block it means rather than any later occurrence. */
@@ -29,7 +30,12 @@ function checkoutScopedSchemaTypes(source: string): Set<string> {
 describe("checkout protocol contract", () => {
   test("authoritative classification exactly matches checkout-scoped schemas", () => {
     const source = readFileSync(join(import.meta.dir, "../src/protocol.ts"), "utf8");
-    expect([...checkoutScopedSchemaTypes(source)].sort())
+    const scoped = checkoutScopedSchemaTypes(source);
+    for (const schema of clipboardMessages) {
+      expect(schema.shape.checkoutId).toBeDefined();
+      scoped.add(schema.shape.type.value);
+    }
+    expect([...scoped].sort())
       .toEqual([...CHECKOUT_VARIABLE_MESSAGE_TYPES].sort());
   });
 

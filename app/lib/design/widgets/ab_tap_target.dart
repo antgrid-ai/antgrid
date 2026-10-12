@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../../utils/platform_utils.dart';
@@ -58,16 +60,41 @@ class AbTapTarget extends StatelessWidget {
 
   final Widget child;
 
+  /// Edge of the square a target reserves in [context]: 0 on desktop, else
+  /// [minSize] raised to the phone touch extent.
+  ///
+  /// The one place the rule lives, so a caller reserving a button's width
+  /// ([AbIconButton.footprintWidth]) cannot drift from what the button lays
+  /// out. A [minSize] below the default is a height the caller has budgeted
+  /// — a full-width header whose extra height would come out of a list — and
+  /// the touch extent does not override it.
+  static double minExtent(
+    BuildContext context, {
+    double minSize = AbTokens.tapTargetMin,
+  }) {
+    if (!isMobilePlatform) return 0;
+    if (minSize < AbTokens.tapTargetMin) return minSize;
+    return math.max(AbTouchSizing.extentOf(context), minSize);
+  }
+
+  /// Run spacing for a [Wrap] of tap targets. Where each target reserves the
+  /// touch height, its footprint already separates the lines and [base] on top
+  /// would read as detached rows; inside [AbCompactTapTargets] the targets
+  /// keep their own height and still need it.
+  static double wrapRunSpacing(BuildContext context, double base) =>
+      AbTouchSizing.extentOf(context) > 0 && !AbCompactTapTargets.of(context)
+      ? 0
+      : base;
+
   @override
   Widget build(BuildContext context) {
     Widget result = child;
     if (isMobilePlatform) {
-      final extent = AbTouchSizing.extentOf(context);
-      final compact = extent == 0 && AbCompactTapTargets.of(context);
+      final extent = minExtent(context, minSize: minSize);
       result = ConstrainedBox(
         constraints: BoxConstraints(
-          minWidth: extent > minSize ? extent : minSize,
-          minHeight: compact ? 0.0 : (extent > minSize ? extent : minSize),
+          minWidth: extent,
+          minHeight: AbCompactTapTargets.of(context) ? 0.0 : extent,
         ),
         // Factors force Center to shrink-wrap the child; without them Align
         // expands to fill any bounded parent, blowing up row layouts.

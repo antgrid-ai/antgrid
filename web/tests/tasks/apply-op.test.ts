@@ -13,6 +13,7 @@ import {
 import { createTask } from "../../src/models/task.js";
 import { getOrCreateLabel, setTaskLabelsInTx } from "../../src/models/label.js";
 import { drainGithubWebhooks } from "../../src/integrations/github-inbound.js";
+import { recordDelivery } from "../../src/integrations/webhook-events.js";
 import { GithubApiError } from "../../src/integrations/github-app.js";
 import { GithubIssueSchema, type GithubIssue } from "../../src/integrations/github-events.js";
 import { githubIssueEchoHash } from "../../src/integrations/github-echo.js";
@@ -112,15 +113,14 @@ function issue(overrides: Record<string, unknown> = {}): GithubIssue {
   return GithubIssueSchema.parse(issuePayload(overrides));
 }
 
+// The route's own insert, so `next_attempt_at` comes from Postgres's clock — see
+// the same helper in tests/integrations/github-inbound.test.ts.
 async function record(type: string, body: unknown) {
-  return pg.db.webhookEvent.create({
-    data: {
-      provider: "github",
-      providerEventId: randomUUID(),
-      type,
-      payload: { deliveryId: `d-${randomUUID()}`, body } as never,
-    },
-    select: { id: true },
+  return recordDelivery(pg.db, {
+    provider: "github",
+    providerEventId: randomUUID(),
+    type,
+    payload: { deliveryId: `d-${randomUUID()}`, body },
   });
 }
 
