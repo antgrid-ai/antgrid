@@ -214,6 +214,9 @@ export async function ensureDefaultSubscription(db: Tx, accountId: string): Prom
   return applyPlanToAccountSubscription(db, accountId, proPlan, {
     provider: "promo",
     promotional: true,
+    // Invites are capped by `seats`, so the promo grants Pro's whole ceiling;
+    // the column default of one would leave nobody to invite.
+    seats: proPlan.maxSeats ?? undefined,
   });
 }
 

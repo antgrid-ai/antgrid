@@ -114,7 +114,7 @@ const CATALOG_PLANS = [
     // Fair use, not a pricing lever — the paid axis is seats.
     workerLimit: 10,
     appDeviceLimit: 10,
-    maxSeats: 25,
+    maxSeats: 5,
     recurring: true,
     trial: false,
     billingPeriod: "yearly",

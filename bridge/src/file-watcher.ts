@@ -668,8 +668,9 @@ export class FileWatcher {
    *  base the file was found under, and a click that quietly picked a different
    *  same-named file would open something the user was not shown.
    *
-   *  A path OUTSIDE the checkout gets one further check: [externalSafeImageMime]
-   *  — an image-generation tool's own output directory is typically outside
+   *  A path OUTSIDE the checkout gets one further check: [externalSafePreview]
+   *  — an image-generation tool's own output directory, or an agent's plans
+   *  directory, is typically outside
    *  any checkout. `externalImagePath` carries the absolute path for exactly
    *  that narrow case, gated the same way [readFile] gates the read it enables:
    *  by extension alone, never by content. */

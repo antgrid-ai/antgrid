@@ -82,10 +82,18 @@ const EXTERNAL_SAFE_IMAGE_MIME: Record<string, string> = {
   ".avif": "image/avif",
 };
 
+/// Markdown is the one text type served from outside the checkout: agents
+/// write plans and reports to their own directories, and the app renders it
+/// as inert text. Keep in lockstep with `_markdownExts` in
+/// `app/lib/widgets/file_viewer_kind.dart`, or the preview shows source.
+const EXTERNAL_SAFE_MARKDOWN_EXTS = new Set([".md", ".markdown", ".mdx"]);
+
 /// Whether [path]'s extension is one `readFile` will serve from outside the
-/// checkout root — see [EXTERNAL_SAFE_IMAGE_MIME].
-export function externalSafeImageMime(path: string): string | undefined {
-  return EXTERNAL_SAFE_IMAGE_MIME[extname(path).toLowerCase()];
+/// checkout root — see [EXTERNAL_SAFE_IMAGE_MIME] and
+/// [EXTERNAL_SAFE_MARKDOWN_EXTS].
+export function externalSafePreview(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return ext in EXTERNAL_SAFE_IMAGE_MIME || EXTERNAL_SAFE_MARKDOWN_EXTS.has(ext);
 }
 
 const DEFAULT_IGNORES = [
@@ -488,12 +496,12 @@ function tooLarge(size: number, cap: number): ReadFileResult {
 
 /** `lstat` inspects only a path's final component, so a file reached through a
  *  link in one of its parent directories is lexically inside the checkout and
- *  really somewhere else. Such a file is served only as the safe image
+ *  really somewhere else. Such a file is served only as the safe preview
  *  an outside path may be, and only if the file it lands on is one too. */
 function leadsOutOfCheckout(absPath: string, root: string): boolean {
   const real = realpathSync.native(absPath);
   if (isInsideResolved(real, realpathSync.native(root))) return false;
-  return !(externalSafeImageMime(absPath) && externalSafeImageMime(real));
+  return !(externalSafePreview(absPath) && externalSafePreview(real));
 }
 
 export function readFile(
@@ -501,9 +509,9 @@ export function readFile(
   relPath: string,
   platform: NodeJS.Platform = process.platform,
 ): ReadFileResult {
-  // Path traversal protection — except for a recognized image extension,
-  // which may be served from outside the checkout root entirely. See
-  // EXTERNAL_SAFE_IMAGE_MIME for why this narrow carve-out is safe where a
+  // Path traversal protection — except for a recognized image or markdown
+  // extension, which may be served from outside the checkout root entirely.
+  // See EXTERNAL_SAFE_IMAGE_MIME for why this narrow carve-out is safe where a
   // general one would not be: `file:read`'s caller for this case is always
   // FileService.openPreview off a resolved `externalImagePath` (see
   // `file-watcher.ts`'s resolvePath), never a bare user-typed
@@ -520,7 +528,7 @@ export function readFile(
   const absPath = resolve(projectRoot, relPath);
   const normalizedRoot = resolve(projectRoot);
   const insideRoot = isInsideResolved(absPath, normalizedRoot);
-  if (refusedUnderRoot(absPath, normalizedRoot, platform) || (!insideRoot && !externalSafeImageMime(absPath))) {
+  if (refusedUnderRoot(absPath, normalizedRoot, platform) || (!insideRoot && !externalSafePreview(absPath))) {
     return { content: null, size: 0, error: "Path traversal denied" };
   }
 

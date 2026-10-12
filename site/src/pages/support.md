@@ -48,7 +48,7 @@ Antgrid supports five sign-in options:
 
 **Antgrid is currently free while in beta** — every feature is included, Handler and phone access alike, on the house. Paid plans activate when the beta ends; the prices on [Pricing](/pricing) are founding prices, below the list price at launch.
 
-Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **access from your phone**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** to guide your agent through the remaining work and ask you when needed, and priority support. Pro includes a **7-day free trial** and covers up to **25 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
+Once plans are live: **Antgrid is free on one worker machine**, with end-to-end encrypted **access from your phone**, fleet view and browser preview included. **Pro is billed per seat — one seat per person** — and gives every person up to **10 worker machines** of their own, plus **Handler** to guide your agent through the remaining work and ask you when needed, and priority support. Pro includes a **7-day free trial** and covers up to **5 seats**. Larger teams are **Enterprise**, where SSO, audit logs and IP allowlisting are on the roadmap — email us at [contact@radhaai.com](mailto:contact@radhaai.com). See [Pricing](/pricing) for current details.
 
 **Manage or cancel your subscription:**
 

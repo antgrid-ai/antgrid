@@ -665,6 +665,20 @@ describe("FileWatcher", () => {
       watcher.stop();
     });
 
+    it("offers a markdown file outside the checkout for preview", async () => {
+      const watcher = newWatcher();
+      const printed = join(outsideDir, "plan.md");
+      writeFileSync(printed, "# Plan\n");
+
+      const reply = await watcher.resolvePath(printed, {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.externalImagePath).toBe(printed);
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+
     it("does not let an image name stand for a file that is not one", async () => {
       const watcher = newWatcher();
       try {
