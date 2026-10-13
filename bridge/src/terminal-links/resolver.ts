@@ -1,4 +1,4 @@
-import { externalSafeImageMime } from "../file-tree";
+import { externalSafePreview } from "../file-tree";
 import { hasDriveLetterAt, isAbsoluteFor, isSeparator, startsWithDoubleSeparator } from "./chars";
 import {
   fold,
@@ -168,9 +168,9 @@ function computeCandidates(variants: readonly string[], bases: LinkBases, platfo
   const add = (text: string, base: PrintedPathBase, abs: string): void => {
     const key = fold(abs, platform);
     const inside = info !== undefined && withinRoot(key, info);
-    // Outside the checkout only an image the preview popup can show is
-    // worth a stat; anything else would be an oracle for the whole disk.
-    if (!inside && (!externalSafeImageMime(abs) || isRefusedPathShape(abs, platform))) return;
+    // Outside the checkout only a file the preview popup can show is worth a
+    // stat; anything else would be an oracle for the whole disk.
+    if (!inside && (!externalSafePreview(abs) || isRefusedPathShape(abs, platform))) return;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(Object.freeze({ text, base, abs, inside }));
@@ -213,9 +213,9 @@ export function classifyPath(
   const { inside, real, realRoot } = hints;
   const escaped = inside && real !== undefined && realRoot !== undefined && !isInsideResolved(real, realRoot, platform);
   if (inside && !escaped) return status === "dir" ? "d" : "f";
-  if (status !== "file" || !externalSafeImageMime(abs)) return undefined;
+  if (status !== "file" || !externalSafePreview(abs)) return undefined;
   // The preview is gated on the printed name, so the file it lands on has to
-  // be an image too, not just the link that leads there.
-  if (escaped && !externalSafeImageMime(real!)) return undefined;
+  // be previewable too, not just the link that leads there.
+  if (escaped && !externalSafePreview(real!)) return undefined;
   return "i";
 }

@@ -28,8 +28,11 @@ function parseFrom(from: string): { address: string; name: string } {
 
 export function createEmailSender(opts: { zeptoToken?: string; from: string; replyTo?: string }): SendEmail {
   if (!opts.zeptoToken) {
-    return async () => {
-      console.info("[email:dev] message accepted by development sink");
+    // Printed whole so a local stack can sign in with no mail provider: the
+    // approval link is copied from stdout (DEVELOPMENT.md). Unreachable in
+    // production, where env.ts refuses to boot without ZEPTOMAIL_TOKEN.
+    return async ({ to, subject, text }) => {
+      console.info(`[email:dev] to=${to} subject=${subject}\n${text}`);
     };
   }
   const from = parseFrom(opts.from);

@@ -135,6 +135,8 @@ describe("addAccountMember acceptance", () => {
     const promo = await ensureDefaultSubscription(pg.db, personalId);
     expect(promo.promotional).toBe(true);
     expect(promo.tier).not.toBe("free");
+    // Pro's whole ceiling, or the promo account could invite nobody.
+    expect(promo.seats).toBe(5);
 
     const { seatHolders } = await addAccountMember(pg.db, {
       accountId,

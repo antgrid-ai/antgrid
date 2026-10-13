@@ -105,6 +105,20 @@ test("a tree request naming the current revision is answered without a listing",
     const last = listings[listings.length - 1];
     seq = last?.type === "file:tree:children" ? last.seq : 0;
   }
+  // Probes written after the one that bumped the seq are still sitting in the
+  // watcher's debounce, and their flush would move the seq past the claim
+  // below. Wait out more than the widest window (BUSY_WINDOW_MS) and re-read
+  // until it holds.
+  for (let settled = false; !settled; ) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const asked = countOf(sent, "file:tree:children");
+    bus.dispatchInbound(createMessage("file:tree:root:request", {}), "control", "loopback");
+    await waitFor(() => countOf(sent, "file:tree:children") > asked, "the settling listing");
+    const last = sent.filter((m) => m.type === "file:tree:children").at(-1);
+    const now = last?.type === "file:tree:children" ? last.seq : 0;
+    settled = now === seq;
+    seq = now;
+  }
   const listingsBefore = countOf(sent, "file:tree:children");
 
   bus.dispatchInbound(

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   readFile,
   loadIgnoreRules,
-  externalSafeImageMime,
+  externalSafePreview,
   listDirectory,
   listDirectoryBatch,
   allocateBudgets,
@@ -610,6 +610,15 @@ describe("file-tree", () => {
       expect(r.mimeType).toBe("image/png");
     });
 
+    it("serves a markdown file from outside the checkout root as text", () => {
+      const outsidePath = join(externalDir, "plan.md");
+      writeFileSync(outsidePath, "# Plan\n");
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("# Plan\n");
+    });
+
     it("still denies a non-image path outside the checkout root", () => {
       const outsidePath = join(externalDir, "notes.txt");
       writeFileSync(outsidePath, "hello");
@@ -683,20 +692,33 @@ describe("file-tree", () => {
     });
   });
 
-  describe("externalSafeImageMime", () => {
+  describe("externalSafePreview", () => {
     it("recognizes common raster image extensions", () => {
-      expect(externalSafeImageMime("a.png")).toBe("image/png");
-      expect(externalSafeImageMime("a.JPG")).toBe("image/jpeg");
-      expect(externalSafeImageMime("a.webp")).toBe("image/webp");
+      expect(externalSafePreview("a.png")).toBe(true);
+      expect(externalSafePreview("a.JPG")).toBe(true);
+      expect(externalSafePreview("a.webp")).toBe(true);
+    });
+
+    it("recognizes markdown extensions", () => {
+      expect(externalSafePreview("plan.md")).toBe(true);
+      expect(externalSafePreview("PLAN.MD")).toBe(true);
+      expect(externalSafePreview("a.markdown")).toBe(true);
+      expect(externalSafePreview("a.mdx")).toBe(true);
     });
 
     it("excludes svg, pdf, and ico even though other surfaces can render them", () => {
       // .svg can embed a script, .pdf is a heavier parser, .ico has no real
       // "generated output" use case here — none is worth the exposure for a
       // path this app never chose to trust with a checkout.
-      expect(externalSafeImageMime("a.svg")).toBeUndefined();
-      expect(externalSafeImageMime("a.pdf")).toBeUndefined();
-      expect(externalSafeImageMime("a.ico")).toBeUndefined();
+      expect(externalSafePreview("a.svg")).toBe(false);
+      expect(externalSafePreview("a.pdf")).toBe(false);
+      expect(externalSafePreview("a.ico")).toBe(false);
+    });
+
+    it("excludes other text files", () => {
+      expect(externalSafePreview("a.txt")).toBe(false);
+      expect(externalSafePreview(".env")).toBe(false);
+      expect(externalSafePreview("a.md.txt")).toBe(false);
     });
   });
 });

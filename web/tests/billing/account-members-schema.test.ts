@@ -142,7 +142,7 @@ describe("seat columns", () => {
 
     expect(bySlug[PLAN_SLUG_FREE]).toBe(1);
     expect(bySlug.trial).toBe(1);
-    expect(bySlug.pro_yearly).toBe(25);
+    expect(bySlug.pro_yearly).toBe(5);
   });
 
   // Runs last: it empties the catalog. seedPlans' create branch is live, so a
@@ -155,7 +155,7 @@ describe("seat columns", () => {
     const SEAT_CAPS: Record<string, number | null> = {
       free: 1,
       trial: 1,
-      pro_yearly: 25,
+      pro_yearly: 5,
       // The one row for which unlimited is the contracted value, not an omission.
       enterprise: null,
     };

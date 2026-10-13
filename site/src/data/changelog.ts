@@ -87,6 +87,20 @@ export type Note = {
  * typo'd tag would otherwise cost someone their writing with no error anywhere.
  */
 export const NOTES: Record<string, Note> = {
+  "v1.20738.1034": {
+    lines: [
+      ["new", "We've added terminal clipboard sharing. In a remote terminal, you can copy text from the host's clipboard to the device you're using. A setting on that device lets you turn off copies initiated by terminal programs."],
+      ["fixed", "Selecting terminal text now holds the view still while output continues, so copying doesn't chase a moving screen. Terminal history has a Copy action on touch screens too."],
+      ["new", "We've added one-off prompts alongside recurring schedules for supported agents, while the desktop app is open. The schedule editor shows upcoming runs and gives each chat schedule its own permission mode."],
+      ["changed", "With the desktop app open again, recurring schedules now catch up the most recent missed run unless the next is less than fifteen minutes away. Earlier misses are recorded together, and you can choose to skip catch-up instead."],
+      ["new", "We've added Clear site data to the browser preview. The app also clears supported preview data when a port changes project and when you sign out. Clearing affects all previews and signs you out of their dev apps; older Android WebViews retain some data."],
+      ["fixed", "Relative file links from terminals, including OpenCode's, now open in the Files tab instead of being refused as non-web links. A line number in the link takes you to that line."],
+      ["changed", "We've made phone controls easier to tap, added pinch and wheel zoom to image previews, and made long lines and wide tables easier to find with visible scrollbars."],
+      ["fixed", "Undelivered push notifications now expire after twelve hours, so a phone coming back after days offline doesn't receive a backlog of old agent updates."],
+      ["changed", "We've made the built-in sample project clearer about when you need to connect your own computer. You can open support chat from the sample without signing in."],
+    ],
+  },
+
   "v1.20732.1032": {
     lines: [
       ["new", "We've added scheduled prompts for supported agents while the desktop app is open. You can manage schedules from connected devices, review each run and open its session when it needs your input."],
