@@ -6,7 +6,6 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_separator.dart';
-import '../design/widgets/ab_button.dart';
 import 'pane_swipe_exclusion.dart';
 import 'terminal_modifier_keys.dart';
 import 'terminal_upload_button.dart';
@@ -95,20 +94,6 @@ class TerminalQuickActionsBar extends StatelessWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  if (onSelectText != null)
-                    AbButton(
-                      label: 'Select text',
-                      compact: true,
-                      onTap: onSelectText,
-                    ),
-                  if (onPaste != null)
-                    AbButton(label: 'Paste', compact: true, onTap: onPaste),
-                  if (onCopyHostClipboard != null)
-                    AbButton(
-                      label: 'Copy host clipboard to this device',
-                      compact: true,
-                      onTap: onCopyHostClipboard,
-                    ),
                   TerminalUploadButton(
                     pick: onPick,
                     onPicked: onPicked,
@@ -152,6 +137,27 @@ class TerminalQuickActionsBar extends StatelessWidget {
                   _actionButton(context, '↓', '\x1b[B'),
                   _actionButton(context, '←', '\x1b[D'),
                   _actionButton(context, '→', '\x1b[C'),
+                  if (onSelectText case final onSelectText?)
+                    _key(
+                      context,
+                      icon: AbIcons.selectText,
+                      semanticLabel: 'Select text',
+                      onTap: onSelectText,
+                    ),
+                  if (onPaste case final onPaste?)
+                    _key(
+                      context,
+                      icon: AbIcons.paste,
+                      semanticLabel: 'Paste',
+                      onTap: onPaste,
+                    ),
+                  if (onCopyHostClipboard case final onCopyHostClipboard?)
+                    _key(
+                      context,
+                      icon: AbIcons.copy,
+                      semanticLabel: 'Copy host clipboard to this device',
+                      onTap: onCopyHostClipboard,
+                    ),
                   _zoomButton(
                     context,
                     icon: AbIcons.zoomOut,

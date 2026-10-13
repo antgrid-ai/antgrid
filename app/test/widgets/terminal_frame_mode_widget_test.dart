@@ -421,7 +421,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         if (kind == PointerDeviceKind.touch) {
-          await tester.tap(find.text('Select text'));
+          await tester.tap(find.bySemanticsLabel('Select text'));
           await tester.pump();
         }
         final finder = find.byType(GhosttyTerminalView);
@@ -484,7 +484,7 @@ void main() {
         ]);
         expect(view.controller.plainText, contains('other replacement'));
         expect(view.controller.cols, 100);
-        await tester.tap(find.text('Select text'));
+        await tester.tap(find.bySemanticsLabel('Select text'));
         await tester.pump();
         tab.latestFrame.value = frame('new run', 1, run: 'replacement-run');
         tab.replaceEpoch.value++;
@@ -496,7 +496,7 @@ void main() {
         );
         expect(replaced.controller.plainText, contains('new run'));
         expect(find.text('Return to live'), findsNothing);
-        await tester.tap(find.text('Select text'));
+        await tester.tap(find.bySemanticsLabel('Select text'));
         await tester.pump();
         final replacementEngine = GhosttyTerminalController();
         addTearDown(replacementEngine.dispose);
