@@ -176,6 +176,7 @@ export async function countActiveSeatHolders(db: Tx, accountId: string): Promise
 export type ActiveMember = {
   userId: string;
   email: string;
+  name: string;
   role: AccountMemberRole | null;
   joinedAt: Date;
 };
@@ -197,12 +198,13 @@ export async function listActiveMembers(db: Tx, accountId: string): Promise<Acti
       userId: true,
       role: true,
       joinedAt: true,
-      user: { select: { email: true } },
+      user: { select: { email: true, name: true } },
     },
   });
   return rows.map((row) => ({
     userId: row.userId,
     email: row.user.email,
+    name: row.user.name,
     role: AccountMemberRoleSchema.safeParse(row.role).data ?? null,
     joinedAt: row.joinedAt,
   }));

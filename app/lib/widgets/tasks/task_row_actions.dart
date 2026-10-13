@@ -64,9 +64,9 @@ Future<void> showTaskRowActions(
         await tasks.setStatus(task.number, next);
       }
     case _RowAction.assignToMe:
-      final me = container.read(taskAssigneeCandidatesProvider).firstOrNull;
+      final me = container.read(taskUserIdProvider);
       if (me != null) {
-        await tasks.setAssignee(task.number, TaskMemberAssignee(me.userId));
+        await tasks.setAssignee(task.number, TaskMemberAssignee(me));
       }
     case _RowAction.unassign:
       await tasks.setAssignee(task.number, null);

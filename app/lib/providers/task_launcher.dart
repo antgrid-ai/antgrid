@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
+import '../demo/demo_identity.dart' show kDemoRefusalText;
 import '../launcher/host_control_client.dart';
 import '../models/git_branch.dart';
 import '../models/session_target.dart';
@@ -16,6 +17,7 @@ import '../utils/platform_utils.dart';
 import 'agent_transport.dart';
 import 'analytics.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'new_session_picker.dart';
 import 'projects.dart';
 import 'providers.dart';
@@ -383,10 +385,24 @@ class AppTaskLauncher implements TaskLauncher {
   }
 }
 
+class _DemoTaskLauncher implements TaskLauncher {
+  const _DemoTaskLauncher();
+
+  @override
+  String? unavailableReason(Task task) => kDemoRefusalText;
+
+  @override
+  Future<void> start(Task task) async {}
+}
+
 /// Wires [taskLauncherProvider] to the real thing. `main()` overrides the seam
 /// with this rather than the seam defaulting to it, so a test container — and
 /// the detail view's own "not wired up yet" copy — still sees the null default.
 final appTaskLauncherProvider = Provider<TaskLauncher?>((ref) {
+  // A demo task launching for real would start a session in whichever project
+  // is focused — the sample one, which has no machine behind it. Declining here
+  // keeps the host-spawn paths behind `start` out of the demo's reach.
+  if (ref.watch(demoModeProvider)) return const _DemoTaskLauncher();
   final entryId = ref.watch(selectedRegistrationIdProvider);
   return AppTaskLauncher(
     container: ref.container,

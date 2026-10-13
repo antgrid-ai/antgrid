@@ -379,6 +379,8 @@ void main() {
     Future<void> publish(TasksApi api) =>
         api.publishTask(number: 7, repoId: 'repo-1');
     Future<void> unlink(TasksApi api) => api.unlinkTask(number: 7);
+    Future<void> comment(TasksApi api) => api.addComment(7, 'hi');
+    Future<void> editComment(TasksApi api) => api.editComment(7, 'c-1', 'x');
 
     final cases = <String, (Future<void> Function(TasksApi), int, String?)>{
       'unauthenticated': (list, 401, 'UNAUTHENTICATED'),
@@ -401,6 +403,10 @@ void main() {
       'publishRepoNotFound': (publish, 404, 'PUBLISH_REPO_NOT_FOUND'),
       'alreadyLinked': (publish, 409, 'ALREADY_LINKED'),
       'notLinked': (unlink, 409, 'NOT_LINKED'),
+      'emptyComment': (comment, 400, 'EMPTY_COMMENT'),
+      'commentNotFound': (editComment, 404, 'COMMENT_NOT_FOUND'),
+      'notCommentAuthor': (editComment, 403, 'NOT_COMMENT_AUTHOR'),
+      'commentImported': (editComment, 409, 'COMMENT_IMPORTED'),
       'badRequest': (create, 400, 'BAD_REQUEST'),
       'server': (list, 500, null),
     };
@@ -544,6 +550,87 @@ void main() {
     test('a body without a projects list is an empty list', () async {
       final api = _api(_answers(jsonEncode({'ok': true}), 200));
       expect(await api.listProjects(), isEmpty);
+    });
+  });
+
+  group('comments', () {
+    const memberComment = {
+      'id': 'c-1',
+      'author': {
+        'kind': 'member',
+        'userId': 'u-1',
+        'name': 'Ada',
+        'avatarUrl': null,
+      },
+      'body': 'Looks good.',
+      'imported': false,
+      'createdAt': '2026-08-01T10:00:00.000Z',
+      'updatedAt': '2026-08-01T10:00:00.000Z',
+    };
+    const importedComment = {
+      'id': 'c-2',
+      'author': {'kind': 'external', 'login': 'octocat'},
+      'body': 'From the issue.',
+      'imported': true,
+      'createdAt': '2026-08-01T11:00:00.000Z',
+      'updatedAt': '2026-08-01T11:00:00.000Z',
+    };
+
+    test('lists the thread and parses both author shapes', () async {
+      late http.Request seen;
+      final api = _api(
+        _answers(
+          jsonEncode({
+            'comments': [memberComment, importedComment, 'junk'],
+          }),
+          200,
+          on: (r) => seen = r,
+        ),
+      );
+      final comments = await api.listComments(7);
+      expect(seen.method, 'GET');
+      expect(seen.url.path, '/tasks/7/comments');
+      expect(comments.map((c) => c.id), ['c-1', 'c-2']);
+      expect(comments[0].author, const TaskMemberAssignee('u-1'));
+      expect(comments[0].authorName, 'Ada');
+      expect(comments[1].imported, isTrue);
+      expect(
+        (comments[1].author! as TaskExternalAssignee).login,
+        'octocat',
+      );
+    });
+
+    test('add posts the body and returns the created comment', () async {
+      late http.Request seen;
+      final api = _api(
+        _answers(jsonEncode({'comment': memberComment}), 201, on: (r) => seen = r),
+      );
+      final comment = await api.addComment(7, 'Looks good.');
+      expect(seen.method, 'POST');
+      expect(jsonDecode(seen.body), {'body': 'Looks good.'});
+      expect(comment.body, 'Looks good.');
+    });
+
+    test('edit and delete address the comment under its task', () async {
+      final paths = <String>[];
+      final api = _api(
+        MockClient((req) async {
+          paths.add('${req.method} ${req.url.path}');
+          return http.Response(jsonEncode({'comment': memberComment, 'ok': true}), 200);
+        }),
+      );
+      await api.editComment(7, 'c-1', 'x');
+      await api.deleteComment(7, 'c-1');
+      expect(paths, ['PATCH /tasks/7/comments/c-1', 'DELETE /tasks/7/comments/c-1']);
+    });
+
+    test('only the member author of a local comment may change it', () {
+      final mine = TaskComment.fromJson(memberComment)!;
+      final imported = TaskComment.fromJson(importedComment)!;
+      expect(mine.isAuthoredBy('u-1'), isTrue);
+      expect(mine.isAuthoredBy('u-2'), isFalse);
+      expect(mine.isAuthoredBy(null), isFalse);
+      expect(imported.isAuthoredBy('u-1'), isFalse);
     });
   });
 }

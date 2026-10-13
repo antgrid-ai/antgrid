@@ -44,6 +44,7 @@ import '../send_capture_to_agent.dart';
 import '../transcript/markdown_body.dart';
 import 'markdown_format.dart';
 import 'task_body_editor.dart';
+import 'task_comments_section.dart';
 import 'task_launch_sheet.dart';
 import 'task_project_missing.dart';
 import 'task_provenance_view.dart';
@@ -642,6 +643,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
         ),
         child: _bodyBlock(context, segments),
       ),
+      _sectionHeader('Comments'),
+      TaskCommentsSection(task: _task),
     ];
 
     final side = <Widget>[

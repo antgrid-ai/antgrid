@@ -186,6 +186,101 @@ class TaskLabel {
   int get hashCode => id.hashCode;
 }
 
+/// An active member of the account — exactly who the server will accept as a
+/// task's assignee.
+class TaskMember {
+  const TaskMember({
+    required this.userId,
+    required this.name,
+    required this.email,
+  });
+
+  final String userId;
+  final String name;
+  final String email;
+
+  String get displayName => name.trim().isNotEmpty ? name : email;
+
+  static TaskMember? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final userId = raw['userId'];
+    if (userId is! String) return null;
+    return TaskMember(
+      userId: userId,
+      name: raw['name'] is String ? raw['name'] as String : '',
+      email: raw['email'] is String ? raw['email'] as String : '',
+    );
+  }
+}
+
+/// One comment in a task's thread.
+///
+/// [author] reuses the assignee shapes because the server's are the same two:
+/// a member, or a provider login that maps to no member. Null when neither
+/// survives — a member who deleted their user, or an import with no login.
+class TaskComment {
+  const TaskComment({
+    required this.id,
+    required this.body,
+    required this.imported,
+    required this.createdAt,
+    required this.updatedAt,
+    this.author,
+    this.authorName,
+  });
+
+  final String id;
+  final String body;
+  final TaskAssignee? author;
+
+  /// The member's display name; the member arm of [author] carries only an id.
+  final String? authorName;
+
+  /// Came from the provider. The import owns it, so the server refuses an edit
+  /// or delete — the affordances are absent rather than dead.
+  final bool imported;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  bool isAuthoredBy(String? userId) {
+    final a = author;
+    return !imported &&
+        userId != null &&
+        a is TaskMemberAssignee &&
+        a.userId == userId;
+  }
+
+  static TaskComment? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final id = raw['id'];
+    final body = raw['body'];
+    final createdAt = _date(raw['createdAt']);
+    if (id is! String || body is! String || createdAt == null) return null;
+    final author = raw['author'];
+    TaskAssignee? parsedAuthor;
+    String? authorName;
+    if (author is Map && author['kind'] == 'member') {
+      final userId = author['userId'];
+      if (userId is String) parsedAuthor = TaskMemberAssignee(userId);
+      authorName = author['name'] is String ? author['name'] as String : null;
+    } else if (author is Map && author['kind'] == 'external') {
+      final login = author['login'];
+      if (login is String) {
+        parsedAuthor = TaskExternalAssignee(externalId: login, login: login);
+      }
+    }
+    return TaskComment(
+      id: id,
+      body: body,
+      author: parsedAuthor,
+      authorName: authorName,
+      imported: raw['imported'] == true,
+      createdAt: createdAt,
+      updatedAt: _date(raw['updatedAt']) ?? createdAt,
+    );
+  }
+}
+
 /// One field both sides edited between two syncs. The provider's value is what
 /// the task holds now; [localValue] is the edit that was set aside and can be
 /// restored from the detail sheet.

@@ -7,7 +7,7 @@ import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import { requireUserOrBearer, type AuthVars } from "../auth/middleware.js";
-import { findActiveMembership } from "../models/account-member.js";
+import { findActiveMembership, listActiveMembers } from "../models/account-member.js";
 import {
   clearTaskPushBlockByNumber,
   createTask,
@@ -60,6 +60,15 @@ import {
   type LabelRecord,
   type TaskLabelResult,
 } from "../models/label.js";
+import {
+  COMMENT_BODY_MAX,
+  createTaskComment,
+  deleteTaskComment,
+  listTaskComments,
+  updateTaskComment,
+  type TaskCommentRecord,
+  type TaskCommentRefusal,
+} from "../models/task-comment.js";
 
 /**
  * Tasks and labels over HTTP.
@@ -185,6 +194,8 @@ const CreateLabelBody = z.object({
   projectId: z.uuid().nullable().optional(),
 });
 
+const CommentBody = z.object({ body: z.string().max(COMMENT_BODY_MAX) });
+
 const AttachLabelBody = z.object({ labelId: z.uuid() });
 const SetLabelsBody = z.object({ labelIds: z.array(z.uuid()) });
 
@@ -285,6 +296,22 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     });
     if (result.kind !== "ok") return refuseTask(c, result);
     return c.json({ task: taskJson(result.task) }, 201);
+  });
+
+  /**
+   * Who a task on this account may be assigned to: exactly the set
+   * `refuseForeignAssignee` accepts, so the picker never offers someone the
+   * write would answer `ASSIGNEE_NOT_MEMBER` for.
+   *
+   * Literal path, so declared before `/tasks/:number` like publish-targets.
+   * The email travels because it is what teammates already see on the team
+   * page and the only thing that tells two members with the same name apart.
+   */
+  r.get("/tasks/members", async (c) => {
+    const members = await listActiveMembers(deps.db, c.get("accountId"));
+    return c.json({
+      members: members.map((m) => ({ userId: m.userId, name: m.name, email: m.email })),
+    });
   });
 
   /**
@@ -518,6 +545,65 @@ export function taskRoutes(deps: { db: DB; auth: Auth; env: Env }) {
     return c.json({ runs: runs.map(runJson) });
   });
 
+  r.get("/tasks/:number/comments", async (c) => {
+    const number = taskNumber(c);
+    if (number === null) return c.json({ error: "NOT_FOUND" }, 404);
+    const comments = await listTaskComments(deps.db, { accountId: c.get("accountId"), number });
+    if (comments === null) return c.json({ error: "NOT_FOUND" }, 404);
+    return c.json({ comments: comments.map(commentJson) });
+  });
+
+  r.post("/tasks/:number/comments", async (c) => {
+    const number = taskNumber(c);
+    if (number === null) return c.json({ error: "NOT_FOUND" }, 404);
+    const parsed = CommentBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
+
+    const result = await createTaskComment(deps.db, {
+      accountId: c.get("accountId"),
+      number,
+      authorUserId: c.get("userId"),
+      body: parsed.data.body,
+    });
+    if (result.kind !== "ok") return refuseComment(c, result);
+    return c.json({ comment: commentJson(result.comment) }, 201);
+  });
+
+  r.patch("/tasks/:number/comments/:commentId", async (c) => {
+    const number = taskNumber(c);
+    if (number === null) return c.json({ error: "NOT_FOUND" }, 404);
+    const commentId = commentIdParam(c);
+    if (commentId === null) return c.json({ error: "COMMENT_NOT_FOUND" }, 404);
+    const parsed = CommentBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
+
+    const result = await updateTaskComment(deps.db, {
+      accountId: c.get("accountId"),
+      number,
+      commentId,
+      actorUserId: c.get("userId"),
+      body: parsed.data.body,
+    });
+    if (result.kind !== "ok") return refuseComment(c, result);
+    return c.json({ comment: commentJson(result.comment) });
+  });
+
+  r.delete("/tasks/:number/comments/:commentId", async (c) => {
+    const number = taskNumber(c);
+    if (number === null) return c.json({ error: "NOT_FOUND" }, 404);
+    const commentId = commentIdParam(c);
+    if (commentId === null) return c.json({ error: "COMMENT_NOT_FOUND" }, 404);
+
+    const result = await deleteTaskComment(deps.db, {
+      accountId: c.get("accountId"),
+      number,
+      commentId,
+      actorUserId: c.get("userId"),
+    });
+    if (result.kind !== "ok") return refuseComment(c, result);
+    return c.json({ ok: true });
+  });
+
   // The three label verbs take a task uuid and a client never holds one, so the
   // number is resolved here rather than a uuid being accepted from the wire.
   // Both the resolve and the write scope to `accountId`; the second is not
@@ -627,6 +713,13 @@ function requireAccount(db: DB): MiddlewareHandler<{ Variables: TaskVars }> {
 function taskNumber(c: Context<{ Variables: TaskVars }>): number | null {
   const raw = c.req.param("number");
   return raw === undefined ? null : parseTaskId(raw);
+}
+
+/** A malformed id is a miss, not a 400: Postgres would raise on the uuid cast,
+ *  and a caller learns nothing from the distinction. */
+function commentIdParam(c: Context<{ Variables: TaskVars }>): string | null {
+  const raw = c.req.param("commentId");
+  return raw !== undefined && z.uuid().safeParse(raw).success ? raw : null;
 }
 
 async function resolveTask(
@@ -932,6 +1025,23 @@ function refuseTaskRun(c: Context<{ Variables: TaskVars }>, refusal: TaskRunRefu
   }
 }
 
+function refuseComment(c: Context<{ Variables: TaskVars }>, refusal: TaskCommentRefusal): Response {
+  switch (refusal.kind) {
+    case "not_found":
+      return c.json({ error: "NOT_FOUND" }, 404);
+    case "comment_not_found":
+      return c.json({ error: "COMMENT_NOT_FOUND" }, 404);
+    case "empty_body":
+      return c.json({ error: "EMPTY_COMMENT" }, 400);
+    case "not_author":
+      return c.json({ error: "NOT_COMMENT_AUTHOR" }, 403);
+    case "imported":
+      return c.json({ error: "COMMENT_IMPORTED" }, 409);
+    default:
+      return unhandledRefusal(refusal);
+  }
+}
+
 function refuseLabel(
   c: Context<{ Variables: TaskVars }>,
   refusal: Exclude<GetOrCreateLabelResult, { kind: "ok" }>
@@ -1123,6 +1233,19 @@ function runJson(run: TaskRunRecord) {
     startedAt: run.startedAt.toISOString(),
     endedAt: run.endedAt?.toISOString() ?? null,
     resultSummary: run.resultSummary,
+  };
+}
+
+/** The uuid crosses the wire for the same reason a label's does: it is the only
+ *  handle the edit and delete verbs have. */
+function commentJson(comment: TaskCommentRecord) {
+  return {
+    id: comment.id,
+    author: comment.author,
+    body: comment.body,
+    imported: comment.imported,
+    createdAt: comment.createdAt.toISOString(),
+    updatedAt: comment.updatedAt.toISOString(),
   };
 }
 

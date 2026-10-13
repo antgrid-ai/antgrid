@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_tasks.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../models/task.dart';
@@ -7,6 +8,7 @@ import '../services/auth_service.dart' show CurrentUser;
 import '../services/tasks_api.dart';
 import '../util/detached.dart';
 import 'auth.dart';
+import 'demo_mode.dart';
 import 'sessions.dart'
     show activeSessionOrCachedProvider, selectableSessionsProvider;
 
@@ -17,8 +19,35 @@ import 'sessions.dart'
 /// with every dev machine offline, and not at all with the network offline.
 /// Only *running* a task needs a live bridge.
 
+/// Who the task surfaces act as: the signed-in user, or the demo's own
+/// identity while the sample project is on screen. Every task provider reads
+/// this rather than [currentUserIdProvider], so the demo's backlog never mixes
+/// with — or is attributed to — a real account, signed in or not.
+final taskUserIdProvider = Provider<String?>((ref) {
+  if (ref.watch(demoModeProvider)) return kDemoTaskUserId;
+  return ref.watch(currentUserIdProvider);
+});
+
+/// The demo's backlog, alive for one visit: re-entering the demo starts from
+/// the seeded state again, like the rest of the sample project.
+final demoTasksClientProvider = Provider<DemoTasksClient>((ref) {
+  ref.watch(demoModeProvider);
+  final client = DemoTasksClient();
+  ref.onDispose(client.close);
+  return client;
+});
+
 final tasksApiProvider = Provider<TasksApi>((ref) {
-  ref.watch(currentUserIdProvider);
+  ref.watch(taskUserIdProvider);
+  if (ref.watch(demoModeProvider)) {
+    // The demo client answers in memory and has no socket to open, which is
+    // what keeps the task surfaces inside the demo's no-network rule.
+    return TasksApi(
+      licenseApiUrl: 'https://demo.invalid',
+      cookieProvider: () async => 'demo',
+      httpClient: ref.watch(demoTasksClientProvider),
+    );
+  }
   final auth = ref.read(authServiceProvider);
   return TasksApi(
     licenseApiUrl: ref.read(licenseApiUrlProvider),
@@ -152,7 +181,7 @@ class TaskFilter {
 class TaskFilterController extends Notifier<TaskFilter> {
   @override
   TaskFilter build() {
-    ref.watch(currentUserIdProvider);
+    ref.watch(taskUserIdProvider);
     return const TaskFilter();
   }
 
@@ -235,14 +264,17 @@ class TaskListController extends AsyncNotifier<List<Task>> {
       // own `await` below is already handling that resolution — bail out so
       // this callback cannot beat it to `state` and complete this build's
       // future early with a bogus reset.
+      if (!_identityKnown || ref.read(demoModeProvider)) return;
+      _switchTo(next.value?.userId);
+    });
+    // Entering or leaving the demo is an account switch by another name: the
+    // backlog on screen belongs to a different identity afterwards, and the
+    // same reset keeps one's tasks from surviving into the other's list.
+    ref.listen<bool>(demoModeProvider, (prev, demo) {
       if (!_identityKnown) return;
-      final userId = next.value?.userId;
-      if (userId == _lastUserId) return;
-      _lastUserId = userId;
-      state = const AsyncData<List<Task>>([]);
-      if (userId != null) {
-        detached('taskListProvider', 'refetch after account switch', refresh);
-      }
+      _switchTo(
+        demo ? kDemoTaskUserId : ref.read(currentUserProvider).value?.userId,
+      );
     });
     // `ref.read` (not `.watch`): waiting for the CURRENT resolution must not
     // itself become a watch dependency, or a later account change would drive
@@ -253,7 +285,9 @@ class TaskListController extends AsyncNotifier<List<Task>> {
     // every launch, not just an actual sign-out.
     String? userId;
     try {
-      userId = (await ref.read(currentUserProvider.future))?.userId;
+      userId = ref.read(demoModeProvider)
+          ? kDemoTaskUserId
+          : (await ref.read(currentUserProvider.future))?.userId;
     } catch (_) {
       // A failed REFETCH (offline after an upgrade or auth callback invalidated
       // the user) leaves the previous user on `.value`, which is what
@@ -279,6 +313,15 @@ class TaskListController extends AsyncNotifier<List<Task>> {
       // pagination: the list has no paging affordance to carry a second page.
       limit: kTaskListPageSize,
     );
+  }
+
+  void _switchTo(String? userId) {
+    if (userId == _lastUserId) return;
+    _lastUserId = userId;
+    state = const AsyncData<List<Task>>([]);
+    if (userId != null) {
+      detached('taskListProvider', 'refetch after account switch', refresh);
+    }
   }
 
   /// Refetch through the provider rather than assigning state directly, so the
@@ -668,7 +711,7 @@ final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
   // user's id, and the scope means nothing until it is known. `me` is also
   // accepted as an explicit assignee because [TaskQuery] documents that
   // spelling and the server used to be the one resolving it.
-  final myUserId = ref.watch(currentUserProvider).value?.userId;
+  final myUserId = ref.watch(taskUserIdProvider);
   final explicitAssignee = filter.assignee == 'me' ? myUserId : filter.assignee;
   final wantedAssignee =
       explicitAssignee ?? (filter.scope == TaskScope.mine ? myUserId : null);
@@ -774,7 +817,7 @@ final taskFacetCountsProvider = Provider<TaskFacetCounts>((ref) {
   if (list == null) return const TaskFacetCounts();
   final scope = ref.watch(taskFilterProvider.select((f) => f.scope));
   final runs = ref.watch(taskRunPresenceProvider);
-  final myUserId = ref.watch(currentUserProvider).value?.userId;
+  final myUserId = ref.watch(taskUserIdProvider);
 
   final byScope = <TaskScope, int>{
     for (final s in TaskScope.values)
@@ -821,7 +864,7 @@ final selectedTaskNumberProvider =
 class SelectedTaskController extends Notifier<int?> {
   @override
   int? build() {
-    ref.watch(currentUserIdProvider);
+    ref.watch(taskUserIdProvider);
     return null;
   }
 
@@ -839,7 +882,7 @@ final selectedTaskProvider = Provider<Task?>((ref) {
 });
 
 final taskLabelsProvider = FutureProvider<List<TaskLabel>>((ref) async {
-  final userId = ref.watch(currentUserIdProvider);
+  final userId = ref.watch(taskUserIdProvider);
   if (userId == null) return const <TaskLabel>[];
   return ref.watch(tasksApiProvider).listLabels();
 });
@@ -985,7 +1028,7 @@ final taskLauncherProvider = Provider<TaskLauncher?>((ref) => null);
 /// per-machine: this is the `projectId` uuid a task actually carries, and the
 /// only thing a publish destination can be resolved from.
 final taskProjectsProvider = FutureProvider<List<TaskProject>>((ref) async {
-  final userId = ref.watch(currentUserIdProvider);
+  final userId = ref.watch(taskUserIdProvider);
   if (userId == null) return const <TaskProject>[];
   return ref.watch(tasksApiProvider).listProjects();
 });
@@ -1062,15 +1105,111 @@ class TaskAssigneeCandidate {
   final String displayName;
 }
 
-/// Who the assignee picker may offer.
+/// The account's active members, from the server's own assignability rule.
 ///
-/// Just the signed-in user today, which is the whole truth: the account service
-/// has no members-list route, so there is no way to name a teammate without
-/// guessing a user id — and a guess is what `ASSIGNEE_NOT_MEMBER` refuses.
+/// Fetched once per sign-in, like the project list: membership changes on the
+/// web's team page, and a member added there shows up on the next sign-in or
+/// [Ref.invalidate].
+final taskMembersProvider = FutureProvider<List<TaskMember>>((ref) async {
+  final userId = ref.watch(taskUserIdProvider);
+  if (userId == null) return const <TaskMember>[];
+  return ref.watch(tasksApiProvider).listMembers();
+});
+
+/// Who the assignee picker may offer: the signed-in user first, then the
+/// rest of the account by name.
+///
+/// Falls back to the signed-in user alone while the member list loads or if it
+/// failed — assigning yourself needs no list, and an empty picker would read as
+/// an account with nobody in it.
 final taskAssigneeCandidatesProvider = Provider<List<TaskAssigneeCandidate>>((
   ref,
 ) {
-  final user = ref.watch(currentUserProvider).value;
-  if (user == null) return const [];
-  return [TaskAssigneeCandidate(userId: user.userId, displayName: user.email)];
+  final userId = ref.watch(taskUserIdProvider);
+  if (userId == null) return const [];
+  final members = ref.watch(taskMembersProvider).value ?? const <TaskMember>[];
+  final self = members.where((m) => m.userId == userId).firstOrNull;
+  final others =
+      members.where((m) => m.userId != userId).toList()..sort(
+        (a, b) => a.displayName.toLowerCase().compareTo(
+          b.displayName.toLowerCase(),
+        ),
+      );
+  return [
+    TaskAssigneeCandidate(
+      userId: userId,
+      displayName:
+          self?.displayName ??
+          ref.watch(currentUserProvider).value?.email ??
+          'You',
+    ),
+    for (final m in others)
+      TaskAssigneeCandidate(userId: m.userId, displayName: m.displayName),
+  ];
 });
+
+/// One task's comment thread, fetched when its detail opens.
+///
+/// Separate from [taskListProvider] rather than a field on [Task]: a thread is
+/// unbounded where a row is not, and the list would carry every task's comments
+/// to show none of them. autoDispose, so reopening a task re-reads the thread —
+/// nothing pushes a teammate's comment to this device.
+final taskCommentsProvider = AsyncNotifierProvider.autoDispose
+    .family<TaskCommentsController, List<TaskComment>, int>(
+      TaskCommentsController.new,
+    );
+
+/// The writes splice the server's answer into the thread instead of re-reading
+/// it, so a slow network never flashes the thread empty. Each throws the
+/// [TaskApiException] it got, for the composer to show beside what was typed.
+class TaskCommentsController extends AsyncNotifier<List<TaskComment>> {
+  TaskCommentsController(this.number);
+
+  final int number;
+
+  TasksApi get _api => ref.read(tasksApiProvider);
+
+  @override
+  Future<List<TaskComment>> build() {
+    ref.watch(taskUserIdProvider);
+    if (ref.watch(demoModeProvider)) {
+      // The demo's teammate answers on a timer; nothing else in the app could
+      // tell this thread the answer exists.
+      final sub = ref
+          .watch(demoTasksClientProvider)
+          .commentChanges
+          .where((changed) => changed == number)
+          .listen((_) => detached('tasks', 'demo reply', _reload));
+      ref.onDispose(sub.cancel);
+    }
+    return ref.watch(tasksApiProvider).listComments(number);
+  }
+
+  Future<void> _reload() async {
+    final comments = await _api.listComments(number);
+    state = AsyncData(comments);
+  }
+
+  Future<void> add(String body) async {
+    final comment = await _api.addComment(number, body);
+    final current = state.value ?? const <TaskComment>[];
+    state = AsyncData([...current, comment]);
+  }
+
+  Future<void> edit(String id, String body) async {
+    final comment = await _api.editComment(number, id, body);
+    final current = state.value ?? const <TaskComment>[];
+    state = AsyncData([
+      for (final c in current) c.id == id ? comment : c,
+    ]);
+  }
+
+  Future<void> remove(String id) async {
+    await _api.deleteComment(number, id);
+    final current = state.value ?? const <TaskComment>[];
+    state = AsyncData([
+      for (final c in current)
+        if (c.id != id) c,
+    ]);
+  }
+}

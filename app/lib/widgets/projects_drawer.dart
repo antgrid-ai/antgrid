@@ -235,10 +235,14 @@ class _NavActions extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final surface = ref.watch(workbenchSurfaceProvider);
-    final schedulerEnabled = !ref.watch(demoModeProvider);
-    // Tasks are account data: the row is absent signed out, not disabled.
-    final signedIn = ref.watch(currentUserProvider).value != null;
-    final openTaskCount = signedIn ? ref.watch(openTaskCountProvider) ?? 0 : 0;
+    final demo = ref.watch(demoModeProvider);
+    final schedulerEnabled = !demo;
+    // Tasks are account data: the row is absent signed out, not disabled. The
+    // demo carries its own sample backlog, so it shows the row either way.
+    final showTasks = demo || ref.watch(currentUserProvider).value != null;
+    final openTaskCount = showTasks
+        ? ref.watch(openTaskCountProvider) ?? 0
+        : 0;
     void openScheduler() {
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -310,7 +314,7 @@ class _NavActions extends ConsumerWidget {
               enabled: schedulerEnabled,
               onTap: openScheduler,
             ),
-            if (signedIn) ...[
+            if (showTasks) ...[
               const SizedBox(height: AbTokens.space4),
               navigationRow(
                 label: 'Tasks',

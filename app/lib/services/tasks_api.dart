@@ -353,6 +353,74 @@ class TasksApi extends CookieApiClient {
     await _send('DELETE', _uri('/labels/$id'), subject: _Subject.label);
   }
 
+  Future<List<TaskMember>> listMembers() async {
+    final body = await _send(
+      'GET',
+      _uri('/tasks/members'),
+      subject: _Subject.task,
+    );
+    final raw = body['members'];
+    if (raw is! List) return const [];
+    return raw
+        .map(TaskMember.fromJson)
+        .whereType<TaskMember>()
+        .toList(growable: false);
+  }
+
+  /// Oldest first, the order a thread is read in.
+  Future<List<TaskComment>> listComments(int number) async {
+    final body = await _send(
+      'GET',
+      _uri('/tasks/$number/comments'),
+      subject: _Subject.task,
+    );
+    final raw = body['comments'];
+    if (raw is! List) return const [];
+    return raw
+        .map(TaskComment.fromJson)
+        .whereType<TaskComment>()
+        .toList(growable: false);
+  }
+
+  Future<TaskComment> addComment(int number, String body) async {
+    final res = await _send(
+      'POST',
+      _uri('/tasks/$number/comments'),
+      subject: _Subject.comment,
+      payload: {'body': body},
+    );
+    return _comment(res);
+  }
+
+  Future<TaskComment> editComment(int number, String id, String body) async {
+    final res = await _send(
+      'PATCH',
+      _uri('/tasks/$number/comments/$id'),
+      subject: _Subject.comment,
+      payload: {'body': body},
+    );
+    return _comment(res);
+  }
+
+  Future<void> deleteComment(int number, String id) async {
+    await _send(
+      'DELETE',
+      _uri('/tasks/$number/comments/$id'),
+      subject: _Subject.comment,
+    );
+  }
+
+  TaskComment _comment(Map<String, Object?> body) {
+    final comment = TaskComment.fromJson(body['comment']);
+    if (comment == null) {
+      throw const TaskApiException(
+        TaskApiError.unknown,
+        'The account service answered with a comment this app could not read.',
+      );
+    }
+    return comment;
+  }
+
   Uri _uri(String path, [Map<String, dynamic>? query]) {
     final uri = Uri.parse('$licenseApiUrl$path');
     if (query == null || query.isEmpty) return uri;
@@ -449,6 +517,10 @@ enum TaskApiError {
   notLinked,
   invalidLabelName,
   invalidLabelColor,
+  commentNotFound,
+  emptyComment,
+  notCommentAuthor,
+  commentImported,
   badRequest,
   network,
   server,
@@ -493,7 +565,7 @@ class TaskApiException implements Exception {
 
 /// What the failing call was about, which is all that separates "that task no
 /// longer exists" from "that label no longer exists" on a shared 404.
-enum _Subject { task, label }
+enum _Subject { task, label, comment }
 
 /// Throws the [TaskApiError.network] exception every carrier-level failure
 /// in `_send`'s try maps to, with [detail] carrying whatever the underlying
@@ -520,6 +592,10 @@ TaskApiException _refusal(
     // own code, and "you are not a member of this account" is the wrong
     // sentence for a carrier the route will not take.
     (_, 'PUBLISH_REQUIRES_SESSION') => TaskApiError.publishRequiresSession,
+    // Above both bare arms for the same reason: each answers 403 or 404 with
+    // a sentence that is not "no account" and not "the task is gone".
+    (_, 'NOT_COMMENT_AUTHOR') => TaskApiError.notCommentAuthor,
+    (_, 'COMMENT_NOT_FOUND') => TaskApiError.commentNotFound,
     // Membership is the only other thing 403 can mean here — the routes carry
     // no subscription gate, so there is no paid arm to confuse it with.
     (403, _) => TaskApiError.noAccount,
@@ -544,6 +620,8 @@ TaskApiException _refusal(
     (_, 'LABELS_LOCAL_UNSUPPORTED') => TaskApiError.labelsLocalUnsupported,
     (_, 'INVALID_LABEL_NAME') => TaskApiError.invalidLabelName,
     (_, 'INVALID_LABEL_COLOR') => TaskApiError.invalidLabelColor,
+    (_, 'EMPTY_COMMENT') => TaskApiError.emptyComment,
+    (_, 'COMMENT_IMPORTED') => TaskApiError.commentImported,
     (400, _) => TaskApiError.badRequest,
     _ when status >= 500 => TaskApiError.server,
     _ => TaskApiError.unknown,
@@ -566,7 +644,17 @@ String _message(TaskApiError error, _Subject subject) => switch (error) {
   TaskApiError.notFound => switch (subject) {
     _Subject.task => 'That task no longer exists — it may have been deleted.',
     _Subject.label => 'That label no longer exists — it may have been deleted.',
+    _Subject.comment =>
+      'That task no longer exists, so its thread cannot take a comment.',
   },
+  TaskApiError.commentNotFound =>
+    'That comment no longer exists — it may have been deleted on another '
+        'device.',
+  TaskApiError.emptyComment => 'A comment needs some text.',
+  TaskApiError.notCommentAuthor =>
+    'Only the person who wrote a comment can edit or delete it.',
+  TaskApiError.commentImported =>
+    'That comment came from GitHub, so it can only be changed there.',
   TaskApiError.invalidTitle =>
     'A task needs a title: 1 to 500 characters, and not only spaces.',
   TaskApiError.projectNotFound =>
