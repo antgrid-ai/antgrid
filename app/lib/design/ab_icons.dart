@@ -140,6 +140,9 @@ abstract final class AbIcons {
   static const upload = Codicon.cloud_upload;
   static const zoomIn = Codicon.zoom_in;
   static const zoomOut = Codicon.zoom_out;
+  // Mdi: Codicons have no clipboard-paste or drag-select glyph.
+  static const paste = Mdi.content_paste;
+  static const selectText = Mdi.select_drag;
   // Codicons ship no paperclip — Mdi's is the one non-codicon glyph. Route
   // any future exceptions through here so this file stays the icon choke
   // point.

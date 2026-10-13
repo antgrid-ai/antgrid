@@ -15,7 +15,7 @@ const { plan, waitlistSource = "pricing" } = Astro.props;
   <div class="mb-1">
     {/* data-price is the headline figure's stable hook — pricing.spec.ts used to
         reach for the type class, which tied a revenue test to a font size. */}
-    <span data-price class="font-display text-[2.125rem] font-semibold tracking-[-0.03em] text-ink">${plan.priceUsd}</span>
+    <span data-price class="font-display text-[2.125rem] font-semibold tracking-[-0.03em] text-ink">{plan.priceLabel ?? `$${plan.priceUsd}`}</span>
     <span class="text-row text-muted2"> {plan.unit}</span>
   </div>
   {/* A forward price, never a struck one. The higher figure has never been

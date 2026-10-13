@@ -147,7 +147,7 @@ describe("POST /ui/team/invite — seat arithmetic", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("an account with no live contract is refused", async () => {
+  test("an account with no live contract is healed onto the promo and can invite", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const owner = await createTestUser(pg.db);
     await createTestSubscription(pg.db, owner.id, { status: "canceled" });
@@ -156,10 +156,9 @@ describe("POST /ui/team/invite — seat arithmetic", () => {
     const res = await post(app, "/ui/team/invite", { email: "nobody@example.com" }, cookie);
 
     // provisionProductAccountForUser heals a promotional grant onto an account
-    // whose only subscription is canceled, so the refusal here is the seat cap on
-    // that one-seat grant, not the missing contract. Either way: no invite.
-    expect(res.headers.get("location")).toBe("/team?invite=seat_cap");
-    expect(await pg.db.accountInvite.count()).toBe(0);
+    // whose only subscription is canceled, and that grant carries Pro's seats.
+    expect(res.headers.get("location")).toBe("/team?invite=sent");
+    expect(await pg.db.accountInvite.count()).toBe(1);
   });
 });
 

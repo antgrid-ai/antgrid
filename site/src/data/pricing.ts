@@ -27,7 +27,7 @@ export const TRIAL_DAYS = 7;
 export const FREE_WORKERS = 1;
 export const TRIAL_WORKERS = 10;
 export const PRO_WORKERS = 10;
-export const PRO_MAX_SEATS = 25;
+export const PRO_MAX_SEATS = 5;
 // Per SEAT, per year — both figures. A total is never quoted here because it
 // depends on a seat count only checkout knows.
 export const YEARLY_LIST_USD = 99;
@@ -56,6 +56,9 @@ export type PlanCardData = {
   comingSoon?: boolean;
   name: string;
   priceUsd: number;
+  // Replaces the `$priceUsd` headline — set during the beta, when the card
+  // quotes no figure, matching web's own pricing page (web/src/ui/pricing.tsx).
+  priceLabel?: string;
   listUsd?: number;
   unit: string;
   note: string;
@@ -107,12 +110,13 @@ export const proYearly: PlanCardData = {
   comingSoon: true,
   name: "Pro",
   priceUsd: seatPriceUsd,
-  listUsd: OFFER_ACTIVE ? YEARLY_LIST_USD : undefined,
-  unit: "/ seat / year",
+  priceLabel: BETA_FREE ? "Free" : undefined,
+  listUsd: OFFER_ACTIVE && !BETA_FREE ? YEARLY_LIST_USD : undefined,
+  unit: BETA_FREE ? "while in beta" : "/ seat / year",
   // Under BETA_FREE the card's CTA is an interest capture, not a checkout, so the
   // copy must not promise a startable trial or a running subscription.
   note: BETA_FREE
-    ? "Free while the beta runs"
+    ? "No card and no charge while the beta runs"
     : `${TRIAL_DAYS}-day free trial, then $${seatPriceUsd} per seat / year`,
   features: [
     "Handler: hand over follow-ups on long-running tasks, with evidence checks and questions brought to you",
@@ -158,7 +162,7 @@ export const faq: { q: string; a: string }[] = [
   {
     q: BETA_FREE ? "What happens when the beta ends?" : "Is there a free trial?",
     a: BETA_FREE
-      ? `Nothing switches off without warning. Paid plans activate${OFFER_ACTIVE ? ` at the founding prices on this page — below the $${YEARLY_LIST_USD} list price at launch` : " at the prices on this page"}, and Pro starts with a ${TRIAL_DAYS}-day free trial. The free plan stays free.`
+      ? `Nothing switches off without warning. Paid plans activate${OFFER_ACTIVE ? " at founding prices, below list price, for everyone on the waitlist" : ""}, and Pro starts with a ${TRIAL_DAYS}-day free trial. The free plan stays free.`
       : `Yes — Pro starts with a ${TRIAL_DAYS}-day free trial on one seat. Your card is not charged until the trial ends, and cancelling before then costs nothing.`,
   },
   {

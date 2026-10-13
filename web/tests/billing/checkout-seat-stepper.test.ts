@@ -231,13 +231,13 @@ describe("POST /ui/checkout/seats", () => {
     const { app, env, quoted } = armedApp();
     const { cookie } = await buyer();
 
-    const res = await orderRequest(app, cookie, { seats: "7", country: "DE" });
+    const res = await orderRequest(app, cookie, { seats: "4", country: "DE" });
     expect(res.status).toBe(200);
     const html = await res.text();
 
     // The seat count reached the gateway, so the total below is a quote for the
     // order that was actually placed.
-    expect(quoted.quantity).toBe(7);
+    expect(quoted.quantity).toBe(4);
     expect(quoted.grandTotal).not.toBeNull();
 
     // One source, compared three ways: the gateway's own number, the session
@@ -245,11 +245,11 @@ describe("POST /ui/checkout/seats", () => {
     const gatewayTotal = Number(quoted.grandTotal);
     const session = jsonBlock<EmbeddedSession>(html, "checkout-session-data");
     expect(session?.total?.amount).toBe(gatewayTotal);
-    expect(session?.seats).toBe(7);
+    expect(session?.seats).toBe(4);
     expect(readable(html)).toContain(formatMoneyMinor(gatewayTotal, quoted.currency as string));
 
     // And emphatically not the number the page could have worked out alone.
-    const ownArithmetic = formatUsd(displayPriceCents("pro_yearly", env) * 7);
+    const ownArithmetic = formatUsd(displayPriceCents("pro_yearly", env) * 4);
     expect(formatMoneyMinor(gatewayTotal, "USD")).not.toBe(ownArithmetic);
     expect(readable(html)).not.toContain(ownArithmetic);
   });
@@ -273,10 +273,10 @@ describe("POST /ui/checkout/seats", () => {
     const { app, calls } = armedApp();
     const { accountId, cookie } = await buyer();
 
-    const res = await orderRequest(app, cookie, { seats: "26", country: "DE" });
+    const res = await orderRequest(app, cookie, { seats: "6", country: "DE" });
 
     expect(res.status).toBe(400);
-    expect(readable(await res.text())).toContain("This plan covers at most 25 seats");
+    expect(readable(await res.text())).toContain("This plan covers at most 5 seats");
     expect(calls).toEqual([]);
     // A refusal must leave nothing behind: the gateway lock is immutable once set.
     const account = await pg.db.productAccount.findUniqueOrThrow({ where: { id: accountId } });
@@ -299,7 +299,7 @@ describe("POST /ui/checkout/seats", () => {
       );
       expect(readable(html)).toContain("Add as many seats as you need.");
     } finally {
-      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 25 } });
+      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 5 } });
     }
   });
 
@@ -310,7 +310,7 @@ describe("POST /ui/checkout/seats", () => {
     const res = await orderRequest(app, cookie, { seats: "0", country: "DE" });
 
     expect(res.status).toBe(400);
-    expect(readable(await res.text())).toContain("Choose between 1 and 25 seats.");
+    expect(readable(await res.text())).toContain("Choose between 1 and 5 seats.");
     expect(calls).toEqual([]);
   });
 
