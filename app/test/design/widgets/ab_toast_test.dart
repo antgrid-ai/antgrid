@@ -311,6 +311,56 @@ void main() {
     expect(find.text('Session committed'), findsNothing);
   }, variant: _desktop);
 
+  testWidgets('overlay: tapping a tappable card opens it and dismisses it', (
+    tester,
+  ) async {
+    final ctx = await _pumpHost(tester);
+    var opened = 0;
+
+    showAbToastOverlay(
+      ctx,
+      toast: AbToast(
+        icon: AbIcons.bell,
+        title: 'Handler needs you',
+        description: 'Ship it?',
+        onTap: () => opened++,
+      ),
+      duration: const Duration(seconds: 8),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Ship it?'));
+    await tester.pump();
+
+    expect(opened, 1);
+    expect(find.text('Handler needs you'), findsNothing);
+  }, variant: TargetPlatformVariant.all());
+
+  testWidgets('overlay: the close button on a tappable card does not open it', (
+    tester,
+  ) async {
+    final ctx = await _pumpHost(tester);
+    var opened = false;
+
+    showAbToastOverlay(
+      ctx,
+      toast: AbToast(
+        icon: AbIcons.bell,
+        title: 'Handler needs you',
+        onTap: () => opened = true,
+      ),
+    );
+    await tester.pump();
+    await hoverRow(tester, find.byType(AbToast));
+    await tester.pump(AbTokens.motionSnap);
+
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pump();
+
+    expect(opened, isFalse);
+    expect(find.text('Handler needs you'), findsNothing);
+  }, variant: _desktop);
+
   testWidgets('touch: a fling dismisses the toast well before its timer', (
     tester,
   ) async {

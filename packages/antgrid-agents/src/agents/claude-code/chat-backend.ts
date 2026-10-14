@@ -14,6 +14,7 @@ import {
 import { adoptLiveTurn, claudeResumeReplay } from "./resume-replay";
 import { readClaudeTranscript } from "./transcript-read";
 import { logger } from "../../host";
+import { PERMISSION_MODES } from "./permission-modes";
 const log = logger.child({ component: "claude-driver" });
 
 // The SDK's `displayName` is a bare family name ("Sonnet"); the version lives
@@ -127,18 +128,6 @@ const RECENTLY_SETTLED_CAP = 20;
 // How long dispose() waits on the background-task reap before giving up, so a
 // wedged control channel can't stall teardown.
 const BACKGROUND_REAP_GRACE_MS = 1_000;
-
-// The SDK's fixed PermissionMode enum (setPermissionMode), NOT a discovered
-// catalog — supportedAgents() lists subagent definitions, which are not modes.
-// bypassPermissions is deliberately not offered remotely (it skips every
-// permission check — unsafe over the wire). Seeded at construction so the
-// session's first, pre-discovery capabilities frame already carries them.
-const PERMISSION_MODES = [
-  { id: "default", name: "Default", description: "Ask before each tool use" },
-  { id: "auto", name: "Auto", description: "Model classifier approves or denies tool prompts" },
-  { id: "acceptEdits", name: "Accept edits", description: "Auto-approve file edits" },
-  { id: "plan", name: "Plan", description: "Read-only planning mode" },
-];
 
 export interface ClaudeDriverOpts {
   sessionId: string;
@@ -261,7 +250,7 @@ export class ClaudeDriver extends ChatSession {
     this.spawnFn = opts.spawn;
     this.selModel = opts.model;
     this.modelExplicit = !!opts.model;
-    this.capModes = PERMISSION_MODES.map((m) => ({ ...m }));
+    this.capModes = PERMISSION_MODES.map(({ gated: _gated, ...mode }) => mode);
     this.onSessionId = opts.onSessionId;
     this.stderrTail = opts.stderrTail;
     this.cwd = opts.cwd;

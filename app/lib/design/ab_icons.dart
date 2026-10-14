@@ -35,6 +35,7 @@ abstract final class AbIcons {
   static const chevronDown = Codicon.chevron_down;
   static const chevronUp = Codicon.chevron_up;
   static const refresh = Codicon.refresh;
+  static const calendar = Codicon.calendar;
   static const revert = Codicon.discard;
   static const pin = Codicon.pin;
   static const unpin = Codicon.pinned;
@@ -44,6 +45,7 @@ abstract final class AbIcons {
   static const send = Codicon.arrow_right;
   static const enterKey = Codicon.newline;
   static const shield = Codicon.shield;
+  static const lock = Codicon.lock;
   static const search = Codicon.search;
   static const arrowUp = Codicon.arrow_up;
   static const arrowDown = Codicon.arrow_down;
@@ -125,6 +127,9 @@ abstract final class AbIcons {
   static const upload = Codicon.cloud_upload;
   static const zoomIn = Codicon.zoom_in;
   static const zoomOut = Codicon.zoom_out;
+  // Mdi: Codicons have no clipboard-paste or drag-select glyph.
+  static const paste = Mdi.content_paste;
+  static const selectText = Mdi.select_drag;
   // Codicons ship no paperclip — Mdi's is the one non-codicon glyph. Route
   // any future exceptions through here so this file stays the icon choke
   // point.

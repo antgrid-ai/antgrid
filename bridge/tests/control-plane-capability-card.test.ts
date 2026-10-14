@@ -332,7 +332,7 @@ test("a session row carries the answering machine's canReply, never the tool str
   seedCatalog(h, "p1", gitDir, "repo");
   seedSessions(h, "p1", "repo", [
     session({ id: "s-reply", tool: "claude-code" }),
-    session({ id: "s-mute", tool: "opencode" }),
+    session({ id: "s-mute", tool: "kimi" }),
   ]);
   await setMobileAccess(h, true);
 

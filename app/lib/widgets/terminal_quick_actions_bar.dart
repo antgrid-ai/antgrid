@@ -34,6 +34,9 @@ class TerminalQuickActionsBar extends StatelessWidget {
     required this.composeOpen,
     required this.onToggleCompose,
     required this.onDirectInput,
+    this.onSelectText,
+    this.onPaste,
+    this.onCopyHostClipboard,
   });
 
   /// Sticky Ctrl/Alt/Shift, armed here and spent by the next keystroke from
@@ -52,6 +55,9 @@ class TerminalQuickActionsBar extends StatelessWidget {
   /// letter for an armed Ctrl or Alt to land on, no tab completion, no
   /// single-key TUI.
   final VoidCallback onDirectInput;
+  final VoidCallback? onSelectText;
+  final VoidCallback? onPaste;
+  final VoidCallback? onCopyHostClipboard;
   final Future<PickedUpload?> Function() onPick;
   final Future<void> Function(PickedUpload picked) onPicked;
 
@@ -131,6 +137,27 @@ class TerminalQuickActionsBar extends StatelessWidget {
                   _actionButton(context, '↓', '\x1b[B'),
                   _actionButton(context, '←', '\x1b[D'),
                   _actionButton(context, '→', '\x1b[C'),
+                  if (onSelectText case final onSelectText?)
+                    _key(
+                      context,
+                      icon: AbIcons.selectText,
+                      semanticLabel: 'Select text',
+                      onTap: onSelectText,
+                    ),
+                  if (onPaste case final onPaste?)
+                    _key(
+                      context,
+                      icon: AbIcons.paste,
+                      semanticLabel: 'Paste',
+                      onTap: onPaste,
+                    ),
+                  if (onCopyHostClipboard case final onCopyHostClipboard?)
+                    _key(
+                      context,
+                      icon: AbIcons.copy,
+                      semanticLabel: 'Copy host clipboard to this device',
+                      onTap: onCopyHostClipboard,
+                    ),
                   _zoomButton(
                     context,
                     icon: AbIcons.zoomOut,

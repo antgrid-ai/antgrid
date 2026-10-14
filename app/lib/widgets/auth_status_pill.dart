@@ -6,7 +6,7 @@ import '../services/auth_service.dart';
 
 /// Small status chip rendered via `AccountFooter` in the drawer, showing the
 /// app user's subscription tier:
-///   - promotional grant (unpurchased) → amber "BETA", regardless of tier
+///   - promotional grant (unpurchased) → nothing, regardless of tier
 ///   - `tier == 'pro'` (real subscription) → accent "PRO"
 ///   - else (trial / unknown) → amber tier label, defaulting to "TRIAL"
 class AuthStatusPill extends StatelessWidget {
@@ -16,17 +16,15 @@ class AuthStatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (user == null) return const SizedBox.shrink();
-    // TEMP-PROMO: hide the real "PRO" tier while the account only has a
-    // temporary, unpurchased grant — grep "TEMP-PROMO" repo-wide for every
-    // related spot. Delete this branch (and CurrentUser.promotional) once
-    // payment integration ships.
+    // TEMP-PROMO: grep "TEMP-PROMO" repo-wide for every related spot. Delete
+    // this branch (and CurrentUser.promotional) once payment integration
+    // ships.
     //
-    // "BETA", not "FREE": the grant carries Pro entitlement, so the Free
-    // allowances this chip used to name are not the ones in force. Amber (not
-    // the accent PRO wears) keeps an unpurchased grant visually distinct.
-    if (user!.promotional) {
-      return AbChip.system(label: 'BETA', color: Colors.amber.shade400);
-    }
+    // No chip at all, because every label is wrong: "PRO" claims a purchase,
+    // "FREE" names allowances that aren't in force (the grant carries Pro
+    // entitlement), and "BETA" got the iOS build rejected under App Store
+    // guideline 2.2 as a pre-release app.
+    if (user!.promotional) return const SizedBox.shrink();
     final label = user!.tier?.toUpperCase() ?? 'TRIAL';
     final color = user!.tier == 'pro'
         ? context.antgrid.accent

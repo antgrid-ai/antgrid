@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { SessionManager } from "../src/session-manager";
 import { WorktreeError } from "../src/worktrees/worktree-manager";
+import { CheckoutStore } from "../src/worktrees/checkout-store";
 
 function fakeRemoteConfig(): HostRemoteConfig {
   return {
@@ -84,6 +85,31 @@ test("deleting a missing session returns ok with deleted:false", async () => {
   const res = (await h.handleSessionsDeleteRpc(delReq("projA", "ghost"))) as any;
   expect(res.ok).toBe(true);
   expect(res.result.deleted).toBe(false);
+});
+
+test("cold deletion of a schedule's last session retains its workspace and ownership", async () => {
+  const h = host!;
+  const workspace = join(abDir!, "retained-workspace");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "changes.txt"), "schedule work");
+  seedSessions("projSchedule", [{
+    id: "last", name: "Daily", createdAt: 1, lastUsedAt: 10, archived: false,
+    checkoutId: "daily-workspace", checkoutKind: "managed-worktree", checkoutState: "ready",
+  }]);
+  const checkouts = new CheckoutStore(abDir!, "projSchedule");
+  await checkouts.put({
+    id: "daily-workspace", projectId: "projSchedule", kind: "managed-worktree", path: workspace,
+    branch: "antgrid/daily", baseRef: "main", managed: true, sessionId: "last",
+    scheduleOwnerId: "daily", createdAt: 1,
+  });
+  seedCatalog(h, "projSchedule");
+  await setMobileAccess(h, true);
+  const res = await h.handleSessionsDeleteRpc(delReqWith("projSchedule", "last", { force: true, deleteBranch: true })) as any;
+  expect(res.ok).toBe(true);
+  expect(res.result.deleted).toBe(true);
+  expect(await SessionManager.readPersisted(abDir!, "projSchedule", true)).toEqual([]);
+  expect(await checkouts.get("daily-workspace")).toMatchObject({ scheduleOwnerId: "daily", sessionId: null, branch: "antgrid/daily", path: workspace });
+  expect(Bun.file(join(workspace, "changes.txt")).size).toBeGreaterThan(0);
 });
 
 test("a WARM core is delegated to and the disk file is NOT mutated", async () => {

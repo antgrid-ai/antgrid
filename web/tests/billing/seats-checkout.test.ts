@@ -84,10 +84,10 @@ describe("POST /billing/checkout-session seat count", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const { accountId, cookie } = await buyer("DE");
 
-    const res = await checkout(app, cookie, { planId: "pro_yearly", country: "DE", seats: 26 });
+    const res = await checkout(app, cookie, { planId: "pro_yearly", country: "DE", seats: 6 });
 
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "SEATS_ABOVE_PLAN_MAX", max_seats: 25 });
+    expect(await res.json()).toEqual({ error: "SEATS_ABOVE_PLAN_MAX", max_seats: 5 });
     // A refusal must leave nothing behind: lockBillingProvider early-returns on
     // an existing value, so reaching it would pin the gateway for good.
     const account = await pg.db.productAccount.findUniqueOrThrow({ where: { id: accountId } });
@@ -119,7 +119,7 @@ describe("POST /billing/checkout-session seat count", () => {
       expect(res.status).toBe(503);
       expect((await res.json()).error).toBe("PADDLE_NOT_CONFIGURED");
     } finally {
-      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 25 } });
+      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 5 } });
     }
   });
 
@@ -139,7 +139,7 @@ describe("POST /billing/checkout-session seat count", () => {
       const account = await pg.db.productAccount.findUniqueOrThrow({ where: { id: accountId } });
       expect(account.billingProvider).toBeNull();
     } finally {
-      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 25 } });
+      await pg.db.plan.update({ where: { id: PLAN_UUID.pro_yearly }, data: { maxSeats: 5 } });
     }
   });
 

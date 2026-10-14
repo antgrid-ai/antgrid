@@ -2,118 +2,62 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { z } from "zod";
 import type { DB } from "../db/index.js";
-import { markDelivery, type DeliveryStatus } from "../models/pending-sign-in.js";
-import {
-  INVITE_REFERENCE_PREFIX,
-  markInviteDelivery,
-} from "../models/account-invite.js";
+import { markDelivery } from "../models/pending-sign-in.js";
+import { INVITE_REFERENCE_PREFIX, markInviteDelivery } from "../models/account-invite.js";
+import { recordStage } from "../auth/flows.js";
 
-// ZeptoMail wraps BOTH top-level fields in single-element arrays:
-// { event_name: ["hardbounce"], event_message: [{ email_info: {...} }] }
-// We tolerate the bare (non-array) forms too so a hand-crafted/legacy payload
-// can't crash the handler. There is NO "delivered" webhook — the events a live
-// Agent emits are hardbounce/softbounce/fbl_compliant (email_open is available
-// but not enabled), and of those only a hard bounce is actionable (classify()).
-type ZeptoMessage = { email_info?: { client_reference?: unknown } };
-type ZeptoEvent = {
-  event_name?: string | string[];
-  event_message?: ZeptoMessage | ZeptoMessage[];
-};
-
-// Names ZeptoMail is configured to send. Used only to scope the breadcrumb
-// below: a name OUTSIDE this set means the contract may have changed (e.g.
-// hardbounce renamed), which is worth a log line; routine soft bounces and
-// complaints are not.
-const KNOWN_EVENTS = new Set(["hardbounce", "softbounce", "fbl_compliant"]);
-
-function safeEqual(a: string, b: string): boolean {
-  // Hash to fixed 32-byte digests before the constant-time compare: comparing
-  // the raw strings would need an early length check, which leaks the secret's
-  // length through timing. SHA-256 first makes both operands equal-length.
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
-
-function extractRef(e: ZeptoEvent | null): string | null {
-  const msg = Array.isArray(e?.event_message) ? e?.event_message[0] : e?.event_message;
-  const ref = msg?.email_info?.client_reference;
-  return typeof ref === "string" && ref.length > 0 ? ref : null;
-}
-
-function eventName(e: ZeptoEvent | null): string {
-  const raw = Array.isArray(e?.event_name) ? e?.event_name[0] : e?.event_name;
-  // String() not a bare cast: a hand-crafted payload could send a non-string
-  // (e.g. event_name:[123]), and `.toLowerCase()` on that would throw a 500.
-  return String(raw ?? "").toLowerCase();
-}
-
-function classify(name: string): DeliveryStatus | null {
-  // Only a hard bounce is actionable: the address is dead and the link will
-  // never arrive, so the app fails fast. softbounce is transient (retryable) and
-  // fbl_compliant (complaint) isn't a sign-in failure — both ignored.
-  return name === "hardbounce" ? "bounced" : null;
-}
-
-function namespaceOf(ref: string | null): string {
-  if (ref === null) return "none";
-  return ref.startsWith(INVITE_REFERENCE_PREFIX) ? "invite" : "sign-in";
-}
-
-function markRef(db: DB, ref: string, status: DeliveryStatus): Promise<number> {
-  if (ref.startsWith(INVITE_REFERENCE_PREFIX)) {
-    return markInviteDelivery(db, ref.slice(INVITE_REFERENCE_PREFIX.length), status);
-  }
-  return markDelivery(db, ref, status);
-}
+const Info = z.object({ client_reference: z.string().max(128).optional(), request_id: z.string().max(128).optional() }).passthrough();
+const Message = z.object({ email_info: Info.optional(), request_id: z.string().max(128).optional() }).passthrough();
+const Event = z.object({ event_name: z.union([z.string().max(64), z.array(z.string().max(64)).max(100)]).optional(),
+  event_message: z.union([Message, z.array(Message).max(100)]).optional(), webhook_request_id: z.string().max(128).optional() }).passthrough();
+const Payload = z.union([Event, z.array(Event).max(100)]);
+const hash = (s: string) => createHash("sha256").update(s).digest();
 
 export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
   const r = new Hono();
-
-  r.post("/webhooks/zeptomail/:key", async (c) => {
+  r.use("/webhooks/zeptomail/:key", async (c, next) => {
     if (!deps.webhookSecret) return c.json({ error: "NOT_CONFIGURED" }, 503);
-    if (!safeEqual(c.req.param("key"), deps.webhookSecret))
-      return c.json({ error: "UNAUTHORIZED" }, 401);
-
-    const body = (await c.req.json().catch(() => null)) as ZeptoEvent | null;
-    const name = eventName(body);
-    const ref = extractRef(body);
-    const status = classify(name);
-    if (status) {
-      // A hard bounce we can't persist is the INVISIBLE-failure case the feature
-      // must not have: a missing/misplaced client_reference (ref null) or an
-      // already-purged row (updateMany matches 0) would otherwise 200 below,
-      // mark nothing, and leave the app spinning to expiry with no trail. Log
-      // whenever a classified bounce isn't recorded — hasRef distinguishes a
-      // parse/contract problem (false) from a benign late/expired bounce (true).
-      //
-      // Two namespaces share one reference field. A bare reference is a
-      // `pending_sign_in` id and stays that way — mail already in flight when
-      // the invite feature shipped carries the bare form, so it cannot be
-      // migrated to a prefix. Invite mail is prefixed at the send site
-      // (`inviteEmailReference`); routed here to the wrong table it would update
-      // zero rows and warn as if it were a late bounce.
-      const marked = ref ? await markRef(deps.db, ref, status) : 0;
-      if (marked === 0) {
-        console.warn(
-          `[zeptomail-webhook] ${name} not recorded (hasRef=${ref !== null}, ns=${namespaceOf(ref)}): missing client_reference or unmatched/expired row`
-        );
+    if (!timingSafeEqual(hash(c.req.param("key") ?? ""), hash(deps.webhookSecret))) return c.json({ error: "UNAUTHORIZED" }, 401);
+    await next();
+  });
+  r.use("/webhooks/zeptomail/:key", bodyLimit({ maxSize: 65536, onError: (c) => c.json({ error: "BODY_TOO_LARGE" }, 413) }));
+  r.post("/webhooks/zeptomail/:key", async (c) => {
+    const parsed = Payload.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "INVALID_PAYLOAD" }, 400);
+    for (const event of Array.isArray(parsed.data) ? parsed.data : [parsed.data]) {
+      const names = Array.isArray(event.event_name) ? event.event_name : [event.event_name ?? ""];
+      const messages = Array.isArray(event.event_message) ? event.event_message : [event.event_message ?? {}];
+      for (const message of messages) for (const name of names) {
+        const kind = ({ hardbounce: "hard_bounce", softbounce: "soft_bounce", fbl_compliant: "complaint", fbl_complaint: "complaint" } as Record<string, string>)[name.toLowerCase()];
+        if (!kind) continue;
+        const ref = message.email_info?.client_reference;
+        const providerId = message.request_id ?? message.email_info?.request_id;
+        if (!ref && !providerId) continue;
+        await deps.db.$transaction(async (tx) => {
+          const job = await tx.emailJob.findFirst({ where: ref ? { reference: ref } : { providerId } });
+          if (job && providerId && job.providerId && job.providerId !== providerId) return;
+          const legacyRef = job?.relatedReference ?? ref;
+          if (job) {
+            const id = hash(JSON.stringify([job.id, kind, providerId ?? ref, event.webhook_request_id ?? ""])).toString("hex");
+            await tx.emailRecipientEvent.upsert({ where: { id }, create: { id, jobId: job.id, kind }, update: {} });
+            if (kind === "hard_bounce") await recordStage(tx, job.flowId ?? undefined, "mail_bounced");
+          }
+          if (kind === "hard_bounce" && legacyRef) {
+            // Resends rotate invitation tokens; an earlier message's bounce
+            // must not overwrite delivery feedback for the current token.
+            const latest = await tx.emailJob.findFirst({ where: { relatedReference: legacyRef }, orderBy: { createdAt: "desc" }, select: { id: true } });
+            if (latest && latest.id !== job?.id) return;
+            if (legacyRef.startsWith(INVITE_REFERENCE_PREFIX)) await markInviteDelivery(tx, legacyRef.slice(INVITE_REFERENCE_PREFIX.length), "bounced");
+            else await markDelivery(tx, legacyRef, "bounced");
+          }
+        });
       }
-    } else if (name && !KNOWN_EVENTS.has(name)) {
-      // An event_name outside the known set means the contract may have changed
-      // (e.g. hardbounce renamed) — worth a log line; routine ignored events
-      // (softbounce, fbl_compliant) are not.
-      console.warn(
-        `[zeptomail-webhook] unrecognized event_name=${JSON.stringify(body?.event_name)}`
-      );
     }
-
-    // Always 200 on an authenticated call so ZeptoMail does not retry events we
-    // deliberately ignore (soft bounce, complaint) or that reference a purged row.
     return c.json({ ok: true });
   });
-
   return r;
 }

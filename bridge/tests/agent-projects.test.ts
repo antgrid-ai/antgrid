@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer } from "../src/host-server";
@@ -37,7 +37,8 @@ afterEach(async () => {
 });
 
 function tempFolder(): string {
-  const f = mkdtempSync(join(tmpdir(), "antgrid-host-"));
+  // Canonical: the host catalogs the realpath.
+  const f = realpathSync.native(mkdtempSync(join(tmpdir(), "antgrid-host-")));
   folders.push(f);
   return f;
 }

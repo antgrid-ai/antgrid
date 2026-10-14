@@ -318,7 +318,7 @@ void main() {
       WidgetTester tester,
       Map<String, HandlerSessionState> sessions, {
       required String focused,
-      required void Function() onReveal,
+      required void Function(WorkspaceView) onReveal,
       List<HandlerEscalation>? escalations,
       List<SessionEntry>? entries,
     }) async {
@@ -337,8 +337,8 @@ void main() {
               SessionsState(projectId: 'p1', sessions: entries),
             ),
           selectedRegistrationIdProvider.overrideWith((_) => null),
-          revealHandlerTabProvider.overrideWith(
-            () => ValueController<VoidCallback?>(onReveal),
+          revealWorkspaceViewControlProvider.overrideWith(
+            () => ValueController<void Function(WorkspaceView)?>(onReveal),
           ),
           handlerStateProvider.overrideWith(
             (ref) => Stream.value(
@@ -380,7 +380,7 @@ void main() {
       // pill exists to make. It goes through the pending handover rather than
       // the reveal callback because the focus write it just made arms the
       // shell's per-session UI restore, which undoes a tab selected before it.
-      var revealed = false;
+      WorkspaceView? revealed;
       final container = await pumpWithContainer(
         tester,
         {
@@ -392,7 +392,7 @@ void main() {
           ),
         },
         focused: 't1',
-        onReveal: () => revealed = true,
+        onReveal: (view) => revealed = view,
       );
 
       expect(find.text('NEEDS YOU 1'), findsOneWidget);
@@ -404,7 +404,7 @@ void main() {
         container.read(pendingWorkspaceViewProvider)?.value,
         WorkspaceView.handler,
       );
-      expect(revealed, isFalse);
+      expect(revealed, isNull);
     });
 
     // The control lands on the handler tab by handover or by call, and the
@@ -424,7 +424,7 @@ void main() {
           ),
         },
         focused: 't1',
-        onReveal: () {},
+        onReveal: (_) {},
       );
       container.read(pendingAgentPageProvider.notifier).set((
         target: null,
@@ -443,7 +443,7 @@ void main() {
 
     testWidgets('leaves focus alone when the focused session is the one '
         'waiting', (tester) async {
-      var revealed = false;
+      WorkspaceView? revealed;
       final container = await pumpWithContainer(
         tester,
         {
@@ -454,14 +454,14 @@ void main() {
           ),
         },
         focused: 't1',
-        onReveal: () => revealed = true,
+        onReveal: (view) => revealed = view,
       );
 
       await tester.tap(find.text('NEEDS YOU 1'));
       await tester.pump();
 
       expect(container.read(activeSessionIdProvider), 't1');
-      expect(revealed, isTrue);
+      expect(revealed, WorkspaceView.handler);
     });
 
     testWidgets('an urgent question elsewhere does not steal a session its '
@@ -470,7 +470,7 @@ void main() {
       // head is not the row the pill was labelled from whenever the focused
       // session has a question of its own — and a status pill must never
       // switch the user's whole workspace to a session they did not pick.
-      var revealed = false;
+      WorkspaceView? revealed;
       final container = await pumpWithContainer(
         tester,
         {
@@ -490,7 +490,7 @@ void main() {
           esc('t2', 0, urgency: 'high'),
           esc('t1', 0, at: 2),
         ],
-        onReveal: () => revealed = true,
+        onReveal: (view) => revealed = view,
       );
 
       expect(find.text('NEEDS YOU 1'), findsOneWidget);
@@ -498,7 +498,7 @@ void main() {
       await tester.pump();
 
       expect(container.read(activeSessionIdProvider), 't1');
-      expect(revealed, isTrue);
+      expect(revealed, WorkspaceView.handler);
     });
 
     testWidgets('lands on a session the pill counted, not the oldest row on '
@@ -522,7 +522,7 @@ void main() {
         },
         focused: 't1',
         escalations: [esc('t1', 0), esc('t2', 0, at: 2)],
-        onReveal: () {},
+        onReveal: (_) {},
       );
 
       expect(find.text('NEEDS YOU 1'), findsOneWidget);
@@ -539,7 +539,7 @@ void main() {
       // so the pill can name a target the write will not take. Handing the tab
       // over as pending regardless would stamp the session still in focus with
       // a destination chosen for the other one.
-      var revealed = false;
+      WorkspaceView? revealed;
       final container = await pumpWithContainer(
         tester,
         {
@@ -552,7 +552,7 @@ void main() {
         },
         focused: 't1',
         entries: [_entry('t1'), _entry('t2', deleting: true)],
-        onReveal: () => revealed = true,
+        onReveal: (view) => revealed = view,
       );
 
       expect(find.text('NEEDS YOU 1'), findsOneWidget);
@@ -561,7 +561,7 @@ void main() {
 
       expect(container.read(activeSessionIdProvider), 't1');
       expect(container.read(pendingWorkspaceViewProvider), isNull);
-      expect(revealed, isTrue);
+      expect(revealed, WorkspaceView.handler);
     });
   });
 }

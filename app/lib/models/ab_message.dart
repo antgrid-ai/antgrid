@@ -1,3 +1,4 @@
+import 'terminal_clipboard_message.dart';
 import 'package:uuid/uuid.dart';
 
 import 'agent_event.dart' show parseAgentEvent;
@@ -147,6 +148,9 @@ class AgentStatusMessage {
   final GitInfo? git;
   final bool? needsFirstRun;
 
+  /// The folder this checkout's ad-hoc terminals start in.
+  final String? checkoutPath;
+
   const AgentStatusMessage({
     required this.id,
     required this.timestamp,
@@ -159,6 +163,7 @@ class AgentStatusMessage {
     this.proxies,
     this.git,
     this.needsFirstRun,
+    this.checkoutPath,
   });
 }
 
@@ -424,6 +429,7 @@ class TerminalSubscribedMessage {
   final String runId;
   final String attachmentId;
   final int version;
+  final int? clipboardVersion;
   final String requestId;
 
   const TerminalSubscribedMessage({
@@ -433,6 +439,7 @@ class TerminalSubscribedMessage {
     required this.runId,
     required this.attachmentId,
     required this.version,
+    this.clipboardVersion,
     required this.requestId,
   });
 }
@@ -1366,6 +1373,11 @@ class PreviewSnapshotMessage {
 // --- Parser ---
 
 Object? parseAbMessage(Map<String, dynamic> json) {
+  final clipboardType = json['type'];
+  if (clipboardType is String &&
+      clipboardType.startsWith('terminal:clipboard:')) {
+    return TerminalClipboardMessage.parse(json);
+  }
   final type = json['type'] as String?;
   final id = json['id'] as String? ?? '';
   final timestamp = json['timestamp'] as int? ?? 0;
@@ -1447,6 +1459,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         proxies: proxies.isEmpty ? null : proxies,
         git: git,
         needsFirstRun: json['needsFirstRun'] as bool?,
+        checkoutPath: json['checkoutPath'] as String?,
       );
 
     case 'terminal:output':
@@ -2071,6 +2084,12 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         paused: paused,
       );
 
+    case 'terminal:clipboard:claimed':
+    case 'terminal:clipboard:revoked':
+    case 'terminal:clipboard:write':
+    case 'terminal:clipboard:host-text':
+      return TerminalClipboardMessage.parse(json);
+
     case 'terminal:subscribed':
       final terminalId = json['terminalId'];
       final runId = json['runId'];
@@ -2091,6 +2110,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         runId: runId,
         attachmentId: attachmentId,
         version: version,
+        clipboardVersion: json['clipboardVersion'] is int
+            ? json['clipboardVersion'] as int
+            : null,
         requestId: requestId,
       );
 

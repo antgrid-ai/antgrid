@@ -18,3 +18,4 @@ export 'src/models/relay_message.dart';
 export 'src/models/stream_open.dart';
 export 'src/push/push_open.dart';
 export 'src/peer_link.dart';
+export 'src/models/scheduler.dart';

@@ -44,11 +44,13 @@ import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/util/terminal_links.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/clipboard.dart';
 import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
 import 'package:antgrid/widgets/terminal_history_view.dart';
 import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
+import 'package:antgrid/widgets/terminal_modifier_keys.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
@@ -377,6 +379,147 @@ Widget _wrap(
 );
 
 void main() {
+  for (final kind in [PointerDeviceKind.mouse, PointerDeviceKind.touch]) {
+    testWidgets(
+      '${kind.name} selection retains its cells while complete frames arrive',
+      (tester) async {
+        if (_skipWithoutNative()) return;
+        final h = await _makeService(addTearDown);
+        final tab = _tab(id: 'stable-selection');
+        TerminalFrameMessage frame(
+          String text,
+          int sequence, {
+          int cols = 80,
+          String run = 'run',
+        }) => TerminalFrameMessage(
+          id: '$sequence',
+          timestamp: 0,
+          terminalId: tab.terminalId,
+          runId: run,
+          attachmentId: 'attachment',
+          sequence: sequence,
+          version: 2,
+          revision: sequence,
+          cols: cols,
+          rows: 24,
+          ansi: '\x1b[2J\x1b[H$text',
+          syncTimedOut: false,
+          history: const TerminalHistoryBoundary(
+            epoch: 1,
+            firstRowId: 0,
+            nextRowId: 0,
+            status: 'recording',
+          ),
+        );
+        tab.latestFrame.value = frame('hello original', 1);
+        final copied = captureClipboard(tester);
+        await tester.pumpWidget(
+          _wrap(
+            TerminalViewWrapper(tab: tab, terminalService: h.service),
+            terminalState: Stream.value(_stateWith()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (kind == PointerDeviceKind.touch) {
+          await tester.tap(find.bySemanticsLabel('Select text'));
+          await tester.pump();
+        }
+        final finder = find.byType(GhosttyTerminalView);
+        final originalElement = tester.element(finder);
+        final view = tester.widget<GhosttyTerminalView>(finder);
+        final box = tester.renderObject<RenderBox>(finder);
+        final cellWidth = (box.size.width - 16) / 80;
+        final cellHeight = (box.size.height - 16) / 24;
+        Offset point(double col) =>
+            box.localToGlobal(Offset(8 + cellWidth * col, 8 + cellHeight / 2));
+        if (kind == PointerDeviceKind.touch) {
+          await tester.tapAt(point(2));
+          await tester.pump(const Duration(milliseconds: 50));
+          await tester.tapAt(point(2));
+          await tester.pump(kDoubleTapTimeout * 2);
+        }
+        final start = kind == PointerDeviceKind.touch
+            ? tester.getCenter(
+                find.byKey(
+                  const ValueKey<String>(
+                    'ghostty-terminal-selection-end-handle',
+                  ),
+                ),
+              )
+            : point(0.2);
+        final pointer = await tester.startGesture(start, kind: kind);
+        tab.latestFrame.value = frame('other replacement', 2, cols: 100);
+        tab.replaceEpoch.value++;
+        await tester.pump();
+        await pointer.moveTo(point(2.8));
+        await pointer.moveTo(point(4.8));
+        await pointer.up();
+        await tester.pump();
+        expect(tester.element(finder), same(originalElement));
+        expect(view.controller.cols, 80);
+        expect(view.controller.plainText, contains('hello original'));
+        expect(view.selectionController!.hasSelection, isTrue);
+        if (kind == PointerDeviceKind.touch) {
+          expect(
+            find.byKey(
+              const ValueKey<String>('ghostty-terminal-selection-start-handle'),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(
+              const ValueKey<String>('ghostty-terminal-selection-end-handle'),
+            ),
+            findsOneWidget,
+          );
+          await tester.tap(find.text('Copy'));
+        } else {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        }
+        await tester.pumpAndSettle();
+        expect(copied, [
+          kind == PointerDeviceKind.mouse ? 'hello' : 'o original\n',
+        ]);
+        expect(view.controller.plainText, contains('other replacement'));
+        expect(view.controller.cols, 100);
+        await tester.tap(find.bySemanticsLabel('Select text'));
+        await tester.pump();
+        tab.latestFrame.value = frame('new run', 1, run: 'replacement-run');
+        tab.replaceEpoch.value++;
+        await tester.pump();
+        final replaced = tester.widget<GhosttyTerminalView>(finder);
+        expect(
+          replaced.touchDragBehavior,
+          GhosttyTerminalTouchDragBehavior.scroll,
+        );
+        expect(replaced.controller.plainText, contains('new run'));
+        expect(find.text('Return to live'), findsNothing);
+        await tester.tap(find.bySemanticsLabel('Select text'));
+        await tester.pump();
+        final replacementEngine = GhosttyTerminalController();
+        addTearDown(replacementEngine.dispose);
+        await tester.pumpWidget(
+          _wrap(
+            TerminalViewWrapper(
+              tab: tab.copyWith(ghostty: replacementEngine),
+              terminalService: h.service,
+            ),
+            terminalState: Stream.value(_stateWith()),
+          ),
+        );
+        await tester.pump();
+        final remounted = tester.widget<GhosttyTerminalView>(finder);
+        expect(remounted.controller, isNot(same(replaced.controller)));
+        expect(
+          remounted.touchDragBehavior,
+          GhosttyTerminalTouchDragBehavior.scroll,
+        );
+        expect(find.text('Return to live'), findsNothing);
+      },
+    );
+  }
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -522,6 +665,172 @@ void main() {
       // The pre-existing generic copy, still reachable, must not show
       // alongside the protocol's own reason.
       expect(find.text("couldn't load this terminal"), findsNothing);
+    });
+  });
+
+  // Ctrl+C over a selection copies it and drops it — the highlight going away
+  // is the only sign the copy happened — and nothing reaches the PTY. The
+  // touch key bar's sticky Ctrl is the same chord on a phone.
+  group('Ctrl+C over a selection', () {
+    const selected = GhosttyTerminalSelectionContent(
+      selection: GhosttyTerminalSelection(
+        base: GhosttyTerminalCellPosition(row: 0, col: 0),
+        extent: GhosttyTerminalCellPosition(row: 0, col: 4),
+      ),
+      text: 'hello',
+    );
+
+    Future<GhosttyTerminalView> pumpSelected(
+      WidgetTester tester,
+      TerminalTab tab,
+    ) async {
+      final h = await _makeService(addTearDown);
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: 300,
+            height: 400,
+            child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+          ),
+          terminalState: Stream.value(_stateWith()),
+          agentTab: tab,
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byType(GhosttyTerminalView));
+      // Past the double-tap window, so the focusing tap leaves no timer.
+      await tester.pump(kDoubleTapTimeout * 2);
+      final view = tester.widget<GhosttyTerminalView>(
+        find.byType(GhosttyTerminalView),
+      );
+      view.onSelectionContentChanged!(selected);
+      await tester.pump();
+      expect(find.byType(SendToAgentButton), findsOneWidget);
+      return view;
+    }
+
+    testWidgets('failed clipboard write keeps selection available for retry', (
+      tester,
+    ) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            throw PlatformException(code: 'denied');
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final view = await pumpSelected(tester, _tab(id: 'copy-failure'));
+      await view.onCopySelection!('hello');
+      await tester.pump();
+      expect(find.byType(SendToAgentButton), findsOneWidget);
+    });
+
+    testWidgets(
+      'old clipboard completion does not clear a newer selected range',
+      (tester) async {
+        final write = Completer<Object?>();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) {
+            return call.method == 'Clipboard.setData'
+                ? write.future
+                : Future<Object?>.value();
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final view = await pumpSelected(tester, _tab(id: 'copy-generation'));
+        final copied = view.onCopySelection!('hello');
+        view.onSelectionContentChanged!(
+          const GhosttyTerminalSelectionContent(
+            selection: GhosttyTerminalSelection(
+              base: GhosttyTerminalCellPosition(row: 1, col: 0),
+              extent: GhosttyTerminalCellPosition(row: 1, col: 4),
+            ),
+            text: 'newer',
+          ),
+        );
+        write.complete(null);
+        await copied;
+        await tester.pump();
+        expect(find.byType(SendToAgentButton), findsOneWidget);
+      },
+    );
+
+    testWidgets('desktop: copies the selection, clears it, sends no ^C', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final copied = captureClipboard(tester);
+        final pty = <int>[];
+        final tab = _tab(id: 't1', type: 'service', pty: pty);
+        await pumpSelected(tester, tab);
+        pty.clear();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+
+        expect(copied, ['hello']);
+        expect(find.byType(SendToAgentButton), findsNothing);
+        expect(pty, isNot(contains(0x03)));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    // Cmd+C and the context menu's Copy are handled inside the view and reach
+    // the wrapper only through this callback.
+    testWidgets('the engine copy paths clear the selection too', (
+      tester,
+    ) async {
+      final copied = captureClipboard(tester);
+      final tab = _tab(id: 't1', type: 'service');
+      final view = await pumpSelected(tester, tab);
+
+      await view.onCopySelection!('hello');
+      await tester.pump();
+
+      expect(copied, ['hello']);
+      expect(find.byType(SendToAgentButton), findsNothing);
+    });
+
+    testWidgets('touch: sticky Ctrl then c copies instead of interrupting', (
+      tester,
+    ) async {
+      debugHasPhysicalKeyboardOverride = false;
+      addTearDown(() => debugHasPhysicalKeyboardOverride = null);
+      final copied = captureClipboard(tester);
+      final pty = <int>[];
+      final tab = _tab(id: 't1', type: 'service', pty: pty);
+      await pumpSelected(tester, tab);
+
+      final bar = tester.widget<TerminalQuickActionsBar>(
+        find.byType(TerminalQuickActionsBar),
+      );
+      bar.onToggleModifier(TerminalModifierKey.ctrl);
+      await tester.pump();
+      bar.onSendInput('c');
+      await tester.pump();
+
+      expect(copied, ['hello']);
+      expect(find.byType(SendToAgentButton), findsNothing);
+      // The latch is spent on the copy, so the next key types plainly.
+      expect(bar.modifiers.value.ctrl, isFalse);
     });
   });
 
@@ -1383,7 +1692,7 @@ void main() {
     );
 
     testWidgets(
-      'copy and modifier chords keep history open without PTY input',
+      'modifiers retain history; Ctrl+Shift+C without selection reaches the guest',
       (tester) async {
         final pty = <int>[];
         final h = await _makeService(addTearDown);
@@ -1408,8 +1717,8 @@ void main() {
         await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
         await tester.pump();
-        expect(find.byType(TerminalHistoryView), findsOneWidget);
-        expect(pty, isEmpty);
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(utf8.decode(pty), '\x1b[99;6u');
       },
     );
 
@@ -2053,14 +2362,17 @@ void main() {
         _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
       );
       await tester.pump();
-      tab.ghostty.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
+      final surface = tester
+          .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView))
+          .controller;
+      surface.appendOutputBytes('\x1b[?1003h\x1b[?1006h'.codeUnits);
       const size = VtMouseEncoderSize(
         screenWidth: 800,
         screenHeight: 600,
         cellWidth: 10,
         cellHeight: 20,
       );
-      void move(double x) => tab.ghostty.sendMouse(
+      void move(double x) => surface.sendMouse(
         action: GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
         position: VtMousePosition(x: x, y: 10),
         size: size,
@@ -2099,7 +2411,10 @@ void main() {
         // What every agent TUI does on its first frame. From here the view's
         // own wheel handling forwards each notch to the guest as button 4/5
         // and returns before anything can clamp at the top.
-        tab.ghostty.appendOutputBytes('\x1b[?1000h'.codeUnits);
+        tester
+            .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView))
+            .controller
+            .appendOutputBytes('\x1b[?1000h'.codeUnits);
         await tester.pump();
 
         final pointer = TestPointer(1, PointerDeviceKind.mouse);
@@ -2584,7 +2899,7 @@ void main() {
       expect(files.searchLine, 12);
     });
 
-    testWidgets('a path link with no workspace menu hands its tab to the shell', (
+    testWidgets('a path link with no shell mounted hands its tab over', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2597,12 +2912,14 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(TerminalViewWrapper)),
       );
-      expect(container.read(workspaceMenuControlProvider), isNull);
+      expect(container.read(revealWorkspaceViewControlProvider), isNull);
       const focused = LocalProject('p');
       container.read(selectedTargetProvider.notifier).set(focused);
 
       unawaited(
-        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-path:?p=src%2Fa.ts&b=s&k=f',
+        ),
       );
       await tester.pump();
       await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
@@ -2634,7 +2951,9 @@ void main() {
           .set(const LocalProject('p'));
 
       unawaited(
-        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-path:?p=src%2Fa.ts&b=s&k=f',
+        ),
       );
       await tester.pump();
       container
@@ -2649,7 +2968,7 @@ void main() {
       );
     });
 
-    testWidgets('a path link reveals through the workspace menu when present', (
+    testWidgets('a path link reveals through the shell when one is mounted', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -2664,11 +2983,13 @@ void main() {
       );
       final revealed = <WorkspaceView>[];
       container
-          .read(workspaceMenuControlProvider.notifier)
-          .set((active: null, reveal: revealed.add));
+          .read(revealWorkspaceViewControlProvider.notifier)
+          .set(revealed.add);
 
       unawaited(
-        _liveView(tester).onOpenHyperlink!('antgrid-path:?p=src%2Fa.ts&b=s&k=f'),
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-path:?p=src%2Fa.ts&b=s&k=f',
+        ),
       );
       await tester.pump();
       await reply(tester, h.transport, {'relPath': 'src/a.ts', 'exists': true});
@@ -2691,9 +3012,9 @@ void main() {
       await preview.openTab(5173);
 
       unawaited(
-        _liveView(
-          tester,
-        ).onOpenHyperlink!('antgrid-url:http://localhost:5173/x?y=1#z'),
+        _liveView(tester).onOpenHyperlink!(
+          'antgrid-url:http://localhost:5173/x?y=1#z',
+        ),
       );
       await tester.pump();
 

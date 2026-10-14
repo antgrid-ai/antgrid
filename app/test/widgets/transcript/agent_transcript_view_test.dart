@@ -27,6 +27,7 @@ import 'package:antgrid/widgets/transcript/rows/tool_call_card.dart';
 import 'package:antgrid/widgets/transcript/rows/turn_fold_row.dart';
 import 'package:antgrid/widgets/transcript/rows/working_row.dart';
 import 'package:antgrid/widgets/transcript/slash_suggestions.dart';
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
@@ -502,6 +503,64 @@ void main() {
 
       await _disposeTree(tester);
     });
+
+    testWidgets(
+      'on a phone the send key shares the control row height and keeps one '
+      'footprint across states',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(390, 844);
+        addTearDown(tester.view.reset);
+
+        final t = await _pumpWithService(tester, stateWithCaps);
+        final send = find.byType(ComposerSendButton);
+        final attach = find.ancestor(
+          of: find.byTooltip('Attach file'),
+          matching: find.byType(AbIconButton),
+        );
+        final controlRow = find
+            .ancestor(of: send, matching: find.byType(Row))
+            .first;
+
+        // Disabled with an empty draft: the footprint is already reserved, so
+        // typing the first character cannot reflow the row.
+        final idle = tester.getRect(send);
+        expect(idle.size, const Size.square(AbTokens.touchControlMin));
+        expect(tester.getSize(attach).height, AbTokens.touchControlMin);
+        expect(idle.center.dy, tester.getCenter(attach).dy);
+        // The send key adds no height of its own to the row it sits in.
+        expect(tester.getSize(controlRow).height, AbTokens.touchControlMin);
+
+        await _typeIntoComposer(tester, 'hi');
+        expect(tester.getRect(send), idle);
+
+        // The margin around the visual key is part of the target.
+        await tester.tapAt(idle.topLeft + const Offset(2, 2));
+        await tester.pump();
+        expect(t.sent.where((m) => m['type'] == 'agent:prompt'), isNotEmpty);
+
+        await _disposeTree(tester);
+      },
+      variant: const TargetPlatformVariant({TargetPlatform.android}),
+    );
+
+    testWidgets(
+      'on a tablet the send key stays its drawn size',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(820, 1180);
+        addTearDown(tester.view.reset);
+
+        await _pumpWithService(tester, stateWithCaps);
+        expect(
+          tester.getSize(find.byType(ComposerSendButton)),
+          const Size.square(AbTokens.iconButtonBox),
+        );
+
+        await _disposeTree(tester);
+      },
+      variant: const TargetPlatformVariant({TargetPlatform.android}),
+    );
 
     testWidgets('typing /re filters the suggestion panel', (tester) async {
       await _pumpWithService(tester, stateWithCaps);

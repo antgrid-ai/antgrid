@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'collapsed_drawer.dart';
+
 /// Ids the user has explicitly EXPANDED, for drawer rows whose default state is
 /// COLLAPSED — remote MACHINE entries (keyed by bare deviceUuid) and the
 /// advertised PROJECT sub-rows nested under them (keyed by the compound
@@ -31,23 +33,24 @@ class ExpandedDrawerIdsNotifier extends Notifier<Set<String>> {
   }
 }
 
+/// The "This machine" band's slot in [collapsedDrawerIdsProvider]. Default-open
+/// and persisted like a local project row, unlike the remote machines: folding
+/// it hides rows that are already listed rather than gating a socket, so there
+/// is nothing a remembered fold could open on launch. Riding the same set keeps
+/// one writer on the store — a second notifier writing the same key would
+/// erase whichever folds it did not hold. The `@` keeps it out of the project
+/// id namespace, and the selection overlay never names it, so selecting a
+/// project cannot unfold the band.
+const kLocalMachineDrawerId = '@this-machine';
+
 /// Whether the "This machine" band has folded its local projects away.
-///
-/// In-memory and default-open, unlike the remote machines: collapsing here
-/// hides rows that are already listed rather than gating a socket, so there is
-/// nothing to protect on launch and a persisted fold would only hide the user's
-/// own projects from them on the next start.
-class LocalMachineCollapsedNotifier extends Notifier<bool> {
-  @override
-  bool build() => false;
+final localMachineCollapsedProvider = Provider<bool>(
+  (ref) =>
+      ref.watch(collapsedDrawerIdsProvider).contains(kLocalMachineDrawerId),
+);
 
-  void toggle() => state = !state;
-}
-
-final localMachineCollapsedProvider =
-    NotifierProvider<LocalMachineCollapsedNotifier, bool>(
-      LocalMachineCollapsedNotifier.new,
-    );
+void toggleLocalMachineCollapsed(WidgetRef ref) =>
+    ref.read(collapsedDrawerIdsProvider.notifier).toggle(kLocalMachineDrawerId);
 
 final expandedDrawerIdsProvider =
     NotifierProvider<ExpandedDrawerIdsNotifier, Set<String>>(

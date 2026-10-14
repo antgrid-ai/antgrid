@@ -15,7 +15,12 @@ import 'send_to_agent_comment.dart';
 ///
 /// Deliberately one tap and never automatic. A failure that wrote itself into
 /// an agent's stdin would interleave with whatever turn was already running.
-Future<void> offerSyncFailureToAgent({
+///
+/// Resolves true once the report has left the user's hands — written to a
+/// terminal agent, or placed in a chat agent's composer — and false when it
+/// was cancelled or could not be delivered, so the caller knows whether the
+/// failure is still unanswered.
+Future<bool> offerSyncFailureToAgent({
   required BuildContext context,
   required ProviderContainer container,
   required GitSyncFailure failure,
@@ -36,16 +41,21 @@ Future<void> offerSyncFailureToAgent({
     selectedText: report,
     sourceLabel: '[from git ${failure.op.name}]',
   );
-  if (message == null || !context.mounted) return;
+  if (message == null || !context.mounted) return false;
 
+  // Read before the send: `sendCaptureToAgent` answers false for a chat
+  // handoff too (nothing is SENT until the user submits the composer), which
+  // would otherwise be indistinguishable from "not connected".
+  final chat = focusedSessionIsChat(container);
   // `sendCaptureToAgent`, not `TerminalService.sendToAgentTerminal`: only it
   // routes for BOTH session modes — a terminal agent takes stdin, a chat agent
   // takes a composer handoff, and they are genuinely different destinations.
-  await sendCaptureToAgent(
+  final sent = await sendCaptureToAgent(
     context: context,
     container: container,
     text: message,
   );
+  return chat || sent;
 }
 
 /// The report handed to the agent.

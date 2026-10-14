@@ -13,6 +13,7 @@
 // Nothing here positions focus by hand: the reader has to take the keyboard
 // from the live pane it is raised over, and a test that hands it focus proves
 // only that the key handler compiles.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:antgrid/design/theme_presets.dart';
@@ -45,6 +46,20 @@ bool _skipWithoutNative() {
   if (_hasNative()) return false;
   markTestSkipped('native VT unavailable');
   return true;
+}
+
+Future<void> _touchSelectRow(WidgetTester tester, int row) async {
+  final finder = find.byType(GhosttyTerminalView);
+  final view = tester.widget<GhosttyTerminalView>(finder);
+  final box = tester.renderObject<RenderBox>(finder);
+  final lineHeight = (box.size.height - 16) / view.controller.rows;
+  final gesture = await tester.startGesture(
+    box.localToGlobal(Offset(30, 8 + lineHeight * (row + 0.5))),
+    kind: PointerDeviceKind.touch,
+  );
+  await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+  await gesture.up();
+  await tester.pumpAndSettle();
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +217,95 @@ double _lineHeight(WidgetTester tester) {
 }
 
 void main() {
+  testWidgets('history copy completion preserves a newer touch selection', (
+    tester,
+  ) async {
+    if (_skipWithoutNative()) return;
+    final write = Completer<Object?>();
+    final copied = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) {
+        if (call.method == 'Clipboard.setData') {
+          copied.add((call.arguments as Map)['text'] as String);
+          return write.future;
+        }
+        return Future<Object?>.value();
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      _wrap(_view(model: _loadedModel(count: 5, nextRowId: 5))),
+    );
+    await tester.pumpAndSettle();
+    final view = tester.widget<GhosttyTerminalView>(
+      find.byType(GhosttyTerminalView),
+    );
+    await _touchSelectRow(tester, 0);
+    await tester.tap(find.text('Copy'));
+    await tester.pump();
+    await _touchSelectRow(tester, 4);
+    write.complete(null);
+    await tester.pumpAndSettle();
+    expect(view.selectionController!.hasSelection, isTrue);
+    expect(find.text('Copy'), findsOneWidget);
+    await tester.tap(find.text('Copy'));
+    await tester.pumpAndSettle();
+    expect(copied, ['row 0', 'row 4']);
+    expect(view.selectionController!.hasSelection, isFalse);
+    expect(tester.testTextInput.isVisible, isFalse);
+  });
+  testWidgets(
+    'touch history selection copies without a keyboard and survives a failed write',
+    (tester) async {
+      if (_skipWithoutNative()) return;
+      final copied = <String>[];
+      var deny = true;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            if (deny) throw PlatformException(code: 'denied');
+            copied.add((call.arguments as Map)['text'] as String);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        _wrap(_view(model: _loadedModel(count: 3, nextRowId: 3))),
+      );
+      await tester.pumpAndSettle();
+      final finder = find.byType(GhosttyTerminalView);
+      final view = tester.widget<GhosttyTerminalView>(finder);
+      await _touchSelectRow(tester, 0);
+      expect(view.selectionController!.hasSelection, isTrue);
+      expect(tester.testTextInput.isVisible, isFalse);
+      expect(find.text('Copy'), findsOneWidget);
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      expect(view.selectionController!.hasSelection, isTrue);
+      expect(find.text('Copy'), findsOneWidget);
+      expect(copied, isEmpty);
+      deny = false;
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      expect(copied, ['row 0']);
+      expect(view.selectionController!.hasSelection, isFalse);
+      expect(find.text('Copy'), findsNothing);
+      expect(tester.testTextInput.isVisible, isFalse);
+    },
+  );
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('encodeTerminalHistoryRows', () {
@@ -884,10 +988,7 @@ void main() {
         _page(
           requestId: 'seed',
           rows: [
-            _row(
-              rowId: 0,
-              spans: [_span('src/a.ts:12', uri: uri)],
-            ),
+            _row(rowId: 0, spans: [_span('src/a.ts:12', uri: uri)]),
           ],
           history: _boundary(nextRowId: 1),
         ),
@@ -1959,7 +2060,10 @@ void main() {
         _row(rowId: 5, spans: [_span('ééé')]),
         _row(
           rowId: 6,
-          spans: [_span('link', uri: 'https://example.com'), _span('   ')],
+          spans: [
+            _span('link', uri: 'https://example.com'),
+            _span('   '),
+          ],
         ),
         _row(rowId: 7, wrapped: true, spans: [_span('tail  ')]),
         _row(rowId: 8, spans: [_span('0123456789')]),

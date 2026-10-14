@@ -26,8 +26,7 @@ class SessionWorkspaceState {
     this.mobilePage = 0,
     this.tabletContextOpen = false,
     this.tabletContextExpanded = false,
-    this.pinnedTerminalId,
-    this.pushedTerminalId,
+    this.selectedTerminalId,
   });
 
   final bool initialized;
@@ -50,8 +49,7 @@ class SessionWorkspaceState {
   final int mobilePage;
   final bool tabletContextOpen;
   final bool tabletContextExpanded;
-  final String? pinnedTerminalId;
-  final String? pushedTerminalId;
+  final String? selectedTerminalId;
 
   SessionWorkspaceState copyWith({
     bool? initialized,
@@ -61,10 +59,8 @@ class SessionWorkspaceState {
     int? mobilePage,
     bool? tabletContextOpen,
     bool? tabletContextExpanded,
-    String? pinnedTerminalId,
-    bool clearPinnedTerminalId = false,
-    String? pushedTerminalId,
-    bool clearPushedTerminalId = false,
+    String? selectedTerminalId,
+    bool clearSelectedTerminalId = false,
   }) => SessionWorkspaceState(
     initialized: initialized ?? this.initialized,
     selectedView: selectedView ?? this.selectedView,
@@ -73,12 +69,9 @@ class SessionWorkspaceState {
     mobilePage: mobilePage ?? this.mobilePage,
     tabletContextOpen: tabletContextOpen ?? this.tabletContextOpen,
     tabletContextExpanded: tabletContextExpanded ?? this.tabletContextExpanded,
-    pinnedTerminalId: clearPinnedTerminalId
+    selectedTerminalId: clearSelectedTerminalId
         ? null
-        : (pinnedTerminalId ?? this.pinnedTerminalId),
-    pushedTerminalId: clearPushedTerminalId
-        ? null
-        : (pushedTerminalId ?? this.pushedTerminalId),
+        : (selectedTerminalId ?? this.selectedTerminalId),
   );
 
   /// Value equality is LOAD-BEARING, not a convenience: Riverpod notifies on
@@ -98,8 +91,7 @@ class SessionWorkspaceState {
           other.mobilePage == mobilePage &&
           other.tabletContextOpen == tabletContextOpen &&
           other.tabletContextExpanded == tabletContextExpanded &&
-          other.pinnedTerminalId == pinnedTerminalId &&
-          other.pushedTerminalId == pushedTerminalId;
+          other.selectedTerminalId == selectedTerminalId;
 
   @override
   int get hashCode => Object.hash(
@@ -110,8 +102,7 @@ class SessionWorkspaceState {
     mobilePage,
     tabletContextOpen,
     tabletContextExpanded,
-    pinnedTerminalId,
-    pushedTerminalId,
+    selectedTerminalId,
   );
 }
 

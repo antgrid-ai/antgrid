@@ -251,7 +251,7 @@ export async function markInviteDelivery(
 ): Promise<number> {
   if (!z.uuid().safeParse(id).success) return 0;
   const res = await tx.accountInvite.updateMany({
-    where: { id },
+    where: { id, status: ACCOUNT_INVITE_STATUS_PENDING, expiresAt: { gt: new Date() } },
     data: { deliveryStatus: status },
   });
   return res.count;

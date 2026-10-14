@@ -33,6 +33,32 @@ test("send posts a mutable-content alert with epk/box custom keys", async () => 
   expect(payload.aps.alert.title).not.toContain("Deploy"); // never real content
 });
 
+test("send bounds delivery with apns-expiration and omits apns-collapse-id without a key", async () => {
+  let headers: Record<string, string> | null = null;
+  const transport: ApnsTransport = {
+    async post(_token, h) { headers = h; return { status: 200, body: "" }; },
+  };
+  const sender = new ApnsSender({ bundleId: "b", providerToken, transport });
+  const before = Math.floor(Date.now() / 1000);
+  expect(await sender.send("dev", { epk: "a", box: "b" })).toBe("ok");
+  const after = Math.floor(Date.now() / 1000);
+  const expiration = Number(headers!["apns-expiration"]);
+  expect(expiration).toBeGreaterThanOrEqual(before + 43200);
+  expect(expiration).toBeLessThanOrEqual(after + 43200);
+  expect("apns-collapse-id" in headers!).toBe(false);
+});
+
+test("send sets apns-collapse-id when a collapseKey is given", async () => {
+  let headers: Record<string, string> | null = null;
+  const transport: ApnsTransport = {
+    async post(_token, h) { headers = h; return { status: 200, body: "" }; },
+  };
+  const sender = new ApnsSender({ bundleId: "b", providerToken, transport });
+  expect(await sender.send("dev", { epk: "a", box: "b" }, { collapseKey: "thread_Key-1" })).toBe("ok");
+  expect(headers!["apns-collapse-id"]).toBe("thread_Key-1");
+  expect(headers!["apns-expiration"]).toMatch(/^\d+$/);
+});
+
 test("410 Unregistered maps to 'unregistered'", async () => {
   const transport: ApnsTransport = {
     async post() { return { status: 410, body: JSON.stringify({ reason: "Unregistered" }) }; },

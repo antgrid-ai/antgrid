@@ -148,7 +148,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
   Future<void> _deleteAccount() async {
     final confirmed = await DeleteAccountDialog.show(context);
     if (!confirmed || !mounted) return;
-    final result = await ref.read(accountApiProvider).deleteAccount();
+    final (:result, :message) = await ref
+        .read(accountApiProvider)
+        .deleteAccount();
     if (!mounted) return;
     switch (result) {
       case DeleteAccountResult.ok:
@@ -167,6 +169,33 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         );
         if (!mounted) return;
         if (go) await openManageSubscription(ref.container);
+      case DeleteAccountResult.blockedByTeam:
+        final go = await AbConfirmDialog.show(
+          context: context,
+          title: 'Remove your team members first',
+          body:
+              message ??
+              'Your account still has team members. Remove them on the Team '
+              'page, or contact support to transfer ownership, before deleting '
+              'your account.',
+          confirmLabel: 'Manage team',
+        );
+        if (!mounted) return;
+        if (go) await openAccountInBrowser(ref.container, path: '/team');
+      case DeleteAccountResult.blocked:
+        // The web account page renders every block the server knows, including
+        // ones newer than this build.
+        final go = await AbConfirmDialog.show(
+          context: context,
+          title: "Account can't be deleted yet",
+          body:
+              message ??
+              'Something on your account has to be resolved first. Your '
+              'account page says what it is.',
+          confirmLabel: 'Open account',
+        );
+        if (!mounted) return;
+        if (go) await openAccountInBrowser(ref.container);
       case DeleteAccountResult.error:
         showAbToast(
           context,
@@ -433,6 +462,15 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     section: SettingsSection.privacy,
                     body: [
                       const SizedBox(height: AbTokens.space8),
+                      _ToggleRow(
+                        title: 'Allow terminal programs to copy text',
+                        caption:
+                            'Applies to this device. Explicit copy and paste remain available.',
+                        enabled: settings.terminalProgramCopies,
+                        onTap: () => service.setTerminalProgramCopies(
+                          !settings.terminalProgramCopies,
+                        ),
+                      ),
                       _ToggleRow(
                         title: 'Anonymous usage analytics',
                         caption:

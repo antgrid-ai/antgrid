@@ -10,6 +10,7 @@ import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/entry_cleanup.dart';
+import 'package:antgrid/providers/preview_site_data.dart';
 import 'package:antgrid/providers/projects.dart'
     show projectStoreProvider, pendingForgetsStoreProvider;
 import 'package:antgrid/providers/providers.dart'
@@ -18,13 +19,16 @@ import 'package:antgrid/services/preferences_service.dart';
 import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/agent_catalog_store.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/pending_forgets_store.dart';
+import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
 import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/fake_webview_platform.dart';
 import '../helpers/prefs_test_mock.dart';
 
 /// Exposes the container's [Ref] so a plain `test()` can call the
@@ -231,6 +235,58 @@ void main() {
       expect(failures, ['cachedSessions']);
       expect(await cache.read('p1'), isNull);
       expect(secureBacking, isNot(contains(scopedStorageKey('paired_agents'))));
+    });
+
+    Future<List<String>> purgeWithPreview(WipeRecorder recorder) async {
+      final container = ProviderContainer(
+        overrides: [
+          cachedSessionsStoreProvider.overrideWithValue(
+            await CachedSessionsStore.open(),
+          ),
+          projectStatusCacheProvider.overrideWithValue(cache),
+          agentCatalogStoreProvider.overrideWithValue(AgentCatalogStore()),
+          storageServiceProvider.overrideWithValue(StorageService()),
+          preferencesServiceProvider.overrideWithValue(PreferencesService()),
+          projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
+          previewSiteDataProvider.overrideWithValue(
+            PreviewSiteData(
+              store: PreviewOriginOwnerStore(),
+              wipe: recorder.call,
+              isDemoMode: () => false,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final failures = <String>[];
+      await purgeAccountCaches(
+        container.read(_refProbe),
+        onError: (store, _) => failures.add(store),
+      );
+      return failures;
+    }
+
+    test('sign-out clears preview website data and leaves no owner ids',
+        () async {
+      await PreviewOriginOwnerStore().replace({3000: 'machine-1.proj-1'});
+      final recorder = WipeRecorder();
+
+      final failures = await purgeWithPreview(recorder);
+
+      expect(recorder.calls, 1);
+      expect(failures, isEmpty);
+      expect(await PreviewOriginOwnerStore().read(), isNull);
+    });
+
+    test('a failed preview clear is reported as previewSiteData', () async {
+      await PreviewOriginOwnerStore().replace({3000: 'machine-1.proj-1'});
+      final recorder = WipeRecorder()..result = kOneFailureResult;
+
+      final failures = await purgeWithPreview(recorder);
+
+      expect(failures, contains('previewSiteData'));
+      expect(await PreviewOriginOwnerStore().read(), isNull);
     });
   });
 }

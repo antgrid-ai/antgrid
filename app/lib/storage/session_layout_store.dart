@@ -9,7 +9,7 @@ import 'scoped_prefs.dart';
 /// One session's persisted workspace layout.
 ///
 /// Deliberately only the geometry a user arranges by hand. Runtime state
-/// (`pinnedTerminalId`, `pushedTerminalId`) names things that may not exist on
+/// (`selectedTerminalId`) names a terminal that may not exist on
 /// the next launch, and restoring it would point the panel at a terminal the
 /// bridge has forgotten.
 class SessionLayout {

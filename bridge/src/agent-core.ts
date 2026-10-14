@@ -1,4 +1,8 @@
 import "./agent-host";
+import { TerminalClipboardRouter, type ClipboardOwner } from "./terminal-clipboard/router";
+import { TerminalClipboardMessageSchema, CLIPBOARD_INBOUND_TYPES, type ClipboardContext } from "./terminal-clipboard/protocol";
+import { readHostClipboard } from "./terminal-clipboard/host-reader";
+import { isClipboardUserInput } from "./terminal-clipboard/interaction";
 import { agentRuntime } from "./agent-runtime";
 import { z } from "zod";
 import { VERSION } from "./version";
@@ -59,6 +63,8 @@ import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
+import { resolveSchedulerCaller } from "./scheduler-caller";
+import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -66,7 +72,7 @@ import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -244,7 +250,7 @@ export function buildChatSpawnAugment(
   abDir?: string,
   runId?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, { abDir });
+  const aug = augmentAgentLaunch(tool, { abDir, mcp: false });
   return {
     args: aug.args,
     env: {
@@ -363,6 +369,10 @@ export interface AgentCore {
    *  calls through here, since only that core's own `SessionManager` can start
    *  a session it persists. */
   startSession(id: string): void;
+  prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession>;
+  observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void;
+  stopScheduledSession(sessionId: string): Promise<void>;
+  releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void>;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
@@ -390,6 +400,7 @@ export interface AgentCore {
    *  desktop that quit, or a phone that dropped off the relay, would keep one
    *  session permanently "on screen" and mute its setup push forever. */
   noteClientGone(client: ClientKey): void;
+  revokeClipboardAccess(): void;
   /** Whether [client] has declared it can render nothing here
    *  (`client:focus-state`); `undefined` when it has declared nothing at all.
    *  Per-client, unlike {@link ConnState.appFocusPaused}, which is the
@@ -590,6 +601,11 @@ export interface BuildAgentCoreOptions {
    *  would sit against the project-wide cap and evict a live session's assign.
    *  Absent for the same reason {@link queueBusLine} is. */
   forgetBusLines?: (sessionId: string) => void;
+  /** The host's scheduler entry for agent callers, with this core's catalog
+   *  project id already bound. The core proves WHICH session is calling; the host
+   *  decides what that session may do. Absent means a bare core, and every
+   *  scheduler route answers SCHEDULER_UNAVAILABLE. */
+  schedulerForAgent?: SchedulerForAgent;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -786,6 +802,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
+  const scheduledObservers = new Set<(observation: ScheduledSessionObservation & { projectId: string }) => void>();
   let namer: SessionNamer | null = null;
   let titleObservers: Array<{ stop(): void }> = [];
   // Title-generation budget per conversation, per terminal. The /session-title
@@ -832,6 +849,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const frameHub = new TerminalFrameHub();
   // Each authenticated app owns its attachments and acknowledgment window.
   const viewerConnections = new Map<ClientKey, TerminalViewerConnection>();
+  const pendingClipboard = new Map<string, { owner: ClipboardOwner; controller: AbortController }>();
+  const clipboardContext = (value: ClipboardContext): ClipboardContext => ({
+    checkoutId: value.checkoutId, terminalId: value.terminalId, runId: value.runId, attachmentId: value.attachmentId,
+  });
+  function clipboardEligible(value: ClipboardContext, client: ClientKey, generation: number): boolean {
+    return client !== "relay" && (clientGenerations.get(client) ?? 0) === generation &&
+      viewerConnections.get(client)?.clipboardEligible({ projectId: project.id, ...clipboardContext(value) }, value.runId, value.attachmentId) === true;
+  }
+  const clipboardRouter = new TerminalClipboardRouter(
+    (owner) => clipboardEligible(owner, owner.client as ClientKey, owner.generation),
+    (owner, reason) => {
+      const key = `${owner.client}\0${owner.runId}`;
+      pendingClipboard.get(key)?.controller.abort();
+      pendingClipboard.delete(key);
+      sendAbToItsChannel(createMessage("terminal:clipboard:revoked", {
+        ...clipboardContext(owner), claimId: owner.claimId, epoch: owner.epoch, reason,
+      }), owner.client as ClientKey);
+    },
+  );
+  const hostReads = new Map<string, AbortController>();
   /** Concurrent `file:resolve-path` stats per client: every one can hit the
    *  disk, so a client that floods them is cut off at a small constant. */
   const resolveInFlight = new Map<ClientKey, number>();
@@ -866,6 +903,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         await sendTerminalTo(message, source, signal);
       },
       retired(_address, attachmentId) {
+        clipboardRouter.dropClient(source, attachmentId);
+        const key = `${source}\0${_address.checkoutId}\0${_address.terminalId}`;
+        hostReads.get(key)?.abort();
+        hostReads.delete(key);
         if (source !== "loopback") terminalStreamHooks?.retired(source, attachmentId);
       },
     };
@@ -902,6 +943,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const attachedClients = new Set<ClientKey>();
 
   function dropViewerConnection(source: ClientKey): void {
+    clipboardRouter.dropClient(source);
+    for (const [key, controller] of hostReads) {
+      if (key.startsWith(`${source}\0`)) { controller.abort(); hostReads.delete(key); }
+    }
     if (!viewerConnections.has(source)) return;
     viewerConnections.get(source)?.close();
     viewerConnections.delete(source);
@@ -1522,6 +1567,43 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string, clientGeneration = clientGenerations.get(client) ?? 0) {
     if ((clientGenerations.get(client) ?? 0) !== clientGeneration) return;
     if (client !== "loopback" && !remoteFrameAllowed("relay")) return;
+    if (msg.type.startsWith("terminal:clipboard:")) {
+      if (!CLIPBOARD_INBOUND_TYPES.has(msg.type)) return;
+      const parsed = TerminalClipboardMessageSchema.safeParse(msg);
+      if (!parsed.success) return;
+      const record = parsed.data;
+      if (!clipboardEligible(record, client, clientGeneration)) return;
+      const context = clipboardContext(record);
+      switch (record.type) {
+        case "terminal:clipboard:claim": {
+          const owner = clipboardRouter.claim(context, client, clientGeneration);
+          sendAbToItsChannel(createMessage("terminal:clipboard:claimed", {
+            ...context, requestId: record.requestId,
+            ...(owner ? { grant: { claimId: owner.claimId, epoch: owner.epoch, lifetimeMs: 5000 } } : { reason: "conflict" as const }),
+          }), client);
+          break;
+        }
+        case "terminal:clipboard:release":
+          clipboardRouter.release(context, client, record.claimId, record.epoch);
+          break;
+        case "terminal:clipboard:read-host": {
+          const key = `${client}\0${record.checkoutId}\0${record.terminalId}`;
+          if (hostReads.has(key)) return;
+          const controller = new AbortController();
+          hostReads.set(key, controller);
+          void readHostClipboard({ signal: controller.signal }).then(async (result) => {
+            if (controller.signal.aborted || !clipboardEligible(context, client, clientGeneration)) return;
+            await sendTerminalTo(createMessage("terminal:clipboard:host-text", {
+              ...context, requestId: record.requestId,
+              ...("text" in result ? { text: Buffer.from(result.text, "utf8").toString("base64") } : result),
+            }), client, controller.signal);
+          }).catch(() => {}).finally(() => { if (hostReads.get(key) === controller) hostReads.delete(key); });
+          break;
+        }
+        case "terminal:clipboard:result": break;
+      }
+      return;
+    }
     switch (msg.type) {
       // A remote bus frame is relayed by an app session between two bridges that
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
@@ -1824,6 +1906,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // relay-routed frames arrive back to back and the bridge writes them as
         // they arrive, which gives the phone no way to time the gap itself.
         const id = internalTerminalId(runtime, msg.terminalId);
+        const runId = manager.runId(id);
+        if (runId && isClipboardUserInput(msg.data)) {
+          clipboardRouter.interact({ checkoutId: runtime.checkout.id, terminalId: msg.terminalId, runId, attachmentId: "" }, client);
+        }
         const line = submittedLine(msg.data);
         // Baseline the transcript-interrupt confirmation BEFORE the key reaches
         // the PTY — Codex's own interrupt marker lands ~36ms after the key, so
@@ -2595,6 +2681,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "client:focus-state": {
+        if (msg.paused) {
+          clipboardRouter.dropClient(client, undefined, false);
+          for (const [key, controller] of hostReads) {
+            if (key.startsWith(`${client}\0`)) { controller.abort(); hostReads.delete(key); }
+          }
+        }
         focusPausedByClient.set(client, msg.paused);
         recomputeFocusPaused();
         // Both edges, because the app restates its focus only on a STREAM
@@ -2655,7 +2747,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           if (owner.disposed || sessions?.isCheckoutDeleting(checkoutId) === true ||
               (clientGenerations.get(client) ?? 0) !== clientGeneration) return;
           return connection.subscribe(
-            { projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.version, msg.requestId,
+            { projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.version, msg.requestId, msg.clipboardVersion,
           );
         })()
           .then((attachmentId) => {
@@ -2799,7 +2891,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
         const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
-        if (msg.pushToken === "") {
+        // The app re-registers on every handshake, once per warm project, so
+        // the common frame repeats what the row already holds. An upsert is a
+        // non-silent store write: the paired-phones watcher answers it with a
+        // re-advertise to every connected phone. Nothing reads `pushUpdatedAt`,
+        // so leaving it unbumped on a repeat is unobservable.
+        const clear = msg.pushToken === "";
+        const unchanged = clear
+          ? phone.pushToken === undefined && phone.pushProvider === undefined && phone.pushPubkey === undefined
+          : phone.pushToken === msg.pushToken && phone.pushProvider === msg.provider && phone.pushPubkey === msg.pushPubkey;
+        if (unchanged) {
+          log.debug("push:register for phone %s repeats its stored registration; not rewriting", phone.phoneDeviceId);
+          break;
+        }
+        if (clear) {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
             ...phone,
@@ -2926,6 +3031,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(msg);
     if (msg.type === "notification:push" && msg.origin === "agent" && msg.sessionId) {
       statusShadow?.observe(msg.sessionId, { kind: "notify", type: msg.notificationType });
+      const state = msg.notificationType === "task_complete" ? "completed"
+        : msg.notificationType === "error" ? "failed"
+        : msg.notificationType === "permission_request" || msg.notificationType === "awaiting_input" ? "needs-input" : undefined;
+      if (state && sessions?.get(msg.sessionId)?.mode === "terminal") {
+        sessions.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+          state === "failed" ? "Agent reported a turn failure" : undefined);
+      }
     }
   }
 
@@ -3776,6 +3888,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
+        checkoutPath: runtime.checkout.path,
         git: runtime.cachedGitBranch
           ? {
               branch: runtime.cachedGitBranch,
@@ -4203,6 +4316,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     };
 
     manager = new TerminalManager((msg: AbMessage) => sendTerminalFrame(msg), {
+      captureClipboardOwner: (id) => {
+        const runId = manager?.runId(id);
+        if (!runId) return;
+        const { runtime, externalId } = terminalOwner(id);
+        return clipboardRouter.capture({ checkoutId: runtime.checkout.id, terminalId: externalId, runId });
+      },
+      onClipboardWrite: (owner: ClipboardOwner, text: string) => {
+        if (!clipboardRouter.current(owner)) return;
+        const key = `${owner.client}\0${owner.runId}`;
+        pendingClipboard.get(key)?.controller.abort();
+        const controller = new AbortController();
+        pendingClipboard.set(key, { owner, controller });
+        const timeout = setTimeout(() => controller.abort(), Math.max(0, owner.expiresAt - performance.now()));
+        timeout.unref();
+        void sendTerminalTo(createMessage("terminal:clipboard:write", {
+          ...clipboardContext(owner), claimId: owner.claimId, epoch: owner.epoch,
+          eventId: crypto.randomUUID(), text: Buffer.from(text, "utf8").toString("base64"),
+        }), owner.client as ClientKey, controller.signal).catch(() => {}).finally(() => {
+          clearTimeout(timeout);
+          if (pendingClipboard.get(key)?.controller === controller) pendingClipboard.delete(key);
+        });
+      },
       onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
       onTerminalExited: (id, runId) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
@@ -4271,12 +4406,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // than voided: an unhandled rejection here reaches `index.ts`'s
       // `unhandledRejection` hook, which takes the whole host down.
       onRunExited: (id, runId, exitCode) => {
+        clipboardRouter.dropRun(runId);
         const { runtime, externalId } = terminalOwner(id);
         return frameHub
           .finish({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, runId, exitCode)
           .catch((error) => log.warn("terminal %s: settling run %s for its viewers failed: %s", id, runId, error));
       },
       onRunEnded: (id, runId, exitCode) => {
+        clipboardRouter.dropRun(runId);
         const { runtime, externalId } = terminalOwner(id);
         // Each retired attachment releases its own mode-exclusivity mark
         // through `TerminalViewerTransport.retired`.
@@ -4378,6 +4515,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     };
     structured = new StructuredAgentManager({
       sendMessage: (msg) => {
+        if ("sessionId" in msg && typeof msg.sessionId === "string") {
+          const state = msg.type === "agent:turn-start" ? "running"
+            : msg.type === "agent:permission-request" || msg.type === "agent:question" ? "needs-input"
+            : msg.type === "agent:request-retracted" ? "running"
+            : msg.type === "agent:turn-end" ? msg.stopReason === "end_turn" ? "completed" : msg.stopReason === "cancelled" ? "interrupted" : "failed"
+            : msg.type === "agent:error" ? "failed" : undefined;
+          if (state) sessions?.observeScheduledSession(msg.sessionId, sessions.hookRunId(msg.sessionId), state,
+            state === "failed" ? "Agent reported a turn failure" : state === "interrupted" ? "Agent turn was cancelled" : undefined);
+        }
         observeChatFrameForHandler(msg);
         sendAb(msg);
       },
@@ -4417,6 +4563,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
             if (run && !run.isCurrent()) return;
+            const state = evt.event === "limit_hit" ? "needs-input" : evt.event === "limit_cleared" ? "running" : "failed";
+            sessions?.observeScheduledSession(sessionId, hookRunId, state,
+              state === "failed" ? "Agent reported a turn failure" : undefined);
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
           },
@@ -4433,6 +4582,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
       agentRuntime,
+      onScheduledObservation: (observation) => {
+        for (const observer of scheduledObservers) {
+          try { observer({ ...observation, projectId: project.id }); }
+          catch { log.warn("Scheduled session observer failed for %s", observation.sessionId); }
+        }
+      },
       onAgentEvent: (sessionId, event) => {
         switch (event.type) {
           case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
@@ -5014,6 +5169,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
+    scheduler: async ({ terminalId, runId, method, params }) => {
+      if (!opts.schedulerForAgent) {
+        throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
+      }
+      const caller = resolveSchedulerCaller({
+        session: (id) => sessions?.get(id),
+        isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+        launchedBySchedule: (id) => sessions?.launchedBySchedule(id) ?? false,
+        runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+        registryAgent: (name) => agentSpec(name),
+      }, terminalId, runId);
+      return opts.schedulerForAgent(caller, method, params);
+    },
     onHandlerEvent: (body) => {
       // What the agent is DISPLAYING is settled ahead of the chat guard, because
       // it is a fact about the agent's own screen rather than about supervision:
@@ -5049,6 +5217,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // whatever a hook reports here instead of never arming at all.
       if (body.transcriptPath) sessions?.noteTranscriptPath(body.terminalId, body.transcriptPath);
       sessions?.confirmHookRun(body.terminalId, body.runId);
+      const scheduledState = body.event === "turn_end" ? "completed"
+        : body.event === "turn_failed" ? "failed"
+        : body.event === "question" || body.event === "awaiting_input" || body.event === "limit_hit" ? "needs-input"
+        : body.event === "prompt_answered" || body.event === "limit_cleared" ? "running" : undefined;
+      if (scheduledState) sessions?.observeScheduledSession(body.terminalId, body.runId, scheduledState,
+        scheduledState === "failed" ? "Agent reported a turn failure" : undefined);
       // The work reduction's SECOND closer: codex fires this and its Stop hook
       // independently. `turn_end` alone, never `turn_failed` — that is claude
       // parking for the Handler, which withholds its notification on purpose.
@@ -5162,6 +5336,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     onTurnStart: (terminalId) => {
       if (terminalId) openAgentPrompts.clear(terminalId);
+      if (terminalId) sessions?.observeScheduledSession(terminalId, sessions.hookRunId(terminalId), "running");
       opts.onTurnStart?.(terminalId);
     },
     // Deliberately does not touch openAgentPrompts: a sibling tool completing
@@ -5335,6 +5510,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // lookup also covers a resumed managed session after an agent restart.
       if (CHECKOUT_VARIABLE_MESSAGE_TYPES.has(msg.type)) {
         const checkoutId = (msg as { checkoutId?: string }).checkoutId ?? "main";
+        // A negotiated attachment already has a prepared checkout. Keeping its
+        // claim and dependent input synchronous preserves project-stream order.
+        const prepared = checkoutId === "main" ? mainRuntime : checkoutRuntimes.runtime(checkoutId);
+        if (msg.type.startsWith("terminal:clipboard:") || (msg.type === "terminal:input" && prepared && !prepared.disposed)) {
+          if (prepared && !prepared.disposed && sessions?.isCheckoutDeleting(checkoutId) !== true) {
+            handleAbMessage({ ...msg, checkoutId } as AbMessage, client, peerId, generation);
+          }
+          return;
+        }
         // A checkout-scoped verb cannot simply skip its prepare while the
         // checkout is being deleted: `runtimeFor` ends in `?? mainRuntime`, so a
         // skipped prepare answers the request out of MAIN's working tree —
@@ -5489,6 +5673,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (result instanceof Promise) result.catch(() => {});
       } catch { /* fire-and-forget */ }
     },
+    async prepareScheduledSession(spec, bind): Promise<PreparedScheduledSession> {
+      if (!sessions) throw new Error("Project sessions are not ready");
+      return sessions.prepareScheduledSession(spec, bind);
+    },
+    observeScheduledSessions(callback): () => void {
+      scheduledObservers.add(callback);
+      return () => { scheduledObservers.delete(callback); };
+    },
+    async stopScheduledSession(sessionId): Promise<void> {
+      await sessions?.stopScheduledSession(sessionId);
+    },
+    async releaseScheduleCheckout(scheduleId, checkoutId): Promise<void> {
+      if (sessions) await sessions.releaseScheduleCheckout(scheduleId, checkoutId);
+      else await new CheckoutStore(abDir, project.id).releaseScheduleOwner(scheduleId, checkoutId);
+    },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
     },
@@ -5521,6 +5720,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         ? [...attachedClients].filter((c) => c !== "loopback")
         : [client];
       for (const key of gone) {
+        clientGenerations.set(key, (clientGenerations.get(key) ?? 0) + 1);
+        dropViewerConnection(key);
         attachedClients.delete(key);
         for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.dropSubscription(key);
         for (const fw of fileWatchers.values()) fw.dropSubscription(key);
@@ -5539,11 +5740,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // retirement releases its own mark through the `retired` hook; the
       // generation bump is for the subscribe still in flight, which has no
       // attachment to retire yet.
-      clientGenerations.set(client, (clientGenerations.get(client) ?? 0) + 1);
-      dropViewerConnection(client);
     },
     clientFocusPaused(client: ClientKey): boolean | undefined {
       return focusPausedByClient.get(client);
+    },
+    revokeClipboardAccess(): void {
+      clipboardRouter.recheck();
+      for (const [key, controller] of hostReads) {
+        if (!key.startsWith("loopback\0")) { controller.abort(); hostReads.delete(key); }
+      }
     },
   };
 }

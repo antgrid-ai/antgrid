@@ -129,13 +129,16 @@ class _TerminalComposeBoxState extends State<TerminalComposeBox> {
               ),
             ),
             const SizedBox(width: AbTokens.space8),
+            // Stacked and pinned to the bottom edge: the box is anchored at the
+            // pane's bottom and grows upward, so neither key moves as the draft
+            // grows, and the column costs the field no width.
             Align(
               alignment: Alignment.bottomCenter,
               child: ValueListenableBuilder<TextEditingValue>(
                 valueListenable: widget.draft,
                 builder: (context, value, _) {
                   final empty = value.text.isEmpty;
-                  return Row(
+                  return Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       // Typing into the box commits to Send, so the way around
@@ -147,12 +150,11 @@ class _TerminalComposeBoxState extends State<TerminalComposeBox> {
                         child: AbIconButton(
                           icon: AbIcons.keyboard,
                           tooltip: 'Type directly in terminal',
-                          boxSize: AbTokens.rowHeightXl,
                           glyphSize: AbTokens.fontLg,
                           onTap: empty ? widget.onDirectInput : null,
                         ),
                       ),
-                      const SizedBox(width: AbTokens.space4),
+                      const SizedBox(height: AbTokens.space4),
                       Semantics(
                         button: true,
                         enabled: !empty,

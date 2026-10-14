@@ -15,8 +15,8 @@ in real terminals on your own hardware, and puts one screen over all of them: ev
 session on every machine you have signed in, grouped by the machine it is on. Around each
 agent it puts the context you need to check the work yourself — multi-session terminals, a
 file tree, git review with diffs, and a live browser preview. The same workspace opens on
-a phone, over a relay that is end-to-end encrypted and cannot read a byte of what passes
-through it.
+a phone, over a connection that is end-to-end encrypted between your devices. Our servers
+never see your code, prompts or terminal output.
 
 Antgrid's Handler feature takes on the follow-ups for long-running coding tasks.
 Start with your agent and do as much as you want together. When you're ready to
@@ -49,7 +49,7 @@ Antgrid does not replace your agent and ships no model of its own.
   instructed. It doesn't start new sessions or jobs.
 - **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,
   Antigravity, Kilo, Kimi and Mistral Vibe are wired for notifications and session naming
-  — the current set is `AGENTS` in [`bridge/src/agents/registry.ts`](bridge/src/agents/registry.ts).
+  — the current set is `AGENTS` in [`packages/antgrid-agents/src/agents/registry.ts`](packages/antgrid-agents/src/agents/registry.ts).
   Any other terminal program still runs; it just gets no integration.
 - **Terminal-first.** The agent's terminal is the primary view — real PTYs with
   scrollback, ANSI colour and input. Many sessions per project, so a build watcher or a
@@ -84,10 +84,13 @@ feature flag.
   authorization lease names for your account, and it never trusts anything the peer
   claims after that. Specification:
   [`docs/protocol/peer-session.md`](docs/protocol/peer-session.md).
-- **The relay is zero-knowledge.** It authenticates devices from a single signed `hello`
-  frame and then routes opaque blobs. It holds no decryption keys, so terminal output,
-  prompts, file contents and diffs are unreadable to it — and to anyone who compromises
-  it. The relay source is in this repo, and the app accepts a custom relay URL.
+- **No relay holds a key to your traffic.** The central relay authenticates devices from a
+  single signed `hello` frame and then carries only presence, policy, revocation and
+  sealed push delivery. It closes any socket that sends it a payload frame, so terminal
+  output, prompts, file contents and diffs never reach it. When your devices can't connect
+  directly, a relay we operate — the stock upstream `iroh-relay` — forwards the
+  already-encrypted QUIC packets; it sees the two endpoint IDs and the size and timing of
+  packets, never their content. The central relay's source is in this repo.
 - **Remote execution is off until you turn it on.** A machine is unreachable from mobile
   until you flip one per-machine switch; off is machine-wide and immediate — the machine
   stops advertising projects and rejects every remote verb. Note what the switch is *not*:
@@ -103,7 +106,7 @@ the relay out of it, not our account service. Your phone learns a machine's Ed25
 identity from your account's device inventory, which `app.antgrid.ai` serves, so that
 service is trusted to hand you the right key even though the relay never is.
 
-None of this needs taking on trust. The handshake specification, both implementations and
+None of this needs taking on trust. The peer session specification, both implementations and
 the relay itself are linked above and in this repo; [SECURITY.md](SECURITY.md) is the
 reporting policy if you find something wrong with them.
 

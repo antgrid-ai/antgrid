@@ -4,7 +4,7 @@ import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
-import type { DeleteSessionOptions } from "./session-manager";
+import type { DeleteSessionOptions, ScheduledSessionSpec, ScheduledSessionIdentity, ScheduledSessionObservation, PreparedScheduledSession } from "./session-manager";
 import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
@@ -39,7 +39,13 @@ export interface ProjectCoreRemoteDeps {
    *  supplier ship unroutable pushes and still compile. */
   machineDeviceId(): string;
   /** Blind FCM/APNs push forward over the central control socket. */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string }; collapseKey?: string }): void;
+  /** Whether the account's current authorization lease leaves out this device
+   *  or this identity key. Sign-out revokes the device and wipes its keys, but
+   *  the push row it registered survives on every machine it could not reach in
+   *  that moment; this, not the row, is what stops a signed-out phone being
+   *  pushed to. False when there is no lease to ask. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean;
 }
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
@@ -359,6 +365,8 @@ export class ProjectCore {
     this.core?.noteClientGone(client);
   }
 
+  revokeClipboardAccess(): void { this.core?.revokeClipboardAccess(); }
+
   /** The user pressed an interrupt key into [sessionId]'s PTY — close its turn
    *  now rather than wait on a Stop hook the CLI may never fire for a manual
    *  interrupt. See {@link closeInterruptedTurn}.
@@ -412,6 +420,25 @@ export class ProjectCore {
    *  the host only calls this for a project it already found warm. */
   startSession(id: string): void {
     this.core?.startSession(id);
+  }
+
+  async prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession> {
+    if (!this.core) throw new Error("Project is not open");
+    return this.core.prepareScheduledSession(spec, bind);
+  }
+
+  observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void {
+    if (!this.core) throw new Error("Project is not open");
+    return this.core.observeScheduledSessions(callback);
+  }
+
+  async stopScheduledSession(sessionId: string): Promise<void> {
+    await this.core?.stopScheduledSession(sessionId);
+  }
+
+  async releaseScheduleCheckout(scheduleId: string, checkoutId: string): Promise<void> {
+    if (!this.core) throw new Error("Project is not open");
+    await this.core.releaseScheduleCheckout(scheduleId, checkoutId);
   }
 
   /** Forward the live session list (with true per-session `running`) to the
@@ -495,6 +522,10 @@ export class ProjectCore {
       // with no host (evals, most of this file's own test callers) offers no
       // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
+      // Forwarded by name for the same reason: dropped here, the core would
+      // answer every scheduler tool SCHEDULER_UNAVAILABLE on a real bridge while
+      // a test that builds the core directly stays green.
+      ...(this.deps.schedulerForAgent ? { schedulerForAgent: this.deps.schedulerForAgent } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,
@@ -734,7 +765,10 @@ export class ProjectCore {
             .map((p) => p.peerPubkey),
         );
         const paired = core.pairedPhones.list();
-        const candidates = paired.filter((p) => !inBand.has(p.phonePubkey));
+        // Key too: a re-sign-in keeps the device id but mints a fresh key.
+        const candidates = paired.filter(
+          (p) => !inBand.has(p.phonePubkey) && !remote.accountDisowns(p.phoneDeviceId, p.phonePubkey),
+        );
         const targets = candidates.flatMap((p) =>
           p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
@@ -745,16 +779,17 @@ export class ProjectCore {
           // pruned token and no phone at all are indistinguishable in host.log
           // without this.
           log.warn(
-            "push: no eligible phone for project %s (in band: %d, paired: %d) — need a registered phone with a push token",
+            "push: no eligible phone for project %s (in band: %d, paired: %d, away and not revoked: %d) — need a registered phone with a push token",
             core.projectId,
             inBand.size,
             paired.length,
+            candidates.length,
           );
         }
         return targets;
       },
       seal: (json, pubkey) => sealPush(json, pubkey),
-      deliver: (token, provider, blob) => remote.sendPushDeliver({ pushToken: token, provider, blob }),
+      deliver: (token, provider, blob, collapseKey) => remote.sendPushDeliver({ pushToken: token, provider, blob, collapseKey }),
     });
     const unsubscribePush = bus.subscribe({
       deliver: (msg) => {

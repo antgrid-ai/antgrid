@@ -245,7 +245,9 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   @override
   Widget build(BuildContext context) {
     final activeId = ref.watch(activeSessionIdProvider);
-    final selected = activeId == session.id;
+    final selected =
+        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.workspace &&
+        activeId == session.id;
     final work = ref.watch(
       sessionWorkStatusProvider((
         entryId: widget.entryId,

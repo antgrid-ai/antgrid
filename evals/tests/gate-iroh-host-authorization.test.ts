@@ -16,7 +16,7 @@ import { computeProjectId } from "../../bridge/src/project-id";
 import { createMessage } from "../../bridge/src/protocol";
 import { setLogLevel } from "../../bridge/src/logger";
 
-import { test } from "bun:test";
+import { spyOn, test } from "bun:test";
 import { startIrohAuthorizationHarness } from "../support/iroh-authorization";
 
 /** Fits two max-size control-plane records on the raw stream this test drives
@@ -25,7 +25,7 @@ import { startIrohAuthorizationHarness } from "../support/iroh-authorization";
 const SESSION_STREAM_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 // Central discovery is controlled; enrollment and payloads use real HTTP/QUIC.
-test("real backend enrollment authorizes native host projects and revocation closes the pair", async () => {
+test("real backend enrollment authorizes native host projects and scheduler management; revocation closes the pair", async () => {
   setLogLevel("fatal");
   const authorization = await startIrohAuthorizationHarness();
   try {
@@ -75,13 +75,16 @@ test("real backend enrollment authorizes native host projects and revocation clo
     const root = mkdtempSync(join(tmpdir(), "antgrid-native-host-smoke-"));
     const previousDirectory = process.env.ANTGRID_DIR;
     process.env.ANTGRID_DIR = join(root, "state");
-    const host = new HostServer({ remote: {
+    const host = new HostServer({ desktopOwned: true, remote: {
       relayUrl: `ws://127.0.0.1:${backend.port}`, licenseApiUrl: authorization.origin,
       identity: { deviceId: machine.id, deviceName: "native-host-smoke", createdAt: "",
         ed25519PublicKey: machine.public, ed25519PrivateKey: machine.secret },
       auth: { clientId: enrollmentId, clientSecret: machineDevice.clientSecret, deviceUuid: machine.id,
         userId: accountId, endpointSecret: endpointSecret.toString("base64") }, onAuthRevoked: () => {},
     }, remoteRuntimeFactory: async () => ({ maint: { getToken: () => machineDevice.token, stop: () => {} } }) });
+    const tools = spyOn(host, "buildToolsAdvertisement").mockResolvedValue([
+      { tool: "claude-code", path: "fixture", label: "Claude", chatCapable: true },
+    ]);
     let writer: StreamRecordWriter | undefined;
     let connection: Awaited<ReturnType<Endpoint["connect"]>> | undefined;
     let timedOut = false;
@@ -136,6 +139,36 @@ test("real backend enrollment authorizes native host projects and revocation clo
       const nativeConnectionId = connection.stableId();
       centralOnline = false;
       centralSocket?.close();
+      const schedulerRpc = async (method: string, params: object = {}) => {
+        const requestId = randomUUID();
+        await sendMessage(createMessage("request", { requestId, method, params }));
+        const reply = await read((value) => value.type === "response" && value.requestId === requestId);
+        assert.equal(reply.ok, true, JSON.stringify(reply.error));
+        return reply.result;
+      };
+      const capabilities = await schedulerRpc("scheduler.capabilities");
+      assert.equal(capabilities.supported, true);
+      assert.equal(capabilities.supportsBaseBranchClear, true);
+      const invalidRequestId = randomUUID();
+      await sendMessage(createMessage("request", { requestId: invalidRequestId, method: "scheduler.preview", params: { cron: "@daily", timezone: "UTC" } }));
+      const invalid = await read((value) => value.type === "response" && value.requestId === invalidRequestId);
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.error.code, "SCHEDULER_INVALID_CRON");
+      const preview = await schedulerRpc("scheduler.preview", { cron: "0 9 * * 1-5", timezone: "UTC" });
+      assert.equal(preview.occurrences.length, 5);
+      const scheduled = await schedulerRpc("scheduler.create", { schedule: {
+        name: "Native schedule", projectId: projects[0]!.id, agentId: "claude-code", mode: "chat",
+        prompt: "Review changes", approvalPolicy: "default", workspace: "shared", cron: "0 9 * * 1-5",
+        timezone: "UTC", enabled: true, baseBranch: "main",
+      } });
+      assert.equal(scheduled.schedule.authorDeviceId, phone.id);
+      assert.equal((await schedulerRpc("scheduler.list")).schedules.length, 1);
+      assert.equal((await schedulerRpc("scheduler.update", { id: scheduled.schedule.id, patch: { enabled: false } })).schedule.enabled, false);
+      assert.equal((await schedulerRpc("scheduler.list")).schedules[0].baseBranch, "main");
+      assert.equal((await schedulerRpc("scheduler.update", { id: scheduled.schedule.id, patch: { baseBranch: null } })).schedule.baseBranch, undefined);
+      assert.equal((await schedulerRpc("scheduler.runs")).runs.length, 0);
+      await schedulerRpc("scheduler.delete", { id: scheduled.schedule.id });
+      assert.equal((await schedulerRpc("scheduler.list")).schedules.length, 0);
       for (const project of projects) {
         await sendMessage(createMessage("project:start", { projectId: project.id }));
         await read((value) => value.type === "stream-ready" && value.projectId === project.id);
@@ -189,6 +222,7 @@ test("real backend enrollment authorizes native host projects and revocation clo
       clearTimeout(timeout);
       writer?.abort();
       await host.shutdown();
+      tools.mockRestore();
       await app.close();
       backend.stop(true);
       if (previousDirectory === undefined) delete process.env.ANTGRID_DIR; else process.env.ANTGRID_DIR = previousDirectory;

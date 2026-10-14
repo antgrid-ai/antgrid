@@ -312,6 +312,23 @@ Future<void> main() async {
         }),
       );
     });
+    // (d) Sign-out holds registration (see clearToken); the next sign-in lifts
+    // it. Only the edge INTO signed-in: a signed-out launch needs no hold of
+    // its own, since a relay session cannot handshake without the account's
+    // credentials, and `false` here also covers a transient /account/me
+    // failure, so it is not a safe signal to stop registering on.
+    container.listen<bool?>(signedInProvider, (previous, next) {
+      if (next != true || previous == true) return;
+      unawaited(
+        pushService.resumeAfterSignIn(warmSessions()).catchError((Object e) {
+          AbLog.error(
+            'Main',
+            'PushMessagingService.resumeAfterSignIn failed',
+            fields: {'error': '$e'},
+          );
+        }),
+      );
+    });
     unawaited(
       pushService.init(sessions: warmSessions).catchError((Object e) {
         AbLog.error(

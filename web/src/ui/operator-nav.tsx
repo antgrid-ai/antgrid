@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-type OperatorSection = "users" | "accounts" | "stats" | "connections";
+type OperatorSection = "users" | "accounts" | "stats" | "connections" | "auth";
 
 export function OperatorNav({ section }: { section: OperatorSection }) {
   const links = [
     ["users", "Users"],
+    ["auth", "Authentication"],
     ["accounts", "Accounts"],
     ["stats", "Stats"],
     ["connections", "Connections"],

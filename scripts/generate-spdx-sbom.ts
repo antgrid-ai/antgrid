@@ -3,7 +3,12 @@ import { licenseForPath } from "./license-map";
 
 const [output = "antgrid.spdx.json", tag = "dev", revision = "unknown"] =
   process.argv.slice(2);
-const files = (await $`git ls-files --cached`.text()).split(/\r?\n/).filter(Boolean);
+const files = (await $`git ls-files --cached --stage -z`.text())
+  .split("\0").filter(Boolean).map((entry) => {
+    const separator = entry.indexOf("\t");
+    const [mode, objectId] = entry.slice(0, separator).split(" ");
+    return { mode, objectId, path: entry.slice(separator + 1) };
+  });
 
 const documentNamespace =
   `https://github.com/antgrid-ai/antgrid/releases/${encodeURIComponent(tag)}/spdx/${revision}`;
@@ -38,8 +43,11 @@ const spdxFiles: Array<{
   copyrightText: string;
 }> = [];
 const filesByPackage = new Map<string, typeof spdxFiles>();
-for (const path of files) {
-  const data = await Bun.file(path).arrayBuffer();
+for (const { mode, objectId, path } of files) {
+  // Git archives store a symlink's target text, not the referenced contents.
+  const data = mode === "120000"
+    ? await $`git cat-file blob ${objectId}`.arrayBuffer()
+    : await Bun.file(path).arrayBuffer();
   const hash = new Bun.CryptoHasher("sha1").update(data).digest("hex");
   const id = `SPDXRef-File-${spdxFiles.length + 1}`;
   spdxFiles.push({

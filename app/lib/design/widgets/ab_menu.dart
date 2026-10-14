@@ -13,6 +13,7 @@ import '../widgets/ab_chip.dart';
 import '../widgets/ab_icon.dart';
 import '../widgets/ab_toast.dart';
 import '../widgets/ab_tooltip.dart';
+import 'ab_touch_sizing.dart';
 
 abstract class AbMenuEntry {
   const AbMenuEntry();
@@ -336,6 +337,9 @@ class AbLiveMenuRow extends StatelessWidget {
         onTap: activate,
         child: Container(
           padding: _menuRowPadding,
+          constraints: BoxConstraints(
+            minHeight: AbTouchSizing.extentOf(context),
+          ),
           child: Row(
             children: [
               if (icon != null) ...[
@@ -904,7 +908,9 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
             },
           ),
         },
-        child: menu,
+        // Touch-sized rows make a short list outgrow a landscape phone; the
+        // layout delegate only clamps position, so the menu scrolls instead.
+        child: SingleChildScrollView(child: menu),
       ),
     );
     return CustomSingleChildLayout(
@@ -1449,6 +1455,9 @@ class _MenuItemTileState extends State<_MenuItemTile> {
         onTap: _activate,
         child: Container(
           padding: _menuRowPadding,
+          constraints: BoxConstraints(
+            minHeight: AbTouchSizing.extentOf(context),
+          ),
           decoration: BoxDecoration(
             color: active ? p.bgHover : Colors.transparent,
             borderRadius: AbTokens.borderRadius3,

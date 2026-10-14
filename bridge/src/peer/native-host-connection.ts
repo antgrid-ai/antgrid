@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION } from "antgrid-wire";
+import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, type PeerAuthorizationSnapshot } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
 import { baseSlotDeviceId } from "../relay-slot";
@@ -68,6 +68,28 @@ export function evalIrohBindAddress(
 const UNKNOWN_ENDPOINT_REFRESH_WINDOW_MS = 5_000;
 const MAX_UNKNOWN_ENDPOINT_ENTRIES = 256;
 
+// Push targeting asks `accountDisowns` once per paired phone per push, and
+// with no lease each ask would otherwise start an authorization request. A
+// refresh that fails fast (web down, a 5xx) settles before the next push, so
+// in-flight dedupe alone lets every push through to the web. Backing off per
+// failed kick, with jitter so every machine on an account does not retry in
+// step, bounds that to one request per window; an accepted snapshot resets it.
+const DISOWN_REFRESH_BASE_MS = 1_000;
+const DISOWN_REFRESH_MAX_MS = 60_000;
+
+// A phone row the account stops naming is not deleted straight away: one
+// accepted snapshot omitting it is not a definitive revocation (a metadata
+// rotation, the inventory query's row cap, a briefly disabled client can each
+// drop a live phone for a refresh or two), and a deleted row loses that
+// phone's push token on this machine until it reconnects here — which a phone
+// that only ever hears from this machine by push may never do. So the row goes
+// only once EVERY accepted snapshot for this long has left it out, timed from
+// its `disownedAt` mark, never from `lastSeenAt`. Pushes to it stop at once
+// regardless: `accountDisowns` filters at send time against the lease, and
+// against the mark when there is no lease. A month is the staleness horizon
+// FCM applies to registration tokens.
+const DISOWNED_PHONE_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** How long an accepted connection may stay without an established session. */
 const HELLO_TIMEOUT_MS = 30_000;
 
@@ -106,6 +128,9 @@ export class NativePeerSessions extends PeerSessionOwner {
   private peerSessionGeneration = 0;
   private approvedRelays = "";
   private closing: Promise<void> | null = null;
+  private disownRefreshing = false;
+  private disownRefreshFailures = 0;
+  private disownRefreshNotBefore = 0;
 
   constructor(private readonly nativeOpts: NativePeerOptions) {
     super(nativeOpts);
@@ -138,9 +163,12 @@ export class NativePeerSessions extends PeerSessionOwner {
         throw error;
       }
     },
-      (reason) => this.invalidatePeerConnections(reason), () => {
+      (reason) => this.invalidatePeerConnections(reason), (snapshot) => {
+        this.disownRefreshFailures = 0;
+        this.disownRefreshNotBefore = 0;
         this.recheckAuthorization();
         this.reconcileRelays();
+        this.collectDisownedPhones(snapshot);
       }, nativeOpts.lifecycle?.now, nativeOpts.lifecycle?.random, nativeOpts.lifecycle?.schedule);
     // Shared by every project-scoped registry: the lookup never opens or
     // promotes a core, and `retirePeer` is guarded the same way
@@ -470,6 +498,96 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 
   invalidateAuthorization(): void { this.lease.invalidate("denied"); }
+
+  /** Synchronous: push targeting asks this from inside a bus deliver. With a
+   *  lease, the phone is disowned unless the snapshot names that exact key.
+   *  With no lease (startup, a policy change in flight, an outage), only a row
+   *  an accepted snapshot already left out — marked `disownedAt` — is
+   *  disowned. That row may belong to a lost phone revoked from the account
+   *  side, which still holds a live push key, so a lease gap must not reopen
+   *  pushes to it; it costs at most a notification to a phone a transient
+   *  omission marked, until the next snapshot names it again. Every other
+   *  phone stays a target: a push to one signed out meanwhile is sealed to a
+   *  key it already discarded, where a dropped one is a lost notification. An
+   *  expired lease is re-armed only by a dialing phone, a resume or a policy
+   *  push, so asking also kicks the refresh that closes the gap — throttled,
+   *  see `DISOWN_REFRESH_BASE_MS`. */
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean {
+    if (!this.lease.current) {
+      this.kickDisownRefresh();
+      const row = this.nativeOpts.pairedPhones?.get(ed25519Pub);
+      return row?.phoneDeviceId === deviceId && row.disownedAt !== undefined;
+    }
+    return !this.lease.names(deviceId, ed25519Pub);
+  }
+
+  private kickDisownRefresh(): void {
+    if (this.stopped || this.lifecycle.state !== "ready" || this.disownRefreshing) return;
+    const now = this.nativeOpts.lifecycle?.now ?? performance.now.bind(performance);
+    if (now() < this.disownRefreshNotBefore) return;
+    // Owns its own in-flight flag rather than leaning on the lease's dedupe:
+    // every ask joined to one failing request would count it as a failure.
+    this.disownRefreshing = true;
+    const failed = () => {
+      const random = this.nativeOpts.lifecycle?.random ?? Math.random;
+      const ceiling = Math.min(DISOWN_REFRESH_MAX_MS, DISOWN_REFRESH_BASE_MS * 2 ** this.disownRefreshFailures++);
+      this.disownRefreshNotBefore = now() + ceiling / 2 + random() * ceiling / 2;
+    };
+    // `true` with no snapshot callback is a transient error the lease already
+    // retries on its own timer; only `false` or a throw is this kick failing.
+    void this.lease.refresh().then((ok) => { if (!ok) failed(); }, failed)
+      .finally(() => { this.disownRefreshing = false; });
+  }
+
+  /** Reconciles the phone rows with an accepted snapshot in one store write.
+   *  A signed-out phone's row survives on every machine it could not reach to
+   *  clear itself, and a re-signed-in phone keeps its old-key row here until it
+   *  reconnects. A row the snapshot leaves out is marked `disownedAt` (so
+   *  pushes to it stay off through a later lease gap) and the mark is cleared
+   *  once a snapshot names it again; the row itself goes only once its mark
+   *  is older than `DISOWNED_PHONE_GRACE_MS`. The lease never delivers a
+   *  denied snapshot, so a lapsed subscription or an outage neither marks nor
+   *  removes anything. A mark that does not parse, or lies in the future (a
+   *  clock set ahead when it was stamped), is restamped rather than trusted:
+   *  neither is evidence of a month's absence, and a future one would hold
+   *  the row long past the grace period. */
+  private collectDisownedPhones(snapshot: PeerAuthorizationSnapshot): void {
+    const store = this.nativeOpts.pairedPhones;
+    if (!store) return;
+    const named = new Set(snapshot.peers.map((peer) => `${peer.deviceId}|${peer.ed25519Pub}`));
+    // Wall clock: the mark is an ISO stamp that must survive a restart, and a
+    // suspended machine must count the sleep toward a mark's age.
+    const now = Date.now();
+    const cutoff = now - DISOWNED_PHONE_GRACE_MS;
+    const disownedAt = new Date(now).toISOString();
+    // A failure here must not fail the lease refresh this runs inside; the next
+    // snapshot retries, and while the lease lasts push targeting reads the
+    // snapshot rather than the marks.
+    try {
+      const removed = store.reconcile((phone) => {
+        const { disownedAt: mark, ...owned } = phone;
+        if (named.has(`${phone.phoneDeviceId}|${phone.phonePubkey}`)) return owned;
+        const since = mark === undefined ? Number.NaN : Date.parse(mark);
+        if (!Number.isFinite(since) || since > now) return { ...phone, disownedAt };
+        return since < cutoff ? null : phone;
+      });
+      for (const phone of removed) {
+        this.diagnostics.info("Removed phone %s: the account has not named it since %s",
+          phone.phoneDeviceId, phone.disownedAt);
+      }
+    } catch (error) {
+      this.diagnostics.warn("Could not reconcile phone rows with the account: %s", error);
+    }
+  }
+
+  async authorizeDevice(deviceId: string): Promise<boolean> {
+    try {
+      if (!this.lease.current && !await this.lease.refresh()) return false;
+      return this.lease.allows(deviceId);
+    } catch {
+      return false;
+    }
+  }
   notePolicyGeneration(generation: string): void {
     this.lease.observePolicyGeneration(generation);
     void this.lease.refresh().catch(() => {});
@@ -666,6 +784,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   }
   redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
+  accountDisowns(deviceId: string, ed25519Pub: string): boolean { return this.peers.accountDisowns(deviceId, ed25519Pub); }
   setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
   attachStream(...args: Parameters<NativePeerSessions["attachStream"]>) { return this.peers.attachStream(...args); }
   establishedPeers() { return this.peers.establishedPeers(); }
@@ -675,6 +794,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   sendOnChannel(...args: Parameters<NativePeerSessions["sendOnChannel"]>) { return this.peers.sendOnChannel(...args); }
   noteResume(): Promise<boolean> { return this.peers.noteResume(); }
   recheckAuthorization(): void { this.peers.recheckAuthorization(); }
+  authorizeDevice(deviceId: string): Promise<boolean> { return this.peers.authorizeDevice(deviceId); }
 }
 
 async function deadline<T>(operation: Promise<T>, cancel: () => void,

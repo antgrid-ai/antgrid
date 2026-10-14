@@ -364,7 +364,7 @@ export class SessionBusCoordinator {
    * check would have to let through — its lead living on the OTHER machine,
    * so attributable to no local project at all — is the common shape anyway.
    * What a peer may name once admitted is bounded at the gate that admits it,
-   * not at this table; see bridge/CLAUDE.md's bullet on one coordinator
+   * not at this table; see bridge/AGENTS.md's bullet on one coordinator
    * serving every project a host has open for what does and does not bound it
    * today.
    *

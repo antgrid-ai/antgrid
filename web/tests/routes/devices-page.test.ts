@@ -86,7 +86,7 @@ test("unauthenticated → redirect to /login", async () => {
   const { app } = buildTestApp(pg.db, pg.url);
   const res = await app.request("/devices");
   expect(res.status).toBe(302);
-  expect(res.headers.get("location")).toBe("/login");
+  expect(res.headers.get("location")).toBe("/login?returnPath=%2Fdevices");
 });
 
 describe("DELETE /ui/devices/:id", () => {

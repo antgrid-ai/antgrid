@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, parseMessage } from "../src/protocol";
+import { clipboardMessages } from "../src/terminal-clipboard/protocol";
 
 /** The text of one top-level `const NAME = ...;` declaration, so a registration
  *  assertion pins the block it means rather than any later occurrence. */
@@ -29,7 +30,12 @@ function checkoutScopedSchemaTypes(source: string): Set<string> {
 describe("checkout protocol contract", () => {
   test("authoritative classification exactly matches checkout-scoped schemas", () => {
     const source = readFileSync(join(import.meta.dir, "../src/protocol.ts"), "utf8");
-    expect([...checkoutScopedSchemaTypes(source)].sort())
+    const scoped = checkoutScopedSchemaTypes(source);
+    for (const schema of clipboardMessages) {
+      expect(schema.shape.checkoutId).toBeDefined();
+      scoped.add(schema.shape.type.value);
+    }
+    expect([...scoped].sort())
       .toEqual([...CHECKOUT_VARIABLE_MESSAGE_TYPES].sort());
   });
 
@@ -47,14 +53,14 @@ describe("checkout protocol contract", () => {
 
   test("session:setup is wired at all five registration points", () => {
     // Miss one and the type silently fails: it parses but nothing answers, or it
-    // answers but never parses. The list is the checklist in CLAUDE.md.
+    // answers but never parses. The list is the checklist in AGENTS.md.
     const protocol = readFileSync(join(import.meta.dir, "../src/protocol.ts"), "utf8");
     // 1. the schema, 2. the AbMessageSchema union, 3. the export.
     expect(protocol).toContain('type: z.literal("session:setup")');
     expect(sourceBlock(protocol, "export const AbMessageSchema")).toContain("SessionSetupMessage,");
     expect(protocol).toContain("export type SessionSetup =");
 
-    // 5. the handler. CLAUDE.md still calls it "the index.ts switch"; the inbound
+    // 5. the handler. AGENTS.md still calls it "the index.ts switch"; the inbound
     // switch itself now lives in agent-core.ts.
     const core = readFileSync(join(import.meta.dir, "../src/agent-core.ts"), "utf8");
     expect(core).toContain('case "session:setup"');

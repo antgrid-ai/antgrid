@@ -98,7 +98,8 @@ void main() {
       await _press(tester, LogicalKeyboardKey.arrowLeft);
       expect(selected(tester), WorkspaceView.preview);
       await _press(tester, LogicalKeyboardKey.arrowLeft);
-      expect(selected(tester), WorkspaceView.handler);
+      // Handler is hidden with no session that has it on, so Terminals is last.
+      expect(selected(tester), WorkspaceView.terminals);
     });
 
     _windowsTest('enter goes into the tab', (tester) async {

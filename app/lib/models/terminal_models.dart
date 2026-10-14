@@ -46,14 +46,12 @@ class TerminalTab {
   /// Threaded through [copyWith] as the SAME instance, exactly like
   /// [ghostty].
   ///
-  /// The view layer owns terminal selection (there is no selection state on
-  /// the engine controller itself), and must treat any change here as "the
-  /// screen underneath a live selection is now different content" and CLEAR
-  /// the selection rather than re-resolve it from row/col anchors that now
-  /// point at the wrong glyphs -- Ctrl+C and `SendToAgentButton` read that
-  /// selection, and handing the user the wrong text on copy is worse than
-  /// losing the selection.
+  /// Surfaces freeze their own engine during local selection; this signal
+  /// invalidates any anchors that still reference a replaced live screen.
   final ValueNotifier<int> replaceEpoch;
+
+  /// Latest accepted complete screen, shared without rebuilding providers.
+  final ValueNotifier<TerminalFrameMessage?> latestFrame;
 
   /// The scrollback this terminal's engine no longer holds.
   ///
@@ -106,6 +104,7 @@ class TerminalTab {
     this.mode = TerminalDisplayMode.frame,
     GhosttyTerminalController? ghostty,
     ValueNotifier<int>? replaceEpoch,
+    ValueNotifier<TerminalFrameMessage?>? latestFrame,
     TerminalHistoryModel? history,
   }) : history = history ?? TerminalHistoryModel(),
        ghostty =
@@ -123,7 +122,8 @@ class TerminalTab {
              maxScrollback: 64 << 20,
              maxScrollbackLines: 10000,
            ),
-       replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0);
+       replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0),
+       latestFrame = latestFrame ?? ValueNotifier<TerminalFrameMessage?>(null);
 
   bool get isAgent => type == 'agent';
 
@@ -160,6 +160,7 @@ class TerminalTab {
       mode: mode ?? this.mode,
       ghostty: ghostty ?? this.ghostty,
       replaceEpoch: replaceEpoch,
+      latestFrame: latestFrame,
       history: history,
     );
   }
@@ -277,6 +278,9 @@ class TerminalState {
   /// it is a property of the transport and not of any one terminal.
   final bool inputPaused;
 
+  /// Where this checkout's ad-hoc terminals start, from `agent:status`.
+  final String? checkoutPath;
+
   const TerminalState({
     this.tabs = const {},
     this.activeTerminalId,
@@ -293,6 +297,7 @@ class TerminalState {
     this.hydration = const {},
     this.attach = CheckoutAttachStatus.unknown,
     this.inputPaused = false,
+    this.checkoutPath,
   });
 
   TerminalTab? get activeTab =>
@@ -324,6 +329,7 @@ class TerminalState {
     Map<String, TerminalHydration>? hydration,
     CheckoutAttachStatus? attach,
     bool? inputPaused,
+    String? checkoutPath,
   }) {
     return TerminalState(
       tabs: tabs ?? this.tabs,
@@ -343,6 +349,7 @@ class TerminalState {
       hydration: hydration ?? this.hydration,
       attach: attach ?? this.attach,
       inputPaused: inputPaused ?? this.inputPaused,
+      checkoutPath: checkoutPath ?? this.checkoutPath,
     );
   }
 }

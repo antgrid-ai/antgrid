@@ -10,8 +10,8 @@ import '../services/terminal_service.dart';
 import 'ab_status_helpers.dart';
 import 'terminal_view_wrapper.dart';
 
-/// Fullscreen terminal output view with a back button header. Used by both
-/// [TerminalListView] (push-nav) and [ServicesListView] (view-logs).
+/// Fullscreen terminal output view with a back button header. Used by
+/// [ServicesListView] (view-logs).
 class TerminalDetailView extends StatelessWidget {
   const TerminalDetailView({
     super.key,

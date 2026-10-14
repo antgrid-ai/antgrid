@@ -6,6 +6,10 @@ import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
 import { createPending, findByIdWithHashes } from "../../src/models/pending-sign-in.js";
 import { TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
+import { createOutboxSender, EmailKeyring } from "../../src/auth/email-outbox.js";
+import { createInvite, inviteEmailReference } from "../../src/models/account-invite.js";
+import { createTestUser } from "../helpers/fixtures.js";
+import { ensureProductAccount } from "../../src/models/product-account.js";
 
 const KEY = "webhook-secret-key-abcdefghij";
 
@@ -171,7 +175,7 @@ describe("POST /webhooks/zeptomail/:key", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ event_name: [123], event_message: [{ email_info: { client_reference: "x" } }] }),
     }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
   });
 
   test("unknown reference returns 200 without error", async () => {
@@ -183,4 +187,37 @@ describe("POST /webhooks/zeptomail/:key", () => {
     }));
     expect(res.status).toBe(200);
   });
+});
+
+test("late bounce records the old job without overwriting a resent invitation", async () => {
+  const { app } = appWithSecret();
+  const owner = await createTestUser(pg.db);
+  const account = await ensureProductAccount(pg.db,owner.id);
+  const invite = await createInvite(pg.db,{ accountId: account.id, createdBy: owner.id, email: "invite@example.com", role: "member", token: "token", secret: TEST_BETTER_AUTH_SECRET });
+  const keys = new EmailKeyring("v1",{ v1: Buffer.alloc(32,3).toString("base64") });
+  const enqueue = createOutboxSender(pg.db,keys);
+  const mail = { to: invite.email, subject: "Invitation", text: "private", clientReference: inviteEmailReference(invite.id) };
+  await enqueue(mail);
+  const old = await pg.db.emailJob.findFirstOrThrow();
+  await pg.db.emailJob.update({ where: { id: old.id }, data: { createdAt: new Date(Date.now()-10000) } });
+  await enqueue(mail);
+  const response = await app.request(`/webhooks/zeptomail/${KEY}`,{ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(bouncePayload(old.reference)) });
+  expect(response.status).toBe(200);
+  expect(await pg.db.emailRecipientEvent.count()).toBe(1);
+  expect((await pg.db.accountInvite.findUniqueOrThrow({ where: { id: invite.id } })).deliveryStatus).toBeNull();
+});
+
+test("distinct provider webhook events survive deduplication and mismatched identifiers are ignored", async () => {
+  const { app } = appWithSecret();
+  const keys = new EmailKeyring("v1",{ v1: Buffer.alloc(32,3).toString("base64") });
+  await createOutboxSender(pg.db,keys)({ to: "mail@example.com", subject: "Review", text: "private" });
+  const job = await pg.db.emailJob.findFirstOrThrow();
+  await pg.db.emailJob.update({ where: { id: job.id }, data: { providerId: "provider-current" } });
+  const submit = (providerId: string, webhookRequestId: string) => app.request(`/webhooks/zeptomail/${KEY}`,{ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event_name: "softbounce", webhook_request_id: webhookRequestId, event_message: { request_id: providerId, email_info: { client_reference: job.reference } } }) });
+  expect((await submit("provider-other","wrong")).status).toBe(200);
+  expect(await pg.db.emailRecipientEvent.count()).toBe(0);
+  await submit("provider-current","first");
+  await submit("provider-current","first");
+  await submit("provider-current","second");
+  expect(await pg.db.emailRecipientEvent.count()).toBe(2);
 });

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
+import 'package:antgrid/design/widgets/ab_scrollbar.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:re_editor/re_editor.dart';
@@ -223,6 +224,24 @@ void main() {
       expect(axis(tester, AxisDirection.right).pixels, greaterThan(0));
       expect(axis(tester, AxisDirection.down).pixels, 0);
     });
+
+    // A long line gives no other cue that it runs off screen, so the
+    // horizontal thumb must be up before anyone scrolls, on every platform.
+    testWidgets('both scrollbars are pinned visible before any scroll', (
+      tester,
+    ) async {
+      await tester.pumpWidget(host());
+      await tester.pumpAndSettle();
+
+      final bars = tester
+          .widgetList<AbScrollbar>(find.byType(AbScrollbar))
+          .toList();
+      expect(
+        bars.map((b) => b.scrollbarOrientation),
+        containsAll([ScrollbarOrientation.bottom, ScrollbarOrientation.right]),
+      );
+      expect(bars.every((b) => b.thumbVisibility == true), isTrue);
+    }, variant: TargetPlatformVariant.all());
   });
 
   // A jump to a printed line marks it, placed from re_editor's own record of

@@ -23,12 +23,12 @@
 # headless-display stack, and a Bun meeting the relay's floor.
 set -uo pipefail
 
-# Pin to the toolchain floor documented in CLAUDE.md (Gradle/AGP minimums and
+# Pin to the toolchain floor documented in AGENTS.md (Gradle/AGP minimums and
 # the KGP 2.2.20 invariant assume this). Keep in lockstep with the
 # FLUTTER_VERSION in .github/workflows/.
 FLUTTER_VERSION="3.47.1"
 FLUTTER_HOME="/opt/flutter"
-BUN_MIN="1.3.14"   # CLAUDE.md relay floor: below this, APNs fails TLS/ALPN
+BUN_MIN="1.3.14"   # AGENTS.md relay floor: below this, APNs fails TLS/ALPN
 NOTES="/opt/antgrid-setup-notes.txt"   # outside the repo, so the snapshot keeps it
 
 : > "$NOTES"
@@ -40,7 +40,7 @@ note() { echo "- $*" >> "$NOTES"; }
 # `flutter run -d linux` needs all of these, and CMake reports exactly ONE
 # missing dependency per configure — so discovering them in-session costs a
 # build round trip each. Worse, a failed configure poisons app/build/linux (the
-# same install-prefix trap CLAUDE.md documents for Windows), so recovery is
+# same install-prefix trap AGENTS.md documents for Windows), so recovery is
 # `rm -rf app/build/linux`, not a re-run.
 #
 # xvfb/gnome-keyring/dbus-x11 are for DRIVING the app headlessly: with no

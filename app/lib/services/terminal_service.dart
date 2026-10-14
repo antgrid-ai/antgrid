@@ -12,13 +12,37 @@ import '../project/perf_recorder.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
+import 'terminal_clipboard_client.dart';
+import '../models/terminal_clipboard_message.dart';
 import 'terminal_screen_cache.dart';
+import 'touch_wheel_limiter.dart';
 
 class TerminalService {
   final ProjectSession session;
   final String checkoutId;
+  late final _clipboard = TerminalClipboardClient(
+    send: _send,
+    connected: () => !_disposed && session.transport.isEstablished,
+  );
+
+  void setClipboardForeground(
+    Object owner,
+    String? terminalId, {
+    bool programCopies = true,
+    void Function()? onCopied,
+  }) => _clipboard.foreground(
+    owner,
+    terminalId,
+    programCopies: programCopies,
+    onCopied: onCopied,
+  );
+  bool supportsHostClipboard(String terminalId) =>
+      _clipboard.contexts.containsKey(terminalId);
+  Future<bool> copyHostClipboard(String terminalId) =>
+      _clipboard.readHost(terminalId);
 
   StreamSubscription<InboundFrame>? _heavySub;
   StreamSubscription<InboundFrame>? _statusSub;
@@ -54,6 +78,7 @@ class TerminalService {
       _displayOwners[owner] == id;
 
   void suspendDisplay() {
+    _clipboard.dispose();
     _cancelPendingMouseMotion();
     _finishPrefetch();
     for (final id in _resizeTimers.keys.toList()) {
@@ -170,6 +195,7 @@ class TerminalService {
         tabs[id] = tab.copyWith(ghostty: replacement.ghostty);
         replacement.history.dispose();
         replacement.replaceEpoch.dispose();
+        replacement.latestFrame.dispose();
         tab.ghostty.dispose();
         _framePaintedIds.remove(id);
         _state = _state.copyWith(tabs: tabs);
@@ -479,7 +505,9 @@ class TerminalService {
 
     // Routed through the focus-gated router status stream so all dispatch goes
     // through one path.
-    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusFrame);
+    _statusSub = session
+        .checkoutStatusStream(checkoutId)
+        .listen(_onStatusFrame);
   }
 
   static const _frameHydratorKey = 'terminal:frames';
@@ -732,7 +760,10 @@ class TerminalService {
     final paused = !session.transport.isEstablished;
     if (paused == _inputPaused) return;
     _inputPaused = paused;
-    if (paused) _cancelPendingMouseMotion();
+    if (paused) {
+      _cancelPendingMouseMotion();
+      _clipboard.dispose();
+    }
     _publishHydration();
   }
 
@@ -889,6 +920,7 @@ class TerminalService {
     tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
     // Every cell a live selection's row/col anchors pointed at was
     // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
+    tab.latestFrame.value = msg;
     tab.replaceEpoch.value++;
     final firstPaint = _framePaintedIds.add(msg.terminalId);
     final recovered = _frameFailedIds.remove(msg.terminalId);
@@ -1055,6 +1087,8 @@ class TerminalService {
   /// attachment, short of whether it has ever painted (see
   /// [_framePaintedIds]'s own doc comment for why that survives this).
   void _resetFrameTracking(String terminalId) {
+    _clipboard.remove(terminalId);
+    _state.tabs[terminalId]?.latestFrame.value = null;
     _screenWaits.remove(terminalId);
     _freshScreens.remove(terminalId);
     _endedHistoryAttachment.remove(terminalId);
@@ -1126,6 +1160,7 @@ class TerminalService {
         createAbMessage('terminal:subscribe', {
           'terminalId': terminalId,
           'version': kTerminalFrameProtocolVersion,
+          'clipboardVersion': 1,
           'requestId': requestId,
         }),
       ),
@@ -1168,6 +1203,7 @@ class TerminalService {
   /// dropped send here costs nothing but a slightly later bridge-side
   /// cleanup.
   void _unsubscribeFrame(String terminalId) {
+    _clipboard.remove(terminalId);
     final handle = _attachmentHandles[terminalId];
     final attachment = _frameAttachment.remove(terminalId);
     if (handle == null && attachment == null) return;
@@ -1345,7 +1381,9 @@ class TerminalService {
     // terminal:frame and terminal:history:page are heavy-tier and dispatched
     // via _onHeavyFrame; they never reach this status-tier handler. agent:hello
     // is consumed by ProjectStatusNotifier, not here.
-    if (message is TerminalStartedMessage) {
+    if (message is TerminalClipboardMessage) {
+      _clipboard.handle(message);
+    } else if (message is TerminalStartedMessage) {
       _handleTerminalStarted(message);
     } else if (message is TerminalExitedMessage) {
       _handleTerminalExited(message);
@@ -1408,6 +1446,15 @@ class TerminalService {
       runId: msg.runId,
       attachmentId: msg.attachmentId,
     );
+    _clipboard.remove(terminalId);
+    if (msg.clipboardVersion == 1) {
+      _clipboard.contexts[terminalId] = (
+        checkoutId: checkoutId,
+        terminalId: terminalId,
+        runId: msg.runId,
+        attachmentId: msg.attachmentId,
+      );
+    }
     _frameHighestSequence[terminalId] = 0;
     if (_visible(terminalId)) {
       _frameSubscribeDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
@@ -1836,6 +1883,9 @@ class TerminalService {
         gitBranches: _state.gitBranches,
         gitBranchesLoading: _state.gitBranchesLoading,
         needsFirstRun: msg.needsFirstRun,
+        // Carried when a frame omits it (an older bridge): a checkout's folder
+        // does not move between two status frames.
+        checkoutPath: msg.checkoutPath ?? _state.checkoutPath,
       ),
     );
     // A tab can leave the status without ever exiting — a service dropped
@@ -1884,6 +1934,8 @@ class TerminalService {
   void _materializeTab(TerminalTab tab) {
     final terminalId = tab.terminalId;
     if (!_materialized.add(terminalId)) return;
+    // Owned by the binding below, so it goes when the tab does.
+    final wheel = isMobilePlatform ? TouchWheelLimiter() : null;
 
     // Wire the Ghostty controller's user-input path back to the agent.
     //
@@ -1901,9 +1953,17 @@ class TerminalService {
         // becomes KeyEventResult.ignored, so the keystroke would escape into
         // the app's global shortcut layer, and the IME/soft-keyboard path
         // discards the bool entirely — the platform this bug bites hardest.
-        final data = utf8.decode(bytes, allowMalformed: true);
+        var data = utf8.decode(bytes, allowMalformed: true);
+        if (wheel != null) {
+          final kept = wheel.filter(data);
+          if (kept == null) return true;
+          data = kept;
+        }
         final transform = _inputTransforms[terminalId];
-        sendInput(terminalId, transform == null ? data : transform(data));
+        final out = transform == null ? data : transform(data);
+        // Empty when the transform consumed the keystroke itself (a sticky
+        // Ctrl+C that copied a selection); there is nothing left to send.
+        if (out.isNotEmpty) sendInput(terminalId, out);
         return true;
       },
       onResize: null,
@@ -1995,6 +2055,7 @@ class TerminalService {
       checkoutId: checkoutId,
       terminalId: terminalId,
     );
+    _clipboard.beforeInput(terminalId, data);
     _send(
       createAbMessage('terminal:input', {
         'terminalId': terminalId,
@@ -2168,6 +2229,29 @@ class TerminalService {
           );
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: terminalId));
     requestStart(terminalId, name: name);
+  }
+
+  /// Respawns [terminalId] in place. The bridge kills a live run under the
+  /// same id before spawning, so this is safe on a running terminal.
+  void restartTerminal(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    requestStart(terminalId, name: tab.name);
+  }
+
+  /// Clears [terminalId]'s screen by asking its shell to: the bridge's screen
+  /// is authoritative, so a local wipe would be repainted by the next frame.
+  /// cmd.exe has no clear-screen key and gets `cls`; bash, zsh, fish and
+  /// PowerShell's PSReadLine all clear on Ctrl+L.
+  bool clearTerminal(String terminalId) => sendInput(
+    terminalId,
+    clearScreenInputFor(_state.tabs[terminalId]?.shell),
+  );
+
+  /// What [clearTerminal] types into a terminal running [shell].
+  static String clearScreenInputFor(String? shell) {
+    final base = (shell ?? '').split(RegExp(r'[\\/]')).last.toLowerCase();
+    return base == 'cmd' || base == 'cmd.exe' ? 'cls\r' : '\x0c';
   }
 
   void _settlePendingTerminal(String terminalId) {
@@ -2344,6 +2428,7 @@ class TerminalService {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    _clipboard.dispose();
     _finishPrefetch();
     _displayServices.remove(this);
     hiddenScreens.removeOwner(this);

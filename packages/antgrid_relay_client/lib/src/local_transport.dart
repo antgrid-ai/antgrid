@@ -61,7 +61,7 @@ class LocalTransport extends BufferedAgentTransport {
   final Duration connectTimeout;
 
   /// Whether this app forwards session-bus frames for other bridges (the
-  /// desktop app is the only carrier — see `session_bus/` in `app/CLAUDE.md`).
+  /// desktop app is the only carrier — see `session_bus/` in `app/AGENTS.md`).
   /// Sent as the hello's `capabilities.sessionBusCarrier` only when true; the
   /// key is omitted for a non-carrier owner, which the agent treats the same
   /// as an owner that sends no `capabilities` at all.

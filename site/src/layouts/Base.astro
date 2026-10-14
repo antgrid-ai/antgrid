@@ -22,7 +22,7 @@ const { title, description, ogImage, ogImageAlt, path, robots, article, rss } = 
   <head>
     {/* preload on all three because all three are in the first viewport: Archivo
         in the headline, Inter in the lede and nav, mono in the eyebrow, beta pill
-        and ProofCard. Without it a font is not even requested until the
+        and hero window. Without it a font is not even requested until the
         render-blocking CSS has parsed — HTML, then CSS, then woff2, three serial
         round trips — which is why the swap used to land long after the page
         looked finished. <Font> emits the @font-face, the metric-matched fallback

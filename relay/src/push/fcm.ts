@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { SignJWT, importPKCS8 } from "jose";
+import { PUSH_TTL_SECONDS, type PushSender } from "./delivery.js";
 
 const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token";
@@ -56,7 +57,7 @@ export class GoogleTokenSource implements TokenSource {
   }
 }
 
-export class FcmSender {
+export class FcmSender implements PushSender {
   private readonly projectId: string;
   private readonly tokenSource: TokenSource;
   private readonly fetchImpl: typeof fetch;
@@ -67,6 +68,14 @@ export class FcmSender {
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
+  /**
+   * Takes no collapse key, and that is deliberate: FCM stores collapsible
+   * messages under at most four keys per device and does not say which keys it
+   * keeps past that, so a per-session key would silently discard whole
+   * sessions' pushes (an escalation among them) for a user with five busy
+   * sessions. It also throttles collapsible sends. The TTL alone bounds the
+   * backlog, and the app replaces per session in the shade.
+   */
   async send(pushToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> {
     const accessToken = await this.tokenSource.getAccessToken();
     const res = await this.fetchImpl(
@@ -74,7 +83,13 @@ export class FcmSender {
       {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ message: { token: pushToken, android: { priority: "high" }, data } }),
+        body: JSON.stringify({
+          message: {
+            token: pushToken,
+            android: { priority: "high", ttl: `${PUSH_TTL_SECONDS}s` },
+            data,
+          },
+        }),
         signal: AbortSignal.timeout(FCM_SEND_TIMEOUT_MS),
       },
     );

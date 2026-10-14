@@ -30,6 +30,7 @@ Uri navLocationToUri(NavLocation loc) {
       final seg = switch (loc.surface) {
         WorkbenchSurface.appSettings => 'settings',
         WorkbenchSurface.remoteDevices => 'devices',
+        WorkbenchSurface.scheduler => 'scheduler',
         // workspace/newSession with no project is not a meaningful deep link;
         // encode defensively as settings-less root.
         _ => 'workspace',
@@ -164,6 +165,8 @@ NavLocation? navLocationFromUri(Uri uri) {
   }
 
   switch (segs.first) {
+    case 'scheduler':
+      return const NavLocation(surface: WorkbenchSurface.scheduler);
     case 'settings':
       return NavLocation(
         target: null,

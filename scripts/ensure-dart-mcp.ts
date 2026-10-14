@@ -22,7 +22,7 @@ const DART_ENTRY = {
  * Why register it at all: a session's server stays warm for that session, so
  * repeat `analyze_files` calls are near-instant instead of spawning
  * `flutter analyze` per check — and two concurrent `flutter analyze` runs
- * deadlock silently on the Flutter startup lock (see the gotcha in CLAUDE.md).
+ * deadlock silently on the Flutter startup lock (see the gotcha in AGENTS.md).
  * The warmth is per session, NOT shared across agents, and only calls into an
  * already-running server dodge that lock: `command: "dart"` resolves to
  * `flutter/bin/dart.bat`, so STARTING one takes the lock like any other.

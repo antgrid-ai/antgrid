@@ -1,7 +1,7 @@
 // Verifies the "This machine" band's fold over every local project row:
 // tapping it hides the local projects and their sessions but leaves the band
 // (the only way to unfold) and every remote machine untouched, and the fold is
-// in-memory only.
+// remembered across launches.
 //
 // Seeding follows projects_drawer_expansion_test.dart: real stores written
 // before pumpWidget, with only the per-row status streams and the account
@@ -187,9 +187,7 @@ void main() {
     expect(find.text('Alpha'), findsOneWidget);
   });
 
-  testWidgets('the fold is not persisted across a fresh ProviderScope', (
-    tester,
-  ) async {
+  testWidgets('the fold survives a fresh ProviderScope', (tester) async {
     await seedLocals();
     await tester.pumpWidget(buildDrawer(scopeKey: UniqueKey()));
     await tester.pumpAndSettle();
@@ -197,6 +195,15 @@ void main() {
     await tapBand(tester);
     expect(find.text(_projectA), findsNothing);
 
+    await tester.pumpWidget(buildDrawer(scopeKey: UniqueKey()));
+    await tester.pumpAndSettle();
+
+    expect(find.text(_band), findsOneWidget);
+    expect(find.text(_projectA), findsNothing);
+    expect(find.text(_projectB), findsNothing);
+
+    // Unfolding is remembered too.
+    await tapBand(tester);
     await tester.pumpWidget(buildDrawer(scopeKey: UniqueKey()));
     await tester.pumpAndSettle();
 

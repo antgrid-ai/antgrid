@@ -106,8 +106,10 @@ void main() {
               final bytes = await image.toByteData(
                 format: ui.ImageByteFormat.png,
               );
+              final dir = Directory('../.tmp/screenshots/help-submenu');
+              await dir.create(recursive: true);
               await File(
-                '../docs/screenshots/help-submenu/${mobile ? 'mobile' : 'desktop'}$suffix.png',
+                '${dir.path}/${mobile ? 'mobile' : 'desktop'}$suffix.png',
               ).writeAsBytes(bytes!.buffer.asUint8List());
             } finally {
               image.dispose();

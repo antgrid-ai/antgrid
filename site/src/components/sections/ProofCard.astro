@@ -10,174 +10,68 @@ import Readout from "../ui/Readout.astro";
 // the load-bearing one: the pitch is "we don't believe the agent", so the card
 // must show the judge refusing a claim, not just a ledger of successes.
 //
-// Two presentation modes share this markup:
-// - Static (default): the final state below, exactly as written. This is what
-//   no-JS, prefers-reduced-motion, and the OG screenshot get.
-// - Story loop: the script at the bottom runs ONLY inside a .pc-animate parent
-//   (the hero) and replays the session — instruction typed, items queued, a
-//   false "done" rejected, evidence landing, snapshot, wake. It rewrites row
-//   state from the data-* attributes and restores this static state as the
-//   final frame of every cycle. Every string the script writes is read back
-//   from this markup, so copy edits cannot drift the two modes apart —
-//   structural edits (adding a row) must also update the schedule below.
-//
-// The two-column split is a CONTAINER query, not a viewport one: this card is
-// full-shell width in the hero but boxed to max-w-xl in the 1200px-wide OG
-// shot, so a `md:` variant would split the OG card into two cramped columns.
-// Wrapping rows in columns is safe for the script — it reads `.pc-row` in
-// document order, which nesting doesn't change.
+// The two-column split is a CONTAINER query, not a viewport one: the card's
+// width is set by whoever places it (the OG shot boxes it narrow inside a
+// 1200px page), so a `md:` variant would split a narrow card into two cramped
+// columns.
 const backlog = [
-  { icon: "tabler:check", tone: "text-ok", item: "auth suite", evidence: "142 passed · exit 0", active: "running…" },
+  { icon: "tabler:check", tone: "text-ok", item: "auth suite", evidence: "142 passed · exit 0" },
   { icon: "tabler:minus", tone: "text-faint", item: "fix lint", evidence: "skipped — already clean" },
   { icon: "tabler:circle-dashed", tone: "text-faint", item: "open a PR", evidence: "up next — tests are green" },
 ];
 const instruction = "get tests green, fix lint if broken, then open a PR";
 ---
 <Readout source="macbook-pro · api" state="watching" class="@container">
-  <div class="grid gap-x-7 gap-y-5 p-4 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] @2xl:p-5" data-proofcard>
+  <div class="grid gap-x-7 gap-y-5 p-4 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] @2xl:p-5">
     <div class="min-w-0">
       <div class="mb-3 text-note font-medium text-ink">Migrate auth to session tokens</div>
 
-      <div class="pc-row mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker" style="--pc-delay: 0.1s">
+      <div class="mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker">
         <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-signal" width="13" height="13" />
         <span class="shrink-0 text-muted2">you · 02:58</span>
-        <span class="relative">
-          {/* Invisible ghost holds the chip's final size so typing never reflows the card. */}
-          <span class="invisible" aria-hidden="true">{instruction}</span>
-          <span class="absolute inset-0 text-ink2" data-instr>{instruction}</span>
-        </span>
+        <span class="text-ink2">{instruction}</span>
       </div>
 
       <div class="mb-3 flex items-baseline justify-between gap-3 border-t border-edge-inner pt-3">
-        <span class="text-marker text-muted2" data-count>2 of 3 resolved — on evidence, never say-so</span>
+        <span class="text-marker text-muted2">2 of 3 resolved — on evidence, never say-so</span>
         {/* Dropped on a phone: the count wraps into it, and every row below
             already carries its evidence. */}
         <span class="hidden shrink-0 font-mono text-marker uppercase tracking-[0.14em] text-faint @sm:inline">evidence</span>
       </div>
 
       <div class="flex flex-col gap-2 font-mono text-row">
-        {backlog.map((r, i) => (
-          <div class="pc-row flex items-center gap-2" style={`--pc-delay: ${0.3 + i * 0.15}s`} data-item data-active={r.active}>
+        {backlog.map((r) => (
+          <div class="flex items-center gap-2">
             <span class="flex w-3.5 shrink-0 items-center justify-center">
-              <Icon name={r.icon} class={`shrink-0 ${r.tone}`} width="13" height="13" data-ic="final" />
-              <Icon name="tabler:circle-dashed" class="hidden shrink-0 text-faint" width="13" height="13" data-ic="queued" />
-              <span class="hidden size-2 rounded-full bg-signal animate-pulse-dot" data-ic="active"></span>
+              <Icon name={r.icon} class={`shrink-0 ${r.tone}`} width="13" height="13" />
             </span>
             <span class="shrink-0 text-ink2">{r.item}</span>
-            <span class="flex-1 truncate text-right text-muted2" data-ev>{r.evidence}</span>
+            <span class="flex-1 truncate text-right text-muted2">{r.evidence}</span>
           </div>
         ))}
       </div>
     </div>
 
     <div class="flex min-w-0 flex-col gap-2 self-start @2xl:border-l @2xl:border-edge-inner @2xl:pl-7">
-      {/* Deliberately NOT a .pc-row: the column has to stay labelled through the
-          part of the loop where it holds nothing, or it reads as a dead half of
-          the card rather than a log waiting for entries. */}
       <div class="mb-1 flex items-baseline justify-between gap-3 border-b border-edge-inner pb-3">
         <span class="text-marker text-muted2">While you slept</span>
         <span class="shrink-0 font-mono text-marker uppercase tracking-[0.14em] text-faint">02:58 — 03:40</span>
       </div>
 
-      <div class="pc-row flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted" style="--pc-delay: 0.85s">
+      <div class="flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted">
         <Icon name="tabler:arrow-back-up" class="mt-px shrink-0 text-muted2" width="15" height="15" />
         <span><span class="text-muted2">03:04</span> agent said <span class="text-ink2">done</span> — no test output, sent back</span>
       </div>
 
-      <div class="pc-row flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted" style="--pc-delay: 1.05s">
+      <div class="flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted">
         <Icon name="tabler:camera" class="mt-px shrink-0 text-muted2" width="15" height="15" />
         <span><span class="text-muted2">03:12</span> flagged <span class="text-ink2">git reset --hard</span> — snapshot taken, undo is one tap</span>
       </div>
 
-      <div class="pc-row flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 font-mono text-row text-amber2" style="--pc-delay: 1.25s">
+      <div class="flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 font-mono text-row text-amber2">
         <Icon name="tabler:alert-triangle" class="mt-px shrink-0 text-amber" width="15" height="15" />
         <span><span class="text-amber">03:40</span> woke you — the migration drops a column, needs your call</span>
       </div>
     </div>
   </div>
 </Readout>
-
-<script>
-  // Story loop. Runs only when the card sits inside .pc-animate (the hero) and
-  // motion is allowed; every other consumer (OG card, no-JS, reduced motion)
-  // keeps the static final state authored in the markup above.
-  const card = document.querySelector(".pc-animate [data-proofcard]");
-  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (card && !reduce) {
-    // DOM order is the schedule order: instruction, 3 backlog items, rejection,
-    // snapshot, wake. The count row is deliberately not a .pc-row.
-    const rows = [...card.querySelectorAll<HTMLElement>(".pc-row")];
-    const items = [...card.querySelectorAll<HTMLElement>("[data-item]")];
-    const instr = card.querySelector<HTMLElement>("[data-instr]")!;
-    const countEl = card.querySelector<HTMLElement>("[data-count]")!;
-    const fullText = instr.textContent ?? "";
-    const finals = items.map((el) => el.querySelector("[data-ev]")?.textContent ?? "");
-
-    const icon = (el: HTMLElement, which: string) =>
-      el.querySelectorAll("[data-ic]").forEach((ic) => ic.classList.toggle("hidden", ic.getAttribute("data-ic") !== which));
-    const ev = (i: number, text: string) => {
-      const el = items[i].querySelector("[data-ev]");
-      if (el) el.textContent = text;
-    };
-    const countTpl = countEl.textContent ?? "";
-    const count = (n: number) => { countEl.textContent = countTpl.replace(/^\d+/, String(n)); };
-    const show = (el: HTMLElement) => el.classList.remove("pc-off");
-
-    let timers: ReturnType<typeof setTimeout>[] = [];
-    const at = (ms: number, fn: () => void) => timers.push(setTimeout(fn, ms));
-    // clearTimeout also cancels intervals — timeout and interval IDs share one space.
-    const stop = () => { timers.forEach(clearTimeout); timers = []; };
-
-    const reset = () => {
-      rows.forEach((r) => r.classList.add("pc-off"));
-      items.forEach((el, i) => { icon(el, "queued"); ev(i, "queued"); });
-      instr.textContent = "";
-      instr.classList.remove("pc-caret");
-      count(0);
-    };
-
-    const type = () => {
-      instr.classList.add("pc-caret");
-      let i = 0;
-      const t = setInterval(() => {
-        instr.textContent = fullText.slice(0, ++i);
-        if (i >= fullText.length) { clearInterval(t); instr.classList.remove("pc-caret"); }
-      }, 32);
-      timers.push(t);
-    };
-
-    const run = () => {
-      stop();
-      reset();
-      at(300, () => { show(rows[0]); type(); });
-      at(2600, () => show(rows[1]));
-      at(2800, () => show(rows[2]));
-      at(3000, () => show(rows[3]));
-      at(3900, () => { icon(items[0], "active"); ev(0, items[0].getAttribute("data-active") ?? "running…"); });
-      at(5600, () => show(rows[4]));
-      at(7400, () => { icon(items[0], "final"); ev(0, finals[0]); count(1); });
-      at(8400, () => { icon(items[1], "final"); ev(1, finals[1]); count(2); });
-      at(9200, () => { icon(items[2], "final"); ev(2, finals[2]); });
-      at(10200, () => show(rows[5]));
-      at(11800, () => show(rows[6]));
-      at(16000, () => rows.forEach((r) => r.classList.add("pc-off")));
-      at(16800, run);
-    };
-
-    card.classList.add("pc-loop");
-    // Hide in the same task as the class add: transitions only animate between
-    // two painted frames, so when this runs before first paint the card starts
-    // blank with no fade — and when it runs after (slow load), the worst case is
-    // one fade-out instead of the finished card flashing and erasing itself.
-    reset();
-    requestAnimationFrame(() => requestAnimationFrame(run));
-
-    // A throttled background tab can't finish a cycle before the next begins
-    // (the 32ms typing ticks clamp to ≥1s), which would stack live intervals —
-    // stop the loop while hidden and restart it fresh on return.
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) stop();
-      else run();
-    });
-  }
-</script>

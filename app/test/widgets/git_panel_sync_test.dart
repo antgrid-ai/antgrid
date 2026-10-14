@@ -262,6 +262,30 @@ void main() {
     expect(find.text('Ask agent to fix'), findsNothing);
   });
 
+  testWidgets('the strip can be dismissed, with or without an agent offer', (
+    tester,
+  ) async {
+    await pump(tester, sync: syncState(behind: 1));
+    for (final kind in ['dirty-tree', 'detached']) {
+      await tester.tap(find.byTooltip('Pull 1 commit'));
+      await tester.pump();
+      transport.emit('git:sync-result', {
+        'projectId': 'p',
+        'op': 'pull',
+        'success': false,
+        'branch': 'main',
+        'error': 'refused',
+        'failureKind': kind,
+      });
+      await tester.pump();
+      expect(find.textContaining('Pull failed'), findsOneWidget, reason: kind);
+
+      await tester.tap(find.byTooltip('Dismiss'));
+      await tester.pump();
+      expect(find.textContaining('Pull failed'), findsNothing, reason: kind);
+    }
+  });
+
   testWidgets('a success clears the strip and the counts follow the bridge', (
     tester,
   ) async {

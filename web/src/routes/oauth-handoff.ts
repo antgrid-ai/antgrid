@@ -1,30 +1,37 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { z } from "zod";
+import { getCookie } from "hono/cookie";
+import type { DB } from "../db/index.js";
+import { nativeCookie, matches } from "../auth/native-plugin.js";
+import { recordStage } from "../auth/flows.js";
 import { Hono } from "hono";
 import { isAPIError } from "better-auth/api";
 import type { Auth } from "../auth/better-auth.js";
 
-/**
- * Better-Auth's social sign-in sets the session cookie via `Set-Cookie` on its
- * own redirect response, then bounces the browser to `callbackURL`. A native
- * deep link (`antgrid://auth/callback`) can't read cookies, so the app passes
- * the same-origin relative `callbackURL=/oauth/handoff` instead. The browser
- * arrives here with the freshly-issued session cookie attached.
- *
- * We do NOT forward the raw session token: a custom-scheme deep link can be
- * hijacked by any app registering `antgrid://`, and the URL can land in logs. We
- * instead mint a single-use, short-lived one-time token (OTT) bound to this
- * session and put *that* in the deep link. The app redeems it over its own
- * HTTPS client (`POST /api/auth/one-time-token/verify`), receiving the real
- * session via `Set-Cookie`. A hijacked OTT is consumed on first redemption and
- * expires within minutes, so an intercept yields nothing replayable.
- */
+// Native handoff carries a verifier-bound code; legacy issuance stays gated
+// until updated clients ship and previously issued tokens have drained.
 const DEEP_LINK = "antgrid://auth/callback";
 
-export function oauthHandoffRoutes(deps: { auth: Auth }) {
+export function oauthHandoffRoutes(deps: { auth: Auth; db?: DB; legacy?: boolean }) {
   const r = new Hono();
   r.get("/oauth/handoff", async (c) => {
+    const flow = c.req.query("flow");
+    if (flow) {
+      if (!z.uuid().safeParse(flow).success || !deps.db) return c.text("Invalid sign-in attempt",400);
+      const attempt = await deps.db.authFlow.findUnique({ where: { id: flow } });
+      if (!attempt || attempt.expiresAt <= new Date() || !matches(attempt.bindingHash,getCookie(c,nativeCookie(flow)) ?? "")) return c.text("Invalid or expired sign-in attempt",400);
+      if (c.req.query("error")) await recordStage(deps.db,flow,"auth_failed","provider_cancelled_or_failed");
+      let code: string;
+      try {
+        if (c.req.query("error")) throw new Error("provider cancellation");
+        const result = await deps.auth.api.nativeComplete({ headers: c.req.raw.headers, body: { id: flow } });
+        code = result.code;
+      } catch { return c.redirect(`${DEEP_LINK}?flow=${encodeURIComponent(flow)}&error=sign_in_failed`); }
+      return c.redirect(`${DEEP_LINK}?flow=${encodeURIComponent(flow)}&code=${encodeURIComponent(code)}`);
+    }
+    if (deps.legacy === false) return c.text("Update Antgrid to continue signing in.", 426);
     let token: string;
     try {
       const res = await deps.auth.api.generateOneTimeToken({

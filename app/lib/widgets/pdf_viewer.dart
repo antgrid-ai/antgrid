@@ -24,7 +24,7 @@ class FilePdfViewer extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         buildViewerHeader(
-          fileName: viewerBasename(content.path),
+          path: content.path,
           size: content.size,
           onClose: onClose,
         ),

@@ -147,7 +147,7 @@ describe("POST /ui/team/invite — seat arithmetic", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("an account with no live contract is refused", async () => {
+  test("an account with no live contract is healed onto the promo and can invite", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const owner = await createTestUser(pg.db);
     await createTestSubscription(pg.db, owner.id, { status: "canceled" });
@@ -156,10 +156,9 @@ describe("POST /ui/team/invite — seat arithmetic", () => {
     const res = await post(app, "/ui/team/invite", { email: "nobody@example.com" }, cookie);
 
     // provisionProductAccountForUser heals a promotional grant onto an account
-    // whose only subscription is canceled, so the refusal here is the seat cap on
-    // that one-seat grant, not the missing contract. Either way: no invite.
-    expect(res.headers.get("location")).toBe("/team?invite=seat_cap");
-    expect(await pg.db.accountInvite.count()).toBe(0);
+    // whose only subscription is canceled, and that grant carries Pro's seats.
+    expect(res.headers.get("location")).toBe("/team?invite=sent");
+    expect(await pg.db.accountInvite.count()).toBe(1);
   });
 });
 
@@ -259,7 +258,7 @@ describe("POST /ui/team/invite/accept — acceptance proves nothing about an add
     const res = await post(app, "/ui/team/invite/accept", { id, token });
 
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Fdashboard");
     const after = await pg.db.user.findUniqueOrThrow({ where: { id: squatted.id } });
     expect(after.emailVerified).toBe(false);
     expect(await pg.db.accountMember.count({ where: { userId: squatted.id } })).toBe(0);
@@ -463,6 +462,12 @@ describe("revoke and resend", () => {
     await post(app, "/ui/team/invite", { email: "resent@example.com" }, cookie);
     const first = inviteLink(sent[0]!);
 
+    const throttled = await post(app, `/ui/team/invite/${first.id}/resend`, {}, cookie);
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect(sent).toHaveLength(1);
+    expect(inviteLink(sent[0]!)).toEqual(first);
+    await pg.db.authRateBucket.deleteMany();
     const res = await post(app, `/ui/team/invite/${first.id}/resend`, {}, cookie);
     expect(res.headers.get("location")).toBe("/team?invite=resent");
     expect(sent).toHaveLength(2);

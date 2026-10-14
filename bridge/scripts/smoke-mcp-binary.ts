@@ -31,6 +31,12 @@ const REQUIRED_TOOLS = [
   "antgrid_reply",
   "antgrid_inbox",
   "antgrid_thread",
+  "antgrid_list_schedules",
+  "antgrid_schedule_runs",
+  "antgrid_create_schedule",
+  "antgrid_update_schedule",
+  "antgrid_delete_schedule",
+  "antgrid_run_schedule_now",
 ];
 
 const binaryArg = process.argv[2];

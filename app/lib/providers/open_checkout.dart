@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -9,6 +8,7 @@ import '../launcher/host_control_client.dart';
 import '../util/ab_log.dart';
 import '../util/external_open_target.dart';
 import '../utils/platform_utils.dart';
+import '../widgets/copy_path.dart';
 import 'device_provisioning.dart';
 import 'projects.dart';
 import 'provider_retry.dart';
@@ -112,18 +112,8 @@ Future<void> copyCheckoutPath(
     projectId: projectId,
     checkoutId: checkoutId,
   );
-  if (path == null) return;
-  // A clipboard the platform refuses to write (a Linux session with no
-  // clipboard owner) would otherwise throw past every caller into a debugPrint,
-  // leaving the user with no snackbar at all and a stale clipboard they believe
-  // they just replaced.
-  try {
-    await Clipboard.setData(ClipboardData(text: path));
-  } catch (_) {
-    if (context.mounted) showAbToast(context, 'Could not copy the path.');
-    return;
-  }
-  if (context.mounted) showAbToast(context, 'Path copied');
+  if (path == null || !context.mounted) return;
+  await copyPathWithToast(context, path);
 }
 
 /// Ask the host where this checkout lives. Returns null after reporting the

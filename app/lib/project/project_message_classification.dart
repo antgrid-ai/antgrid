@@ -46,6 +46,15 @@ const Set<String> kCheckoutDurableReplayTypes = <String>{
 /// Every type here must carry `checkoutId`; absence decodes as `main` only for
 /// legacy frames. Services use this same set when filtering their bundles.
 const Set<String> kCheckoutVariableMessageTypes = <String>{
+  'terminal:clipboard:claim',
+  'terminal:clipboard:claimed',
+  'terminal:clipboard:release',
+  'terminal:clipboard:revoked',
+  'terminal:clipboard:write',
+  'terminal:clipboard:result',
+  'terminal:clipboard:read-host',
+  'terminal:clipboard:host-text',
+
   'terminal:start',
   'terminal:stop',
   'terminal:input',
@@ -170,6 +179,11 @@ const Set<String> kConfigValidityTypes = <String>{
 };
 
 const Set<String> _statusTypes = <String>{
+  'terminal:clipboard:claimed',
+  'terminal:clipboard:revoked',
+  'terminal:clipboard:write',
+  'terminal:clipboard:host-text',
+
   'session:list:result',
   'session:result',
   'session:updated',

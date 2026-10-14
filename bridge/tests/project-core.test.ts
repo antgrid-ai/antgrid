@@ -411,6 +411,7 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
     peerSession: () => null,
     machineDeviceId: () => "machine-uuid",
     sendPushDeliver: () => {},
+    accountDisowns: () => false,
   };
 
   const core = new ProjectCore({
@@ -488,6 +489,7 @@ test("sendToAppSession returns false and sends nothing when deliverableTo(peer) 
     peerSession: () => null,
     machineDeviceId: () => "machine-uuid",
     sendPushDeliver: () => {},
+    accountDisowns: () => false,
   };
 
   const core = new ProjectCore({

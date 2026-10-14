@@ -385,7 +385,7 @@ export class CentralControlClient {
 
   /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A
    *  top-level control message on OUR socket — the relay itself consumes it. */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void {
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string }; collapseKey?: string }): void {
     this.sendJson({ type: "push:deliver", ...msg });
   }
 

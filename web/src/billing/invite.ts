@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { authEmail } from "../auth/templates.js";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
 import type { SendEmail } from "../auth/email.js";
@@ -289,7 +290,10 @@ export async function sendInviteEmail(
 
   await sendEmail({
     to: args.to,
-    subject: "You've been invited to a team on Antgrid",
+    ...authEmail({ action: "Review team invitation", url,
+      description: `${args.invitedBy.slice(0, 160)} invited you to their team. Joining cancels your current subscription, including any free Pro grant. Leaving does not restore it. Sign in with the invited address to review.`,
+      createdAt: new Date(), expiresAt: new Date(Date.now() + INVITE_TTL_SECONDS * 1000) }),
+    expiresAt: new Date(Date.now() + INVITE_TTL_SECONDS * 1000),
     text:
       `${args.invitedBy} invited you to join their team on Antgrid.\n\n` +
       `Accept the invitation: ${url}\n\n` +

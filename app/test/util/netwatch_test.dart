@@ -27,6 +27,36 @@ void main() {
   Netwatch make({int capacity = 512}) =>
       Netwatch(JsonlSink(logPath), capacity: capacity);
 
+  test('clipboard capture serializes metadata without body or text', () async {
+    final w = make();
+    for (final type in [
+      'terminal:clipboard:write',
+      'terminal:clipboard:host-text',
+    ]) {
+      w.tap({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'json',
+        'msgType': type,
+        'bytes': 200,
+        'frameId': type,
+        'body': {'text': 'clipboard-sensitive-marker'},
+        'text': 'clipboard-sensitive-marker',
+      });
+    }
+    await w.flush();
+    final records = readLines();
+    expect(records, hasLength(2));
+    expect(jsonEncode(records), isNot(contains('clipboard-sensitive-marker')));
+    expect(
+      records.every(
+        (record) => !record.containsKey('body') && !record.containsKey('text'),
+      ),
+      isTrue,
+    );
+    w.dispose();
+  });
+
   test('writes one JSON line per frame, tagged as the app half', () async {
     final w = make();
     w.record(
@@ -64,22 +94,25 @@ void main() {
     w.dispose();
   });
 
-  test('an annotation for an already-written frame is a no-op, not a crash', () async {
-    // Capacity 1: the second record forces the first out of the buffer, which
-    // is the flood case — a capture must degrade to typeless frames, never
-    // stall a send to keep one annotatable.
-    final w = make(capacity: 1);
-    w.record(dir: 'tx', kind: 'frame', frameId: 'gone');
-    w.record(dir: 'tx', kind: 'frame', frameId: 'here');
-    expect(() => w.annotate('gone', msgType: 'too:late'), returnsNormally);
-    await w.flush();
+  test(
+    'an annotation for an already-written frame is a no-op, not a crash',
+    () async {
+      // Capacity 1: the second record forces the first out of the buffer, which
+      // is the flood case — a capture must degrade to typeless frames, never
+      // stall a send to keep one annotatable.
+      final w = make(capacity: 1);
+      w.record(dir: 'tx', kind: 'frame', frameId: 'gone');
+      w.record(dir: 'tx', kind: 'frame', frameId: 'here');
+      expect(() => w.annotate('gone', msgType: 'too:late'), returnsNormally);
+      await w.flush();
 
-    final lines = readLines();
-    expect(lines, hasLength(2));
-    expect(lines.first['frameId'], 'gone');
-    expect(lines.first.containsKey('msgType'), isFalse);
-    w.dispose();
-  });
+      final lines = readLines();
+      expect(lines, hasLength(2));
+      expect(lines.first['frameId'], 'gone');
+      expect(lines.first.containsKey('msgType'), isFalse);
+      w.dispose();
+    },
+  );
 
   test('order is preserved and seq is contiguous under eviction', () async {
     final w = make(capacity: 2);
@@ -176,7 +209,10 @@ void main() {
       expect(() => w.tap(<String, Object?>{}), returnsNormally);
       expect(() => w.tap({'op': 'annotate'}), returnsNormally);
       expect(() => w.tap({'op': 'frame', 'dir': 'tx'}), returnsNormally);
-      expect(() => w.tap({'op': 'frame', 'dir': 1, 'kind': 2}), returnsNormally);
+      expect(
+        () => w.tap({'op': 'frame', 'dir': 1, 'kind': 2}),
+        returnsNormally,
+      );
       await w.flush();
 
       expect(readLines(), isEmpty);
@@ -192,37 +228,34 @@ void main() {
   // already carries every field complete (no annotate step), so this is a
   // lockstep check that the existing tap adapter writes it through verbatim —
   // the same literal shape bridge-tests pins on its own half of the join.
-  test(
-    'a complete session-record row from the tap adapter round-trips to the '
-    'JSONL line bridge-tests pins on its own half',
-    () async {
-      final w = make();
-      w.tap({
-        'op': 'frame',
-        'dir': 'tx',
-        'kind': 'frame',
-        'transport': 'iroh',
-        'channel': 'control',
-        'streamKind': 'session',
-        'streamId': '0',
-        'msgType': 'session:ping',
-        'bytes': 23,
-        'frameId': '1e65322bad672889949c1355',
-      });
-      await w.flush();
+  test('a complete session-record row from the tap adapter round-trips to the '
+      'JSONL line bridge-tests pins on its own half', () async {
+    final w = make();
+    w.tap({
+      'op': 'frame',
+      'dir': 'tx',
+      'kind': 'frame',
+      'transport': 'iroh',
+      'channel': 'control',
+      'streamKind': 'session',
+      'streamId': '0',
+      'msgType': 'session:ping',
+      'bytes': 23,
+      'frameId': '1e65322bad672889949c1355',
+    });
+    await w.flush();
 
-      final o = readLines().single;
-      expect(o['dir'], 'tx');
-      expect(o['kind'], 'frame');
-      expect(o['transport'], 'iroh');
-      expect(o['origin'], 'app');
-      expect(o['channel'], 'control');
-      expect(o['streamId'], '0');
-      expect(o['streamKind'], 'session');
-      expect(o['msgType'], 'session:ping');
-      expect(o['bytes'], 23);
-      expect(o['frameId'], '1e65322bad672889949c1355');
-      w.dispose();
-    },
-  );
+    final o = readLines().single;
+    expect(o['dir'], 'tx');
+    expect(o['kind'], 'frame');
+    expect(o['transport'], 'iroh');
+    expect(o['origin'], 'app');
+    expect(o['channel'], 'control');
+    expect(o['streamId'], '0');
+    expect(o['streamKind'], 'session');
+    expect(o['msgType'], 'session:ping');
+    expect(o['bytes'], 23);
+    expect(o['frameId'], '1e65322bad672889949c1355');
+    w.dispose();
+  });
 }

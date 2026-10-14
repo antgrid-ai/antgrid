@@ -101,7 +101,7 @@ describe("verifyDeviceToken", () => {
   });
 
   // License verification is identity/validity only — the relay holds no
-  // entitlement claim (relay/CLAUDE.md, the `license/` bullet), so web may
+  // entitlement claim (relay/AGENTS.md, the `license/` bullet), so web may
   // stop minting `sessionLimit` at any time, and a stale or garbage value from
   // an older mint must never be read as a verdict.
   test("no entitlement claim is required — tokens with or without sessionLimit verify", async () => {

@@ -1,2 +1,2 @@
 [test]
-preload = ["./src/agent-host.ts"]
+preload = ["./tests/setup-env.ts", "./src/agent-host.ts"]

@@ -52,7 +52,11 @@ function session(peerPubkey: string): PeerSessionView {
 }
 
 /** A remote core whose native transport reports [peers] as established. */
-async function startCore(peers: PeerSessionView[], register: (store: PairedPhonesStore) => void) {
+async function startCore(
+  peers: PeerSessionView[],
+  register: (store: PairedPhonesStore) => void,
+  accountDisowns: (deviceId: string, ed25519Pub: string) => boolean = () => false,
+) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-multi-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -81,6 +85,7 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -172,4 +177,24 @@ test("a phone whose own session is reachable and unpaused is not pushed to while
   notify();
 
   expect(delivered.map((d) => d.pushToken)).toEqual(["TOKEN_POCKET"]);
+});
+
+test("a phone the account has revoked is not pushed to", async () => {
+  // Regression: sign-out revokes the device, but its row and push token survive
+  // on every machine the phone held no warm project session with at that moment.
+  // PK_OLD is a re-signed-in device: same id, but the lease names its new key.
+  const lease = new Set(["pk_kept|PK_KEPT", "pk_old|PK_NEW"]);
+  const { notify, delivered } = await startCore(
+    [],
+    (store) => {
+      registerPhone(store, "PK_KEPT", "TOKEN_KEPT", "fcm");
+      registerPhone(store, "PK_SIGNED_OUT", "TOKEN_SIGNED_OUT", "fcm");
+      registerPhone(store, "PK_OLD", "TOKEN_OLD", "fcm");
+    },
+    (deviceId, ed25519Pub) => !lease.has(`${deviceId}|${ed25519Pub}`),
+  );
+
+  notify();
+
+  expect(delivered.map((d) => d.pushToken)).toEqual(["TOKEN_KEPT"]);
 });

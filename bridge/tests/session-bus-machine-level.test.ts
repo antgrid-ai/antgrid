@@ -228,7 +228,7 @@ test(
     const sessionBus = sharedCoordinator();
 
     // Addressed by machine + session alone — the project id on the wire is a
-    // LABEL (bridge/CLAUDE.md's existing address invariant) and deliberately
+    // LABEL (bridge/AGENTS.md's existing address invariant) and deliberately
     // wrong here, to prove that label is not what admits the frame.
     const inbound = createMessage("session-bus:post", {
       from: REMOTE,

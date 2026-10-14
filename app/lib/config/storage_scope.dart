@@ -71,7 +71,7 @@ String get _scopeFragment => storageScopePrefix.isEmpty
 /// does not vary it per config. A [scopedStorageKey] prefix therefore does NOT
 /// give a debug/profile build its own storage: it still shares one physical
 /// file with any release install on the same machine (this project's normal
-/// dev setup — see `docs`/CLAUDE.md on running the real app alongside a dev
+/// dev setup — see `docs`/AGENTS.md on running the real app alongside a dev
 /// checkout). That would be a non-issue if a shared file merely interleaved
 /// writes, but the Windows and Linux plugins (`SharedPreferencesAsyncWindows`/
 /// `Linux`, see their `_cachedPreferences`) read the WHOLE file into memory

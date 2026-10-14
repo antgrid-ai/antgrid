@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../project/project_session_registry.dart';
 import 'agent_catalog.dart';
 import 'cached_sessions.dart';
+import 'preview_site_data.dart';
 import 'projects.dart' show projectsProvider;
 import 'providers.dart' show preferencesServiceProvider, storageServiceProvider;
 import 'session_workspace_state.dart' show sessionLayoutStoreProvider;
@@ -48,6 +49,11 @@ Future<void> _runBestEffortSteps(
 /// filtered-on-read (a dead id never matches a live entry) and self-prune on
 /// the next reorder/toggle, so they leak nothing that can resurface — only a
 /// harmless dead id that costs a few bytes until the next drawer interaction.
+///
+/// Preview origin owners are likewise left alone: they are keyed by port, so a
+/// removed project's id left in the map can only cause one extra clear, while
+/// dropping its record would make the port read as clean with its data still
+/// on disk.
 ///
 /// Each store is purged independently and best-effort: a failure clearing one
 /// (a disk error, a Windows file-handle race on the status file) must not
@@ -119,6 +125,11 @@ void _logPurgeFailure(String store, Object error) {
 ///   - App settings, install/client id, and the relay epoch — machine-level, and
 ///     the epoch specifically must stay monotonic across sign-outs.
 ///
+/// Preview website data comes from pages on the account's machines, and no
+/// webview offers a narrower clear than all preview origins, so the whole
+/// profile is wiped. The owner map is forgotten rather than reset, so the next
+/// account's first preview clears again.
+///
 /// Best-effort and step-isolated exactly like [purgeEntryState] (same shared
 /// runner, [_runBestEffortSteps]): one failing store must not strand the
 /// rest, and a swallowed failure is reported rather than lost.
@@ -165,6 +176,10 @@ Future<void> purgeAccountCaches(
             .read(preferencesServiceProvider)
             .clearAccountScoped(localProjectIds.contains);
       },
+    ),
+    (
+      store: 'previewSiteData',
+      clear: () => ref.read(previewSiteDataProvider).clearForSignOut(),
     ),
   ];
   await _runBestEffortSteps(steps, onError ?? _logAccountPurgeFailure);

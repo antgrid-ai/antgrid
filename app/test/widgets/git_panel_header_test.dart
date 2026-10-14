@@ -344,6 +344,40 @@ void main() {
     expect(find.byTooltip('Stage All Changes'), findsOneWidget);
   });
 
+  testWidgets('phone width switches between Changes and History', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ], width: 400);
+
+    // AbSegmented uppercases; with no commits loaded the History segment
+    // reads the same as the section header, so count them.
+    expect(find.text('CHANGES · 1'), findsOneWidget);
+    expect(find.text('CHANGES'), findsNothing);
+    expect(find.text('a.dart'), findsOneWidget);
+    expect(find.byTooltip('Stage All Changes'), findsOneWidget);
+    expect(find.text('HISTORY'), findsOneWidget);
+
+    await tester.tap(find.text('HISTORY'));
+    await tester.pump();
+
+    expect(find.text('a.dart'), findsNothing);
+    expect(find.byTooltip('Stage All Changes'), findsNothing);
+    expect(find.text('HISTORY'), findsNWidgets(2));
+    // The commit box stays above the switch on either tab.
+    expect(find.byType(TextField), findsOneWidget);
+  });
+
+  testWidgets('phone width with a clean tree shows History alone', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, const [], width: 400);
+
+    expect(find.textContaining('CHANGES'), findsNothing);
+    expect(find.text('HISTORY'), findsOneWidget);
+  });
+
   // The state the panel used to render as an anonymous red dot on one row: git
   // refuses the commit, so the header has to say why BEFORE a message is typed
   // into a sheet whose work is about to be thrown away.

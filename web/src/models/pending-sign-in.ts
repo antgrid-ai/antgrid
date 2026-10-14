@@ -18,6 +18,10 @@ export const BROWSER_TOKEN_BYTES = 32;
 
 export type PendingSignInRow = {
   id: string;
+  journeyId: string | null;
+  issuedSessionId: string | null;
+  returnPath: string;
+  createdAt: Date;
   email: string;
   approvedAt: Date | null;
   approvedUserId: string | null;
@@ -38,6 +42,10 @@ export function generateBrowserToken(): string {
 /** Standard public projection — excludes hash columns. */
 const rowSelect = {
   id: true,
+  journeyId: true,
+  issuedSessionId: true,
+  returnPath: true,
+  createdAt: true,
   email: true,
   approvedAt: true,
   approvedUserId: true,
@@ -50,6 +58,9 @@ const rowSelect = {
 export async function createPending(
   tx: Tx,
   args: {
+    id?: string;
+    journeyId?: string;
+    returnPath?: string;
     email: string;
     nonce: string;
     browserToken: string;
@@ -64,6 +75,9 @@ export async function createPending(
 
   return tx.pendingSignIn.create({
     data: {
+      id: args.id,
+      journeyId: args.journeyId,
+      returnPath: args.returnPath,
       email: args.email,
       nonceHash,
       browserTokenHash,
@@ -85,19 +99,7 @@ export async function findValidById(tx: Tx, id: string): Promise<PendingSignInRo
 export async function findByIdWithHashes(
   tx: Tx,
   id: string
-): Promise<{
-  id: string;
-  email: string;
-  nonceHash: Uint8Array;
-  browserTokenHash: Uint8Array;
-  approvedAt: Date | null;
-  approvedUserId: string | null;
-  consumedAt: Date | null;
-  expiresAt: Date;
-  requesterUa: string | null;
-  requesterIp: string | null;
-  deliveryStatus: string | null;
-} | null> {
+): Promise<PendingSignInRow & { nonceHash: Uint8Array; browserTokenHash: Uint8Array; deliveryStatus: string | null } | null> {
   return tx.pendingSignIn.findFirst({
     where: { id, expiresAt: { gt: new Date() } },
     select: {
@@ -140,7 +142,7 @@ export async function markDelivery(
   // zero rows instead of throwing.
   if (!z.uuid().safeParse(clientReference).success) return 0;
   const res = await tx.pendingSignIn.updateMany({
-    where: { id: clientReference },
+    where: { id: clientReference, approvedAt: null, consumedAt: null, expiresAt: { gt: new Date() } },
     data: { deliveryStatus: status },
   });
   return res.count;

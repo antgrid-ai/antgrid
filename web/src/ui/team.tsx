@@ -5,6 +5,7 @@ import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { CellMeter } from "./cell-meter.js";
 import type { AccountMemberRole } from "../models/account-member.js";
 import type { TeamNotice } from "./team-notice.js";
+import { pricingHidden } from "./pricing-visibility.js";
 
 export type TeamMemberRow = {
   userId: string;
@@ -60,6 +61,9 @@ export type TeamView =
 export type TeamPageProps = {
   user: LayoutUser;
   notice: TeamNotice | null;
+  /** Other people still on the account the reader OWNS, when the page is
+   *  showing a different team. Zero when there is nothing hidden. */
+  hiddenTeamMembers: number;
   view: TeamView;
 };
 
@@ -71,8 +75,14 @@ const ALERT_CLASS = {
 
 /** Every outcome the invite verbs redirect back with, in the words the person
  *  reading them can act on. Wording lives here rather than in the query string
- *  so nobody can hand a signed-in owner a page that says whatever they like. */
-const NOTICE: Record<TeamNotice, { tone: keyof typeof ALERT_CLASS; text: string }> = {
+ *  so nobody can hand a signed-in owner a page that says whatever they like.
+ *
+ *  `noPurchaseText` replaces `text` in the iOS app's sheet, which must not point
+ *  at buying anything (App Store guideline 3.1.1, see pricing-visibility.ts). */
+const NOTICE: Record<
+  TeamNotice,
+  { tone: keyof typeof ALERT_CLASS; text: string; noPurchaseText?: string }
+> = {
   sent: { tone: "success", text: "Invitation sent." },
   resent: {
     tone: "success",
@@ -87,10 +97,12 @@ const NOTICE: Record<TeamNotice, { tone: keyof typeof ALERT_CLASS; text: string 
   seat_cap: {
     tone: "error",
     text: "Every seat is taken or promised to an invitation. Buy another seat, or withdraw one.",
+    noPurchaseText: "Every seat is taken or promised to an invitation. Withdraw one first.",
   },
   over_subscribed: {
     tone: "error",
     text: "This account has more members than seats. Buy seats or remove someone before inviting.",
+    noPurchaseText: "This account has more members than seats. Remove someone before inviting.",
   },
   already_member: { tone: "error", text: "That address is already on this team." },
   already_invited: {
@@ -105,6 +117,7 @@ const NOTICE: Record<TeamNotice, { tone: keyof typeof ALERT_CLASS; text: string 
   removed: {
     tone: "success",
     text: "Removed. Their seat is free — the subscription is unchanged, so buying fewer seats is a separate decision.",
+    noPurchaseText: "Removed. Their seat is free, and the subscription is unchanged.",
   },
   left: {
     tone: "success",
@@ -150,6 +163,7 @@ function RoleBadge({ role }: { role: AccountMemberRole | null }) {
 
 export function TeamPage(props: TeamPageProps) {
   const notice = props.notice ? NOTICE[props.notice] : null;
+  const noticeText = notice && pricingHidden() ? (notice.noPurchaseText ?? notice.text) : notice?.text;
   return (
     <Layout title="Team" user={props.user} section="team">
       <PageHead title="Team">
@@ -162,8 +176,12 @@ export function TeamPage(props: TeamPageProps) {
           class={`alert ${ALERT_CLASS[notice.tone]} text-sm mb-6`}
           role={notice.tone === "error" ? "alert" : "status"}
         >
-          <span>{notice.text}</span>
+          <span>{noticeText}</span>
         </div>
+      )}
+
+      {props.hiddenTeamMembers > 0 && (
+        <HiddenTeamNotice members={props.hiddenTeamMembers} canLeave={props.view.canLeave} />
       )}
 
       {props.view.kind === "owner" ? (
@@ -199,6 +217,26 @@ function LeaveCard() {
           </button>
         </form>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The team the reader owns, when this page is showing one they joined. Nothing
+ * on the page can reach those members — every owner verb acts on the team shown
+ * — and leaving is what brings the owner's view of their own team back.
+ */
+function HiddenTeamNotice({ members, canLeave }: { members: number; canLeave: boolean }) {
+  return (
+    <div class="alert alert-warning text-sm mb-6" role="status">
+      <span>
+        You also own another team, which still has {members}{" "}
+        {plural(members, "member")}. It can't be managed from here while you're
+        on this one.{" "}
+        {canLeave
+          ? "Leave this team to manage it, or contact support to transfer its ownership."
+          : "Contact support to transfer its ownership."}
+      </span>
     </div>
   );
 }
@@ -263,8 +301,10 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
             <div class="alert alert-warning text-sm mt-2" role="status">
               <span>
                 This account has {seatsUsed} {plural(seatsUsed, "member")} on{" "}
-                {seatsPurchased} {plural(seatsPurchased ?? 0, "seat")}. Buy seats
-                or remove someone before inviting anyone else.
+                {seatsPurchased} {plural(seatsPurchased ?? 0, "seat")}.{" "}
+                {pricingHidden()
+                  ? "Remove someone before inviting anyone else."
+                  : "Buy seats or remove someone before inviting anyone else."}
               </span>
             </div>
           )}
@@ -441,8 +481,9 @@ function MemberView({ view }: { view: Extract<TeamView, { kind: "member" }> }) {
             </div>
           </div>
           <p class="text-xs text-muted mt-2">
-            Only the owner can change the subscription, buy seats, or invite
-            people.
+            {pricingHidden()
+              ? "Only the owner can change the subscription or invite people."
+              : "Only the owner can change the subscription, buy seats, or invite people."}
           </p>
         </div>
       </div>

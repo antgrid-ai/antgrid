@@ -54,7 +54,8 @@ for (const page of ["connections", "stats"]) {
         const evt = `internal.${page}.denied`;
         const hit = warn.mock.calls.map((a) => String(a[0])).find((l) => l.includes(evt));
         expect(hit).toBeDefined();
-        expect(JSON.parse(hit!)).toMatchObject({ evt, userId: user.id, email: user.email });
+        expect(JSON.parse(hit!)).toMatchObject({ evt, userId: user.id });
+        expect(JSON.parse(hit!)).not.toHaveProperty("email");
       } finally {
         warn.mockRestore();
       }

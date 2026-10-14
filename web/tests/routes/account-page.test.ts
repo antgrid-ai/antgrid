@@ -84,6 +84,7 @@ describe("GET /account", () => {
     const res = await app.request("/account", { headers: { cookie } });
     const html = await res.text();
     expect(html).toContain("still has team members");
+    expect(html).toContain('href="/team"');
     expect(html).not.toContain('name="confirm"');
   });
 
@@ -110,7 +111,7 @@ describe("GET /account", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const res = await app.request("/account", { redirect: "manual" });
     expect([302, 307]).toContain(res.status);
-    expect(res.headers.get("location")).toBe("/login");
+    expect(res.headers.get("location")).toBe("/login?returnPath=%2Faccount");
   });
 
   function deleteReq(

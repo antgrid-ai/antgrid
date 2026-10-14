@@ -1,6 +1,6 @@
 // packages/antgrid_relay_client/lib/src/relay_auth.dart
 // Byte-for-byte mirror of packages/antgrid-wire/src/relay-auth.ts.
-// Spec: relay/CLAUDE.md (`server.ts` — hello verification order). The shared
+// Spec: relay/AGENTS.md (`server.ts` — hello verification order). The shared
 // vector fixture (evals/fixtures/relay-hello-vector.json) pins both languages.
 import 'dart:convert';
 import 'dart:typed_data';

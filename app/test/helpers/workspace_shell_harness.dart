@@ -2,8 +2,10 @@
 // stand-in — the shell gates its whole subtree behind a focused project whose
 // transport and session resolve without error, so there is a fair amount of
 // scaffolding before anything renders at all.
+import 'package:antgrid/models/ab_message.dart' show GitFileStatusEntry;
 import 'package:antgrid/models/command_models.dart';
 import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/models/git_status_index.dart';
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/models/session_target.dart';
@@ -43,10 +45,11 @@ const _unset = Object();
 ///
 /// Pass [transport] to drive the wire from the test (inspect `sent`, `emit`
 /// replies), [terminalStates] to drive CheckoutReadiness through a specific
-/// attach-status sequence, and [target] for a [SessionTarget] other than the
+/// attach-status sequence, [fileTreeStates] to feed the Files and Git tabs,
+/// and [target] for a [SessionTarget] other than the
 /// default local project (e.g. a remote one, to exercise the ladder, or
 /// `null` for the "route mounted, nothing focused yet" window with
-/// `withProject: true`) — all three must come through these parameters rather
+/// `withProject: true`) — all four must come through these parameters rather
 /// than [extraOverrides]: Riverpod 3 asserts on ANY provider overridden twice
 /// in one container, not only a family one.
 ///
@@ -57,6 +60,7 @@ Future<ProviderContainer> pumpWorkspaceShell(
   bool followSelectedTarget = false,
   AgentTransport Function(String projectId)? transport,
   Stream<TerminalState>? terminalStates,
+  Stream<FileTreeState>? fileTreeStates,
   Object? target = _unset,
   List<Override> extraOverrides = const [],
 }) async {
@@ -112,7 +116,7 @@ Future<ProviderContainer> pumpWorkspaceShell(
               ),
         ),
         fileTreeStateProvider.overrideWith(
-          (ref) => Stream.value(const FileTreeState()),
+          (ref) => fileTreeStates ?? Stream.value(const FileTreeState()),
         ),
         previewStateProvider.overrideWith(
           (ref) => Stream.value(const PreviewState()),
@@ -141,3 +145,20 @@ Future<ProviderContainer> pumpWorkspaceShell(
 
   return ProviderScope.containerOf(tester.element(find.byType(AppShell)));
 }
+
+/// Bounded pumps rather than `pumpAndSettle`: the shell always has something
+/// animating (loading indicators, the terminal cursor), so settling never
+/// terminates. Long enough to cover the 300ms page animation either way.
+Future<void> settleShell(WidgetTester tester) async {
+  for (var i = 0; i < 4; i++) {
+    await tester.pump(const Duration(milliseconds: 200));
+  }
+}
+
+/// A tree with one unstaged edit, `a.dart`, for the Git tab to list.
+FileTreeState oneChangeTree() => FileTreeState(
+  gitFileStatuses: const {'a.dart': 'M'},
+  gitStatus: GitStatusIndex(const [
+    GitFileStatusEntry(path: 'a.dart', status: 'M', staged: false),
+  ]),
+);

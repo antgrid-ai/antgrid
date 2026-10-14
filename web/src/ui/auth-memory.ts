@@ -166,7 +166,7 @@ export const AUTH_MEMORY_SCRIPT = `(function(){
     if(!btn)return;
     var slot="antgrid.auth.cooldown."+form.getAttribute("data-ab-cooldown")+"."+norm(emailFor(form));
     var label=btn.textContent,timer=null;
-    function readAt(){var v=parseInt(sessionStorage.getItem(slot)||"",10);return isNaN(v)?0:v;}
+    function readAt(){try{var v=parseInt(sessionStorage.getItem(slot)||"",10);return isNaN(v)?0:v;}catch(e){return 0;}}
     function tick(){
       var left=Math.ceil((readAt()+COOL*1000-Date.now())/1000);
       if(left<=0){if(timer){clearInterval(timer);timer=null;}btn.disabled=false;btn.textContent=label;return;}

@@ -34,7 +34,6 @@ abstract final class BackPriority {
   static const int fileViewer = 820;
   static const int fileSearch = 810;
   static const int gitViewer = 805;
-  static const int pushedTerminal = 800;
   // Below every handler a workspace view registers, because the surface
   // CONTAINS one of those views: a back press with a file open inside it must
   // close the file, not the surface out from under it.

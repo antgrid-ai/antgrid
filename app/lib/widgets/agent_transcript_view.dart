@@ -201,7 +201,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       (s) => s.fileService,
     );
     if (fileService == null) return;
-    ref.read(workspaceMenuControlProvider)?.reveal(WorkspaceView.files);
+    revealWorkspaceView(ref, WorkspaceView.files);
     fileService.selectFile(path);
   }
 

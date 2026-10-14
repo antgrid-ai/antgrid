@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -210,6 +212,7 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
               return RecentSessionRowWidget(
                 key: ValueKey('${row.origin.registrationId}:${row.session.id}'),
                 row: row,
+                groupedBy: groupBy,
               );
             }, childCount: groups[i].rows.length),
           ),
@@ -252,14 +255,24 @@ List<_SessionGroup> _groupSessions(
     labels[key] = label;
   }
 
-  final keys = groupBy == RecentGroupBy.status
-      ? [
-          for (final s in kWorkStatusOrder) s.name,
-        ].where(buckets.containsKey).toList()
-      : (buckets.keys.toList()..sort(
-          (a, b) =>
-              labels[a]!.toLowerCase().compareTo(labels[b]!.toLowerCase()),
-        ));
+  // Every grouping leads with the group worked in most recently; the label
+  // only breaks ties. One exception: by status, "needs you" always leads —
+  // a blocked agent is waiting on the user however old its last activity.
+  final latest = {
+    for (final e in buckets.entries)
+      e.key: e.value.map((r) => r.session.lastUsedAt).reduce(math.max),
+  };
+  final pinned = groupBy == RecentGroupBy.status
+      ? AgentWorkStatus.attention.name
+      : null;
+  final keys = buckets.keys.toList()
+    ..sort((a, b) {
+      if (a == pinned) return -1;
+      if (b == pinned) return 1;
+      final byRecency = latest[b]!.compareTo(latest[a]!);
+      if (byRecency != 0) return byRecency;
+      return labels[a]!.toLowerCase().compareTo(labels[b]!.toLowerCase());
+    });
 
   return [
     for (final key in keys)

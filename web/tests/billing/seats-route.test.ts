@@ -140,11 +140,11 @@ describe("POST /billing/seats", () => {
     const { app } = buildTestApp(pg.db, pg.url, { envOverrides: testBillingEnv() });
     const o = await owner(1);
 
-    const res = await post(app, { seats: 26 }, o.cookie);
+    const res = await post(app, { seats: 6 }, o.cookie);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; max_seats: number };
     expect(body.error).toBe("SEATS_ABOVE_PLAN_MAX");
-    expect(body.max_seats).toBe(25);
+    expect(body.max_seats).toBe(5);
     expect(await seatsOf(o.accountId)).toBe(1);
   });
 
@@ -185,6 +185,6 @@ describe("POST /billing/seats", () => {
       where: { accountId: account.id, status: "active" },
     });
     expect(sub.promotional).toBe(true);
-    expect(sub.seats).toBe(1);
+    expect(sub.seats).toBe(5);
   });
 });

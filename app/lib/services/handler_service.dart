@@ -32,7 +32,7 @@ class HandlerService {
   // State as of each `handler:status` frame only; other emissions carry the
   // last entitlement, so a fresh refusal is indistinguishable from a held one.
   final _statusFrameController = StreamController<HandlerState>.broadcast();
-  HandlerState _state = const HandlerState.initial();
+  HandlerState _state = const HandlerState.initial(heard: false);
   bool _disposed = false;
   // agent:prompt correlation ids — the driver only needs per-send uniqueness.
   int _reqCounter = 0;
@@ -416,6 +416,7 @@ class HandlerService {
       return s == null || s.backlogTotal > 0;
     });
     final next = _state.copyWith(
+      heard: true,
       sessions: sessions,
       escalations: escalations,
       defaultTool: msg.defaultTool,

@@ -4,7 +4,7 @@
 // not per machine — because a per-session ceiling lets a halted pair carry on
 // through a third session, and a per-machine one lets one session spend
 // another's budget (see "the no-progress halt is per (sender, target) PAIR" in
-// bridge/CLAUDE.md).
+// bridge/AGENTS.md).
 //
 // The record is MIRRORED, not shared: the two ends of a pair can be on two
 // machines, and neither can write the other's store, so each keeps its own copy
@@ -71,7 +71,7 @@ export const PairBudgetRecordSchema = z.object({
 export type PairBudgetState = z.infer<typeof PairBudgetRecordSchema>;
 
 /** One end of a pair, as bare identity — machine + session, never a project id:
- *  a bus address is matched on machine + session (`bridge/CLAUDE.md`), and the
+ *  a bus address is matched on machine + session (`bridge/AGENTS.md`), and the
  *  same two agents can legitimately hold different project ids for the same
  *  checkout. */
 export interface PairEnd {

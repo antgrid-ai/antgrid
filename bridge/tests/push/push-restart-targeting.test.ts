@@ -8,6 +8,7 @@ import { computeProjectId } from "../../src/project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phones";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
+import { pushCollapseKey } from "../../src/push/push-dispatcher";
 import type { MessageBus } from "../../src/message-bus";
 import type { AttachStreamOpts } from "../../src/project-streams";
 
@@ -32,6 +33,7 @@ interface Delivered {
   pushToken: string;
   provider: string;
   blob: { epk: string; box: string };
+  collapseKey?: string;
 }
 
 /** Opens a sealed push with the recipient's push private key, mirroring the
@@ -93,6 +95,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -133,6 +136,9 @@ test("the sealed payload names the machine the phone must dial", async () => {
   const opened = openPush(delivered[0].blob, phonePush.privateKey);
   expect(opened.machineUuid).toBe("machine-uuid");
   expect(opened.projectId).toBe(projectId);
+  // The collapse key rides the same hop, keyed to this phone's push key.
+  expect(delivered[0].collapseKey)
+    .toBe(pushCollapseKey(phonePush.publicKey.toString("base64"), "machine-uuid", projectId, undefined));
 });
 
 test("persisted-store fallback still refuses to push from a machine with mobile access off", async () => {
@@ -201,6 +207,7 @@ async function startAfterDesktopLeft() {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });
@@ -275,6 +282,7 @@ async function startAfterPhoneLeft() {
       peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
+      accountDisowns: () => false,
     },
   });
   cleanup.push(() => { void core.shutdown(); });

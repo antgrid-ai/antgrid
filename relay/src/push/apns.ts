@@ -3,6 +3,7 @@
 
 import { SignJWT, importPKCS8 } from "jose";
 import http2 from "node:http2";
+import { PUSH_TTL_SECONDS, type PushSendOptions, type PushSender } from "./delivery.js";
 
 const APNS_HOST_PROD = "https://api.push.apple.com";
 const APNS_HOST_SANDBOX = "https://api.sandbox.push.apple.com";
@@ -71,7 +72,7 @@ export class Http2ApnsTransport implements ApnsTransport {
   }
 }
 
-export class ApnsSender {
+export class ApnsSender implements PushSender {
   private readonly bundleId: string;
   private readonly providerToken: { get(): Promise<string> };
   private readonly transport: ApnsTransport;
@@ -82,7 +83,7 @@ export class ApnsSender {
     this.transport = opts.transport;
   }
 
-  async send(deviceToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> {
+  async send(deviceToken: string, data: Record<string, string>, opts: PushSendOptions = {}): Promise<"ok" | "unregistered" | "error"> {
     const jwt = await this.providerToken.get();
     // Content-blind: the relay writes only a generic placeholder. The NSE
     // replaces title/body after decrypting epk/box. mutable-content=1 is what
@@ -91,13 +92,15 @@ export class ApnsSender {
       aps: { alert: { title: "Antgrid", body: "New activity" }, "mutable-content": 1, sound: "default" },
       ...data,
     });
-    const headers = {
+    const headers: Record<string, string> = {
       authorization: `bearer ${jwt}`,
       "apns-topic": this.bundleId,
       "apns-push-type": "alert",
       "apns-priority": "10",
+      "apns-expiration": String(Math.floor(Date.now() / 1000) + PUSH_TTL_SECONDS),
       "content-type": "application/json",
     };
+    if (opts.collapseKey) headers["apns-collapse-id"] = opts.collapseKey;
     let res: { status: number; body: string };
     try {
       res = await this.transport.post(deviceToken, headers, payload);

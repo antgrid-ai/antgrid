@@ -3,6 +3,8 @@ import 'package:flutter/widgets.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
+import 'ab_tap_target.dart';
+import 'ab_touch_sizing.dart';
 
 /// Visual emphasis for [AbButton].
 enum AbButtonVariant {
@@ -27,6 +29,8 @@ class AbButton extends StatefulWidget {
     this.onTap,
     this.color,
     this.leading,
+    this.trailing,
+    this.maxLines,
     this.compact = false,
     this.variant = AbButtonVariant.normal,
     this.fontSize,
@@ -42,6 +46,11 @@ class AbButton extends StatefulWidget {
   /// [AbButtonVariant.primary].
   final Color? color;
   final Widget? leading;
+  final Widget? trailing;
+
+  /// Truncates the label with an ellipsis past this many lines. Meaningful
+  /// only with [wrapLabel], which is what lets the label shrink.
+  final int? maxLines;
   final bool compact;
   final AbButtonVariant variant;
 
@@ -94,6 +103,8 @@ class _AbButtonState extends State<AbButton> {
 
     Widget label = Text(
       widget.label,
+      maxLines: widget.maxLines,
+      overflow: widget.maxLines == null ? null : TextOverflow.ellipsis,
       style: AbTokens.sansStyle(
         fontSize: fontSize,
         color: textColor,
@@ -102,7 +113,17 @@ class _AbButtonState extends State<AbButton> {
     );
     if (widget.wrapLabel) label = Flexible(child: label);
 
+    final extent = AbTouchSizing.extentOf(context);
+    // Inside a compact host the row owns the height, as it does for
+    // AbTapTarget; a compact button keeps its small box and gains only the
+    // footprint.
+    final rowOwnsHeight = AbCompactTapTargets.of(context);
     Widget visual = Container(
+      constraints: BoxConstraints(
+        minHeight: extent == 0 || widget.compact || rowOwnsHeight
+            ? 0
+            : AbTokens.rowHeightSm,
+      ),
       padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
         color: fillColor,
@@ -120,36 +141,59 @@ class _AbButtonState extends State<AbButton> {
             const SizedBox(width: AbTokens.space4),
           ],
           label,
+          if (widget.trailing != null) ...[
+            const SizedBox(width: AbTokens.space4),
+            widget.trailing!,
+          ],
         ],
       ),
     );
 
+    // Touch sizing reserves the full target around a box of desktop
+    // proportions, as AbChip does; a box drawn at the target's size dwarfs
+    // its label.
+    Widget sized(Widget child) => extent == 0
+        ? child
+        : ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: extent,
+              minHeight: rowOwnsHeight ? 0 : extent,
+            ),
+            child: Center(widthFactor: 1, heightFactor: 1, child: child),
+          );
+
     if (!interactive) {
-      return Opacity(opacity: AbTokens.opacityDisabled, child: visual);
+      return sized(Opacity(opacity: AbTokens.opacityDisabled, child: visual));
     }
 
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      onShowHoverHighlight: (v) {
-        if (_hovered != v) setState(() => _hovered = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AbFocusRing(
-          focused: _focused,
-          borderRadius: AbTokens.borderRadius5,
-          child: visual,
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onTap?.call();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: sized(
+            AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius5,
+              child: visual,
+            ),
+          ),
         ),
       ),
     );

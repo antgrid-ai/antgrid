@@ -7,7 +7,7 @@ path: /privacy
 
 # Privacy Policy
 
-**Last updated:** September 11, 2026
+**Last updated:** October 5, 2026
 
 This Privacy Notice for **BHARATH MOHAN** (doing business as **Radha AI Products**) ("we," "us," or "our") describes how and why we might access, collect, store, use, and/or share ("process") your personal information when you use **Antgrid** and our related services ("Services"), including when you:
 
@@ -41,6 +41,7 @@ When you use the Services, we collect limited technical information necessary to
 
 - **Device and pairing data** — a device identifier (device UUID), device public keys (a persistent **Ed25519** identity key, and the public key that serves as each device's network endpoint identity) used to authenticate your devices and establish encrypted connections, the device/machine name (derived from your system hostname or set by you), and your subscription tier. While a device is connected, our relay holds these in memory to authenticate it and to tell your other devices that it is online.
 - **Session and connection data** — your **IP address** and **browser/device user-agent**. We use these to operate the Services, authenticate sessions, prevent abuse, and enforce rate limits. How long this is retained, and where it is stored, is described in Sections 5 and 7.
+- **Account origins and authentication operations**: we retain the surface, platform, sign-in method, and app version where available for registration and first verified activation, together with attribution quality. Device reports are informational. We also record accepted authentication requests, ownership proof, session issuance, first authenticated use, and email execution or bounce outcomes to operate authentication and identify onboarding failures. These first-party operational records are separate from optional interaction analytics; emails, account identifiers and authentication flow identifiers are never sent to Umami. Historical origins remain unknown without reliable creation evidence.
 - **Sign-in security data** — when you use cross-device (email link) sign-in, we briefly record the requesting IP address and user-agent and include them in the approval email so you can confirm the request is yours.
 - **Website analytics** — when you visit [https://antgrid.ai](https://antgrid.ai) or your account pages at [https://app.antgrid.ai](https://app.antgrid.ai), our self-hosted Umami instance records the page address (including any campaign parameters in the link you followed), the referring site, the page title, your browser, operating system, device type, screen size, language, and an approximate location (country, and region or city where available). No cookies are set and nothing is stored on your device. Visits are grouped using an anonymous hash derived from your IP address and browser; the IP address itself is not kept in the analytics record, the hash is scoped to the individual site you are on — our website and your account pages are counted separately and cannot be joined — and you are never tracked across other websites.
 - **App usage analytics** — when telemetry is enabled (opt-out; toggled in app settings), we collect anonymous usage events: an install-scoped random UUID (generated on first run and stored in secure device storage — this is **not** your account id, device UUID, or any persistent personal identifier), the event name, your platform, and app version. The install id is sent only to our own first-party backend (for retention analysis); our self-hosted Umami instance receives no install id or identifier of any kind — only the event name, your platform, and a small set of non-identifying properties describing the event itself (for example which sign-in method was used), grouped by the same cookieless, anonymous hash and approximate location described under **Website analytics** above. No personal information, no content, and no relay traffic is included. The install id is never shared with any third party, and it persists locally in secure storage; when telemetry is off it is simply not transmitted.
@@ -80,7 +81,7 @@ The app's telemetry is **on by default** but entirely optional. If you opt out, 
 ## 5. Where Your Information Is Stored
 
 - **Account and session data** (name, email, and your session's IP address and user-agent) is stored in our application database, associated with your account, for security and account management.
-- **Cross-device sign-in records** (including the requesting IP and user-agent) are stored only briefly and expire automatically (within approximately 10 minutes).
+- **Authentication records and email jobs** are stored in our application database. Links expire at their stated deadline; recipients and token-bearing queued messages are encrypted with a dedicated keyring and deleted after provider acceptance or terminal expiry/failure. Authentication-link pages are excluded from analytics, and authentication mail disables open and click tracking.
 - **Relay traffic** is processed in transit only and is end-to-end encrypted; the relay does not maintain a database of your activity.
 
 ## 6. Artificial Intelligence and Third-Party Coding Agents
@@ -111,7 +112,7 @@ We keep personal information only for as long as necessary for the purposes set 
 
 - **Account information** — for as long as your account is active, and then as required for legal/financial obligations.
 - **Session IP address and user-agent** — for the lifetime of the session; expired and deleted sessions are removed.
-- **Cross-device sign-in records** — automatically expire within approximately 10 minutes.
+- **Authentication history and sanitized email execution/event metadata**: retained for 30 days. Link expiry ends authorization sooner and does not extend when email delivery retries. Aggregated authentication cohorts, without account links, are retained for 12 months. Registration and first verified activation origins are retained for the account lifetime and removed with account deletion.
 - **Operational logs** (which may contain IP addresses) — retained for up to 30 days, then deleted.
 - **Waitlist email address** — until founding pricing opens and we have contacted you, or until you ask us to remove it, whichever comes first.
 - **Support conversations** — while needed to resolve and follow up on your request, and then according to our support retention settings or until you ask us to delete them where applicable.

@@ -186,24 +186,6 @@ chain with `;` instead. One script is bash-only regardless of how you invoke it:
 `npm run check:font-tokens` shells out to `bash app/scripts/check_font_tokens.sh`
 and will not run under PowerShell or cmd.
 
-**Symlinks.** Every `AGENTS.md` in this repo is a symlink to the `CLAUDE.md`
-beside it, so an agent looking for the vendor-neutral name reads the same file.
-Windows has supported symlinks since Vista and needs no elevation once Developer
-Mode is on — the obstacle is Git's own default. Unless "Enable symbolic links"
-was ticked during installation, Git for Windows writes `core.symlinks=false` into
-its system config, and a clone made under that setting materialises every symlink
-as a one-line text file holding the target path. That stub reads as ordinary
-content instead of failing, so a dangling or unresolved link can sit unnoticed
-for a long time.
-
-```bash
-git config --global core.symlinks true
-```
-
-Set it **before** cloning: a clone records the value in its own `.git/config` and
-keeps it thereafter. To repair an existing clone, set it there as well, then
-delete the stub files and `git checkout -- .` so git writes real links.
-
 ### macOS — desktop and iOS builds
 
 A working Xcode toolchain, the standard Flutter macOS setup, and the Rust
@@ -399,9 +381,8 @@ prebuilt binaries, so alignment is a property of the artifact and nothing in thi
 repo re-applies it.
 
 **Fix.** Identify the offending library, then fix it in the release that
-produced it (for the terminal libraries, see
-[docs/dart-terminal-fork-release.md](docs/dart-terminal-fork-release.md)) — not
-in the app:
+produced it (for the terminal libraries, the `dart_terminal` fork pinned in
+`app/pubspec.yaml`) — not in the app:
 
 ```bash
 llvm-readelf -lW <lib>   # every LOAD Align must be >= 0x4000

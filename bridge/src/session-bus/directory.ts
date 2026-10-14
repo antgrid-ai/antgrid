@@ -173,8 +173,9 @@ export function directoryRowsFor(
       ...(entry.workStatus === undefined ? {} : { workStatus: entry.workStatus }),
       lastActiveAt: entry.lastUsedAt,
       // An unknown tool is receive-only, not a peer: a session whose vendor
-      // this bridge cannot name certainly does not declare an mcp profile.
-      canReply: entry.tool !== undefined && agentSpec(entry.tool)?.mcp !== undefined,
+      // this bridge cannot name certainly does not declare an mcp profile. Only
+      // terminal launches inject the profile; `buildChatSpawnAugment` skips it.
+      canReply: entry.mode !== "chat" && entry.tool !== undefined && agentSpec(entry.tool)?.mcp !== undefined,
     });
   }
   return rows;

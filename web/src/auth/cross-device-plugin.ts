@@ -5,211 +5,140 @@ import { createAuthEndpoint } from "@better-auth/core/api";
 import { APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { z } from "zod";
-import {
-  PENDING_TTL_SECONDS,
-  createPending,
-  generateBrowserToken,
-  generateNonce,
-  findByIdWithHashes,
-  checkNonce,
-  markApproved,
-  markConsumed,
-} from "../models/pending-sign-in.js";
+import { PENDING_TTL_SECONDS, createPending, generateBrowserToken, generateNonce,
+  findByIdWithHashes, checkNonce } from "../models/pending-sign-in.js";
 import type { PrismaClient } from "../generated/prisma/client.js";
 import type { SendEmail } from "./email.js";
 import type { BetterAuthPlugin } from "better-auth";
 import { provisionProductAccountForUser } from "../models/subscription.js";
 import { purgeUnprovenPasswordCredential } from "../models/credential.js";
+import { authScope, authTransaction, lockAuthAccount } from "./transaction.js";
+import { classifyJourney, createFlow, linkFlowUser, recordStage } from "./flows.js";
+import { FlowResultSchema, requestOrigin, safeReturnPath } from "./contracts.js";
+import { authEmail } from "./templates.js";
+import { pruneBrowserBindings } from "./browser-bindings.js";
 
-export type CrossDevicePluginOptions = {
-  db: PrismaClient;
-  sendEmail: SendEmail;
-  baseURL: string;
-};
-
-const startBody = z.object({
-  email: z.email(),
-});
-
-/**
- * Cookie set on Browser A at /sign-in/cross-device/start. Carries the pending
- * row id and the browser-binding token so /sign-in/cross-device/status (Task 5)
- * can prove the poller is the same browser that initiated the flow. Format:
- *   "<row.id>.<browserToken>"
- * httpOnly + sameSite=lax. Expires when the row does (10 min).
- */
+export type CrossDevicePluginOptions = { db: PrismaClient; sendEmail: SendEmail; baseURL: string };
 export const COOKIE_BROWSER_TOKEN = "antgrid.cross_device_token";
-
-/**
- * Rejection message for an approve that lands on an already-approved row. This
- * is the one approve failure that means the work succeeded — a re-submitted
- * form or a re-opened link — so callers key off it to report success. Import it
- * rather than re-typing the literal; a silent rename here would otherwise
- * downgrade those callers back to a generic error (see routes/ui.tsx).
- */
+export const bindingCookie = (id: string) => `${COOKIE_BROWSER_TOKEN}.${id}`;
 export const ERR_ALREADY_APPROVED = "ALREADY_APPROVED";
+const idQuery = z.object({ id: z.uuid().optional() });
 
-export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => {
-  return {
-    id: "cross-device-magic-link" as const,
-    endpoints: {
-      crossDeviceStart: createAuthEndpoint(
-        "/sign-in/cross-device/start",
-        { method: "POST", body: startBody, requireHeaders: true },
-        async (ctx) => {
-          const email = ctx.body.email.toLowerCase();
-          const nonce = generateNonce();
-          const browserToken = generateBrowserToken();
-          // Read from ctx.headers, NOT ctx.request: this endpoint is always
-          // invoked via auth.api.crossDeviceStart() (server-to-server from the
-          // /ui/login/start Hono route), where Better-Auth populates ctx.headers
-          // from the passed `headers` but leaves ctx.request undefined. Reading
-          // ctx.request silently dropped UA + IP in every environment.
-          const hdr = ctx.headers ?? ctx.request?.headers ?? null;
-          const rawUa = hdr?.get("user-agent")?.trim() || null;
-          const ua = rawUa ? rawUa.slice(0, 512) : null;
-          // X-Forwarded-For is already resolved to a single spoof-safe hop by
-          // the time it gets here — /ui/login/start forwards its trusted-proxy
-          // walk result, and app.ts rewrites the header on the HTTP route. Take
-          // the rightmost hop anyway, never the leftmost, so a future caller
-          // that forwards a raw chain still gets the proxy-appended entry
-          // rather than a client-forgeable one. This endpoint has no socket
-          // access, so it cannot run the walk itself. Informational only (shown
-          // in the approval email) — never used for authorization.
-          const xffClient = hdr
-            ?.get("x-forwarded-for")
-            ?.split(",")
-            .map((h) => h.trim())
-            .filter(Boolean)
-            .at(-1);
-          const ip = xffClient || hdr?.get("x-real-ip")?.trim() || null;
-
-          const row = await createPending(opts.db, {
-            email,
-            nonce,
-            browserToken,
-            secret: ctx.context.secret,
-            requesterUa: ua,
-            requesterIp: ip,
-          });
-
-          ctx.setCookie(COOKIE_BROWSER_TOKEN, `${row.id}.${browserToken}`, {
-            httpOnly: true,
-            sameSite: "lax",
-            secure: opts.baseURL.startsWith("https://"),
-            path: "/",
-            maxAge: PENDING_TTL_SECONDS,
-          });
-
-          const approveUrl = new URL(
-            `/login/approve?id=${row.id}&t=${nonce}`,
-            opts.baseURL
-          ).toString();
-
-          await opts.sendEmail({
-            to: email,
-            subject: "Approve sign-in to Antgrid",
-            text:
-              `Approve sign-in: ${approveUrl}\n\n` +
-              `Requested from: ${ua ?? "unknown"} (${ip ?? "ip hidden"}).\n` +
-              `Link expires in 10 minutes. If you did not request this, ignore this email.`,
-            clientReference: row.id,
-          });
-
-          return ctx.json({ id: row.id });
-        }
-      ),
-      crossDeviceApprove: createAuthEndpoint(
-        "/sign-in/cross-device/approve",
-        {
-          method: "POST",
-          body: z.object({
-            id: z.string().uuid(),
-            token: z.string().min(1),
-          }),
-        },
-        async (ctx) => {
-          const row = await findByIdWithHashes(opts.db, ctx.body.id);
-          if (!row) throw new APIError("BAD_REQUEST", { message: "INVALID" });
-          if (row.expiresAt < new Date())
-            throw new APIError("BAD_REQUEST", { message: "EXPIRED" });
-          if (!checkNonce(row.nonceHash, ctx.body.token, ctx.context.secret))
-            throw new APIError("BAD_REQUEST", { message: "INVALID" });
-          // After the nonce, never before: this reply tells approved apart from
-          // pending, and the row id alone must not buy that. The id travels in
-          // the emailed URL and survives in history, logs and referrers; the
-          // nonce is what proves the caller actually holds the link.
-          if (row.approvedAt)
-            throw new APIError("BAD_REQUEST", { message: ERR_ALREADY_APPROVED });
-
-          // Find or create the user (signup-on-approve, like the original magic-link plugin).
-          let user = (await ctx.context.internalAdapter.findUserByEmail(row.email))?.user;
-          if (!user) {
-            user = await ctx.context.internalAdapter.createUser({
-              email: row.email,
-              emailVerified: true,
-              name: row.email,
-            });
-          }
-
-          await provisionProductAccountForUser(opts.db, user.id);
-          if (!user.emailVerified) {
-            // This flip is what would arm a password planted on the address by
-            // someone who never proved they owned it — sign-up writes the
-            // credential row before verification and only withholds the
-            // session. The owner is standing right here holding the link, and
-            // they did not ask for that password. See models/credential.ts.
-            await purgeUnprovenPasswordCredential(opts.db, user.id);
-            user = await ctx.context.internalAdapter.updateUser(user.id, {
-              emailVerified: true,
-            });
-          }
-
-          await markApproved(opts.db, row.id, user.id);
-          return ctx.json({ ok: true });
-        }
-      ),
-      crossDeviceStatus: createAuthEndpoint(
-        "/sign-in/cross-device/status",
-        { method: "GET", requireHeaders: true },
-        async (ctx) => {
-          const cookie = ctx.getCookie(COOKIE_BROWSER_TOKEN);
-          if (!cookie) return ctx.json({ status: "unbound" });
-          const dot = cookie.indexOf(".");
-          if (dot < 0) return ctx.json({ status: "unbound" });
-          const id = cookie.slice(0, dot);
-          const browserToken = cookie.slice(dot + 1);
-
-          const row = await findByIdWithHashes(opts.db, id);
-          if (!row) return ctx.json({ status: "expired" });
-          if (!checkNonce(row.browserTokenHash, browserToken, ctx.context.secret))
-            return ctx.json({ status: "expired" });
-          if (row.consumedAt) return ctx.json({ status: "consumed" });
-          if (!row.approvedAt || !row.approvedUserId)
-            return ctx.json({ status: "pending", delivery: row.deliveryStatus ?? null });
-
-          // Approved + not yet consumed → mint session, set cookie, mark consumed.
-          const user = (await ctx.context.internalAdapter.findUserByEmail(row.email))?.user;
-          if (!user) return ctx.json({ status: "expired" });
-          // NOTE: internalAdapter.createSession signature is
-          //   (userId, dontRememberMe?, override?, overrideAll?)
-          // — the docs snippet's `(userId, ctx)` shape is stale.
-          const session = await ctx.context.internalAdapter.createSession(user.id);
-          if (!session) return ctx.json({ status: "expired" });
-          // Cast: `@better-auth/core/api`'s EndpointContext and
-          // `better-auth/cookies`'s GenericEndpointContext have drifted
-          // (the former lacks `hasPlugin`). Runtime shape is identical;
-          // every first-party Better-Auth endpoint passes its own ctx here.
-          await setSessionCookie(
-            ctx as unknown as Parameters<typeof setSessionCookie>[0],
-            { session, user }
-          );
-          await markConsumed(opts.db, row.id);
-          // Clear the pending cookie — it has served its purpose.
-          ctx.setCookie(COOKIE_BROWSER_TOKEN, "", { maxAge: 0, path: "/" });
-          return ctx.json({ status: "ready" });
-        }
-      ),
-    },
-  } satisfies BetterAuthPlugin;
-};
+export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => ({
+  id: "cross-device-magic-link" as const,
+  endpoints: {
+    crossDeviceStart: createAuthEndpoint("/sign-in/cross-device/start", {
+      method: "POST", requireHeaders: true,
+      body: z.object({ email: z.email(), previousId: z.uuid().optional(), returnPath: z.string().optional() }),
+    }, async (ctx) => authTransaction(opts.db, async () => {
+      const email = ctx.body.email.trim().toLowerCase();
+      const hdr = ctx.headers ?? ctx.request?.headers ?? null;
+      let journeyId: string | undefined;
+      if (ctx.body.previousId) {
+        const previous = await findByIdWithHashes(opts.db, ctx.body.previousId);
+        const binding = ctx.getCookie(bindingCookie(ctx.body.previousId));
+        if (previous && binding && previous.email === email &&
+          checkNonce(previous.browserTokenHash, binding, ctx.context.secret)) journeyId = previous.journeyId ?? undefined;
+      }
+      const flow = await createFlow(opts.db, requestOrigin(hdr, "magic_link"), PENDING_TTL_SECONDS, journeyId);
+      const nonce = generateNonce();
+      const browserToken = generateBrowserToken();
+      const row = await createPending(opts.db, {
+        id: flow.id, journeyId: flow.journeyId, returnPath: safeReturnPath(ctx.body.returnPath),
+        email, nonce, browserToken, secret: ctx.context.secret,
+        requesterUa: hdr?.get("user-agent")?.slice(0, 512) ?? null, requesterIp: hdr?.get("x-forwarded-for")?.split(",").at(-1)?.trim() || null,
+      });
+      const cookieOptions = { httpOnly: true, sameSite: "lax" as const,
+        secure: opts.baseURL.startsWith("https://"), path: "/", maxAge: PENDING_TTL_SECONDS };
+      await pruneBrowserBindings(opts.db, ctx.context.secret, hdr, (name) => ctx.getCookie(name),
+        (name, value, maxAge) => ctx.setCookie(name, value, { ...cookieOptions, maxAge }),
+        { id: flow.id, kind: "cross_device", expiresAt: flow.expiresAt, value: browserToken });
+      ctx.setCookie(bindingCookie(row.id), browserToken, cookieOptions);
+      // Released native clients read this exact cookie name and send the
+      // flow id inside its value. Modern clients retain independent cookies;
+      // the alias still authenticates only the one flow named in its value.
+      ctx.setCookie(COOKIE_BROWSER_TOKEN, `${row.id}.${browserToken}`, cookieOptions);
+      const url = new URL("/login/approve", opts.baseURL);
+      url.searchParams.set("id", row.id); url.searchParams.set("t", nonce);
+      await opts.sendEmail({ to: email, ...authEmail({ action: "Review sign-in request", url: url.toString(),
+        description: "A sign-in was requested for this email address. Continue only if you started it.",
+        device: `${row.requesterUa ?? "Unknown device"} (${row.requesterIp ?? "IP hidden"})`, createdAt: row.createdAt, expiresAt: row.expiresAt }),
+        clientReference: row.id, expiresAt: row.expiresAt });
+      await recordStage(opts.db, flow.id, "mail_queued");
+      return ctx.json(FlowResultSchema.parse({ id: row.id, journeyId: flow.journeyId, status: "pending",
+        serverTime: new Date().toISOString(), expiresAt: row.expiresAt.toISOString(),
+        retryAt: new Date(row.createdAt.getTime() + 45000).toISOString(), delivery: "queued" }));
+    })),
+    crossDeviceApprove: createAuthEndpoint("/sign-in/cross-device/approve", {
+      method: "POST", body: z.object({ id: z.uuid(), token: z.string().min(1).max(128) }),
+    }, async (ctx) => authTransaction(opts.db, async () => {
+      const requested = await findByIdWithHashes(opts.db, ctx.body.id);
+      if (requested) await lockAuthAccount(opts.db, requested.email);
+      await opts.db.$queryRaw`SELECT id FROM pending_sign_in WHERE id=${ctx.body.id}::uuid FOR UPDATE`;
+      const row = await findByIdWithHashes(opts.db, ctx.body.id);
+      if (!row || !checkNonce(row.nonceHash, ctx.body.token, ctx.context.secret)) throw new APIError("BAD_REQUEST", { message: "INVALID" });
+      if (row.approvedAt) throw new APIError("BAD_REQUEST", { message: ERR_ALREADY_APPROVED });
+      authScope.getStore()!.flowId = row.id;
+      await lockAuthAccount(opts.db, row.email);
+      let user = (await ctx.context.internalAdapter.findUserByEmail(row.email))?.user;
+      await recordStage(opts.db, row.id, "approval_submitted");
+      await opts.db.authFlow.update({ where: { id: row.id }, data: { approvalOrigin: requestOrigin(ctx.headers ?? null, "approval") } });
+      if (user) await classifyJourney(opts.db, user.id, user.emailVerified);
+      if (!user) user = await ctx.context.internalAdapter.createUser({ email: row.email, emailVerified: true, name: row.email });
+      if (!user.emailVerified) {
+        await purgeUnprovenPasswordCredential(opts.db, user.id);
+        user = await ctx.context.internalAdapter.updateUser(user.id, { emailVerified: true });
+      }
+      await linkFlowUser(opts.db, user.id, "ownership_verified");
+      await provisionProductAccountForUser(opts.db, user.id);
+      await opts.db.pendingSignIn.update({ where: { id: row.id }, data: { approvedAt: new Date(), approvedUserId: user.id } });
+      return ctx.json({ ok: true });
+    })),
+    crossDeviceStatus: createAuthEndpoint("/sign-in/cross-device/status", {
+      method: "GET", requireHeaders: true, query: idQuery,
+    }, async (ctx) => authTransaction(opts.db, async () => {
+      // A legacy binding is accepted only when it names the requested flow.
+      const legacy = ctx.getCookie(COOKIE_BROWSER_TOKEN);
+      const id = ctx.query.id ?? legacy?.split(".")[0];
+      if (!id || !z.uuid().safeParse(id).success) {
+        if (legacy) ctx.setCookie(COOKIE_BROWSER_TOKEN, "", { maxAge: 0, path: "/" });
+        return ctx.json({ status: "unbound" });
+      }
+      const binding = ctx.getCookie(bindingCookie(id)) ?? (legacy?.startsWith(id + ".") ? legacy.slice(id.length + 1) : null);
+      if (!binding) return ctx.json({ status: "unbound" });
+      const requested = await findByIdWithHashes(opts.db, id);
+      if (requested) await lockAuthAccount(opts.db, requested.email);
+      await opts.db.$queryRaw`SELECT id FROM pending_sign_in WHERE id=${id}::uuid FOR UPDATE`;
+      const row = await findByIdWithHashes(opts.db, id);
+      if (!row || !checkNonce(row.browserTokenHash, binding, ctx.context.secret)) {
+        ctx.setCookie(bindingCookie(id), "", { maxAge: 0, path: "/" });
+        if (legacy?.startsWith(id + ".")) ctx.setCookie(COOKIE_BROWSER_TOKEN, "", { maxAge: 0, path: "/" });
+        return ctx.json({ status: "expired" });
+      }
+      const delivery = await opts.db.emailJob.findFirst({ where: { flowId: id }, orderBy: { createdAt: "desc" }, select: { state: true } });
+      const result = (status: string) => ctx.json({ id, journeyId: row.journeyId, status,
+        serverTime: new Date().toISOString(), expiresAt: row.expiresAt.toISOString(),
+        retryAt: new Date(row.createdAt.getTime() + 45000).toISOString(), delivery: row.deliveryStatus ?? delivery?.state ?? null });
+      if (!row.approvedAt || !row.approvedUserId) return result("pending");
+      await lockAuthAccount(opts.db, row.email);
+      await opts.db.$queryRaw`SELECT id FROM "user" WHERE id=${row.approvedUserId} FOR UPDATE`;
+      const user = await opts.db.user.findUnique({ where: { id: row.approvedUserId } });
+      if (!user || !user.emailVerified) return result("expired");
+      authScope.getStore()!.flowId = id;
+      let session;
+      if (row.consumedAt) {
+        if (!row.issuedSessionId) return result("consumed");
+        session = await opts.db.session.findUnique({ where: { id: row.issuedSessionId } });
+        if (!session || session.expiresAt <= new Date()) return result("consumed");
+      } else {
+        session = await ctx.context.internalAdapter.createSession(user.id);
+        if (!session) return result("expired");
+        await opts.db.pendingSignIn.update({ where: { id }, data: { consumedAt: new Date(), issuedSessionId: session.id } });
+        await opts.db.authFlow.updateMany({ where: { id }, data: { state: "redeemed", sessionId: session.id } });
+        await recordStage(opts.db, id, "session_issued");
+      }
+      await setSessionCookie(ctx as unknown as Parameters<typeof setSessionCookie>[0], { session, user });
+      return result("ready");
+    })),
+  },
+} satisfies BetterAuthPlugin);

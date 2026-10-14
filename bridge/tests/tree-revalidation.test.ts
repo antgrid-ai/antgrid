@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { FileWatcher } from "../src/file-watcher";
 import { createConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setLogLevel } from "../src/logger";
@@ -51,11 +51,17 @@ describe("FileWatcher — subscribed-directory revalidation", () => {
 
   it("reports a change no watcher event ever arrived for", async () => {
     const { messages, watcher } = makeWatcher();
+    // Directory creation and the write can share a filesystem timestamp tick.
+    const directory = join(tempDir, "src");
+    const before = new Date("2020-01-01T00:00:00Z");
+    const after = new Date("2020-01-02T00:00:00Z");
+    utimesSync(directory, before, before);
     watcher.setSubscription("A", ["src"]);
     watcher.revalidateSubscribedDirs();
 
     // The loss: the file lands, and nothing tells the watcher.
     writeFileSync(join(tempDir, "src", "appeared.ts"), "x");
+    utimesSync(directory, after, after);
     watcher.revalidateSubscribedDirs();
     await settle();
 

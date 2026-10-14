@@ -298,6 +298,9 @@ model User {
   accountId           String?         @map("account_id") @db.Uuid
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
+  registrationOrigin  Json? @map("registration_origin")
+  activationOrigin    Json? @map("activation_origin")
+  authJourneys        AuthJourney[]
   sessions            Session[]
   accounts            Account[]
   memberships         AccountMember[]
@@ -359,6 +362,9 @@ model Verification {
 }
 
 model PendingSignIn {
+  journeyId String? @map("journey_id") @db.Uuid
+  issuedSessionId String? @map("issued_session_id")
+  returnPath String @default("/dashboard") @map("return_path")
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email            String
   // HMAC of nonce that travels in the magic-link URL. Plain nonce is never stored.
@@ -578,4 +584,88 @@ model OauthConsent {
   @@index([clientId])
   @@index([userId])
   @@map("oauth_consent")
+}
+
+model AuthJourney {
+  recipientHash Bytes? @map("recipient_hash")
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String? @map("user_id")
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  origin Json
+  category String @default("unknown")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  flows AuthFlow[]
+  @@index([createdAt])
+  @@map("auth_journeys")
+}
+model AuthFlow {
+  approvalOrigin Json? @map("approval_origin")
+  returnPath String @default("/dashboard") @map("return_path")
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId String @map("journey_id") @db.Uuid
+  journey AuthJourney @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  state String @default("pending")
+  sessionId String? @map("session_id")
+  challenge String?
+  launchHash Bytes? @map("launch_hash")
+  bindingHash Bytes? @map("binding_hash")
+  codeHash Bytes? @map("code_hash")
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  events AuthFlowEvent[]
+  mail EmailJob[]
+  @@index([expiresAt])
+  @@map("auth_flows")
+}
+model AuthFlowEvent {
+  flowId String @map("flow_id") @db.Uuid
+  flow AuthFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  stage String
+  at DateTime @default(now()) @db.Timestamptz(6)
+  failure String?
+  @@id([flowId, stage])
+  @@map("auth_flow_events")
+}
+model EmailJob {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  flowId String? @map("flow_id") @db.Uuid
+  flow AuthFlow? @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  reference String @unique
+  relatedReference String? @map("related_reference")
+  providerId String? @map("provider_id")
+  keyVersion String? @map("key_version")
+  payload Bytes?
+  state String @default("queued")
+  attempts Int @default(0)
+  nextAt DateTime @default(now()) @map("next_at") @db.Timestamptz(6)
+  leaseId String? @map("lease_id") @db.Uuid
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  failure String?
+  events EmailRecipientEvent[]
+  @@index([state, nextAt])
+  @@map("email_jobs")
+}
+model EmailRecipientEvent {
+  id String @id
+  jobId String @map("job_id") @db.Uuid
+  job EmailJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind String
+  at DateTime @default(now()) @db.Timestamptz(6)
+  @@map("email_recipient_events")
+}
+model AuthRateBucket {
+  key String @id
+  stamps DateTime[] @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@map("auth_rate_buckets")
+}
+model AuthCohort {
+  day DateTime @db.Date
+  dimension String
+  counts Json
+  @@id([day, dimension])
+  @@map("auth_cohorts")
 }

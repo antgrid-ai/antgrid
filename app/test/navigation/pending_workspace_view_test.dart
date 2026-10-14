@@ -23,15 +23,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
 
-/// Bounded pumps rather than `pumpAndSettle`: the shell always has something
-/// animating (connection pulse, terminal cursor), so it never settles. Long
-/// enough to cover the 300ms page animation.
-Future<void> _settle(WidgetTester tester) async {
-  for (var i = 0; i < 4; i++) {
-    await tester.pump(const Duration(milliseconds: 200));
-  }
-}
-
 /// The platform override must be cleared inside the test body — the binding
 /// asserts every foundation debug variable is unset before tearDown runs. It has
 /// to stay set for the whole body because the shell's default panel mode reads
@@ -53,7 +44,7 @@ Future<void> _withShell(
       tester,
       extraOverrides: extraOverrides,
     );
-    await _settle(tester);
+    await settleShell(tester);
     await body(container);
   } finally {
     debugDefaultTargetPlatformOverride = null;
@@ -123,7 +114,7 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
 
       // Still side-by-side with the agent — a pending nav docks the view the
       // same way the workspace menu does, it does not take the whole route.
@@ -207,7 +198,7 @@ void main() {
         container
             .read(workbenchSurfaceProvider.notifier)
             .set(WorkbenchSurface.workspace);
-        await _settle(tester);
+        await settleShell(tester);
 
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
         expect(container.read(pendingWorkspaceViewProvider), isNull);
@@ -247,7 +238,7 @@ void main() {
   testWidgets('a null pending view opens nothing', (tester) async {
     await _withDesktopShell(tester, (container) async {
       container.read(pendingWorkspaceViewProvider.notifier).set(null);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
       expect(find.byType(AgentPanel), findsOneWidget);
@@ -266,7 +257,7 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
       expect(container.read(agentSurfaceVisibleProvider), isFalse);
@@ -289,11 +280,11 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
       expect(container.read(agentSurfaceVisibleProvider), isFalse);
 
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(agentSurfaceVisibleProvider), isTrue);
       expect(find.byType(AgentPanel), findsOneWidget);
@@ -310,13 +301,13 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
       expect(container.read(agentSurfaceVisibleProvider), isFalse);
 
       container
           .read(pendingAgentPageProvider.notifier)
           .set((target: const LocalProject('somewhere-else'), value: true));
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(agentSurfaceVisibleProvider), isFalse);
       expect(container.read(pendingAgentPageProvider), isNull);
@@ -330,7 +321,7 @@ void main() {
   ) async {
     await _withDesktopShell(tester, (container) async {
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(AgentPanel), findsOneWidget);
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
@@ -351,11 +342,11 @@ void main() {
       tester
           .widget<WorkspacePanel>(find.byType(WorkspacePanel))
           .onToggleExpand!();
-      await _settle(tester);
+      await settleShell(tester);
       expect(find.byType(AgentPanel), findsNothing);
 
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(AgentPanel), findsOneWidget);
       expect(container.read(pendingAgentPageProvider), isNull);
@@ -374,12 +365,12 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
       expect(container.read(agentSurfaceVisibleProvider), isTrue);
 
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
       expect(container.read(agentSurfaceVisibleProvider), isTrue);
@@ -394,11 +385,11 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
-      await _settle(tester);
+      await settleShell(tester);
       tester
           .widget<WorkspacePanel>(find.byType(WorkspacePanel))
           .onToggleExpand!();
-      await _settle(tester);
+      await settleShell(tester);
       // Squeezing the agent pane to nothing leaves `AgentBar`'s row narrower
       // than its own content, which the framework reports as an overflow. That
       // is a property of the expanded tablet state itself — it is why
@@ -408,7 +399,7 @@ void main() {
       expect(container.read(agentSurfaceVisibleProvider), isFalse);
 
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(agentSurfaceVisibleProvider), isTrue);
       expect(
@@ -433,14 +424,14 @@ void main() {
       tester
           .widget<WorkspacePanel>(find.byType(WorkspacePanel))
           .onToggleExpand!();
-      await _settle(tester);
+      await settleShell(tester);
       expect(find.byType(AgentPanel), findsNothing);
 
       container
           .read(pendingActiveSessionIdProvider.notifier)
           .set('not-resolved-yet');
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(AgentPanel), findsNothing);
       expect(
@@ -456,7 +447,7 @@ void main() {
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.files));
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(find.byType(AgentPanel), findsOneWidget);
       expect(container.read(pendingAgentPageProvider), isNull);
@@ -474,7 +465,7 @@ void main() {
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
       container.read(pendingAgentPageProvider.notifier).set(_pendingAgentPage);
-      await _settle(tester);
+      await settleShell(tester);
 
       expect(container.read(pendingWorkspaceViewProvider), isNull);
       expect(container.read(pendingAgentPageProvider), isNull);

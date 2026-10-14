@@ -9,6 +9,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toast.dart';
+import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
 import '../../providers/projects.dart';
@@ -301,9 +302,22 @@ class _TopBar extends StatelessWidget {
         // scrolling header used to render them at this width.
         if (isPhoneWidth) ...[
           const SizedBox(height: AbTokens.space8),
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [RecentGroupByChips()],
+          // Capped so the toggle chips' touch footprint is clamped to a dense
+          // bar's height: this row is fixed chrome above the list, and the
+          // chips still floor at the touch extent wide. A cap, not a fixed
+          // height, so the row still collapses when the chips hide themselves;
+          // only where the chips inflate, so a narrow desktop window never
+          // clips them.
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: AbTouchSizing.extentOf(context) > 0
+                  ? AbTokens.rowHeightSm
+                  : double.infinity,
+            ),
+            child: const Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [RecentGroupByChips()],
+            ),
           ),
         ],
         const SizedBox(height: AbTokens.space8),

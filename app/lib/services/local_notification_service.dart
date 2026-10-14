@@ -1,8 +1,32 @@
+import 'dart:convert' show utf8;
 import 'dart:math' show Random;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../util/ab_log.dart';
+
+/// The notification id for a tagged notification: 32-bit FNV-1a over the
+/// tag's UTF-8 bytes, masked to the positive 31 bits Android's `int` id takes.
+///
+/// Not `String.hashCode`, which is free to differ between isolates and runs —
+/// and the headless push isolate that posts a notification is never the one
+/// that next posts to the same tag, so an unstable id would add where it was
+/// meant to replace.
+int notificationIdForTag(String tag) {
+  var hash = 0x811c9dc5;
+  for (final byte in utf8.encode(tag)) {
+    hash ^= byte;
+    // The FNV prime 0x01000193 as 2^24 + 0x193, keeping every intermediate
+    // under 2^53: a direct multiply loses its low bits to a web double.
+    hash = (hash * 0x193 + (hash & 0xff) * 0x1000000) & 0xffffffff;
+  }
+  return hash & 0x7fffffff;
+}
+
+/// Prefixes a group's summary tag, so the summary never shares a (tag, id) with
+/// a project-level child, whose tag is the bare group key.
+const _summaryTagPrefix = 'summary|';
 
 /// FOREGROUND OS notifications while backgrounded. One instance per isolate:
 /// the demo skips [init], so per-instance readiness would no-op [show] there.
@@ -120,39 +144,63 @@ class LocalNotificationService {
   /// a pending-answer store flushed once `handler:status` replays the
   /// still-unanswered escalation; then `showsUserInterface: true` actions here
   /// so the tap resumes the app instead of a headless isolate.
+  ///
+  /// [tag] makes the notification REPLACE whatever this app last posted under
+  /// the same tag, so a thread shows only its latest state: the id becomes
+  /// [notificationIdForTag] instead of the next counter value, and Android
+  /// keys a notification by (tag, id). Hashed ids cannot displace counter ones
+  /// there, because a counter notification carries no tag.
+  ///
+  /// [groupKey] bundles notifications into one expandable group, and on
+  /// Android also posts the group's summary, without which the OS will not
+  /// bundle them. The summary is silent — the child that prompted it already
+  /// alerted — and carries no payload, since it stands for every thread in the
+  /// group rather than one route. Elsewhere there is no summary to post: a
+  /// second visible notification is all it would be.
+  ///
+  /// [silent] posts (or replaces) the notification without sound or vibration.
+  /// Android only: elsewhere the OS owns how a notification is presented.
   Future<void> show({
     required String title,
     required String body,
     String? payload,
+    String? tag,
+    String? groupKey,
+    bool silent = false,
   }) async {
     if (!_ready) return;
-    final id = _nextId;
-    _nextId = (_nextId + 1) & 0x7fffffff;
+    final int id;
+    if (tag != null) {
+      id = notificationIdForTag(tag);
+    } else {
+      id = _nextId;
+      _nextId = (_nextId + 1) & 0x7fffffff;
+    }
     try {
       await _plugin.show(
         id: id,
         title: title,
         body: body,
         payload: payload,
-        notificationDetails: const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'agent_notifications',
-            'Agent notifications',
-            importance: Importance.high,
-            priority: Priority.high,
-            // Bodies carry agent output, which reaches the shade and possibly a
-            // lock screen. Deliberately no in-app toggle: Android already owns
-            // this control, so users who set "hide sensitive content" get OS
-            // redaction here for free, and a second in-app switch would be a
-            // worse duplicate of a setting they already have.
-            visibility: NotificationVisibility.private,
-          ),
-          iOS: DarwinNotificationDetails(),
-          macOS: DarwinNotificationDetails(),
-          linux: LinuxNotificationDetails(),
-          windows: WindowsNotificationDetails(),
+        notificationDetails: _details(
+          tag: tag,
+          groupKey: groupKey,
+          silent: silent,
         ),
       );
+      if (groupKey != null && defaultTargetPlatform == TargetPlatform.android) {
+        final summaryTag = '$_summaryTagPrefix$groupKey';
+        await _plugin.show(
+          id: notificationIdForTag(summaryTag),
+          title: title,
+          body: body,
+          notificationDetails: _details(
+            tag: summaryTag,
+            groupKey: groupKey,
+            summary: true,
+          ),
+        );
+      }
     } catch (e) {
       AbLog.error(
         'LocalNotificationService',
@@ -161,4 +209,36 @@ class LocalNotificationService {
       );
     }
   }
+
+  static NotificationDetails _details({
+    String? tag,
+    String? groupKey,
+    bool summary = false,
+    bool silent = false,
+  }) => NotificationDetails(
+    android: AndroidNotificationDetails(
+      'agent_notifications',
+      'Agent notifications',
+      importance: Importance.high,
+      priority: Priority.high,
+      // Bodies carry agent output, which reaches the shade and possibly a
+      // lock screen. Deliberately no in-app toggle: Android already owns
+      // this control, so users who set "hide sensitive content" get OS
+      // redaction here for free, and a second in-app switch would be a
+      // worse duplicate of a setting they already have.
+      visibility: NotificationVisibility.private,
+      tag: tag,
+      groupKey: groupKey,
+      setAsGroupSummary: summary,
+      silent: silent,
+      onlyAlertOnce: summary,
+      groupAlertBehavior: summary
+          ? GroupAlertBehavior.children
+          : GroupAlertBehavior.all,
+    ),
+    iOS: const DarwinNotificationDetails(),
+    macOS: const DarwinNotificationDetails(),
+    linux: const LinuxNotificationDetails(),
+    windows: const WindowsNotificationDetails(),
+  );
 }

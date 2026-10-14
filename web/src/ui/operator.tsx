@@ -123,7 +123,7 @@ export function OperatorUsersPage({ user, data, query }: {
   return <Layout title="Operator users" user={user} analytics={false} contentWidth="wide"><OperatorNav section="users" />
     <div class="mb-6 flex flex-wrap items-baseline justify-between gap-3"><h1 class="text-2xl font-semibold">Users</h1><p class="text-sm text-muted">{data.total.toLocaleString("en-US")} matching users</p></div><Filters query={query} />
     <DefinitionNotes><p>{ACTIVITY_NOTE} Active sign-in sessions are unexpired Better-Auth sessions. Active devices are unrevoked registrations.</p></DefinitionNotes>
-    <Table headers={["User / signup", "Effective plan", "Active devices", "Sign-in methods", "Sessions / activity"]}
+    <Table headers={["User / signup", "Registration / activation origin", "Effective plan", "Active devices", "Sign-in methods", "Sessions / activity"]}
       rows={data.rows.map((row) => [<div class="space-y-3"><UserLink user={row} /><div class="flex flex-wrap gap-1"><Badge warning={!row.emailVerified}>{row.emailVerified ? "Email verified" : "Email unverified"}</Badge>{row.deletedAt && <Badge warning>Retained deleted record</Badge>}</div><div><span class="mb-1 block text-xs text-muted">Signed up</span><Timestamp value={row.createdAt} /></div>{row.deletedAt && <div><span class="mb-1 block text-xs text-amber">Deleted</span><Timestamp value={row.deletedAt} /></div>}</div>,
         <div class="space-y-3"><Plan subscription={row.subscription} />{row.billingAccountId && <a href={`/internal/accounts/${encodeURIComponent(row.billingAccountId)}`} class="link block text-xs text-muted">Billing account →</a>}</div>,
         <DeviceCounts row={row} />, <Credentials credentials={row.credentials} />, <Observations row={row} />])}

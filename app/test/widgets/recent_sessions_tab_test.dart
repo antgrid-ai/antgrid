@@ -13,6 +13,7 @@ import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
+import 'package:antgrid/widgets/recent_sessions/recent_sessions_summary.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/recent_sessions/starting_session_row.dart';
 import 'package:antgrid/widgets/session_search_field.dart';
@@ -293,6 +294,71 @@ void main() {
 
     expect(find.textContaining('1 needs you'), findsOneWidget);
     expect(find.textContaining('1 working'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('groups lead with the most recently worked one, except that '
+      'needs-you leads the status grouping', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    RecentSessionRow row(String uuid, String machine, String name, int used) =>
+        RecentSessionRow(
+          session: SessionEntry(
+            id: name,
+            name: name,
+            createdAt: 0,
+            lastUsedAt: used,
+            archived: false,
+            running: true,
+          ),
+          origin: RecentOrigin(
+            isLocal: false,
+            registrationId: '$uuid.proj',
+            projectId: 'proj',
+            machineUuid: uuid,
+            projectName: 'proj-$machine',
+            deviceName: machine,
+          ),
+        );
+    // Alphabetical order, and the fixed status order (error before working),
+    // would both put Older above Newer.
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([
+            row('uuidZ', 'Zed box', 'Newer', 3),
+            row('uuidA', 'Alpha box', 'Older', 2),
+            row('uuidM', 'Mid box', 'Blocked', 1),
+          ]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(RecentSessionsTab)),
+    );
+    final statuses = container.read(remoteSessionStatusProvider.notifier);
+    statuses.setMachineSessionStatuses('uuidA', {
+      'uuidA.proj': {'Older': AgentWorkStatus.error},
+    });
+    statuses.setMachineSessionStatuses('uuidZ', {
+      'uuidZ.proj': {'Newer': AgentWorkStatus.working},
+    });
+    statuses.setMachineSessionStatuses('uuidM', {
+      'uuidM.proj': {'Blocked': AgentWorkStatus.attention},
+    });
+    double top(String name) => tester.getTopLeft(find.text(name)).dy;
+
+    for (final groupBy in RecentGroupBy.values) {
+      container.read(recentGroupByProvider.notifier).set(groupBy);
+      await tester.pump();
+      expect(top('Newer'), lessThan(top('Older')), reason: '$groupBy');
+    }
+    // Status is still grouped by STATUS: the oldest session leads because it
+    // needs the user, and recency orders everything after it.
+    expect(top('Blocked'), lessThan(top('Newer')));
     debugDefaultTargetPlatformOverride = null;
   });
 

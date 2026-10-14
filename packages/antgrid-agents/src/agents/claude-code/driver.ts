@@ -36,9 +36,9 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
   };
   // Reuse the terminal-mode title plugin in chat mode so /session-title
   // auto-names the session from the conversation. Only the plugin dir is
-  // lifted out of the augmentation and mapped to the SDK's extraArgs shape:
-  // the MCP `--mcp-config` flag riding alongside it has no verified form
-  // here, so chat sessions get no Antgrid tools.
+  // lifted out of the augmentation and mapped to the SDK's extraArgs shape.
+  // The chat augmentation carries no MCP profile (`buildChatSpawnAugment`
+  // skips it), so chat sessions get no Antgrid tools.
   const chatAug = ctx.chatAugment();
   const pluginDir = pluginDirArg(chatAug.args);
   // `claude update` is install-method-sensitive, but this is detection

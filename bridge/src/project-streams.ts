@@ -90,7 +90,7 @@ export interface TerminalStreamHooks {
  *  `dispatch`). */
 export interface ProjectBinding {
   /** The peer holds an open project stream for this project — the single
-   *  per-peer admission point, root CLAUDE.md's checkout-routing invariant. */
+   *  per-peer admission point, root AGENTS.md's checkout-routing invariant. */
   hasOpenStream(peerId: string): boolean;
   /** `entry.opts.mayAcceptFrom(peerSession(peerId))`, re-read on every call —
    *  the same per-sender gate `dispatch` applies. Any code this returns is

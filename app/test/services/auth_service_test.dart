@@ -1,11 +1,9 @@
 import 'dart:convert';
 import 'dart:async';
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter/foundation.dart'
-    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
+import 'package:http/testing.dart' as http_testing;
 import 'package:antgrid/services/auth_service.dart';
 
 class _InMemoryStorage implements AuthStorage {
@@ -68,6 +66,38 @@ class _ClearFailingStorage extends _InMemoryStorage {
   Future<void> clearPendingSignIn() async => throw Exception('keychain');
 }
 
+http.Client protocolClient(
+  Future<http.Response> Function(http.Request) handler,
+) => http_testing.MockClient((request) async {
+  final response = await handler(request);
+  if (request.url.path != '/api/auth/sign-in/cross-device/start' ||
+      response.statusCode != 200) {
+    return response;
+  }
+  try {
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    if (body['id'] is! String) return response;
+    final now = DateTime.now().toUtc();
+    body.addAll({
+      'serverTime': now.toIso8601String(),
+      'expiresAt': now.add(kMagicLinkWindow).toIso8601String(),
+      'retryAt': now.add(const Duration(seconds: 45)).toIso8601String(),
+      'journeyId': 'journey-test',
+    });
+    final header = response.headers['set-cookie']?.replaceFirst(
+      'antgrid.cross_device_token=',
+      'antgrid.cross_device_token.${body['id']}=',
+    );
+    return http.Response(
+      jsonEncode(body),
+      response.statusCode,
+      headers: {...response.headers, 'set-cookie': ?header},
+    );
+  } catch (_) {
+    return response;
+  }
+});
+
 void main() {
   test('sign-out clears local credentials when the server stalls', () {
     fakeAsync((clock) {
@@ -77,7 +107,7 @@ void main() {
       final auth = AuthService(
         licenseApiUrl: 'https://api.antgrid.test',
         storage: storage,
-        httpClient: MockClient((_) {
+        httpClient: protocolClient((_) {
           calls++;
           return response.future;
         }),
@@ -96,294 +126,6 @@ void main() {
   });
 
   group('AuthService', () {
-    test('OAuth start URI uses a relative same-origin handoff', () {
-      final uri = buildOAuthStartUri(
-        licenseApiUrl: 'http://localhost:8787',
-        provider: 'google',
-      );
-
-      expect(uri.path, '/oauth/start');
-      expect(uri.queryParameters['provider'], 'google');
-      expect(uri.queryParameters['callbackURL'], '/oauth/handoff');
-    });
-
-    test('redeems a one-time token and stores the session cookie', () async {
-      final storage = _InMemoryStorage();
-      late http.Request captured;
-      final client = MockClient((req) async {
-        captured = req;
-        return http.Response(
-          '{"session":{}}',
-          200,
-          headers: {
-            'set-cookie':
-                'better-auth.session_token=signed.value-123; Path=/; HttpOnly; SameSite=Lax',
-          },
-        );
-      });
-      final service = AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: storage,
-        httpClient: client,
-      );
-
-      await service.handleDeepLink(
-        Uri.parse('antgrid://auth/callback?token=ott-abc'),
-      );
-
-      // Redeemed against the OTT verify endpoint with the token in the body.
-      expect(
-        captured.url.toString(),
-        'https://lic.test/api/auth/one-time-token/verify',
-      );
-      expect(jsonDecode(captured.body)['token'], 'ott-abc');
-      // Persisted the full session cookie name=value pair from Set-Cookie
-      // (not the OTT), so it can be replayed verbatim.
-      expect(
-        await storage.readCookie(),
-        'better-auth.session_token=signed.value-123',
-      );
-    });
-
-    test('extracts the value from a production __Secure- prefixed, '
-        'multi-cookie Set-Cookie header', () async {
-      // In production Better-Auth emits `__Secure-better-auth.session_token`
-      // and may set sibling cookies. The session value must still be captured
-      // (and not bleed into a neighbouring cookie or an Expires= comma).
-      final storage = _InMemoryStorage();
-      final client = MockClient((req) async {
-        return http.Response(
-          '{"session":{}}',
-          200,
-          headers: {
-            'set-cookie':
-                'csrf=abc; Expires=Wed, 09 Jun 2027 10:18:14 GMT; Path=/, '
-                '__Secure-better-auth.session_token=signed.secure-456; '
-                'Path=/; Secure; HttpOnly; SameSite=Lax',
-          },
-        );
-      });
-      final service = AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: storage,
-        httpClient: client,
-      );
-      await service.handleDeepLink(
-        Uri.parse('antgrid://auth/callback?token=ott-abc'),
-      );
-      // The stored pair preserves the production `__Secure-` prefixed name.
-      expect(
-        await storage.readCookie(),
-        '__Secure-better-auth.session_token=signed.secure-456',
-      );
-    });
-
-    test(
-      'swallows a network failure during redemption (never throws)',
-      () async {
-        // The cold-start deep link runs before runApp(); a thrown network error
-        // here would crash app launch. Redemption must fail silently.
-        final storage = _InMemoryStorage();
-        final client = MockClient((req) async {
-          throw http.ClientException('offline');
-        });
-        final service = AuthService(
-          licenseApiUrl: 'https://lic.test',
-          storage: storage,
-          httpClient: client,
-        );
-        await service.handleDeepLink(
-          Uri.parse('antgrid://auth/callback?token=ott-abc'),
-        );
-        expect(await storage.readCookie(), isNull);
-      },
-    );
-
-    test('ignores a deep link with no token', () async {
-      final storage = _InMemoryStorage();
-      final client = MockClient((req) async {
-        fail('should not call the network without a token');
-      });
-      final service = AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: storage,
-        httpClient: client,
-      );
-      await service.handleDeepLink(Uri.parse('antgrid://auth/callback'));
-      expect(await storage.readCookie(), isNull);
-    });
-
-    // `queryParameters` percent-DECODES and throws on an escape that is not
-    // valid UTF-8. Any web page can fire this URL, and main() dispatches deep
-    // links unawaited, so a throw here is an unhandled async error.
-    test('ignores a deep link with an undecodable percent-escape', () async {
-      final storage = _InMemoryStorage();
-      final client = MockClient((req) async {
-        fail('should not call the network for an undecodable link');
-      });
-      final service = AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: storage,
-        httpClient: client,
-      );
-      await expectLater(
-        service.handleDeepLink(Uri.parse('antgrid://auth/callback?token=%80')),
-        completes,
-      );
-      expect(await storage.readCookie(), isNull);
-    });
-
-    group('OAuth failure surfacing', () {
-      AuthService make(
-        MockClient client, {
-        Future<bool> Function(Uri url)? launchUrl,
-      }) => AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: _InMemoryStorage(),
-        httpClient: client,
-        // Never the default in these tests: on desktop `flutter test`
-        // registers the real url_launcher Dart plugin, which would open an
-        // actual browser on the test machine.
-        launchUrl: launchUrl ?? (_) async => false,
-      );
-
-      /// Runs [act] with [service]'s oauthFailures collected, then yields the
-      /// emitted messages (a microtask turn later — broadcast streams deliver
-      /// asynchronously).
-      Future<List<String>> failuresDuring(
-        AuthService service,
-        Future<void> Function() act,
-      ) async {
-        final messages = <String>[];
-        final sub = service.oauthFailures.listen(messages.add);
-        await act();
-        await Future<void>.delayed(Duration.zero);
-        await sub.cancel();
-        return messages;
-      }
-
-      test(
-        'a ?error= bounce emits a failure without touching the network',
-        () async {
-          // The handoff redirects errors back as ?error=no_session|server_error;
-          // previously the handler dropped them and the user saw nothing.
-          final service = make(
-            MockClient((req) async => fail('no network call expected')),
-          );
-          final messages = await failuresDuring(
-            service,
-            () => service.handleDeepLink(
-              Uri.parse('antgrid://auth/callback?error=no_session'),
-            ),
-          );
-          expect(messages, ["Sign-in didn't complete. Try again."]);
-        },
-      );
-
-      for (final (provider, name) in [
-        ('github', 'GitHub'),
-        ('google', 'Google'),
-        ('apple', 'Apple'),
-      ]) {
-        test('failure copy names $provider when startOAuth recorded it', () async {
-          final service = make(
-            MockClient((req) async => fail('no network call expected')),
-            launchUrl: (_) async => true,
-          );
-          await service.startOAuth(provider);
-          final messages = await failuresDuring(
-            service,
-            () => service.handleDeepLink(
-              Uri.parse('antgrid://auth/callback?error=server_error'),
-            ),
-          );
-          expect(messages, ["$name sign-in didn't complete. Try again."]);
-        });
-      }
-
-      test(
-        'startOAuth surfaces an unopenable browser as AuthException',
-        () async {
-          // launchUrl reporting false and launchUrl throwing both mean the same
-          // thing to the user: the browser never opened.
-          final refused = make(
-            MockClient((req) async => fail('no network call expected')),
-          );
-          await expectLater(
-            refused.startOAuth('github'),
-            throwsA(isA<AuthException>()),
-          );
-
-          final threw = make(
-            MockClient((req) async => fail('no network call expected')),
-            launchUrl: (_) async => throw Exception('no handler'),
-          );
-          await expectLater(
-            threw.startOAuth('github'),
-            throwsA(isA<AuthException>()),
-          );
-        },
-      );
-
-      test('a network failure during redemption emits a failure', () async {
-        final service = make(
-          MockClient((req) async => throw http.ClientException('off')),
-        );
-        final messages = await failuresDuring(
-          service,
-          () => service.handleDeepLink(
-            Uri.parse('antgrid://auth/callback?token=ott-abc'),
-          ),
-        );
-        expect(messages, hasLength(1));
-      });
-
-      test('a non-200 verify response emits a failure', () async {
-        final service = make(MockClient((req) async => http.Response('', 401)));
-        final messages = await failuresDuring(
-          service,
-          () => service.handleDeepLink(
-            Uri.parse('antgrid://auth/callback?token=ott-abc'),
-          ),
-        );
-        expect(messages, hasLength(1));
-      });
-
-      test('a 200 verify without a session cookie emits a failure', () async {
-        final service = make(
-          MockClient((req) async => http.Response('{}', 200)),
-        );
-        final messages = await failuresDuring(
-          service,
-          () => service.handleDeepLink(
-            Uri.parse('antgrid://auth/callback?token=ott-abc'),
-          ),
-        );
-        expect(messages, hasLength(1));
-      });
-
-      test('a successful redemption emits nothing', () async {
-        final service = make(
-          MockClient(
-            (req) async => http.Response(
-              '{"session":{}}',
-              200,
-              headers: {
-                'set-cookie': 'better-auth.session_token=signed.ok; Path=/',
-              },
-            ),
-          ),
-        );
-        final messages = await failuresDuring(
-          service,
-          () => service.handleDeepLink(
-            Uri.parse('antgrid://auth/callback?token=ott-abc'),
-          ),
-        );
-        expect(messages, isEmpty);
-      });
-    });
-
     test('signOut clears the cookie', () async {
       final storage = _InMemoryStorage();
       await storage.writeCookie('old');
@@ -399,7 +141,7 @@ void main() {
     group('startMagicLink', () {
       test('posts email, returns id, captures bind cookie', () async {
         late http.Request captured;
-        final client = MockClient((req) async {
+        final client = protocolClient((req) async {
           captured = req;
           return http.Response(
             jsonEncode({'id': 'row-123'}),
@@ -427,7 +169,9 @@ void main() {
       });
 
       test('throws AuthException on non-2xx', () async {
-        final client = MockClient((req) async => http.Response('nope', 429));
+        final client = protocolClient(
+          (req) async => http.Response('nope', 429),
+        );
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
@@ -442,7 +186,7 @@ void main() {
       test(
         'extracts bind cookie even when Set-Cookie folds multiple cookies',
         () async {
-          final client = MockClient(
+          final client = protocolClient(
             (req) async => http.Response(
               jsonEncode({'id': 'row-9'}),
               200,
@@ -464,7 +208,7 @@ void main() {
       );
 
       test('throws AuthException on a 200 with a non-JSON body', () async {
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response(
             'not json',
             200,
@@ -488,7 +232,9 @@ void main() {
       test(
         'network failure surfaces as AuthException (not a raw exception)',
         () async {
-          final client = MockClient((req) async => throw Exception('offline'));
+          final client = protocolClient(
+            (req) async => throw Exception('offline'),
+          );
           final service = AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: _InMemoryStorage(),
@@ -507,7 +253,7 @@ void main() {
       // The user leaves the app to approve the link, so Android is free to kill
       // the process while it is backgrounded; a cookie held only in widget
       // state dies with it and strands the approval with no way to claim it.
-      MockClient startClient() => MockClient(
+      http.Client startClient() => protocolClient(
         (req) async => http.Response(
           jsonEncode({'id': 'row-123'}),
           200,
@@ -618,17 +364,17 @@ void main() {
         expect(await storage.readPendingSignIn(), isNull);
       });
 
-      test('a failing secure store does not sink the send-link path', () async {
-        // The link is already sent by the time the ticket is written, and
-        // SignInScreen only catches AuthException — so a raw store failure
-        // escapes and strands the button on "Sending…" forever. Persisting is
-        // an optimization for the relaunch case; losing it must not lose the
-        // sign-in the user can still complete in this process.
-        final session = await make(
-          _WriteFailingStorage(),
-        ).startMagicLink('a@b.com');
-
-        expect(session.bindCookie, 'row-123.tok');
+      test('a failing secure store reports a typed storage error', () async {
+        await expectLater(
+          make(_WriteFailingStorage()).startMagicLink('a@b.com'),
+          throwsA(
+            isA<AuthException>().having(
+              (e) => e.kind,
+              'kind',
+              AuthFailure.storage,
+            ),
+          ),
+        );
       });
 
       test(
@@ -663,7 +409,7 @@ void main() {
 
       /// Drives one pollStatus tick against a stored ticket and reports whether
       /// the ticket survived.
-      Future<bool> ticketSurvivesPoll(MockClient client) async {
+      Future<bool> ticketSurvivesPoll(http.Client client) async {
         final storage = _InMemoryStorage();
         await storage.writePendingSignIn('{"id":"r1","bindCookie":"r1.tok"}');
         await AuthService(
@@ -678,7 +424,7 @@ void main() {
         'pollStatus clears the persisted session once it is ready',
         () async {
           final survived = await ticketSurvivesPoll(
-            MockClient(
+            protocolClient(
               (req) async => http.Response(
                 jsonEncode({'status': 'ready'}),
                 200,
@@ -695,7 +441,7 @@ void main() {
         () async {
           for (final dead in ['expired', 'consumed', 'unbound']) {
             final survived = await ticketSurvivesPoll(
-              MockClient(
+              protocolClient(
                 (req) async => http.Response(jsonEncode({'status': dead}), 200),
               ),
             );
@@ -706,7 +452,7 @@ void main() {
 
       test('pollStatus keeps the persisted session while pending', () async {
         final survived = await ticketSurvivesPoll(
-          MockClient(
+          protocolClient(
             (req) async =>
                 http.Response(jsonEncode({'status': 'pending'}), 200),
           ),
@@ -720,7 +466,7 @@ void main() {
           // The approval may still be waiting; a flaky network must not throw
           // away the only credential that can claim it.
           final survived = await ticketSurvivesPoll(
-            MockClient((req) async => throw Exception('offline')),
+            protocolClient((req) async => throw Exception('offline')),
           );
           expect(survived, isTrue);
         },
@@ -738,7 +484,7 @@ void main() {
           final poll = await AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: storage,
-            httpClient: MockClient(
+            httpClient: protocolClient(
               (req) async => http.Response(
                 jsonEncode({'status': 'ready'}),
                 200,
@@ -763,7 +509,7 @@ void main() {
           final poll = await AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: _ClearFailingStorage(),
-            httpClient: MockClient(
+            httpClient: protocolClient(
               (req) async => http.Response(jsonEncode({'status': dead}), 200),
             ),
           ).pollStatus(MagicLinkSession(id: 'r1', bindCookie: 'r1.tok'));
@@ -774,7 +520,7 @@ void main() {
     });
 
     group('pollStatus', () {
-      AuthService make(MockClient client, AuthStorage storage) => AuthService(
+      AuthService make(http.Client client, AuthStorage storage) => AuthService(
         licenseApiUrl: 'https://lic.test',
         storage: storage,
         httpClient: client,
@@ -783,19 +529,22 @@ void main() {
 
       test('sends bind cookie and maps pending', () async {
         late http.Request captured;
-        final client = MockClient((req) async {
+        final client = protocolClient((req) async {
           captured = req;
           return http.Response(jsonEncode({'status': 'pending'}), 200);
         });
         final poll = await make(client, _InMemoryStorage()).pollStatus(session);
         expect(poll.status, MagicLinkStatus.pending);
         expect(captured.url.path, '/api/auth/sign-in/cross-device/status');
-        expect(captured.headers['cookie'], 'antgrid.cross_device_token=r1.tok');
+        expect(
+          captured.headers['cookie'],
+          'antgrid.cross_device_token.r1=r1.tok',
+        );
       });
 
       test('ready writes the session cookie and returns ready', () async {
         final storage = _InMemoryStorage();
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response(
             jsonEncode({'status': 'ready'}),
             200,
@@ -821,7 +570,7 @@ void main() {
           // and may fold sibling cookies (with comma-bearing Expires dates) into
           // one header. The session value must still be captured.
           final storage = _InMemoryStorage();
-          final client = MockClient(
+          final client = protocolClient(
             (req) async => http.Response(
               jsonEncode({'status': 'ready'}),
               200,
@@ -844,7 +593,7 @@ void main() {
 
       test('maps expired / consumed / unbound', () async {
         for (final s in ['expired', 'consumed', 'unbound']) {
-          final client = MockClient(
+          final client = protocolClient(
             (req) async => http.Response(jsonEncode({'status': s}), 200),
           );
           final poll = await make(
@@ -858,7 +607,7 @@ void main() {
       test(
         'transient network failure maps to error (caller keeps polling)',
         () async {
-          final client = MockClient((req) async => throw Exception('boom'));
+          final client = protocolClient((req) async => throw Exception('boom'));
           final poll = await make(
             client,
             _InMemoryStorage(),
@@ -869,7 +618,7 @@ void main() {
 
       test('ready without a session cookie maps to error', () async {
         final storage = _InMemoryStorage();
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response(jsonEncode({'status': 'ready'}), 200),
         );
         final poll = await make(client, storage).pollStatus(session);
@@ -878,7 +627,7 @@ void main() {
       });
 
       test('200 with a non-JSON body maps to error', () async {
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response('not json', 200),
         );
         final poll = await make(client, _InMemoryStorage()).pollStatus(session);
@@ -887,7 +636,7 @@ void main() {
 
       test('pollStatus surfaces delivery=bounced while pending', () async {
         final storage = _InMemoryStorage();
-        final client = MockClient((req) async {
+        final client = protocolClient((req) async {
           return http.Response(
             '{"status":"pending","delivery":"bounced"}',
             200,
@@ -907,7 +656,7 @@ void main() {
 
       test('pollStatus reports delivery=null when absent', () async {
         final storage = _InMemoryStorage();
-        final client = MockClient((req) async {
+        final client = protocolClient((req) async {
           return http.Response('{"status":"pending"}', 200);
         });
         final service = AuthService(
@@ -938,7 +687,7 @@ void main() {
           await storage.writeCookie(
             '__Secure-better-auth.session_token=sess-secure',
           );
-          final client = MockClient((req) async {
+          final client = protocolClient((req) async {
             captured = req;
             return http.Response(
               jsonEncode({
@@ -971,7 +720,7 @@ void main() {
           late http.Request captured;
           final storage = _InMemoryStorage();
           await storage.writeCookie('better-auth.session_token=sess-dev');
-          final client = MockClient((req) async {
+          final client = protocolClient((req) async {
             captured = req;
             return http.Response(
               jsonEncode({'userId': 'u1', 'email': 'a@b.com'}),
@@ -998,7 +747,7 @@ void main() {
         await storage.writeCookie(
           '__Secure-better-auth.session_token=sess-secure',
         );
-        final client = MockClient((req) async {
+        final client = protocolClient((req) async {
           captured = req;
           return http.Response('', 200);
         });
@@ -1020,7 +769,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'http://evil.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async => http.Response('{}', 200)),
+          httpClient: protocolClient((req) async => http.Response('{}', 200)),
         );
         expect(
           () => service.startMagicLink('a@b.com'),
@@ -1029,7 +778,7 @@ void main() {
       });
 
       test('allows http to localhost (dev)', () async {
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response(
             jsonEncode({'id': 'x'}),
             200,
@@ -1046,7 +795,7 @@ void main() {
       });
 
       test('allows http to IPv6 loopback ::1 (dev)', () async {
-        final client = MockClient(
+        final client = protocolClient(
           (req) async => http.Response(
             jsonEncode({'id': 'x'}),
             200,
@@ -1071,7 +820,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'http://evil.test',
             storage: storage,
-            httpClient: MockClient((req) async {
+            httpClient: protocolClient((req) async {
               requested = true;
               return http.Response('{}', 200);
             }),
@@ -1091,7 +840,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'http://evil.test',
             storage: storage,
-            httpClient: MockClient((req) async {
+            httpClient: protocolClient((req) async {
               requested = true;
               return http.Response('', 200);
             }),
@@ -1110,7 +859,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: storage,
-          httpClient: MockClient((req) async {
+          httpClient: protocolClient((req) async {
             captured = req;
             return http.Response(
               jsonEncode({'token': 't'}),
@@ -1142,7 +891,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async {
+          httpClient: protocolClient((req) async {
             captured = req;
             return http.Response(
               jsonEncode({'code': 'INVALID_EMAIL_OR_PASSWORD'}),
@@ -1169,7 +918,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient(
+          httpClient: protocolClient(
             (req) async => http.Response(
               jsonEncode({'code': 'EMAIL_NOT_VERIFIED', 'message': 'nope'}),
               403,
@@ -1187,7 +936,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient(
+          httpClient: protocolClient(
             (req) async => http.Response(
               jsonEncode({'code': 'INVALID_EMAIL_OR_PASSWORD'}),
               401,
@@ -1206,7 +955,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: storage,
-          httpClient: MockClient((req) async => http.Response('{}', 200)),
+          httpClient: protocolClient((req) async => http.Response('{}', 200)),
         );
 
         await expectLater(
@@ -1221,7 +970,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'http://evil.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async {
+          httpClient: protocolClient((req) async {
             requested = true;
             return http.Response('{}', 200);
           }),
@@ -1232,123 +981,6 @@ void main() {
           throwsA(isA<AuthException>()),
         );
         expect(requested, isFalse);
-      });
-    });
-
-    group('OAuth on iOS', () {
-      const verifyPath = '/api/auth/one-time-token/verify';
-
-      setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
-      tearDown(() => debugDefaultTargetPlatformOverride = null);
-
-      AuthService iosService({
-        required AuthStorage storage,
-        required List<http.Request> requests,
-        required InAppWebAuth sheet,
-        int verifyStatus = 200,
-      }) => AuthService(
-        licenseApiUrl: 'https://lic.test',
-        storage: storage,
-        httpClient: MockClient((req) async {
-          requests.add(req);
-          return http.Response(
-            '{}',
-            verifyStatus,
-            headers: verifyStatus == 200
-                ? {
-                    'set-cookie':
-                        '__Secure-better-auth.session_token=signed.gh; Path=/',
-                  }
-                : {},
-          );
-        }),
-        launchUrl: (_) async => fail('iOS must not open Safari'),
-        authenticateInApp: sheet,
-      );
-
-      test('runs in the in-app sheet and redeems its callback', () async {
-        final storage = _InMemoryStorage();
-        final requests = <http.Request>[];
-        late Uri opened;
-        final service = iosService(
-          storage: storage,
-          requests: requests,
-          sheet: (url, scheme) async {
-            opened = url;
-            expect(scheme, 'antgrid');
-            return Uri.parse('antgrid://auth/callback?token=ott-1');
-          },
-        );
-
-        expect(await service.startOAuth('github'), OAuthStart.signedIn);
-        expect(opened.path, '/oauth/start');
-        expect(opened.queryParameters['provider'], 'github');
-        expect(requests.single.url.path, verifyPath);
-        expect(jsonDecode(requests.single.body), {'token': 'ott-1'});
-        expect(
-          await storage.readCookie(),
-          '__Secure-better-auth.session_token=signed.gh',
-        );
-      });
-
-      test('a closed sheet is not signed in and asks nothing', () async {
-        final requests = <http.Request>[];
-        final service = iosService(
-          storage: _InMemoryStorage(),
-          requests: requests,
-          sheet: (_, _) async => null,
-        );
-
-        expect(await service.startOAuth('google'), OAuthStart.notSignedIn);
-        expect(requests, isEmpty);
-      });
-
-      test('an error bounce is reported, not signed in', () async {
-        final failures = <String>[];
-        final service = iosService(
-          storage: _InMemoryStorage(),
-          requests: [],
-          sheet: (_, _) async =>
-              Uri.parse('antgrid://auth/callback?error=no_session'),
-        );
-        final sub = service.oauthFailures.listen(failures.add);
-
-        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
-        await Future<void>.delayed(Duration.zero);
-        expect(failures, ["GitHub sign-in didn't complete. Try again."]);
-        await sub.cancel();
-      });
-
-      test('a refused token stores no session', () async {
-        final storage = _InMemoryStorage();
-        final service = iosService(
-          storage: storage,
-          requests: [],
-          verifyStatus: 401,
-          sheet: (_, _) async =>
-              Uri.parse('antgrid://auth/callback?token=ott-1'),
-        );
-
-        expect(await service.startOAuth('github'), OAuthStart.notSignedIn);
-        expect(await storage.readCookie(), isNull);
-      });
-
-      test('other platforms hand off to the browser', () async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        var sheetShown = false;
-        final service = AuthService(
-          licenseApiUrl: 'https://lic.test',
-          storage: _InMemoryStorage(),
-          httpClient: MockClient((_) async => http.Response('', 500)),
-          launchUrl: (_) async => true,
-          authenticateInApp: (_, _) async {
-            sheetShown = true;
-            return null;
-          },
-        );
-
-        expect(await service.startOAuth('github'), OAuthStart.handedOff);
-        expect(sheetShown, isFalse);
       });
     });
 
@@ -1366,7 +998,7 @@ void main() {
       }) => AuthService(
         licenseApiUrl: licenseApiUrl,
         storage: storage,
-        httpClient: MockClient((req) async {
+        httpClient: protocolClient((req) async {
           requests.add(req);
           if (req.url.path == '/api/auth/sign-in/social') {
             return http.Response(
@@ -1551,7 +1183,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: storage,
-            httpClient: MockClient((req) async {
+            httpClient: protocolClient((req) async {
               captured = req;
               return http.Response(jsonEncode({'user': {}}), 200);
             }),
@@ -1579,7 +1211,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async {
+          httpClient: protocolClient((req) async {
             requested = true;
             return http.Response('{}', 200);
           }),
@@ -1605,7 +1237,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: _InMemoryStorage(),
-            httpClient: MockClient((req) async {
+            httpClient: protocolClient((req) async {
               requested = true;
               return http.Response('{}', 200);
             }),
@@ -1637,7 +1269,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: storage,
-            httpClient: MockClient((req) async {
+            httpClient: protocolClient((req) async {
               captured = req;
               return http.Response(jsonEncode({'status': true}), 200);
             }),
@@ -1659,7 +1291,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async {
+          httpClient: protocolClient((req) async {
             captured = req;
             return http.Response(jsonEncode({'status': true}), 200);
           }),
@@ -1679,7 +1311,7 @@ void main() {
           final service = AuthService(
             licenseApiUrl: 'https://lic.test',
             storage: _InMemoryStorage(),
-            httpClient: MockClient(
+            httpClient: protocolClient(
               (req) async =>
                   http.Response(jsonEncode({'code': 'USER_NOT_FOUND'}), 400),
             ),
@@ -1687,9 +1319,12 @@ void main() {
 
           await expectLater(
             service.sendVerificationEmail('a@b.com'),
-            completes,
+            throwsA(isA<AuthException>()),
           );
-          await expectLater(service.requestPasswordReset('a@b.com'), completes);
+          await expectLater(
+            service.requestPasswordReset('a@b.com'),
+            throwsA(isA<AuthException>()),
+          );
         },
       );
 
@@ -1697,7 +1332,7 @@ void main() {
         final service = AuthService(
           licenseApiUrl: 'https://lic.test',
           storage: _InMemoryStorage(),
-          httpClient: MockClient((req) async => throw Exception('offline')),
+          httpClient: protocolClient((req) async => throw Exception('offline')),
         );
 
         // The distinction the swallow above must not eat: the request never

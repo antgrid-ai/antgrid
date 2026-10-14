@@ -60,6 +60,10 @@ export class AuthorizationLease {
       (endpointId === undefined || peer.endpoint?.endpointId === endpointId)) ?? false;
   }
 
+  names(deviceId: string, ed25519Pub: string): boolean {
+    return this.current?.peers.some((peer) => peer.deviceId === deviceId && peer.ed25519Pub === ed25519Pub) ?? false;
+  }
+
   /**
    * Drops the current snapshot but lets a request already in flight finish:
    * its answer is judged by the policy generation the server read, and one

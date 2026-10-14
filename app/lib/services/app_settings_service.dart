@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/environment.dart';
+import 'terminal_clipboard_coordinator.dart';
 import '../config/storage_scope.dart';
 import '../design/theme_presets.dart';
 import '../storage/scoped_prefs.dart';
@@ -18,6 +19,7 @@ final _kReduceMotion = scopedStorageKey('antgrid.reduce_motion.v1');
 final _kFollowSystemBrightness = scopedStorageKey(
   'antgrid.follow_system_brightness.v1',
 );
+final _kTerminalProgramCopies = scopedStorageKey('app.terminal.programCopies');
 final _kTelemetryEnabled = scopedStorageKey('app.telemetry.enabled');
 final _kSidebarHidden = scopedStorageKey('antgrid.sidebar_hidden.v1');
 final _kHideGitIgnoredFiles = scopedStorageKey(
@@ -37,6 +39,7 @@ final appSettingsPrefsKeys = <String>{
   _kReduceMotion,
   _kFollowSystemBrightness,
   _kTelemetryEnabled,
+  _kTerminalProgramCopies,
   _kSidebarHidden,
   _kHideGitIgnoredFiles,
 };
@@ -54,6 +57,7 @@ class AppSettings {
     this.reduceMotion = false,
     this.followSystemBrightness = false,
     this.telemetryEnabled = true,
+    this.terminalProgramCopies = true,
     this.sidebarHidden = false,
     this.hideGitIgnoredFiles = false,
   });
@@ -68,6 +72,7 @@ class AppSettings {
   final bool reduceMotion;
   final bool followSystemBrightness;
   final bool telemetryEnabled;
+  final bool terminalProgramCopies;
 
   /// Desktop projects-drawer visibility. App-wide rather than per-project (as
   /// `ProjectPreferences.panelMode` is): the drawer is how you MOVE between
@@ -102,6 +107,7 @@ class AppSettings {
     bool? reduceMotion,
     bool? followSystemBrightness,
     bool? telemetryEnabled,
+    bool? terminalProgramCopies,
     bool? sidebarHidden,
     bool? hideGitIgnoredFiles,
   }) {
@@ -119,6 +125,8 @@ class AppSettings {
       followSystemBrightness:
           followSystemBrightness ?? this.followSystemBrightness,
       telemetryEnabled: telemetryEnabled ?? this.telemetryEnabled,
+      terminalProgramCopies:
+          terminalProgramCopies ?? this.terminalProgramCopies,
       sidebarHidden: sidebarHidden ?? this.sidebarHidden,
       hideGitIgnoredFiles: hideGitIgnoredFiles ?? this.hideGitIgnoredFiles,
     );
@@ -146,6 +154,7 @@ class AppSettings {
       reduceMotion: prefs.getBool(_kReduceMotion) ?? false,
       followSystemBrightness: prefs.getBool(_kFollowSystemBrightness) ?? false,
       telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
+      terminalProgramCopies: prefs.getBool(_kTerminalProgramCopies) ?? true,
       sidebarHidden: prefs.getBool(_kSidebarHidden) ?? false,
       hideGitIgnoredFiles: prefs.getBool(_kHideGitIgnoredFiles) ?? false,
     );
@@ -159,7 +168,16 @@ class AppSettingsService extends Notifier<AppSettings> {
   final AppSettings _seed;
 
   @override
-  AppSettings build() => _seed;
+  AppSettings build() {
+    TerminalClipboardCoordinator.instance.allowed = _seed.terminalProgramCopies;
+    return _seed;
+  }
+
+  Future<void> setTerminalProgramCopies(bool enabled) async {
+    state = state.copyWith(terminalProgramCopies: enabled);
+    TerminalClipboardCoordinator.instance.allowed = enabled;
+    await _prefs.setBool(_kTerminalProgramCopies, enabled);
+  }
 
   /// Persists the relay URL. Returns `null` on success, or a human-readable
   /// error message if the URL is malformed — caught at input rather than
@@ -262,6 +280,7 @@ class AppSettingsService extends Notifier<AppSettings> {
 
   Future<void> reset() async {
     state = AppSettings.defaults;
+    TerminalClipboardCoordinator.instance.allowed = true;
     await Future.wait([
       _prefs.remove(_kDefaultRelayUrl),
       _prefs.remove(_kThemePreset),
@@ -273,6 +292,7 @@ class AppSettingsService extends Notifier<AppSettings> {
       _prefs.remove(_kReduceMotion),
       _prefs.remove(_kFollowSystemBrightness),
       _prefs.remove(_kTelemetryEnabled),
+      _prefs.remove(_kTerminalProgramCopies),
       _prefs.remove(_kSidebarHidden),
       _prefs.remove(_kHideGitIgnoredFiles),
     ]);

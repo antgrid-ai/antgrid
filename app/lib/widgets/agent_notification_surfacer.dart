@@ -276,8 +276,8 @@ class _AgentNotificationSurfacerState
     NotificationRoute? route,
   }) {
     if (shouldShowInAppToast(_lifecycle)) {
-      // Gate the chip on the route RESOLVING: an offer that opens nothing is
-      // worse than none. The OS payload is re-resolved at tap time instead.
+      // Gate the tap target on the route RESOLVING: a card that opens nothing
+      // is worse than a plain one. The OS payload is re-resolved at tap time instead.
       final destination = route == null
           ? null
           : resolveNotificationRoute(
@@ -302,8 +302,7 @@ class _AgentNotificationSurfacerState
           icon: AbIcons.bell,
           title: title,
           description: body,
-          actionLabel: 'Open',
-          onAction: () => detached(
+          onTap: () => detached(
             'AgentNotificationSurfacer',
             'notification route failed',
             () => applyNotificationRoute(toastContext, container, route!),

@@ -4,12 +4,13 @@
 import { test, expect, afterAll, beforeAll } from "bun:test";
 import { startServer, connect, connectHello, defaultConfig, waitForMessage } from "../helpers/relay-harness.js";
 import type { RelayServer } from "../../src/server.js";
+import type { PushSendOptions } from "../../src/push/delivery.js";
 
 let relay: RelayServer;
-const sent: Array<{ token: string; data: Record<string, string> }> = [];
+const sent: Array<{ token: string; data: Record<string, string>; opts?: PushSendOptions }> = [];
 const fcmSender = {
-  async send(token: string, data: Record<string, string>) {
-    sent.push({ token, data });
+  async send(token: string, data: Record<string, string>, opts?: PushSendOptions) {
+    sent.push({ token, data, opts });
     return "ok" as const;
   },
 };
@@ -32,6 +33,7 @@ test("authenticated agent push:deliver forwards to FCM and replies push:result",
   expect(sent).toHaveLength(1);
   expect(sent[0].token).toBe("tok-1");
   expect(sent[0].data).toEqual({ epk: "ZXBr", box: "Ym94" });
+  expect(sent[0].opts?.collapseKey).toBeUndefined();
   expect(result).toEqual({ type: "push:result", pushToken: "tok-1", ok: true });
   ws.close();
 });
@@ -132,4 +134,21 @@ test("push:deliver is rate-limited per (agent, token)", async () => {
 
   ws.close();
   r.stop();
+});
+
+test("push:deliver forwards collapseKey to the sender", async () => {
+  const { ws } = await connectHello(relay, { deviceId: "push-agent-collapse" });
+  const resultP = waitForMessage(ws);
+  ws.send(JSON.stringify({
+    type: "push:deliver",
+    pushToken: "tok-collapse",
+    provider: "fcm",
+    blob: { epk: "ZXBr", box: "Ym94" },
+    collapseKey: "thread_Key-1",
+  }));
+  expect(await resultP).toEqual({ type: "push:result", pushToken: "tok-collapse", ok: true });
+  const forwarded = sent.find((s) => s.token === "tok-collapse");
+  expect(forwarded?.opts).toEqual({ collapseKey: "thread_Key-1" });
+  expect(forwarded?.data).toEqual({ epk: "ZXBr", box: "Ym94" });
+  ws.close();
 });

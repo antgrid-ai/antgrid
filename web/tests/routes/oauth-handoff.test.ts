@@ -33,6 +33,25 @@ beforeEach(async () => {
 });
 
 describe("/oauth/handoff", () => {
+  test("stopping legacy issuance retains existing token redemption until the drain ends", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "legacy@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    const issued = await app.request("/oauth/handoff", { headers: { cookie } });
+    const token = new URL(issued.headers.get("location")!).searchParams.get("token");
+    const drain = buildTestApp(pg.db, pg.url, { envOverrides: { LEGACY_NATIVE_OAUTH_ISSUANCE: false } }).app;
+    expect((await drain.request("/oauth/handoff", { headers: { cookie } })).status).toBe(426);
+    expect((await drain.request("/api/auth/one-time-token/generate", { headers: { cookie } })).status).toBe(426);
+    expect((await drain.request("/api/auth/one-time-token/verify", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
+    })).status).toBe(200);
+    const disabled = buildTestApp(pg.db, pg.url, { envOverrides: { LEGACY_NATIVE_OAUTH: false } }).app;
+    expect((await disabled.request("/api/auth/one-time-token/verify", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
+    })).status).toBe(426);
+    expect((await disabled.request("/account/me", { headers: { cookie } })).status).toBe(200);
+  });
+
   test("mints a one-time token (not the raw session) that redeems to the user's session", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "alice@example.com");

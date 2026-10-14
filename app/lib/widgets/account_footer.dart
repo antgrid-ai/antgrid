@@ -98,7 +98,9 @@ class _AccountFooterState extends ConsumerState<AccountFooter> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (user != null) ...[
+                  // TEMP-PROMO: the pill renders nothing for a promotional
+                  // grant, so its spacer must go with it.
+                  if (user != null && !user.promotional) ...[
                     AuthStatusPill(user),
                     const SizedBox(width: AbTokens.space8),
                   ],

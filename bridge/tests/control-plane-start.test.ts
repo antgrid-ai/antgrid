@@ -47,6 +47,7 @@ function makeAuthenticatingRelayFactory() {
         return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
       sendPushDeliver: () => {},
+      accountDisowns: () => false,
     }) as unknown as RemoteHostConnection;
 }
 

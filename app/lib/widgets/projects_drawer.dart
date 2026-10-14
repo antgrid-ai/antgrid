@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_docked_column.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
@@ -22,6 +21,9 @@ import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
+import '../navigation/nav_controller.dart';
+import '../navigation/nav_location.dart';
+import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
@@ -237,6 +239,51 @@ class _NavActions extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final surface = ref.watch(workbenchSurfaceProvider);
+    final schedulerEnabled = !ref.watch(demoModeProvider);
+    void openScheduler() {
+      ref
+          .read(workbenchSurfaceProvider.notifier)
+          .set(WorkbenchSurface.scheduler);
+      ref
+          .read(navControllerProvider.notifier)
+          .commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+      closeDrawerIfOverlay(context);
+    }
+
+    Widget navigationRow({
+      required String label,
+      required String icon,
+      required bool selected,
+      required VoidCallback onTap,
+      bool enabled = true,
+    }) {
+      Widget row = AbListRow(
+        title: Text(label, style: AbTokens.sansStyle()),
+        leading: AbIcon(
+          icon,
+          size: AbTokens.iconButtonGlyph,
+          color: context.antgrid.textSecondary,
+        ),
+        density: AbRowDensity.sm,
+        horizontalPadding: AbTokens.space8,
+        selected: selected,
+        selectionStyle: AbRowSelection.surface,
+        hoverable: true,
+        enabled: enabled,
+        onTap: enabled ? onTap : null,
+      );
+      if (isMobilePlatform) {
+        row = ConstrainedBox(
+          constraints: const BoxConstraints(
+            minHeight: AbTokens.touchControlMin,
+          ),
+          child: row,
+        );
+      }
+      return Semantics(selected: selected, enabled: enabled, child: row);
+    }
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
@@ -246,12 +293,24 @@ class _NavActions extends ConsumerWidget {
       ),
       child: SizedBox(
         width: double.infinity,
-        child: AbButton(
-          label: 'New Session',
-          color: context.antgrid.accent,
-          fontSize: AbTokens.fontBody,
-          leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-          onTap: () => enterNewSession(ref.container),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            navigationRow(
+              label: 'New Session',
+              icon: AbIcons.add,
+              selected: surface == WorkbenchSurface.newSession,
+              onTap: () => enterNewSession(ref.container),
+            ),
+            const SizedBox(height: AbTokens.space4),
+            navigationRow(
+              label: 'Scheduler',
+              icon: AbIcons.calendar,
+              selected: surface == WorkbenchSurface.scheduler,
+              enabled: schedulerEnabled,
+              onTap: openScheduler,
+            ),
+          ],
         ),
       ),
     );

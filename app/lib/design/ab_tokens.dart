@@ -340,6 +340,7 @@ abstract final class AbTokens {
   // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers
   // are precise and dense toolbars must stay compact.
   static const tapTargetMin = 44.0;
+  static const touchControlMin = 48.0;
 
   // Status dots.
   static const double dotSizeSm = 6.0;

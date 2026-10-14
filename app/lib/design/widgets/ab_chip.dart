@@ -3,6 +3,8 @@ import 'package:flutter/widgets.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
+import 'ab_tap_target.dart';
+import 'ab_touch_sizing.dart';
 
 enum _AbChipVariant { system, label, toggle, choice }
 
@@ -110,6 +112,16 @@ class _AbChipState extends State<AbChip> {
     };
 
     final interactive = widget.enabled && widget.onTap != null;
+    if (widget.onTap != null) {
+      final extent = AbTouchSizing.extentOf(context);
+      chip = ConstrainedBox(
+        constraints: BoxConstraints(
+          minWidth: extent,
+          minHeight: AbCompactTapTargets.of(context) ? 0 : extent,
+        ),
+        child: Center(widthFactor: 1, heightFactor: 1, child: chip),
+      );
+    }
     if (!widget.enabled) {
       return Opacity(opacity: AbTokens.opacityDisabled, child: chip);
     }

@@ -59,13 +59,13 @@ void main() {
         'docs/commands.md',
       );
       expect(
-        resolve('../app/CLAUDE.md', from: 'docs/architecture.md').value,
-        'app/CLAUDE.md',
+        resolve('../app/AGENTS.md', from: 'docs/architecture.md').value,
+        'app/AGENTS.md',
       );
     });
 
     test('a leading slash means the project root', () {
-      expect(resolve('/CLAUDE.md', from: 'docs/a.md').value, 'CLAUDE.md');
+      expect(resolve('/AGENTS.md', from: 'docs/a.md').value, 'AGENTS.md');
     });
 
     test('a link climbing past the project root has no destination', () {

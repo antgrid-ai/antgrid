@@ -665,6 +665,20 @@ describe("FileWatcher", () => {
       watcher.stop();
     });
 
+    it("offers a markdown file outside the checkout for preview", async () => {
+      const watcher = newWatcher();
+      const printed = join(outsideDir, "plan.md");
+      writeFileSync(printed, "# Plan\n");
+
+      const reply = await watcher.resolvePath(printed, {}, new PathStatCache());
+
+      expect(reply.relPath).toBeNull();
+      expect(reply.externalImagePath).toBe(printed);
+      expect(reply.exists).toBe(true);
+
+      watcher.stop();
+    });
+
     it("does not let an image name stand for a file that is not one", async () => {
       const watcher = newWatcher();
       try {
@@ -822,13 +836,17 @@ describe("FileWatcher pause", () => {
     fw.startWatching();
     await new Promise((r) => setTimeout(r, 500));
     connState.appFocusPaused = true;
+    // macOS FSEvents replays the beforeEach write as an `added` update shortly
+    // after the watch starts; only what arrives after the pause is in question.
+    const emittedBeforePause = emitted.length;
+    const seqBeforePause = connState.fileSeq(tempDir);
 
     writeFileSync(join(tempDir, "new-file.txt"), "x");
     await new Promise((r) => setTimeout(r, 500));
 
-    const updates = emitted.filter((m) => m.type === "tree:update");
+    const updates = emitted.slice(emittedBeforePause).filter((m) => m.type === "tree:update");
     expect(updates.length).toBe(0);
-    expect(connState.fileSeq(tempDir)).toBeGreaterThan(0);
+    expect(connState.fileSeq(tempDir)).toBeGreaterThan(seqBeforePause);
     fw.stop();
   });
 
