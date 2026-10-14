@@ -305,6 +305,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
     // the reveal callback above: left published, the agent bar's workspace menu
     // would call setState on a disposed shell.
     final menuNotifier = ref.read(workspaceMenuControlProvider.notifier);
+    final tabCommandsNotifier = ref.read(
+      workspaceTabCommandsSuspendedProvider.notifier,
+    );
     // Left published, a stale `true` tells the focus binder the agent terminal
     // is still on screen while the New Session canvas is up — it keeps the
     // PREVIOUS session's terminal marked as viewed, and notifications for it
@@ -337,6 +340,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
         revealViewNotifier.set(null);
         visibleViewNotifier.set(null);
         menuNotifier.set(null);
+        tabCommandsNotifier.set(false);
         agentSurfaceNotifier.set(false);
         if (identical(
           container.read(openDrawerProvider),
@@ -1093,16 +1097,24 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
       });
     }
 
+    final tabCommandsSuspended = isMobile || surfaceChild != null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref
+          .read(workspaceTabCommandsSuspendedProvider.notifier)
+          .set(tabCommandsSuspended);
+    });
+
     // App-wide shortcuts (search, panes, tabs, back/forward) are dispatched by
     // AppShortcutScope, which the New Session route shares. Only what needs
     // this State is offered here.
     return AppCommandHandlers(
       handlers: {
-        AppCommand.toggleMaximizePanel: (isMobile || surfaceChild != null)
+        AppCommand.toggleMaximizePanel: tabCommandsSuspended
             ? null
             : _toggleMaximizeContextPanel,
         for (final entry in _tabCommandFallbacks.entries)
-          entry.key: (isMobile || surfaceChild != null) ? null : entry.value,
+          entry.key: tabCommandsSuspended ? null : entry.value,
       },
       // Android 15 forces edge-to-edge (targetSdk 35+): system bars are
       // transparent and we draw behind them. Without this the header collides

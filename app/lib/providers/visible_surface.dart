@@ -297,6 +297,13 @@ typedef WorkspaceMenuControl = ({
   void Function(WorkspaceView) reveal,
 });
 
+/// True while WorkspaceShell withdraws the commands a workspace tab owns
+/// (new terminal, go to file, search in files): at phone width, and behind a
+/// workbench surface. A tab registers its handlers after the shell, so it
+/// outranks the shell's own null and has to read this to step aside itself.
+final workspaceTabCommandsSuspendedProvider =
+    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+
 final workspaceMenuControlProvider =
     NotifierProvider<
       ValueController<WorkspaceMenuControl?>,

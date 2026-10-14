@@ -226,10 +226,12 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files;
 
+    final commandsSuspended = ref.watch(workspaceTabCommandsSuspendedProvider);
+
     return AppCommandHandlers(
       handlers: {
-        AppCommand.goToFile: _goToFile,
-        AppCommand.searchInFiles: _searchInFiles,
+        AppCommand.goToFile: commandsSuspended ? null : _goToFile,
+        AppCommand.searchInFiles: commandsSuspended ? null : _searchInFiles,
       },
       child: BackHandler(
         priority: BackPriority.fileViewer,

@@ -76,7 +76,16 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
   Widget build(BuildContext context) {
     final sidebar = ref.watch(sidebarControlProvider);
     final panel = ref.watch(contextPanelControlProvider);
-    final canCycle = _cycleCandidates().length > 1;
+    // Only the yes/no: watching the list itself rebuilt this root scope on
+    // every status or title change in the focused project.
+    final regId = ref.watch(selectedRegistrationIdProvider);
+    final canCycle =
+        regId != null &&
+        ref.watch(
+          sessionsForEntryProvider(
+            regId,
+          ).select((all) => _cycleCandidates(all).length > 1),
+        );
 
     return AppCommandHandlers(
       handlers: {
@@ -134,11 +143,8 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
   /// The focused project's sessions in drawer order — the list the user sees
   /// the chord walk through. A session mid-delete stays in the drawer but can
   /// never be focused, so it is stepped over.
-  List<SessionEntry> _cycleCandidates() {
-    final regId = ref.watch(selectedRegistrationIdProvider);
-    if (regId == null) return const [];
-    return ref
-        .watch(sessionsForEntryProvider(regId))
+  static List<SessionEntry> _cycleCandidates(List<SessionEntry> all) {
+    return all
         .whereVisibleInDrawer()
         .where((s) => !s.deleting)
         .toList(growable: false);
@@ -147,11 +153,9 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
   void _cycleSession(int delta) {
     final regId = ref.read(selectedRegistrationIdProvider);
     if (regId == null) return;
-    final sessions = ref
-        .read(sessionsForEntryProvider(regId))
-        .whereVisibleInDrawer()
-        .where((s) => !s.deleting)
-        .toList(growable: false);
+    final sessions = _cycleCandidates(
+      ref.read(sessionsForEntryProvider(regId)),
+    );
     if (sessions.length < 2) return;
     final current = sessions.indexWhere(
       (s) => s.id == ref.read(activeSessionIdProvider),

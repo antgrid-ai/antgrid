@@ -155,9 +155,11 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     final atLimit = tabs.length >= _maxAdHocTerminals;
     final menu = ref.watch(workspaceMenuControlProvider);
 
+    final suspended = ref.watch(workspaceTabCommandsSuspendedProvider);
+
     return AppCommandHandlers(
       handlers: {
-        AppCommand.newTerminal: atLimit
+        AppCommand.newTerminal: atLimit || suspended
             ? null
             : () {
                 menu?.reveal(WorkspaceView.terminals);

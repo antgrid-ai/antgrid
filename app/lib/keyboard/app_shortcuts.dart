@@ -136,41 +136,17 @@ class KeyChord {
 
   /// `Ctrl+Shift+K` off Apple platforms, `⇧⌘K` on them (Apple's own modifier
   /// order: ⌃⌥⇧⌘).
-  String label({required bool apple}) {
-    final name = _keyName(key, apple: apple);
-    if (apple) {
-      return '${control ? '⌃' : ''}${alt ? '⌥' : ''}${shift ? '⇧' : ''}'
-          '${meta ? '⌘' : ''}$name';
-    }
-    return [
-      if (control) 'Ctrl',
-      if (alt) 'Alt',
-      if (shift) 'Shift',
-      if (meta) 'Win',
-      name,
-    ].join('+');
-  }
+  String label({required bool apple}) =>
+      keyCaps(apple: apple).join(apple ? '' : '+');
 
   /// [label] split into one string per key, for [AbKbdGroup].
-  List<String> keyCaps({required bool apple}) {
-    final name = _keyName(key, apple: apple);
-    if (apple) {
-      return [
-        if (control) '⌃',
-        if (alt) '⌥',
-        if (shift) '⇧',
-        if (meta) '⌘',
-        name,
-      ];
-    }
-    return [
-      if (control) 'Ctrl',
-      if (alt) 'Alt',
-      if (shift) 'Shift',
-      if (meta) 'Win',
-      name,
-    ];
-  }
+  List<String> keyCaps({required bool apple}) => [
+    if (control) apple ? '⌃' : 'Ctrl',
+    if (alt) apple ? '⌥' : 'Alt',
+    if (shift) apple ? '⇧' : 'Shift',
+    if (meta) apple ? '⌘' : 'Win',
+    _keyName(key, apple: apple),
+  ];
 
   static String _keyName(LogicalKeyboardKey key, {required bool apple}) {
     final special = <LogicalKeyboardKey, (String, String)>{

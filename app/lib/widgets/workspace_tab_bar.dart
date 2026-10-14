@@ -101,11 +101,18 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowLeft ||
         key == LogicalKeyboardKey.arrowRight) {
+      if (views.isEmpty) return KeyEventResult.ignored;
       final step = key == LogicalKeyboardKey.arrowRight ? 1 : -1;
-      widget.onSelected(views[(i + step) % views.length]);
+      // A selection the strip no longer shows (Handler just hidden) steps in
+      // from the matching end rather than from an index that is not there.
+      final next = i < 0
+          ? (step > 0 ? 0 : views.length - 1)
+          : (i + step) % views.length;
+      widget.onSelected(views[next]);
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.home || key == LogicalKeyboardKey.end) {
+      if (views.isEmpty) return KeyEventResult.ignored;
       widget.onSelected(
         key == LogicalKeyboardKey.home ? views.first : views.last,
       );

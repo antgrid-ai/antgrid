@@ -11,6 +11,7 @@ import '../design/ab_theme.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_toast.dart';
@@ -176,8 +177,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           body:
               message ??
               'Your account still has team members. Remove them on the Team '
-              'page, or contact support to transfer ownership, before deleting '
-              'your account.',
+                  'page, or contact support to transfer ownership, before deleting '
+                  'your account.',
           confirmLabel: 'Manage team',
         );
         if (!mounted) return;
@@ -191,7 +192,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           body:
               message ??
               'Something on your account has to be resolved first. Your '
-              'account page says what it is.',
+                  'account page says what it is.',
           confirmLabel: 'Open account',
         );
         if (!mounted) return;
@@ -586,45 +587,37 @@ class _ShortcutsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
     final sheet = shortcutLabel(AppCommand.showShortcuts);
-    return InkWell(
+    return AbListRow(
       onTap: onTap,
-      borderRadius: AbTokens.borderRadius,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'View all shortcuts',
-                    style: AbTokens.sansStyle(color: antgrid.textPrimary),
-                  ),
-                  const SizedBox(height: AbTokens.space2),
-                  Text(
-                    'Every key the app answers to, searchable.',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXxs,
-                      color: antgrid.textMuted,
-                    ),
-                  ),
-                ],
+      hoverable: true,
+      horizontalPadding: 0,
+      verticalPadding: AbTokens.space8,
+      title: Text(
+        'View all shortcuts',
+        style: AbTokens.sansStyle(color: antgrid.textPrimary),
+      ),
+      subtitle: Text(
+        'Every key the app answers to, searchable.',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXxs,
+          color: antgrid.textMuted,
+        ),
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (sheet != null) ...[
+            Text(
+              sheet,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXxs,
+                color: antgrid.textMuted,
               ),
             ),
-            if (sheet != null) ...[
-              Text(
-                sheet,
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: antgrid.textMuted,
-                ),
-              ),
-              const SizedBox(width: AbTokens.space8),
-            ],
-            AbIcon(AbIcons.chevronRight, size: 12, color: antgrid.textMuted),
+            const SizedBox(width: AbTokens.space8),
           ],
-        ),
+          AbIcon(AbIcons.chevronRight, size: 12, color: antgrid.textMuted),
+        ],
       ),
     );
   }

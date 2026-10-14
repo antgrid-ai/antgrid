@@ -403,7 +403,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // controller's loadedOwner is always its lastAppliedOwner.
       if (s.originPort > 0 &&
           (s.controller != null || s.pendingLoadUrl != null))
-        s.originPort: (s.loadedOwner ?? s.lastAppliedOwner) == s.lastAppliedOwner
+        s.originPort:
+            (s.loadedOwner ?? s.lastAppliedOwner) == s.lastAppliedOwner
             ? s.lastAppliedOwner!
             : PreviewOriginOwnerStore.unsettled,
   };
@@ -804,16 +805,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (!ok || !mounted) return;
     final status = await _siteData.clearManually();
     if (!mounted) return;
-    showAbToast(
-      context,
-      switch (status) {
-        PreviewClearStatus.cleared => 'Preview site data cleared',
-        PreviewClearStatus.partial =>
-          'Preview site data partly cleared: this device keeps some of it',
-        PreviewClearStatus.failed => "Couldn't clear preview site data",
-        PreviewClearStatus.refused => kDemoRefusalText,
-      },
-    );
+    showAbToast(context, switch (status) {
+      PreviewClearStatus.cleared => 'Preview site data cleared',
+      PreviewClearStatus.partial =>
+        'Preview site data partly cleared: this device keeps some of it',
+      PreviewClearStatus.failed => "Couldn't clear preview site data",
+      PreviewClearStatus.refused => kDemoRefusalText,
+    });
   }
 
   Future<void> _openDesktopMoreMenu() async {
@@ -1435,35 +1433,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final showOpenExternal = !isMobilePlatform;
 
     // Reaches only as far as Flutter's focus does: once the user clicks into
-    // the page itself, the WebView owns the keyboard natively.
-    return CallbackShortcuts(
-      bindings: localShortcutBindings({
-        AppCommand.focusAddressBar: () {
-          _addrFocus.requestFocus();
-          _addrController.selection = TextSelection(
-            baseOffset: 0,
-            extentOffset: _addrController.text.length,
-          );
-        },
-        if (activeState != null)
-          AppCommand.refresh: () => activeState.controller?.reload(),
-        if (activeState?.controller != null)
-          AppCommand.hardRefresh: () =>
-              detached('PreviewScreen', 'hard refresh failed', () async {
-                final controller = activeState!.controller!;
-                await controller.clearCache();
-                await controller.reload();
-              }),
-        if (preview != null) AppCommand.newPreviewTab: _startComposingNewTab,
-        if (activeTab != null) AppCommand.closePreviewTab: _closeActiveTab,
-        if ((activeState?.canGoForward ?? false) &&
-            activeState?.controller != null)
-          AppCommand.previewForward: () => detached(
-            'PreviewScreen',
-            'page forward failed',
-            () async => activeState!.controller!.goForward(),
-          ),
-      }),
+    // the page itself, the WebView owns the keyboard natively. Rebuilt on the
+    // address bar's focus so its caret keys stay the text field's.
+    return ListenableBuilder(
+      listenable: _addrFocus,
       child: _buildToolbarAndBody(
         state: state,
         preview: preview,
@@ -1471,6 +1444,44 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         activeState: activeState,
         captureInFlight: captureInFlight,
         showOpenExternal: showOpenExternal,
+      ),
+      builder: (context, child) => CallbackShortcuts(
+        bindings: localShortcutBindings({
+          AppCommand.focusAddressBar: () {
+            _addrFocus.requestFocus();
+            _addrController.selection = TextSelection(
+              baseOffset: 0,
+              extentOffset: _addrController.text.length,
+            );
+          },
+          // The controller is read at the key press, not here: the WebView can
+          // be torn down between this build and the chord.
+          if (activeState != null)
+            AppCommand.refresh: () =>
+                detached('PreviewScreen', 'refresh failed', () async {
+                  await activeState.controller?.reload();
+                }),
+          if (activeState?.controller != null)
+            AppCommand.hardRefresh: () =>
+                detached('PreviewScreen', 'hard refresh failed', () async {
+                  final controller = activeState!.controller;
+                  if (controller == null) return;
+                  await controller.clearCache();
+                  await controller.reload();
+                }),
+          if (preview != null) AppCommand.newPreviewTab: _startComposingNewTab,
+          if (activeTab != null) AppCommand.closePreviewTab: _closeActiveTab,
+          // ⌘→ / Alt+→ also move the caret, so the address bar keeps them.
+          if ((activeState?.canGoForward ?? false) &&
+              activeState?.controller != null &&
+              !_addrFocus.hasFocus)
+            AppCommand.previewForward: () => detached(
+              'PreviewScreen',
+              'page forward failed',
+              () async => activeState!.controller?.goForward(),
+            ),
+        }),
+        child: child!,
       ),
     );
   }
@@ -2051,10 +2062,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
     }
     return Stack(
-      children: [
-        content,
-        if (tabState?.loading ?? false) _loadingRule,
-      ],
+      children: [content, if (tabState?.loading ?? false) _loadingRule],
     );
   }
 }
