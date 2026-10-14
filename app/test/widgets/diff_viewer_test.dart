@@ -1,8 +1,11 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_scrollbar.dart';
+import 'package:antgrid/keyboard/app_command_registry.dart';
+import 'package:antgrid/keyboard/app_shortcuts.dart';
 import 'package:antgrid/widgets/code_syntax.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
 
@@ -27,6 +30,17 @@ index 1111111..2222222 100644
 /// Long enough to outrun any pane in these tests, so the vertical list has
 /// somewhere to creep to. The short `}` line comes first, where it stays on
 /// screen at scroll offset zero.
+/// Two runs of changes far enough apart that each is its own stop.
+final _twoChanges =
+    '''
+@@ -1,62 +1,62 @@
+${List.generate(20, (i) => ' a = $i;').join('\n')}
++first change
+${List.generate(20, (i) => ' b = $i;').join('\n')}
+-second change
+${List.generate(20, (i) => ' c = $i;').join('\n')}
+''';
+
 final _tallDiff =
     '''
 @@ -1,32 +1,32 @@
@@ -44,23 +58,25 @@ Widget _host({
   int deletions = 1,
   VoidCallback? onViewFile,
   TextScaler textScaler = TextScaler.noScaling,
-}) => MaterialApp(
-  home: Scaffold(
-    body: Center(
-      child: MediaQuery(
-        data: MediaQueryData(textScaler: textScaler),
-        child: SizedBox(
-          width: width,
-          height: height,
-          child: DiffViewer(
-            path: path,
-            gitStatus: 'M',
-            diff: diff ?? _diff,
-            additions: additions,
-            deletions: deletions,
-            onViewFile: onViewFile ?? () {},
-            onClose: () {},
-            onSendToAgent: (context, message) async {},
+}) => ProviderScope(
+  child: MaterialApp(
+    home: Scaffold(
+      body: Center(
+        child: MediaQuery(
+          data: MediaQueryData(textScaler: textScaler),
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: DiffViewer(
+              path: path,
+              gitStatus: 'M',
+              diff: diff ?? _diff,
+              additions: additions,
+              deletions: deletions,
+              onViewFile: onViewFile ?? () {},
+              onClose: () {},
+              onSendToAgent: (context, message) async {},
+            ),
           ),
         ),
       ),
@@ -205,23 +221,25 @@ void main() {
       final controller = PageController();
       addTearDown(controller.dispose);
       await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: PageView(
-              controller: controller,
-              children: [
-                const SizedBox.expand(),
-                DiffViewer(
-                  path: 'lib/a.dart',
-                  gitStatus: 'M',
-                  diff: _diff,
-                  additions: 1,
-                  deletions: 1,
-                  onViewFile: () {},
-                  onClose: () {},
-                  onSendToAgent: (context, message) async {},
-                ),
-              ],
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: PageView(
+                controller: controller,
+                children: [
+                  const SizedBox.expand(),
+                  DiffViewer(
+                    path: 'lib/a.dart',
+                    gitStatus: 'M',
+                    diff: _diff,
+                    additions: 1,
+                    deletions: 1,
+                    onViewFile: () {},
+                    onClose: () {},
+                    onSendToAgent: (context, message) async {},
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -387,9 +405,7 @@ void main() {
       expect(find.text('assets/logo.png'), findsOneWidget);
     });
 
-    testWidgets('the binary placeholder action opens the file', (
-      tester,
-    ) async {
+    testWidgets('the binary placeholder action opens the file', (tester) async {
       var viewed = 0;
       await tester.pumpWidget(
         binaryHost(width: 600, onViewFile: () => viewed++),
@@ -418,6 +434,49 @@ void main() {
 
       expect(wide, greaterThan(find.text('View file').evaluate().length));
       expect(find.widgetWithText(AbButton, 'View file'), findsOneWidget);
+    });
+  });
+
+  group('next and previous change', () {
+    AppCommandRegistry registryOf(WidgetTester tester) =>
+        ProviderScope.containerOf(
+          tester.element(find.byType(DiffViewer)),
+        ).read(appCommandRegistryProvider);
+
+    testWidgets('walk the runs of changes and wrap at the ends', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_host(diff: _twoChanges, height: 200));
+      await tester.pumpAndSettle();
+      final registry = registryOf(tester);
+      double down() => _axis(tester, AxisDirection.down).pixels;
+      expect(down(), 0);
+
+      registry.run(AppCommand.nextChange);
+      await tester.pumpAndSettle();
+      final first = down();
+      expect(first, greaterThan(0));
+
+      registry.run(AppCommand.nextChange);
+      await tester.pumpAndSettle();
+      expect(down(), greaterThan(first));
+
+      // Past the last run, Next comes back round to the first.
+      registry.run(AppCommand.nextChange);
+      await tester.pumpAndSettle();
+      expect(down(), first);
+
+      registry.run(AppCommand.previousChange);
+      await tester.pumpAndSettle();
+      expect(down(), greaterThan(first));
+    });
+
+    testWidgets('a diff with no changes offers neither', (tester) async {
+      await tester.pumpWidget(_host(diff: '@@ -1,1 +1,1 @@\n same\n'));
+      await tester.pumpAndSettle();
+      final registry = registryOf(tester);
+      expect(registry.handlerFor(AppCommand.nextChange), isNull);
+      expect(registry.handlerFor(AppCommand.previousChange), isNull);
     });
   });
 }

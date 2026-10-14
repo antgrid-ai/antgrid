@@ -243,7 +243,7 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       await pumpAt(tester, 1400);
       expect(find.byKey(WindowTitleBarContents.searchSlotKey), findsOneWidget);
-      expect(find.text('Search sessions…'), findsOneWidget);
+      expect(find.textContaining('Search sessions…'), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

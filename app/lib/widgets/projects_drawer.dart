@@ -54,6 +54,8 @@ import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'session_row.dart';
 import 'update_row.dart';
+import '../keyboard/focus_regions.dart';
+import '../keyboard/app_shortcuts.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
 /// and paired remote agents merged by last-access. Width is fixed at 288px on
@@ -102,7 +104,10 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      FocusArea(area: AppFocusArea.projects, child: _buildDrawer(context));
+
+  Widget _buildDrawer(BuildContext context) {
     // Unfiltered by design. The session search lives in the window title bar
     // and aims at the Recent list, which is the complete flat view of sessions;
     // narrowing THIS list by its projects' sessions only hid rows the user was
@@ -257,9 +262,23 @@ class _NavActions extends ConsumerWidget {
       required bool selected,
       required VoidCallback onTap,
       bool enabled = true,
+      AppCommand? command,
     }) {
+      // Desktop only: a phone has no keyboard to press it on.
+      final keys = command == null || isMobilePlatform
+          ? null
+          : shortcutLabel(command);
       Widget row = AbListRow(
         title: Text(label, style: AbTokens.sansStyle()),
+        trailing: keys == null
+            ? null
+            : Text(
+                keys,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: context.antgrid.textMuted,
+                ),
+              ),
         leading: AbIcon(
           icon,
           size: AbTokens.iconButtonGlyph,
@@ -301,6 +320,7 @@ class _NavActions extends ConsumerWidget {
               icon: AbIcons.add,
               selected: surface == WorkbenchSurface.newSession,
               onTap: () => enterNewSession(ref.container),
+              command: AppCommand.newSession,
             ),
             const SizedBox(height: AbTokens.space4),
             navigationRow(

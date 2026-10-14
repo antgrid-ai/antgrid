@@ -4,7 +4,10 @@
 // assertion here — a single missed guard is a sample project the user finds
 // sitting in their drawer after a relaunch.
 import 'package:antgrid/analytics/analytics_service.dart';
+import 'package:antgrid/config/storage_scope.dart';
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/keyboard/app_shortcuts.dart';
+import 'package:antgrid/keyboard/user_keybindings.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
 import 'package:antgrid/main.dart' show telemetryAllowed;
 import 'package:antgrid/models/preferences_models.dart';
@@ -36,7 +39,9 @@ import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/storage/project_store.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -362,6 +367,28 @@ void main() {
     await store.write(<String>{'real-project', kDemoProjectId});
 
     expect(store.read(), <String>{'real-project'});
+  });
+
+  test('keyboard rebindings stay in memory while the demo is on', () async {
+    useInMemoryPrefs();
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    addTearDown(() => applyUserKeybindings(const {}));
+    container.read(demoModeProvider.notifier).set(true);
+
+    container
+        .read(userKeybindingsProvider.notifier)
+        .bind(
+          AppCommand.toggleSidebar,
+          const KeyChord(LogicalKeyboardKey.keyY, control: true, shift: true),
+        );
+    await pumpEventQueue();
+
+    expect(container.read(userKeybindingsProvider), isNotEmpty);
+    final prefs = SharedPreferencesAsync(
+      options: desktopSharedPreferencesOptions,
+    );
+    expect(await prefs.getKeys(), isEmpty);
   });
 
   test('the preview origin owner store drops the demo', () async {

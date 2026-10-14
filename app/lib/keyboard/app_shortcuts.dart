@@ -9,6 +9,8 @@ enum AppCommandGroup {
   keyboard('Moving around'),
   layout('Layout'),
   session('Session'),
+  terminal('Terminal'),
+  chat('Chat'),
   files('Files'),
   panels('Git & preview'),
   dialogs('Dialogs');
@@ -27,6 +29,7 @@ enum AppCommand {
   newSession('New session', AppCommandGroup.general),
   openSettings('Settings', AppCommandGroup.general),
   showShortcuts('Keyboard shortcuts', AppCommandGroup.general),
+  commandPalette('Command palette', AppCommandGroup.general),
 
   moveFocus('Move between rows and tabs', AppCommandGroup.keyboard),
   expandCollapse(
@@ -34,19 +37,44 @@ enum AppCommand {
     AppCommandGroup.keyboard,
   ),
   activate('Open the focused row / enter a tab', AppCommandGroup.keyboard),
+  focusAgent('Focus the agent', AppCommandGroup.keyboard),
+  focusNextArea(
+    'Focus the next area (projects, agent, context panel)',
+    AppCommandGroup.keyboard,
+  ),
+  focusPreviousArea('Focus the previous area', AppCommandGroup.keyboard),
 
   goBack('Back', AppCommandGroup.navigation),
   goForward('Forward', AppCommandGroup.navigation),
   nextSession('Next session', AppCommandGroup.navigation),
   previousSession('Previous session', AppCommandGroup.navigation),
+  goToSession(
+    'Go to session 1–8, or the last one',
+    AppCommandGroup.navigation,
+    range: true,
+  ),
 
   toggleSidebar('Show/hide projects', AppCommandGroup.layout),
   toggleContextPanel('Show/hide context panel', AppCommandGroup.layout),
   toggleMaximizePanel('Maximize/restore context panel', AppCommandGroup.layout),
+  showPreviewTab('Show the Preview tab', AppCommandGroup.layout),
+  showFilesTab('Show the Files tab', AppCommandGroup.layout),
+  showGitTab('Show the Git tab', AppCommandGroup.layout),
+  showTerminalsTab('Show the Terminals tab', AppCommandGroup.layout),
+  showHandlerTab('Show the Handler tab', AppCommandGroup.layout),
 
   toggleSessionMode('Switch chat/terminal', AppCommandGroup.session),
-  newTerminal('New terminal', AppCommandGroup.session),
-  stopAgent('Stop the agent (chat composer)', AppCommandGroup.session),
+  newTerminal('New terminal', AppCommandGroup.terminal),
+  nextTerminal('Next terminal tab', AppCommandGroup.terminal),
+  previousTerminal('Previous terminal tab', AppCommandGroup.terminal),
+  terminalCopy('Copy the selection', AppCommandGroup.terminal),
+  terminalPaste('Paste', AppCommandGroup.terminal),
+  terminalHistory('Browse history', AppCommandGroup.terminal),
+
+  sendMessage('Send the message', AppCommandGroup.chat),
+  messageNewline('New line', AppCommandGroup.chat),
+  acceptSuggestion('Accept a / or @ suggestion', AppCommandGroup.chat),
+  stopAgent('Stop the agent', AppCommandGroup.chat),
 
   goToFile('Filter files', AppCommandGroup.files),
   searchInFiles('Search in files', AppCommandGroup.files),
@@ -54,20 +82,34 @@ enum AppCommand {
   findNext('Next match', AppCommandGroup.files),
   findPrevious('Previous match', AppCommandGroup.files),
   closeFile('Close file', AppCommandGroup.files),
+  copyFilePath('Copy file path', AppCommandGroup.files),
+  copyRelativePath('Copy relative file path', AppCommandGroup.files),
+  nextChange('Next change in a diff', AppCommandGroup.files),
+  previousChange('Previous change in a diff', AppCommandGroup.files),
 
   refresh('Refresh', AppCommandGroup.panels),
   hardRefresh('Refresh, bypassing the cache', AppCommandGroup.panels),
   focusAddressBar('Preview address bar', AppCommandGroup.panels),
   newPreviewTab('New preview tab', AppCommandGroup.panels),
   closePreviewTab('Close preview tab', AppCommandGroup.panels),
+  previewBack('Preview: page back', AppCommandGroup.panels),
   previewForward('Preview: page forward', AppCommandGroup.panels),
+  nextPreviewTab('Next preview tab', AppCommandGroup.panels),
+  previousPreviewTab('Previous preview tab', AppCommandGroup.panels),
+  openPreviewInBrowser('Open preview in the browser', AppCommandGroup.panels),
+  commit('Commit staged changes', AppCommandGroup.panels),
 
   confirmDialog('Confirm', AppCommandGroup.dialogs),
   dismiss('Cancel / close', AppCommandGroup.dialogs);
 
-  const AppCommand(this.label, this.group);
+  const AppCommand(this.label, this.group, {this.range = false});
   final String label;
   final AppCommandGroup group;
+
+  /// Bound to a run of keys (1–9) rather than one chord: the sheet shows the
+  /// first and last instead of every one, and the handler reads which was
+  /// pressed from `AppCommandRegistry.dispatchingChordIndex`.
+  final bool range;
 }
 
 /// How far a chord reaches.
@@ -117,15 +159,37 @@ class KeyChord {
       SingleActivator(k, control: control, shift: shift, alt: alt, meta: meta),
   ];
 
+  /// Punctuation chords also match by the key's US-layout POSITION: on a
+  /// German, French or Nordic layout the key that types `/[/] on US types
+  /// something else (often a dead key), so matching the character alone would
+  /// leave those chords unpressable. The same rule VS Code and browsers use.
+  static final Map<LogicalKeyboardKey, PhysicalKeyboardKey> _byPosition = {
+    LogicalKeyboardKey.backquote: PhysicalKeyboardKey.backquote,
+    LogicalKeyboardKey.slash: PhysicalKeyboardKey.slash,
+    LogicalKeyboardKey.comma: PhysicalKeyboardKey.comma,
+    LogicalKeyboardKey.bracketLeft: PhysicalKeyboardKey.bracketLeft,
+    LogicalKeyboardKey.bracketRight: PhysicalKeyboardKey.bracketRight,
+    // AZERTY puts symbols, not digits, on the unshifted digit row.
+    LogicalKeyboardKey.digit1: PhysicalKeyboardKey.digit1,
+    LogicalKeyboardKey.digit2: PhysicalKeyboardKey.digit2,
+    LogicalKeyboardKey.digit3: PhysicalKeyboardKey.digit3,
+    LogicalKeyboardKey.digit4: PhysicalKeyboardKey.digit4,
+    LogicalKeyboardKey.digit5: PhysicalKeyboardKey.digit5,
+    LogicalKeyboardKey.digit6: PhysicalKeyboardKey.digit6,
+    LogicalKeyboardKey.digit7: PhysicalKeyboardKey.digit7,
+    LogicalKeyboardKey.digit8: PhysicalKeyboardKey.digit8,
+    LogicalKeyboardKey.digit9: PhysicalKeyboardKey.digit9,
+  };
+
   /// Matches key-down AND repeat: a held global chord's repeats must be
   /// swallowed too, or the terminal behind it receives them.
-
   bool accepts(KeyEvent event, HardwareKeyboard keyboard) {
     if (event is KeyUpEvent) return false;
     if (event.logicalKey != key &&
         // Numpad Enter is the same key to a user.
         !(key == LogicalKeyboardKey.enter &&
-            event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+            event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
+        !(_byPosition[key] != null && event.physicalKey == _byPosition[key])) {
       return false;
     }
     return keyboard.isControlPressed == control &&
@@ -135,7 +199,7 @@ class KeyChord {
   }
 
   /// `Ctrl+Shift+K` off Apple platforms, `⇧⌘K` on them (Apple's own modifier
-  /// order: ⌃⌥⇧⌘).
+  /// order: ⌃⌥⇧⌘). The meta key reads Win on Windows and Super on Linux.
   String label({required bool apple}) =>
       keyCaps(apple: apple).join(apple ? '' : '+');
 
@@ -144,7 +208,12 @@ class KeyChord {
     if (control) apple ? '⌃' : 'Ctrl',
     if (alt) apple ? '⌥' : 'Alt',
     if (shift) apple ? '⇧' : 'Shift',
-    if (meta) apple ? '⌘' : 'Win',
+    if (meta)
+      apple
+          ? '⌘'
+          : defaultTargetPlatform == TargetPlatform.linux
+          ? 'Super'
+          : 'Win',
     _keyName(key, apple: apple),
   ];
 
@@ -159,6 +228,7 @@ class KeyChord {
       LogicalKeyboardKey.arrowDown: ('↓', '↓'),
       LogicalKeyboardKey.pageUp: ('PgUp', '⇞'),
       LogicalKeyboardKey.pageDown: ('PgDn', '⇟'),
+      LogicalKeyboardKey.insert: ('Ins', 'Ins'),
       LogicalKeyboardKey.comma: (',', ','),
       LogicalKeyboardKey.slash: ('/', '/'),
       LogicalKeyboardKey.backquote: ('`', '`'),
@@ -202,8 +272,98 @@ bool isApplePlatform([TargetPlatform? platform]) {
 /// plainly.
 ///
 /// Alt+←/→ stay [ChordReach.focused]: shells use them to move by word.
-Map<AppCommand, List<KeyChord>> appShortcutChords([TargetPlatform? platform]) =>
-    isApplePlatform(platform) ? _appleChords : _otherChords;
+Map<AppCommand, List<KeyChord>> appShortcutChords([TargetPlatform? platform]) {
+  final p = platform ?? defaultTargetPlatform;
+  final base = isApplePlatform(p)
+      ? _appleChords
+      : p == TargetPlatform.linux
+      ? _linuxChords
+      : _otherChords;
+  // The user's rebindings were recorded on this machine's keyboard, so they
+  // apply to its own table only — never to another family listed for reference.
+  if (_userOverrides.isEmpty || p != defaultTargetPlatform) return base;
+  return _merged[base] ??= {
+    ...base,
+    for (final MapEntry(key: command, value: chord) in _userOverrides.entries)
+      command: [
+        KeyChord(
+          chord.key,
+          control: chord.control,
+          shift: chord.shift,
+          alt: chord.alt,
+          meta: chord.meta,
+          // A rebinding changes the keys, never how far they reach.
+          reach: base[command]?.first.reach ?? ChordReach.global,
+        ),
+      ],
+  };
+}
+
+/// The commands a user may rebind. Excluded: keys handled by code that does
+/// not read this table (the terminal's copy/paste, the composer's Enter, list
+/// and dialog navigation) — a rebinding there would show a key that does
+/// nothing — and the 1–9 run, which is one command per digit.
+bool isRebindable(AppCommand command) =>
+    !command.range && !_fixedCommands.contains(command);
+
+const _fixedCommands = {
+  AppCommand.moveFocus,
+  AppCommand.expandCollapse,
+  AppCommand.activate,
+  AppCommand.terminalCopy,
+  AppCommand.terminalPaste,
+  AppCommand.terminalHistory,
+  AppCommand.sendMessage,
+  AppCommand.messageNewline,
+  AppCommand.acceptSuggestion,
+  AppCommand.stopAgent,
+  AppCommand.confirmDialog,
+  AppCommand.dismiss,
+};
+
+Map<AppCommand, KeyChord> _userOverrides = const {};
+final _merged = Expando<Map<AppCommand, List<KeyChord>>>();
+
+/// The user's rebindings in force, one chord per command replacing all of its
+/// defaults. Set by `UserKeybindings`; read through [appShortcutChords].
+Map<AppCommand, KeyChord> get userKeybindings => _userOverrides;
+
+void applyUserKeybindings(Map<AppCommand, KeyChord> overrides) {
+  _userOverrides = Map.unmodifiable({
+    for (final e in overrides.entries)
+      if (isRebindable(e.key)) e.key: e.value,
+  });
+  _merged[_appleChords] = null;
+  _merged[_linuxChords] = null;
+  _merged[_otherChords] = null;
+}
+
+const _digits = [
+  LogicalKeyboardKey.digit1,
+  LogicalKeyboardKey.digit2,
+  LogicalKeyboardKey.digit3,
+  LogicalKeyboardKey.digit4,
+  LogicalKeyboardKey.digit5,
+  LogicalKeyboardKey.digit6,
+  LogicalKeyboardKey.digit7,
+  LogicalKeyboardKey.digit8,
+  LogicalKeyboardKey.digit9,
+];
+
+/// Linux terminals paste with Ctrl+Shift+V and leave bare Ctrl+V to the
+/// program (see `terminal_view_wrapper.dart`); everything else is Windows'.
+final Map<AppCommand, List<KeyChord>> _linuxChords = {
+  ..._otherChords,
+  AppCommand.terminalPaste: const [
+    KeyChord(
+      LogicalKeyboardKey.keyV,
+      control: true,
+      shift: true,
+      reach: _local,
+    ),
+    KeyChord(LogicalKeyboardKey.insert, shift: true, reach: _local),
+  ],
+};
 
 const _local = ChordReach.local;
 const _focused = ChordReach.focused;
@@ -226,6 +386,65 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, control: true, shift: true),
     KeyChord(LogicalKeyboardKey.slash, control: true, reach: _focused),
+  ],
+  AppCommand.commandPalette: const [
+    KeyChord(LogicalKeyboardKey.keyP, control: true, shift: true),
+  ],
+  AppCommand.focusAgent: const [
+    KeyChord(LogicalKeyboardKey.keyA, control: true, shift: true),
+  ],
+  // F6 is the Windows/GTK "next pane" key; global, so it also leaves the
+  // agent's terminal, the one place nothing else can.
+  AppCommand.focusNextArea: const [KeyChord(LogicalKeyboardKey.f6)],
+  AppCommand.focusPreviousArea: const [
+    KeyChord(LogicalKeyboardKey.f6, shift: true),
+  ],
+  // Ctrl+digit means nothing to almost every terminal program (Ctrl+2 as NUL
+  // is the rare exception), so it is free to be global.
+  AppCommand.goToSession: [for (final d in _digits) KeyChord(d, control: true)],
+  AppCommand.showPreviewTab: const [
+    KeyChord(LogicalKeyboardKey.digit1, control: true, shift: true),
+  ],
+  AppCommand.showFilesTab: const [
+    KeyChord(LogicalKeyboardKey.digit2, control: true, shift: true),
+  ],
+  AppCommand.showGitTab: const [
+    KeyChord(LogicalKeyboardKey.digit3, control: true, shift: true),
+  ],
+  AppCommand.showTerminalsTab: const [
+    KeyChord(LogicalKeyboardKey.digit4, control: true, shift: true),
+  ],
+  AppCommand.showHandlerTab: const [
+    KeyChord(LogicalKeyboardKey.digit5, control: true, shift: true),
+  ],
+  AppCommand.nextTerminal: const [
+    KeyChord(LogicalKeyboardKey.bracketRight, control: true, shift: true),
+  ],
+  AppCommand.previousTerminal: const [
+    KeyChord(LogicalKeyboardKey.bracketLeft, control: true, shift: true),
+  ],
+  // Listed for the sheet; the terminal handles these itself
+  // (terminal_view_wrapper.dart).
+  AppCommand.terminalCopy: const [
+    KeyChord(LogicalKeyboardKey.keyC, control: true, reach: _local),
+  ],
+  AppCommand.terminalPaste: const [
+    KeyChord(LogicalKeyboardKey.keyV, control: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.insert, shift: true, reach: _local),
+  ],
+  AppCommand.terminalHistory: const [
+    KeyChord(LogicalKeyboardKey.pageUp, shift: true, reach: _local),
+  ],
+  // Listed for the sheet; the composer handles these itself (smart_enter.dart).
+  AppCommand.sendMessage: const [
+    KeyChord(LogicalKeyboardKey.enter, reach: _local),
+    KeyChord(LogicalKeyboardKey.enter, control: true, reach: _local),
+  ],
+  AppCommand.messageNewline: const [
+    KeyChord(LogicalKeyboardKey.enter, shift: true, reach: _local),
+  ],
+  AppCommand.acceptSuggestion: const [
+    KeyChord(LogicalKeyboardKey.tab, reach: _local),
   ],
   AppCommand.moveFocus: const [
     KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
@@ -305,6 +524,24 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.closeFile: const [
     KeyChord(LogicalKeyboardKey.keyW, control: true, reach: _local),
   ],
+  AppCommand.copyFilePath: const [
+    KeyChord(LogicalKeyboardKey.keyC, shift: true, alt: true, reach: _local),
+  ],
+  AppCommand.copyRelativePath: const [
+    KeyChord(
+      LogicalKeyboardKey.keyC,
+      control: true,
+      shift: true,
+      alt: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.nextChange: const [
+    KeyChord(LogicalKeyboardKey.f5, alt: true, reach: _focused),
+  ],
+  AppCommand.previousChange: const [
+    KeyChord(LogicalKeyboardKey.f5, shift: true, alt: true, reach: _focused),
+  ],
   AppCommand.refresh: const [
     KeyChord(LogicalKeyboardKey.f5, reach: _local),
     KeyChord(LogicalKeyboardKey.keyR, control: true, reach: _local),
@@ -328,10 +565,40 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   AppCommand.closePreviewTab: const [
     KeyChord(LogicalKeyboardKey.keyW, control: true, reach: _local),
   ],
-  // Alt+→ also means app-level Forward; bound in the preview only while the
-  // page can go forward, so it falls through to the app's otherwise.
+  // Alt+←/→ also mean app-level Back/Forward; bound in the preview only while
+  // the page can go that way, so they fall through to the app's otherwise.
+  AppCommand.previewBack: const [
+    KeyChord(LogicalKeyboardKey.arrowLeft, alt: true, reach: _local),
+  ],
   AppCommand.previewForward: const [
     KeyChord(LogicalKeyboardKey.arrowRight, alt: true, reach: _local),
+  ],
+  AppCommand.nextPreviewTab: const [
+    KeyChord(
+      LogicalKeyboardKey.pageDown,
+      control: true,
+      alt: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.previousPreviewTab: const [
+    KeyChord(
+      LogicalKeyboardKey.pageUp,
+      control: true,
+      alt: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.openPreviewInBrowser: const [
+    KeyChord(
+      LogicalKeyboardKey.keyO,
+      control: true,
+      shift: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.commit: const [
+    KeyChord(LogicalKeyboardKey.enter, control: true, reach: _local),
   ],
   AppCommand.confirmDialog: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),
@@ -351,6 +618,58 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.showShortcuts: const [
     KeyChord(LogicalKeyboardKey.slash, meta: true),
+  ],
+  AppCommand.commandPalette: const [
+    KeyChord(LogicalKeyboardKey.keyP, shift: true, meta: true),
+  ],
+  AppCommand.focusAgent: const [
+    KeyChord(LogicalKeyboardKey.keyA, shift: true, meta: true),
+  ],
+  AppCommand.focusNextArea: const [KeyChord(LogicalKeyboardKey.f6)],
+  AppCommand.focusPreviousArea: const [
+    KeyChord(LogicalKeyboardKey.f6, shift: true),
+  ],
+  AppCommand.goToSession: [for (final d in _digits) KeyChord(d, meta: true)],
+  AppCommand.showPreviewTab: const [
+    KeyChord(LogicalKeyboardKey.digit1, alt: true, meta: true),
+  ],
+  AppCommand.showFilesTab: const [
+    KeyChord(LogicalKeyboardKey.digit2, alt: true, meta: true),
+  ],
+  AppCommand.showGitTab: const [
+    KeyChord(LogicalKeyboardKey.digit3, alt: true, meta: true),
+  ],
+  AppCommand.showTerminalsTab: const [
+    KeyChord(LogicalKeyboardKey.digit4, alt: true, meta: true),
+  ],
+  AppCommand.showHandlerTab: const [
+    KeyChord(LogicalKeyboardKey.digit5, alt: true, meta: true),
+  ],
+  // ⇧⌘] / ⇧⌘[ switch tabs in Terminal.app and the Mac browsers.
+  AppCommand.nextTerminal: const [
+    KeyChord(LogicalKeyboardKey.bracketRight, shift: true, meta: true),
+  ],
+  AppCommand.previousTerminal: const [
+    KeyChord(LogicalKeyboardKey.bracketLeft, shift: true, meta: true),
+  ],
+  AppCommand.terminalCopy: const [
+    KeyChord(LogicalKeyboardKey.keyC, meta: true, reach: _local),
+  ],
+  AppCommand.terminalPaste: const [
+    KeyChord(LogicalKeyboardKey.keyV, meta: true, reach: _local),
+  ],
+  AppCommand.terminalHistory: const [
+    KeyChord(LogicalKeyboardKey.pageUp, shift: true, reach: _local),
+  ],
+  AppCommand.sendMessage: const [
+    KeyChord(LogicalKeyboardKey.enter, reach: _local),
+    KeyChord(LogicalKeyboardKey.enter, meta: true, reach: _local),
+  ],
+  AppCommand.messageNewline: const [
+    KeyChord(LogicalKeyboardKey.enter, shift: true, reach: _local),
+  ],
+  AppCommand.acceptSuggestion: const [
+    KeyChord(LogicalKeyboardKey.tab, reach: _local),
   ],
   AppCommand.moveFocus: const [
     KeyChord(LogicalKeyboardKey.arrowUp, reach: _local),
@@ -424,6 +743,24 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   AppCommand.closeFile: const [
     KeyChord(LogicalKeyboardKey.keyW, meta: true, reach: _local),
   ],
+  AppCommand.copyFilePath: const [
+    KeyChord(LogicalKeyboardKey.keyC, alt: true, meta: true, reach: _local),
+  ],
+  AppCommand.copyRelativePath: const [
+    KeyChord(
+      LogicalKeyboardKey.keyC,
+      shift: true,
+      alt: true,
+      meta: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.nextChange: const [
+    KeyChord(LogicalKeyboardKey.f5, alt: true, reach: _focused),
+  ],
+  AppCommand.previousChange: const [
+    KeyChord(LogicalKeyboardKey.f5, shift: true, alt: true, reach: _focused),
+  ],
   AppCommand.refresh: const [
     KeyChord(LogicalKeyboardKey.keyR, meta: true, reach: _local),
     KeyChord(LogicalKeyboardKey.f5, reach: _local),
@@ -440,10 +777,36 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   AppCommand.closePreviewTab: const [
     KeyChord(LogicalKeyboardKey.keyW, meta: true, reach: _local),
   ],
-  // ⌘] is the app's global Forward, which claims it before the preview could
-  // see it; ⌘→ is Safari's and Chrome's other spelling.
+  // ⌘[/⌘] are the app's global Back/Forward, which claim them before the
+  // preview could see them; ⌘←/→ are Safari's and Chrome's other spelling.
+  AppCommand.previewBack: const [
+    KeyChord(LogicalKeyboardKey.arrowLeft, meta: true, reach: _local),
+  ],
   AppCommand.previewForward: const [
     KeyChord(LogicalKeyboardKey.arrowRight, meta: true, reach: _local),
+  ],
+  AppCommand.nextPreviewTab: const [
+    KeyChord(
+      LogicalKeyboardKey.arrowRight,
+      alt: true,
+      meta: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.previousPreviewTab: const [
+    KeyChord(
+      LogicalKeyboardKey.arrowLeft,
+      alt: true,
+      meta: true,
+      reach: _local,
+    ),
+  ],
+  AppCommand.openPreviewInBrowser: const [
+    KeyChord(LogicalKeyboardKey.keyO, shift: true, meta: true, reach: _local),
+  ],
+  AppCommand.commit: const [
+    KeyChord(LogicalKeyboardKey.enter, meta: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.enter, control: true, reach: _local),
   ],
   AppCommand.confirmDialog: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),

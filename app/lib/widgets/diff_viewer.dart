@@ -11,6 +11,8 @@ import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_scrollbar.dart';
+import '../keyboard/app_command_registry.dart';
+import '../keyboard/app_shortcuts.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
@@ -228,6 +230,10 @@ class _DiffViewerState extends State<DiffViewer> {
   SelectedContent? _lastSelection;
 
   late List<_DiffRow> _rows;
+
+  /// Row index where each run of added/removed lines begins — the stops for
+  /// [AppCommand.nextChange], finer than hunks, which can hold several runs.
+  late List<int> _changeStarts;
   late List<_DiffHunk> _hunks;
   late double _codeWidth;
   late bool _isBinary;
@@ -281,6 +287,7 @@ class _DiffViewerState extends State<DiffViewer> {
     if (_isBinary) {
       _hunks = const [];
       _rows = const [];
+      _changeStarts = const [];
       _highlighter = null;
       _codeWidth = 0;
       return;
@@ -294,8 +301,39 @@ class _DiffViewerState extends State<DiffViewer> {
         ...hunk.lines.map(_CodeRow.new),
       ],
     ];
+    bool isChange(int i) =>
+        i >= 0 &&
+        switch (_rows[i]) {
+          _CodeRow(:final line) => line.type != _DiffLineType.context,
+          _ => false,
+        };
+    _changeStarts = [
+      for (var i = 0; i < _rows.length; i++)
+        if (isChange(i) && !isChange(i - 1)) i,
+    ];
     _highlighter = CodeLineHighlighter.forPath(widget.path);
     _codeWidth = _measureWidestLine(hunks);
+  }
+
+  /// Scrolls the next (or previous) run of changes to the top, with two rows of
+  /// context above it, wrapping at the ends.
+  void _jumpToChange(int delta) {
+    if (_changeStarts.isEmpty || !_vertical.hasClients) return;
+    final position = _vertical.position;
+    double offsetOf(int row) => ((row - 2) * _rowHeight).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    final here = position.pixels;
+    final offsets = _changeStarts.map(offsetOf).toList();
+    final target = delta > 0
+        ? offsets.firstWhere((o) => o > here + 1, orElse: () => offsets.first)
+        : offsets.lastWhere((o) => o < here - 1, orElse: () => offsets.last);
+    _vertical.animateTo(
+      target,
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+    );
   }
 
   /// The width the code column needs to hold its longest line unwrapped.
@@ -366,12 +404,19 @@ class _DiffViewerState extends State<DiffViewer> {
         ? const AbEmptyState.compact(title: 'No changes')
         : _buildBody(context);
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildHeader(context),
-        Expanded(child: body),
-      ],
+    final canJump = _changeStarts.isNotEmpty;
+    return AppCommandHandlers(
+      handlers: {
+        AppCommand.nextChange: canJump ? () => _jumpToChange(1) : null,
+        AppCommand.previousChange: canJump ? () => _jumpToChange(-1) : null,
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildHeader(context),
+          Expanded(child: body),
+        ],
+      ),
     );
   }
 
@@ -433,7 +478,8 @@ class _DiffViewerState extends State<DiffViewer> {
                       // to the vertical list, which is exactly where a sideways
                       // scroll starts creeping up and down again.
                       behavior: HitTestBehavior.opaque,
-                      onPointerSignal: (e) => claimSidewaysScroll(e, _horizontal),
+                      onPointerSignal: (e) =>
+                          claimSidewaysScroll(e, _horizontal),
                       child: switch (_rows[index]) {
                         _HunkHeaderRow(:final text) => _buildHunkHeader(
                           context,

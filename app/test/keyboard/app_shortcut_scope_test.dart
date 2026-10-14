@@ -8,6 +8,8 @@ import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/keyboard/app_command_registry.dart';
 import 'package:antgrid/keyboard/app_shortcut_scope.dart';
 import 'package:antgrid/keyboard/app_shortcuts.dart';
+import 'package:antgrid/keyboard/command_palette.dart';
+import 'package:antgrid/keyboard/focus_regions.dart';
 import 'package:antgrid/keyboard/shortcuts_sheet.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:flutter/foundation.dart';
@@ -223,6 +225,156 @@ void main() {
     registry.unregister(a);
     registry.unregister(b);
     expect(registry.handlerFor(AppCommand.newTerminal), isNull);
+  });
+
+  windowsTest('the palette lists what is on offer and runs the pick', (
+    tester,
+  ) async {
+    await pump(tester, const SizedBox.expand());
+    var toggles = 0;
+    offerSidebar(() => toggles++);
+    await tester.pump();
+
+    await chord(tester, ctrlShift, LogicalKeyboardKey.keyP);
+    await tester.pumpAndSettle();
+    expect(find.byType(CommandPalette), findsOneWidget);
+    // Nothing offers the context panel here, so the palette leaves it out.
+    expect(find.text(AppCommand.toggleContextPanel.label), findsNothing);
+
+    await tester.enterText(find.byType(EditableText), 'hide projects');
+    await tester.pumpAndSettle();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CommandPalette), findsNothing);
+    expect(toggles, 1);
+  });
+
+  windowsTest('a range chord tells its handler which key was pressed', (
+    tester,
+  ) async {
+    await pump(tester, const SizedBox.expand());
+    final registry = container.read(appCommandRegistryProvider);
+    final pressed = <int>[];
+    final token = registry.register({
+      AppCommand.goToSession: () => pressed.add(registry.dispatchingChordIndex),
+    });
+    addTearDown(() => registry.unregister(token));
+
+    await chord(tester, const [
+      LogicalKeyboardKey.controlLeft,
+    ], LogicalKeyboardKey.digit3);
+    await chord(tester, const [
+      LogicalKeyboardKey.controlLeft,
+    ], LogicalKeyboardKey.digit9);
+
+    expect(pressed, [2, 8]);
+    // Outside a key press the index is back to the first chord's.
+    expect(registry.dispatchingChordIndex, 0);
+  });
+
+  windowsTest('F6 walks the areas in screen order and wraps', (tester) async {
+    final nodes = {
+      for (final area in AppFocusArea.values)
+        area: FocusNode(debugLabel: area.name),
+    };
+    for (final node in nodes.values) {
+      addTearDown(node.dispose);
+    }
+    await pump(
+      tester,
+      Row(
+        children: [
+          for (final area in AppFocusArea.values)
+            Expanded(
+              child: FocusArea(
+                area: area,
+                child: Focus(focusNode: nodes[area], child: const SizedBox()),
+              ),
+            ),
+        ],
+      ),
+    );
+
+    Future<void> f6({bool back = false}) => chord(tester, [
+      if (back) LogicalKeyboardKey.shiftLeft,
+    ], LogicalKeyboardKey.f6);
+
+    // From nowhere, F6 starts after the agent.
+    await f6();
+    expect(nodes[AppFocusArea.context]!.hasFocus, isTrue);
+    await f6();
+    expect(nodes[AppFocusArea.projects]!.hasFocus, isTrue);
+    await f6();
+    expect(nodes[AppFocusArea.agent]!.hasFocus, isTrue);
+    await f6(back: true);
+    expect(nodes[AppFocusArea.projects]!.hasFocus, isTrue);
+  });
+
+  windowsTest('a paused registry claims nothing', (tester) async {
+    final received = <LogicalKeyboardKey>[];
+    await pump(tester, _KeyEater(received: received));
+    var toggles = 0;
+    offerSidebar(() => toggles++);
+    await tester.pump();
+    final registry = container.read(appCommandRegistryProvider)..pause();
+
+    await chord(tester, ctrlShift, LogicalKeyboardKey.keyB);
+    expect(toggles, 0);
+    expect(received, contains(LogicalKeyboardKey.keyB));
+
+    registry.resume();
+    await chord(tester, ctrlShift, LogicalKeyboardKey.keyB);
+    expect(toggles, 1);
+  });
+
+  windowsTest('the chord that opens the shortcut sheet also closes it', (
+    tester,
+  ) async {
+    await pump(tester, const SizedBox.expand());
+
+    await chord(tester, ctrlShift, LogicalKeyboardKey.slash);
+    await tester.pumpAndSettle();
+    expect(find.byType(ShortcutsSheet), findsOneWidget);
+
+    await chord(tester, ctrlShift, LogicalKeyboardKey.slash);
+    await tester.pumpAndSettle();
+    expect(find.byType(ShortcutsSheet), findsNothing);
+  });
+
+  // On a German layout the key left of 1 types a dead ^, not a backquote; the
+  // simulator has no Windows keycode for ^, so another character stands in.
+  windowsTest('a punctuation chord also matches by key position', (
+    tester,
+  ) async {
+    final received = <LogicalKeyboardKey>[];
+    await pump(tester, _KeyEater(received: received));
+    var opened = 0;
+    final token = container.read(appCommandRegistryProvider).register({
+      AppCommand.newTerminal: () => opened++,
+    });
+    addTearDown(
+      () => container.read(appCommandRegistryProvider).unregister(token),
+    );
+
+    for (final m in ctrlShift) {
+      await tester.sendKeyDownEvent(m);
+    }
+    await tester.sendKeyDownEvent(
+      LogicalKeyboardKey.backslash,
+      physicalKey: PhysicalKeyboardKey.backquote,
+    );
+    await tester.sendKeyUpEvent(
+      LogicalKeyboardKey.backslash,
+      physicalKey: PhysicalKeyboardKey.backquote,
+    );
+    for (final m in ctrlShift.reversed) {
+      await tester.sendKeyUpEvent(m);
+    }
+    await tester.pump();
+
+    expect(opened, 1);
+    expect(received, isNot(contains(LogicalKeyboardKey.backslash)));
   });
 
   windowsTest('the shortcut sheet lists every command with its keys', (

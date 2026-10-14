@@ -64,12 +64,16 @@ import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
 import 'display_visibility.dart';
 import 'workspace_readiness_chip.dart';
+import '../keyboard/focus_regions.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context, WidgetRef ref) =>
+      FocusArea(area: AppFocusArea.agent, child: _buildPanel(context, ref));
+
+  Widget _buildPanel(BuildContext context, WidgetRef ref) {
     // The transcript is addressed by id alone, and the LIVE row
     // (activeSessionProvider) is null for the whole window in which the session
     // list re-resolves — reading the id from there is what made a chat session

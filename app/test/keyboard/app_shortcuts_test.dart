@@ -86,18 +86,37 @@ void main() {
         AppCommand.newPreviewTab: 'Ctrl+T',
         AppCommand.closePreviewTab: 'Ctrl+W',
         AppCommand.hardRefresh: 'Ctrl+Shift+R',
+        AppCommand.previewBack: 'Alt+←',
         AppCommand.previewForward: 'Alt+→',
+        AppCommand.commit: 'Ctrl+Enter',
       },
       TargetPlatform.macOS: {
         AppCommand.newPreviewTab: '⌘T',
         AppCommand.closePreviewTab: '⌘W',
         AppCommand.hardRefresh: '⇧⌘R',
+        AppCommand.previewBack: '⌘←',
         AppCommand.previewForward: '⌘→',
+        AppCommand.commit: '⌘↩',
       },
     };
     for (final MapEntry(key: platform, value: commands) in expected.entries) {
       for (final MapEntry(key: command, value: label) in commands.entries) {
         expect(shortcutLabel(command, platform), label, reason: '$command');
+      }
+    }
+  });
+
+  test('the meta key reads Win on Windows and Super on Linux', () {
+    const chord = KeyChord(LogicalKeyboardKey.keyK, meta: true);
+    for (final (platform, label) in const [
+      (TargetPlatform.windows, 'Win+K'),
+      (TargetPlatform.linux, 'Super+K'),
+    ]) {
+      debugDefaultTargetPlatformOverride = platform;
+      try {
+        expect(chord.label(apple: false), label, reason: '$platform');
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
       }
     }
   });

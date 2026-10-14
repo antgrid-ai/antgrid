@@ -11,6 +11,7 @@ import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_separator.dart';
 import '../providers/session_search.dart';
 import 'session_search_results.dart';
+import '../keyboard/app_shortcuts.dart';
 
 /// The MOBILE session search: an icon in the canvas's top bar that opens a
 /// full-screen search modal.
@@ -30,7 +31,7 @@ class SessionSearchButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return AbIconButton(
       icon: AbIcons.search,
-      tooltip: 'Search sessions',
+      tooltip: withShortcut('Search sessions', AppCommand.searchSessions),
       onTap: () => showSessionSearch(context),
     );
   }

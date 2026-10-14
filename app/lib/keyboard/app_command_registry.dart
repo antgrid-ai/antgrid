@@ -21,6 +21,27 @@ class AppCommandRegistry {
   final _entries = <_Registration>[];
   final _activeChecks = <bool Function()>[];
 
+  /// Which of the running command's chords was pressed, for a
+  /// [AppCommand.range] command whose handler acts on the key (session 1–9).
+  /// Zero outside a keyboard dispatch: the palette runs a command as its
+  /// first chord.
+  int get dispatchingChordIndex => _dispatchingChordIndex;
+  int _dispatchingChordIndex = 0;
+
+  /// Runs [command]'s live handler as if its chord at [chordIndex] had been
+  /// pressed. Returns false when nothing offers it.
+  bool run(AppCommand command, {int chordIndex = 0}) {
+    final handler = handlerFor(command);
+    if (handler == null) return false;
+    _dispatchingChordIndex = chordIndex;
+    try {
+      handler();
+    } finally {
+      _dispatchingChordIndex = 0;
+    }
+    return true;
+  }
+
   Object register(Map<AppCommand, VoidCallback?> handlers) {
     final token = Object();
     _entries.add(_Registration(token, handlers));
@@ -48,6 +69,14 @@ class AppCommandRegistry {
     return null;
   }
 
+  /// While paused no chord is claimed, so a widget recording a key
+  /// combination (the settings page's key search) receives it instead of the
+  /// command bound to it. Every [pause] owes one [resume].
+  void pause() => _pauses++;
+  void resume() => _pauses = (_pauses - 1).clamp(0, _pauses);
+  bool get paused => _pauses > 0;
+  int _pauses = 0;
+
   /// Registered by each mounted `AppShortcutScope`; global chords fire only
   /// while one of them says its route is the current one, so a chord pressed
   /// under a dialog stays with the dialog.
@@ -64,6 +93,7 @@ class AppCommandRegistry {
   /// step aside on its own.
   AppCommand? claims(KeyEvent event) {
     if (event is KeyUpEvent) return null;
+    if (_pauses > 0) return null;
     if (!_activeChecks.any((check) => check())) return null;
     final command = globalCommandFor(event, HardwareKeyboard.instance);
     if (command == null || handlerFor(command) == null) return null;
@@ -75,7 +105,18 @@ class AppCommandRegistry {
   KeyEventResult handleEarlyKey(KeyEvent event) {
     final command = claims(event);
     if (command == null) return KeyEventResult.ignored;
-    if (event is KeyDownEvent) handlerFor(command)?.call();
+    if (event is KeyDownEvent) {
+      final chords = appShortcutChords()[command] ?? const <KeyChord>[];
+      final keyboard = HardwareKeyboard.instance;
+      run(
+        command,
+        chordIndex: chords
+            .indexWhere(
+              (c) => c.reach == ChordReach.global && c.accepts(event, keyboard),
+            )
+            .clamp(0, chords.length),
+      );
+    }
     return KeyEventResult.handled;
   }
 }

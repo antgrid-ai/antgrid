@@ -19,7 +19,10 @@ import '../widgets/session_row.dart' show showSessionSurface;
 import '../widgets/session_search_modal.dart';
 import 'app_command_registry.dart';
 import 'app_shortcuts.dart';
+import 'command_palette.dart';
+import 'focus_regions.dart';
 import 'shortcuts_sheet.dart';
+import 'user_keybindings.dart';
 
 /// Installs the app's keyboard shortcuts over [child] and offers the commands
 /// that belong to no single screen.
@@ -74,18 +77,24 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
 
   @override
   Widget build(BuildContext context) {
+    // Loads the user's rebindings and rebuilds the focused-chord map below when
+    // they change; the global chords read the table at each key press.
+    ref.watch(userKeybindingsProvider);
     final sidebar = ref.watch(sidebarControlProvider);
     final panel = ref.watch(contextPanelControlProvider);
     // Only the yes/no: watching the list itself rebuilt this root scope on
     // every status or title change in the focused project.
     final regId = ref.watch(selectedRegistrationIdProvider);
-    final canCycle =
-        regId != null &&
-        ref.watch(
-          sessionsForEntryProvider(
-            regId,
-          ).select((all) => _cycleCandidates(all).length > 1),
-        );
+    // Capped at 2: all the handlers below need is none, one, or several.
+    final sessionCount = regId == null
+        ? 0
+        : ref.watch(
+            sessionsForEntryProvider(
+              regId,
+            ).select((all) => _cycleCandidates(all).length.clamp(0, 2)),
+          );
+    final canCycle = sessionCount > 1;
+    final agentFocusable = ref.watch(focusAgentInputProvider) != null;
 
     return AppCommandHandlers(
       handlers: {
@@ -97,6 +106,15 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
           'shortcut sheet failed',
           () => showShortcutsSheet(context),
         ),
+        AppCommand.commandPalette: () => detached(
+          'AppShortcutScope',
+          'command palette failed',
+          () => showCommandPalette(context, ref),
+        ),
+        AppCommand.focusAgent: agentFocusable ? _focusAgent : null,
+        AppCommand.focusNextArea: () => _cycleArea(1),
+        AppCommand.focusPreviousArea: () => _cycleArea(-1),
+        AppCommand.goToSession: sessionCount > 0 ? _goToSession : null,
         AppCommand.goBack: () =>
             resolveBackIntent(ref.container, allowExit: false),
         AppCommand.goForward: () =>
@@ -143,11 +161,62 @@ class _AppShortcutScopeState extends ConsumerState<AppShortcutScope> {
   /// The focused project's sessions in drawer order — the list the user sees
   /// the chord walk through. A session mid-delete stays in the drawer but can
   /// never be focused, so it is stepped over.
-  static List<SessionEntry> _cycleCandidates(List<SessionEntry> all) {
-    return all
-        .whereVisibleInDrawer()
-        .where((s) => !s.deleting)
-        .toList(growable: false);
+  static List<SessionEntry> _cycleCandidates(List<SessionEntry> all) => all
+      .whereVisibleInDrawer()
+      .where((s) => !s.deleting)
+      .toList(growable: false);
+
+  /// Ctrl/⌘+1–8 is that session in drawer order, 9 the last one — the
+  /// browsers' tab rule.
+  void _goToSession() {
+    final regId = ref.read(selectedRegistrationIdProvider);
+    if (regId == null) return;
+    final sessions = _cycleCandidates(
+      ref.read(sessionsForEntryProvider(regId)),
+    );
+    if (sessions.isEmpty) return;
+    final digit = ref.read(appCommandRegistryProvider).dispatchingChordIndex;
+    final index = digit >= 8 ? sessions.length - 1 : digit;
+    if (index >= sessions.length) return;
+    final id = sessions[index].id;
+    if (!focusSessionInFocusedProject(ref.container, id)) return;
+    showSessionSurface(ref.container, id);
+  }
+
+  void _focusAgent() {
+    ref.read(switchToAgentProvider)?.call();
+    final input = ref.read(focusAgentInputProvider);
+    if (input != null) {
+      input();
+    } else {
+      ref.read(focusAreaRegistryProvider).focus(AppFocusArea.agent);
+    }
+  }
+
+  /// F6 order: projects, agent, context panel — skipping a hidden pane rather
+  /// than opening it, since F6 walks what is on screen.
+  void _cycleArea(int delta) {
+    final areas = ref.read(focusAreaRegistryProvider);
+    final sidebarHidden = ref.read(sidebarControlProvider)?.hidden ?? false;
+    final panelHidden = ref.read(contextPanelControlProvider)?.hidden ?? false;
+    final visible = [
+      for (final area in AppFocusArea.values)
+        if (areas.isMounted(area) &&
+            !(area == AppFocusArea.projects && sidebarHidden) &&
+            !(area == AppFocusArea.context && panelHidden))
+          area,
+    ];
+    if (visible.isEmpty) return;
+    final at = visible.indexOf(areas.current ?? AppFocusArea.agent);
+    for (var step = 1; step <= visible.length; step++) {
+      final next = visible[((at < 0 ? 0 : at) + delta * step) % visible.length];
+      if (next == AppFocusArea.agent &&
+          ref.read(focusAgentInputProvider) != null) {
+        _focusAgent();
+        return;
+      }
+      if (areas.focus(next)) return;
+    }
   }
 
   void _cycleSession(int delta) {
@@ -184,7 +253,7 @@ class _AppCommandAction extends Action<_AppCommandIntent> {
 
   @override
   bool isEnabled(_AppCommandIntent intent) =>
-      registry.handlerFor(intent.command) != null;
+      !registry.paused && registry.handlerFor(intent.command) != null;
 
   @override
   Object? invoke(_AppCommandIntent intent) {

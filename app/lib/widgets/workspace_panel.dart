@@ -8,6 +8,7 @@ import 'handler/handler_screen.dart';
 import 'terminal_list_view.dart';
 import 'workspace_tab_bar.dart';
 import 'display_visibility.dart';
+import '../keyboard/focus_regions.dart';
 
 /// Renders the workspace area. The horizontal [WorkspaceTabBar] sits at the
 /// top on desktop; on mobile the caller hides it and uses [MobileBottomNav]
@@ -33,7 +34,10 @@ class WorkspacePanel extends StatelessWidget {
   final bool showTabBar;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      FocusArea(area: AppFocusArea.context, child: _buildPanel(context));
+
+  Widget _buildPanel(BuildContext context) {
     return ColoredBox(
       color: context.antgrid.bgDeep,
       child: Column(

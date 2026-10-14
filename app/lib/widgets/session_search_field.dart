@@ -9,6 +9,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_search_field.dart';
 import '../providers/session_search.dart';
 import 'session_search_results.dart';
+import '../keyboard/app_shortcuts.dart';
 
 /// The DESKTOP session search: a title-bar field that drops a result popup
 /// beneath itself. Mobile uses `SessionSearchButton` and its full-screen modal
@@ -184,7 +185,7 @@ class _SessionSearchFieldState extends ConsumerState<SessionSearchField> {
           child: AbSearchField(
             controller: _controller,
             focusNode: _focusNode,
-            hint: 'Search sessions…',
+            hint: withShortcut('Search sessions…', AppCommand.searchSessions),
             height: widget.height,
             // No debounce: filtering is a local pass over the session cache, so
             // a keystroke costs a rebuild, not a round trip.

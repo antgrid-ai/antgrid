@@ -1085,6 +1085,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return _closeActiveTab();
   }
 
+  /// Wraps at the ends, in tab-bar order.
+  void _cycleTab(PreviewService preview, PreviewState state, int delta) {
+    final tabs = state.tabs;
+    final at = tabs.indexWhere((t) => t.port == state.activeTabId);
+    preview.setActiveTab(tabs[((at < 0 ? 0 : at) + delta) % tabs.length].port);
+  }
+
   Future<void> _openInSystemBrowser(
     PreviewService preview,
     PreviewTab tab,
@@ -1471,7 +1478,26 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                 }),
           if (preview != null) AppCommand.newPreviewTab: _startComposingNewTab,
           if (activeTab != null) AppCommand.closePreviewTab: _closeActiveTab,
-          // ⌘→ / Alt+→ also move the caret, so the address bar keeps them.
+          if (preview != null && state.tabs.length > 1) ...{
+            AppCommand.nextPreviewTab: () => _cycleTab(preview, state, 1),
+            AppCommand.previousPreviewTab: () => _cycleTab(preview, state, -1),
+          },
+          if (showOpenExternal && preview != null && activeTab != null)
+            AppCommand.openPreviewInBrowser: () => detached(
+              'PreviewScreen',
+              'open in browser failed',
+              () => _openInSystemBrowser(preview, activeTab),
+            ),
+          // ⌘←/→ and Alt+←/→ also move the caret, so the address bar keeps
+          // them.
+          if ((activeState?.canGoBack ?? false) &&
+              activeState?.controller != null &&
+              !_addrFocus.hasFocus)
+            AppCommand.previewBack: () => detached(
+              'PreviewScreen',
+              'page back failed',
+              () async => activeState!.controller?.goBack(),
+            ),
           if ((activeState?.canGoForward ?? false) &&
               activeState?.controller != null &&
               !_addrFocus.hasFocus)
@@ -1551,7 +1577,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                   if (showOpenExternal)
                     AbIconButton(
                       icon: AbIcons.openExternal,
-                      tooltip: 'Open in browser',
+                      tooltip: withShortcut(
+                        'Open in browser',
+                        AppCommand.openPreviewInBrowser,
+                      ),
                       onTap: (preview == null || activeTab == null)
                           ? null
                           : () => _openInSystemBrowser(preview, activeTab),

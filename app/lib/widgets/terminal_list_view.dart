@@ -156,6 +156,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     final menu = ref.watch(workspaceMenuControlProvider);
 
     final suspended = ref.watch(workspaceTabCommandsSuspendedProvider);
+    // Wraps at the ends, and brings the Terminals tab forward: cycling tabs
+    // nobody can see would only change which one is there later.
+    void cycle(int delta) {
+      final at = tabs.indexWhere((t) => t.terminalId == active?.terminalId);
+      final next = tabs[((at < 0 ? 0 : at) + delta) % tabs.length];
+      menu?.reveal(WorkspaceView.terminals);
+      _select(service, next.terminalId);
+    }
 
     return AppCommandHandlers(
       handlers: {
@@ -165,6 +173,12 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                 menu?.reveal(WorkspaceView.terminals);
                 _createTerminal(service, tabs);
               },
+        AppCommand.nextTerminal: suspended || tabs.length < 2
+            ? null
+            : () => cycle(1),
+        AppCommand.previousTerminal: suspended || tabs.length < 2
+            ? null
+            : () => cycle(-1),
       },
       child: ColoredBox(
         color: context.antgrid.bgDeepest,

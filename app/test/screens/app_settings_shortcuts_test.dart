@@ -7,6 +7,7 @@
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/keyboard/app_shortcuts.dart';
 import 'package:antgrid/keyboard/shortcuts_sheet.dart';
+import 'package:flutter/services.dart';
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/settings_section.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -213,6 +214,88 @@ void main() {
       await tester.enterText(onPage(find.byType(EditableText)), 'zzz');
       await tester.pumpAndSettle();
       expect(onPage(find.text('No shortcut matches "zzz".')), findsOneWidget);
+    });
+  });
+
+  group('rebinding', () {
+    tearDown(() => applyUserKeybindings(const {}));
+
+    /// The Change keys button on [command]'s row.
+    Finder editButton(AppCommand command) => find.descendant(
+      of: find.ancestor(of: row(command), matching: find.byType(Row)).first,
+      matching: find.byTooltip('Change keys'),
+    );
+
+    Future<void> press(
+      WidgetTester tester,
+      List<LogicalKeyboardKey> modifiers,
+      LogicalKeyboardKey key,
+    ) async {
+      for (final m in modifiers) {
+        await tester.sendKeyDownEvent(m);
+      }
+      await tester.sendKeyDownEvent(key);
+      await tester.sendKeyUpEvent(key);
+      for (final m in modifiers.reversed) {
+        await tester.sendKeyUpEvent(m);
+      }
+      await tester.pumpAndSettle();
+    }
+
+    const ctrlShift = [
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.shiftLeft,
+    ];
+
+    testWidgets('new keys replace the old ones and can be reset', (
+      tester,
+    ) async {
+      await withSettings(tester, () async {
+        await openPage(tester);
+        await tester.tap(editButton(AppCommand.toggleSidebar));
+        await tester.pumpAndSettle();
+        expect(onPage(find.textContaining('Press the new keys')), findsOne);
+
+        await press(tester, ctrlShift, LogicalKeyboardKey.keyY);
+
+        expect(shortcutLabel(AppCommand.toggleSidebar), 'Ctrl+Shift+Y');
+        expect(onPage(find.textContaining('Press the new keys')), findsNothing);
+
+        await tester.tap(
+          find.descendant(
+            of: find
+                .ancestor(
+                  of: row(AppCommand.toggleSidebar),
+                  matching: find.byType(Row),
+                )
+                .first,
+            matching: find.byTooltip('Back to the default keys'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(shortcutLabel(AppCommand.toggleSidebar), 'Ctrl+Shift+B');
+      });
+    });
+
+    testWidgets('keys another command has are refused, and it may retry', (
+      tester,
+    ) async {
+      await withSettings(tester, () async {
+        await openPage(tester);
+        await tester.tap(editButton(AppCommand.toggleSidebar));
+        await tester.pumpAndSettle();
+
+        await press(tester, ctrlShift, LogicalKeyboardKey.keyK);
+        expect(
+          onPage(find.textContaining(AppCommand.searchSessions.label)),
+          findsWidgets,
+        );
+        expect(onPage(find.textContaining('Already used by')), findsOne);
+        expect(shortcutLabel(AppCommand.toggleSidebar), 'Ctrl+Shift+B');
+
+        await press(tester, ctrlShift, LogicalKeyboardKey.keyY);
+        expect(shortcutLabel(AppCommand.toggleSidebar), 'Ctrl+Shift+Y');
+      });
     });
   });
 }

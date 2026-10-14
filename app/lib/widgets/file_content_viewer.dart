@@ -21,6 +21,7 @@ import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
+import 'copy_path.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -452,8 +453,26 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
         AppCommand.findNext: () => _stepMatch(forward: true),
         AppCommand.findPrevious: () => _stepMatch(forward: false),
         if (widget.onClose != null) AppCommand.closeFile: widget.onClose!,
+        AppCommand.copyFilePath: () => _copyPath(content.path, absolute: true),
+        AppCommand.copyRelativePath: () =>
+            _copyPath(content.path, absolute: false),
       }),
       child: _buildContent(content),
+    );
+  }
+
+  /// The absolute form needs the checkout root from `agent:status`; an older
+  /// bridge that reports none gets the relative path rather than nothing.
+  void _copyPath(String path, {required bool absolute}) {
+    var text = path;
+    if (absolute && !isAbsoluteViewerPath(path)) {
+      final root = ref.read(terminalStateProvider).value?.checkoutPath;
+      if (root != null && root.isNotEmpty) text = joinCheckoutPath(root, path);
+    }
+    detached(
+      'FileContentViewer',
+      'copy path failed',
+      () => copyPathWithToast(context, text),
     );
   }
 

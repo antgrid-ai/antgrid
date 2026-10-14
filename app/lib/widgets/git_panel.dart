@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
@@ -417,7 +416,12 @@ class _GitBranchBar extends StatelessWidget {
     } else {
       why = null;
     }
-    if (why == null) return button;
+    if (why == null) {
+      return AbTooltip(
+        message: withShortcut('Commit staged changes', AppCommand.commit),
+        child: button,
+      );
+    }
     return AbTooltip(
       message: why,
       // A disabled child swallows no pointer here (AbButton drops its gesture
@@ -453,7 +457,10 @@ class _BranchLine extends StatelessWidget {
         child: Text(
           '→ $remote',
           maxLines: 1,
-          style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
         ),
       );
     } else {
@@ -563,11 +570,7 @@ class _CommitMessageField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, control: true):
-            onCommit,
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): onCommit,
-      },
+      bindings: localShortcutBindings({AppCommand.commit: onCommit}),
       child: AbTextField(
         controller: panel.draft,
         focusNode: panel.draftFocus,
@@ -726,11 +729,7 @@ class _SplitCellState extends State<_SplitCell> {
           if (widget.running)
             const AbLoadingDot(size: AbTokens.fontXs)
           else
-            AbIcon(
-              widget.icon,
-              size: AbTokens.fontSm,
-              color: p.textSecondary,
-            ),
+            AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
           const SizedBox(width: AbTokens.space4),
           Flexible(
             child: Text(
@@ -995,9 +994,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         // current state — the tree itself already shows which folders are open.
         if (counts.changedFolders.isNotEmpty)
           AbIconButton(
-            icon: allFoldersCollapsed
-                ? AbIcons.expandAll
-                : AbIcons.collapseAll,
+            icon: allFoldersCollapsed ? AbIcons.expandAll : AbIcons.collapseAll,
             tooltip: allFoldersCollapsed
                 ? 'Expand All Folders'
                 : 'Collapse All Folders',
@@ -1015,9 +1012,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         AbIconButton(
           icon: AbIcons.gitStage,
           tooltip: 'Stage All Changes',
-          onTap: counts.unstagedPaths.isEmpty
-              ? null
-              : () => _stageAll(context),
+          onTap: counts.unstagedPaths.isEmpty ? null : () => _stageAll(context),
         ),
       ],
     );
@@ -1205,10 +1200,7 @@ class _GitPanelBody extends ConsumerWidget {
         if (showSideBySide) {
           return Row(
             children: [
-              SizedBox(
-                width: _columnWidth,
-                child: _buildColumn(context),
-              ),
+              SizedBox(width: _columnWidth, child: _buildColumn(context)),
               const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1220,10 +1212,7 @@ class _GitPanelBody extends ConsumerWidget {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _CompactViewerBar(
-                path: diffPath,
-                onBack: fileService.clearDiff,
-              ),
+              _CompactViewerBar(path: diffPath, onBack: fileService.clearDiff),
               const AbSeparator.horizontal(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1564,10 +1553,7 @@ class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
                     value: _GitCompactTab.changes,
                     label: 'Changes · ${widget.changedCount}',
                   ),
-                  AbSegment(
-                    value: _GitCompactTab.history,
-                    label: 'History',
-                  ),
+                  AbSegment(value: _GitCompactTab.history, label: 'History'),
                 ],
                 selected: _tab,
                 onSelect: (value) => setState(() => _tab = value),

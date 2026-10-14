@@ -1115,6 +1115,19 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
             : _toggleMaximizeContextPanel,
         for (final entry in _tabCommandFallbacks.entries)
           entry.key: tabCommandsSuspended ? null : entry.value,
+        // Phone width too: revealView swipes to the workspace page there.
+        for (final (command, view) in const [
+          (AppCommand.showPreviewTab, WorkspaceView.preview),
+          (AppCommand.showFilesTab, WorkspaceView.files),
+          (AppCommand.showGitTab, WorkspaceView.git),
+          (AppCommand.showTerminalsTab, WorkspaceView.terminals),
+          (AppCommand.showHandlerTab, WorkspaceView.handler),
+        ])
+          command:
+              surfaceChild != null ||
+                  !ref.watch(visibleWorkspaceViewsProvider).contains(view)
+              ? null
+              : () => revealView(view),
       },
       // Android 15 forces edge-to-edge (targetSdk 35+): system bars are
       // transparent and we draw behind them. Without this the header collides

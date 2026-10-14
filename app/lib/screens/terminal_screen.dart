@@ -25,6 +25,7 @@ import '../util/detached.dart';
 import '../widgets/session_setup_progress.dart';
 import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
+import '../keyboard/app_shortcuts.dart';
 
 /// Shows the terminal for the currently active session.
 ///
@@ -329,6 +330,11 @@ class _NoSessionEmptyState extends ConsumerWidget {
       color: context.antgrid.bgDeepest,
       child: AbEmptyState(
         title: 'No active session',
+        // The chord is said here because this is where it is needed: the
+        // screen a user lands on with nothing open.
+        subtitle: shortcutLabel(AppCommand.newSession) == null
+            ? null
+            : '${shortcutLabel(AppCommand.newSession)} starts one from anywhere',
         action: AbButton(
           label: 'New session',
           onTap: () => enterNewSession(ref.container),
