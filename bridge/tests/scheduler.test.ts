@@ -416,7 +416,8 @@ describe("scheduler runtime", () => {
       expect({ ...capped, count: full.count }).toEqual(full);
       expect(capped.count).toBe(5);
     }
-  });
+  // The uncapped reference walks ~35k tz-aware occurrences, past bun's 5s default on Windows.
+  }, 30_000);
   test("a spring-forward gap-day occurrence runs on time, catches up, or is recorded, never silently dropped", async () => {
     const nightly: ScheduleInput = { ...input, cron: "30 2 * * *", timezone: "America/New_York" };
     const gapDay = Date.parse("2026-03-08T07:30:00Z");

@@ -9,6 +9,7 @@ import {
   antigravityHookCommand,
   antigravityScriptPath,
   mergeAntigravityHookEntries,
+  stripLegacyAntigravityPreToolUseHook,
 } from "./global-hooks";
 
 const log = logger.child({ component: "agent-launch" });
@@ -80,12 +81,17 @@ export function ensureAntigravityHook(
         }
       }
     }
-    const merged = mergeAntigravityHookEntries(data, [
+    // Undo a withdrawn feature (PreToolUse permission-request notify) that
+    // some installs already picked up; see stripLegacyAntigravityPreToolUseHook.
+    const cleaned = stripLegacyAntigravityPreToolUseHook(data) ?? data;
+    const merged = mergeAntigravityHookEntries(cleaned, [
       { event: "PreInvocation", command: antigravityHookCommand(scriptPath, "PreInvocation") },
       { event: "Stop", command: antigravityHookCommand(scriptPath, "Stop") },
     ]);
-    if (merged === null) return true; // both hooks already present
-    atomicWriteFile(hooksPath, `${JSON.stringify(merged, null, 2)}\n`);
+    // merged === null means nothing needed adding; still write back cleaned if
+    // the legacy-hook strip actually changed something.
+    const out = merged ?? (cleaned !== data ? cleaned : null);
+    if (out) atomicWriteFile(hooksPath, `${JSON.stringify(out, null, 2)}\n`);
     return true;
   } catch (err) {
     log.warn("failed to write global antigravity hooks.json (%s): %s", hooksPath, err);

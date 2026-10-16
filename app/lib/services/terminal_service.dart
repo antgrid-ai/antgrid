@@ -2272,8 +2272,13 @@ class TerminalService {
     _setState(_state.copyWith(tabs: tabs));
   }
 
-  void requestStop(String terminalId) {
-    _send(createAbMessage('terminal:stop', {'terminalId': terminalId}));
+  void requestStop(String terminalId, {bool forget = false}) {
+    _send(
+      createAbMessage('terminal:stop', {
+        'terminalId': terminalId,
+        if (forget) 'forget': true,
+      }),
+    );
   }
 
   /// Stops the terminal on the agent and disposes the local Ghostty controller
@@ -2285,7 +2290,9 @@ class TerminalService {
   void deleteTerminal(String terminalId) {
     _discardFrameArchive(terminalId);
     _historyRunId.remove(terminalId);
-    requestStop(terminalId);
+    // Without forget, the bridge's archived history resurrects the tab as
+    // exited after the next restart.
+    requestStop(terminalId, forget: true);
     _deletedTerminalIds.add(terminalId);
     if (_pendingTerminalIds.contains(terminalId)) {
       _canceledPendingTerminalIds.add(terminalId);

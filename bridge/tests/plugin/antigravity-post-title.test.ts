@@ -16,10 +16,14 @@ function run(event: string, stdin: string, env: Record<string, string | undefine
       return new Response("{}");
     },
   });
+  // Strip ANTGRID_RUN_ID: this suite's own host process may be an Antgrid-managed
+  // terminal (dogfooding), which would otherwise leak a real run id into the
+  // spawned script and stamp it onto the posted body the test asserts against.
+  const { ANTGRID_RUN_ID: _hostRunId, ...hostEnv } = process.env;
   const res = spawnSync("node", [SCRIPT, event], {
     input: stdin,
     env: {
-      ...process.env,
+      ...hostEnv,
       ANTGRID_API_PORT: String(server.port),
       ANTGRID_TERMINAL_ID: "t1",
       ...env,

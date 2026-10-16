@@ -551,6 +551,27 @@ T? focusedCheckoutServiceOrNull<T>(
   return pick(session.servicesForCheckout(checkoutId));
 }
 
+/// [focusedCheckoutServiceOrNull], for an EXPLICIT project AND checkout
+/// rather than whichever is currently on screen — for a caller (an event
+/// handler, or the task detail view's Changes section) that needs a SPECIFIC
+/// session's checkout regardless of what is focused. [registrationId] must
+/// come from the SAME read/watch that resolved [checkoutId] (e.g. the
+/// project a task's session actually lives in), never from
+/// [selectedRegistrationIdProvider] at the call site — reading current focus
+/// there defeats the one thing this helper exists for, and does it silently:
+/// the widget still activates the checkout it meant to on mount, then
+/// deactivates a DIFFERENT project's entry if focus moved before it unmounts.
+T? checkoutServiceOrNull<T>(
+  ProviderContainer ref,
+  String registrationId,
+  String checkoutId,
+  T Function(CheckoutServices) pick,
+) {
+  final session = ref.read(projectSessionProvider(registrationId)).value;
+  if (session == null) return null;
+  return pick(session.servicesForCheckout(checkoutId));
+}
+
 final commandStateProvider = StreamProvider<CommandState>((ref) {
   final service = focusedCheckoutServicesOrNull(ref)?.commandService;
   if (service == null) return const Stream<CommandState>.empty();
@@ -722,6 +743,23 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // See provider_retry.dart.
 }, retry: noProviderRetry);
 
+/// [fileTreeStateProvider] for an EXPLICIT project and checkout — what the
+/// task detail view's Changes section watches, since a task's own checkout is
+/// rarely the focused project's on-screen one (see [checkoutServiceOrNull],
+/// the `.read` equivalent this mirrors for a reactive `.watch`). No prefs
+/// binding here — that binding is for the focused checkout's persisted UI
+/// state (expanded paths, selection), which this read-only summary has none
+/// of. `autoDispose` so a task's entry is released once its detail view
+/// closes rather than staying warm for every checkout ever viewed.
+final taskCheckoutFileTreeStateProvider = StreamProvider.autoDispose.family<
+  FileTreeState,
+  ({String registrationId, String checkoutId})
+>((ref, key) {
+  final session = ref.watch(projectSessionProvider(key.registrationId)).value;
+  if (session == null) return const Stream<FileTreeState>.empty();
+  final service = session.servicesForCheckout(key.checkoutId).fileService;
+  return seededStream(() => service.currentState, service.stateStream);
+}, retry: noProviderRetry);
 /// Git op, checkout and session-refusal feedback from every warm project, not
 /// just the focused one, or results landing after a focus switch are lost.
 final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(

@@ -5,6 +5,10 @@ import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import type { DeviceKind, Platform } from "../../src/models/device.js";
 import { PLAN_UUID } from "../../src/models/plan.js";
+import { createTask } from "../../src/models/task.js";
+import type { TaskRecord } from "../../src/models/task.js";
+import { upsertIntegration, upsertIntegrationRepo } from "../../src/models/integration.js";
+import type { TaskStatus } from "../../src/tasks/merge.js";
 import { TEST_BETTER_AUTH_SECRET } from "./app.js";
 
 /** HMAC-SHA-256 signature using the same algorithm Hono's serializeSigned uses. */
@@ -159,4 +163,81 @@ export async function createTestDevice(
     select: { id: true, deviceId: true, publicKey: true },
   });
   return { id: row.id, deviceId: row.deviceId, publicKey: new Uint8Array(row.publicKey) };
+}
+
+export type TestRepo = { integrationId: string; repoId: string };
+
+/**
+ * A GitHub App installation with one consented repository — the target a
+ * linked task's outbox writes resolve through `resolvePushTarget`.
+ */
+export async function createTestIntegrationRepo(
+  db: PrismaClient,
+  account: { userId: string; accountId: string },
+  pushEnabled: boolean
+): Promise<TestRepo> {
+  const suffix = crypto.randomUUID();
+  const integration = await upsertIntegration(db, {
+    accountId: account.accountId,
+    provider: "github",
+    externalAccountId: `org-${suffix}`,
+    installationId: `${Math.floor(Math.random() * 1_000_000)}`,
+    displayName: "acme",
+    installedBy: account.userId,
+  });
+  if (integration.kind !== "ok") throw new Error(`upsertIntegration: ${integration.kind}`);
+  const repo = await upsertIntegrationRepo(db, {
+    accountId: account.accountId,
+    integrationId: integration.integration.id,
+    repoKey: `github.com/acme/repo-${suffix}`,
+    externalRepoId: suffix,
+    visibility: "private",
+    syncEnabled: true,
+    pushEnabled,
+  });
+  if (repo.kind !== "ok") throw new Error(`upsertIntegrationRepo: ${repo.kind}`);
+  return { integrationId: integration.integration.id, repoId: repo.repo.id };
+}
+
+/** What the inbound importer leaves on a task it linked — the external
+ *  columns plus the repository the issue lives in. */
+export async function linkTestTaskToRepo(
+  db: PrismaClient,
+  taskId: string,
+  repo: TestRepo,
+  syncState = "synced"
+): Promise<void> {
+  await db.task.update({
+    where: { id: taskId },
+    data: {
+      integrationRepoId: repo.repoId,
+      externalProvider: "github",
+      externalId: crypto.randomUUID(),
+      externalKey: "acme/repo#1",
+      syncState,
+    },
+  });
+}
+
+/**
+ * A task already linked to an issue, the way the inbound importer leaves one —
+ * the state every outbox test that needs a push target starts a task from.
+ */
+export async function createLinkedTestTask(
+  db: PrismaClient,
+  account: { userId: string; accountId: string },
+  pushEnabled: boolean,
+  args: { title?: string; body?: string; status?: TaskStatus } = {}
+): Promise<{ task: TaskRecord; repo: TestRepo }> {
+  const repo = await createTestIntegrationRepo(db, account, pushEnabled);
+  const created = await createTask(db, {
+    accountId: account.accountId,
+    createdBy: account.userId,
+    title: args.title ?? "linked",
+    body: args.body,
+    status: args.status,
+  });
+  if (created.kind !== "ok") throw new Error(`createTask: ${created.kind}`);
+  await linkTestTaskToRepo(db, created.task.id, repo);
+  return { task: created.task, repo };
 }

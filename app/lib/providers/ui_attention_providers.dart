@@ -28,6 +28,7 @@ enum WorkbenchSurface {
   scheduler,
   appSettings,
   remoteDevices,
+  tasks,
 }
 
 /// The top-level workbench surface rendered beside the project drawer.

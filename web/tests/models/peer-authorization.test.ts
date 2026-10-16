@@ -96,7 +96,7 @@ describe("endpoint enrollment transactions", () => {
     const auth = { handler: async () => Response.json({ keys: [{ ...jwk, kid: "test", alg: "EdDSA" }] }) } as unknown as Auth;
     const issuer = "https://account.example/api/auth";
     const token = await new SignJWT({ uid: identity.userId, deviceUuid: identity.deviceId,
-      azp: identity.enrollmentId, pk: Buffer.from(identity.publicKey).toString("base64") })
+      azp: identity.enrollmentId, pk: Buffer.from(identity.publicKey).toString("base64"), scope: "agent" })
       .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer(issuer).setAudience(issuer)
       .setIssuedAt().setExpirationTime("1m").sign(signing.privateKey);
     const app = new Hono().route("/", peerAuthorizationRoutes({ db: pg.db, auth,

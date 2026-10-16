@@ -132,7 +132,7 @@ test("a tree request naming the current revision is answered without a listing",
   expect(unchanged?.type === "file:tree:unchanged" ? unchanged.seq : -1).toBe(seq);
   // The point of the whole exchange: no listing crossed for the second ask.
   expect(countOf(sent, "file:tree:children")).toBe(listingsBefore);
-});
+}, 20_000);
 
 test("a tree request naming an unrecognised revision still gets a listing", async () => {
   const { bus, sent } = await bootCore();

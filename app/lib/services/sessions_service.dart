@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/session_entry.dart';
 import '../models/ab_message.dart';
+import '../models/task_ref.dart';
 import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../storage/cached_sessions_store.dart';
@@ -374,6 +375,7 @@ class SessionsService {
     String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
+    TaskRef? taskRef,
   }) {
     final requestId = _newRequestId();
     final pending = _newPending<SessionEntry?>(
@@ -392,6 +394,7 @@ class SessionsService {
           'approvalPolicy': approvalPolicy,
           'isolation': isolation,
           'baseBranch': ?baseBranch,
+          'taskRef': ?taskRef?.toJson(),
         }),
       ),
     );

@@ -11,6 +11,8 @@ import { serveStatic } from "hono/bun";
 import { health } from "./routes/health.js";
 import { deviceRoutes } from "./routes/devices.js";
 import { agentRoutes } from "./routes/agents.js";
+import { projectRoutes } from "./routes/projects.js";
+import { taskRoutes } from "./routes/tasks.js";
 import { peerAuthorizationRoutes } from "./routes/peer-authorization.js";
 import { irohAccessRoutes } from "./routes/iroh-access.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
@@ -99,7 +101,9 @@ export function buildApp(deps: AppDeps) {
       origin: (origin) => (deps.corsOrigins.includes(origin) ? origin : null),
       credentials: true,
       allowHeaders: ["content-type", "authorization"],
-      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+      // PATCH edits a task and PUT replaces its label set; a browser client
+      // cannot reach either without them being listed here.
+      allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
       // Without this the fetch spec caches a preflight for 5 seconds, so every
       // retry on a cross-origin JSON POST (the marketing site's waitlist form)
       // pays a second round trip before the one that carries the body.
@@ -155,6 +159,8 @@ export function buildApp(deps: AppDeps) {
   app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens }));
   app.route("/", appleRoutes({ db: deps.db, auth: deps.auth, apple: appleTokens }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
+  app.route("/", projectRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
+  app.route("/", taskRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", peerAuthorizationRoutes(deps));
   app.route("/", irohAccessRoutes(deps));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
@@ -164,8 +170,10 @@ export function buildApp(deps: AppDeps) {
     webhookRoutes({
       db: deps.db,
       relay: deps.relay,
+      clientIp,
       paddleWebhookSecret: deps.env.PADDLE_WEBHOOK_SECRET,
       razorpayWebhookSecret: deps.env.RAZORPAY_WEBHOOK_SECRET,
+      githubWebhookSecret: deps.env.GITHUB_APP_WEBHOOK_SECRET,
     })
   );
   app.route("/", emailWebhookRoutes({ db: deps.db, webhookSecret: deps.env.ZEPTOMAIL_WEBHOOK_SECRET }));

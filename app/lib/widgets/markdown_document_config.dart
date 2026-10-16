@@ -24,8 +24,10 @@ const double _proseHeight = 1.55;
 /// this and aligns inside it. Scaled rather than constant: the paragraph beside
 /// it grows with the system text size, and a fixed box would leave every marker
 /// riding above the line it belongs to.
-double _proseLine(BuildContext context) =>
-    MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) * _proseHeight;
+double _proseLine(
+  BuildContext context, [
+  double fontSize = AbTokens.fontBody,
+]) => MediaQuery.textScalerOf(context).scale(fontSize) * _proseHeight;
 
 /// Gutter holding a list marker. Pinned instead of left to the package default
 /// because both markers below align themselves inside it — a checkbox lands
@@ -117,8 +119,9 @@ MarkdownConfig buildMarkdownDocumentConfig(
         marker: (isOrdered, depth, index) =>
             _ListMarker(isOrdered: isOrdered, depth: depth, index: index),
       ),
-      // The package default draws a raw Material `Icons.check_box`.
-      CheckBoxConfig(builder: (checked) => _TaskMarker(checked: checked)),
+      CheckBoxConfig(
+        builder: (checked) => MarkdownTaskMarker(checked: checked),
+      ),
       ImgConfig(
         builder: (url, attributes) => _MarkdownImage(
           url: url,
@@ -239,10 +242,26 @@ class _Bullet extends StatelessWidget {
 
 /// Task-list box, drawn with the app's own toggle pair rather than Material's
 /// checkbox glyphs.
-class _TaskMarker extends StatelessWidget {
-  const _TaskMarker({required this.checked});
+///
+/// Every markdown surface must supply one through [CheckBoxConfig]: the
+/// package default pads its own Material glyph by `lineHeight / 2 - 12`, which
+/// goes negative on a prose line under ~24px and fails `Padding`'s assertion,
+/// so any task list renders as an error box.
+class MarkdownTaskMarker extends StatelessWidget {
+  const MarkdownTaskMarker({
+    super.key,
+    required this.checked,
+    this.fontSize = AbTokens.fontBody,
+    this.onTap,
+  });
 
   final bool checked;
+
+  /// The surrounding paragraph's size, so the box centres on its line.
+  final double fontSize;
+
+  /// Null leaves the box read-only, as in a file being viewed.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -251,8 +270,8 @@ class _TaskMarker extends StatelessWidget {
     // into the marker gutter as a raw inline span, so anything narrower than
     // the gutter hugs its left edge and the boxes step left of the bullets
     // above them in a mixed list.
-    return SizedBox(
-      height: _proseLine(context),
+    final box = SizedBox(
+      height: _proseLine(context, fontSize),
       width: _listGutter,
       child: Align(
         alignment: Alignment.centerRight,
@@ -263,6 +282,20 @@ class _TaskMarker extends StatelessWidget {
             size: AbTokens.fontSm,
             color: checked ? c.success : c.textMuted,
           ),
+        ),
+      ),
+    );
+    if (onTap == null) return box;
+    // The whole gutter is the target: the glyph alone is a ~12px hit area.
+    return Semantics(
+      checked: checked,
+      button: true,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: box,
         ),
       ),
     );

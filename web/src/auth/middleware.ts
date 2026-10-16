@@ -7,11 +7,19 @@ import { recordStage } from "./flows.js";
 import type { Auth } from "./better-auth.js";
 import { getSignedCookie } from "hono/cookie";
 import type { DB } from "../db/index.js";
+import type { Env } from "../env.js";
+import { requireDeviceBearerJwt } from "./jwt-bearer.js";
 
 export type AuthVars = {
   userId: string;
   sessionId: string;
   userEmail: string | null;
+  /**
+   * The caller's live device, set only by `requireDeviceBearerJwt`. Its presence is
+   * the actor-type signal — a Bearer-gated request leaves `sessionId` empty, so
+   * the credential is all that distinguishes a bridge from a browser session.
+   */
+  deviceId?: string;
   userName: string | null;
   deviceAuthorization?: {
     id: string;
@@ -61,6 +69,37 @@ export function requireUser(deps: { auth: Auth; db?: DB }): MiddlewareHandler<{ 
   };
 }
 
+/**
+ * Gate a route both a human client and the bridge reach, each with its own
+ * carrier — cookie from the app and browser, device JWT from the bridge.
+ *
+ * An `Authorization: Bearer` header is terminal. A request that presents a
+ * device token and fails on it must not be rescued by a session cookie riding
+ * along in the same request, or a revoked device keeps working the moment its
+ * user happens to be signed in somewhere.
+ *
+ * The two gates stay distinguishable downstream: only the Bearer path sets
+ * `deviceId`, so a route that must not be reachable programmatically can still
+ * refuse on its presence.
+ */
+export function requireUserOrBearer(deps: {
+  auth: Auth;
+  db: DB;
+  env: Env;
+}): MiddlewareHandler<{ Variables: AuthVars }> {
+  // Built once: the bearer gate caches the JWKS per instance, and rebuilding it
+  // per request would refetch on every call.
+  const bearer = requireDeviceBearerJwt(deps);
+  const cookie = requireUser({ auth: deps.auth });
+  return async (c, next) => {
+    // One lookup: `header()` reads through the Fetch Headers API, which folds
+    // case itself.
+    const authz = c.req.header("authorization");
+    if (authz && authz.toLowerCase().startsWith("bearer ")) return bearer(c, next);
+    return cookie(c, next);
+  };
+}
+
 /** Gate a UI route. Redirects to /login when unauthenticated. */
 export function requireUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
@@ -75,6 +114,40 @@ export function requireUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareH
   };
 }
 
+/**
+ * Guards a browser hand-off from the app: the app passes the email of its own
+ * signed-in user as `?asEmail=`, and a browser whose Better-Auth session
+ * belongs to someone else must not be allowed to act as if it were that user
+ * — most importantly, must not bind a GitHub installation to the wrong
+ * account. Runs AFTER `requireUserOrRedirect`, which already sends a browser
+ * with no session at all to `/login`; this only has to catch the case where a
+ * session exists but names a different person.
+ *
+ * No-op (never reads or writes anything) when the route was reached without
+ * `asEmail` — a plain visit to the page in a browser carries no expectation
+ * to check against.
+ *
+ * On a mismatch this only REDIRECTS (GET, no side effect) to a page that asks
+ * before signing out. A GET must never sign out directly: `?asEmail=` is read
+ * from the query string, so any page could force this browser to navigate
+ * here — a top-level GET still carries a `SameSite=Lax` cookie — and log a
+ * signed-in victim out with no interaction beyond loading a page. The sign-out
+ * sits behind a same-origin POST instead (`/ui/integrations/switch-account` in
+ * `routes/ui.tsx`), which the router's same-origin check on non-GET requests
+ * is what a forged cross-site request cannot pass.
+ */
+export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
+  return async (c, next) => {
+    const asEmail = c.req.query("asEmail");
+    if (!asEmail) return next();
+    const actual = c.get("userEmail");
+    if (actual && actual.toLowerCase() === asEmail.toLowerCase()) return next();
+
+    return c.redirect(`/integrations/switch-account?asEmail=${encodeURIComponent(asEmail)}`);
+  };
+}
+
+/** Gate a UI route without touching the session: operator pages only observe. */
 export function requireReadOnlyUserOrRedirect(deps: { auth: Auth; db: DB }): MiddlewareHandler<{ Variables: AuthVars }> {
   return async (c, next) => {
     // Better-Auth's getSession refreshes old sessions and deletes expired ones.

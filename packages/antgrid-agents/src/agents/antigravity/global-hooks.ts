@@ -95,3 +95,33 @@ export function mergeAntigravityHookEntries(
   next[ANTIGRAVITY_HOOK_GROUP] = group;
   return next;
 }
+
+/**
+ * A withdrawn feature briefly shipped a `PreToolUse` entry under our own
+ * group (fires on every agy tool call and always answers `{"decision":"ask"}`,
+ * which turned into a phone push per tool). An install that already ran that
+ * build has it sitting in its global hooks.json with no code left to keep
+ * refreshing it, so the merge in ensureAntigravityHook can't undo it on its
+ * own — this strips it so those machines heal on their next launch. Matched
+ * by the command it ran (post-title.js), not just the key name, so a future
+ * legitimate PreToolUse entry under this group isn't silently eaten. Returns
+ * `null` if there is nothing to remove.
+ */
+export function stripLegacyAntigravityPreToolUseHook(data: any): any | null {
+  const group = data && typeof data === "object" && !Array.isArray(data) ? data[ANTIGRAVITY_HOOK_GROUP] : undefined;
+  if (!group || typeof group !== "object" || Array.isArray(group) || !("PreToolUse" in group)) return null;
+  if (!isOwnPreToolUseEntry(group.PreToolUse)) return null;
+  const { PreToolUse: _removed, ...restGroup } = group;
+  return { ...data, [ANTIGRAVITY_HOOK_GROUP]: restGroup };
+}
+
+// The withdrawn feature used agy's matcher/hooks group shape (required for any
+// per-tool event, unlike the flat PreInvocation/Stop arrays), so that's the
+// only shape checked here.
+function isOwnPreToolUseEntry(entry: unknown): boolean {
+  if (!Array.isArray(entry)) return false;
+  return entry.some((matcherGroup: any) =>
+    Array.isArray(matcherGroup?.hooks)
+    && matcherGroup.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("post-title.js")),
+  );
+}

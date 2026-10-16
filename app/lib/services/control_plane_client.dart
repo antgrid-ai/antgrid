@@ -17,7 +17,7 @@ export '../models/agent_work_status.dart' show AgentWorkStatus;
 /// A project advertised by the agent over the control-plane connection.
 ///
 /// Hand-mirrors the bridge `agent:projects` entry schema
-/// (`{ projectId, label?, path?, running, status?, runningSessions? }`) per the
+/// (`{ projectId, label?, path?, running, status?, runningSessions?, repoKey? }`) per the
 /// package convention that the Dart side mirrors the TS Zod schemas by hand.
 /// Beside the entries, the message carries a machine-level top-level
 /// `remoteAccessEnabled?` flag — that one lands on
@@ -48,6 +48,12 @@ class AdvertisedProject {
   final Map<String, AgentWorkStatus>? sessionStatuses;
   final String? lastActiveAt;
 
+  /// Cross-machine repository identity, folded from the project's origin remote
+  /// by the bridge (`bridge/src/repo-key.ts`). Null on an older bridge, and on
+  /// a machine with no device id to synthesize a `local:` key from — so it is
+  /// never an identity the app may invent, only one it may carry.
+  final String? repoKey;
+
   const AdvertisedProject({
     required this.projectId,
     this.label,
@@ -57,6 +63,7 @@ class AdvertisedProject {
     this.runningSessions,
     this.sessionStatuses,
     this.lastActiveAt,
+    this.repoKey,
   });
 
   static AdvertisedProject? fromJson(Map<String, dynamic> json) {
@@ -72,6 +79,7 @@ class AdvertisedProject {
       runningSessions: (json['runningSessions'] as num?)?.toInt(),
       sessionStatuses: parseSessionStatuses(json['sessionStatuses']),
       lastActiveAt: json['lastActiveAt'] as String?,
+      repoKey: json['repoKey'] as String?,
     );
   }
 }

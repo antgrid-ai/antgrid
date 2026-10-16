@@ -120,6 +120,9 @@ async function waitForHealth(url: string, timeoutMs: number) {
 
 // 1. web first — relay JWKS + agent token refresh both depend on it.
 start({ name: "web", cmd: ["bun", "run", "dev"], cwd: "web" });
+// The GitHub sync jobs have no in-process timer by design; this is the dev
+// stand-in for the cron that runs them in a deployed environment.
+start({ name: "web-sync", cmd: ["bun", "run", "dev:sync"], cwd: "web" });
 
 console.log(`[antgrid] Waiting for web at ${LICENSE_API_URL}/health ...`);
 try {
