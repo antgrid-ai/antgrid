@@ -11,7 +11,12 @@ import {
   statusFailure,
   type FetchLike,
 } from "./github-app.js";
-import { GithubIssueSchema, type GithubIssue } from "./github-events.js";
+import {
+  GithubIssueCommentSchema,
+  GithubIssueSchema,
+  type GithubIssue,
+  type GithubIssueComment,
+} from "./github-events.js";
 
 /**
  * The outbox's writer seam: the only place in this service that mutates a
@@ -54,6 +59,9 @@ function isPathSegment(value: string): boolean {
  *  description of a repository rather than an address for one. */
 export type GithubRepoTarget = { owner: string; repo: string };
 export type GithubIssueTarget = GithubRepoTarget & { number: number };
+/** Comments are addressed under the repository, not the issue — GitHub's own
+ *  shape for the edit and delete endpoints. */
+export type GithubCommentTarget = GithubRepoTarget & { commentId: string };
 
 /**
  * Exactly what v1 pushes, and **`assignees` is absent by construction**.
@@ -111,6 +119,17 @@ export interface GithubIssueWriter {
     ref: GithubRepoTarget,
     args: { appSlug: string; since: Date }
   ): Promise<GithubIssue[]>;
+  createComment(ref: GithubIssueTarget, body: string): Promise<GithubIssueComment>;
+  updateComment(ref: GithubCommentTarget, body: string): Promise<GithubIssueComment>;
+  /** Resolves on a 404 too: the comment being gone is what a delete asked for. */
+  deleteComment(ref: GithubCommentTarget): Promise<void>;
+  /**
+   * Retry resolution for a comment create whose response was lost, the
+   * comment-thread twin of `listAppIssuesSince`: the issue's comments since the
+   * first hand-off, matched on the embedded marker. Fails closed on the page
+   * ceiling for the same reason — the caller's next move on a miss is to post.
+   */
+  listIssueCommentsSince(ref: GithubIssueTarget, since: Date): Promise<GithubIssueComment[]>;
 }
 
 /**
@@ -177,7 +196,45 @@ export function findOpKey(body: string | null | undefined): string | null {
   return (body ? OP_MARKER.exec(body)?.[1] : null) ?? null;
 }
 
+/**
+ * The marker on a comment mirrored from Antgrid, naming the local comment it
+ * mirrors. Stable for the comment's life, so every retry and every edit carries
+ * the same one.
+ *
+ * Readable by anyone who can read the repository, so finding it proves nothing
+ * about who wrote the comment carrying it. Both readers therefore also require
+ * this App's own bot as the author (`isOwnAppComment`), and the inbound side
+ * links only to a local comment not yet linked.
+ *
+ * Anchored to the end of the body, where `renderMirroredComment` writes it: the
+ * member's own text comes first and may quote another comment's marker.
+ */
+const COMMENT_MARKER = /<!--\s*antgrid:comment:([0-9a-f-]{36})\s*-->\s*$/;
+
+export function commentMarker(commentId: string): string {
+  if (!/^[0-9a-f-]{36}$/.test(commentId)) throw new TypeError("comment id is not a uuid");
+  return `<!-- antgrid:comment:${commentId} -->`;
+}
+
+export function findCommentKey(body: string | null | undefined): string | null {
+  return (body ? COMMENT_MARKER.exec(body)?.[1] : null) ?? null;
+}
+
+/**
+ * Whether a provider comment was written by this App, the precondition for
+ * reading its marker as ours.
+ *
+ * Any other App's bot can post the marker too, so `type: Bot` alone is not
+ * enough. GitHub names an App's bot account `<slug>[bot]`, and no person or
+ * other App can hold that login.
+ */
+export function isOwnAppComment(comment: GithubIssueComment, appSlug: string): boolean {
+  return comment.user?.type === "Bot" && comment.user.login === `${appSlug}[bot]`;
+}
+
 const IssueListSchema = z.array(GithubIssueSchema);
+const CommentListSchema = z.array(GithubIssueCommentSchema);
+const COMMENT_ID = /^\d{1,20}$/;
 
 export function createGithubIssueWriter(opts: {
   /** A function so a drain outliving the installation token's hour can re-mint
@@ -290,6 +347,48 @@ export function createGithubIssueWriter(opts: {
       throw new GithubApiError("unexpected", base, 0, "exceeded the page ceiling");
     },
 
+    async createComment(ref: GithubIssueTarget, body: string): Promise<GithubIssueComment> {
+      return call(GithubIssueCommentSchema, `${issuePath(ref)}/comments`, {
+        method: "POST",
+        body: { body },
+      });
+    },
+
+    async updateComment(ref: GithubCommentTarget, body: string): Promise<GithubIssueComment> {
+      return call(GithubIssueCommentSchema, commentPath(ref), { method: "PATCH", body: { body } });
+    },
+
+    async deleteComment(ref: GithubCommentTarget): Promise<void> {
+      const endpoint = commentPath(ref);
+      const res = await send(endpoint, `${API_BASE}${endpoint}`, {
+        method: "DELETE",
+        headers: apiHeaders(await authorization()),
+      });
+      if (res.ok || res.status === 404) return;
+      throw new GithubApiError(statusFailure(res.status), endpoint, res.status, "failed", res.headers);
+    },
+
+    async listIssueCommentsSince(
+      ref: GithubIssueTarget,
+      since: Date
+    ): Promise<GithubIssueComment[]> {
+      const base = `${issuePath(ref)}/comments`;
+      const out: GithubIssueComment[] = [];
+      for (let page = 1; page <= GITHUB_MAX_PAGES; page++) {
+        const query = new URLSearchParams({
+          since: since.toISOString(),
+          per_page: String(GITHUB_PER_PAGE),
+          page: String(page),
+        });
+        const items = await call(CommentListSchema, `${base}?${query.toString()}`, {
+          method: "GET",
+        });
+        out.push(...items);
+        if (items.length < GITHUB_PER_PAGE) return out;
+      }
+      throw new GithubApiError("unexpected", base, 0, "exceeded the page ceiling");
+    },
+
     async listRepoIssuesSince(
       ref: GithubRepoTarget,
       args: { since: Date | null; page: number }
@@ -331,4 +430,11 @@ function issuePath(ref: GithubIssueTarget): string {
     throw new GithubApiError("refused", "/repos", 0, "malformed issue number");
   }
   return `${repoPath(ref)}/issues/${ref.number}`;
+}
+
+function commentPath(ref: GithubCommentTarget): string {
+  if (!COMMENT_ID.test(ref.commentId)) {
+    throw new GithubApiError("refused", "/repos", 0, "malformed comment id");
+  }
+  return `${repoPath(ref)}/issues/comments/${ref.commentId}`;
 }

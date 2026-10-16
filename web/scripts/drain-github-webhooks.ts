@@ -39,7 +39,9 @@ const env = loadEnv();
 const db = createDb(env.PG_DATABASE_URL);
 
 try {
-  const report = await drainGithubBacklog(githubDrainLoopDeps(db));
+  const report = await drainGithubBacklog(
+    githubDrainLoopDeps(db, { appSlug: env.GITHUB_APP_SLUG?.trim() || undefined })
+  );
 
   // Whole report, not a summary: a delivery is applied once and the row is then
   // deleted by retention, so this is the only record that the issues, comments

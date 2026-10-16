@@ -4,7 +4,12 @@
 import { z } from "zod";
 import type { DB, Tx } from "../db/index.js";
 import { isUuid } from "../util/uuid.js";
-import { enqueueForTask, issueLabelsPayload, sameLabelSet } from "../tasks/sync-op.js";
+import {
+  enqueueForTask,
+  issueLabelsPayload,
+  lockTaskSync,
+  sameLabelSet,
+} from "../tasks/sync-op.js";
 
 /**
  * Labels: the vocabulary a task list is triaged by, account-scoped like
@@ -369,19 +374,6 @@ export async function setTaskLabelsInTx(
     skipDuplicates: true,
   });
   return { kind: "ok" };
-}
-
-/**
- * The lock `enqueueForTask` requires of its caller, and the one every
- * read-merge-write on a task row takes (`src/tasks/merge.ts`).
- *
- * Taken only after the id has resolved under the caller's `accountId`: a lock
- * keyed on an id a caller named is one a stranger can take. Last in the fixed
- * `ghhook:` -> `taskimport:` -> `tasksync:` order, so taking it alone deadlocks
- * against nothing.
- */
-async function lockTaskSync(tx: Tx, taskId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${taskId}`}))`;
 }
 
 async function labelNames(tx: Tx, taskId: string): Promise<string[]> {

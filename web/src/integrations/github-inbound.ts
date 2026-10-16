@@ -40,6 +40,7 @@ import {
   type GithubRepoRef,
 } from "./github-events.js";
 import { isOwnEcho } from "./github-echo.js";
+import { findCommentKey, isOwnAppComment } from "./github-issues.js";
 import {
   DEFAULT_LABEL_COLOR,
   foldLocalConflict,
@@ -120,6 +121,9 @@ export type DropReason =
   | "unknown_task"
   | "unknown_comment"
   | "comment_cap"
+  /** A comment written here and mirrored to the provider: its author owns the
+   *  text, so the provider's copy never writes it back. */
+  | "own_comment"
   /** The delivery is the echo of our own push — its normalized field set hashes
    *  equal to `Task.pushedHash`. */
   | "own_echo"
@@ -149,7 +153,7 @@ type ClaimOutcome = ApplyOutcome | { kind: "skipped" };
  */
 export async function drainGithubWebhooks(
   db: DB,
-  opts: { batchSize?: number } = {}
+  opts: { batchSize?: number; appSlug?: string } = {}
 ): Promise<GithubDrainReport> {
   const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
   const claimable = await db.$queryRaw<{ id: string }[]>`
@@ -177,7 +181,7 @@ export async function drainGithubWebhooks(
 
   for (const { id } of claimable) {
     try {
-      const outcome = await db.$transaction(async (tx) => claimAndApply(tx, id));
+      const outcome = await db.$transaction(async (tx) => claimAndApply(tx, id, opts.appSlug));
       report[outcome.kind === "applied" ? "applied" : outcome.kind] += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -196,7 +200,7 @@ export async function drainGithubWebhooks(
   return report;
 }
 
-async function claimAndApply(tx: Tx, id: string): Promise<ClaimOutcome> {
+async function claimAndApply(tx: Tx, id: string, appSlug: string | undefined): Promise<ClaimOutcome> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey(id)}))`;
 
   // Re-read under the lock, never before it: the row a concurrent drainer was
@@ -211,14 +215,19 @@ async function claimAndApply(tx: Tx, id: string): Promise<ClaimOutcome> {
 
   const stored = StoredGithubDeliverySchema.safeParse(row.payload);
   const outcome: ApplyOutcome = stored.success
-    ? await applyDelivery(tx, row.type, stored.data.body)
+    ? await applyDelivery(tx, row.type, stored.data.body, appSlug)
     : { kind: "invalid", error: "payload is not a stored github delivery" };
 
   await markDeliveryProcessed(tx, id, outcome.kind === "invalid" ? outcome.error : undefined);
   return outcome;
 }
 
-async function applyDelivery(tx: Tx, type: string, body: unknown): Promise<ApplyOutcome> {
+async function applyDelivery(
+  tx: Tx,
+  type: string,
+  body: unknown,
+  appSlug: string | undefined
+): Promise<ApplyOutcome> {
   switch (type) {
     case "installation":
       return applyInstallation(tx, body);
@@ -229,7 +238,7 @@ async function applyDelivery(tx: Tx, type: string, body: unknown): Promise<Apply
     case "issues":
       return applyIssue(tx, body);
     case "issue_comment":
-      return applyIssueComment(tx, body);
+      return applyIssueComment(tx, body, appSlug);
     default:
       return { kind: "dropped", reason: "unhandled_event" };
   }
@@ -907,7 +916,11 @@ async function resolveRemoteLabels(
  * up at the attempt ceiling. Importing the embedded issue first is what stops a
  * thread being dropped for want of a parent that will never be redelivered.
  */
-async function applyIssueComment(tx: Tx, body: unknown): Promise<ApplyOutcome> {
+async function applyIssueComment(
+  tx: Tx,
+  body: unknown,
+  appSlug: string | undefined
+): Promise<ApplyOutcome> {
   const parsed = IssueCommentEventSchema.safeParse(body);
   if (!parsed.success) return invalid("issue_comment", parsed.error);
 
@@ -922,7 +935,7 @@ async function applyIssueComment(tx: Tx, body: unknown): Promise<ApplyOutcome> {
   const issue = await importIssue(tx, routed.route, parsed.data.issue);
   if (issue.kind !== "ok") return issue;
 
-  return applyComment(tx, routed.route, issue.taskId, parsed.data.comment, action);
+  return applyComment(tx, routed.route, issue.taskId, parsed.data.comment, action, appSlug);
 }
 
 async function applyComment(
@@ -930,21 +943,36 @@ async function applyComment(
   route: ImportRoute,
   taskId: string,
   comment: GithubIssueComment,
-  action: "created" | "edited" | "deleted"
+  action: "created" | "edited" | "deleted",
+  appSlug: string | undefined
 ): Promise<ApplyOutcome> {
   const externalId = githubExternalId(comment);
   const existing = await tx.taskComment.findFirst({
     where: { taskId, externalId },
-    select: { id: true },
+    select: { id: true, authorUserId: true, deletedAt: true },
   });
 
   if (action === "deleted") {
     if (!existing) return { kind: "dropped", reason: "unknown_comment" };
+    // Already gone here — the echo of our own delete of a mirror.
+    if (existing.deletedAt !== null) return { kind: "dropped", reason: "own_comment" };
     // Soft, never a row delete: `[taskId, externalId]` is what makes a
     // redelivery idempotent, and removing the row lets the same comment import
-    // again as a brand-new one.
+    // again as a brand-new one. A mirror deleted on the provider goes too:
+    // the thread on both sides has to say the same thing.
     await tx.taskComment.update({ where: { id: existing.id }, data: { deletedAt: new Date() } });
     return { kind: "applied", detail: "issue_comment.deleted" };
+  }
+
+  // The mirror of a comment written here. Its author owns the text, and the
+  // provider's copy carries a byline and a marker ours does not — importing it
+  // would rewrite the comment with both, and would hand our own push's echo
+  // the last word over an edit made since.
+  if (existing && existing.authorUserId !== null) {
+    return { kind: "dropped", reason: "own_comment" };
+  }
+  if (!existing && (await linkMirroredComment(tx, taskId, externalId, comment, appSlug))) {
+    return { kind: "applied", detail: `issue_comment.${action} linked to its local comment` };
   }
 
   const fields = {
@@ -977,6 +1005,35 @@ async function applyComment(
 
   await tx.taskComment.create({ data: { taskId, externalId, ...fields } });
   return { kind: "applied", detail: `issue_comment.${action} imported` };
+}
+
+/**
+ * The echo of a comment we posted, drained before the push recorded what it
+ * created. Linking it here is what stops it importing as a stranger's
+ * duplicate of the comment it mirrors.
+ *
+ * The marker alone is not evidence — anyone who can read the repository can
+ * read it and paste it — so this also requires this App's own bot as the
+ * author, and a local comment on this same task that is not yet linked to
+ * anything. A drain run without the slug links nothing: the echo then imports
+ * as a duplicate, which the push's own commit removes when it records the link.
+ */
+async function linkMirroredComment(
+  tx: Tx,
+  taskId: string,
+  externalId: string,
+  comment: GithubIssueComment,
+  appSlug: string | undefined
+): Promise<boolean> {
+  const localId = findCommentKey(comment.body);
+  if (localId === null || appSlug === undefined || !isOwnAppComment(comment, appSlug)) {
+    return false;
+  }
+  const linked = await tx.taskComment.updateMany({
+    where: { id: localId, taskId, externalId: null, authorUserId: { not: null } },
+    data: { externalId },
+  });
+  return linked.count > 0;
 }
 
 function invalid(event: string, error: z.ZodError): ApplyOutcome {

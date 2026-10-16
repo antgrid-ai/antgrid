@@ -328,6 +328,9 @@ class TaskListController extends AsyncNotifier<List<Task>> {
   /// previous list is retained under the reload — a refresh must not blank a
   /// list the user is reading down.
   Future<void> refresh() async {
+    // Membership changes on the web's team page and nothing pushes it here, so
+    // a deliberate refresh is the moment a new teammate becomes assignable.
+    ref.invalidate(taskMembersProvider);
     ref.invalidateSelf();
     try {
       await future;
@@ -1146,6 +1149,20 @@ final taskAssigneeCandidatesProvider = Provider<List<TaskAssigneeCandidate>>((
     for (final m in others)
       TaskAssigneeCandidate(userId: m.userId, displayName: m.displayName),
   ];
+});
+
+/// How a member assignee reads: their name from the account's member list.
+///
+/// Empty while that list loads, so an avatar shows a placeholder rather than
+/// initials cut from a uuid. A user absent from a loaded list has left the
+/// account — the task keeps pointing at them, and nothing else can name them.
+final taskMemberNameProvider = Provider.family<String, String>((ref, userId) {
+  for (final c in ref.watch(taskAssigneeCandidatesProvider)) {
+    if (c.userId == userId) return c.displayName;
+  }
+  final members = ref.watch(taskMembersProvider);
+  if (members.hasValue) return 'Former member';
+  return members.hasError ? 'Teammate' : '';
 });
 
 /// One task's comment thread, fetched when its detail opens.

@@ -1213,7 +1213,10 @@ class _LoadedState extends ConsumerState<_Loaded> {
       TaskMemberAssignee() => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AbAvatar(name: assignee.userId, size: _avatarSize),
+          AbAvatar(
+            name: _displayNameFor(assignee.userId),
+            size: _avatarSize,
+          ),
           const SizedBox(width: AbTokens.space6),
           Flexible(
             child: Text(
@@ -1268,7 +1271,10 @@ class _LoadedState extends ConsumerState<_Loaded> {
                   TaskMemberAssignee() => Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      AbAvatar(name: other.userId, size: _avatarSize),
+                      AbAvatar(
+                        name: _displayNameFor(other.userId),
+                        size: _avatarSize,
+                      ),
                       const SizedBox(width: AbTokens.space6),
                       Text(
                         _displayNameFor(other.userId),
@@ -2127,12 +2133,11 @@ class _LoadedState extends ConsumerState<_Loaded> {
     );
   }
 
-  String _displayNameFor(String userId) {
-    for (final c in ref.read(taskAssigneeCandidatesProvider)) {
-      if (c.userId == userId) return c.displayName;
-    }
-    return userId;
-  }
+  /// Watched, not read: the member list usually lands after the sheet first
+  /// builds, and a read would leave the name blank until something else
+  /// rebuilt it.
+  String _displayNameFor(String userId) =>
+      ref.watch(taskMemberNameProvider(userId));
 }
 
 /// The task's own changed-files list, scoped to a specific session checkout

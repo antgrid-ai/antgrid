@@ -225,6 +225,7 @@ class TaskComment {
     required this.imported,
     required this.createdAt,
     required this.updatedAt,
+    this.mirrored = false,
     this.author,
     this.authorName,
   });
@@ -239,6 +240,10 @@ class TaskComment {
   /// Came from the provider. The import owns it, so the server refuses an edit
   /// or delete — the affordances are absent rather than dead.
   final bool imported;
+
+  /// Written here and also posted to the linked issue. Still its author's to
+  /// edit and delete — those go to the issue as well.
+  final bool mirrored;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -275,6 +280,7 @@ class TaskComment {
       author: parsedAuthor,
       authorName: authorName,
       imported: raw['imported'] == true,
+      mirrored: raw['mirrored'] == true,
       createdAt: createdAt,
       updatedAt: _date(raw['updatedAt']) ?? createdAt,
     );

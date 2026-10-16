@@ -42,14 +42,24 @@ import {
   enqueueSyncOp,
   failOp,
   isArrayValuedOpKind,
+  isCommentPayload,
+  lockTaskSync,
   markOpAttempted,
   refuseOp,
   throttleOp,
   TaskSyncOpKindSchema,
   TaskSyncOpPayloadSchema,
+  type IssueSyncOpPayload,
   type TaskSyncOpPayload,
   type TaskSyncOpRecord,
 } from "./sync-op.js";
+import {
+  commitComment,
+  decideComment,
+  sendComment,
+  type CommentPlan,
+  type CommentSkipReason,
+} from "./comment-push.js";
 
 /**
  * One outbox op, one provider round trip.
@@ -125,9 +135,18 @@ export type ApplyOpSkipReason =
   /** The op's own `integrationId`, pinned at enqueue, no longer matches the
    *  task's current target — see `CancelPendingOpsResult.keptCreate`
    *  (`tasks/sync-op.ts`) for why this op survives long enough to hit it. */
-  | "integration_mismatch";
+  | "integration_mismatch"
+  | CommentSkipReason;
 
 export type ApplyOpOutcome =
+  | {
+      kind: "comment";
+      opId: string;
+      taskId: string;
+      verb: CommentPlan["request"]["kind"];
+      /** A create found already posted by its marker, so nothing was posted. */
+      recovered: boolean;
+    }
   | {
       kind: "applied";
       opId: string;
@@ -220,6 +239,7 @@ type PushRequest =
 
 type Decision =
   | { kind: "push"; plan: PushPlan }
+  | { kind: "comment"; plan: CommentPlan }
   | { kind: "stop"; outcome: ApplyOpOutcome };
 
 export async function applyOp(
@@ -255,16 +275,19 @@ export async function applyOp(
     await deps.db.$transaction((tx) => markOpAttempted(tx, op.id, clock()));
   }
 
+  if (decision.kind === "comment") return applyComment(deps, decision.plan, op.id, clock);
+  const issuePlan = decision.plan;
+
   let response: GithubIssue;
   let recovered = false;
   try {
-    const sent = await send(deps, plan);
+    const sent = await send(deps, issuePlan);
     if (sent.kind === "aborted") {
-      const detail = await abortToMerge(deps, plan, sent.issue);
+      const detail = await abortToMerge(deps, issuePlan, sent.issue);
       return {
         kind: "aborted_to_merge",
         opId: op.id,
-        taskId: plan.taskId,
+        taskId: issuePlan.taskId,
         field: sent.field,
         detail,
       };
@@ -272,13 +295,51 @@ export async function applyOp(
     response = sent.issue;
     recovered = sent.recovered;
   } catch (err) {
-    return failed(deps, plan, op.id, err, clock());
+    return failed(deps, issuePlan, op.id, err, clock());
   }
 
   try {
-    return await commit(deps, plan, op.id, response, recovered, clock());
+    return await commit(deps, issuePlan, op.id, response, recovered, clock());
   } catch (err) {
-    return failed(deps, plan, op.id, err, clock());
+    return failed(deps, issuePlan, op.id, err, clock());
+  }
+}
+
+async function applyComment(
+  deps: ApplyOpDeps,
+  plan: CommentPlan,
+  opId: string,
+  clock: () => Date
+): Promise<ApplyOpOutcome> {
+  try {
+    const sent = await sendComment(deps.writer, plan, deps.appSlug);
+    const done = await deps.db.$transaction(async (tx) => {
+      await lockTaskSync(tx, plan.taskId);
+      return commitComment(tx, plan, opId, sent);
+    });
+    if (done.kind === "superseded") {
+      return { kind: "superseded", opId, taskId: plan.taskId, reason: "op_key" };
+    }
+    if (done.kind === "orphaned") {
+      // Nothing local names this comment any more, so this is the only chance
+      // to take it back off the issue. Best-effort: the op is already closed,
+      // and a failure here leaves exactly what a retry would have left.
+      try {
+        await deps.writer.deleteComment({ ...plan.repo, commentId: done.externalId });
+      } catch {
+        // Intentionally empty.
+      }
+      return { kind: "comment", opId, taskId: plan.taskId, verb: plan.request.kind, recovered: false };
+    }
+    return {
+      kind: "comment",
+      opId,
+      taskId: plan.taskId,
+      verb: plan.request.kind,
+      recovered: done.recovered,
+    };
+  } catch (err) {
+    return failed(deps, plan, opId, err, clock());
   }
 }
 
@@ -287,7 +348,7 @@ export async function applyOp(
  * would be sent, and commit before anything talks to GitHub.
  */
 async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${op.taskId}`}))`;
+  await lockTaskSync(tx, op.taskId);
 
   // Re-read under the lock rather than trusting the claimed record: an enqueue
   // can supersede an op between the claim and here, and the payload that gets
@@ -301,6 +362,13 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
   }
   const payload = parsePayload(row.payload, op.payload);
   const isCreate = payload.kind === TaskSyncOpKindSchema.enum["issue.create"];
+  // A comment post already handed to GitHub may have landed. The guards that
+  // retract consent below stop it posting again, but cancelling it outright
+  // would orphan a public comment nothing here could edit or delete — so it
+  // still runs, to find and link whatever the hand-off posted.
+  const postInFlight =
+    payload.kind === TaskSyncOpKindSchema.enum["comment.create"] && row.attemptedAt !== null;
+  let resolveOnly = false;
 
   const task = await tx.task.findUnique({ where: { id: op.taskId }, select: PUSH_TASK_SELECT });
   if (!task) {
@@ -308,15 +376,20 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "task_missing" });
   }
   if (task.deletedAt !== null || task.syncState === TaskSyncStateSchema.enum.unlinked) {
-    await cancelOp(tx, op.id, "task was deleted or unlinked");
-    return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "task_unlinked" });
+    if (!postInFlight) {
+      await cancelOp(tx, op.id, "task was deleted or unlinked");
+      return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "task_unlinked" });
+    }
+    resolveOnly = true;
   }
 
   // `Task.localConflict` is sticky by construction and only a person clears it.
   // Pushing over it releases a write nobody adjudicated, so the op waits instead
   // — deferred rather than failed, and deferred rather than left due, which
-  // would re-claim it on every tick for ever.
-  if (task.syncState === TaskSyncStateSchema.enum.conflict) {
+  // would re-claim it on every tick for ever. A comment is no field of the
+  // issue a conflict is about, and holding back a delete there keeps a comment
+  // public that its author already took back.
+  if (task.syncState === TaskSyncStateSchema.enum.conflict && !isCommentPayload(payload)) {
     await throttleOp(tx, op.id, new Date(at.getTime() + CONFLICT_RECHECK_SECONDS * 1000));
     return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "task_in_conflict" });
   }
@@ -354,9 +427,12 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
   // `syncEnabled`; withdrawing it has to stop queued writes too, or the consent
   // only governs new ones.
   if (!repo.pushEnabled) {
-    await cancelOp(tx, op.id, "outbound writes are off for this repository");
-    await abandonStuckCreate();
-    return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "push_disabled" });
+    if (!postInFlight) {
+      await cancelOp(tx, op.id, "outbound writes are off for this repository");
+      await abandonStuckCreate();
+      return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: "push_disabled" });
+    }
+    resolveOnly = true;
   }
 
   // `row.integrationId` is pinned at enqueue and normally always matches: any
@@ -386,6 +462,25 @@ async function decide(tx: Tx, op: TaskSyncOpRecord, at: Date): Promise<Decision>
       status: null,
       reason: "repository key is not addressable",
     });
+  }
+
+  if (isCommentPayload(payload)) {
+    const decided = await decideComment(tx, {
+      opId: op.id,
+      opKey: row.opKey,
+      attemptedAt: row.attemptedAt,
+      taskId: op.taskId,
+      integrationId: repo.integrationId,
+      externalKey: task.externalKey,
+      repo: target,
+      payload,
+      resolveOnly,
+    });
+    if (decided.kind === "push") return { kind: "comment", plan: decided.plan };
+    if (decided.kind === "skip") {
+      return stop({ kind: "skipped", opId: op.id, taskId: op.taskId, reason: decided.reason });
+    }
+    return stop({ kind: "refused", opId: op.id, taskId: op.taskId, status: null, reason: decided.reason });
   }
 
   if (isCreate && task.externalId !== null) {
@@ -447,7 +542,7 @@ function parsePayload(stored: unknown, claimed: TaskSyncOpPayload): TaskSyncOpPa
   return parsed.success ? parsed.data : claimed;
 }
 
-function pushFieldsOf(payload: TaskSyncOpPayload): PushField[] {
+function pushFieldsOf(payload: IssueSyncOpPayload): PushField[] {
   switch (payload.kind) {
     case "issue.create":
       // No `status`: `POST /issues` has no `state` field at all, so a create
@@ -465,7 +560,7 @@ function pushFieldsOf(payload: TaskSyncOpPayload): PushField[] {
   }
 }
 
-function buildCreate(payload: TaskSyncOpPayload, opKey: string): PushRequest | null {
+function buildCreate(payload: IssueSyncOpPayload, opKey: string): PushRequest | null {
   if (payload.kind !== "issue.create") return null;
   return {
     kind: "create",
@@ -483,7 +578,7 @@ function buildCreate(payload: TaskSyncOpPayload, opKey: string): PushRequest | n
 }
 
 function buildPatch(
-  payload: TaskSyncOpPayload,
+  payload: IssueSyncOpPayload,
   externalKey: string | null,
   localLabels: string[]
 ): PushRequest | null {
@@ -649,7 +744,7 @@ async function commit(
   at: Date
 ): Promise<ApplyOpOutcome> {
   return deps.db.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${plan.taskId}`}))`;
+    await lockTaskSync(tx, plan.taskId);
 
     const row = await tx.taskSyncOp.findUnique({
       where: { id: opId },
@@ -697,6 +792,9 @@ async function commit(
 
     if (superseded) {
       await tx.task.update({ where: { id: plan.taskId }, data: observation });
+      // The link is written on this path too, so the thread that was waiting
+      // for an issue must be queued here as well, or it never is.
+      if (plan.request.kind === "create") await queuePrePublishThread(tx, plan);
       return { kind: "superseded", opId, taskId: plan.taskId, reason: "op_key" as const };
     }
 
@@ -735,6 +833,10 @@ async function commit(
       });
     }
 
+    // Here for the same reason as the state above: the issue a comment is
+    // posted under exists from this point on.
+    if (plan.request.kind === "create") await queuePrePublishThread(tx, plan);
+
     if (noEffect.length > 0) {
       const fields = noEffect.map((entry) => entry.field);
       return {
@@ -748,6 +850,30 @@ async function commit(
     }
     return { kind: "applied", opId, taskId: plan.taskId, recovered, pushedHash, cleared: took.filter((field) => blob[field] !== undefined) };
   });
+}
+
+/**
+ * The thread written before the issue existed, oldest first so it reads on
+ * GitHub in the order it was written. A comment already queued is not queued
+ * twice: `enqueueSyncOp` supersedes per comment.
+ */
+async function queuePrePublishThread(
+  tx: Tx,
+  plan: { taskId: string; integrationId: string }
+): Promise<void> {
+  const thread = await tx.taskComment.findMany({
+    where: { taskId: plan.taskId, deletedAt: null, externalId: null, authorUserId: { not: null } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true },
+  });
+  for (const comment of thread) {
+    await enqueueSyncOp(tx, {
+      taskId: plan.taskId,
+      integrationId: plan.integrationId,
+      provider: GITHUB_PROVIDER,
+      payload: { kind: TaskSyncOpKindSchema.enum["comment.create"], commentId: comment.id },
+    });
+  }
 }
 
 /**
@@ -810,7 +936,7 @@ function noEffectFields(
  *  attempt and a permanent refusal never burns five of them. */
 async function failed(
   deps: ApplyOpDeps,
-  plan: PushPlan,
+  plan: { taskId: string },
   opId: string,
   err: unknown,
   at: Date

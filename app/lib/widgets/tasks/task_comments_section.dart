@@ -14,12 +14,13 @@ import '../../services/tasks_api.dart';
 import '../../util/detached.dart';
 import '../transcript/markdown_body.dart';
 import 'task_body_editor.dart';
+import 'task_provenance_view.dart';
 
 /// A task's comment thread, oldest first, with a composer under it.
 ///
-/// Comments written here stay in Antgrid — nothing pushes them to the provider
-/// — so the composer says so, or a user on a linked task would reasonably
-/// expect theirs to appear on the issue.
+/// On a task whose issue takes pushes, a comment written here is posted there
+/// too; otherwise it stays in Antgrid. The composer says which, because the
+/// difference is whether a repository's watchers read it.
 class TaskCommentsSection extends ConsumerStatefulWidget {
   const TaskCommentsSection({super.key, required this.task});
 
@@ -224,10 +225,10 @@ class _TaskCommentsSectionState extends ConsumerState<TaskCommentsSection> {
             color: palette.textMuted,
           ),
         ),
-        if (comment.imported) ...[
+        if (comment.imported || comment.mirrored) ...[
           const SizedBox(width: AbTokens.space8),
           Text(
-            'from GitHub',
+            comment.imported ? 'from GitHub' : 'on GitHub',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXxs,
               color: palette.textMuted,
@@ -360,10 +361,7 @@ class _TaskCommentsSectionState extends ConsumerState<TaskCommentsSection> {
       children: [
         TaskBodyEditor(
           controller: _draft,
-          hintText: widget.task.isLocal && widget.task.syncState == null
-              ? 'Leave a comment.'
-              : 'Leave a comment. It stays in Antgrid and is not posted to '
-                    'GitHub.',
+          hintText: _composerHint(widget.task),
           minLines: 3,
           maxLines: 12,
         ),
@@ -408,6 +406,23 @@ class _TaskCommentsSectionState extends ConsumerState<TaskCommentsSection> {
     TaskExternalAssignee(:final login) => '@$login',
     null => comment.imported ? 'GitHub user' : 'Former member',
   };
+}
+
+/// Mirrors the account service's push gate: a linked issue whose repository
+/// takes pushes, or a publish whose create is still on its way and carries the
+/// thread with it.
+String _composerHint(Task task) {
+  final provider = taskProviderLabel(task);
+  final publishing =
+      task.syncState == TaskSyncState.pending && task.externalId == null;
+  if ((task.isLinked || publishing) && task.pushLive == true) {
+    return 'Leave a comment. It is also posted to the $provider issue.';
+  }
+  if (task.isLinked) {
+    return 'Leave a comment. It stays in Antgrid — this task is not '
+        'sending edits to $provider right now.';
+  }
+  return 'Leave a comment.';
 }
 
 String _stamp(DateTime at) {

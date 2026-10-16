@@ -199,7 +199,7 @@ class TaskRow extends ConsumerWidget {
         // In the two-line layout an unassigned task already said so up on the
         // title line (see `_titleBadges`); a real assignee still belongs down
         // here regardless of layout.
-        if (!twoLine || task.assignee != null) _assignee(context),
+        if (!twoLine || task.assignee != null) _assignee(context, ref),
         // A count, not an avatar stack: the row is a scanning surface and
         // these are provider identities the account cannot even name. Who they
         // are is the detail sheet's answer.
@@ -258,7 +258,7 @@ class TaskRow extends ConsumerWidget {
     );
   }
 
-  Widget _assignee(BuildContext context) {
+  Widget _assignee(BuildContext context, WidgetRef ref) {
     final assignee = task.assignee;
     return switch (assignee) {
       null => AbIcon(
@@ -267,7 +267,7 @@ class TaskRow extends ConsumerWidget {
         color: context.antgrid.iconMuted,
       ),
       TaskMemberAssignee() => AbAvatar(
-        name: assignee.userId,
+        name: ref.watch(taskMemberNameProvider(assignee.userId)),
         size: _avatarSize,
       ),
       // An imported provider identity with no Antgrid account: its login is the

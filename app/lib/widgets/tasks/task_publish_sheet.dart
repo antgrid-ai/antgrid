@@ -294,8 +294,10 @@ class _TaskPublishConfirmSheetState extends State<_TaskPublishConfirmSheet> {
                 // every title, description and label edit reaches GitHub with
                 // no further asking.
                 Text(
-                  'From then on, edits to the title, description, status and '
-                  'labels are sent to the issue without asking again.',
+                  'The task’s comments are posted to the issue too. From then '
+                  'on, edits to the title, description, status and labels, '
+                  'and new comments, are sent to the issue without asking '
+                  'again.',
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXxs,
                     color: palette.textMuted,

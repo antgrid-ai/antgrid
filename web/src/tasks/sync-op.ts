@@ -33,14 +33,32 @@ import { TaskSyncStateSchema } from "./sync-state.js";
  */
 
 /**
+ * The lock `enqueueForTask` requires of its caller, and the one every
+ * read-merge-write on a task row takes (`src/tasks/merge.ts`). One spelling of
+ * the key, because a typo in a hand-copied prefix takes a lock nothing else
+ * contends for and silently drops the exclusion.
+ *
+ * Taken only after the id has resolved under the caller's `accountId`: a lock
+ * keyed on an id a caller named is one a stranger can take. Last in the fixed
+ * `ghhook:` -> `taskimport:` -> `tasksync:` order, so taking it alone deadlocks
+ * against nothing.
+ */
+export async function lockTaskSync(tx: Tx, taskId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`tasksync:${taskId}`}))`;
+}
+
+/**
  * The closed set of writes the outbox can carry.
  *
- * Note the two that are absent. There is no `issue.assignees`: v1 never pushes
+ * Note the one that is absent. There is no `issue.assignees`: v1 never pushes
  * an assignee, because GitHub silently drops one lacking push access and
- * returns 200, which is a push loop no response comparison can see. There is no
- * `comment.create`: comments are inbound-only, so a comment written in Antgrid
- * stays in Antgrid. Adding either is a schema change *and* a change to what we
- * told users we would send, which is the point of enumerating them.
+ * returns 200, which is a push loop no response comparison can see. Adding it
+ * is a schema change *and* a change to what we told users we would send, which
+ * is the point of enumerating them.
+ *
+ * The comment kinds mirror a thread written here onto the issue. Their payload
+ * names the comment and carries no text: the body is read when the op is sent,
+ * so an edit made while a create waits is the text that gets posted.
  */
 export const TaskSyncOpKindSchema = z.enum([
   "issue.create",
@@ -48,6 +66,9 @@ export const TaskSyncOpKindSchema = z.enum([
   "issue.patch.body",
   "issue.state",
   "issue.labels",
+  "comment.create",
+  "comment.update",
+  "comment.delete",
 ]);
 export type TaskSyncOpKind = z.infer<typeof TaskSyncOpKindSchema>;
 
@@ -93,6 +114,21 @@ const IssueLabelsPayloadSchema = z.object({
   labels: z.array(z.string()),
 });
 
+const CommentCreatePayloadSchema = z.object({
+  kind: z.literal(TaskSyncOpKindSchema.enum["comment.create"]),
+  commentId: z.uuid(),
+});
+
+const CommentUpdatePayloadSchema = z.object({
+  kind: z.literal(TaskSyncOpKindSchema.enum["comment.update"]),
+  commentId: z.uuid(),
+});
+
+const CommentDeletePayloadSchema = z.object({
+  kind: z.literal(TaskSyncOpKindSchema.enum["comment.delete"]),
+  commentId: z.uuid(),
+});
+
 /** Discriminated so a later `applyOp` dispatches over a closed set instead of
  *  comparing strings, and so an unparseable stored payload is a state the drain
  *  can name rather than a runtime cast. */
@@ -102,8 +138,17 @@ export const TaskSyncOpPayloadSchema = z.discriminatedUnion("kind", [
   IssueBodyPayloadSchema,
   IssueStatePayloadSchema,
   IssueLabelsPayloadSchema,
+  CommentCreatePayloadSchema,
+  CommentUpdatePayloadSchema,
+  CommentDeletePayloadSchema,
 ]);
 export type TaskSyncOpPayload = z.infer<typeof TaskSyncOpPayloadSchema>;
+export type CommentSyncOpPayload = Extract<TaskSyncOpPayload, { commentId: string }>;
+export type IssueSyncOpPayload = Exclude<TaskSyncOpPayload, CommentSyncOpPayload>;
+
+export function isCommentPayload(payload: TaskSyncOpPayload): payload is CommentSyncOpPayload {
+  return "commentId" in payload;
+}
 
 type Assert<T extends true> = T;
 
@@ -247,6 +292,11 @@ export async function enqueueSyncOp(
       kind,
       status: TaskSyncOpStatusSchema.enum.pending,
       attemptedAt: null,
+      // One op per issue field, but one per comment per verb: an edit to one
+      // comment must never rewrite the queued post of another.
+      ...(isCommentPayload(payload)
+        ? { payload: { path: ["commentId"], equals: payload.commentId } }
+        : {}),
     },
     orderBy: { seq: "asc" },
     select: { id: true },
@@ -673,6 +723,22 @@ export async function cancelOp(tx: Tx, id: string, reason: string): Promise<void
   });
 }
 
+/**
+ * Mark an op's intent as moved without rewriting its payload.
+ *
+ * For a payload that names its subject rather than carrying it — the comment
+ * kinds read the body at send time — an edit changes what the op means while
+ * leaving the row identical. The drain may already have read the old text in
+ * its first critical section; a fresh `opKey` is what its second one compares
+ * to notice that. Same caller precondition as `enqueueSyncOp`.
+ */
+export async function rotateOpKey(tx: Tx, id: string): Promise<void> {
+  await tx.taskSyncOp.update({
+    where: { id },
+    data: { opKey: randomBytes(16).toString("hex") },
+  });
+}
+
 export type CancelPendingOpsResult = {
   cancelled: { id: string; kind: string }[];
   /**
@@ -713,9 +779,14 @@ export async function cancelPendingOps(
   opts: { spareCreates?: boolean } = {}
 ): Promise<CancelPendingOpsResult> {
   const createKind = TaskSyncOpKindSchema.enum["issue.create"];
+  // An attempted comment post is spared for the same reason as an attempted
+  // issue create: it may have landed, and only its own resolution step can
+  // find the public comment and link it before it is orphaned.
+  const commentCreateKind = TaskSyncOpKindSchema.enum["comment.create"];
   const spareGuard = opts.spareCreates
-    ? Prisma.sql`AND NOT (kind = ${createKind})`
-    : Prisma.sql`AND NOT (kind = ${createKind} AND attempted_at IS NOT NULL)`;
+    ? Prisma.sql`AND NOT (kind = ${createKind})
+        AND NOT (kind = ${commentCreateKind} AND attempted_at IS NOT NULL)`
+    : Prisma.sql`AND NOT (kind IN (${createKind}, ${commentCreateKind}) AND attempted_at IS NOT NULL)`;
 
   const cancelled = await tx.$queryRaw<{ id: string; kind: string }[]>`
     UPDATE task_sync_ops SET status = ${TaskSyncOpStatusSchema.enum.cancelled}

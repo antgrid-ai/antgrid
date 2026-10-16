@@ -385,6 +385,7 @@ function emptyTotals(): Totals {
 function count(totals: Totals, outcome: ApplyOpOutcome): void {
   switch (outcome.kind) {
     case "applied":
+    case "comment":
       totals.applied += 1;
       return;
     case "no_effect":
@@ -438,6 +439,11 @@ function lazyWriter(load: () => Promise<GithubIssueWriter>): GithubIssueWriter {
     patchIssue: async (ref, patch) => (await load()).patchIssue(ref, patch),
     createIssue: async (ref, input) => (await load()).createIssue(ref, input),
     listAppIssuesSince: async (ref, args) => (await load()).listAppIssuesSince(ref, args),
+    createComment: async (ref, body) => (await load()).createComment(ref, body),
+    updateComment: async (ref, body) => (await load()).updateComment(ref, body),
+    deleteComment: async (ref) => (await load()).deleteComment(ref),
+    listIssueCommentsSince: async (ref, since) =>
+      (await load()).listIssueCommentsSince(ref, since),
   };
 }
 

@@ -36,16 +36,18 @@ Map<String, Object?> _comment(
     'name': 'Me Myself',
   },
   bool imported = false,
+  bool mirrored = false,
 }) => {
   'id': id,
   'author': author,
   'body': body,
   'imported': imported,
+  'mirrored': mirrored,
   'createdAt': '2026-08-01T10:00:00.000Z',
   'updatedAt': '2026-08-01T10:00:00.000Z',
 };
 
-Future<void> _pump(WidgetTester tester, MockClient client) async {
+Future<void> _pump(WidgetTester tester, MockClient client, {Task? task}) async {
   tester.view.physicalSize = const Size(900, 1400);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -71,7 +73,9 @@ Future<void> _pump(WidgetTester tester, MockClient client) async {
       child: MaterialApp(
         theme: buildAbTheme(),
         home: Scaffold(
-          body: SingleChildScrollView(child: TaskCommentsSection(task: _task)),
+          body: SingleChildScrollView(
+            child: TaskCommentsSection(task: task ?? _task),
+          ),
         ),
       ),
     ),
@@ -79,7 +83,61 @@ Future<void> _pump(WidgetTester tester, MockClient client) async {
   await tester.pumpAndSettle();
 }
 
+final _linkedTask = Task.fromJson({
+  'number': 42,
+  'title': 'Fix the drawer',
+  'body': '',
+  'status': 'open',
+  'sortKey': 'm',
+  'source': 'github',
+  'labels': const <Object?>[],
+  'createdBy': 'u-1',
+  'createdAt': '2026-08-01T10:00:00.000Z',
+  'updatedAt': '2026-08-01T10:00:00.000Z',
+  'externalProvider': 'github',
+  'externalId': '1001',
+  'externalKey': 'acme/relay#7',
+  'syncState': 'synced',
+  'pushLive': true,
+})!;
+
 void main() {
+  final empty = MockClient((_) async => http.Response('{"comments":[]}', 200));
+
+  testWidgets('a task with no issue keeps its comments here', (tester) async {
+    await _pump(tester, empty);
+    expect(find.text('Leave a comment.'), findsOneWidget);
+  });
+
+  testWidgets('a task whose issue takes pushes says comments go there', (
+    tester,
+  ) async {
+    await _pump(tester, empty, task: _linkedTask);
+    expect(
+      find.text('Leave a comment. It is also posted to the GitHub issue.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets("a mirrored comment is marked and stays its author's to edit", (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'comments': [_comment('c-1', 'posted both ways', mirrored: true)],
+          }),
+          200,
+        ),
+      ),
+      task: _linkedTask,
+    );
+    expect(find.text('on GitHub'), findsOneWidget);
+    expect(find.byTooltip('Edit comment'), findsOneWidget);
+  });
+
   testWidgets('an empty thread says so and offers the composer', (
     tester,
   ) async {

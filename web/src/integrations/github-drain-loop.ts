@@ -184,10 +184,14 @@ export async function drainGithubBacklog(
 }
 
 /** The production dependencies: the real drain and the real retention DELETE. */
-export function githubDrainLoopDeps(db: DB): GithubDrainLoopDeps {
+export function githubDrainLoopDeps(
+  db: DB,
+  opts: { appSlug?: string } = {}
+): GithubDrainLoopDeps {
   return {
     db,
-    drain: drainGithubWebhooks,
+    // The slug is what tells this App's own comments from anyone else's.
+    drain: (handle) => drainGithubWebhooks(handle, { appSlug: opts.appSlug }),
     purge: purgeProcessedWebhookEvents,
     now: () => new Date(),
   };

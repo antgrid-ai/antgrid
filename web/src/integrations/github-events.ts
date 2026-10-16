@@ -203,6 +203,8 @@ const GithubUserSchema = z
     id: ExternalIdSchema,
     login: z.string().min(1).max(200),
     avatar_url: z.string().max(2000).nullish(),
+    /** `Bot` for an App's own writes — a type no person's account can hold. */
+    type: z.string().max(40).nullish(),
   })
   .loose();
 

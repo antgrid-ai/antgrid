@@ -226,8 +226,18 @@ function fakeWriter(opts: FakeWriterOpts = {}): {
       calls.list.push({ ref, since: args.since });
       return opts.listed?.() ?? [];
     },
+    // Comment ops have their own suite (comment-push.test.ts); nothing here
+    // queues one.
+    createComment: unexpectedCall,
+    updateComment: unexpectedCall,
+    deleteComment: unexpectedCall,
+    listIssueCommentsSince: unexpectedCall,
   };
   return { writer, calls };
+}
+
+async function unexpectedCall(): Promise<never> {
+  throw new Error("comment writer called from an issue-op test");
 }
 
 function run(writer: GithubIssueWriter, op: TaskSyncOpRecord, extra: { budget?: ReturnType<typeof createWriteBudget> } = {}) {

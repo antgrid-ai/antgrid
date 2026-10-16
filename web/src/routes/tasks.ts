@@ -1244,6 +1244,7 @@ function commentJson(comment: TaskCommentRecord) {
     author: comment.author,
     body: comment.body,
     imported: comment.imported,
+    mirrored: comment.mirrored,
     createdAt: comment.createdAt.toISOString(),
     updatedAt: comment.updatedAt.toISOString(),
   };

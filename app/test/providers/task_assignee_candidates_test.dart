@@ -72,6 +72,29 @@ void main() {
     ]);
   });
 
+  test('a member assignee is named from the list, never by uuid', () async {
+    final container = _container(
+      MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'members': [
+              {'userId': 'u-amy', 'name': 'Amy Pond', 'email': 'amy@test'},
+            ],
+          }),
+          200,
+        ),
+      ),
+    );
+    container.listen(taskMemberNameProvider('u-gone'), (_, _) {});
+    // Still loading: blank, so an avatar never shows initials cut from an id.
+    expect(container.read(taskMemberNameProvider('u-gone')), '');
+    await _settle(container);
+
+    expect(container.read(taskMemberNameProvider('u-amy')), 'Amy Pond');
+    // Absent from a loaded list: they have left the account.
+    expect(container.read(taskMemberNameProvider('u-gone')), 'Former member');
+  });
+
   test('a failed member fetch still offers me', () async {
     final container = _container(
       MockClient((_) async => http.Response('{"error":"boom"}', 500)),

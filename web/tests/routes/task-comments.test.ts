@@ -88,6 +88,28 @@ describe("task comments", () => {
     expect((await list(app, me.cookie, number)).map((c) => c.body)).toEqual(["first", "second"]);
   });
 
+  test("a thread past the list cap still shows its newest comment, last", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const me = await signedIn("me@example.com");
+    const number = await createTaskVia(app, me.cookie, "long thread");
+    const task = await pg.db.task.findFirstOrThrow({ where: { accountId: me.accountId, number } });
+    const base = Date.UTC(2026, 0, 1);
+    await pg.db.taskComment.createMany({
+      data: Array.from({ length: 500 }, (_, i) => ({
+        taskId: task.id,
+        authorUserId: me.user.id,
+        body: `old ${i}`,
+        createdAt: new Date(base + i * 1000),
+      })),
+    });
+
+    expect((await post(app, me.cookie, number, { body: "newest" })).status).toBe(201);
+    const bodies = (await list(app, me.cookie, number)).map((c) => c.body);
+    expect(bodies).toHaveLength(500);
+    expect(bodies[0]).toBe("old 1");
+    expect(bodies.at(-1)).toBe("newest");
+  });
+
   test("the ANT- display id addresses the same thread", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const me = await signedIn("me@example.com");

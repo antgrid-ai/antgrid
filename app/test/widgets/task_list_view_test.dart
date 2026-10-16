@@ -532,6 +532,10 @@ void main() {
         if (req.url.path == '/account/projects') {
           return http.Response(jsonEncode({'projects': []}), 200);
         }
+        // A member assignee's row names them from this list.
+        if (req.url.path == '/tasks/members') {
+          return http.Response(jsonEncode({'members': []}), 200);
+        }
         listCalls++;
         return http.Response(
           jsonEncode({
