@@ -8,6 +8,7 @@ import 'dart:ui' as ui;
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
@@ -56,22 +57,26 @@ Future<TerminalService> _makeService(
   return bundle.terminalService;
 }
 
-Widget _wrap(Widget child, {required SharedPreferencesWithCache prefs}) =>
-    ProviderScope(
-      overrides: [
-        clientIdProvider.overrideWith((ref) async => 'this-install'),
-        agentTerminalProvider.overrideWith((ref) => null),
-        appSettingsServiceProvider.overrideWith(
-          () => AppSettingsService(prefs, AppSettings.fromPrefs(prefs)),
-        ),
-      ],
-      child: MaterialApp(
-        theme: ThemeData.dark().copyWith(
-          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
-        ),
-        home: Scaffold(body: child),
-      ),
-    );
+Widget _wrap(
+  Widget child, {
+  required SharedPreferencesWithCache prefs,
+  required ProjectSession session,
+}) => ProviderScope(
+  overrides: [
+    projectSessionProvider(session.projectId).overrideWith((ref) => session),
+    clientIdProvider.overrideWith((ref) async => 'this-install'),
+    agentTerminalProvider.overrideWith((ref) => null),
+    appSettingsServiceProvider.overrideWith(
+      () => AppSettingsService(prefs, AppSettings.fromPrefs(prefs)),
+    ),
+  ],
+  child: MaterialApp(
+    theme: ThemeData.dark().copyWith(
+      extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+    ),
+    home: Scaffold(body: child),
+  ),
+);
 
 /// `testWidgets` with the platform override restored in a `finally`.
 ///
@@ -202,6 +207,7 @@ void main() {
           ),
         ),
         prefs: prefs,
+        session: service.session,
       ),
     );
     await tester.pumpAndSettle();
@@ -403,6 +409,10 @@ void main() {
         LogicalKeyboardKey.controlLeft,
       ], LogicalKeyboardKey.keyV);
 
+      // Readiness awaits stream cancellation, which completes outside the
+      // widget binding's fake async zone.
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      expect(transport.uploadCalls, hasLength(1));
       final upload = transport.uploadCalls.single;
       expect(upload.fileName, 'pasted.png');
       expect(upload.bytes, hasLength(3));
