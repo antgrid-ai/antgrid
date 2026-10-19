@@ -76,6 +76,21 @@ void main() {
   }
 
   group('AppShell layout', () {
+    testWidgets('notification shade does not resume mobile connections', (
+      tester,
+    ) async {
+      final manager = _ResumeManager();
+      addTearDown(manager.disposeAll);
+      await tester.pumpWidget(buildTestShell(width: 400, manager: manager));
+      await tester.pump();
+      final binding = tester.binding;
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(manager.resumes, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'one foreground transition refreshes remote authorization once',
       (tester) async {
@@ -94,8 +109,13 @@ void main() {
         binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
         await tester.pump();
         expect(manager.resumes, 1);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pump();
+        expect(manager.resumes, 1);
         await tester.pumpWidget(const SizedBox.shrink());
       },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
     testWidgets('renders WorkspaceShell when paired', (tester) async {

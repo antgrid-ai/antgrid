@@ -53,6 +53,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   MobileLifecycleObserver? _mobileLifecycle;
   Future<void>? _eagerKick;
   DateTime? _lastRemint;
+  bool _wasBackgrounded = false;
 
   /// Floor between out-of-band re-mint attempts. Eager pinning keeps a lapsed
   /// account's machines Blocked(licenseExpired) in the manager for the whole
@@ -80,6 +81,11 @@ class _AppShellState extends ConsumerState<AppShell> {
       // refreshing at both points can invalidate the first connection attempt.
       onResume: _resume,
       onStateChange: (state) {
+        if (state == AppLifecycleState.hidden ||
+            state == AppLifecycleState.paused ||
+            state == AppLifecycleState.detached) {
+          _wasBackgrounded = true;
+        }
         _mobileLifecycle?.handleState(state);
       },
     );
@@ -144,6 +150,10 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 
   void _resume() {
+    // Notification shades and system dialogs only take focus; resetting a
+    // phone's authorization lease here would close otherwise healthy links.
+    if (isMobilePlatform && !_wasBackgrounded) return;
+    _wasBackgrounded = false;
     if (!isMobilePlatform) {
       final host = ref.read(hostControllerProvider);
       detached(
