@@ -75,10 +75,24 @@ class TerminalAttachmentUploader {
 
   bool _inFlight = false;
   bool _disposed = false;
+  bool _disposeRequested = false;
+  int _holders = 0;
   int _generation = 0;
   Timer? _clearTimer;
 
   bool get busy => _inFlight;
+
+  /// A native picker can outlive the terminal view during reconnection.
+  Future<void> keepAliveDuring(Future<void> Function() operation) async {
+    if (_disposed) return;
+    _holders++;
+    try {
+      await operation();
+    } finally {
+      _holders--;
+      if (_disposeRequested && _holders == 0) dispose();
+    }
+  }
 
   Future<void> attach({
     required Uint8List bytes,
@@ -148,6 +162,8 @@ class TerminalAttachmentUploader {
   }
 
   void dispose() {
+    _disposeRequested = true;
+    if (_holders > 0) return;
     if (_disposed) return;
     _disposed = true;
     _clearTimer?.cancel();

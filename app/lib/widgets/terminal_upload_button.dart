@@ -81,11 +81,13 @@ class TerminalUploadButton extends StatefulWidget {
     required this.onPicked,
     required this.busy,
     required this.onError,
+    this.onAttach,
   });
 
   final Future<PickedUpload?> Function() pick;
   final Future<void> Function(PickedUpload picked) onPicked;
   final bool busy;
+  final Future<void> Function()? onAttach;
   final void Function(String message) onError;
 
   @override
@@ -101,11 +103,12 @@ class _TerminalUploadButtonState extends State<TerminalUploadButton> {
     if (_picking || widget.busy) return;
     setState(() => _picking = true);
     try {
-      await runFilePick(
-        pick: widget.pick,
-        onPicked: widget.onPicked,
-        onError: widget.onError,
-      );
+      await (widget.onAttach?.call() ??
+          runFilePick(
+            pick: widget.pick,
+            onPicked: widget.onPicked,
+            onError: widget.onError,
+          ));
     } finally {
       if (mounted) setState(() => _picking = false);
     }
@@ -150,11 +153,13 @@ class TerminalAttachOverlayButton extends StatefulWidget {
     required this.onPicked,
     required this.busy,
     required this.onError,
+    this.onAttach,
   });
 
   final Future<PickedUpload?> Function() pick;
   final Future<void> Function(PickedUpload picked) onPicked;
   final bool busy;
+  final Future<void> Function()? onAttach;
   final void Function(String message) onError;
 
   @override
@@ -170,11 +175,12 @@ class _TerminalAttachOverlayButtonState
     if (_picking || widget.busy) return;
     setState(() => _picking = true);
     try {
-      await runFilePick(
-        pick: widget.pick,
-        onPicked: widget.onPicked,
-        onError: widget.onError,
-      );
+      await (widget.onAttach?.call() ??
+          runFilePick(
+            pick: widget.pick,
+            onPicked: widget.onPicked,
+            onError: widget.onError,
+          ));
     } finally {
       if (mounted) setState(() => _picking = false);
     }
