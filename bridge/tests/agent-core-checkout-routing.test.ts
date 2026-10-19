@@ -760,3 +760,23 @@ test("file:resolve-path with terminal ids that name nothing records no terminal 
   }
   expect(recorded).toEqual([]);
 }, 30_000);
+
+test("a service whose launch throws neither stops the services after it nor a later config reload", async () => {
+  const services = (names: string[]) => ["name: checkout-routing", "agent:", "  tool: claude-code", "services:",
+    ...names.flatMap((name) => [`  - name: ${name}`, "    command: git --version"]), ""].join("\n");
+  writeFileSync(join(root, "antgrid.yaml"), services(["broken", "svc"]));
+  const spawn = TerminalManager.prototype.spawn;
+  const failing = spyOn(TerminalManager.prototype, "spawn").mockImplementation(function (this: TerminalManager, config) {
+    if (config.terminalId?.startsWith("broken")) throw new Error("PTY spawn failed");
+    return spawn.call(this, config);
+  });
+  try {
+    const { sent } = await bootCore();
+    await waitFor(sent, (m) => m.type === "terminal:started" && m.terminalId === "svc");
+    // The watcher's debounce timer is the caller here, so a throw would reach the process's uncaught-exception exit.
+    writeFileSync(join(root, "antgrid.yaml"), services(["broken", "svc", "broken-too"]));
+    await waitFor(sent, (m) => m.type === "config:changed", 10_000);
+  } finally {
+    failing.mockRestore();
+  }
+}, 30_000);
