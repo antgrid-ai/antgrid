@@ -142,11 +142,9 @@ function codexMessagesIn(raw: string): string[] {
     let obj: any;
     try { obj = JSON.parse(line); } catch { continue; }
     if (obj?.type === "compacted") {
-      // History before a compaction left the model's context; the summary
-      // (often empty) is the surviving base.
-      out = [];
-      const summary = typeof obj?.payload?.message === "string" ? obj.payload.message.trim() : "";
-      if (summary) out.push(summary);
+      // History before a compaction left the model's context; what the
+      // checkpoint carries forward is the surviving base.
+      out = compactedBase(obj.payload);
       continue;
     }
     if (obj?.type !== "event_msg") continue;
@@ -169,6 +167,24 @@ function codexMessagesIn(raw: string): string[] {
     }
   }
   return out;
+}
+
+// Legacy checkpoints carry a summary in `message`. Current ones (codex 0.162
+// and later at least) leave it empty and keep the recent turns verbatim in retained_context, user
+// and assistant lists apart, so `order` (the thread-wide sequence) restores
+// the interleaving.
+function compactedBase(payload: any): string[] {
+  const summary = typeof payload?.message === "string" ? payload.message.trim() : "";
+  if (summary) return [summary];
+  const retained = payload?.retained_context;
+  const entries = (list: unknown, user: boolean) =>
+    (Array.isArray(list) ? list : [])
+      .filter((m: any) => typeof m?.text === "string" && typeof m?.order === "number")
+      .map((m: any) => ({ order: m.order as number, text: user ? withoutRequestWrapper(m.text) : m.text.trim() }));
+  return [...entries(retained?.user_messages, true), ...entries(retained?.assistant_messages, false)]
+    .sort((a, b) => a.order - b.order)
+    .map((e) => e.text)
+    .filter(Boolean);
 }
 
 function withoutRequestWrapper(message: string): string {
