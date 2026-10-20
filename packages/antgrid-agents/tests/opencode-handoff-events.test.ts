@@ -6,6 +6,8 @@ import type { HandoffEvent } from "../src/agents/handoff/events";
 import type { HandoffSnapshot } from "../src/agents/handoff/types";
 import { kiloHandoffEvents } from "../src/agents/kilo/handoff-events";
 import { opencodeFamilyEvents } from "../src/agents/opencode/handoff-events";
+import { kiloFork } from "../src/agents/kilo/fork";
+import { opencodeFork } from "../src/agents/opencode/fork";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -83,8 +85,8 @@ test("tool parts yield a call and its output or error; reasoning and patches are
   ]);
 });
 
-test("unknown shapes and unreadable files degrade to fewer events without throwing", async () => {
-  expect(await parse([], "not json")).toEqual([]);
+test("unknown shapes degrade to fewer events, and an unreadable document throws so the bridge falls back", async () => {
+  await expect(parse([], "not json")).rejects.toThrow();
   expect(await parse([], JSON.stringify({ messages: "nope" }))).toEqual([]);
   expect(await parse([null, 3, { info: 4 }, { info: { role: "user" } }, { info: { role: "assistant" }, parts: "x" }])).toEqual([]);
 });
@@ -92,4 +94,9 @@ test("unknown shapes and unreadable files degrade to fewer events without throwi
 test("Kilo reads the same document shape", async () => {
   const events = await parse([user("m1", [text("p", "kilo task")])], undefined, kiloHandoffEvents);
   expect(events).toEqual([{ kind: "user", text: "kilo task", genuine: true, at: "m1" }]);
+});
+
+test("the registered opencode and kilo forks read through the shared parser", () => {
+  expect(opencodeFork.events).toBe(opencodeFamilyEvents);
+  expect(kiloFork.events).toBe(kiloHandoffEvents);
 });

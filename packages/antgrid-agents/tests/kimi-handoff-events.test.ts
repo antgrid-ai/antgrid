@@ -109,3 +109,13 @@ test("unknown shapes and torn lines never throw", async () => {
   ].join("\n"));
   expect(events.map((event) => event.kind)).toEqual(["tool_call"]);
 });
+
+test("an undo or clear is marked in the history instead of silently leaking retracted turns", async () => {
+  const events = await parse([
+    prompt("task"),
+    { type: "context.undo", count: 1 },
+    { type: "context.clear" },
+    prompt("after"),
+  ]);
+  expect(events.map((event) => event.kind)).toEqual(["user", "note", "note", "user"]);
+});

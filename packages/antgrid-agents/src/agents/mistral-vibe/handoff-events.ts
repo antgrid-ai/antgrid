@@ -2,7 +2,7 @@ import { join } from "node:path";
 import {
   capEventText,
   forEachJsonlLine,
-  isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
 
@@ -50,7 +50,7 @@ export const vibeEvents: HandoffEventsFn = async (dir, manifest, sink, signal) =
       if (value.injected === true || value.context_boundary !== undefined || value.manual_shell !== undefined) return;
       const text = (str(value.input_text) ?? contentText(value.content)).trim();
       if (!text) return;
-      sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+      sink(userEvent(text, at));
     } else if (role === "assistant") {
       const text = contentText(value.content).trim();
       if (text) sink({ kind: "assistant", text: capEventText(text), at });

@@ -12,6 +12,7 @@ import {
   safeJoin,
   scrollbackEvents,
   writeText,
+  type ExcerptMeta,
   type HandoffEventsFn,
   type HandoffFile,
   type HandoffMethod,
@@ -253,30 +254,41 @@ async function writeExcerpt(
   signal: AbortSignal,
 ): Promise<void> {
   const budget = excerptBudgetFor(targetTool);
-  const meta = { sourceLabel: manifest.sourceAgentLabel, capturedAt: manifest.capturedAt, files: manifest.files.map((file) => file.name) };
-  const render = async (events: HandoffEventsFn, forManifest: HandoffManifest, within: AbortSignal): Promise<string> => {
+  const meta: ExcerptMeta = { sourceLabel: manifest.sourceAgentLabel, capturedAt: manifest.capturedAt, files: manifest.files.map((file) => file.name) };
+  const render = async (events: HandoffEventsFn, forManifest: HandoffManifest, within: AbortSignal, withMeta: ExcerptMeta, readsOwnTranscript: boolean): Promise<string> => {
     const builder = new ExcerptBuilder(budget);
     await events(outDir, asSnapshot(forManifest), builder.push, within);
-    return builder.render(meta);
+    // A parser that reads a drifted format returns cleanly with nothing; that is
+    // a failure to degrade from, not an empty conversation.
+    if (readsOwnTranscript && !builder.hasConversation) throw new Error("the transcript held no conversation the parser could read");
+    return builder.render(withMeta);
   };
+  // A scrollback snapshot never ran a parser, so the stage deadline that may
+  // already have fired has no bearing on reading it.
+  const ownTranscript = manifest.method !== "scrollback";
   let text: string;
   try {
-    if (manifest.method === "scrollback") text = await render(scrollbackEvents, manifest, signal);
-    else if (parse) text = await render(parse, manifest, signal);
+    if (!ownTranscript) {
+      const scrollbackMeta = { ...meta, degraded: `built from terminal output only; read ${manifest.primary} for the conversation` };
+      text = await render(scrollbackEvents, manifest, AbortSignal.timeout(EXCERPT_FALLBACK_MS), scrollbackMeta, false);
+    } else if (parse) text = await render(parse, manifest, signal, meta, true);
     else throw new Error("the source agent declares no transcript parser");
   } catch (error) {
-    const reason = signal.aborted ? "ran past its deadline" : errorText(error);
+    const reason = ownTranscript && signal.aborted ? "ran past its deadline" : errorText(error);
     log.warn("excerpt parse failed for %s: %s", manifest.agent, reason);
-    const scrollback = manifest.files.find((file) => file.name === SCROLLBACK_FILE);
-    text = new ExcerptBuilder(budget).render(meta);
+    const degradedMeta = { ...meta, degraded: `the agent's transcript could not be summarized; read ${manifest.primary} for the conversation` };
+    text = new ExcerptBuilder(budget).render(degradedMeta);
+    const scrollback = ownTranscript ? manifest.files.find((file) => file.name === SCROLLBACK_FILE) : undefined;
     if (scrollback) {
       try {
-        text = await render(scrollbackEvents, { ...manifest, primary: SCROLLBACK_FILE }, AbortSignal.timeout(EXCERPT_FALLBACK_MS));
+        text = await render(scrollbackEvents, { ...manifest, primary: SCROLLBACK_FILE }, AbortSignal.timeout(EXCERPT_FALLBACK_MS), degradedMeta, false);
       } catch (fallbackError) {
         log.warn("scrollback excerpt failed for %s: %s", manifest.agent, errorText(fallbackError));
       }
     }
-    manifest.warnings.push(`The conversation could not be summarized from the agent's own transcript (${reason}); the excerpt holds only what the terminal showed.`);
+    if (ownTranscript) {
+      manifest.warnings.push(`The conversation could not be summarized from the agent's own transcript (${reason}); the excerpt holds only what the terminal showed.`);
+    }
   }
   await writeFile(join(outDir, EXCERPT_FILE), text);
 }

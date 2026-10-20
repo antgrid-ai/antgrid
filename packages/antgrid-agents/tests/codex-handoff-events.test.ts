@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { codexFork } from "../src/agents/codex/fork";
 import { codexEvents } from "../src/agents/codex/handoff-events";
 import type { HandoffEvent, HandoffFile, HandoffSnapshot } from "../src/agents/handoff";
 
@@ -150,4 +151,19 @@ test("unknown shapes and torn lines degrade to fewer events without throwing", a
     ],
   });
   expect(events.every((e) => e.kind === "tool_call")).toBe(true);
+});
+
+test("a legacy rollout's user_message and agent_message events are read", async () => {
+  const events = await run({
+    "rollout.jsonl": [
+      rec("event_msg", { type: "user_message", message: "## My request for Codex:\nport the lexer" }),
+      rec("event_msg", { type: "agent_message", message: "starting" }),
+    ],
+  });
+  expect(events.map((e) => e.kind)).toEqual(["user", "assistant"]);
+  expect(users(events)[0]).toMatchObject({ text: "port the lexer", genuine: true });
+});
+
+test("the registered fork reads through codexEvents", () => {
+  expect(codexFork.events).toBe(codexEvents);
 });

@@ -2,13 +2,14 @@ import { join } from "node:path";
 import {
   capEventText,
   forEachJsonlLine,
-  isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
 
 /** Wrapper tags Claude puts around records that are not something the user typed. */
 const NOISE_PREFIX = /^\s*(?:<(?:command-name|command-message|local-command-[a-z]+|task-notification|bash-[a-z]+|system-reminder)[\s>]|\[Request interrupted)/;
 const COMMAND_ARGS = /<command-args>([\s\S]*?)<\/command-args>/;
+const LOCAL_COMMAND_STDOUT = /^\s*<local-command-stdout[\s>]/;
 const COMMAND_WRAPPER = /^\s*<command-(?:name|message|args)[\s>]/;
 /** Bounds the id-to-name map; a result whose call is older than this loses its name only. */
 const TOOL_NAME_MAP_MAX = 4_096;
@@ -51,6 +52,14 @@ function stringify(value: unknown): string {
  * because that structured copy is what makes single lines megabytes long. */
 export const claudeHandoffEvents: HandoffEventsFn = async (dir, manifest, sink, signal) => {
   const names = new Map<string, string>();
+  // Built-in commands (/model, /compact) are logged like prompt commands, with
+  // their arguments in the same tag. Only the record after tells them apart: a
+  // local command is followed by its stdout, a prompt command by its expansion.
+  let pendingCommand: { text: string; at: string } | undefined;
+  const flushCommand = () => {
+    if (pendingCommand) sink(userEvent(pendingCommand.text, pendingCommand.at));
+    pendingCommand = undefined;
+  };
   await forEachJsonlLine(
     join(dir, manifest.primary),
     (lineNo, value) => {
@@ -58,6 +67,11 @@ export const claudeHandoffEvents: HandoffEventsFn = async (dir, manifest, sink, 
       const at = `${manifest.primary}:${lineNo}`;
       const message = isObj(value.message) ? value.message : undefined;
       const content = message?.content;
+
+      if (pendingCommand) {
+        if (value.type === "user" && LOCAL_COMMAND_STDOUT.test(contentText(content))) pendingCommand = undefined;
+        else flushCommand();
+      }
 
       if (value.type === "assistant") {
         if (!Array.isArray(content)) return;
@@ -101,10 +115,13 @@ export const claudeHandoffEvents: HandoffEventsFn = async (dir, manifest, sink, 
 
       // Records without an origin predate the field and were typed by a person.
       if (isObj(value.origin) && value.origin.kind !== "human") return;
-      const text = userText(contentText(content));
+      const raw = contentText(content);
+      const text = userText(raw);
       if (text === undefined) return;
-      sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+      if (COMMAND_WRAPPER.test(raw.trim())) pendingCommand = { text, at };
+      else sink(userEvent(text, at));
     },
     signal,
   );
+  flushCommand();
 };

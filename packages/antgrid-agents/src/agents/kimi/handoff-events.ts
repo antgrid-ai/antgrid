@@ -2,7 +2,7 @@ import { join } from "node:path";
 import {
   capEventText,
   forEachJsonlLine,
-  isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
 
@@ -70,7 +70,7 @@ export const kimiEvents: HandoffEventsFn = async (dir, manifest, sink, signal) =
         if (!isHumanOrigin(value)) return;
         const text = (typeof value.prompt === "string" ? value.prompt : partsText(value.input)).trim();
         if (!text) return;
-        sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+        sink(userEvent(text, at));
         return;
       }
       case "context.apply_compaction": {
@@ -78,6 +78,12 @@ export const kimiEvents: HandoffEventsFn = async (dir, manifest, sink, signal) =
         sink({ kind: "compaction", ...(summary ? { summary: capEventText(summary) } : { note: "Kimi compacted here but its summary was unreadable" }), at });
         return;
       }
+      case "context.undo":
+        sink({ kind: "note", text: "Kimi undid recent turns here; the turns just above may have been retracted and are no longer part of its live context.", at });
+        return;
+      case "context.clear":
+        sink({ kind: "note", text: "Kimi cleared its context here; everything above, including the original task, is no longer live context.", at });
+        return;
       case "context.append_loop_event": {
         const event = value.event;
         if (!isRec(event)) return;

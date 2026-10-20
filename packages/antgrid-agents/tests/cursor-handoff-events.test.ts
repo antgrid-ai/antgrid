@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cursorHandoffEvents } from "../src/agents/cursor-agent/handoff-events";
+import { cursorAgentFork } from "../src/agents/cursor-agent/fork";
 import type { HandoffEvent } from "../src/agents/handoff/events";
 import type { HandoffSnapshot } from "../src/agents/handoff/types";
 
@@ -97,4 +98,8 @@ test("tail events carry assistant text, tool calls and results; reasoning is ski
 test("torn lines and unknown shapes are skipped without throwing", async () => {
   const events = await parse(["{\"type\":\"mess", { type: "message", message: 4 }, { type: "other" }, 7, message({ role: "weird" }), message(query("ok"))]);
   expect(events).toEqual([{ kind: "user", text: "ok", genuine: true, at: "cursor-chat.jsonl:6" }]);
+});
+
+test("the registered fork reads through cursorHandoffEvents", () => {
+  expect(cursorAgentFork.events).toBe(cursorHandoffEvents);
 });

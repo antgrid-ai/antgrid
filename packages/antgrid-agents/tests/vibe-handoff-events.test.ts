@@ -45,13 +45,13 @@ test("genuine user selection skips injected, boundary and shell records and pref
   ]);
 });
 
-test("a nested Antgrid handoff prompt is emitted as not genuine", async () => {
+test("a nested Antgrid handoff prompt is emitted as not genuine, and a path alone is not a handoff prompt", async () => {
   const events = await parse([
     user("Continue a task handed off from Codex. Antgrid saved its context in two files: a, b"),
     user("read .antgrid/handoff/abc/messages.jsonl please"),
     user("real task"),
   ]);
-  expect(events.map((event) => event.kind === "user" && event.genuine)).toEqual([false, false, true]);
+  expect(events.map((event) => event.kind === "user" && event.genuine)).toEqual([false, true, true]);
 });
 
 test("the latest compaction summary is the tagged span, not the replayed user turns", async () => {
@@ -97,4 +97,15 @@ test("unknown shapes and torn lines never throw", async () => {
     '{"role":"user","content":"tor',
   ].join("\n"));
   expect(events).toEqual([]);
+});
+
+test("the instruction appended to a handoff prompt stays the user's own text", async () => {
+  const events = await parse([
+    user("Continue a task handed off from Codex. Antgrid saved its context in two files: a, b. Additional instruction: also run the tests"),
+    user("<antgrid-fork-transcript>\n[Agent conversation]\nold words</antgrid-fork-transcript>"),
+  ]);
+  expect(events.map((event) => event.kind === "user" && [event.genuine, event.text, event.handoffPrompt])).toEqual([
+    [true, "also run the tests", true],
+    [false, expect.stringContaining("antgrid-fork-transcript"), true],
+  ]);
 });

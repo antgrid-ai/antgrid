@@ -16,6 +16,7 @@ afterEach(() => {
 
 interface Options {
   scrollback?: string | null;
+  promptDelivery?: PreparedTerminalLaunch["promptDelivery"];
   snapshot?: (opts: HandoffSnapshotOpts) => Promise<HandoffSnapshot | undefined>;
 }
 
@@ -41,17 +42,19 @@ function fixture(options: Options = {}) {
     },
     prepareTerminal: async (request: TerminalLaunchRequest): Promise<PreparedTerminalLaunch> => {
       requests.push(request);
-      return { command: "kimi", args: [], env: {}, invocationKind: "exec", resumed: false, promptDelivery: "none" };
+      return { command: "kimi", args: [], env: {}, invocationKind: "exec", resumed: false, promptDelivery: options.promptDelivery ?? "none" };
     },
   };
   const requests: TerminalLaunchRequest[] = [];
   const chatStarts: { sessionId: string; initialPrompt?: string }[] = [];
   const spawns: any[] = [];
+  const submits: string[] = [];
   const live = new Set<string>();
   const scrollback = options.scrollback === undefined ? "fix the parser" : options.scrollback;
   const terminal = {
     has: (id: string) => live.has(id), kill: (id: string) => live.delete(id),
     forget: (id: string) => live.delete(id), treeKilled: async () => {},
+    submit: (_id: string, text: string) => { submits.push(text); },
     spawn: (config: any) => { spawns.push(config); live.add(config.terminalId); return config.terminalId; },
     getScrollback: () => (scrollback === null ? null : { text: scrollback, seq: 1 }),
   };
@@ -68,7 +71,7 @@ function fixture(options: Options = {}) {
   };
   const staging = (id: string) => join(directory, "agents", "project", "handoff", id);
   const placed = (id: string) => join(directory, ".antgrid", "handoff", id);
-  return { directory, manager: makeManager(), makeManager, rows, spawns, snapshots, requests, chatStarts, staging, placed, sessionsPath };
+  return { directory, manager: makeManager(), makeManager, rows, spawns, submits, snapshots, requests, chatStarts, staging, placed, sessionsPath };
 }
 
 function source(f: ReturnType<typeof fixture>) {
@@ -92,11 +95,38 @@ test("a staging failure leaves no row and no staging dir", async () => {
   expect(readdirSync(join(f.directory, "agents", "project", "handoff"))).toEqual([]);
 });
 
-test("a 5 MB transcript forks and the excerpt stays bounded", async () => {
-  const f = fixture({ scrollback: "word ".repeat(1_000_000) });
+test("a 5 MB transcript forks and the excerpt stays bounded and keeps the newest turn", async () => {
+  const turns = 20_000;
+  const f = fixture({
+    scrollback: "word ".repeat(1_000_000),
+    snapshot: async (opts) => {
+      const lines: string[] = [];
+      for (let turn = 0; turn < turns; turn++) {
+        lines.push(JSON.stringify({ type: "turn.prompt", prompt: `question ${turn}` }));
+        lines.push(JSON.stringify({
+          type: "context.append_loop_event",
+          event: { type: "content.part", part: { type: "text", text: `answer ${turn} ${"x".repeat(150)}` } },
+        }));
+      }
+      const file = await writeText(opts.outDir, "fixture.jsonl", `${lines.join("\n")}\n`, "transcript", new ByteBudget());
+      return { agent: "kimi", method: "copy", primary: "fixture.jsonl", files: [file], references: [], redactions: [], warnings: [] };
+    },
+  });
   const fork = await f.manager.fork(source(f).id, "current");
-  expect(existsSync(join(f.staging(fork.id), "manifest.json"))).toBe(true);
-  expect(statSync(join(f.staging(fork.id), "excerpt.md")).size).toBeLessThanOrEqual(16_000);
+  expect(statSync(join(f.staging(fork.id), "fixture.jsonl")).size).toBeGreaterThan(5_000_000);
+  const excerpt = join(f.staging(fork.id), "excerpt.md");
+  expect(statSync(excerpt).size).toBeLessThanOrEqual(16_000);
+  expect(readFileSync(excerpt, "utf8")).toContain(`question ${turns - 1}`);
+});
+
+test("a source with no argv prompt gets the one-line prompt typed in", async () => {
+  const f = fixture({ promptDelivery: "buffered" });
+  const fork = await f.manager.fork(source(f).id, "current");
+  await f.manager.start(fork.id);
+  expect(f.submits).toHaveLength(1);
+  expect(f.submits[0]).not.toContain("\n");
+  expect(f.submits[0]!.length).toBeLessThanOrEqual(1_500);
+  expect(f.submits[0]).toContain(join(f.placed(fork.id), "excerpt.md"));
 });
 
 test("an empty store and empty scrollback refuses with the existing copy", async () => {

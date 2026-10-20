@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { capEventText, forEachJsonlLine, isAntgridHandoffPrompt, type HandoffEvent, type HandoffEventsFn } from "../handoff/events";
+import { capEventText, forEachJsonlLine, userEvent, type HandoffEvent, type HandoffEventsFn } from "../handoff/events";
 
 type Rec = Record<string, unknown>;
 
@@ -48,7 +48,7 @@ function messageEvents(message: Rec, at: string): HandoffEvent[] {
   switch (message.role) {
     case "user": {
       const text = userQuery(message.content);
-      return text ? [{ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at }] : [];
+      return text ? [userEvent(text, at)] : [];
     }
     case "assistant": {
       if (typeof message.content === "string") {

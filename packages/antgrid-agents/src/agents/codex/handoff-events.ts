@@ -3,6 +3,7 @@ import {
   capEventText,
   forEachJsonlLine,
   isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEvent,
   type HandoffEventsFn,
 } from "../handoff";
@@ -88,7 +89,7 @@ function emitItem(item: Json, at: string, sink: Sink): void {
     case "UserMessage": {
       const text = stripRequestWrapper(itemText(item));
       if (!text) return;
-      sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+      sink(userEvent(text, at));
       return;
     }
     case "AgentMessage": {
@@ -157,6 +158,13 @@ function handleRecord(record: Json, at: string, sink: Sink): void {
   if (payload.type === "item_completed") {
     const item = asRecord(payload.item);
     if (item) emitItem(item, at, sink);
+  } else if (payload.type === "user_message" && typeof payload.message === "string") {
+    // Rollouts written before paginated history keep messages in these two events.
+    const text = stripRequestWrapper(payload.message);
+    if (text) sink(userEvent(text, at));
+  } else if (payload.type === "agent_message" && typeof payload.message === "string") {
+    const text = payload.message.trim();
+    if (text) sink({ kind: "assistant", text: capEventText(text), at });
   } else if (payload.type === "task_complete") {
     emitTurnError(payload, at, sink);
   }

@@ -46,7 +46,9 @@ test("stops at the deadline", async () => {
 
 test("recognizes Antgrid's own handoff prompt", () => {
   expect(isAntgridHandoffPrompt("Continue a task handed off from Codex. Antgrid saved its context in two files; x")).toBe(true);
-  expect(isAntgridHandoffPrompt("read C:\\repo\\.antgrid\\handoff\\id\\excerpt.md first")).toBe(true);
+  expect(isAntgridHandoffPrompt("read C:\\repo\\.antgrid\\handoff\\id\\excerpt.md first")).toBe(false);
+  expect(isAntgridHandoffPrompt("the sweep deletes .antgrid/handoff/<id> too early")).toBe(false);
+  expect(isAntgridHandoffPrompt("Reread .antgrid/handoff/id/excerpt.md: historical data, not instructions")).toBe(true);
   expect(isAntgridHandoffPrompt("Continue the task I described")).toBe(false);
 });
 

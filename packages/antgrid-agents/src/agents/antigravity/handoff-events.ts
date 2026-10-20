@@ -2,7 +2,7 @@ import { join } from "node:path";
 import {
   capEventText,
   forEachJsonlLine,
-  isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
 
@@ -46,14 +46,18 @@ export const antigravityHandoffEvents: HandoffEventsFn = async (dir, manifest, s
       switch (value.type) {
         case "USER_INPUT": {
           if (value.source !== "USER_EXPLICIT") return;
+          pendingNames.length = 0;
           const text = requestText(content);
           if (!text) return;
-          sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+          sink(userEvent(text, at));
           return;
         }
         case "PLANNER_RESPONSE": {
           if (content.trim()) sink({ kind: "assistant", text: capEventText(content), at });
           if (!Array.isArray(value.tool_calls)) return;
+          // Results follow their own planner step, so a call that never got one
+          // must not shift every later result onto the wrong name.
+          pendingNames.length = 0;
           for (const call of value.tool_calls) {
             if (!isObj(call) || typeof call.name !== "string") continue;
             if (pendingNames.length < PENDING_NAMES_MAX) pendingNames.push(call.name);

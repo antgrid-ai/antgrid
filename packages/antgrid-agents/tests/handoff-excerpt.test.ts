@@ -1,18 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
   EXCERPT_LARGE_MAX_BYTES,
+  EXCERPT_LARGE_MAX_LINES,
   EXCERPT_SMALL_MAX_BYTES,
   EXCERPT_VIEW_MAX,
   EXCERPT_WRAP,
   ExcerptBuilder,
+  classifyUserText,
   excerptBudgetFor,
+  type ExcerptMeta,
   type HandoffEvent,
 } from "antgrid-agents/handoff";
 
 const META = { sourceLabel: "Claude Code", capturedAt: "2026-10-20T10:00:00Z", files: ["transcript.jsonl", "terminal-scrollback.txt"] };
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
-function build(events: Iterable<HandoffEvent>, target = "github-copilot", meta = META): string {
+function build(events: Iterable<HandoffEvent>, target = "github-copilot", meta: ExcerptMeta = META): string {
   const builder = new ExcerptBuilder(excerptBudgetFor(target));
   for (const event of events) builder.push(event);
   return builder.render(meta);
@@ -112,15 +115,87 @@ describe("excerpt content", () => {
       { kind: "assistant", text: "reading", at: "t:2" },
       { kind: "user", text: "Now fix the flaky test", genuine: true, at: "t:3" },
     ]);
-    const task = out.slice(out.indexOf("## Original task"), out.indexOf("## Recent turns"));
+    const task = out.slice(out.indexOf("## First instruction after an earlier handoff"), out.indexOf("## Recent turns"));
+    expect(out).not.toContain("## Original task");
     expect(task).toContain("Now fix the flaky test");
     expect(task).not.toContain("Continue a task");
     expect(out).toContain("(handoff prompt)");
   });
 
-  test("a genuine-flagged handoff prompt is still never the task", () => {
-    const out = build([{ kind: "user", text: "see .antgrid/handoff/x/excerpt.md", genuine: true, at: "t:1" }]);
+  test("a handoff prompt flagged not genuine is never the task", () => {
+    const out = build([{ kind: "user", text: "see .antgrid/handoff/x/excerpt.md", genuine: false, at: "t:1" }]);
     expect(out).not.toContain("## Original task");
+  });
+
+  test("a typed message that merely names the handoff directory is the task and stays in the tail", () => {
+    const text = "the sweep deletes .antgrid/handoff/<id> too early, fix it";
+    const out = build([
+      { kind: "user", ...classifyUserText(text), at: "t:1" },
+      { kind: "assistant", text: "looking", at: "t:2" },
+    ]);
+    expect(out).toContain("## Original task");
+    expect(out.match(/too early, fix it/g)).toHaveLength(2);
+    expect(out).not.toContain("(handoff prompt)");
+  });
+
+  test("an instruction typed on a handoff prompt survives a second handoff", () => {
+    const prompt = "Continue a task handed off from Codex. Antgrid saved its context in two files; read it. Additional instruction: migrate the schema";
+    const out = build([{ kind: "user", ...classifyUserText(prompt), at: "t:1" }]);
+    expect(out).toContain("## First instruction after an earlier handoff");
+    expect(out).toContain("migrate the schema");
+    expect(out).not.toContain("Continue a task handed off");
+  });
+
+  test("the retired envelope prompt is recognised so it never becomes the task", () => {
+    const old = "Start a fresh conversation using this captured transcript as context.\n\n<antgrid-fork-transcript>\n[Agent conversation]\nreal old task</antgrid-fork-transcript>";
+    const out = build([{ kind: "user", ...classifyUserText(old), at: "t:1" }]);
+    expect(out).not.toContain("## Original task");
+    expect(out).toContain("(handoff prompt)");
+  });
+
+  test("a large-tier excerpt of short lines stays under the line limit with its closing line", () => {
+    const events: HandoffEvent[] = [];
+    for (let n = 0; n < 600; n++) {
+      events.push({ kind: "user", text: `q${n}`, genuine: true, at: `t:${n}` });
+      events.push({ kind: "assistant", text: Array.from({ length: 40 }, (_, line) => `l${line}`).join("\n"), at: `t:${n}` });
+    }
+    const out = build(events, "claude-code");
+    expect(out.split("\n").length).toBeLessThanOrEqual(EXCERPT_LARGE_MAX_LINES);
+    expect(out).toContain("End of excerpt");
+    expect(out).toContain("q599");
+  });
+
+  test("an oversized task and summary shrink to fit instead of failing the whole excerpt", () => {
+    const tall = Array.from({ length: 4_000 }, () => "x").join("\n");
+    const out = build([
+      { kind: "user", text: tall, genuine: true, at: "t:1" },
+      { kind: "compaction", summary: tall, at: "t:2" },
+      { kind: "user", text: "latest", genuine: true, at: "t:3" },
+    ], "codex");
+    expect(viewSize(out)).toBeLessThanOrEqual(EXCERPT_VIEW_MAX);
+    expect(out).toContain("## Original task");
+    expect(out).toContain("## Compaction summary");
+  });
+
+  test("a note is rendered where it happened, and a degraded excerpt says so in its header", () => {
+    const out = build(
+      [
+        { kind: "user", text: "q", genuine: true, at: "t:1" },
+        { kind: "note", text: "Kimi undid recent turns here", at: "t:2" },
+      ],
+      "kimi",
+      { ...META, degraded: "built from terminal output only" },
+    );
+    expect(out).toContain("**Note:** Kimi undid recent turns here");
+    expect(out).toContain("Truncation: built from terminal output only.");
+  });
+
+  test("hasConversation is false when only tool traffic arrived", () => {
+    const builder = new ExcerptBuilder();
+    builder.push({ kind: "tool_call", name: "x", input: "y", at: "t:1" });
+    expect(builder.hasConversation).toBe(false);
+    builder.push({ kind: "assistant", text: "hi", at: "t:2" });
+    expect(builder.hasConversation).toBe(true);
   });
 
   test("includes only the latest compaction", () => {

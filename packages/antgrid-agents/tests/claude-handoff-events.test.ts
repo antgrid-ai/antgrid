@@ -117,3 +117,21 @@ test("unknown shapes and torn lines degrade to fewer events instead of throwing"
   );
   expect(events).toEqual([{ kind: "tool_result", output: "", at: "claude-code.jsonl:6" }]);
 });
+
+test("a built-in local command's arguments are not the user's task, but a prompt command's are", async () => {
+  const events = await parse([
+    user("<command-name>/model</command-name><command-message>model</command-message><command-args>sonnet</command-args>"),
+    user("<local-command-stdout>Set model to sonnet</local-command-stdout>"),
+    user("<command-name>/compact</command-name><command-args>keep the db notes</command-args>"),
+    user("<local-command-stdout>Compacted</local-command-stdout>"),
+    user("<command-name>/fix</command-name><command-args>repair the parser</command-args>"),
+    user("expanded skill body", { isMeta: true }),
+    user("the real task"),
+  ]);
+  expect(genuine(events)).toEqual(["repair the parser", "the real task"]);
+});
+
+test("a prompt command that ends the file is still emitted", async () => {
+  const events = await parse([user("<command-name>/fix</command-name><command-args>last words</command-args>")]);
+  expect(genuine(events)).toEqual(["last words"]);
+});

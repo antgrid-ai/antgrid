@@ -91,3 +91,16 @@ test("unknown shapes degrade to no events instead of throwing", async () => {
   );
   expect(events).toEqual([]);
 });
+
+test("a call that never got a result does not mislabel the next turn's results", async () => {
+  const events = await parse([
+    input(wrap("first")),
+    { type: "PLANNER_RESPONSE", content: "", tool_calls: [{ name: "run_command", args: {} }, { name: "view_file", args: {} }] },
+    { type: "GENERIC", content: "Created At: t\nonly one result" },
+    input(wrap("second")),
+    { type: "PLANNER_RESPONSE", content: "", tool_calls: [{ name: "grep_search", args: {} }] },
+    { type: "GENERIC", content: "Created At: t\nmatch" },
+  ]);
+  const names = events.filter((e) => e.kind === "tool_result").map((e) => (e as { name?: string }).name);
+  expect(names).toEqual(["run_command", "grep_search"]);
+});

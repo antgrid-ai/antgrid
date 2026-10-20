@@ -2,7 +2,7 @@ import { join } from "node:path";
 import {
   capEventText,
   forEachJsonlLine,
-  isAntgridHandoffPrompt,
+  userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
 
@@ -42,7 +42,7 @@ export const copilotHandoffEvents: HandoffEventsFn = async (dir, manifest, sink,
         case "user.message": {
           // `content` is what the person typed; `transformedContent` is the model-facing XML wrapping.
           if (data.source || data.isAutopilotContinuation || typeof data.content !== "string" || !data.content.trim()) return;
-          sink({ kind: "user", text: capEventText(data.content), genuine: !isAntgridHandoffPrompt(data.content), at });
+          sink(userEvent(data.content, at));
           return;
         }
         case "assistant.message": {

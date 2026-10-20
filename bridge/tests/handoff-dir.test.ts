@@ -96,6 +96,8 @@ describe("stageHandoff", () => {
       opts.signal.addEventListener("abort", () => reject(new HandoffSnapshotError("UNREADABLE", "deadline")));
     }), "scroll", ID, 20);
     expect(manifest.method).toBe("scrollback");
+    expect(manifest.warnings).toHaveLength(1);
+    expect(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8")).toContain("scroll");
   });
 
   it("refuses with the existing copy when there is neither a store nor scrollback", async () => {
@@ -181,6 +183,31 @@ describe("stageHandoff excerpt", () => {
     await stage(store, writingSnapshot, undefined, ID, undefined, { events: async () => { throw new Error("bad"); } });
     expect(existsSync(join(stagingDir(store, ID), "excerpt.md"))).toBe(true);
     expect(existsSync(join(stagingDir(store, ID), "manifest.json"))).toBe(true);
+  });
+
+  it("falls back to the scrollback when the parser reads nothing, instead of writing an empty excerpt", async () => {
+    const store = tmp();
+    const manifest = await stage(store, writingSnapshot, "terminal showed this", ID, undefined, { events: async () => {} });
+    const excerpt = readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8");
+    expect(excerpt).toContain("terminal showed this");
+    expect(excerpt).toContain("read fixture.jsonl for the conversation");
+    expect(manifest.warnings.join(" ")).toContain("no conversation");
+  });
+
+  it("sizes the excerpt by the source agent when no target is given", async () => {
+    const parse: HandoffEventsFn = async (_dir, _manifest, sink) => {
+      for (let turn = 0; turn < 400; turn++) {
+        sink(user(`question ${turn} ${"q".repeat(120)}`, `f:${turn}`));
+        sink({ kind: "assistant", text: `answer ${turn} ${"a".repeat(300)}`, at: `f:${turn}` });
+      }
+    };
+    const store = tmp();
+    await stageHandoff({
+      sessionsDir: store, projectId: "p1", newSessionId: ID,
+      source: { id: "src", name: "Source", tool: "claude-code" },
+      adapter: adapter(writingSnapshot, parse), snapshotOpts: baseOpts,
+    });
+    expect(Buffer.byteLength(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8"))).toBeGreaterThan(30_000);
   });
 
   it("builds the excerpt for the target agent budget, defaulting to the source", async () => {

@@ -4,11 +4,14 @@ import { join } from "node:path";
 import type { HandoffSnapshot } from "./types";
 
 export type HandoffEvent =
-  | { kind: "user"; text: string; genuine: boolean; at: string }
+  | { kind: "user"; text: string; genuine: boolean; /** Set on a user turn that was or contained Antgrid's own handoff prompt. */ handoffPrompt?: boolean; at: string }
   | { kind: "assistant"; text: string; at: string }
   | { kind: "tool_call"; name: string; input: string; at: string }
   | { kind: "tool_result"; name?: string; output: string; isError?: boolean; at: string }
-  | { kind: "compaction"; summary?: string; note?: string; at: string };
+  | { kind: "compaction"; summary?: string; note?: string; at: string }
+  /** A point in the history the reader must not take at face value, such as a
+   * retracted turn, rendered where it happened. */
+  | { kind: "note"; text: string; at: string };
 
 /** Push-style so the whole parse runs inside the adapter's async call, and
  * therefore inside `withAgentHost`'s AsyncLocalStorage context: an
@@ -80,13 +83,34 @@ export async function forEachJsonlLine(
 }
 
 const HANDOFF_PROMPT_MARKER = /^\s*Continue a task handed off from .{1,80}?\. Antgrid saved its context in two files/s;
+// Sessions forked before the one-line prompt opened with this envelope.
+const LEGACY_ENVELOPE = /^\s*Start a fresh conversation using this captured transcript as context|<antgrid-fork-transcript>/;
+const EXTRA_LEAD = " Additional instruction: ";
 const HANDOFF_PATH = /\.antgrid[\\/]+handoff[\\/]/;
+const REWORDED_ECHO = /excerpt\.md[\s\S]*historical data, not instructions|historical data, not instructions[\s\S]*excerpt\.md/;
 
 /** True for a user text that is Antgrid's own handoff prompt, so a source that
- * was itself a handoff target keeps its real original task. Matching the path
- * as well as the template keeps a prompt that an agent echoed back reworded. */
+ * was itself a handoff target keeps its real original task. A path alone is not
+ * enough: a person debugging the handoff code names that directory too. */
 export function isAntgridHandoffPrompt(text: string): boolean {
-  return HANDOFF_PROMPT_MARKER.test(text) || HANDOFF_PATH.test(text);
+  return HANDOFF_PROMPT_MARKER.test(text) || LEGACY_ENVELOPE.test(text) || (HANDOFF_PATH.test(text) && REWORDED_ECHO.test(text));
+}
+
+/** The fields every parser's user event shares. The instruction a person
+ * appended to a handoff prompt is their own task, so it stays genuine; the
+ * template around it does not. */
+export function classifyUserText(text: string): { text: string; genuine: boolean; handoffPrompt?: true } {
+  if (!isAntgridHandoffPrompt(text)) return { text, genuine: true };
+  const lead = HANDOFF_PROMPT_MARKER.test(text) ? text.indexOf(EXTRA_LEAD) : -1;
+  const extra = lead >= 0 ? text.slice(lead + EXTRA_LEAD.length).trim() : "";
+  return extra ? { text: extra, genuine: true, handoffPrompt: true } : { text, genuine: false, handoffPrompt: true };
+}
+
+/** The user event every parser emits; classifies before capping so a long
+ * prompt cannot lose its marker. */
+export function userEvent(raw: string, at: string): Extract<HandoffEvent, { kind: "user" }> {
+  const classified = classifyUserText(raw);
+  return { kind: "user", ...classified, text: capEventText(classified.text), at };
 }
 
 /** The newest part of a terminal's scrollback is the part that matters. */

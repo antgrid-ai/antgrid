@@ -1,6 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { capEventText, isAntgridHandoffPrompt, type HandoffEventsFn } from "../handoff/events";
+import { capEventText, userEvent, type HandoffEventsFn } from "../handoff/events";
+
+const MAX_DOCUMENT_BYTES = 48 * 1024 * 1024;
 
 type Rec = Record<string, unknown>;
 
@@ -43,15 +45,15 @@ function isCompactionSummary(info: Rec): boolean {
  * summary message, never from the marker user message that precedes it.
  */
 export const opencodeFamilyEvents: HandoffEventsFn = async (dir, manifest, sink, signal) => {
-  let doc: unknown;
-  try {
-    doc = JSON.parse(await readFile(join(dir, manifest.primary), "utf8"));
-  } catch {
-    return;
-  }
+  const file = join(dir, manifest.primary);
+  // One JSON document cannot be streamed, and its synchronous parse blocks the
+  // bridge past any deadline, so an oversized one goes to the scrollback fallback.
+  if ((await stat(file)).size > MAX_DOCUMENT_BYTES) throw new Error("the session document is too large to summarize");
+  const doc: unknown = JSON.parse(await readFile(file, { encoding: "utf8", signal }));
   if (signal.aborted) throw new Error("The handoff parse ran past its deadline.");
   const messages = isRecord(doc) && Array.isArray(doc.messages) ? doc.messages : [];
   for (const message of messages) {
+    if (signal.aborted) throw new Error("The handoff parse ran past its deadline.");
     if (!isRecord(message) || !isRecord(message.info)) continue;
     const info = message.info;
     const parts = Array.isArray(message.parts) ? message.parts.filter(isRecord) : [];
@@ -59,7 +61,7 @@ export const opencodeFamilyEvents: HandoffEventsFn = async (dir, manifest, sink,
 
     if (info.role === "user") {
       const text = visibleText(parts);
-      if (text) sink({ kind: "user", text: capEventText(text), genuine: !isAntgridHandoffPrompt(text), at });
+      if (text) sink(userEvent(text, at));
       continue;
     }
     if (info.role !== "assistant") continue;
