@@ -203,13 +203,14 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
     //
-    // "gpt-5.4-mini", the lowest-priority tier in this account's own
-    // ~/.codex/models_cache.json, verified against the readonly argv below: the
-    // CLI's own plain-mode banner echoed "model: gpt-5.4-mini" and the call
-    // completed. A dated, account-scoped slug rather than an alias — codex has
-    // none — so it is the likeliest of the declared entries to need re-verifying
-    // first if a title call starts failing for this vendor.
-    cheapNamingModel: "gpt-5.4-mini",
+    // "gpt-5.6-luna", the lowest-priority listed tier in a ChatGPT account's
+    // ~/.codex/models_cache.json (codex-cli 0.163.0), run through the readonly
+    // argv below with --json: exit 0 and a completed turn. An account-scoped
+    // slug rather than an alias — codex has none — so it ages out: its
+    // predecessor gpt-5.4-mini left the catalog and the API answered it 400
+    // "not supported when using Codex with a ChatGPT account". Re-check this
+    // first when the model-calls log shows codex title calls exiting 1.
+    cheapNamingModel: "gpt-5.6-luna",
     headless: {
       readonly: {
         // --skip-git-repo-check because a project need not be a git repo:
