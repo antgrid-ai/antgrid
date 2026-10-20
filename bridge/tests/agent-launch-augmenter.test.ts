@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import * as os from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
 import { suppressesOscNotifications, suppressesOscTitle } from "../../packages/antgrid-agents/src/known-agents";
@@ -407,15 +408,20 @@ describe("augmentAgentLaunch MCP injection", () => {
     for (const k of keys) delete process.env[k];
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    // On Linux, Bun's homedir() does not follow a HOME set at runtime, so the
+    // env redirect alone would leave it resolving the real home there; the spy
+    // redirects it on every platform.
+    const homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
     try {
       // Stop before any launch if the redirect did not take, rather than let
       // this test write the real home it guards.
-      expect(homedir()).toBe(home);
+      expect(os.homedir()).toBe(home);
       for (const key of AGENT_KEYS) {
         withUserEnv({}, () => augmentAgentLaunch(key, { abDir: abdir(), self: BRIDGE_SELF }));
       }
       expect(readdirSync(home)).toEqual([]);
     } finally {
+      homedirSpy.mockRestore();
       for (const [k, v] of prev) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
