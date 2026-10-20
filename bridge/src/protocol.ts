@@ -1823,7 +1823,8 @@ const SessionEntrySchema = z.object({
   // source may be renamed, archived or deleted, and no surface resolves it
   // back — it is what survives the derived name once either side is renamed.
   forkedFromSessionId: z.string().optional(),
-  // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
+  // Raw CLI-args string (not an argv array): shell-interpreted on POSIX, split
+  // into argv on Windows (packages/antgrid-agents/src/agents/windows-argv.ts).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).default("terminal"),
   approvalPolicy: z.enum(["default", "bypass"]).default("default"),
@@ -1905,7 +1906,8 @@ const SessionCreateMessage = BaseMessage.extend({
   name: z.string().optional(),
   tool: z.string().optional(),
   command: z.string().optional(),
-  // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
+  // Raw CLI-args string (not an argv array): shell-interpreted on POSIX, split
+  // into argv on Windows (packages/antgrid-agents/src/agents/windows-argv.ts).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).optional(),
   approvalPolicy: z.enum(["default", "bypass"]).optional(),

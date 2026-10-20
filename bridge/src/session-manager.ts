@@ -30,7 +30,8 @@ import { createAgentRunScope, TerminalAgentEventSchema, type TerminalAgentEvent 
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus, HandlerAvailability } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
-import { AGENT_GRACE_MS } from "./terminal-session";
+import { AGENT_GRACE_MS, terminalInvocationHost } from "./terminal-session";
+import { windowsShellLimit } from "./terminal-invocation";
 import { TaskRefSchema, type AbMessage, type SessionEntry, type TaskRef } from "./protocol";
 import {
   CHECKOUT_KINDS,
@@ -105,6 +106,22 @@ export interface PreparedScheduledSession extends ScheduledSessionIdentity {
 export interface ScheduledSessionObservation extends ScheduledSessionIdentity {
   status: "running" | "needs-input" | "completed" | "failed" | "interrupted";
   reason?: string;
+}
+
+/** A Windows command line cannot carry a NUL or exceed its length limit, and
+ * cmd.exe cannot carry a newline, so an opening prompt that would trip one of
+ * those is typed into the terminal instead of passed in argv.
+ * Left alone when dropping the prompt would not cure it, so the spawn still fails loudly. */
+function typeUncarriablePrompt(launch: PreparedTerminalLaunch, toolName: string): PreparedTerminalLaunch {
+  const count = launch.promptArgCount;
+  if (process.platform !== "win32" || launch.promptDelivery !== "included" || !count) return launch;
+  const host = terminalInvocationHost({ ...process.env, ...launch.env });
+  const reason = windowsShellLimit({ command: launch.command, args: launch.args, invocationKind: launch.invocationKind }, host);
+  if (!reason) return launch;
+  const args = launch.args.slice(0, launch.args.length - count);
+  if (windowsShellLimit({ command: launch.command, args, invocationKind: launch.invocationKind }, host)) return launch;
+  log.info({ reason, agent: toolName }, "opening prompt will be typed into the terminal because the Windows command line cannot carry it");
+  return { ...launch, args, promptArgCount: undefined, promptDelivery: "buffered" };
 }
 
 function scheduledLaunchError(code: string, message: string): Error & { code: string } {
@@ -1110,6 +1127,7 @@ export class SessionManager {
     const adapter = (this.opts.agentRuntime ?? agentRuntime).get(tool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
     const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
+      && (workspace === "current" || !adapter.fork.nativeForkKeepsWorkspace)
       ? capturedSourceId : undefined;
     const transcript = nativeSource
       ? undefined
@@ -2500,7 +2518,9 @@ export class SessionManager {
       if (launch.dispose) scope.registerCleanup(launch.dispose);
       return launch;
     };
-    const dispatch = (launch: PreparedTerminalLaunch): void | Promise<void> => {
+    const dispatch = (prepared: PreparedTerminalLaunch): void | Promise<void> => {
+      // Replaced up front so the delivery, readiness and scheduled checks below all see the typed-prompt launch.
+      const launch = typeUncarriablePrompt(prepared, tool);
       if (launch.promptDelivery === "adapter" && !launch.deliverPrompt) throw new Error("Adapter prompt delivery requires a delivery operation");
       if (controller.signal.aborted || this.entries.get(id) !== entry || entry.archived || entry.mode !== "terminal" || entry.checkoutId !== launchCheckoutId) {
         const cleanup = this.releaseTerminalPreparation(id);
@@ -2528,6 +2548,20 @@ export class SessionManager {
           this.releaseTerminalPreparation(id);
           throw error;
         }
+      }
+      if (launch.createNativeFork) {
+        if (!this.awaitingNativeForkIdentity(entry)) throw new Error("Native fork preparation requires a pending fork.");
+        return scope.track(launch.createNativeFork()).then(({ nativeId, launch: resumedLaunch }) => {
+          ownLaunch(resumedLaunch);
+          if (controller.signal.aborted || this.entries.get(id) !== entry) throw new Error("Terminal launch cancelled during native fork.");
+          if (!nativeId || nativeId === entry.forkSourceSessionId || resumedLaunch.createNativeFork || !resumedLaunch.resumed) {
+            throw new Error("The provider did not return an independent resumable fork.");
+          }
+          if (!this.setAgentSession(id, nativeId)) throw new Error("The provider fork identity could not be saved.");
+          // A PTY failure must retry the known fork, never clone its source again.
+          writePersistedAtomic(this.path, Array.from(this.entries.values()));
+          return dispatch(resumedLaunch);
+        });
       }
       this.noteConversationStart(entry, launch.resumed);
       const notificationsInjected = launch.observation ?? launch.notificationsInjected;

@@ -3,6 +3,7 @@ import { resolveAgent, resolveAgentEnv } from "../known-agents";
 import { augmentAgentLaunch } from "../agent-launch-augmenter";
 import { resolveApprovalPolicy } from "../agent-approval-policy";
 import { initialPromptArgv } from "../initial-prompt";
+import { windowsRawArgv } from "./windows-argv";
 import { agentSpec } from "./registry";
 import type { ApprovalPolicy, LaunchAugmentation } from "./types";
 import type { AgentRunScope } from "../run-scope";
@@ -38,8 +39,14 @@ export interface PreparedTerminalLaunch {
   env: Record<string, string>;
   resumed: boolean;
   promptDelivery: "none" | "included" | "buffered" | "adapter" | "unsupported";
+  /** How many trailing `args` carry the opening prompt, so a host that cannot
+   * pass them (cmd.exe cannot carry a newline) can drop them and type the prompt instead. */
+  promptArgCount?: number;
   notificationsInjected?: boolean;
   observation?: LaunchAugmentation["observation"];
+  /** The host durably records the attempt before this provider mutation, and
+   * persists the returned identity before dispatching its resume invocation. */
+  createNativeFork?: () => Promise<{ nativeId: string; launch: PreparedTerminalLaunch }>;
   /** Resources allocated before dispatch remain owned until terminal teardown. */
   dispose?: () => void | Promise<void>;
   attach?: (terminal: { write(data: string): void; submit(text: string): void }, scope: AgentRunScope<TerminalAgentEvent>) => Promise<void>;
@@ -59,6 +66,7 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
   const augment = (id: string) => augmentAgentLaunch(id, {
     abDir: request.storeDir,
     cursorDir: typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined,
+    kimiHome: typeof request.adapterOptions?.kimiHome === "string" ? request.adapterOptions.kimiHome : undefined,
     hookCommand: runtime?.host.hookCommand(),
     mcpCommand: runtime?.host.mcpCommand?.(),
   }, runtime?.get);
@@ -103,7 +111,18 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
   const promptArgs = custom || !prompt ? [] : runtime ? spec?.cli?.initialPrompt?.(prompt) ?? [] : initialPromptArgv(tool ?? configured.name, prompt);
   const raw = request.rawArgs?.trim();
   const legacyConfiguredShell = !tool && !custom && args.length === 0 && /\s/.test(command) && !existsSync(command);
-  if (raw) {
+  // On Windows the raw args string becomes the argv cmd.exe would have handed
+  // the agent, rather than cmd syntax, so its quoted paths reach the agent
+  // verbatim and none of it runs as a command. What cmd would also have done
+  // with it is lost; windows-argv.ts lists it. A custom or legacy command is
+  // itself a shell line, so it keeps the shell.
+  const rawArgv = raw && process.platform === "win32" && !custom && !legacyConfiguredShell
+    ? windowsRawArgv(raw, { ...process.env, ...env })
+    : undefined;
+  if (rawArgv) {
+    const after = spec?.cli?.resumeIsSubcommand === true;
+    args = [...args, ...(after ? [] : conversationArgs), ...rawArgv, ...(after ? conversationArgs : []), ...promptArgs];
+  } else if (raw) {
     const head = custom ? [command] : [shellQuoteArg(command), ...args.map(shellQuoteArg)];
     const tail = conversationArgs.map(shellQuoteArg);
     const after = spec?.cli?.resumeIsSubcommand === true;
@@ -115,9 +134,11 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
   }
   return {
     command, args, env,
-    invocationKind: raw || custom || legacyConfiguredShell ? "shell" : "exec",
+    invocationKind: (raw && !rawArgv) || custom || legacyConfiguredShell ? "shell" : "exec",
     resumed: conversation.kind === "resume" && conversationArgs.length > 0,
     promptDelivery: !request.initialPrompt?.trim() ? "none" : promptArgs.length > 0 ? "included" : request.promptKind === "fork-handoff" ? "buffered" : "unsupported",
+    // On POSIX the folded branch quotes the prompt into `command`, so it is not a trailing arg there.
+    promptArgCount: promptArgs.length > 0 && (process.platform === "win32" || !raw) ? promptArgs.length : undefined,
     notificationsInjected: augmentation?.notificationsInjected,
     observation: augmentation?.observation,
   };

@@ -6,6 +6,8 @@ import { atomicWriteFile } from "./atomic-file";
 // @ts-expect-error Bun's text loader returns source text.
 import opencode from "../assets/opencode/plugin.ts" with { type: "text" };
 // @ts-expect-error Bun's text loader returns source text.
+import kilo from "../assets/kilo/plugin.ts" with { type: "text" };
+// @ts-expect-error Bun's text loader returns source text.
 import antigravity from "../assets/antigravity/post-title.js" with { type: "text" };
 
 // @ts-expect-error Bun embeds shell source as text.
@@ -20,6 +22,7 @@ const assets: Record<string, string> = {
   "hooks/on-notification": onNotification,
   "hooks/_resolve-api-port.sh": resolvePort,
   "opencode/plugin.ts": opencode,
+  "kilo/plugin.ts": kilo,
   "antigravity/post-title.js": antigravity,
   "package.json": '{"type":"module"}\n',
 };

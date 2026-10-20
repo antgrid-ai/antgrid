@@ -9,6 +9,8 @@ const plugin = await import(pathToFileURL(join(root, "opencode/plugin.ts")).href
 if (typeof plugin.AntgridSessionNamer !== "function") throw new Error("Plugin export missing");
 const runtime = await plugin.AntgridSessionNamer();
 if (typeof runtime.event !== "function") throw new Error("Plugin event handler missing");
+const kilo = await import(pathToFileURL(join(root, "kilo/plugin.ts")).href);
+if (typeof (await kilo.AntgridSessionIdentity()).event !== "function") throw new Error("Kilo identity handler missing");
 const env = { ...process.env };
 delete env.ANTGRID_API_PORT;
 delete env.ANTGRID_TERMINAL_ID;

@@ -627,7 +627,20 @@ export class TerminalManager {
       try { fn(session); } catch { /* ignore */ }
     }
     if (config.env?.ANTGRID_RUN_ID) this.agentRunIds.set(session, config.env.ANTGRID_RUN_ID);
-    session.spawn();
+    try {
+      session.spawn();
+    } catch (error) {
+      // No PTY started, so no exit will ever release the slot: left registered,
+      // it reads as running for good, Start refuses it and Stop cannot reach it.
+      this.sessions.delete(terminalId);
+      this.scrollbacks.delete(terminalId);
+      this.modeTrackers.delete(terminalId);
+      this.disposeScreen(terminalId);
+      this.retainScrollback.delete(terminalId);
+      this.terminalTypes.delete(terminalId);
+      liveTerminalHistoryStore()?.deleteRun(runId);
+      throw error;
+    }
     log.info(`Terminal "${terminalId}" spawned (${config.name ?? "shell"})`);
     return terminalId;
   }

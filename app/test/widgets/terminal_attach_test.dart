@@ -55,6 +55,22 @@ class _Harness {
 
 void main() {
   group('TerminalAttachmentUploader', () {
+    test('picker can finish after the terminal view is disposed', () async {
+      final h = _Harness();
+      final picked = Completer<void>();
+      final operation = h.uploader.keepAliveDuring(() async {
+        await picked.future;
+        await h.uploader.attach(bytes: Uint8List(4), fileName: 'a.png');
+      });
+      h.uploader.dispose();
+      picked.complete();
+      await operation;
+      expect(h.inserted, ['"$_stagedPath" ']);
+      expect(h.errors, isEmpty);
+      await h.uploader.attach(bytes: Uint8List(4), fileName: 'b.png');
+      expect(h.inserted, hasLength(1));
+    });
+
     test('inserts the quoted path with a trailing space on success', () async {
       final h = _Harness();
       addTearDown(h.uploader.dispose);
