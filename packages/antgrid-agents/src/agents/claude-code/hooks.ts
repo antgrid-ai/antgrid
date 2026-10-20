@@ -180,6 +180,7 @@ export const observation = { notifications: true, titles: true, handler: true, t
 const CLAUDE_FATAL_STOP_ERRORS = new Set([
   "authentication_failed", "oauth_org_not_allowed", "billing_error",
   "invalid_request", "model_not_found", "max_output_tokens",
+  "account_on_hold", "verification_required", "cloud_credential_error",
 ]);
 
 // Anything unrecognized is treated as transient: a value added upstream should
