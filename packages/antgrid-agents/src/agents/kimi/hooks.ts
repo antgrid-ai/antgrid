@@ -7,6 +7,7 @@ import { hookShellCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import { NO_INJECTION } from "../launch-inject";
+import { runningUnderTest } from "../test-runner";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 const begin = "# BEGIN ANTGRID KIMI IDENTITY";
@@ -59,9 +60,8 @@ function withoutHooksTables(text: string, drop: (hook: unknown) => boolean): str
 const inlineHooks = (text: string) => Config.parse(Bun.TOML.parse(withoutHooksTables(text, () => true))).hooks;
 
 export function inject({ kimiHome, hookCommand }: HookInjectCtx): LaunchAugmentation {
-  // Kimi exposes only user-level hooks. Test launches must never install their
-  // test-runner command into the user's configuration.
-  if (kimiHome === undefined && /\.(test|spec)\.[cm]?[jt]sx?$/.test(Bun.main)) return NO_INJECTION;
+  // Kimi exposes only user-level hooks.
+  if (kimiHome === undefined && runningUnderTest()) return NO_INJECTION;
   const path = join(kimiHome ?? process.env.KIMI_CODE_HOME ?? join(homedir(), ".kimi-code"), "config.toml");
   try {
     const original = existsSync(path) ? readFileSync(path, "utf8") : "";
