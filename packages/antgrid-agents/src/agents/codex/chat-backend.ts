@@ -344,18 +344,67 @@ export class CodexDriver extends ChatSession {
     await this.ep.request("thread/compact/start", { threadId: this.threadId });
   }
 
+  // Drops the target turn and every later one from codex's stored history;
+  // files the agent changed stay as they are.
   async revert(target: { turnId?: string }): Promise<void> {
     if (!target.turnId) throw new Error("revert requires a turn id");
-    const idx = this.turnOrder.indexOf(target.turnId);
-    if (idx < 0) throw new Error("revert target turn not found");
-    const numTurns = this.turnOrder.length - idx;
-    const res = await this.ep.request("thread/rollback", {
-      threadId: this.threadId,
-      numTurns,
-    });
-    this.seedTurnsFromThread((res as any)?.thread);
+    const turns = await this.revertedTurns(target.turnId);
+    this.seedTurnsFromThread({ turns });
     this.emitSessionReset();
-    this.emitTranscriptReplay(codexResumeReplay(this.sessionId, (res as any)?.thread));
+    this.emitTranscriptReplay(codexResumeReplay(this.sessionId, { turns }));
+  }
+
+  private async revertedTurns(turnId: string): Promise<any[]> {
+    try {
+      await this.ep.request("thread/revert", { threadId: this.threadId, beforeTurnId: turnId });
+    } catch (err) {
+      if (!rollbackMayServe(err)) throw err;
+      return this.rolledBackTurns(turnId, err);
+    }
+    return this.listTurns();
+  }
+
+  // thread/revert's response carries no turns (thread.turns is always empty);
+  // codex hydrates retained history through thread/turns/list. thread/read with
+  // includeTurns would return the same turns, but it is deprecated for
+  // paginated threads — the only kind thread/revert accepts — and answers every
+  // such call with a deprecationNotice.
+  private async listTurns(): Promise<any[]> {
+    const turns: any[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const page = (await this.ep.request("thread/turns/list", {
+        threadId: this.threadId,
+        sortDirection: "asc",
+        itemsView: "full",
+        limit: CODEX_TURNS_PAGE_MAX,
+        ...(cursor ? { cursor } : {}),
+      })) as any;
+      if (Array.isArray(page?.data)) turns.push(...page.data);
+      const next = typeof page?.nextCursor === "string" ? page.nextCursor : null;
+      if (!next) return turns;
+      if (next === cursor) throw new Error("codex thread/turns/list repeated a cursor");
+      cursor = next;
+    }
+  }
+
+  // thread/rollback is the only revert codex offers before 0.148 (no
+  // thread/revert) and, through 0.154, for non-paginated threads; 0.155 removed
+  // it. If this build lacks it too, the thread/revert refusal is the
+  // explanation worth surfacing.
+  private async rolledBackTurns(turnId: string, revertErr: unknown): Promise<any[]> {
+    const idx = this.turnOrder.indexOf(turnId);
+    if (idx < 0) throw new Error("revert target turn not found");
+    let res: any;
+    try {
+      res = await this.ep.request("thread/rollback", {
+        threadId: this.threadId,
+        numTurns: this.turnOrder.length - idx,
+      });
+    } catch (err) {
+      throw isUnknownMethod(err, "thread/rollback") ? revertErr : err;
+    }
+    return Array.isArray(res?.thread?.turns) ? res.thread.turns : [];
   }
 
   // Widened to `void | Promise<void>` because agent-core wraps dispose() to also
@@ -748,6 +797,25 @@ export class CodexDriver extends ChatSession {
     if (this.structuredPlanTurns.has(turnId)) return;
     this.emitPlan(turnId, [{ text: String(p?.item?.text ?? ""), status: "pending" }]);
   }
+}
+
+// codex-rs app-server's per-call ceiling for thread/turns/list pages.
+const CODEX_TURNS_PAGE_MAX = 100;
+
+// codex rejects a method it does not know while deserializing the request, so
+// the refusal is serde's tagged-enum error ("unknown variant `<method>`") and
+// carries no dedicated code. Matched on text: a miss only skips a fallback.
+function isUnknownMethod(err: unknown, method: string): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(`unknown variant \`${method}\``);
+}
+
+// Both refusals come back before codex touches the thread's history, so a
+// rollback after either cannot drop a turn twice. Timeouts and dropped streams
+// are deliberately excluded: the revert may have landed.
+function rollbackMayServe(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return isUnknownMethod(err, "thread/revert") || message.includes("only supports paginated threads");
 }
 
 function questionRequest(q: FlatQuestion): QuestionRequest {
