@@ -287,6 +287,79 @@ describe("excerpt content", () => {
     expect(out).not.toContain("\ufffd");
   });
 
+  test("long prose wraps at a space; only a spaceless token is hard-cut", () => {
+    const prose = Array.from({ length: 120 }, (_, i) => `word${i}`).join(" ");
+    const token = "k".repeat(400);
+    const out = build([
+      { kind: "user", text: prose, genuine: true, at: "t:1" },
+      { kind: "assistant", text: `before ${token} after`, at: "t:2" },
+    ]);
+    const lines = out.split("\n");
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(EXCERPT_WRAP);
+
+    // The header sentence is longer than the wrap width.
+    const captured = lines.findIndex((line) => line.startsWith("Captured "));
+    expect(lines[captured]!.endsWith(" ")).toBe(true);
+    expect(lines[captured]! + lines[captured + 1]!).toContain("wherever this record disagrees with it.");
+    expect(out).not.toMatch(/recor\nd /);
+
+    const proseLines = lines.filter((line) => line.startsWith("word"));
+    expect(proseLines.length).toBeGreaterThan(2);
+    for (const line of proseLines) {
+      for (const word of line.trim().split(" ")) expect(word).toMatch(/^word\d+$/);
+    }
+    expect(proseLines.join("")).toContain(prose);
+
+    const tokenLines = lines.filter((line) => /^k+$/.test(line) || line.startsWith("before k"));
+    expect(tokenLines.length).toBeGreaterThan(1);
+    expect(out.replace(/\n/g, "")).toContain(`before ${token} after`);
+  });
+
+  test("a wrap never starts a line with a fence", () => {
+    const out = build([
+      { kind: "user", text: "go", genuine: true, at: "t:1" },
+      // The only space inside the width is too early to break at, so the hard
+      // cut lands right before an indented fence run.
+      { kind: "note", text: `${"n".repeat(150)} \`\`\`\`evil ${"m".repeat(60)}`, at: "t:2" },
+    ]);
+    expect(structureLines(out).filter((line) => /^ {0,3}`{3,}/.test(line))).toHaveLength(0);
+    for (const line of out.split("\n")) expect(line.length).toBeLessThanOrEqual(EXCERPT_WRAP);
+  });
+
+  test("a long older turn behind a short newest one fills the tail in part", () => {
+    const events: HandoffEvent[] = [{ kind: "user", text: "the older task", genuine: true, at: "o:0" }];
+    for (let i = 0; i < 30; i++) events.push({ kind: "assistant", text: `older ${i} ${"o".repeat(400)}`, at: `o:${i + 1}` });
+    events.push({ kind: "user", text: "the newest ask", genuine: true, at: "n:0" });
+    for (let i = 0; i < 15; i++) events.push({ kind: "assistant", text: `newer ${i} ${"n".repeat(400)}`, at: `n:${i + 1}` });
+    const out = build(events);
+    expect(bytes(out)).toBeGreaterThan(12_000);
+    expect(bytes(out)).toBeLessThanOrEqual(EXCERPT_SMALL_MAX_BYTES);
+    expect(viewSize(out)).toBeLessThanOrEqual(EXCERPT_VIEW_MAX);
+
+    const tail = out.slice(out.indexOf("## Recent turns"));
+    expect(tail.indexOf("### Turn 1 ")).toBeGreaterThan(-1);
+    expect(tail.indexOf("### Turn 1 ")).toBeLessThan(tail.indexOf("### Turn 2 "));
+    expect(tail).toMatch(/\[… \d+ earlier entries of this turn omitted; see o:1–o:\d+\]/);
+    expect(tail).toContain("older 29 ");
+    expect(tail).toContain("newer 0 ");
+    expect(tail).toContain("newer 14 ");
+    expect(out).toContain("Truncation: turn 1 was cut at an entry boundary.");
+    expect(out).not.toContain("earlier turns not shown");
+  });
+
+  test("the large tier fills its tail with a partial older turn too", () => {
+    const events: HandoffEvent[] = [{ kind: "user", text: "the older task", genuine: true, at: "o:0" }];
+    for (let i = 0; i < 75; i++) events.push({ kind: "assistant", text: `older ${i} ${"o".repeat(400)}`, at: `o:${i + 1}` });
+    events.push({ kind: "user", text: "the newest ask", genuine: true, at: "n:0" });
+    for (let i = 0; i < 37; i++) events.push({ kind: "assistant", text: `newer ${i} ${"n".repeat(400)}`, at: `n:${i + 1}` });
+    const out = build(events, "claude-code");
+    expect(bytes(out)).toBeGreaterThan(30_000);
+    expect(bytes(out)).toBeLessThanOrEqual(EXCERPT_LARGE_MAX_BYTES);
+    expect(out.split("\n").length).toBeLessThanOrEqual(EXCERPT_LARGE_MAX_LINES);
+    expect(out).toContain("older 74 ");
+    expect(out).toContain("newer 36 ");
+  });
+
   test("budget unused by the summary flows to the tail", () => {
     const events = [...turns(200, 400)];
     const without = build(events);

@@ -47,6 +47,9 @@ const FALLBACK_USER_MAX = 1_200;
 const TOOL_INPUT_MAX = 300;
 const TOOL_RESULT_MAX = 400;
 const OMISSION_NOTE_RESERVE = 150;
+/** Below this, a partial older turn would be little more than its heading and
+ * capped user message, which says too little to be worth the clutter. */
+const PARTIAL_TURN_MIN = 1_500;
 const AT_MAX = 120;
 const HANDOFF_PROMPT_PLACEHOLDER = "(handoff prompt)";
 
@@ -94,18 +97,44 @@ function truncateMiddle(text: string, maxBytes: number, at: string, headShare = 
   return `${head}${markerFor(Math.max(0, text.length - head.length - tail.length))}${tail}`;
 }
 
+/** A space this far into a piece is worth breaking at; nearer the start, a word
+ * wrap would waste most of the line, so a long token is hard-cut instead. */
+const WRAP_SOFT_FLOOR = Math.ceil((EXCERPT_WRAP * 2) / 3);
+
+/** A continuation line that starts like this would open a code fence when it
+ * lands among structure lines, forging everything after it into a code block. */
+const opensFence = (line: string, at: number): boolean => /^ {0,3}(?:`{3,}|~{3,})/.test(line.slice(at, at + 8));
+
+const isLowSurrogate = (line: string, at: number): boolean => {
+  const code = line.charCodeAt(at);
+  return code >= 0xdc00 && code <= 0xdfff;
+};
+
+function breakPoint(line: string, start: number): number {
+  const limit = start + EXCERPT_WRAP;
+  // The space stays on the earlier piece, so rejoining the pieces with nothing
+  // restores the line exactly.
+  for (let space = limit - 1; space >= start + WRAP_SOFT_FLOOR; space--) {
+    if (line[space] === " " && !opensFence(line, space + 1)) return space + 1;
+  }
+  let end = limit;
+  while (end > start + 1 && (isLowSurrogate(line, end) || opensFence(line, end))) end--;
+  // A run of fence characters spanning the whole piece cannot be avoided; inside
+  // a fenced body it is shorter than the fence, so the plain cut is harmless there.
+  if (end === start + 1) end = isLowSurrogate(line, limit) ? limit - 1 : limit;
+  return end;
+}
+
 function wrapLine(line: string): string {
   if (line.length <= EXCERPT_WRAP) return line;
   const pieces: string[] = [];
   let index = 0;
-  while (index < line.length) {
-    let end = Math.min(index + EXCERPT_WRAP, line.length);
-    const next = line.charCodeAt(end);
-    // Never split a surrogate pair.
-    if (end < line.length && next >= 0xdc00 && next <= 0xdfff) end--;
+  while (line.length - index > EXCERPT_WRAP) {
+    const end = breakPoint(line, index);
     pieces.push(line.slice(index, end));
     index = end;
   }
+  pieces.push(line.slice(index));
   return pieces.join("\n");
 }
 
@@ -182,8 +211,9 @@ function renderTurn(turn: Turn): string {
   return lines.join("\n");
 }
 
-/** For a newest turn too large to keep whole: its user message, then the newest
- * entries from an entry boundary, with a locator range for what was left out. */
+/** For a turn too large to keep whole in the room left: its user message, then
+ * the newest entries from an entry boundary, with a locator range for what was
+ * left out. */
 function renderTurnFallback(turn: Turn, budget: number): string {
   const head = [turnHeading(turn)];
   if (turn.user) head.push(renderUser(turn.user, FALLBACK_USER_MAX));
@@ -353,28 +383,41 @@ export class ExcerptBuilder {
     return [this.taskSection(scale), this.summarySection(scale)].reduce((sum, section) => sum + (section ? bytes(section) + 2 : 0), 0);
   }
 
-  private tail(budget: number): { text: string; omittedTurns: number; trimmedEntries: boolean } {
+  private tail(budget: number): { text: string; omittedTurns: number; cutTurns: number[] } {
     const usable = budget - OMISSION_NOTE_RESERVE;
     const shown: string[] = [];
     let used = 0;
     let firstShown = this.turns.length;
-    let trimmedEntries = false;
+    const cutTurns: number[] = [];
     for (let index = this.turns.length - 1; index >= 0; index--) {
       const turn = this.turns[index]!;
       let block = renderTurn(turn);
       let cost = bytes(block) + 1;
+      let partial = false;
       if (used + cost > usable) {
-        if (shown.length > 0 || usable <= 0) break;
-        block = renderTurnFallback(turn, usable);
-        cost = bytes(block) + 1;
-        trimmedEntries = true;
+        if (usable <= 0) break;
+        if (shown.length > 0) {
+          // A long older turn behind a short newest one would otherwise leave
+          // most of the tail empty; its newest entries are the next-best context.
+          const room = usable - used;
+          if (room < PARTIAL_TURN_MIN) break;
+          block = renderTurnFallback(turn, room - 1);
+          cost = bytes(block) + 1;
+          if (cost > room) break;
+        } else {
+          block = renderTurnFallback(turn, usable);
+          cost = bytes(block) + 1;
+        }
+        partial = true;
       }
+      if (partial || turn.omitted > 0) cutTurns.unshift(turn.n);
       shown.unshift(block);
       used += cost;
       firstShown = index;
+      if (partial) break;
     }
     const omittedTurns = shown.length > 0 ? this.turns[firstShown]!.n - 1 : this.turnCount;
-    return { text: shown.join("\n"), omittedTurns, trimmedEntries };
+    return { text: shown.join("\n"), omittedTurns, cutTurns };
   }
 
   private assemble(meta: ExcerptMeta, tailBudget: number, scale: number): string {
@@ -393,7 +436,13 @@ export class ExcerptBuilder {
 
     const notes: string[] = [];
     if (tail.omittedTurns > 0) notes.push(`${tail.omittedTurns} earlier turns not shown`);
-    if (tail.trimmedEntries) notes.push("the newest turn was cut at an entry boundary");
+    const newest = this.turns.at(-1)?.n;
+    if (tail.cutTurns.length === 1 && tail.cutTurns[0] === newest) {
+      notes.push("the newest turn was cut at an entry boundary");
+    } else if (tail.cutTurns.length > 0) {
+      const many = tail.cutTurns.length > 1;
+      notes.push(`${many ? "turns" : "turn"} ${tail.cutTurns.join(" and ")} ${many ? "were" : "was"} cut at an entry boundary`);
+    }
     if (meta.degraded) notes.push(meta.degraded);
     const top = [
       `# Handoff excerpt from ${inline(meta.sourceLabel, 80)}`,
