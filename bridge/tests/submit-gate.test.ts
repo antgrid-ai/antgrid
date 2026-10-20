@@ -253,6 +253,61 @@ test("a respawn drops the previous guest's startup hold", () => {
   expect(sent).toEqual(["card"]);
 });
 
+// Cursor's dialog never enables the mode; with `--trust` there is no dialog at
+// all, and the screen would otherwise be read for the life of the session.
+test("a guest that never reads and shows no prompt is past its startup after the cold bound", async () => {
+  const gate = new SubmitGate(5);
+  gate.holdForStartup("t1");
+  gate.startupScreen("t1", false);
+  await wait(40);
+
+  expect(gate.awaitingStartup("t1")).toBe(false);
+});
+
+test("a guest that never reads keeps its hold while a prompt is up", async () => {
+  const gate = new SubmitGate(5);
+  gate.holdForStartup("t1");
+  gate.startupScreen("t1", true);
+  await wait(40);
+
+  expect(gate.awaitingStartup("t1")).toBe(true);
+});
+
+test("a reading guest's screen is judged before the bound may send", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(5, 5);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.markReady("t1");
+  await wait(40);
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+// The answer is followed by the guest swapping its composer in, mode off for
+// the gap; a bound that began before the answer would send into it.
+test("the bound restarts from the answer, not from before it", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(40);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.startupScreen("t1", true);
+  await wait(30);
+  gate.startupScreen("t1", false);
+  await wait(25);
+  expect(sent).toEqual([]);
+
+  gate.markReady("t1");
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
 test("a startup screen check reads the screen only once output settles", async () => {
   const reports: boolean[] = [];
   let reads = 0;
@@ -317,6 +372,38 @@ test("a composer painted before the trust dialog is not taken for no dialog", as
   expect(reports).toEqual([]);
 
   rows = ["Trust this folder? Codex can read, edit, and run files here", "› 1. Trust and continue"];
+  check.noteOutput();
+  await wait(40);
+  expect(reports).toEqual([true]);
+  check.dispose();
+});
+
+// A slow cold start: the blank pre-TUI screen outlasts the window, and only
+// then does Codex paint its composer ahead of the dialog.
+test("the clear window starts once the guest is reading", async () => {
+  const reports: boolean[] = [];
+  let reading = false;
+  let rows = [""];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => rows,
+    reading: () => reading,
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 200,
+  });
+
+  check.noteOutput();
+  await wait(260);
+  expect(reports).toEqual([]);
+
+  reading = true;
+  rows = ["› Ask Codex to do anything"];
+  check.noteOutput();
+  await wait(60);
+  expect(reports).toEqual([]);
+
+  rows = ["Trust this folder? Codex can read, edit, and run files here"];
   check.noteOutput();
   await wait(40);
   expect(reports).toEqual([true]);

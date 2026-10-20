@@ -573,7 +573,8 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // v2.24.5. The trust dialog (shown for a folder with AGENTS.md or .vibe/)
     // highlights "Trust folder", read from setup/trusted_folders/
     // trust_folder_dialog.py; first-run setup, measured on screen, takes Enter
-    // to continue.
+    // to continue. Its welcome line is onboarding-only: the project's own
+    // tests/e2e/test_cli_tui_streaming.py asserts the main TUI never shows it.
     startupPrompts: ["Trust this folder?", "Trust folder or repository?", "Welcome to Mistral Vibe"],
     // No headless entry, and `-p --agent ask` must not come back as one. Read
     // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated

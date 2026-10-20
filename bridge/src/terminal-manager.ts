@@ -405,6 +405,9 @@ export class TerminalManager {
     // and has nothing any other caller wants, so it lives and dies with the
     // handler below rather than in a map something has to remember to clear.
     const readiness = new GuestReadiness();
+    // This guest's own latch, kept apart from the gate's per-id one so a
+    // replaced run's verdicts cannot speak for the screen check below.
+    let guestReading = false;
     // A fresh guest occupies this id, whatever the last one announced. Held
     // submits are released here rather than at the previous exit so a respawn
     // reusing a retained slot cannot inherit the dead run's readiness.
@@ -413,6 +416,7 @@ export class TerminalManager {
       ? new StartupScreenCheck({
         prompts: config.startupPrompts,
         read: () => screen?.visibleLines() ?? [],
+        reading: () => guestReading,
         // Same ownership rule as readiness: a replaced run's screen says
         // nothing about the guest now holding the id.
         report: (showing) => {
@@ -471,6 +475,7 @@ export class TerminalManager {
             on: modes.isSet(BRACKETED_PASTE),
             changed: moved.has(BRACKETED_PASTE),
           });
+          if (verdict) guestReading = verdict === "ready";
           // Only while no OTHER session holds the slot, the gate the exit
           // handler applies: a replaced PTY keeps emitting until its tree is
           // reaped, and its teardown would otherwise retract readiness the live
@@ -534,9 +539,9 @@ export class TerminalManager {
           // The gate covers the SEND too, not just the bookkeeping: an exit
           // frame for a slot a live session now holds tells the app a running
           // terminal is dead, and nothing later corrects it.
+          startupCheck?.dispose();
           const current = this.sessions.get(terminalId);
           if (current !== undefined && current !== session) return;
-          startupCheck?.dispose();
           this.submitGate.reset(terminalId);
           // Forgotten while still live: the owner row is already gone, so the
           // exit frame would be stamped with main's checkout and the

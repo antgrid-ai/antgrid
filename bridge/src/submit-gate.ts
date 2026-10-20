@@ -229,8 +229,12 @@ export class SubmitGate {
   /** Guests that may open on a prompt only the user may answer and have not
    *  yet been seen reading past it: `pending` until a settled screen decides,
    *  `prompt` while one is showing. Absent once the composer has been seen,
-   *  for good — agent output later in the session can quote the same words. */
+   *  or a guest that never reads has gone a cold bound with no prompt up, and
+   *  for good: agent output later in the session can quote the same words. */
   private readonly startup = new Map<string, "pending" | "prompt">();
+  /** When this id's startup prompt last went away, i.e. was answered. */
+  private readonly answered = new Map<string, number>();
+  private readonly startupDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly timeoutMs: number = SUBMIT_READY_TIMEOUT_MS,
@@ -255,6 +259,30 @@ export class SubmitGate {
    */
   holdForStartup(terminalId: string): void {
     this.startup.set(terminalId, "pending");
+    this.armStartupDeadline(terminalId);
+  }
+
+  /**
+   * A guest that never announces an input mode (Cursor's dialog, a CLI on a
+   * plain line editor) can never be seen reading past its startup. After the
+   * same bound a cold wait takes, a screen with no prompt on it is taken as
+   * past it, so the screen stops being read for the rest of the run.
+   */
+  private armStartupDeadline(terminalId: string): void {
+    clearTimeout(this.startupDeadlines.get(terminalId));
+    const timer = setTimeout(() => {
+      this.startupDeadlines.delete(terminalId);
+      if (this.startup.get(terminalId) === "pending" && !this.ready.has(terminalId)) this.endStartup(terminalId);
+    }, this.timeoutMs);
+    timer.unref?.();
+    this.startupDeadlines.set(terminalId, timer);
+  }
+
+  private endStartup(terminalId: string): void {
+    this.startup.delete(terminalId);
+    clearTimeout(this.startupDeadlines.get(terminalId));
+    this.startupDeadlines.delete(terminalId);
+    if (this.ready.has(terminalId)) this.release(terminalId, "guest ready");
   }
 
   /** Whether {@link startupScreen} still has a question to answer. */
@@ -276,12 +304,13 @@ export class SubmitGate {
       this.startup.set(terminalId, "prompt");
       return;
     }
+    if (state === "prompt") this.answered.set(terminalId, Date.now());
     if (!this.ready.has(terminalId)) {
       this.startup.set(terminalId, "pending");
+      if (state === "prompt") this.armStartupDeadline(terminalId);
       return;
     }
-    this.startup.delete(terminalId);
-    this.release(terminalId, "guest ready");
+    this.endStartup(terminalId);
   }
 
   /**
@@ -308,6 +337,9 @@ export class SubmitGate {
   reset(terminalId: string): void {
     this.ready.delete(terminalId);
     this.startup.delete(terminalId);
+    this.answered.delete(terminalId);
+    clearTimeout(this.startupDeadlines.get(terminalId));
+    this.startupDeadlines.delete(terminalId);
     // A new process cold-starts, whatever the last one managed.
     this.rearming.delete(terminalId);
     this.guests.set(terminalId, this.guest(terminalId) + 1);
@@ -365,12 +397,24 @@ export class SubmitGate {
         resolve();
       };
       const bound = this.rearming.has(terminalId) ? this.rearmMs : this.timeoutMs;
-      // The bound restarts rather than expiring while a startup prompt is up:
-      // only the user's answer may end that wait.
+      // The bound restarts rather than expiring while a startup prompt is up,
+      // since only the user's answer may end that wait, and while a reading
+      // guest's screen is still being judged, which `StartupScreenCheck`
+      // settles within its window.
       const expire = (): void => {
-        if (this.startup.get(terminalId) !== "prompt") return finish("timeout");
-        timer = setTimeout(expire, bound);
-        timer.unref?.();
+        const state = this.startup.get(terminalId);
+        let wait = state === "prompt" || (state === "pending" && this.ready.has(terminalId)) ? bound : 0;
+        // An answer is followed by the guest swapping its composer in. A bound
+        // that started before the answer must not send into that gap.
+        const answeredAt = this.answered.get(terminalId);
+        if (wait === 0 && answeredAt !== undefined) wait = answeredAt + bound - Date.now();
+        if (wait > 0) {
+          timer = setTimeout(expire, wait);
+          timer.unref?.();
+          return;
+        }
+        if (state === "pending") this.endStartup(terminalId);
+        finish("timeout");
       };
       let timer = setTimeout(expire, bound);
       // A bounded wait must not be a reason to stay alive: a bridge whose last
@@ -432,6 +476,9 @@ export class StartupScreenCheck {
       /** The visible rows, one string each. */
       read: () => string[];
       report: (promptShowing: boolean) => void;
+      /** Whether the guest currently looks like it is reading; absent means it
+       *  always does. */
+      reading?: () => boolean;
       settleMs?: number;
       maxDeferMs?: number;
       clearMs?: number;
@@ -465,6 +512,13 @@ export class StartupScreenCheck {
     }
     if (this.promptSeen) {
       this.opts.report(false);
+      return;
+    }
+    // The window is measured on a guest that is reading. A blank pre-TUI screen
+    // can outlast it on a slow cold start, and a window spent there would let
+    // the composer Codex paints before its dialog disarm the check at once.
+    if (!(this.opts.reading?.() ?? true)) {
+      this.clearSince = undefined;
       return;
     }
     const now = this.now();
