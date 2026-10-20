@@ -1,10 +1,11 @@
 // bridge/tests/codex-rollout-read.test.ts
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findCodexRolloutPath, readLastCodexMessages } from "../../packages/antgrid-agents/src/agents/codex/rollout-read";
+import { readTranscript } from "../../packages/antgrid-agents/src/agents/codex/transcript";
 
 const THREAD = "019f8e9e-acc9-78a2-8f61-803e7bbabac3";
 
@@ -140,6 +141,47 @@ test("findCodexRolloutPath falls back to the scan when the recorded file is gone
   db.query("INSERT INTO threads VALUES (?, ?)").run(THREAD, join(home, "compressed-away.jsonl"));
   db.close();
   expect(await findCodexRolloutPath(THREAD, home)).toBe(path);
+});
+
+// Codex compresses a rollout idle for about a week to <name>.jsonl.zst and
+// deletes the .jsonl, while the state DB row keeps naming the .jsonl.
+function compressAway(path: string): string {
+  const compressed = `${path}.zst`;
+  writeFileSync(compressed, Bun.zstdCompressSync(readFileSync(path)));
+  rmSync(path);
+  return compressed;
+}
+
+test("a cold thread's compressed rollout is found through the state DB and read", async () => {
+  const { home, path } = makeHome([pagedUser("rename the widget"), pagedAgent("renamed")]);
+  const compressed = compressAway(path);
+  const db = new Database(join(home, "state_5.sqlite"));
+  db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)");
+  db.query("INSERT INTO threads VALUES (?, ?)").run(THREAD, path);
+  db.close();
+  expect(await findCodexRolloutPath(THREAD, home)).toBe(compressed);
+  expect(await readLastCodexMessages(compressed, 1)).toEqual(["renamed"]);
+  expect(await readTranscript({ agentSessionId: THREAD, codexHome: home, maxMsgs: 10 }))
+    .toEqual({ msgs: ["rename the widget", "renamed"], transcriptPath: compressed });
+});
+
+test("findCodexRolloutPath finds a compressed rollout by scan when no state DB names it", async () => {
+  const { home, path } = makeHome([pagedUser("hi")]);
+  expect(await findCodexRolloutPath(THREAD, home)).toBe(path); // primes the cache
+  const compressed = compressAway(path);
+  expect(await findCodexRolloutPath(THREAD, home)).toBe(compressed);
+});
+
+test("findCodexRolloutPath prefers a resumed thread's plain rollout over its compressed sibling", async () => {
+  const { home, path } = makeHome([pagedUser("hi")]);
+  writeFileSync(`${path}.zst`, Bun.zstdCompressSync(readFileSync(path)));
+  expect(await findCodexRolloutPath(THREAD, home)).toBe(path);
+});
+
+test("readLastCodexMessages returns [] for a corrupt compressed rollout", async () => {
+  const { path } = makeHome([pagedUser("hi")]);
+  writeFileSync(`${path}.zst`, "not zstd");
+  expect(await readLastCodexMessages(`${path}.zst`, 5)).toEqual([]);
 });
 
 test("readLastCodexMessages returns [] for a missing file", async () => {
