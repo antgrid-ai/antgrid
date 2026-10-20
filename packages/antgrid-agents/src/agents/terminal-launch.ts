@@ -137,6 +137,9 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
     command, args, env,
     invocationKind: (raw && !rawArgv) || custom || legacyConfiguredShell ? "shell" : "exec",
     resumed: conversation.kind === "resume" && conversationArgs.length > 0,
+    // Only a handoff prompt may be typed into an agent with no prompt argv: it is
+    // one bounded line with no control characters, so typing it cannot be read
+    // as keys or flattened by a paste.
     promptDelivery: !request.initialPrompt?.trim() ? "none" : promptArgs.length > 0 ? "included" : request.promptKind === "fork-handoff" ? "buffered" : "unsupported",
     // On POSIX the folded branch quotes the prompt into `command`, so it is not a trailing arg there.
     promptArgCount: promptArgs.length > 0 && (process.platform === "win32" || !raw) ? promptArgs.length : undefined,

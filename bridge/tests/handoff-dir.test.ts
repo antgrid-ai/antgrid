@@ -6,9 +6,12 @@ import { rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSpec } from "antgrid-agents/contracts";
-import { HandoffSnapshotError, writeText, ByteBudget, type HandoffSnapshot, type HandoffSnapshotOpts } from "antgrid-agents/handoff";
 import {
-  assertSessionUuid, materializeHandoff, removeHandoff, stageHandoff, stagingDir, sweepHandoffs,
+  HandoffSnapshotError, writeText, ByteBudget, scrollbackEvents,
+  type HandoffEvent, type HandoffEventsFn, type HandoffSnapshot, type HandoffSnapshotOpts,
+} from "antgrid-agents/handoff";
+import {
+  assertSessionUuid, materializeHandoff, removeHandoff, stageHandoff, stageLegacyText, stagingDir, sweepHandoffs,
 } from "../src/handoff/handoff-dir";
 
 const ID = "11111111-2222-4333-8444-555555555555";
@@ -24,8 +27,8 @@ function tmp(): string {
 
 type Snapshotter = (opts: HandoffSnapshotOpts) => Promise<HandoffSnapshot | undefined>;
 
-function adapter(snapshot: Snapshotter): AgentSpec {
-  return { label: "Fixture", fork: { snapshot } } as unknown as AgentSpec;
+function adapter(snapshot: Snapshotter, events: HandoffEventsFn = scrollbackEvents): AgentSpec {
+  return { label: "Fixture", fork: { snapshot, events } } as unknown as AgentSpec;
 }
 
 function git(cwd: string, ...args: string[]): string {
@@ -48,11 +51,14 @@ async function writingSnapshot(opts: HandoffSnapshotOpts): Promise<HandoffSnapsh
   return { agent: "fixture", method: "copy", primary: "fixture.jsonl", files: [file], references: [], redactions: [], warnings: [] };
 }
 
-function stage(sessionsDir: string, snapshot: Snapshotter, scrollback?: string, id = ID, deadlineMs?: number) {
+function stage(
+  sessionsDir: string, snapshot: Snapshotter, scrollback?: string, id = ID, deadlineMs?: number,
+  extra: { events?: HandoffEventsFn; targetTool?: string } = {},
+) {
   return stageHandoff({
     sessionsDir, projectId: "p1", newSessionId: id,
     source: { id: "src", name: "Source", tool: "fixture" },
-    adapter: adapter(snapshot), snapshotOpts: baseOpts, scrollback, deadlineMs,
+    adapter: adapter(snapshot, extra.events), snapshotOpts: baseOpts, scrollback, deadlineMs, targetTool: extra.targetTool,
   });
 }
 
@@ -62,7 +68,7 @@ describe("stageHandoff", () => {
     const manifest = await stage(store, writingSnapshot, "scroll");
     expect(manifest.method).toBe("copy");
     expect(manifest.files.map((f) => f.name)).toEqual(["fixture.jsonl", "terminal-scrollback.txt"]);
-    expect(readdirSync(stagingDir(store, ID)).sort()).toEqual(["fixture.jsonl", "manifest.json", "terminal-scrollback.txt"]);
+    expect(readdirSync(stagingDir(store, ID)).sort()).toEqual(["excerpt.md", "fixture.jsonl", "manifest.json", "terminal-scrollback.txt"]);
     expect(existsSync(`${stagingDir(store, ID)}.partial`)).toBe(false);
   });
 
@@ -81,7 +87,7 @@ describe("stageHandoff", () => {
       throw new HandoffSnapshotError("UNREADABLE", "locked");
     }, "scroll");
     expect(manifest.method).toBe("scrollback");
-    expect(readdirSync(stagingDir(store, ID)).sort()).toEqual(["manifest.json", "terminal-scrollback.txt"]);
+    expect(readdirSync(stagingDir(store, ID)).sort()).toEqual(["excerpt.md", "manifest.json", "terminal-scrollback.txt"]);
   });
 
   it("falls back to the scrollback when the deadline passes", async () => {
@@ -127,6 +133,104 @@ describe("stageHandoff", () => {
       return { ...snap, files: [{ ...snap.files[0]!, name: "../escape.jsonl" }] };
     }, "scroll");
     expect(manifest.method).toBe("scrollback");
+  });
+});
+
+describe("stageHandoff excerpt", () => {
+  const user = (text: string, at: string): HandoffEvent => ({ kind: "user", text, genuine: true, at });
+
+  it("writes the parsed excerpt before the manifest", async () => {
+    const store = tmp();
+    const manifest = await stage(store, writingSnapshot, "scroll", ID, undefined, {
+      events: async (_dir, _manifest, sink) => {
+        sink(user("port the parser to rust", "fixture.jsonl:1"));
+        sink({ kind: "assistant", text: "Starting with the lexer.", at: "fixture.jsonl:2" });
+      },
+    });
+    const excerpt = readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8");
+    expect(excerpt).toContain("port the parser to rust");
+    expect(excerpt).toContain("Starting with the lexer.");
+    expect(manifest.warnings).toEqual([]);
+  });
+
+  it("falls back to the scrollback excerpt when the parser throws", async () => {
+    const store = tmp();
+    const manifest = await stage(store, writingSnapshot, "terminal showed this", ID, undefined, {
+      events: async () => { throw new Error("bad record"); },
+    });
+    expect(manifest.method).toBe("copy");
+    expect(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8")).toContain("terminal showed this");
+    expect(manifest.warnings.join(" ")).toContain("bad record");
+    expect(JSON.parse(readFileSync(join(stagingDir(store, ID), "manifest.json"), "utf8")).warnings).toEqual(manifest.warnings);
+  });
+
+  it("falls back when the parser overruns the deadline, and still stages the raw snapshot", async () => {
+    const store = tmp();
+    const manifest = await stage(store, writingSnapshot, "late scrollback", ID, 40, {
+      events: (_dir, _manifest, _sink, signal) => new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      }),
+    });
+    expect(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8")).toContain("late scrollback");
+    expect(manifest.warnings.join(" ")).toContain("deadline");
+    expect(existsSync(join(stagingDir(store, ID), "fixture.jsonl"))).toBe(true);
+  });
+
+  it("still stages when the parser throws and there is no scrollback", async () => {
+    const store = tmp();
+    await stage(store, writingSnapshot, undefined, ID, undefined, { events: async () => { throw new Error("bad"); } });
+    expect(existsSync(join(stagingDir(store, ID), "excerpt.md"))).toBe(true);
+    expect(existsSync(join(stagingDir(store, ID), "manifest.json"))).toBe(true);
+  });
+
+  it("builds the excerpt for the target agent budget, defaulting to the source", async () => {
+    const parse: HandoffEventsFn = async (_dir, _manifest, sink) => {
+      for (let turn = 0; turn < 400; turn++) {
+        sink(user(`question ${turn} ${"q".repeat(120)}`, `f:${turn}`));
+        sink({ kind: "assistant", text: `answer ${turn} ${"a".repeat(300)}`, at: `f:${turn}` });
+      }
+    };
+    const store = tmp();
+    await stage(store, writingSnapshot, undefined, ID, undefined, { events: parse, targetTool: "claude-code" });
+    await stage(store, writingSnapshot, undefined, OTHER, undefined, { events: parse, targetTool: "github-copilot" });
+    const large = readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8");
+    const small = readFileSync(join(stagingDir(store, OTHER), "excerpt.md"), "utf8");
+    expect(Buffer.byteLength(small)).toBeLessThanOrEqual(16_000);
+    expect(Buffer.byteLength(large)).toBeGreaterThan(30_000);
+    expect(Buffer.byteLength(large)).toBeLessThanOrEqual(40_000);
+  });
+
+  it("summarizes a scrollback-only handoff from its scrollback file", async () => {
+    const store = tmp();
+    const manifest = await stage(store, async () => undefined, "only the terminal", ID, undefined, {
+      events: async () => { throw new Error("must not run"); },
+    });
+    expect(manifest.method).toBe("scrollback");
+    expect(manifest.warnings).toHaveLength(1);
+    expect(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8")).toContain("only the terminal");
+  });
+});
+
+describe("stageLegacyText", () => {
+  it("stages only the saved text with an excerpt and never asks an adapter", async () => {
+    const store = tmp();
+    const manifest = await stageLegacyText({
+      sessionsDir: store, projectId: "p1", newSessionId: ID, text: "[Codex conversation]\nfix the parser",
+      sourceTool: "codex", sourceLabel: "Codex", sourceSessionId: "src",
+    });
+    expect(manifest.method).toBe("scrollback");
+    expect(manifest.primary).toBe("fork-transcript.txt");
+    expect(readdirSync(stagingDir(store, ID)).sort()).toEqual(["excerpt.md", "fork-transcript.txt", "manifest.json"]);
+    expect(readFileSync(join(stagingDir(store, ID), "fork-transcript.txt"), "utf8")).toContain("fix the parser");
+    expect(readFileSync(join(stagingDir(store, ID), "excerpt.md"), "utf8")).toContain("fix the parser");
+  });
+
+  it("replaces an earlier staging of the same session", async () => {
+    const store = tmp();
+    const args = { sessionsDir: store, projectId: "p1", newSessionId: ID, sourceTool: "codex", sourceLabel: "Codex" };
+    await stageLegacyText({ ...args, text: "first" });
+    await stageLegacyText({ ...args, text: "second" });
+    expect(readFileSync(join(stagingDir(store, ID), "fork-transcript.txt"), "utf8")).toBe("second");
   });
 });
 

@@ -1,13 +1,18 @@
+import { readFileSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile, cp } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { z } from "zod";
 import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
 import {
   ByteBudget,
+  ExcerptBuilder,
   HANDOFF_STAGE_DEADLINE_MS,
   HandoffSnapshotError,
+  excerptBudgetFor,
   safeJoin,
+  scrollbackEvents,
   writeText,
+  type HandoffEventsFn,
   type HandoffFile,
   type HandoffMethod,
   type HandoffSnapshot,
@@ -20,6 +25,11 @@ const log = logger.child({ component: "handoff-dir" });
 
 export const HANDOFF_REL_DIR = ".antgrid/handoff";
 export const SCROLLBACK_FILE = "terminal-scrollback.txt";
+export const EXCERPT_FILE = "excerpt.md";
+export const LEGACY_TRANSCRIPT_FILE = "fork-transcript.txt";
+// The scrollback fallback only reads one file, so it gets its own short budget:
+// the stage deadline may be what stopped the parse it replaces.
+const EXCERPT_FALLBACK_MS = 10_000;
 export const NO_TRANSCRIPT_COPY = "This session has no captured transcript to fork yet.";
 export const SNAPSHOT_TOO_LARGE_COPY = "This conversation's transcript is over 256 MB, too large to copy for a handoff.";
 
@@ -106,11 +116,25 @@ async function readManifest(dir: string): Promise<HandoffManifest | undefined> {
   }
 }
 
+/** Where a materialized handoff sits and which file in it a reader opens
+ *  first. Synchronous because the prompt is built on the launch path, which
+ *  cannot suspend; the manifest is a few KB. */
+export function readPlacedHandoff(root: string, id: string): { dir: string; primary: string } | undefined {
+  try {
+    assertSessionUuid(id);
+    const dir = join(root, ".antgrid", "handoff", id);
+    const parsed = ManifestSchema.safeParse(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")));
+    return parsed.success ? { dir, primary: parsed.data.primary } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Calls the source agent's snapshot into a staging dir, falls back to (and
- * always adds) the terminal scrollback, and writes `manifest.json` last. The dir
- * only appears under its final name once complete, so a crash leaves at most a
- * `.partial` for the sweep.
+ * always adds) the terminal scrollback, writes the bounded `excerpt.md`, and
+ * writes `manifest.json` last. The dir only appears under its final name once
+ * complete, so a crash leaves at most a `.partial` for the sweep.
  */
 export async function stageHandoff(args: {
   sessionsDir: string;
@@ -120,6 +144,9 @@ export async function stageHandoff(args: {
   adapter: RegistryAgentSpec;
   snapshotOpts: Omit<HandoffSnapshotOpts, "outDir" | "signal">;
   scrollback?: string;
+  /** The agent that will read the excerpt: its read tool sets the excerpt's size.
+   *  Defaults to the source's own agent. */
+  targetTool?: string;
   deadlineMs?: number;
 }): Promise<HandoffManifest> {
   const finalDir = stagingDir(args.sessionsDir, args.newSessionId);
@@ -131,6 +158,7 @@ export async function stageHandoff(args: {
   try {
     const manifest = await capture(args, partial, controller.signal);
     try {
+      await writeExcerpt(partial, manifest, args.adapter.fork.events, args.targetTool ?? args.source.tool, controller.signal);
       await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
       await rename(partial, finalDir);
     } catch (error) {
@@ -206,6 +234,97 @@ async function capture(
     redactions: [],
     warnings,
   };
+}
+
+// A scrollback manifest carries a method no agent's own parser ever sees.
+const asSnapshot = (manifest: HandoffManifest): HandoffSnapshot => manifest as unknown as HandoffSnapshot;
+
+/**
+ * Writes `excerpt.md` before the manifest, so a manifest on disk always names a
+ * dir whose excerpt exists. The raw snapshot is already complete by now, so a
+ * parser that throws or overruns the deadline degrades the excerpt to the
+ * scrollback's tail rather than failing the fork.
+ */
+async function writeExcerpt(
+  outDir: string,
+  manifest: HandoffManifest,
+  parse: HandoffEventsFn | undefined,
+  targetTool: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const budget = excerptBudgetFor(targetTool);
+  const meta = { sourceLabel: manifest.sourceAgentLabel, capturedAt: manifest.capturedAt, files: manifest.files.map((file) => file.name) };
+  const render = async (events: HandoffEventsFn, forManifest: HandoffManifest, within: AbortSignal): Promise<string> => {
+    const builder = new ExcerptBuilder(budget);
+    await events(outDir, asSnapshot(forManifest), builder.push, within);
+    return builder.render(meta);
+  };
+  let text: string;
+  try {
+    if (manifest.method === "scrollback") text = await render(scrollbackEvents, manifest, signal);
+    else if (parse) text = await render(parse, manifest, signal);
+    else throw new Error("the source agent declares no transcript parser");
+  } catch (error) {
+    const reason = signal.aborted ? "ran past its deadline" : errorText(error);
+    log.warn("excerpt parse failed for %s: %s", manifest.agent, reason);
+    const scrollback = manifest.files.find((file) => file.name === SCROLLBACK_FILE);
+    text = new ExcerptBuilder(budget).render(meta);
+    if (scrollback) {
+      try {
+        text = await render(scrollbackEvents, { ...manifest, primary: SCROLLBACK_FILE }, AbortSignal.timeout(EXCERPT_FALLBACK_MS));
+      } catch (fallbackError) {
+        log.warn("scrollback excerpt failed for %s: %s", manifest.agent, errorText(fallbackError));
+      }
+    }
+    manifest.warnings.push(`The conversation could not be summarized from the agent's own transcript (${reason}); the excerpt holds only what the terminal showed.`);
+  }
+  await writeFile(join(outDir, EXCERPT_FILE), text);
+}
+
+/**
+ * Stages the saved text of a fork that was created before file handoffs
+ * existed: the text is all there is, never a fresh read of a source that has
+ * moved on since.
+ */
+export async function stageLegacyText(args: {
+  sessionsDir: string;
+  projectId: string;
+  newSessionId: string;
+  text: string;
+  sourceTool: string;
+  sourceLabel: string;
+  sourceSessionId?: string;
+}): Promise<HandoffManifest> {
+  const finalDir = stagingDir(args.sessionsDir, args.newSessionId);
+  const partial = `${finalDir}.partial`;
+  // A retry after a failed placement finds the earlier staging of the same text.
+  await removeTree(finalDir);
+  await removeTree(partial);
+  await mkdir(partial, { recursive: true });
+  try {
+    const file = await writeText(partial, LEGACY_TRANSCRIPT_FILE, args.text, "transcript", new ByteBudget());
+    const manifest: HandoffManifest = {
+      version: 1,
+      capturedAt: new Date().toISOString(),
+      projectId: args.projectId,
+      sourceSessionId: args.sourceSessionId ?? "",
+      sourceAgentLabel: args.sourceLabel,
+      agent: args.sourceTool,
+      method: "scrollback",
+      primary: LEGACY_TRANSCRIPT_FILE,
+      files: [file],
+      references: [],
+      redactions: [],
+      warnings: ["Saved as text before file handoffs existed; this is the only copy of that conversation."],
+    };
+    await writeExcerpt(partial, manifest, undefined, args.sourceTool, AbortSignal.timeout(EXCERPT_FALLBACK_MS));
+    await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
+    await rename(partial, finalDir);
+    return manifest;
+  } catch (error) {
+    await removeTree(partial).catch(() => {});
+    throw error instanceof HandoffSnapshotError && error.code === "TOO_LARGE" ? new Error(SNAPSHOT_TOO_LARGE_COPY) : snapshotFailure(error);
+  }
 }
 
 /** The directory the handoff lands under: the agent's launch cwd when it is

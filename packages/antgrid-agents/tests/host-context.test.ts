@@ -51,15 +51,3 @@ test("a spec without fork.events is rejected at registration", () => {
   expect(() => createAgentRuntime({ registry: createAgentRegistry([["service", definition]]), host })).toThrow();
 });
 
-test("a spec may omit fork.handoff", () => {
-  const base = serviceAdapter();
-  const definition: AgentDefinition = {
-    ...base,
-    create(h) {
-      const spec = base.create(h);
-      const { handoff: _omitted, ...fork } = spec.fork;
-      return { ...spec, fork };
-    },
-  };
-  expect(() => createAgentRuntime({ registry: createAgentRegistry([["service", definition]]), host })).not.toThrow();
-});

@@ -1,8 +1,9 @@
-import { terminalOnlyFork } from "../fork-handoff";
 import type { AgentForkSupport } from "../types";
+import { cursorHandoffEvents } from "./handoff-events";
 import { cursorSnapshot } from "./handoff-snapshot";
 
 export const cursorAgentFork: AgentForkSupport = {
-  ...terminalOnlyFork("Cursor"),
+  kind: "terminal-transcript",
   snapshot: cursorSnapshot,
+  events: cursorHandoffEvents,
 };

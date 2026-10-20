@@ -719,7 +719,7 @@ class _SessionMenu extends ConsumerWidget {
               // the user the tool cannot do it at all.
               //
               // What the bridge actually reads is a native conversation id or the
-              // live terminal's scrollback (`captureForkTranscript`), and both
+              // live terminal's scrollback, and both
               // inputs are already on the wire — so this mirrors the precondition
               // rather than asking for it. Drift costs a refusal the branch below
               // now reports, never a silence.

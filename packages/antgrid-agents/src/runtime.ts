@@ -16,7 +16,7 @@ const SpecRegistrationSchema = z.object({
   hookName: z.string().min(1).nullable(),
   cli: z.object({ bin: z.string().min(1), args: z.array(z.string()).optional(), resume: Operation.optional(), initialPrompt: Operation.optional(), env: Operation.optional(), nativeForkArgs: Operation.optional(), approvalBypassArgs: z.array(z.string()).optional() }).passthrough().optional(),
   driver: Operation.optional(), prepareTerminal: Operation.optional(), discover: Operation.optional(),
-  fork: z.object({ kind: z.enum(["native-fork", "native-transcript", "terminal-transcript"]), handoff: Operation.optional(), snapshot: Operation, events: Operation }).passthrough(),
+  fork: z.object({ kind: z.enum(["native-fork", "native-transcript", "terminal-transcript"]), snapshot: Operation, events: Operation }).passthrough(),
   approvalPolicies: z.object({ bypass: z.object({ terminal: z.literal(true).optional(), chat: z.literal(true).optional(), risk: z.enum(["bypasses-approvals", "bypasses-approvals-and-sandbox"]) }).optional() }),
   headless: z.partialRecord(z.enum(["sealed", "readonly", "transcript"]), z.union([
     z.object({ cmd: Operation, noHistory: z.enum(["flag", "ephemeral-store", "stateless"]) }).passthrough(),

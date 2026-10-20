@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
+import { handoffPrompt } from "../src/handoff/handoff-prompt";
+import { escapeCmdArg } from "../../packages/antgrid-agents/src/agents/windows-argv";
 import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import { prepareTerminalLaunch, type PreparedTerminalLaunch } from "../../packages/antgrid-agents/src/agents/terminal-launch";
 import { createAgentRuntime } from "antgrid-agents/runtime";
@@ -332,5 +334,44 @@ describe("native fork durable intent", () => {
     const rejected = f.createManager();
     expect(() => rejected.start(fork.id)).toThrow("cannot be migrated safely");
     rejected.flushNow();
+  });
+});
+
+describe("fork-handoff prompt delivery", () => {
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  afterEach(() => { Object.defineProperty(process, "platform", realPlatform); });
+
+  const prompt = handoffPrompt({
+    sourceLabel: "Codex",
+    excerptPath: "C:\work\%PATH%\.antgrid\handoff\id\excerpt.md",
+    rawPath: "C:\work\%PATH%\.antgrid\handoff\id\codex-rollout-01.jsonl",
+  });
+
+  async function launch(tool: string, adapterOptions?: Record<string, unknown>) {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-handoff-launch-"));
+    dirs.push(dir);
+    const scope = createAgentRunScope({ runId: "run", isCurrent: () => true, emit: () => {} });
+    return agentRuntime.prepareTerminal({
+      tool, configured: { name: tool, command: tool }, conversation: { kind: "fresh" },
+      initialPrompt: prompt, promptKind: "fork-handoff", approvalPolicy: "default",
+      storeDir: dir, adapterOptions, cwd: dir, signal: scope.signal, scope,
+    });
+  }
+
+  it("stays an included argv on a Windows cmd agent and carries % through escapeCmdArg", async () => {
+    Object.defineProperty(process, "platform", { ...realPlatform, value: "win32" });
+    const prepared = await launch("claude-code");
+    expect(prepared.promptDelivery).toBe("included");
+    expect(prepared.args.at(-1)).toBe(prompt);
+    // The shim's command line limit is about 7.1k characters.
+    expect(escapeCmdArg(prompt, true).length).toBeLessThan(6_500);
+    expect(escapeCmdArg("100% %PATH%", true)).toContain("^^^%");
+  });
+
+  it("is typed for an agent with no prompt argv", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kimi-home-"));
+    dirs.push(dir);
+    const prepared = await launch("kimi", { kimiHome: dir });
+    expect(prepared.promptDelivery).toBe("buffered");
   });
 });

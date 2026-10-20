@@ -1,17 +1,10 @@
-import { scrollbackEvents } from "../handoff/events";
-import { forkHandoffOrTerminal } from "../fork-handoff";
-import type { AgentForkSupport, ForkHandoffOpts } from "../types";
+import type { AgentForkSupport } from "../types";
+import { opencodeFamilyEvents } from "./handoff-events";
 import { opencodeSnapshot } from "./handoff-snapshot";
-import { readTranscript } from "./transcript";
 
 /** `opencode --session <id> --fork` clones instead of resuming the source. */
 export function opencodeNativeForkArgs(sessionId: string): string[] {
   return ["--session", sessionId, "--fork"];
-}
-
-/** OpenCode's adapter reads the session rows from its local SQLite store. */
-export async function opencodeForkHandoff(opts: ForkHandoffOpts): Promise<string> {
-  return forkHandoffOrTerminal("OpenCode", (await readTranscript(opts)).msgs, opts);
 }
 
 export function opencodeLegacyForkSource(args: readonly string[]): string | undefined {
@@ -20,9 +13,8 @@ export function opencodeLegacyForkSource(args: readonly string[]): string | unde
 
 export const opencodeFork: AgentForkSupport & { nativeForkArgs: (sessionId: string) => string[] } = {
   kind: "native-fork",
-  handoff: opencodeForkHandoff,
   nativeForkArgs: opencodeNativeForkArgs,
   decodeLegacyArgs: opencodeLegacyForkSource,
   snapshot: opencodeSnapshot,
-  events: scrollbackEvents,
+  events: opencodeFamilyEvents,
 };

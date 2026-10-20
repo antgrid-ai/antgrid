@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PreparedTerminalLaunch } from "antgrid-agents/contracts";
+import type { PreparedTerminalLaunch, TerminalLaunchRequest } from "antgrid-agents/contracts";
 import { ByteBudget, writeText, type HandoffSnapshot, type HandoffSnapshotOpts } from "antgrid-agents/handoff";
 import { agentRuntime } from "../src/agent-runtime";
-import { MAX_FORK_TRANSCRIPT_BYTES, SessionManager } from "../src/session-manager";
+import { SessionManager } from "../src/session-manager";
 
 const managers: SessionManager[] = [];
 const directories: string[] = [];
@@ -15,7 +15,6 @@ afterEach(() => {
 });
 
 interface Options {
-  handoffFiles?: boolean;
   scrollback?: string | null;
   snapshot?: (opts: HandoffSnapshotOpts) => Promise<HandoffSnapshot | undefined>;
 }
@@ -34,15 +33,19 @@ function fixture(options: Options = {}) {
   const snapshot = options.snapshot ?? writingSnapshot;
   const runtime = {
     ...agentRuntime,
+    // Every agent gets the fixture snapshot, so no test can reach a real store.
     get: (id: string) => {
       const spec = agentRuntime.get(id);
-      if (!spec || id !== "kimi") return spec;
+      if (!spec) return spec;
       return { ...spec, fork: { ...spec.fork, snapshot: async (opts: HandoffSnapshotOpts) => { snapshots.push(opts); return snapshot(opts); } } };
     },
-    prepareTerminal: async (): Promise<PreparedTerminalLaunch> => ({
-      command: "kimi", args: [], env: {}, invocationKind: "exec", resumed: false, promptDelivery: "none",
-    }),
+    prepareTerminal: async (request: TerminalLaunchRequest): Promise<PreparedTerminalLaunch> => {
+      requests.push(request);
+      return { command: "kimi", args: [], env: {}, invocationKind: "exec", resumed: false, promptDelivery: "none" };
+    },
   };
+  const requests: TerminalLaunchRequest[] = [];
+  const chatStarts: { sessionId: string; initialPrompt?: string }[] = [];
   const spawns: any[] = [];
   const live = new Set<string>();
   const scrollback = options.scrollback === undefined ? "fix the parser" : options.scrollback;
@@ -56,7 +59,8 @@ function fixture(options: Options = {}) {
     const manager = new SessionManager({
       projectId: "project", projectPath: directory, storeDir: directory,
       agentSpec: { name: "kimi", command: "kimi" }, terminalManager: terminal as any,
-      agentRuntime: runtime as any, sendMessage() {}, handoffFiles: options.handoffFiles ?? true,
+      agentRuntime: runtime as any, sendMessage() {},
+      onStartChat: (start: { sessionId: string; initialPrompt?: string }) => { chatStarts.push(start); },
       ...extra,
     });
     managers.push(manager);
@@ -64,7 +68,7 @@ function fixture(options: Options = {}) {
   };
   const staging = (id: string) => join(directory, "agents", "project", "handoff", id);
   const placed = (id: string) => join(directory, ".antgrid", "handoff", id);
-  return { directory, manager: makeManager(), makeManager, rows, spawns, snapshots, staging, placed, sessionsPath };
+  return { directory, manager: makeManager(), makeManager, rows, spawns, snapshots, requests, chatStarts, staging, placed, sessionsPath };
 }
 
 function source(f: ReturnType<typeof fixture>) {
@@ -88,11 +92,11 @@ test("a staging failure leaves no row and no staging dir", async () => {
   expect(readdirSync(join(f.directory, "agents", "project", "handoff"))).toEqual([]);
 });
 
-test("an over-128 KB fork refuses before staging", async () => {
-  const f = fixture({ scrollback: "x".repeat(MAX_FORK_TRANSCRIPT_BYTES + 10) });
-  await expect(f.manager.fork(source(f).id, "current")).rejects.toThrow("too large to fork");
-  expect(f.snapshots).toHaveLength(0);
-  expect(existsSync(join(f.directory, "agents", "project", "handoff"))).toBe(false);
+test("a 5 MB transcript forks and the excerpt stays bounded", async () => {
+  const f = fixture({ scrollback: "word ".repeat(1_000_000) });
+  const fork = await f.manager.fork(source(f).id, "current");
+  expect(existsSync(join(f.staging(fork.id), "manifest.json"))).toBe(true);
+  expect(statSync(join(f.staging(fork.id), "excerpt.md")).size).toBeLessThanOrEqual(16_000);
 });
 
 test("an empty store and empty scrollback refuses with the existing copy", async () => {
@@ -203,13 +207,70 @@ test("a native fork takes no snapshot", async () => {
   expect(f.rows().find((row) => row.id === fork.id).forkHandoff).toBeUndefined();
 });
 
-test("with handoffFiles off nothing is staged and a launch places nothing", async () => {
-  const f = fixture({ handoffFiles: false });
+test("a fork never carries the transcript in the row or the prompt", async () => {
+  const f = fixture({ scrollback: "SECRET-TRANSCRIPT-WORDS" });
   const fork = await f.manager.fork(source(f).id, "current");
-  expect(f.snapshots).toHaveLength(0);
+  expect(f.rows().find((row) => row.id === fork.id).forkTranscript).toBeUndefined();
   await f.manager.start(fork.id);
-  expect(existsSync(join(f.directory, ".antgrid"))).toBe(false);
-  expect(existsSync(join(f.directory, "agents", "project", "handoff"))).toBe(false);
+  expect(f.requests[0]!.initialPrompt).not.toContain("SECRET-TRANSCRIPT-WORDS");
+});
+
+test("a terminal launch gets the one-line prompt with the fork-handoff kind", async () => {
+  const f = fixture();
+  const fork = await f.manager.fork(source(f).id, "current");
+  await f.manager.start(fork.id, "also run the tests");
+  const request = f.requests[0]!;
+  expect(request.promptKind).toBe("fork-handoff");
+  expect(request.initialPrompt).not.toContain("\n");
+  expect(request.initialPrompt!.length).toBeLessThanOrEqual(1_500);
+  expect(request.initialPrompt).toContain(join(f.placed(fork.id), "excerpt.md"));
+  expect(request.initialPrompt).toContain(join(f.placed(fork.id), "fixture.jsonl"));
+  expect(request.initialPrompt).toContain("Additional instruction: also run the tests");
+  expect(request.initialPrompt).toContain("handed off from Kimi");
+});
+
+test("a start with no fork keeps the initial prompt kind and text", async () => {
+  const f = fixture();
+  const session = source(f);
+  await f.manager.start(session.id, "plain prompt");
+  expect(f.requests[0]!.promptKind).toBe("initial");
+  expect(f.requests[0]!.initialPrompt).toBe("plain prompt");
+});
+
+test("a chat fork gets the one-line prompt as its initial prompt", async () => {
+  const f = fixture();
+  const chat = f.manager.create("Chat source", { tool: "codex", mode: "chat" });
+  const fork = await f.manager.fork(chat.id, "current");
+  await f.manager.start(fork.id);
+  expect(f.chatStarts).toHaveLength(1);
+  const prompt = f.chatStarts[0]!.initialPrompt!;
+  expect(prompt).toContain(join(f.placed(fork.id), "excerpt.md"));
+  expect(prompt).toContain("handed off from Codex");
+  expect(prompt).not.toContain("\n");
+});
+
+test("a legacy forkTranscript row launches from its saved text, not a fresh snapshot", async () => {
+  const f = fixture({ scrollback: "TODAYS-SCROLLBACK" });
+  const id = "11111111-2222-4333-8444-555555555555";
+  mkdirSync(join(f.directory, "agents", "project"), { recursive: true });
+  writeFileSync(f.sessionsPath, JSON.stringify({ version: 1, sessions: [
+    { id, name: "Old fork", archived: false, tool: "kimi", mode: "terminal", conversationStart: "fork", forkTranscript: "[Kimi conversation]\nlegacy words" },
+  ] }));
+  const manager = f.makeManager();
+  await manager.start(id);
+  expect(f.snapshots).toHaveLength(0);
+  const saved = readFileSync(join(f.placed(id), "fork-transcript.txt"), "utf8");
+  expect(saved).toContain("legacy words");
+  expect(saved).not.toContain("TODAYS-SCROLLBACK");
+  expect(readFileSync(join(f.placed(id), "excerpt.md"), "utf8")).toContain("legacy words");
+  const request = f.requests[0]!;
+  expect(request.promptKind).toBe("fork-handoff");
+  expect(request.initialPrompt).toContain(join(f.placed(id), "fork-transcript.txt"));
+  expect(request.initialPrompt).not.toContain("legacy words");
+  manager.flushNow();
+  const row = f.rows().find((r) => r.id === id);
+  expect(row.forkHandoff).toEqual({ state: "materialized", sourceTool: "kimi", root: f.directory });
+  expect(row.forkTranscript).toBeUndefined();
 });
 
 test("a fork that fails after staging removes its staging dir and adds no row", async () => {

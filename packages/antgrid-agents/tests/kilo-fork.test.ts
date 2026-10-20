@@ -28,7 +28,6 @@ test("Kilo preserves native fork identity and resumes the resulting conversation
   expect(spec.fork.decodeLegacyArgs?.(["--session", "ses_source", "--fork"])).toBe("ses_source");
   expect(spec.fork.decodeLegacyArgs?.(["--session", "ses_source"])).toBeUndefined();
   expect(BY_HOOK_NAME.kilo).toBe("kilo");
-  expect(await spec.fork.handoff!({ projectPath: ".", maxMsgs: 10, terminalTranscript: "context" })).toBe("[Kilo conversation]\ncontext");
 });
 
 test("Kilo injects a bundled identity plugin alongside MCP while preserving user config", () => {

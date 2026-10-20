@@ -1,8 +1,9 @@
-import { terminalOnlyFork } from "../fork-handoff";
 import type { AgentForkSupport } from "../types";
+import { vibeEvents } from "./handoff-events";
 import { snapshotVibe } from "./handoff-snapshot";
 
 export const vibeFork: AgentForkSupport = {
-  ...terminalOnlyFork("Mistral Vibe"),
+  kind: "terminal-transcript",
   snapshot: snapshotVibe,
+  events: vibeEvents,
 };

@@ -204,7 +204,7 @@ export interface TranscriptOpts {
   opencodeDbPath?: string;
 }
 
-/** The bridge-owned source material an agent adapter may turn into a fork
+/** The bridge-owned source material an agent adapter may snapshot for a fork
  * handoff. Neither field is ever client supplied. */
 export interface ForkHandoffOpts extends TranscriptOpts {
   projectPath: string;
@@ -223,7 +223,6 @@ export interface AgentForkSupport {
    * working directory, so resumed in another checkout it would run against the
    * source's tree. A fork into a new workspace takes the handoff instead. */
   nativeForkKeepsWorkspace?: true;
-  handoff?: (opts: ForkHandoffOpts) => Promise<string>;
   /** Copies the provider's own transcript into `opts.outDir`. Required so a new
    * agent cannot ship without deciding; an agent with no readable store
    * resolves `undefined` and the bridge hands off the terminal scrollback. */

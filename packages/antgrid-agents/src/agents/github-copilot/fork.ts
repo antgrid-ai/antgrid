@@ -1,8 +1,9 @@
-import { terminalOnlyFork } from "../fork-handoff";
 import type { AgentForkSupport } from "../types";
+import { copilotHandoffEvents } from "./handoff-events";
 import { snapshotCopilotTranscript } from "./handoff-snapshot";
 
 export const copilotFork: AgentForkSupport = {
-  ...terminalOnlyFork("GitHub Copilot"),
+  kind: "terminal-transcript",
   snapshot: snapshotCopilotTranscript,
+  events: copilotHandoffEvents,
 };
