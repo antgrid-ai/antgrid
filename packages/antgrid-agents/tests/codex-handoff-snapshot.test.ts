@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { HandoffSnapshotError, safeJoin, type HandoffSnapshotOpts } from "../src/agents/handoff";
 import { codexFork } from "../src/agents/codex/fork";
+import { withEnv } from "./fixtures/with-env";
 
 const T = "019aaaaa-0000-7000-8000-000000000001";
 const BASE = "019aaaaa-0000-7000-8000-000000000002";
@@ -64,8 +65,9 @@ const read = (name: string) => readFileSync(join(out, name), "utf8");
 
 test("locates a zst-only rollout from the state DB path", async () => {
   const body = meta(T) + user("hello");
-  const plain = join(home, "sessions", "2026", "01", "01", `rollout-2026-01-01T00-00-00-${T}.jsonl`);
-  put(`sessions/2026/01/01/rollout-2026-01-01T00-00-00-${T}.jsonl`, body, true);
+  // Not a name the directory scan accepts, so only the recorded path can find it.
+  const plain = join(home, "sessions", "2026", "01", "01", `saved-${T}.jsonl`);
+  put(`sessions/2026/01/01/saved-${T}.jsonl`, body, true);
   stateDb([{ id: T, rollout_path: plain }]);
 
   const snapshot = await codexFork.snapshot(opts());
@@ -134,6 +136,7 @@ test("a cyclic history_base is refused, not looped", async () => {
 
   expect(error).toBeInstanceOf(HandoffSnapshotError);
   expect(error.code).toBe("UNREADABLE");
+  expect(error.message).toContain("leads back into its own lineage");
 });
 
 test("an unsafe history_base.thread_id is refused", async () => {
@@ -169,7 +172,8 @@ test("a hook transcriptPath outside the store is ignored", async () => {
 
 test("a hook transcriptPath inside the store is honoured", async () => {
   const hinted = put(`sessions/2026/01/01/rollout-2026-01-01T00-00-00-${T}.jsonl`, meta(T) + user("hinted"));
-  rmSync(join(home, "state_5.sqlite"), { force: true });
+  // Newer, so a scan alone would pick it over the hinted file.
+  put(`sessions/2026/02/01/rollout-2026-02-01T00-00-00-${T}.jsonl`, meta(T) + user("newer"));
 
   await codexFork.snapshot(opts({ transcriptPath: hinted }));
 
@@ -193,5 +197,7 @@ test("every emitted file name passes safeJoin", async () => {
 });
 
 test("refuses to read a real store under the test runner when no home is given", async () => {
-  expect(await codexFork.snapshot(opts({ codexHome: undefined }))).toBeUndefined();
+  put(`sessions/2026/01/01/rollout-2026-01-01T00-00-00-${T}.jsonl`, meta(T) + user("real"));
+  expect(await withEnv("CODEX_HOME", home, () => codexFork.snapshot(opts({ codexHome: undefined })))).toBeUndefined();
+  expect(await codexFork.snapshot(opts())).toBeDefined();
 });

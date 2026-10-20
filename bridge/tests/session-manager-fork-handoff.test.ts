@@ -52,11 +52,12 @@ function fixture(options: Options = {}) {
     spawn: (config: any) => { spawns.push(config); live.add(config.terminalId); return config.terminalId; },
     getScrollback: () => (scrollback === null ? null : { text: scrollback, seq: 1 }),
   };
-  const makeManager = () => {
+  const makeManager = (extra: Record<string, unknown> = {}) => {
     const manager = new SessionManager({
       projectId: "project", projectPath: directory, storeDir: directory,
       agentSpec: { name: "kimi", command: "kimi" }, terminalManager: terminal as any,
       agentRuntime: runtime as any, sendMessage() {}, handoffFiles: options.handoffFiles ?? true,
+      ...extra,
     });
     managers.push(manager);
     return manager;
@@ -209,4 +210,66 @@ test("with handoffFiles off nothing is staged and a launch places nothing", asyn
   await f.manager.start(fork.id);
   expect(existsSync(join(f.directory, ".antgrid"))).toBe(false);
   expect(existsSync(join(f.directory, "agents", "project", "handoff"))).toBe(false);
+});
+
+test("a fork that fails after staging removes its staging dir and adds no row", async () => {
+  const f = fixture();
+  const src = source(f);
+  mkdirSync(join(f.directory, "agents", "project"), { recursive: true });
+  // A directory where sessions.json belongs makes the flush that commits the row fail.
+  mkdirSync(f.sessionsPath);
+  await expect(f.manager.fork(src.id, "current")).rejects.toThrow();
+  expect(f.manager.list()).toHaveLength(1);
+  expect(readdirSync(join(f.directory, "agents", "project", "handoff"))).toEqual([]);
+});
+
+test("a managed delete waits for the handoff placement before removing the worktree", async () => {
+  const f = fixture();
+  const fork = await f.manager.fork(source(f).id, "current");
+  f.manager.flushNow();
+  const worktree = join(f.directory, "wt");
+  mkdirSync(worktree);
+  const file = JSON.parse(readFileSync(f.sessionsPath, "utf8"));
+  const row = file.sessions.find((r: any) => r.id === fork.id);
+  row.checkoutId = "co1";
+  row.checkoutKind = "managed-worktree";
+  writeFileSync(f.sessionsPath, JSON.stringify(file));
+  const record = {
+    id: "co1", projectId: "project", kind: "managed-worktree", path: worktree,
+    branch: "antgrid/x", baseRef: "main", managed: true, sessionId: fork.id, createdAt: 1,
+  };
+  let placedAtRemove = false;
+  const manager = f.makeManager({
+    worktreeSessionsSupported: true,
+    isGitRepository: async () => true,
+    resolveCheckout: async () => record,
+    resolveAgentSpec: async () => ({ name: "kimi", command: "kimi" }),
+    worktreeManager: {
+      recordFor: async () => record,
+      inspect: async () => ({ exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false }),
+      remove: async () => {
+        placedAtRemove = existsSync(join(worktree, ".antgrid", "handoff", fork.id, "manifest.json"));
+        await Bun.sleep(150);
+      },
+    },
+  });
+  const starting = Promise.resolve(manager.start(fork.id)).catch(() => {});
+  for (let i = 0; i < 200 && !existsSync(join(worktree, ".antgrid", "handoff")); i++) await Bun.sleep(5);
+  const deleting = manager.delete(fork.id);
+  await Promise.all([starting, deleting]);
+  await manager.settleHandoffCleanup();
+  expect(placedAtRemove).toBe(true);
+  expect(f.spawns).toHaveLength(0);
+  expect(existsSync(join(worktree, ".antgrid", "handoff", fork.id))).toBe(false);
+});
+
+test("a sessions.json that cannot be read in full is never swept against", async () => {
+  const f = fixture();
+  const fork = await f.manager.fork(source(f).id, "current");
+  f.manager.flushNow();
+  writeFileSync(f.sessionsPath, "{ not json");
+  const reloaded = f.makeManager();
+  await reloaded.settleHandoffCleanup();
+  await Bun.sleep(100);
+  expect(existsSync(join(f.staging(fork.id), "manifest.json"))).toBe(true);
 });

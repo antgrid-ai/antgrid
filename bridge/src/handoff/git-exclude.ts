@@ -79,7 +79,9 @@ export async function ensureHandoffExcluded(handoffRoot: string, id: string): Pr
       log.warn("git common dir %s is not a directory here", commonRaw);
       return await writeFallbackIgnore(handoffRoot);
     }
-    const prefix = prefixRaw.trim();
+    // Escaped, and not trimmed: a directory name is literal text, but a glob
+    // character in it would widen a rule that stays in the repo-wide exclude.
+    const prefix = prefixRaw.replace(/[\\*?[\]]/g, "\\$&");
     const pattern = `/${prefix}.antgrid/handoff/`;
     const excludePath = join(commonDir, "info", "exclude");
     try {

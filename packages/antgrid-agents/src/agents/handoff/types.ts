@@ -67,8 +67,13 @@ export interface HandoffSnapshotOpts extends ForkHandoffOpts {
  * then falls back to the terminal scrollback. */
 export type HandoffSnapshotFn = (opts: HandoffSnapshotOpts) => Promise<HandoffSnapshot | undefined>;
 
+/** WRITE is a failure on the output side (a full disk, a locked staging dir):
+ * unlike UNREADABLE it says nothing about the source store, so falling back to
+ * the scrollback would hit the same failure and hide it. */
+export type HandoffSnapshotErrorCode = "TOO_LARGE" | "UNREADABLE" | "WRITE";
+
 export class HandoffSnapshotError extends Error {
-  constructor(readonly code: "TOO_LARGE" | "UNREADABLE", message: string) {
+  constructor(readonly code: HandoffSnapshotErrorCode, message: string, readonly errno?: string) {
     super(message);
     this.name = "HandoffSnapshotError";
   }

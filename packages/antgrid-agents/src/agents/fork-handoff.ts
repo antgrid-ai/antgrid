@@ -20,11 +20,15 @@ export function forkHandoffOrTerminal(
     || normalizedForkHandoff(agent, opts.terminalTranscript ? [opts.terminalTranscript] : []);
 }
 
+/** The snapshot of an agent with no store to read. A single shared function so
+ * a test can tell, by identity, that no registered agent still uses it. */
+export const NO_HANDOFF_SNAPSHOT: AgentForkSupport["snapshot"] = async () => undefined;
+
 /** The explicit adapter for agents with no readable native conversation store. */
 export function terminalForkHandoff(agent: string): AgentForkSupport {
   return {
     kind: "terminal-transcript",
     handoff: async (opts: ForkHandoffOpts) => forkHandoffOrTerminal(agent, [], opts),
-    snapshot: async () => undefined,
+    snapshot: NO_HANDOFF_SNAPSHOT,
   };
 }

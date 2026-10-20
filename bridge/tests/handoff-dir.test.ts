@@ -28,6 +28,19 @@ function adapter(snapshot: Snapshotter): AgentSpec {
   return { label: "Fixture", fork: { snapshot } } as unknown as AgentSpec;
 }
 
+function git(cwd: string, ...args: string[]): string {
+  const run = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd });
+  if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr.toString()}`);
+  return run.stdout.toString();
+}
+
+function initRepo(dir: string): void {
+  git(dir, "init", "-q");
+  writeFileSync(join(dir, "a.txt"), "a");
+  git(dir, "add", "a.txt");
+  git(dir, "commit", "-q", "-m", "init");
+}
+
 const baseOpts = { projectPath: "/p", maxMsgs: 1, sourceCwd: "/p" };
 
 async function writingSnapshot(opts: HandoffSnapshotOpts): Promise<HandoffSnapshot> {
@@ -96,6 +109,13 @@ describe("stageHandoff", () => {
   it("reports a write failure without falling back", async () => {
     const store = tmp();
     await expect(stage(store, async () => { throw Object.assign(new Error("disk"), { code: "ENOSPC" }); }, "scroll"))
+      .rejects.toThrow("Could not snapshot the conversation: ENOSPC");
+    expect(readdirSync(join(store, "handoff"))).toEqual([]);
+  });
+
+  it("reports an output-side failure without falling back to the scrollback", async () => {
+    const store = tmp();
+    await expect(stage(store, async () => { throw new HandoffSnapshotError("WRITE", "write handoff output (ENOSPC): full", "ENOSPC"); }, "scroll"))
       .rejects.toThrow("Could not snapshot the conversation: ENOSPC");
     expect(readdirSync(join(store, "handoff"))).toEqual([]);
   });
@@ -176,7 +196,41 @@ describe("materializeHandoff", () => {
   });
 });
 
+describe("materializeHandoff in a git checkout", () => {
+  it("excludes the placed files, so status stays clean and a worktree removal is not refused", async () => {
+    const store = tmp();
+    const repo = tmp();
+    initRepo(repo);
+    const worktree = join(tmp(), "wt");
+    git(repo, "worktree", "add", "-q", "-b", "feature", worktree);
+    await stage(store, writingSnapshot, "scroll");
+    const placed = await materializeHandoff(store, worktree, worktree, ID);
+    expect(existsSync(join(placed.dir, "manifest.json"))).toBe(true);
+    expect(git(worktree, "status", "--porcelain")).toBe("");
+    git(repo, "worktree", "remove", worktree);
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  it("names the root when the move fails after the checkout was resolved", async () => {
+    const store = tmp();
+    const checkout = tmp();
+    await stage(store, writingSnapshot);
+    const failing = { rename: async () => { throw new Error("nope"); } } as unknown as { rename: typeof rename };
+    const error = await materializeHandoff(store, checkout, checkout, ID, failing).catch((e) => e);
+    expect((error as { handoffRoot?: string }).handoffRoot).toBe(checkout);
+  });
+});
+
 describe("removeHandoff", () => {
+  it("also removes the copy an interrupted cross-volume move left behind", async () => {
+    const checkout = tmp();
+    const moving = join(checkout, ".antgrid", "handoff", `${ID}.moving`);
+    mkdirSync(moving, { recursive: true });
+    writeFileSync(join(moving, "fixture.jsonl"), "partial");
+    await removeHandoff(undefined, checkout, ID);
+    expect(existsSync(moving)).toBe(false);
+  });
+
   it("removes staging and the checkout copy, and never throws", async () => {
     const store = tmp();
     const checkout = tmp();
@@ -241,6 +295,43 @@ describe("sweepHandoffs", () => {
     expect(existsSync(join(project, ".antgrid", "handoff", ids.mine))).toBe(false);
     expect(existsSync(join(project, ".antgrid", "handoff", ids.theirs))).toBe(true);
     expect(existsSync(join(project, ".antgrid", "handoff", ids.kept))).toBe(true);
+  });
+
+  it("keeps the staging dir of any row whose handoff has not been placed, however the marker parsed", async () => {
+    const store = tmp();
+    await stage(store, writingSnapshot, undefined, ID);
+    await sweepHandoffs({ sessionsDir: store, projectPath: tmp(), projectId: "p1", inFlight: new Set(), rows: new Map([[ID, {}]]) });
+    expect(existsSync(stagingDir(store, ID))).toBe(true);
+  });
+
+  it("visits roots recorded on rows and extra roots, and clears unfinished moves", async () => {
+    const store = tmp();
+    const project = tmp();
+    const nested = tmp();
+    const worktree = tmp();
+    const ids = [
+      "bbbbbbbb-0000-4000-8000-000000000001",
+      "bbbbbbbb-0000-4000-8000-000000000002",
+      "bbbbbbbb-0000-4000-8000-000000000003",
+    ] as const;
+    const placeAt = async (root: string, id: string, suffix = "") => {
+      await stage(store, writingSnapshot, undefined, id);
+      mkdirSync(join(root, ".antgrid", "handoff"), { recursive: true });
+      await rename(stagingDir(store, id), join(root, ".antgrid", "handoff", id + suffix));
+      return join(root, ".antgrid", "handoff", id + suffix);
+    };
+    const inNested = await placeAt(nested, ids[0]);
+    const inWorktree = await placeAt(worktree, ids[1]);
+    const moving = await placeAt(project, ids[2], ".moving");
+    rmSync(join(moving, "manifest.json"));
+    await sweepHandoffs({
+      sessionsDir: store, projectPath: project, projectId: "p1", inFlight: new Set(),
+      rows: new Map([["cccccccc-0000-4000-8000-000000000001", { forkHandoff: { state: "materialized" as const, root: nested } }]]),
+      extraRoots: [worktree],
+    });
+    expect(existsSync(inNested)).toBe(false);
+    expect(existsSync(inWorktree)).toBe(false);
+    expect(existsSync(moving)).toBe(false);
   });
 
   it("never removes a partial dir or staged dir that is in flight", async () => {

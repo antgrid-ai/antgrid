@@ -29,31 +29,33 @@ async function isRegularFile(path: string): Promise<boolean> {
   }
 }
 
-/** The first record that names a session must name this one: a file whose
- * records belong to another conversation is never ours, whatever its basename says. */
+/** A resumed session copies the prior history in under a fresh id, so the file's
+ * own id can first appear far from the top. The basename already binds the file
+ * to the id; this only rules out a file whose records never mention it, so both
+ * ends are read rather than the whole of a transcript that can be very large. */
 async function namesSession(path: string, id: string): Promise<boolean> {
-  let head: string;
   try {
     const handle = await open(path, "r");
     try {
-      const buffer = Buffer.alloc(HEAD_BYTES);
-      const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0);
-      head = buffer.subarray(0, bytesRead).toString("utf8");
+      const { size } = await handle.stat();
+      const windows = size > HEAD_BYTES * 2 ? [0, size - HEAD_BYTES] : [0];
+      for (const position of windows) {
+        const buffer = Buffer.alloc(HEAD_BYTES);
+        const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, position);
+        for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+          if (!line.includes(id)) continue;
+          try {
+            if ((JSON.parse(line) as { sessionId?: unknown } | null)?.sessionId === id) return true;
+          } catch {
+            // A window can begin or end mid-record.
+          }
+        }
+      }
     } finally {
       await handle.close();
     }
   } catch {
     return false;
-  }
-  for (const line of head.split("\n")) {
-    if (!line.trim()) continue;
-    let record: { sessionId?: unknown };
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (typeof record?.sessionId === "string") return record.sessionId === id;
   }
   return false;
 }

@@ -4,6 +4,7 @@ import {
   ByteBudget,
   HandoffSnapshotError,
   SAFE_NATIVE_ID,
+  copyWholeFile,
   copyWholeLines,
   refusesRealStoreUnderTest,
   type HandoffFile,
@@ -71,10 +72,10 @@ export const snapshotAntigravityTranscript: HandoffSnapshotFn = async (opts) => 
       continue;
     }
     try {
-      const copied = await copyWholeLines(path, opts.outDir, name, "sidecar", budget);
+      const copied = await copyWholeFile(path, opts.outDir, name, "sidecar", budget);
       files.push({ ...copied, originalName: original });
     } catch (error) {
-      if (error instanceof HandoffSnapshotError && error.code === "TOO_LARGE") throw error;
+      if (error instanceof HandoffSnapshotError && error.code !== "UNREADABLE") throw error;
       warnings.push(`Could not copy ${original}.`);
     }
   }

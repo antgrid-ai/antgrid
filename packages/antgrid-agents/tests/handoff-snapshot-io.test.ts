@@ -111,6 +111,16 @@ test("an aborted deadline stops a copy with UNREADABLE", async () => {
   expect(error.code).toBe("UNREADABLE");
 });
 
+test("an output-side failure is WRITE, not a store-read failure", async () => {
+  const src = join(root, "src.jsonl");
+  writeFileSync(src, '{"a":1}\n');
+  const missing = join(root, "no-such-dir");
+  const error = await rejection(copyWholeLines(src, missing, "t.jsonl", "transcript", new ByteBudget()));
+  expect(error.code).toBe("WRITE");
+  expect(error.errno).toBe("ENOENT");
+  expect((await rejection(writeText(missing, "n.txt", "x", "sidecar", new ByteBudget()))).code).toBe("WRITE");
+});
+
 test("writeText writes and hashes the text", async () => {
   const file = await writeText(out, "note.txt", "héllo\n", "sidecar", new ByteBudget());
   expect(file).toEqual({ name: "note.txt", role: "sidecar", bytes: 7, sha256: sha("héllo\n") });

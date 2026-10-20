@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { safeJoin } from "../src/agents/handoff";
 import { antigravityFork } from "../src/agents/antigravity/fork";
+import { withEnv } from "./fixtures/with-env";
 
 const ID = "5d1c0a52-1111-4222-8333-444444444444";
 let root: string;
@@ -38,7 +39,7 @@ function opts(extra: Record<string, unknown> = {}) {
 test("copies the full transcript, drops a torn tail, and adds small plan artifacts", async () => {
   writeFileSync(join(logs, "transcript_full.jsonl"), '{"type":"USER_INPUT"}\n{"torn');
   writeFileSync(join(logs, "transcript.jsonl"), "compact\n");
-  writeFileSync(join(brain, "plan.md"), "# plan\n");
+  writeFileSync(join(brain, "plan.md"), "# plan\n\n- last line with no newline");
   writeFileSync(join(brain, "walkthrough.md"), "x".repeat(1024 * 1024 + 1));
   mkdirSync(join(brain, ".system_generated", "steps"));
 
@@ -49,6 +50,7 @@ test("copies the full transcript, drops a torn tail, and adds small plan artifac
   expect(snapshot?.warnings.join(" ")).toContain("walkthrough.md");
   expect(snapshot?.references.map((r) => r.path.split(/[\\/]/).pop())).toEqual(["steps"]);
   expect(existsSync(join(out, "antigravity-walkthrough.md"))).toBe(false);
+  expect(readFileSync(join(out, "antigravity-plan.md"), "utf8")).toBe("# plan\n\n- last line with no newline");
   for (const file of snapshot!.files) expect(() => safeJoin(out, file.name)).not.toThrow();
 });
 
@@ -79,5 +81,13 @@ test("returns undefined with no transcript yet, an unsafe id, or no seam under t
   expect(await antigravityFork.snapshot(opts())).toBeUndefined();
   expect(await antigravityFork.snapshot(opts({ agentSessionId: "../x" }))).toBeUndefined();
   writeFileSync(join(logs, "transcript_full.jsonl"), "{}\n");
-  expect(await antigravityFork.snapshot(opts({ antigravityHome: undefined }))).toBeUndefined();
+  // The CLI keeps its store under the user's home, so that is what a missing
+  // guard would read.
+  const fakeHome = join(root, "fake-home");
+  const fakeLogs = join(fakeHome, ".gemini", "antigravity-cli", "brain", ID, ".system_generated", "logs");
+  mkdirSync(fakeLogs, { recursive: true });
+  writeFileSync(join(fakeLogs, "transcript_full.jsonl"), "{}\n");
+  const refused = await withEnv("HOME", fakeHome, () => withEnv("USERPROFILE", fakeHome, () => antigravityFork.snapshot(opts({ antigravityHome: undefined }))));
+  expect(refused).toBeUndefined();
+  expect(await antigravityFork.snapshot(opts({ antigravityHome: join(fakeHome, ".gemini", "antigravity-cli") }))).toBeDefined();
 });

@@ -64,7 +64,7 @@ export interface HandoffManifest extends Omit<HandoffSnapshot, "method"> {
 
 /** The only part of a session row the handoff lifecycle reads. */
 export interface HandoffRow {
-  forkHandoff?: { state: "staged" | "materialized" };
+  forkHandoff?: { state: "staged" | "materialized"; root?: string };
 }
 
 export function assertSessionUuid(id: string): void {
@@ -79,6 +79,14 @@ export function stagingDir(sessionsDir: string, id: string): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A disk-side failure is surfaced rather than papered over with the scrollback,
+ * which would be written to the same disk. */
+function snapshotFailure(error: unknown): Error {
+  if (error instanceof HandoffSnapshotError) return new Error(`Could not snapshot the conversation: ${error.errno ?? error.code}`);
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return new Error(`Could not snapshot the conversation: ${code ?? errorText(error)}`);
 }
 
 function isUnder(child: string, parent: string): boolean {
@@ -122,8 +130,12 @@ export async function stageHandoff(args: {
   const timer = setTimeout(() => controller.abort(), args.deadlineMs ?? HANDOFF_STAGE_DEADLINE_MS);
   try {
     const manifest = await capture(args, partial, controller.signal);
-    await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
-    await rename(partial, finalDir);
+    try {
+      await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
+      await rename(partial, finalDir);
+    } catch (error) {
+      throw snapshotFailure(error);
+    }
     return manifest;
   } catch (error) {
     await removeTree(partial).catch(() => {});
@@ -145,10 +157,8 @@ async function capture(
     if (snapshot) for (const file of snapshot.files) safeJoin(outDir, file.name);
   } catch (error) {
     if (error instanceof HandoffSnapshotError && error.code === "TOO_LARGE") throw new Error(SNAPSHOT_TOO_LARGE_COPY);
-    if (!(error instanceof HandoffSnapshotError) && !signal.aborted) {
-      const code = (error as NodeJS.ErrnoException | undefined)?.code;
-      throw new Error(`Could not snapshot the conversation: ${code ?? errorText(error)}`);
-    }
+    if (error instanceof HandoffSnapshotError && error.code === "WRITE") throw snapshotFailure(error);
+    if (!(error instanceof HandoffSnapshotError) && !signal.aborted) throw snapshotFailure(error);
     warnings.push(`The agent's own transcript could not be read (${errorText(error)}); the terminal scrollback was used instead.`);
     snapshot = undefined;
     // Whatever the adapter had written is not a usable snapshot.
@@ -162,7 +172,11 @@ async function capture(
   const scrollbackText = args.scrollback ?? "";
   let scrollbackFile: HandoffFile | undefined;
   if (scrollbackText.trim().length > 0) {
-    scrollbackFile = await writeText(outDir, SCROLLBACK_FILE, scrollbackText, snapshot ? "sidecar" : "transcript", new ByteBudget());
+    try {
+      scrollbackFile = await writeText(outDir, SCROLLBACK_FILE, scrollbackText, snapshot ? "sidecar" : "transcript", new ByteBudget());
+    } catch (error) {
+      throw error instanceof HandoffSnapshotError && error.code === "TOO_LARGE" ? new Error(SNAPSHOT_TOO_LARGE_COPY) : snapshotFailure(error);
+    }
   }
   if (!snapshot && !scrollbackFile) throw new Error(NO_TRANSCRIPT_COPY);
 
@@ -264,15 +278,22 @@ export async function materializeHandoff(
     if (placed) return { root, dir, manifest: placed };
     throw new Error("The staged handoff is missing.");
   }
-  await ensureHandoffExcluded(root, id);
-  if (placed) {
-    await removeTree(staging);
-    return { root, dir, manifest: placed };
+  try {
+    await ensureHandoffExcluded(root, id);
+    if (placed) {
+      await removeTree(staging);
+      return { root, dir, manifest: placed };
+    }
+    // A target with no manifest is a copy that died partway.
+    await removeTree(dir);
+    await moveDir(staging, dir, io);
+    return { root, dir, manifest: stagedManifest };
+  } catch (error) {
+    // The move may have landed before it failed; the caller has to be able to
+    // name where, or a later delete cannot find the files.
+    if (error instanceof Error) Object.assign(error, { handoffRoot: root });
+    throw error;
   }
-  // A target with no manifest is a copy that died partway.
-  await removeTree(dir);
-  await moveDir(staging, dir, io);
-  return { root, dir, manifest: stagedManifest };
 }
 
 /** Removes a session's staging dir and its copy in the checkout. Best-effort and
@@ -293,7 +314,9 @@ export async function removeHandoff(sessionsDir: string | undefined, handoffRoot
   if (handoffRoot) {
     try {
       await assertNoLinks(handoffRoot, [".antgrid", "handoff", id]);
-      await removeTree(join(handoffRoot, ".antgrid", "handoff", id));
+      const target = join(handoffRoot, ".antgrid", "handoff", id);
+      await removeTree(target);
+      await removeTree(`${target}.moving`);
     } catch (error) {
       log.warn("could not remove the handoff in %s: %s", handoffRoot, errorText(error));
     }
@@ -311,6 +334,8 @@ export async function sweepHandoffs(args: {
   projectId: string;
   rows: ReadonlyMap<string, HandoffRow>;
   inFlight: ReadonlySet<string>;
+  /** Checkouts other than the project folder that may hold a placed handoff. */
+  extraRoots?: readonly string[];
 }): Promise<void> {
   const stagingRoot = join(args.sessionsDir, "handoff");
   let names: string[] = [];
@@ -322,7 +347,9 @@ export async function sweepHandoffs(args: {
       if (!SESSION_UUID.test(id) || args.inFlight.has(id)) continue;
       if (partial) {
         if ((await stat(join(stagingRoot, name))).mtimeMs >= PROCESS_START_MS) continue;
-      } else if (args.rows.get(id)?.forkHandoff?.state === "staged") {
+      } else if (args.rows.get(id)?.forkHandoff?.state !== "materialized" && args.rows.has(id)) {
+        // Whatever its forkHandoff parsed to: a row that lost the field to a
+        // schema mismatch must not lose the only copy of its context too.
         continue;
       }
       await removeTree(join(stagingRoot, name));
@@ -331,21 +358,35 @@ export async function sweepHandoffs(args: {
     }
   }
 
-  const checkoutHandoffs = join(args.projectPath, ".antgrid", "handoff");
+  // A launch cwd below the project, or a managed worktree, holds its own copy;
+  // a removal that failed there is retried only if that root is visited here.
+  const roots = new Set([args.projectPath, ...(args.extraRoots ?? [])]);
+  for (const row of args.rows.values()) if (row.forkHandoff?.root) roots.add(row.forkHandoff.root);
+  for (const root of roots) await sweepCheckoutRoot(root, args);
+}
+
+async function sweepCheckoutRoot(root: string, args: Parameters<typeof sweepHandoffs>[0]): Promise<void> {
+  const checkoutHandoffs = join(root, ".antgrid", "handoff");
+  let names: string[];
   try {
-    await assertNoLinks(args.projectPath, [".antgrid", "handoff"]);
+    await assertNoLinks(root, [".antgrid", "handoff"]);
     names = await readdir(checkoutHandoffs);
   } catch { return; }
-  for (const name of names) {
+  for (const entry of names) {
+    // An interrupted cross-volume move leaves `<id>.moving`.
+    const name = entry.endsWith(".moving") ? entry.slice(0, -".moving".length) : entry;
     if (!SESSION_UUID.test(name) || args.rows.has(name) || args.inFlight.has(name)) continue;
     try {
-      const dir = join(checkoutHandoffs, name);
+      const dir = join(checkoutHandoffs, entry);
       // Only what this project's own manifest claims: another project can share
       // the folder.
-      if ((await readManifest(dir))?.projectId !== args.projectId) continue;
+      const manifest = await readManifest(dir);
+      // A copy that died partway may not have reached its manifest yet.
+      const unfinishedMove = entry !== name && !manifest;
+      if (!unfinishedMove && manifest?.projectId !== args.projectId) continue;
       await removeTree(dir);
     } catch (error) {
-      log.warn("handoff sweep skipped %s: %s", name, errorText(error));
+      log.warn("handoff sweep skipped %s: %s", entry, errorText(error));
     }
   }
 }

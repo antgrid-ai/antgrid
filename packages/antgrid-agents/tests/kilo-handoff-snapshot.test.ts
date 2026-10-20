@@ -6,6 +6,7 @@ import { kiloFork } from "../src/agents/kilo/fork";
 import { resolveKiloDbPath } from "../src/agents/kilo/db-path";
 import { kiloSnapshot } from "../src/agents/kilo/handoff-snapshot";
 import { addSession, createOpencodeDb, snapshotOpts } from "./fixtures/opencode-db";
+import { withEnv } from "./fixtures/with-env";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "kilo-handoff-")); });
@@ -65,5 +66,12 @@ test("kiloFork keeps its native fork contract and declares a snapshot", () => {
 });
 
 test("refuses the real store under test when no seam is given", async () => {
-  expect(await kiloSnapshot(snapshotOpts(root, { agentSessionId: "ses_a" }))).toBeUndefined();
+  const dbPath = join(root, "kilo.db");
+  const db = createOpencodeDb(dbPath);
+  addSession(db, "ses_a", null, "x");
+  db.close();
+  const outDir = join(root, "out");
+  mkdirSync(outDir);
+  expect(await withEnv("KILO_DB", dbPath, () => kiloSnapshot(snapshotOpts(outDir, { agentSessionId: "ses_a" })))).toBeUndefined();
+  expect(await kiloSnapshot(snapshotOpts(outDir, { kiloDbPath: dbPath, agentSessionId: "ses_a" }))).toBeDefined();
 });

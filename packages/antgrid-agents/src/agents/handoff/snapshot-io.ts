@@ -51,26 +51,26 @@ export interface RolloutSource {
   open(): AsyncIterable<Uint8Array>;
 }
 
-function unreadable(error: unknown, what: string): HandoffSnapshotError {
+function unreadable(error: unknown, what: string, kind: "UNREADABLE" | "WRITE" = "UNREADABLE"): HandoffSnapshotError {
   if (error instanceof HandoffSnapshotError) return error;
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   const detail = error instanceof Error ? error.message : String(error);
-  return new HandoffSnapshotError("UNREADABLE", `${what}${code ? ` (${code})` : ""}: ${detail}`);
+  return new HandoffSnapshotError(kind, `${what}${code ? ` (${code})` : ""}: ${detail}`, code);
 }
 
 /** One retry for a Windows share lock (an agent mid-write, an AV scan), then UNREADABLE. */
-async function retryLocked<T>(what: string, run: () => Promise<T>): Promise<T> {
+async function retryLocked<T>(what: string, run: () => Promise<T>, kind: "UNREADABLE" | "WRITE" = "UNREADABLE"): Promise<T> {
   try {
     return await run();
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === undefined || !LOCK_CODES.has(code)) throw unreadable(error, what);
+    if (code === undefined || !LOCK_CODES.has(code)) throw unreadable(error, what, kind);
   }
   await Bun.sleep(50);
   try {
     return await run();
   } catch (error) {
-    throw unreadable(error, what);
+    throw unreadable(error, what, kind);
   }
 }
 
@@ -99,7 +99,7 @@ class Sink {
 
   static async create(path: string, budget: ByteBudget): Promise<Sink> {
     // "wx": the bridge hands over an empty directory, so an existing file means two writers.
-    const handle = await retryLocked("open handoff output", () => open(path, "wx"));
+    const handle = await retryLocked("open handoff output", () => open(path, "wx"), "WRITE");
     return new Sink(handle, budget);
   }
 
@@ -111,12 +111,14 @@ class Sink {
     try {
       await this.handle.writeFile(chunk);
     } catch (error) {
-      throw unreadable(error, "write handoff output");
+      throw unreadable(error, "write handoff output", "WRITE");
     }
   }
 
   async finish(): Promise<{ bytes: number; sha256: string }> {
-    await this.handle.close();
+    await this.handle.close().catch((error) => {
+      throw unreadable(error, "close handoff output", "WRITE");
+    });
     return { bytes: this.bytes, sha256: this.hash.digest("hex") };
   }
 
@@ -177,6 +179,30 @@ export async function copyWholeLines(
       for (const held of pending) await sink.write(held);
       await sink.write(chunk.subarray(0, newline + 1));
       pending = newline + 1 < chunk.length ? [chunk.subarray(newline + 1)] : [];
+    }
+  } catch (error) {
+    await sink.abandon();
+    throw error;
+  }
+  return { name, role, sourcePath: src, ...(await sink.finish()) };
+}
+
+/** For documents that are complete as they stand; a transcript still being
+ * appended to goes through `copyWholeLines` instead. */
+export async function copyWholeFile(
+  src: string,
+  outDir: string,
+  name: string,
+  role: HandoffFile["role"],
+  budget: ByteBudget,
+): Promise<HandoffFile> {
+  const dest = safeJoin(outDir, name);
+  await requireRegularFile(src);
+  const sink = await Sink.create(dest, budget);
+  try {
+    for await (const raw of chunksOf(createReadStream(src, { highWaterMark: READ_CHUNK }), "read handoff source")) {
+      budget.check();
+      await sink.write(raw);
     }
   } catch (error) {
     await sink.abandon();

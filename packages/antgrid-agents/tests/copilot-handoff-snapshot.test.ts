@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { safeJoin } from "../src/agents/handoff";
 import { copilotFork } from "../src/agents/github-copilot/fork";
+import { withEnv } from "./fixtures/with-env";
 
 const ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 let root: string;
@@ -73,5 +74,6 @@ test("returns undefined before the first prompt, for a non-uuid id, and with no 
   expect(await copilotFork.snapshot(opts())).toBeUndefined();
   expect(await copilotFork.snapshot(opts({ agentSessionId: "../../etc" }))).toBeUndefined();
   writeFileSync(join(session, "events.jsonl"), `${start()}\n`);
-  expect(await copilotFork.snapshot(opts({ copilotHome: undefined }))).toBeUndefined();
+  expect(await withEnv("COPILOT_HOME", home, () => copilotFork.snapshot(opts({ copilotHome: undefined })))).toBeUndefined();
+  expect(await copilotFork.snapshot(opts())).toBeDefined();
 });

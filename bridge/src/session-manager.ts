@@ -430,19 +430,28 @@ const PersistedFileSchema = z.object({
  *  two never drift. A malformed row is skipped; a missing/corrupt/wrong-version
  *  file yields []. Never throws. */
 function parsePersistedContent(raw: string | null): PersistedEntry[] {
-  if (raw === null) return [];
+  return parsePersistedDetailed(raw).entries;
+}
+
+/** `complete` is false whenever anything was dropped or unreadable, so a caller
+ *  that deletes what the rows do not name can tell "no rows" from "rows we could
+ *  not read". */
+function parsePersistedDetailed(raw: string | null): { entries: PersistedEntry[]; complete: boolean } {
+  if (raw === null) return { entries: [], complete: true };
   try {
     const file = PersistedFileSchema.safeParse(JSON.parse(raw));
-    if (!file.success) return [];
+    if (!file.success) return { entries: [], complete: false };
     const out: PersistedEntry[] = [];
+    let complete = true;
     for (const s of file.data.sessions) {
       const entry = PersistedEntrySchema.safeParse(s);
       if (entry.success) out.push(entry.data);
+      else complete = false;
     }
-    return out;
+    return { entries: out, complete };
   } catch (err) {
     log.warn("sessions.json unreadable, treating as empty: %s", err);
-    return [];
+    return { entries: [], complete: false };
   }
 }
 
@@ -783,6 +792,7 @@ export class SessionManager {
    *  share it, and a delete waits on it so it cannot race a half-done copy. */
   private readonly materializing = new Map<string, Promise<void>>();
   private readonly handoffCleanups = new Set<Promise<void>>();
+  private loadedCompletely = true;
 
   constructor(private opts: SessionManagerOpts) {
     this.dir = join(opts.storeDir, "agents", opts.projectId);
@@ -791,14 +801,10 @@ export class SessionManager {
     this.projectPath = opts.projectPath;
     this.agentSpec = opts.agentSpec;
     this.load();
-    if (opts.handoffFiles) {
-      void sweepHandoffs({
-        sessionsDir: this.dir,
-        projectPath: this.projectPath,
-        projectId: opts.projectId,
-        rows: this.entries,
-        inFlight: this.stagingInFlight,
-      }).catch((err) => log.warn("handoff sweep failed: %s", err));
+    // A sessions.json that could not be read in full names no reliable set of
+    // rows, and the sweep deletes whatever the rows do not name.
+    if (opts.handoffFiles && this.loadedCompletely) {
+      void this.sweepHandoffFiles().catch((err) => log.warn("handoff sweep failed: %s", err));
     }
     void this.recoverSetupStates().catch((err) => {
       log.warn("recovering checkout setup states failed: %s", err);
@@ -1771,6 +1777,15 @@ export class SessionManager {
     this.handoffCleanups.add(cleanup);
   }
 
+  /** A delete waits out a placement already under way: that copy would
+   *  otherwise finish inside a checkout being removed, and the start that follows
+   *  it would spawn an agent there. Callers guard on `materializing.has` rather
+   *  than awaiting unconditionally: even an empty await yields a turn, and an
+   *  exit delivered in that turn lands before `stopAndAwait` is listening. */
+  private async settlePlacement(id: string): Promise<void> {
+    await this.materializing.get(id)?.catch(() => {});
+  }
+
   /** Resolves once every handoff cleanup a delete has started has finished. */
   async settleHandoffCleanup(): Promise<void> {
     while (this.handoffCleanups.size > 0) await Promise.all([...this.handoffCleanups]);
@@ -1811,6 +1826,7 @@ export class SessionManager {
       // WORKTREE_MISSING would — makes that row permanently undeletable.
       this.markDeleting(entry);
       try {
+        if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
         if (!await this.stopAndAwait(entry.id)) throw new Error("The session runtime could not be stopped; deletion was refused.");
         await this.cancelSetupForDelete(entry);
         // Still torn down even though there is no worktree left to unlock: the
@@ -1866,6 +1882,7 @@ export class SessionManager {
       // refusals, which destroy nothing and are still answerable — but before
       // everything that does, because a live setup process holding the checkout
       // as its cwd is what makes `git worktree remove` fail on Windows.
+      if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
       await this.cancelSetupForDelete(entry);
       if (!await this.stopAndAwait(entry.id)) {
         throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
@@ -2497,6 +2514,25 @@ export class SessionManager {
     return new CheckoutStore(this.opts.storeDir, this.opts.projectId);
   }
 
+  /** Managed worktrees and launch cwds below the project hold their own handoff
+   *  copies; a failed removal there is only ever retried if the sweep looks. */
+  private async sweepHandoffFiles(): Promise<void> {
+    let extraRoots: string[] = [];
+    try {
+      extraRoots = (await this.checkoutStore().list()).map((record) => record.path);
+    } catch (err) {
+      log.warn("checkout list unreadable for the handoff sweep: %s", err);
+    }
+    await sweepHandoffs({
+      sessionsDir: this.dir,
+      projectPath: this.projectPath,
+      projectId: this.opts.projectId,
+      rows: this.entries,
+      inFlight: this.stagingInFlight,
+      extraRoots,
+    });
+  }
+
   private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void | Promise<void> {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
@@ -2511,10 +2547,13 @@ export class SessionManager {
       // Ahead of every already-running guard below, which all assume the
       // checkout already holds what the opening prompt points at.
       if (entry.forkHandoff?.state === "staged") {
+        // A delete that began while the checkout was resolving must not get files
+        // placed into a workspace it is about to remove.
+        if (this.deleting.has(id)) return;
         const launchCwd = sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath;
         return this.placeForkHandoff(entry, checkoutPath, launchCwd).then(() => {
           // Deleted while the files were moving: nothing is left to start.
-          if (this.entries.get(id) !== entry) return;
+          if (this.entries.get(id) !== entry || this.deleting.has(id)) return;
           return this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec);
         });
       }
@@ -2813,6 +2852,7 @@ export class SessionManager {
     // under a message saying their workspace is being deleted.
     this.markDeleting(entry, null);
     try {
+      if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
       // Checked, as deleteManaged does: dropSession() tombstones the terminal,
       // so forgetting a member whose agent never died leaves that process alive
       // inside the shared worktree with no row and nothing able to kill it.
@@ -2866,11 +2906,16 @@ export class SessionManager {
         try {
           await this.flushNowOrThrow();
         } catch (error) {
-          // Not durable: leave it staged so a retry places it again.
-          entry.forkHandoff = staged;
+          // Not durable: leave it staged so a retry places it again, but keep
+          // where the files are so a delete before that retry can find them.
+          entry.forkHandoff = staged && { ...staged, root: placed.root };
           throw error;
         }
       } catch (error) {
+        const root = (error as { handoffRoot?: string }).handoffRoot;
+        if (root && entry.forkHandoff?.state === "staged" && !entry.forkHandoff.root) {
+          entry.forkHandoff = { ...entry.forkHandoff, root };
+        }
         throw new Error(`Could not place the handoff files in the workspace: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         this.materializing.delete(entry.id);
@@ -3361,12 +3406,16 @@ export class SessionManager {
 
   private load(): void {
     let raw: string | null = null;
+    let readable = true;
     try {
       if (existsSync(this.path)) raw = readFileSync(this.path, "utf8");
     } catch (err) {
       log.warn("sessions.json unreadable, treating as empty: %s", err);
+      readable = false;
     }
-    for (const e of parsePersistedContent(raw)) this.entries.set(e.id, e);
+    const parsed = parsePersistedDetailed(raw);
+    this.loadedCompletely = readable && parsed.complete;
+    for (const e of parsed.entries) this.entries.set(e.id, e);
   }
 
   private scheduleFlush(): void {

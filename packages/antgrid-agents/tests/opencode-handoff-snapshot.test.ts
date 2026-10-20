@@ -7,6 +7,7 @@ import { opencodeSnapshot } from "../src/agents/opencode/handoff-snapshot";
 import { serializeOpencodeSession } from "../src/agents/handoff/opencode-serialize";
 import { safeJoin } from "../src/agents/handoff";
 import { addSession, createOpencodeDb, snapshotOpts } from "./fixtures/opencode-db";
+import { withEnv } from "./fixtures/with-env";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "opencode-handoff-")); });
@@ -55,7 +56,14 @@ test("returns undefined for a session the store does not hold, or an unsafe id",
 });
 
 test("refuses the real store under test when no seam is given", async () => {
-  expect(await opencodeSnapshot(snapshotOpts(root, { agentSessionId: "ses_a" }))).toBeUndefined();
+  const dbPath = join(root, "opencode.db");
+  const db = createOpencodeDb(dbPath);
+  addSession(db, "ses_a", null, "x");
+  db.close();
+  const outDir = join(root, "out");
+  mkdirSync(outDir);
+  expect(await withEnv("OPENCODE_DB", dbPath, () => opencodeSnapshot(snapshotOpts(outDir, { agentSessionId: "ses_a" })))).toBeUndefined();
+  expect(await opencodeSnapshot(snapshotOpts(outDir, { opencodeDbPath: dbPath, agentSessionId: "ses_a" }))).toBeDefined();
 });
 
 test("serializeOpencodeSession never selects credential tables and allowlists info.error", () => {

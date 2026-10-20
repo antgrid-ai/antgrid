@@ -96,7 +96,7 @@ export const snapshotCopilotTranscript: HandoffSnapshotFn = async (opts) => {
       sidecarBytes += written.bytes;
       files.push({ ...written, originalName: source.name, sourcePath: source.path });
     } catch (error) {
-      if (error instanceof HandoffSnapshotError && error.code === "TOO_LARGE") throw error;
+      if (error instanceof HandoffSnapshotError && error.code !== "UNREADABLE") throw error;
       warnings.push(`Could not copy ${source.name}.`);
     }
   };

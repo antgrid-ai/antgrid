@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { safeJoin } from "../src/agents/handoff";
 import { vibeFork } from "../src/agents/mistral-vibe/fork";
 import { snapshotVibe } from "../src/agents/mistral-vibe/handoff-snapshot";
+import { withEnv } from "./fixtures/with-env";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -81,9 +82,14 @@ test("Vibe snapshot lists subagents and attachments as references", async () => 
 
 test("Vibe snapshot prefers a hook transcript path inside the save dir", async () => {
   const { home, saveDir } = store();
-  const dir = session(saveDir, ID, "/repo");
-  const snapshot = await run(home, { transcriptPath: join(dir, "messages.jsonl") });
+  const older = session(saveDir, ID, "/repo", "20260101_120000");
+  writeFileSync(join(older, "messages.jsonl"), '{"role":"user","content":"OLDER"}\n');
+  session(saveDir, ID, "/repo", "20260102_120000");
+  const outDir = temp("antgrid-vibe-out-");
+  const snapshot = await run(home, { outDir, transcriptPath: join(older, "messages.jsonl") });
   expect(snapshot?.primary).toBe("vibe-messages.jsonl");
+  // Without the hint the id scan would take the newer directory.
+  expect(readFileSync(join(outDir, "vibe-messages.jsonl"), "utf8")).toContain("OLDER");
 });
 
 test("Vibe snapshot ignores a hook transcript path outside the store", async () => {
@@ -124,10 +130,13 @@ test("Vibe snapshot refuses unsafe ids and returns undefined for a missing store
 });
 
 test("Vibe snapshot is refused under the test runner without a seam", async () => {
-  expect(await snapshotVibe({
+  const { home, saveDir } = store();
+  session(saveDir, ID, "/repo");
+  expect(await withEnv("VIBE_HOME", home, () => snapshotVibe({
     maxMsgs: 10, projectPath: "/repo", sourceCwd: "/repo", agentSessionId: ID,
     outDir: temp("antgrid-vibe-out-"), signal: new AbortController().signal,
-  })).toBeUndefined();
+  }))).toBeUndefined();
+  expect(await run(home)).toBeDefined();
 });
 
 test("Vibe fork is a terminal-transcript fork that carries the snapshot", () => {

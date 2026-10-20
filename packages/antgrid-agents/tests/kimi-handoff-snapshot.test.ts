@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { safeJoin } from "../src/agents/handoff";
 import { kimiFork } from "../src/agents/kimi/fork";
 import { snapshotKimi } from "../src/agents/kimi/handoff-snapshot";
+import { withEnv } from "./fixtures/with-env";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -107,10 +108,12 @@ test("Kimi snapshot refuses a symlinked wire", async () => {
 });
 
 test("Kimi snapshot is refused under the test runner without a seam", async () => {
-  expect(await snapshotKimi({
+  const { home } = store();
+  expect(await withEnv("KIMI_CODE_HOME", home, () => snapshotKimi({
     maxMsgs: 10, projectPath: "/repo", sourceCwd: "/repo", agentSessionId: ID,
     outDir: temp("antgrid-kimi-out-"), signal: new AbortController().signal,
-  })).toBeUndefined();
+  }))).toBeUndefined();
+  expect(await run(home)).toBeDefined();
 });
 
 test("Kimi fork keeps its native fork shape and carries the snapshot", () => {

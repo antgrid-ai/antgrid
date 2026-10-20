@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --compile --outfile dist/antgrid --define 'process.env.LICENSE_API_URL=\"https://app.antgrid.ai\"' --define 'process.env.ANTGRID_BRIDGE_COMPILED=\"1\"'",
+    "build": "cd .. && bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile --outfile bridge/dist/antgrid --define 'process.env.LICENSE_API_URL=\"https://app.antgrid.ai\"' --define 'process.env.ANTGRID_BRIDGE_COMPILED=\"1\"'",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "qualify:iroh-host": "bun run scripts/iroh-host-smoke.ts",

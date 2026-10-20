@@ -6,6 +6,7 @@ import { safeJoin } from "../src/agents/handoff";
 import { resolveClaudeProjectsRoot } from "../src/agents/claude-code/handoff-snapshot";
 import { claudeFork } from "../src/agents/claude-code/fork";
 import { claudeProjectSlug } from "../src/agents/claude-code/transcript-read";
+import { withEnv } from "./fixtures/with-env";
 
 const ID = "11111111-2222-4333-8444-555555555555";
 let root: string;
@@ -72,6 +73,19 @@ test("a file whose records name another session is not accepted", async () => {
   expect(await claudeFork.snapshot(opts())).toBeUndefined();
 });
 
+test("accepts a resumed file whose own id only appears after the copied history", async () => {
+  mkdirSync(join(projects, "dir"), { recursive: true });
+  const filler = JSON.stringify({ type: "assistant", sessionId: "older", message: "x".repeat(4000) });
+  const lines = [
+    ...Array.from({ length: 200 }, () => filler),
+    JSON.stringify({ type: "user", sessionId: ID, message: { role: "user", content: "after resume" } }),
+  ];
+  writeFileSync(join(projects, "dir", `${ID}.jsonl`), `${lines.join("\n")}\n`);
+  const snapshot = await claudeFork.snapshot(opts());
+  expect(snapshot?.method).toBe("copy");
+  expect(readFileSync(join(out, "claude-code.jsonl"), "utf8")).toContain("after resume");
+});
+
 test("finds a worktree session by the sourceCwd slug, then projectPath slug, then glob", async () => {
   const cwdSlug = claudeProjectSlug(join(root, "checkout"));
   const projectSlug = claudeProjectSlug(join(root, "project"));
@@ -115,7 +129,9 @@ test("returns undefined with no session id, an unsafe id, or no store (and never
   expect(await claudeFork.snapshot(opts({ agentSessionId: undefined }))).toBeUndefined();
   expect(await claudeFork.snapshot(opts({ agentSessionId: "../escape" }))).toBeUndefined();
   expect(await claudeFork.snapshot(opts())).toBeUndefined();
-  expect(await claudeFork.snapshot({ ...opts(), claudeProjectsRoot: undefined })).toBeUndefined();
+  transcript("p");
+  expect(await withEnv("CLAUDE_CONFIG_DIR", root, () => claudeFork.snapshot({ ...opts(), claudeProjectsRoot: undefined }))).toBeUndefined();
+  expect(await claudeFork.snapshot(opts())).toBeDefined();
 });
 
 test("every emitted file name passes safeJoin", async () => {

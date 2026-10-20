@@ -90,6 +90,20 @@ describe("ensureHandoffExcluded", () => {
     expect(git(dir, "status", "--porcelain", "--", ".antgrid")).toBe("");
   });
 
+  it("escapes glob characters in the prefix so the rule cannot widen to siblings", async () => {
+    const dir = repo();
+    const odd = join(dir, "a[b]");
+    mkdirSync(odd);
+    mkdirSync(join(dir, "ab"));
+    expect(await ensureHandoffExcluded(odd, ID)).toBe("excluded");
+    expect(readFileSync(join(dir, ".git", "info", "exclude"), "utf8")).toContain("/a\\[b\\]/.antgrid/handoff/");
+    dropHandoffFile(odd);
+    dropHandoffFile(join(dir, "ab"));
+    const status = git(dir, "status", "--porcelain", "-uall");
+    expect(status).toContain("ab/.antgrid/handoff/");
+    expect(status).not.toContain("a[b]");
+  });
+
   it("falls back when the exclude file cannot be written", async () => {
     const dir = repo();
     rmSync(join(dir, ".git", "info", "exclude"), { force: true });

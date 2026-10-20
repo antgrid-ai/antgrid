@@ -8,6 +8,7 @@ import { cursorAgentFork } from "../src/agents/cursor-agent/fork";
 import { cursorSnapshot } from "../src/agents/cursor-agent/handoff-snapshot";
 import { walkRootBlob } from "../src/agents/cursor-agent/store-walk";
 import { safeJoin, type HandoffSnapshotOpts } from "../src/agents/handoff";
+import { withEnv } from "./fixtures/with-env";
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "cursor-handoff-")); });
@@ -171,7 +172,12 @@ test("returns undefined for an unsafe id, a missing chat, or the real store unde
   mkdirSync(outDir);
   expect(await cursorSnapshot(opts(outDir, cfg, { agentSessionId: "../escape" }))).toBeUndefined();
   expect(await cursorSnapshot(opts(outDir, cfg))).toBeUndefined();
-  expect(await cursorSnapshot(opts(outDir, cfg, { cursorConfigDir: undefined }))).toBeUndefined();
+  const chat = createChat(cfg, "/work");
+  const m1 = chat.blob(JSON.stringify({ role: "user", content: "x" }));
+  setMeta(chat, chat.blob(Buffer.from(lengthDelimited(1, m1))));
+  expect(await withEnv("CURSOR_CONFIG_DIR", cfg, () => cursorSnapshot(opts(outDir, cfg, { cursorConfigDir: undefined })))).toBeUndefined();
+  expect(await cursorSnapshot(opts(outDir, cfg))).toBeDefined();
+  chat.db.close();
 });
 
 test("a root blob that is not protobuf is unreadable", async () => {

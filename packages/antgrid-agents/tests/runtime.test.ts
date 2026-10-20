@@ -4,6 +4,7 @@ import { createAgentRegistry } from "antgrid-agents/registry";
 import type { AgentHostServices, AgentLogger } from "antgrid-agents/host";
 import { createAgentRunScope } from "antgrid-agents/contracts";
 import { AGENTS } from "../src/agents/registry";
+import { NO_HANDOFF_SNAPSHOT } from "../src/agents/fork-handoff";
 import type { AgentDefinition } from "antgrid-agents/runtime";
 import { serviceAdapter } from "./fixtures/service-adapter";
 
@@ -54,7 +55,7 @@ test("every registry agent declares a fork snapshot", () => {
   expect(entries.length).toBeGreaterThan(0);
   for (const [id, spec] of entries) {
     expect(typeof spec.fork.snapshot, id).toBe("function");
-    expect(String(spec.fork.snapshot), id).not.toMatch(/^async\s*\(\)\s*=>\s*(undefined|void 0)$/);
+    expect(spec.fork.snapshot, id).not.toBe(NO_HANDOFF_SNAPSHOT);
   }
 });
 
