@@ -12,7 +12,7 @@ import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/
 //
 // Every filesystem write is redirected into a fresh temp dir. Nothing here may
 // touch the developer's real ~/.cursor, ~/.claude, ~/.codex or ~/.antgrid —
-// same discipline as the Bun.main guard in cursor-agent's hooks.json write path.
+// same discipline as runningUnderTest (packages/antgrid-agents/src/agents/test-runner.ts).
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
