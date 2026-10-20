@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { cursorChatSerializer } from "../cursor-agent/store-walk";
+import { opencodeFamilySerializer } from "./opencode-serialize";
 import type { HandoffFile, HandoffReference } from "./types";
 
 export interface DbSerializeFile {
@@ -25,4 +27,8 @@ export type DbSerializer = (db: Database, args: unknown) => DbSerializeOutput;
  * a compiled bridge bundles only what its entrypoints reach, and a dynamic
  * import of a computed path would be absent from the binary. Register a
  * serializer here to make it available to `runDbSerializer`. */
-export const DB_SERIALIZERS: Record<string, DbSerializer> = {};
+export const DB_SERIALIZERS: Record<string, DbSerializer> = {
+  opencode: opencodeFamilySerializer,
+  kilo: opencodeFamilySerializer,
+  cursor: cursorChatSerializer,
+};

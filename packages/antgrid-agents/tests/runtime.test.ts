@@ -3,6 +3,8 @@ import { createAgentRuntime } from "antgrid-agents/runtime";
 import { createAgentRegistry } from "antgrid-agents/registry";
 import type { AgentHostServices, AgentLogger } from "antgrid-agents/host";
 import { createAgentRunScope } from "antgrid-agents/contracts";
+import { AGENTS } from "../src/agents/registry";
+import type { AgentDefinition } from "antgrid-agents/runtime";
 import { serviceAdapter } from "./fixtures/service-adapter";
 
 const logger: AgentLogger = { child: () => logger, debug() {}, info() {}, warn() {}, error() {} };
@@ -45,4 +47,26 @@ test("native fork and approval policy require no argv builders", async () => {
 test("rejects incompatible API registrations before calling their factories", () => {
   const definition = { ...serviceAdapter(), apiVersion: 99 };
   expect(() => createAgentRuntime({ registry: createAgentRegistry([["service", definition]]) as never, host: host("one") })).toThrow("Unsupported agent API");
+});
+
+test("every registry agent declares a fork snapshot", () => {
+  const entries = Object.entries(AGENTS);
+  expect(entries.length).toBeGreaterThan(0);
+  for (const [id, spec] of entries) {
+    expect(typeof spec.fork.snapshot, id).toBe("function");
+    expect(String(spec.fork.snapshot), id).not.toMatch(/^async\s*\(\)\s*=>\s*(undefined|void 0)$/);
+  }
+});
+
+test("a spec without fork.snapshot is rejected at registration", () => {
+  const base = serviceAdapter();
+  const definition: AgentDefinition = {
+    ...base,
+    create(host) {
+      const spec = base.create(host);
+      const { snapshot: _omitted, ...fork } = spec.fork;
+      return { ...spec, fork } as never;
+    },
+  };
+  expect(() => createAgentRuntime({ registry: createAgentRegistry([["service", definition]]), host: host("one") })).toThrow();
 });

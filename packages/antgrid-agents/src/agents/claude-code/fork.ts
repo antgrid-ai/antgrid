@@ -1,5 +1,6 @@
 import { forkHandoffOrTerminal } from "../fork-handoff";
-import type { ForkHandoffOpts } from "../types";
+import type { AgentForkSupport, ForkHandoffOpts } from "../types";
+import { snapshotClaudeTranscript } from "./handoff-snapshot";
 import { messageText, readTranscript } from "./transcript";
 import { readClaudeTranscript } from "./transcript-read";
 
@@ -29,3 +30,11 @@ export async function claudeForkHandoff(opts: ForkHandoffOpts): Promise<string> 
 export function claudeLegacyForkSource(args: readonly string[]): string | undefined {
   return args.length === 3 && !!args[1] && args[0] === "--resume" && args[2] === "--fork-session" ? args[1] : undefined;
 }
+
+export const claudeFork: AgentForkSupport & { nativeForkArgs: (id: string) => string[] } = {
+  kind: "native-fork",
+  handoff: claudeForkHandoff,
+  snapshot: snapshotClaudeTranscript,
+  nativeForkArgs: claudeNativeForkArgs,
+  decodeLegacyArgs: claudeLegacyForkSource,
+};

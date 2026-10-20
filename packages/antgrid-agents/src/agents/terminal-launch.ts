@@ -67,6 +67,7 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
     abDir: request.storeDir,
     cursorDir: typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined,
     kimiHome: typeof request.adapterOptions?.kimiHome === "string" ? request.adapterOptions.kimiHome : undefined,
+    vibeHome: typeof request.adapterOptions?.vibeHome === "string" ? request.adapterOptions.vibeHome : undefined,
     hookCommand: runtime?.host.hookCommand(),
     mcpCommand: runtime?.host.mcpCommand?.(),
   }, runtime?.get);

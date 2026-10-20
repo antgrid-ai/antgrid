@@ -1,5 +1,6 @@
 import { forkHandoffOrTerminal } from "../fork-handoff";
-import type { ForkHandoffOpts } from "../types";
+import type { AgentForkSupport, ForkHandoffOpts } from "../types";
+import { opencodeSnapshot } from "./handoff-snapshot";
 import { readTranscript } from "./transcript";
 
 /** `opencode --session <id> --fork` clones instead of resuming the source. */
@@ -15,3 +16,11 @@ export async function opencodeForkHandoff(opts: ForkHandoffOpts): Promise<string
 export function opencodeLegacyForkSource(args: readonly string[]): string | undefined {
   return args.length === 3 && !!args[1] && args[0] === "--session" && args[2] === "--fork" ? args[1] : undefined;
 }
+
+export const opencodeFork: AgentForkSupport & { nativeForkArgs: (sessionId: string) => string[] } = {
+  kind: "native-fork",
+  handoff: opencodeForkHandoff,
+  nativeForkArgs: opencodeNativeForkArgs,
+  decodeLegacyArgs: opencodeLegacyForkSource,
+  snapshot: opencodeSnapshot,
+};
