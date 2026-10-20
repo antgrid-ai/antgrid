@@ -1,3 +1,4 @@
+import { scrollbackEvents } from "../handoff/events";
 import { forkHandoffOrTerminal } from "../fork-handoff";
 import type { AgentForkSupport, ForkHandoffOpts } from "../types";
 import { opencodeSnapshot } from "./handoff-snapshot";
@@ -23,4 +24,5 @@ export const opencodeFork: AgentForkSupport & { nativeForkArgs: (sessionId: stri
   nativeForkArgs: opencodeNativeForkArgs,
   decodeLegacyArgs: opencodeLegacyForkSource,
   snapshot: opencodeSnapshot,
+  events: scrollbackEvents,
 };

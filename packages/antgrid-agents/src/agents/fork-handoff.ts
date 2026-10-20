@@ -1,3 +1,4 @@
+import { scrollbackEvents } from "./handoff/events";
 import type { AgentForkSupport, ForkHandoffOpts } from "./types";
 
 /** A stable, provider-neutral envelope. It is deliberately text rather than a
@@ -24,11 +25,13 @@ export function forkHandoffOrTerminal(
  * a test can tell, by identity, that no registered agent still uses it. */
 export const NO_HANDOFF_SNAPSHOT: AgentForkSupport["snapshot"] = async () => undefined;
 
-/** The explicit adapter for agents with no readable native conversation store. */
-export function terminalForkHandoff(agent: string): AgentForkSupport {
+/** The explicit adapter for agents with no readable native conversation store:
+ * nothing to snapshot, and the terminal scrollback stands in for the events. */
+export function terminalOnlyFork(agent: string): AgentForkSupport {
   return {
     kind: "terminal-transcript",
     handoff: async (opts: ForkHandoffOpts) => forkHandoffOrTerminal(agent, [], opts),
     snapshot: NO_HANDOFF_SNAPSHOT,
+    events: scrollbackEvents,
   };
 }

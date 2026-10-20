@@ -1,3 +1,4 @@
+import { scrollbackEvents } from "../handoff/events";
 import { forkHandoffOrTerminal } from "../fork-handoff";
 import type { AgentForkSupport, ForkHandoffOpts } from "../types";
 import { snapshotClaudeTranscript } from "./handoff-snapshot";
@@ -35,6 +36,7 @@ export const claudeFork: AgentForkSupport & { nativeForkArgs: (id: string) => st
   kind: "native-fork",
   handoff: claudeForkHandoff,
   snapshot: snapshotClaudeTranscript,
+  events: scrollbackEvents,
   nativeForkArgs: claudeNativeForkArgs,
   decodeLegacyArgs: claudeLegacyForkSource,
 };

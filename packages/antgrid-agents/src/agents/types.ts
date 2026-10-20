@@ -6,6 +6,7 @@
 import type { BridgeCommand, HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
+import type { HandoffEventsFn } from "./handoff/events";
 import type { HandoffSnapshotFn } from "./handoff/types";
 import type { StructuredDriver } from "../structured/structured-driver";
 import type { TerminalLaunchRequest, PreparedTerminalLaunch } from "./terminal-launch";
@@ -222,11 +223,15 @@ export interface AgentForkSupport {
    * working directory, so resumed in another checkout it would run against the
    * source's tree. A fork into a new workspace takes the handoff instead. */
   nativeForkKeepsWorkspace?: true;
-  handoff: (opts: ForkHandoffOpts) => Promise<string>;
+  handoff?: (opts: ForkHandoffOpts) => Promise<string>;
   /** Copies the provider's own transcript into `opts.outDir`. Required so a new
    * agent cannot ship without deciding; an agent with no readable store
    * resolves `undefined` and the bridge hands off the terminal scrollback. */
   snapshot: HandoffSnapshotFn;
+  /** Normalizes the snapshot in `dir` into events for the excerpt. Required so
+   * an agent cannot ship a snapshot nothing can summarize; an agent with no
+   * parser of its own uses the scrollback one. */
+  events: HandoffEventsFn;
 }
 
 /** Inputs to a spec's `resolveTitle`. The `*Home` fields are test seams. */

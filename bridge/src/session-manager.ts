@@ -1359,7 +1359,7 @@ export class SessionManager {
 
   private async captureForkTranscript(source: PersistedEntry, adapter: RegistryAgentSpec, projectPath: string): Promise<string> {
     const scrollback = this.tm.getScrollback(source.id)?.text;
-    const text = await adapter.fork.handoff({
+    const text = await adapter.fork.handoff!({
       ...this.opts.adapterOptions?.[source.tool ?? this.agentSpec.name],
       maxMsgs: 500,
       projectPath,

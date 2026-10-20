@@ -1,3 +1,4 @@
+import { scrollbackEvents } from "../handoff/events";
 import { forkHandoffOrTerminal } from "../fork-handoff";
 import type { AgentForkSupport, ForkHandoffOpts } from "../types";
 import { codexSnapshot } from "./handoff-snapshot";
@@ -21,6 +22,7 @@ export const codexFork: AgentForkSupport & { nativeForkArgs: (id: string) => str
   kind: "native-fork",
   handoff: codexForkHandoff,
   snapshot: codexSnapshot,
+  events: scrollbackEvents,
   nativeForkArgs: codexNativeForkArgs,
   decodeLegacyArgs: codexLegacyForkSource,
 };

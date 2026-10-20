@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { claudeForkHandoff, claudeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/claude-code/fork";
 import { codexNativeForkArgs } from "../../packages/antgrid-agents/src/agents/codex/fork";
 import { opencodeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/opencode/fork";
-import { terminalForkHandoff } from "../../packages/antgrid-agents/src/agents/fork-handoff";
+import { terminalOnlyFork } from "../../packages/antgrid-agents/src/agents/fork-handoff";
 
 const dirs: string[] = [];
 
@@ -31,8 +31,8 @@ describe("agent fork handoffs", () => {
   });
 
   test("terminal-only adapters never invent provider ids or paths", async () => {
-    const adapter = terminalForkHandoff("Kimi");
-    await expect(adapter.handoff({
+    const adapter = terminalOnlyFork("Kimi");
+    await expect(adapter.handoff!({
       maxMsgs: 20,
       projectPath: "/project",
       terminalTranscript: "Existing terminal context",
