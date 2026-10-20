@@ -15,6 +15,7 @@
     "./config-inject": "./src/agents/config-inject.ts",
     "./defaults": "./src/agents/defaults.ts",
     "./fork-handoff": "./src/agents/fork-handoff.ts",
+    "./handoff": "./src/agents/handoff/index.ts",
     "./hook-posts": "./src/agents/hook-posts.ts",
     "./launch-inject": "./src/agents/launch-inject.ts",
     "./windows-argv": "./src/agents/windows-argv.ts",

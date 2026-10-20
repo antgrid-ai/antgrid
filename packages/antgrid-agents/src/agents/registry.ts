@@ -79,6 +79,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     fork: {
       kind: "native-fork",
       handoff: claudeForkHandoff,
+      snapshot: async () => undefined,
       nativeForkArgs: claudeNativeForkArgs,
       decodeLegacyArgs: claudeLegacyForkSource,
     },
@@ -190,6 +191,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     fork: {
       kind: "native-fork",
       handoff: codexForkHandoff,
+      snapshot: async () => undefined,
       nativeForkArgs: codexNativeForkArgs,
       decodeLegacyArgs: codexLegacyForkSource,
     },
@@ -281,6 +283,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     fork: {
       kind: "native-fork",
       handoff: opencodeForkHandoff,
+      snapshot: async () => undefined,
       nativeForkArgs: opencodeNativeForkArgs,
       decodeLegacyArgs: opencodeLegacyForkSource,
     },

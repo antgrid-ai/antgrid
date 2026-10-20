@@ -14,7 +14,7 @@ export function serviceAdapter(onRelease: () => void = () => {}): AgentDefinitio
         conversations: { terminal: ["fresh", "resume", "fork"], chat: ["fresh", "resume"] },
         observation: { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false },
         discover: async () => ({ status: "available" }),
-        fork: { kind: "native-fork", handoff: async () => "fixture context" },
+        fork: { kind: "native-fork", handoff: async () => "fixture context", snapshot: async () => undefined },
         prepareTerminal: async (request) => {
           request.scope?.registerCleanup(onRelease);
           return {

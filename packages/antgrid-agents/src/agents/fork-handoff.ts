@@ -25,5 +25,6 @@ export function terminalForkHandoff(agent: string): AgentForkSupport {
   return {
     kind: "terminal-transcript",
     handoff: async (opts: ForkHandoffOpts) => forkHandoffOrTerminal(agent, [], opts),
+    snapshot: async () => undefined,
   };
 }
