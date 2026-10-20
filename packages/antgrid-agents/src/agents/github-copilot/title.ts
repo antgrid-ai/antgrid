@@ -1,10 +1,13 @@
 import { Database } from "bun:sqlite";
+import { createReadStream } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import type { ResolvedTitle } from "../types";
 import { firstMessage } from "../title-read";
 
 /**
- * The first user turn of a Copilot session, from session-store.db.
+ * The first user turn of a Copilot session, from session-store.db, or from the
+ * session's event log while that turn has no row yet.
  *
  * Copilot also writes a lazy generated summary to the `sessions` row, and it is
  * deliberately not read: we name sessions ourselves (see ResolvedTitle), and
@@ -26,13 +29,46 @@ export async function resolveCopilotSessionTitle(sessionId: string, copilotHome:
     const turn = db
       .query("SELECT user_message FROM turns WHERE session_id = ? AND trim(coalesce(user_message, '')) <> '' ORDER BY turn_index ASC LIMIT 1")
       .get(sessionId) as { user_message?: string | null } | null;
-    const first = (turn?.user_message ?? "").trim();
+    const first = (turn?.user_message ?? "").trim() || await firstEventsPrompt(copilotHome, sessionId);
     return first ? firstMessage(first) : null;
   } catch {
     return null;
   } finally {
     db?.close();
   }
+}
+
+// Session ids reach this reader from hook posts, so one is checked before it
+// becomes a path segment.
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The first prompt from the session's own event log. Copilot writes a `turns`
+ * row only once the NEXT prompt arrives or the session shuts down, so a
+ * one-prompt session has none, while `events.jsonl` records each `user.message`
+ * as it is sent. `content` is what the user typed; `transformedContent` adds
+ * Copilot's injected context and is never a name.
+ */
+async function firstEventsPrompt(copilotHome: string, sessionId: string): Promise<string> {
+  if (!SESSION_ID.test(sessionId)) return "";
+  const stream = createReadStream(join(copilotHome, "session-state", sessionId, "events.jsonl"), { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.includes('"user.message"')) continue;
+      try {
+        const event = JSON.parse(line) as { type?: unknown; data?: { content?: unknown } };
+        const content = event.type === "user.message" && typeof event.data?.content === "string" ? event.data.content.trim() : "";
+        if (content) return content;
+      } catch {}
+    }
+  } catch {
+    // No log yet: the session has not been sent a prompt.
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+  return "";
 }
 
 /**

@@ -46,14 +46,19 @@ export async function lastAssistantText(
 }
 
 // Mirrors ./title.ts's JSONL iteration, but collects a rolling window of the
-// last N message texts instead of title-specific fields. Every role is included:
-// the handler needs conversation context, not just the agent's turn.
+// last N message texts instead of title-specific fields. Both conversation roles
+// are included: the handler needs conversation context, not just the agent's
+// turn. Only user/assistant records are conversation — Claude Code also writes
+// `api-request-blob` records into the same file, each a `message` carrying a
+// request's system prompt, tool list or replayed turns, which would otherwise
+// crowd the real messages out of the window.
 function claudeMessagesIn(raw: string): string[] {
   const out: string[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const obj = JSON.parse(line);
+      if (obj?.type !== "user" && obj?.type !== "assistant") continue;
       const text = messageText(obj?.message?.content);
       if (text) out.push(text);
     } catch { /* skip malformed line */ }
