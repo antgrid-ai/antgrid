@@ -1,9 +1,11 @@
 // bridge/src/agents/codex/rollout-read.ts
-import { existsSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { existsSync, readdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { readTailUntil } from "../../transcript-tail";
 import { codexHomeDir } from "./home";
+import { stateDbVersion } from "./title";
 
 // codex wraps typed input in a contextual template; everything before this
 // marker is injected scaffolding, not the user's words (codex-rs protocol.rs
@@ -27,24 +29,55 @@ async function entriesDesc(path: string): Promise<string[]> {
 }
 
 /**
- * Rollout file for a thread: sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<threadId>.jsonl,
- * searched newest date dirs first (zero-padded names, so lexicographic desc is
- * chronological desc). archived_sessions/ and .zst siblings are deliberately not
- * searched: a session under live supervision is neither archived nor cold enough
- * to be compressed. Never throws.
+ * The thread's current rollout as Codex itself records it. A rolled-back thread
+ * continues in a new rollout-<ts>-<threadId>_<rolloutId>.jsonl while its old
+ * file stays on disk as the history base, so a filename match — and above all
+ * a cached one — can name a file Codex no longer appends to.
+ */
+function rolloutPathFromStateDb(threadId: string, home: string): string | undefined {
+  let db: Database | null = null;
+  try {
+    const newest = readdirSync(home)
+      .filter((f) => stateDbVersion(f) >= 0)
+      .sort((a, b) => stateDbVersion(b) - stateDbVersion(a))[0];
+    if (!newest) return undefined;
+    db = new Database(join(home, newest), { readonly: true });
+    // Synchronous on the bridge's loop: never wait on codex's write lock.
+    db.exec("PRAGMA busy_timeout = 0");
+    const row = db.query("SELECT rollout_path FROM threads WHERE id = ?").get(threadId) as { rollout_path?: string | null } | null;
+    const path = row?.rollout_path?.trim();
+    // Absent when the recorded file was compressed to .zst — fall back to the scan.
+    return path && existsSync(path) ? path : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Rollout file for a thread: the path codex's state DB records, else a scan of
+ * sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<threadId>[_<rolloutId>].jsonl, newest
+ * date dirs and names first (zero-padded, so lexicographic desc is chronological
+ * desc). archived_sessions/ and .zst siblings are deliberately not searched: a
+ * session under live supervision is neither archived nor cold enough to be
+ * compressed. Never throws.
  */
 export async function findCodexRolloutPath(threadId: string, codexHome?: string): Promise<string | undefined> {
   const home = codexHome ?? codexHomeDir();
+  const recorded = rolloutPathFromStateDb(threadId, home);
+  if (recorded) return recorded;
   const cacheKey = `${home}\0${threadId}`;
   const cached = resolvedPaths.get(cacheKey);
   if (cached && existsSync(cached)) return cached;
   const sessions = join(home, "sessions");
-  const suffix = `-${threadId}.jsonl`;
+  const exact = `-${threadId}.jsonl`;
+  const revision = `-${threadId}_`;
   for (const y of await entriesDesc(sessions)) {
     for (const m of await entriesDesc(join(sessions, y))) {
       for (const d of await entriesDesc(join(sessions, y, m))) {
         for (const f of await entriesDesc(join(sessions, y, m, d))) {
-          if (f.endsWith(suffix)) {
+          if (f.endsWith(exact) || (f.includes(revision) && f.endsWith(".jsonl"))) {
             const path = join(sessions, y, m, d, f);
             if (resolvedPaths.size >= RESOLVED_CACHE_CAP) {
               resolvedPaths.delete(resolvedPaths.keys().next().value!);
@@ -61,12 +94,15 @@ export async function findCodexRolloutPath(threadId: string, codexHome?: string)
 
 /**
  * Last n conversation texts from a codex rollout, chronological. Reads only
- * event_msg lines: user_message/agent_message carry what was actually typed and
- * said, while their response_item twins duplicate the text plus injected
- * context (<environment_context>, AGENTS.md dumps) as fake user turns — taking
- * one side is also what prevents double-counting. Unknown line types (codex
- * writes variants newer than any reader, e.g. world_state) and torn lines are
- * skipped, matching codex's own tolerant loader. Never throws.
+ * event_msg lines: they carry what was actually typed and said, while their
+ * response_item twins duplicate the text plus injected context
+ * (<environment_context>, AGENTS.md dumps) as fake user turns — taking one side
+ * is also what prevents double-counting. Paginated rollouts (codex 0.16x, and
+ * every older file its migration rewrote) record messages as item_completed
+ * UserMessage/AgentMessage items; legacy rollouts as user_message/agent_message.
+ * Unknown line types (codex writes variants newer than any reader, e.g.
+ * world_state) and torn lines are skipped, matching codex's own tolerant
+ * loader. Never throws.
  */
 export async function readLastCodexMessages(path: string, n: number): Promise<string[]> {
   if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
@@ -93,9 +129,17 @@ function codexMessagesIn(raw: string): string[] {
     }
     if (obj?.type !== "event_msg") continue;
     const p = obj.payload;
-    if (p?.type === "user_message" && typeof p.message === "string") {
-      const idx = p.message.indexOf(USER_MESSAGE_BEGIN);
-      const text = (idx >= 0 ? p.message.slice(idx + USER_MESSAGE_BEGIN.length) : p.message).trim();
+    if (p?.type === "item_completed") {
+      const item = p.item;
+      if (item?.type === "UserMessage") {
+        const text = withoutRequestWrapper(itemText(item));
+        if (text) out.push(text);
+      } else if (item?.type === "AgentMessage") {
+        const text = itemText(item).trim();
+        if (text) out.push(text);
+      }
+    } else if (p?.type === "user_message" && typeof p.message === "string") {
+      const text = withoutRequestWrapper(p.message);
       if (text) out.push(text);
     } else if (p?.type === "agent_message" && typeof p.message === "string") {
       const text = p.message.trim();
@@ -103,4 +147,21 @@ function codexMessagesIn(raw: string): string[] {
     }
   }
   return out;
+}
+
+function withoutRequestWrapper(message: string): string {
+  const idx = message.indexOf(USER_MESSAGE_BEGIN);
+  return (idx >= 0 ? message.slice(idx + USER_MESSAGE_BEGIN.length) : message).trim();
+}
+
+// A long user message arrives split across several text parts, each carrying
+// its own line breaks, so the parts are joined with nothing between them.
+// UserMessage spells the part type "text", AgentMessage "Text"; images
+// (local_image) carry no text and are dropped.
+function itemText(item: any): string {
+  if (!Array.isArray(item?.content)) return "";
+  return item.content
+    .filter((part: any) => typeof part?.text === "string" && String(part.type).toLowerCase() === "text")
+    .map((part: any) => part.text)
+    .join("");
 }
