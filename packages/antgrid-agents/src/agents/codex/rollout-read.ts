@@ -1,7 +1,7 @@
 // bridge/src/agents/codex/rollout-read.ts
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readTailUntil } from "../../transcript-tail";
 import { codexHomeDir } from "./home";
@@ -19,6 +19,8 @@ const USER_MESSAGE_BEGIN = "## My request for Codex:";
 // creation for new threads, so a miss may become a hit on the next call.
 const resolvedPaths = new Map<string, string>();
 const RESOLVED_CACHE_CAP = 200;
+
+const ZST = ".zst";
 
 async function entriesDesc(path: string): Promise<string[]> {
   try {
@@ -46,8 +48,12 @@ function rolloutPathFromStateDb(threadId: string, home: string): string | undefi
     db.exec("PRAGMA busy_timeout = 0");
     const row = db.query("SELECT rollout_path FROM threads WHERE id = ?").get(threadId) as { rollout_path?: string | null } | null;
     const path = row?.rollout_path?.trim();
-    // Absent when the recorded file was compressed to .zst — fall back to the scan.
-    return path && existsSync(path) ? path : undefined;
+    if (!path) return undefined;
+    if (existsSync(path)) return path;
+    // Codex compresses a rollout idle for about a week to <path>.zst and leaves
+    // the row naming the .jsonl it replaced.
+    const compressed = `${path}${ZST}`;
+    return existsSync(compressed) ? compressed : undefined;
   } catch {
     return undefined;
   } finally {
@@ -59,9 +65,9 @@ function rolloutPathFromStateDb(threadId: string, home: string): string | undefi
  * Rollout file for a thread: the path codex's state DB records, else a scan of
  * sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<threadId>[_<rolloutId>].jsonl, newest
  * date dirs and names first (zero-padded, so lexicographic desc is chronological
- * desc). archived_sessions/ and .zst siblings are deliberately not searched: a
- * session under live supervision is neither archived nor cold enough to be
- * compressed. Never throws.
+ * desc). Either may be a compressed .jsonl.zst: a fork or handoff of a session
+ * idle for a week reads one. archived_sessions/ is deliberately not searched.
+ * Never throws.
  */
 export async function findCodexRolloutPath(threadId: string, codexHome?: string): Promise<string | undefined> {
   const home = codexHome ?? codexHomeDir();
@@ -73,11 +79,18 @@ export async function findCodexRolloutPath(threadId: string, codexHome?: string)
   const sessions = join(home, "sessions");
   const exact = `-${threadId}.jsonl`;
   const revision = `-${threadId}_`;
+  const isRollout = (f: string) => f.endsWith(exact) || (f.includes(revision) && f.endsWith(".jsonl"));
   for (const y of await entriesDesc(sessions)) {
     for (const m of await entriesDesc(join(sessions, y))) {
       for (const d of await entriesDesc(join(sessions, y, m))) {
         for (const f of await entriesDesc(join(sessions, y, m, d))) {
-          if (f.endsWith(exact) || (f.includes(revision) && f.endsWith(".jsonl"))) {
+          if (f.endsWith(ZST) && isRollout(f.slice(0, -ZST.length))) {
+            // Sorts ahead of a plain sibling, which only a resume rewrites and
+            // which is then the live file. Not cached: the resume can follow.
+            const plain = join(sessions, y, m, d, f.slice(0, -ZST.length));
+            return existsSync(plain) ? plain : join(sessions, y, m, d, f);
+          }
+          if (isRollout(f)) {
             const path = join(sessions, y, m, d, f);
             if (resolvedPaths.size >= RESOLVED_CACHE_CAP) {
               resolvedPaths.delete(resolvedPaths.keys().next().value!);
@@ -106,6 +119,15 @@ export async function findCodexRolloutPath(threadId: string, codexHome?: string)
  */
 export async function readLastCodexMessages(path: string, n: number): Promise<string[]> {
   if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
+  if (path.endsWith(ZST)) {
+    // A zstd frame has no tail to seek to, and a cold rollout no longer grows.
+    try {
+      const raw = new TextDecoder().decode(await Bun.zstdDecompress(await readFile(path)));
+      return codexMessagesIn(raw).slice(-n);
+    } catch {
+      return [];
+    }
+  }
   // Widened until it HAS n — same bound, same reason, as the Claude reader. A
   // rollout interleaves its conversation with response_item twins and tool
   // traffic this drops, so the share of a byte window that survives to here is
