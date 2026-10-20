@@ -284,7 +284,7 @@ describe("cheapNamingModel", () => {
     expect(calls[0]![0]).toBe("codex");
     expect(calls[0]).not.toContain("haiku");
     // Not merely dropped — replaced by the entry the SERVING vendor verified.
-    expect(calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.4-mini"]);
+    expect(calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.6-luna"]);
   });
 
   // Every entry here was verified against ONE account, and what an account can
@@ -333,6 +333,20 @@ describe("cheapNamingModel", () => {
     ]);
   });
 
+  // The `list`-visibility slugs in a ChatGPT account's ~/.codex/models_cache.json
+  // under codex-cli 0.163.0. A slug outside it is refused by the API with a 400
+  // ("not supported when using Codex with a ChatGPT account"), so every codex
+  // title call exits 1 and burns one of the session's title attempts.
+  const CODEX_0_163_LISTED = [
+    "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+  ];
+  test("codex names with a model its ChatGPT-account catalog lists", async () => {
+    const { spawn, calls } = fakeSpawn("t\n");
+    await generateTitleFromContext("ctx", { tool: "codex", spawn, installedTools: ["codex"] });
+    const argv = calls[0]!;
+    expect(CODEX_0_163_LISTED).toContain(argv[argv.indexOf("-m") + 1]);
+  });
+
   // Each agent's `cmd` places --model at a different, independently-verified
   // spot in the argv (immediately after --allowedTools' value for claude,
   // immediately before the positional prompt for codex and opencode). The
@@ -348,7 +362,7 @@ describe("cheapNamingModel", () => {
     await generateTitleFromContext("ctx", {
       tool: "codex", spawn: codex.spawn, installedTools: ["codex"],
     });
-    expect(codex.calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.4-mini"]);
+    expect(codex.calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.6-luna"]);
 
     const opencode = fakeSpawn("t\n");
     await generateTitleFromContext("ctx", {
