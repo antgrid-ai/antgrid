@@ -110,6 +110,56 @@ test("a paginated user message split across text parts is joined as written", as
   expect(await readLastCodexMessages(path, 10)).toEqual(["first line\n> quoted\nlast line", "see image"]);
 });
 
+// Current compaction checkpoint: `message` is empty and the recent turns ride
+// in retained_context, user and assistant lists kept apart and keyed by order.
+const retained = (order: number, text: string, extra: object = {}) => ({
+  revision: `retained_019f8e9e-0000-7000-8000-${String(order).padStart(12, "0")}`,
+  order,
+  turn_id: "019f8e9e-1111-7000-8000-000000000001",
+  message_id: `msg_${order}`,
+  text,
+  complete: true,
+  ...extra,
+});
+const checkpoint = (user: object[], assistant: object[]) => ({
+  timestamp: "t",
+  type: "compacted",
+  payload: {
+    message: "",
+    replacement_history: [
+      { type: "message", id: "msg_rh", role: "user", content: [{ type: "input_text", text: "replayed context" }] },
+      { type: "compaction", encrypted_content: "opaque" },
+    ],
+    replacement_history_metadata: {},
+    retained_context: {
+      user_messages: user,
+      assistant_messages: assistant,
+      user_messages_incomplete: false,
+      assistant_messages_incomplete: true,
+      next_order: 9,
+      verified_answers: [],
+      incomplete: false,
+    },
+    window_number: 2,
+    window_id: "019f8e9e-2222-7000-8000-000000000001",
+    compaction_response_id: "resp_synthetic",
+    resume_metadata: {},
+  },
+});
+
+test("an empty-summary compaction keeps its retained turns, interleaved by order", async () => {
+  const { path } = makeHome([
+    pagedUser("dropped"),
+    checkpoint(
+      [retained(0, "fix the bug", { complete: false }), retained(5, "<ctx>x</ctx>\n## My request for Codex: and add a test")],
+      [retained(2, "looking", { phase: "commentary" }), retained(3, "fixed", { phase: "final_answer" }), retained(7, "  ", { phase: "commentary" })],
+    ),
+    completed({ type: "ContextCompaction", id: "cc" }),
+    pagedAgent("test added"),
+  ]);
+  expect(await readLastCodexMessages(path, 10)).toEqual(["fix the bug", "looking", "fixed", "and add a test", "test added"]);
+});
+
 test("findCodexRolloutPath finds a rolled-back thread's revision file", async () => {
   const home = mkdtempSync(join(tmpdir(), "ab-codex-"));
   const dir = join(home, "sessions", "2026", "07", "28");
