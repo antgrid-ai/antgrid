@@ -923,12 +923,6 @@ export class TerminalFrameSource extends TerminalScreen {
     super.dispose();
   }
 
-  visibleLines(): string[] {
-    const buffer = this.term.buffer.active;
-    return Array.from({ length: this.term.rows }, (_, row) =>
-      buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "");
-  }
-
   normalHistoryLines(): string[] {
     const buffer = this.term.buffer.normal;
     return Array.from({ length: buffer.length }, (_, row) => buffer.getLine(row)?.translateToString(true) ?? "");

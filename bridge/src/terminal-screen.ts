@@ -204,6 +204,12 @@ export class TerminalScreen {
     this.term.resize(clampCols(cols), clampRows(rows));
   }
 
+  visibleLines(): string[] {
+    const buffer = this.term.buffer.active;
+    return Array.from({ length: this.term.rows }, (_, row) =>
+      buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "");
+  }
+
   /** True once `dispose()` has run — a pending `settle()` still resolves after it. */
   get isDisposed(): boolean {
     return this.disposed;

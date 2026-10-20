@@ -103,6 +103,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // `TerminateProcess` nor `SIGKILL` runs. A stale entry auto-disables that
     // renderer MACHINE-WIDE until the file is hand-edited.
     gracefulExit: { keystrokes: [ETX, ETX, ETX] },
+    // Measured against 2.1.304 in an untrusted folder: the trust dialog
+    // highlights "No, exit", so a submit typed into it ends the session.
+    startupPrompts: ["Is this a project you created or one you trust?", "Yes, I trust this folder"],
     // No "sealed" entry: an allowlist naming this agent's read tools is what a
     // sealed argv would have to omit, and `--allowedTools` with an empty value
     // has not been run against the real CLI. Until it is, naming takes the
@@ -200,6 +203,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // agent leaves. A single Ctrl+C on an IDLE prompt exits the CLI instead,
     // but that is a different case from a turn to confirm closed.
     transcriptInterrupt: isCodexInterruptRecord,
+    // Measured against 0.163.0 in an untrusted folder: "Trust and continue" is
+    // highlighted, and the decision is saved for the whole repository.
+    startupPrompts: ["Trust this folder?", "Trust and continue"],
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
     //
@@ -352,6 +358,10 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
     fork: terminalForkHandoff("Cursor"),
+    // Shown only when `--trust` is unsupported (see ./cursor-agent/hooks.ts).
+    // Measured against v2026.10.01: the dialog never enables bracketed paste,
+    // so only the readiness timeout would have sent a submit into it.
+    startupPrompts: ["Workspace Trust Required", "Trust this workspace"],
     hooks: cursorHooks,
     mcp: cursorMcp,
     augmentsDefaultSpec: true,
@@ -376,6 +386,8 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
     fork: terminalForkHandoff("GitHub Copilot"),
+    // Measured against 1.0.95 in an untrusted folder: "Yes" is highlighted.
+    startupPrompts: ["Confirm folder trust", "Do you trust the files in this folder?"],
     hooks: copilotHooks,
     mcp: copilotMcp,
     augmentsDefaultSpec: true,
@@ -464,6 +476,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // `agy --conversation <uuid>` is a global flag, so it goes before any raw
     // args. See `agy --help`.
     resume: (id) => ["--conversation", id],
+    // Measured against 1.4.3 in an untrusted folder: "Yes, I trust this
+    // folder" is highlighted.
+    startupPrompts: ["Do you trust the contents of this project?", "Yes, I trust this folder"],
     initialPrompt: (p) => ["--prompt-interactive", p],
     fork: terminalForkHandoff("Antigravity"),
     hooks: antigravityHooks,
@@ -538,6 +553,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     prepareTerminal: prepareKimiTerminal,
     initialPrompt: () => [],
     fork: { ...terminalForkHandoff("Kimi"), kind: "native-fork", nativeForkKeepsWorkspace: true },
+    // Measured against 2.1.1 in a folder with project MCP config: "Trust this
+    // folder" is highlighted, saved, and starts the project's MCP servers.
+    startupPrompts: ["Trust this folder?"],
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
   // (DEC 1004-derived), so the default-blur drives it — no injection.
@@ -552,6 +570,11 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    // v2.24.5. The trust dialog (shown for a folder with AGENTS.md or .vibe/)
+    // highlights "Trust folder", read from setup/trusted_folders/
+    // trust_folder_dialog.py; first-run setup, measured on screen, takes Enter
+    // to continue.
+    startupPrompts: ["Trust this folder?", "Trust folder or repository?", "Welcome to Mistral Vibe"],
     // No headless entry, and `-p --agent ask` must not come back as one. Read
     // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated
     // profile ("Requires approval for tool executions"), not a read-only one —

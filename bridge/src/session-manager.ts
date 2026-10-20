@@ -2593,6 +2593,7 @@ export class SessionManager {
             ? entry.tool ?? sessionAgentSpec.name
             : undefined,
           gracefulAsk: (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
+          startupPrompts: (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name)?.startupPrompts,
         });
         const deliver = async () => {
           const terminal = {

@@ -226,6 +226,11 @@ export class SubmitGate {
   /** Ids whose guest has been reading at least once, so a later wait is an
    *  interface swap and takes {@link SUBMIT_REARM_TIMEOUT_MS}. */
   private readonly rearming = new Set<string>();
+  /** Guests that may open on a prompt only the user may answer and have not
+   *  yet been seen reading past it: `pending` until a settled screen decides,
+   *  `prompt` while one is showing. Absent once the composer has been seen,
+   *  for good — agent output later in the session can quote the same words. */
+  private readonly startup = new Map<string, "pending" | "prompt">();
 
   constructor(
     private readonly timeoutMs: number = SUBMIT_READY_TIMEOUT_MS,
@@ -238,6 +243,44 @@ export class SubmitGate {
     if (this.ready.has(terminalId)) return;
     this.ready.add(terminalId);
     this.rearming.add(terminalId);
+    // A startup prompt enables the mode and paints like a composer, so for a
+    // guest that may show one, readiness alone is not enough to let go.
+    if (!this.startup.has(terminalId)) this.release(terminalId, "guest ready");
+  }
+
+  /**
+   * This guest may open on a prompt only the user may answer
+   * (`AgentSpec.startupPrompts`). Its submits now also wait for
+   * {@link startupScreen} to report a clear screen while the guest is reading.
+   */
+  holdForStartup(terminalId: string): void {
+    this.startup.set(terminalId, "pending");
+  }
+
+  /** Whether {@link startupScreen} still has a question to answer. */
+  awaitingStartup(terminalId: string): boolean {
+    return this.startup.has(terminalId);
+  }
+
+  /**
+   * What a settled screen showed. A prompt on screen holds every submit, past
+   * the readiness bound, because the bound's guess that nobody will announce
+   * anything is now known to be wrong, and what it would release into picks
+   * the highlighted option. A clear screen on a reading guest ends the hold.
+   */
+  startupScreen(terminalId: string, promptShowing: boolean): void {
+    const state = this.startup.get(terminalId);
+    if (state === undefined) return;
+    if (promptShowing) {
+      if (state !== "prompt") log.info({ terminalId }, "submit gate: holding submits behind a startup prompt the user must answer");
+      this.startup.set(terminalId, "prompt");
+      return;
+    }
+    if (!this.ready.has(terminalId)) {
+      this.startup.set(terminalId, "pending");
+      return;
+    }
+    this.startup.delete(terminalId);
     this.release(terminalId, "guest ready");
   }
 
@@ -264,6 +307,7 @@ export class SubmitGate {
    */
   reset(terminalId: string): void {
     this.ready.delete(terminalId);
+    this.startup.delete(terminalId);
     // A new process cold-starts, whatever the last one managed.
     this.rearming.delete(terminalId);
     this.guests.set(terminalId, this.guest(terminalId) + 1);
@@ -281,7 +325,7 @@ export class SubmitGate {
     // steady-state path — a Handler reply, the `continue` nudge, a bus card into
     // a live agent — must not grow a scheduling hop, and a submit that jumped
     // ahead of one still waiting would reorder the two.
-    if (this.ready.has(terminalId) && !this.chains.has(terminalId)) {
+    if (this.reading(terminalId) && !this.chains.has(terminalId)) {
       send();
       return;
     }
@@ -301,8 +345,12 @@ export class SubmitGate {
     return this.guests.get(terminalId) ?? 0;
   }
 
+  private reading(terminalId: string): boolean {
+    return this.ready.has(terminalId) && !this.startup.has(terminalId);
+  }
+
   private whenReady(terminalId: string, guest: number, sha?: string): Promise<void> {
-    if (this.ready.has(terminalId) || this.guest(terminalId) !== guest) return Promise.resolve();
+    if (this.reading(terminalId) || this.guest(terminalId) !== guest) return Promise.resolve();
     const waitedFrom = Date.now();
     return new Promise<void>((resolve) => {
       let done = false;
@@ -317,7 +365,14 @@ export class SubmitGate {
         resolve();
       };
       const bound = this.rearming.has(terminalId) ? this.rearmMs : this.timeoutMs;
-      const timer = setTimeout(() => finish("timeout"), bound);
+      // The bound restarts rather than expiring while a startup prompt is up:
+      // only the user's answer may end that wait.
+      const expire = (): void => {
+        if (this.startup.get(terminalId) !== "prompt") return finish("timeout");
+        timer = setTimeout(expire, bound);
+        timer.unref?.();
+      };
+      let timer = setTimeout(expire, bound);
       // A bounded wait must not be a reason to stay alive: a bridge whose last
       // outstanding work is a submit into a guest that never announces should
       // still exit when everything else is done.
@@ -333,5 +388,101 @@ export class SubmitGate {
     if (!list) return;
     this.waiters.delete(terminalId);
     for (const resolve of list) resolve(reason);
+  }
+}
+
+/**
+ * How long a guest's output must pause before its screen is read for a
+ * startup prompt.
+ *
+ * A dialog's frame can reach the PTY in more than one read, and a screen read
+ * between them would find its border and miss its question. Once drawn it
+ * stays on the grid, so waiting out the burst is enough.
+ */
+export const STARTUP_SCREEN_SETTLE_MS = 250;
+
+/** The longest a read is put off by output that never pauses, such as a
+ *  spinner, so a guest that animates through startup is still decided. */
+const STARTUP_SCREEN_MAX_DEFER_MS = 1_000;
+
+/**
+ * How long a screen must stay clear of every startup prompt, before any has
+ * been seen, to count as having none.
+ *
+ * Codex 0.163 paints its composer, bracketed paste on, and opens the trust
+ * dialog over it about 600ms later (measured on an idle machine), so the first
+ * clear screen of a reading guest is not yet an answer. A prompt that was seen
+ * and then cleared needs no wait: the user answered it.
+ */
+export const STARTUP_SCREEN_CLEAR_MS = 2_000;
+
+/**
+ * Reads a guest's rendered screen for its declared startup prompts once its
+ * output settles, and reports what it found to {@link SubmitGate.startupScreen}.
+ */
+export class StartupScreenCheck {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private deferredSince: number | undefined;
+  private clearSince: number | undefined;
+  private promptSeen = false;
+
+  constructor(
+    private readonly opts: {
+      prompts: readonly string[];
+      /** The visible rows, one string each. */
+      read: () => string[];
+      report: (promptShowing: boolean) => void;
+      settleMs?: number;
+      maxDeferMs?: number;
+      clearMs?: number;
+      now?: () => number;
+    },
+  ) {}
+
+  /** The guest wrote something; read the screen once it has settled. */
+  noteOutput(): void {
+    const now = this.now();
+    this.deferredSince ??= now;
+    const settle = this.opts.settleMs ?? STARTUP_SCREEN_SETTLE_MS;
+    const left = this.deferredSince + (this.opts.maxDeferMs ?? STARTUP_SCREEN_MAX_DEFER_MS) - now;
+    this.schedule(Math.min(settle, left));
+  }
+
+  dispose(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private check(): void {
+    this.timer = undefined;
+    this.deferredSince = undefined;
+    const rows = this.opts.read();
+    if (rows.some((row) => this.opts.prompts.some((prompt) => row.includes(prompt)))) {
+      this.promptSeen = true;
+      this.clearSince = undefined;
+      this.opts.report(true);
+      return;
+    }
+    if (this.promptSeen) {
+      this.opts.report(false);
+      return;
+    }
+    const now = this.now();
+    this.clearSince ??= now;
+    const left = this.clearSince + (this.opts.clearMs ?? STARTUP_SCREEN_CLEAR_MS) - now;
+    // Output in the meantime replaces this timer with a sooner read, which
+    // comes back here and keeps the same deadline.
+    if (left > 0) this.schedule(left);
+    else this.opts.report(false);
+  }
+
+  private schedule(delayMs: number): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.check(), Math.max(0, delayMs));
+    this.timer.unref?.();
+  }
+
+  private now(): number {
+    return (this.opts.now ?? Date.now)();
   }
 }

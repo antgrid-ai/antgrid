@@ -9,7 +9,7 @@ import type { GracefulExitAsk } from "antgrid-agents/contracts";
 import { ScrollbackBuffer } from "./scrollback";
 import { submitPlan } from "./pty-submit";
 import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
-import { GuestReadiness, SubmitGate } from "./submit-gate";
+import { GuestReadiness, StartupScreenCheck, SubmitGate } from "./submit-gate";
 import { TerminalScreen } from "./terminal-screen";
 import { TerminalFrameSource, type TerminalLinkOptions } from "./terminal-frames/source";
 import type { LinkBases } from "./terminal-links/resolver";
@@ -180,6 +180,10 @@ export interface TerminalSpawnConfig {
   /** This agent's measured refinement of the platform's soft ask; see
    *  `GracefulExitAsk`. Absent everywhere but an agent session. */
   gracefulAsk?: GracefulExitAsk;
+  /** This agent's `AgentSpec.startupPrompts`: while one is on screen, held
+   *  submits wait for the user to answer it. Absent everywhere but an agent
+   *  session. */
+  startupPrompts?: readonly string[];
   /** Keep this terminal's scrollback replayable after the process exits.
    *  For a transcript whose whole value is what it said — a `worktree.setup`
    *  run, where the log of the step that failed is the only explanation the
@@ -405,6 +409,18 @@ export class TerminalManager {
     // submits are released here rather than at the previous exit so a respawn
     // reusing a retained slot cannot inherit the dead run's readiness.
     this.submitGate.reset(terminalId);
+    const startupCheck = config.startupPrompts?.length
+      ? new StartupScreenCheck({
+        prompts: config.startupPrompts,
+        read: () => screen?.visibleLines() ?? [],
+        // Same ownership rule as readiness: a replaced run's screen says
+        // nothing about the guest now holding the id.
+        report: (showing) => {
+          if (this.sessions.get(terminalId) === session) this.submitGate.startupScreen(terminalId, showing);
+        },
+      })
+      : undefined;
+    if (startupCheck) this.submitGate.holdForStartup(terminalId);
     // Assigned below, before `spawn()`, so no output can reach the handler
     // while it is null. Captured rather than looked up for the same reason
     // `scrollback` and `modes` are: a replaced PTY keeps emitting until its
@@ -463,6 +479,7 @@ export class TerminalManager {
           if (owner === undefined || owner === session) {
             if (verdict === "ready") this.submitGate.markReady(terminalId);
             else if (verdict === "lost") this.submitGate.markUnready(terminalId);
+            if (startupCheck && this.submitGate.awaitingStartup(terminalId)) startupCheck.noteOutput();
           }
           // Rebuild only while THIS generation still owns the map slot, by
           // SESSION identity rather than by comparing `screen` against the
@@ -519,6 +536,7 @@ export class TerminalManager {
           // terminal is dead, and nothing later corrects it.
           const current = this.sessions.get(terminalId);
           if (current !== undefined && current !== session) return;
+          startupCheck?.dispose();
           this.submitGate.reset(terminalId);
           // Forgotten while still live: the owner row is already gone, so the
           // exit frame would be stamped with main's checkout and the
