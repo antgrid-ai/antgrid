@@ -1799,6 +1799,13 @@ const SessionEntrySchema = z.object({
   // A current bridge derives this from the registry adapter. False by default
   // keeps the menu hidden against an older bridge that cannot parse session:fork.
   forkSupported: z.boolean().default(false),
+  // This bridge accepts `targetTool` on session:fork for this session. An older
+  // bridge's schema strips the key and would fork into the same agent, so a
+  // client must not send it unless this is true.
+  handoffSupported: z.boolean().default(false),
+  // The resolved registry key. `tool` is set only when it overrode the project's
+  // agent, so a client cannot otherwise tell a same-agent pick from a cross-agent one.
+  agentKey: z.string().optional(),
   // The session this one was forked from. Provenance rather than a link: the
   // source may be renamed, archived or deleted, and no surface resolves it
   // back — it is what survives the derived name once either side is renamed.
@@ -1901,11 +1908,14 @@ const SessionCreateMessage = BaseMessage.extend({
 // A fork names only an existing bridge-owned session and its workspace policy.
 // In particular it never accepts an agent-native id, transcript, path, command
 // or argv from a client: all of those are local authority held by the bridge.
+// A registry agent key is not local authority, unlike an id, path or argv.
 const SessionForkMessage = BaseMessage.extend({
   type: z.literal("session:fork"),
   requestId: z.string(),
   sourceSessionId: z.string(),
   workspace: z.enum(["copy", "current"]),
+  // Absent means the source's own agent.
+  targetTool: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
 });
 
 const SessionStartMessage = BaseMessage.extend({

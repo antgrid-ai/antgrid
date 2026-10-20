@@ -896,6 +896,7 @@ export class SessionManager {
         // that cannot resolve the checkout's agent spec is a menu item that can
         // only fail.
         forkSupported: false,
+        handoffSupported: false,
         sharedWorkspace: false,
         workspaceMemberCount: 1,
         // Optimistic, like `running: false` above: the peek has no live core,
@@ -1168,10 +1169,10 @@ export class SessionManager {
   }
 
   /** Create a fresh registry-agent conversation from bridge-owned context. */
-  async fork(sourceSessionId: string, workspace: ForkWorkspace): Promise<SessionEntry> {
+  async fork(sourceSessionId: string, workspace: ForkWorkspace, targetTool?: string): Promise<SessionEntry> {
     const staged: { id?: string } = {};
     try {
-      return await this.forkCore(sourceSessionId, workspace, staged);
+      return await this.forkCore(sourceSessionId, workspace, staged, targetTool);
     } catch (error) {
       // A fork that refuses must leave nothing behind, and the staging dir is
       // the one durable thing it may already have written.
@@ -1182,7 +1183,7 @@ export class SessionManager {
     }
   }
 
-  private async forkCore(sourceSessionId: string, workspace: ForkWorkspace, staged: { id?: string }): Promise<SessionEntry> {
+  private async forkCore(sourceSessionId: string, workspace: ForkWorkspace, staged: { id?: string }, targetTool?: string): Promise<SessionEntry> {
     const source = this.entries.get(sourceSessionId);
     if (!source) throw new Error(`session not found: ${sourceSessionId}`);
     if (source.command) throw new Error("Custom-command sessions cannot be forked.");
@@ -1194,11 +1195,25 @@ export class SessionManager {
     const tool = source.tool ?? sourceAgentSpec.name;
     const adapter = (this.opts.agentRuntime ?? agentRuntime).get(tool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
-    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
+    const runtime = this.opts.agentRuntime ?? agentRuntime;
+    const target = targetTool ?? tool;
+    // Before any staging, so an unknown key leaves nothing durable.
+    if (!runtime.get(target)) throw new Error(`Antgrid does not know the agent ${target}.`);
+    // A native fork resumes the source agent's own store, which no other agent can read.
+    const nativeSource = target === tool && source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
       && (workspace === "current" || !adapter.fork.nativeForkKeepsWorkspace)
       ? capturedSourceId : undefined;
+    // A chat conversation cannot continue in an agent with no chat surface.
+    const mode = source.mode === "chat" && runtime.isChatCapable(target) ? "chat" : "terminal";
+    let approvalPolicy = source.approvalPolicy;
+    try {
+      runtime.resolveApprovalPolicy(target, mode, approvalPolicy);
+    } catch {
+      // The target lacks the source's policy; its default is never looser.
+      approvalPolicy = "default";
+    }
     // Never inherit raw command/args. A fork launches the registry default.
-    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy: source.approvalPolicy });
+    const entry = this.buildEntry(undefined, { tool: target, mode, approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
     // the user reads that. Assigned here instead of passed to buildEntry so
@@ -1237,7 +1252,7 @@ export class SessionManager {
         // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
         // mostly CSI/OSC redraw that would read as keys once it is a prompt.
         scrollback: scrollback ? stripAnsi(scrollback) : undefined,
-        targetTool: tool,
+        targetTool: target,
         inheritedTask,
       });
       entry.forkHandoff = { state: "staged", sourceTool: tool };
@@ -1267,7 +1282,7 @@ export class SessionManager {
 
     return this.createWorktree(
       undefined,
-      { tool, mode: source.mode, approvalPolicy: source.approvalPolicy, isolation: "worktree" },
+      { tool: target, mode, approvalPolicy, isolation: "worktree" },
       entry,
       // A thunk, not a value: an argument expression is evaluated before the
       // call, so resolving HEAD eagerly here would answer "no committed HEAD"
@@ -3230,6 +3245,7 @@ export class SessionManager {
   // withholding it leaves a session started on another device rendering empty.
   private toWire(e: PersistedEntry): SessionEntry {
     const memberCount = this.countMembersForCheckout(e.checkoutId);
+    const forkSupported = !e.command && !!(this.opts.agentRuntime ?? agentRuntime).get(e.tool ?? this.agentSpec.name);
     return {
       id: e.id,
       name: e.name,
@@ -3240,7 +3256,9 @@ export class SessionManager {
       deleting: this.deleting.has(e.id),
       tool: e.tool,
       command: e.command,
-      forkSupported: !e.command && !!(this.opts.agentRuntime ?? agentRuntime).get(e.tool ?? this.agentSpec.name),
+      forkSupported,
+      handoffSupported: forkSupported,
+      ...(forkSupported ? { agentKey: e.tool ?? this.agentSpec.name } : {}),
       forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,

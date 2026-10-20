@@ -19,10 +19,12 @@ import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
+import '../navigation/notification_route.dart' show splitRegistrationId;
 import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/chat_composer_drafts.dart';
+import '../providers/new_session_picker.dart' show handoffTargetsFor;
 import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
@@ -60,6 +62,11 @@ const double _dotOpticalYBias = 0.45;
 const String _startNoAnswerMessage =
     "The agent didn't answer. If the session doesn't come up in a moment, try "
     'again.';
+
+/// Shown when a `session:fork` gets no reply: the bridge may still be staging
+/// the conversation, so the fork may yet appear.
+const String _forkNoAnswerMessage =
+    'The fork may still be in progress. Check the session list.';
 
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
 /// session: if its parent project is not currently active, switches projects
@@ -814,18 +821,40 @@ class _SessionMenu extends ConsumerWidget {
         case _SessionAction.stop:
           await svc.stopSession(session.id);
         case _SessionAction.fork:
-          final workspace = await promptSessionFork(
+          // Offered only against a bridge that said it honours `targetTool`:
+          // an older one drops the key and would fork into the same agent
+          // while the dialog promised another.
+          final sourceTool = session.handoffSupported ? session.agentKey : null;
+          final targets = sourceTool == null
+              ? const <({String tool, String label})>[]
+              : await handoffTargetsFor(
+                  ref,
+                  splitRegistrationId(entryId),
+                  sourceTool: sourceTool,
+                );
+          if (!anchor.mounted) return;
+          final choice = await promptSessionFork(
             anchor,
             isolatedSource: sessionIsIsolated(session),
+            sourceTool: sourceTool,
+            targets: targets,
           );
-          if (workspace == null || !anchor.mounted) return;
+          if (choice == null || !anchor.mounted) return;
+          final workspace = choice.workspace;
+          final targetTool = choice.targetTool == sourceTool
+              ? null
+              : choice.targetTool;
           // Caught per-branch, per the contract above: every fork refusal the
           // bridge documents — no captured transcript yet, a conversation past
           // the handoff cap, a custom-command session, a missing checkout —
           // arrives as a typed exception carrying the bridge's own sentence,
           // and without this the menu item just appears to do nothing.
           try {
-            final fork = await svc.fork(session.id, workspace: workspace);
+            final fork = await svc.fork(
+              session.id,
+              workspace: workspace,
+              targetTool: targetTool,
+            );
             // An `ok` carrying no session: there is nothing to start and
             // nothing to land in, so say so rather than returning as though the
             // fork had happened. The same answer the New Session canvas treats
@@ -865,6 +894,14 @@ class _SessionMenu extends ConsumerWidget {
               toaster,
               sessionForkRefusalCopy(error.errorCode, error.message),
             );
+          } on TimeoutException {
+            // Not a failure: staging a long conversation can outlast even the
+            // extended wait, and the fork may still land. Never retried here,
+            // since a second request would duplicate a large fork.
+            reportSessionNotice(toaster, _forkNoAnswerMessage);
+            detached('SessionRow', 'refresh after fork timeout', () async {
+              await svc.requestList();
+            });
           }
         case _SessionAction.rename:
           final name = await promptSessionRename(anchor, session.name);

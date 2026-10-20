@@ -3,12 +3,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/widgets/session_fork_dialog.dart';
 
-String? _answer;
+SessionForkChoice? _answer;
 bool _answered = false;
+
+const _targets = [
+  (tool: 'codex', label: 'Codex'),
+  (tool: 'claude-code', label: 'Claude Code'),
+];
 
 /// Opens the dialog from a button, the way the kebab menu does, and records
 /// what it answered into [_answer] / [_answered].
-Future<void> _open(WidgetTester tester, {required bool isolatedSource}) async {
+Future<void> _open(
+  WidgetTester tester, {
+  required bool isolatedSource,
+  String? sourceTool,
+  List<SessionForkTarget> targets = const [],
+}) async {
   _answer = null;
   _answered = false;
   await tester.pumpWidget(
@@ -23,6 +33,8 @@ Future<void> _open(WidgetTester tester, {required bool isolatedSource}) async {
               _answer = await promptSessionFork(
                 context,
                 isolatedSource: isolatedSource,
+                sourceTool: sourceTool,
+                targets: targets,
               );
               _answered = true;
             },
@@ -33,6 +45,13 @@ Future<void> _open(WidgetTester tester, {required bool isolatedSource}) async {
     ),
   );
   await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _pickClaude(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('fork-agent-selector')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Claude Code'));
   await tester.pumpAndSettle();
 }
 
@@ -48,7 +67,7 @@ void main() {
     expect(find.text('THIS WORKSPACE'), findsOneWidget);
   });
 
-  testWidgets('the default fork takes a workspace of its own', (tester) async {
+  testWidgets('default copy for the same agent', (tester) async {
     await _open(tester, isolatedSource: true);
     // The uncommitted-changes consequence is the one thing a user cannot
     // recover by looking, so the default arm has to say it outright.
@@ -58,7 +77,8 @@ void main() {
     );
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
-    expect(_answer, forkWorkspaceCopy);
+    expect(_answer?.workspace, forkWorkspaceCopy);
+    expect(_answer?.targetTool, isNull);
   });
 
   testWidgets('picking this workspace names the concurrency it buys', (
@@ -73,7 +93,7 @@ void main() {
     );
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
-    expect(_answer, forkWorkspaceCurrent);
+    expect(_answer?.workspace, forkWorkspaceCurrent);
   });
 
   // "This workspace" means something different for a session on the main tree:
@@ -103,5 +123,76 @@ void main() {
     await tester.pumpAndSettle();
     expect(_answered, isTrue);
     expect(_answer, isNull);
+  });
+
+  testWidgets('selecting another agent switches the default to This workspace', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      isolatedSource: true,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
+    await _pickClaude(tester);
+    expect(
+      find.textContaining('continues in this workspace with your uncommitted'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(_answer?.workspace, forkWorkspaceCurrent);
+    expect(_answer?.targetTool, 'claude-code');
+  });
+
+  testWidgets('a touched workspace is not overridden by an agent change', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      isolatedSource: true,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
+    await tester.tap(find.text('THIS WORKSPACE'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('NEW WORKSPACE'));
+    await tester.pumpAndSettle();
+    await _pickClaude(tester);
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(_answer?.workspace, forkWorkspaceCopy);
+    expect(_answer?.targetTool, 'claude-code');
+  });
+
+  testWidgets('no agent row when targets is empty', (tester) async {
+    await _open(tester, isolatedSource: true, sourceTool: 'codex');
+    expect(find.byKey(const Key('fork-agent-selector')), findsNothing);
+  });
+
+  testWidgets('no agent row when sourceTool is null', (tester) async {
+    await _open(tester, isolatedSource: true, targets: _targets);
+    expect(find.byKey(const Key('fork-agent-selector')), findsNothing);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    expect(_answer?.targetTool, isNull);
+  });
+
+  testWidgets('cross-agent copy wording warns uncommitted changes stay behind', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      isolatedSource: true,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
+    await _pickClaude(tester);
+    await tester.tap(find.text('NEW WORKSPACE'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('uncommitted changes stay behind'),
+      findsOneWidget,
+    );
   });
 }
