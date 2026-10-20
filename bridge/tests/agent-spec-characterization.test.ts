@@ -83,8 +83,8 @@ describe("resume argv", () => {
     "cursor-agent": ["--resume", "ID"],
     // Copilot's optional-value --resume drops a space-separated value.
     "github-copilot": ["--resume=ID"],
-    kilo: [],
-    kimi: [],
+    kilo: ["--session", "ID"],
+    kimi: ["--session", "ID"],
     "mistral-vibe": [],
   };
 
@@ -288,7 +288,7 @@ describe("initial prompt argv", () => {
     opencode: ["--prompt", "p"],
     "cursor-agent": ["--", "p"],
     "github-copilot": [],
-    kilo: [],
+    kilo: ["--prompt", "p"],
     kimi: [],
     "mistral-vibe": [],
   };
@@ -470,18 +470,22 @@ describe("launch augmentation", () => {
     expect(a.notificationsInjected).toBeUndefined();
   });
 
-  test("kilo materializes only its MCP entry", () => {
+  test("kilo materializes its identity plugin and MCP entry", () => {
     const a = augment("kilo", tmp("ab-spec-"), tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
-    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG_CONTENT"]);
+    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT"]);
     expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
   });
 
-  for (const key of ["kimi", "mistral-vibe"] as const) {
+  for (const key of ["mistral-vibe"] as const) {
     test(`${key} has no launch injection`, () => {
       expect(augment(key, tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
     });
   }
+
+  test("Kimi does not install global hooks from a test launch", () => {
+    expect(augment("kimi", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
+  });
 
   test("an unregistered tool has no launch injection", () => {
     expect(augment("some-future-agent", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
@@ -613,7 +617,7 @@ describe("materialized files", () => {
     );
   });
 
-  for (const key of ["codex", "kilo", "kimi", "mistral-vibe"] as const) {
+  for (const key of ["codex", "kimi", "mistral-vibe"] as const) {
     test(`${key} materializes nothing`, () => {
       const abDir = tmp("ab-spec-");
       augmentAgentLaunch(key, { abDir, cursorDir: tmp("ab-cursor-"), self: BRIDGE_SELF });
@@ -670,7 +674,7 @@ const HOOK_NAME: PerAgent<string | null> = {
   "cursor-agent": "cursor",
   "github-copilot": "github-copilot",
   kilo: null,
-  kimi: null,
+  kimi: "kimi",
   "mistral-vibe": null,
 };
 

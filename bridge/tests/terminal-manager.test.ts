@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { TerminalManager } from "../src/terminal-manager";
 import { TerminalSession } from "../src/terminal-session";
 import type { TerminalFrameSource } from "../src/terminal-frames/source";
@@ -62,6 +62,26 @@ describe("TerminalManager", () => {
     expect(manager.runId("t1")).not.toBe(firstRun);
     expect(manager.runId("nope")).toBeUndefined();
     manager.killAll();
+  });
+
+  test("a launch that fails leaves no session behind, so the slot can start again", () => {
+    const runs: string[] = [];
+    manager = new TerminalManager((msg) => messages.push(msg), {
+      onRunStarted: (_id, run) => { runs.push(`started ${run}`); },
+      onRunEnded: (_id, run) => { runs.push(`ended ${run}`); },
+    }, connState);
+    const failing = spyOn(TerminalSession.prototype, "spawn").mockImplementation(() => { throw new Error("PTY spawn failed"); });
+    try {
+      expect(() => manager.spawn({ terminalId: "t1" })).toThrow("PTY spawn failed");
+    } finally {
+      failing.mockRestore();
+    }
+    expect(manager.has("t1")).toBe(false);
+    expect(manager.runId("t1")).toBeUndefined();
+    expect(runs).toHaveLength(2);
+    expect(runs[1]).toBe(runs[0]!.replace("started", "ended"));
+    manager.spawn({ terminalId: "t1" });
+    expect(manager.has("t1")).toBe(true);
   });
 
   test("parsed bells are run-scoped and throttled independently of remote viewer suppression", async () => {

@@ -17,6 +17,7 @@
     "./fork-handoff": "./src/agents/fork-handoff.ts",
     "./hook-posts": "./src/agents/hook-posts.ts",
     "./launch-inject": "./src/agents/launch-inject.ts",
+    "./windows-argv": "./src/agents/windows-argv.ts",
     "./launch-path": "./src/agents/launch-path.ts",
     "./terminal-platform": "./src/agents/terminal-platform.ts",
     "./title-attempts": "./src/agents/title-attempts.ts",

@@ -1,4 +1,4 @@
-import { resolveTerminalInvocation } from "./terminal-invocation";
+import { resolveTerminalInvocation, type TerminalInvocationHost } from "./terminal-invocation";
 import { needsShellForAgentBinary, prepareAgentBinary, stripParentClaudeSession } from "antgrid-agents/terminal-platform";
 import { agentRuntime } from "./agent-host";
 import { spawn as ptySpawn } from "bun-pty";
@@ -455,14 +455,33 @@ export function stripInheritedCertOverrides(
  * order and the `isFile()` guard stay consistent with tool detection. Returns
  * null if the command isn't found on PATH.
  */
-function resolveWinExecutable(command: string): { path: string; ext: string } | null {
-  const pathExt = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+function resolveWinExecutable(
+  command: string,
+  env: Record<string, string | undefined>,
+): { path: string; ext: string } | null {
+  const pathExt = (envValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD")
     .split(";")
     .map((e) => e.trim())
     .filter(Boolean);
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const dirs = (envValue(env, "PATH") ?? "").split(delimiter).filter(Boolean);
   const found = findOnPath(command, dirs, pathExt);
   return found ? { path: found, ext: extname(found).toLowerCase() } : null;
+}
+
+/** Windows environment names are case-insensitive, and a spread of `process.env` keeps the original spelling (`Path`). */
+function envValue(env: Record<string, string | undefined>, name: string): string | undefined {
+  return env[name] ?? Object.entries(env).find(([k]) => k.toUpperCase() === name)?.[1];
+}
+
+/** The host `resolveTerminalInvocation` and `windowsShellLimit` must both be given, so a pre-spawn check sees what spawn will. */
+export function terminalInvocationHost(env: Record<string, string | undefined>): TerminalInvocationHost {
+  return {
+    platform: process.platform,
+    shell: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : process.env.SHELL ?? "/bin/sh",
+    env,
+    resolveWindowsExecutable: (command) => resolveWinExecutable(command, env),
+    requiresWindowsShell: (command) => needsShellForAgentBinary(command, agentRuntime.agents),
+  };
 }
 
 export class TerminalSession {
@@ -631,25 +650,6 @@ export class TerminalSession {
   }
 
   spawn(): void {
-    let cmd: string;
-    let args: string[];
-    if (this.command) {
-      const invocation = resolveTerminalInvocation({
-        command: this.command, args: this.args, invocationKind: this.invocationKind,
-      }, {
-        platform: process.platform,
-        shell: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : process.env.SHELL ?? "/bin/sh",
-        resolveWindowsExecutable: resolveWinExecutable,
-        requiresWindowsShell: (command) => needsShellForAgentBinary(command, agentRuntime.agents),
-      });
-      cmd = invocation.command;
-      args = invocation.args;
-    } else {
-      cmd = this.shell;
-      args = [];
-    }
-    log.info(`Spawning terminal "${this.terminalId}": ${cmd} ${args.join(" ")} (${this._cols}x${this._rows})`);
-
     // Announce a terminal identity that agents recognize as OSC-9-capable so
     // they emit rich desktop notifications (with a message) instead of bare
     // BEL. Ghostty is fitting — the app renderer is ghostty-VTE. See design
@@ -668,13 +668,22 @@ export class TerminalSession {
       ...this.extraEnv,
     } as Record<string, string>);
 
+    const invocation: ReturnType<typeof resolveTerminalInvocation> = this.command
+      ? resolveTerminalInvocation(
+        { command: this.command, args: this.args, invocationKind: this.invocationKind },
+        terminalInvocationHost(env),
+      )
+      : { command: this.shell, args: [] };
+    const shown = invocation.cmdLine ?? invocation.args.join(" ");
+    log.info(`Spawning terminal "${this.terminalId}": ${invocation.command} ${shown} (${this._cols}x${this._rows})`);
+
     prepareAgentBinary(this.command ?? "", env, agentRuntime.agents);
 
-    this.pty = ptySpawn(cmd, args, {
+    this.pty = ptySpawn(invocation.command, invocation.args, {
       cols: this._cols,
       rows: this._rows,
       cwd: this.cwd ?? process.cwd(),
-      env,
+      env: { ...env, ...invocation.env },
       name: "xterm-256color",
     });
 
@@ -691,7 +700,7 @@ export class TerminalSession {
     this.onMessage(
       createMessage("terminal:started", {
         terminalId: this.terminalId,
-        shell: cmd,
+        shell: invocation.command,
         cols: this._cols,
         ...(this.type ? { terminalType: this.type } : {}),
         rows: this._rows,

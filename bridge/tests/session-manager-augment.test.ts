@@ -52,6 +52,15 @@ test("codex session with per-session args folds the quoted notify token into the
   const s = sm.create(undefined, { tool: "codex", args: "exec demo" });
   sm.start(s.id);
   const spawned = tm.spawns[0];
+  if (process.platform === "win32") {
+    // Windows execs with the raw args as argv, so each token arrives unquoted.
+    expect(spawned.command).toBe("codex");
+    expect(spawned.args.some((a: string) => a.startsWith("notify="))).toBe(true);
+    expect(spawned.args.some((a: string) => a.startsWith("hooks.Stop="))).toBe(true);
+    expect(spawned.args.some((a: string) => a.includes("trusted_hash="))).toBe(true);
+    expect(spawned.args.slice(-2)).toEqual(["exec", "demo"]);
+    return;
+  }
   // args were folded into `command`, so the direct argv is empty.
   expect(spawned.args).toEqual([]);
   expect(spawned.command.startsWith("codex ")).toBe(true);

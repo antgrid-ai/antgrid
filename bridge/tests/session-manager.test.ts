@@ -16,11 +16,11 @@ function tempDir() {
 // the always-stamped ANTGRID_TERMINAL_ID pass unnoticed.
 function makeFakeTerm() {
   const spawned = new Set<string>();
-  const spawns: Array<{ terminalId?: string; command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }> = [];
+  const spawns: Array<{ terminalId?: string; command?: string; args?: string[]; invocationKind?: string; cwd?: string; env?: Record<string, string> }> = [];
   return {
     spawned,
     spawns,
-    spawn: (cfg: { terminalId?: string; command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }) => {
+    spawn: (cfg: { terminalId?: string; command?: string; args?: string[]; invocationKind?: string; cwd?: string; env?: Record<string, string> }) => {
       spawned.add(cfg.terminalId!);
       spawns.push({ ...cfg, env: buildSpawnEnv(cfg.terminalId!, null, cfg.env ?? {}) });
       return cfg.terminalId!;
@@ -661,6 +661,13 @@ describe("SessionManager start/stop", () => {
 
       sm.start(s.id);
 
+      if (process.platform === "win32") {
+        const args = term.spawns[0].args!;
+        expect(term.spawns[0].command).toBe("copilot");
+        expect(args.indexOf("--plugin-dir")).toBeGreaterThan(-1);
+        expect(args.slice(-3)).toEqual(["--resume=cop-1", "--", "--raw-user-arg"]);
+        return;
+      }
       const command = term.spawns[0].command!;
       expect(term.spawns[0].args).toEqual([]);
       expect(command.indexOf("--plugin-dir")).toBeGreaterThan(-1);
@@ -760,6 +767,14 @@ describe("SessionManager start/stop", () => {
     });
     const s = sm.create("a", { tool: "claude-code", args: "--model opus" });
     sm.start(s.id);
+    if (process.platform === "win32") {
+      // Windows execs with the raw args as argv behind the augmenter's flags.
+      expect(term.spawns[0].command).toBe("claude");
+      expect(term.spawns[0].invocationKind).toBe("exec");
+      expect(term.spawns[0].args![0]).toBe("--plugin-dir");
+      expect(term.spawns[0].args!.slice(-2)).toEqual(["--model", "opus"]);
+      return;
+    }
     // The augmenter's --plugin-dir folds into baseArgs ahead of the per-session
     // args, so the folded command line is:
     //   claude --plugin-dir "<path>" --model opus
@@ -826,6 +841,12 @@ describe("SessionManager start/stop", () => {
     });
     const s = sm.create("a", { args: "--verbose" }); // fallback command + per-session args
     sm.start(s.id);
+    if (process.platform === "win32") {
+      expect(term.spawns[0].command).toBe("claude");
+      expect(term.spawns[0].args!.slice(0, 2)).toEqual(["--model", "opus"]);
+      expect(term.spawns[0].args!.at(-1)).toBe("--verbose");
+      return;
+    }
     expect(term.spawns[0].command).toBe("claude --model opus --verbose");
     expect(term.spawns[0].args).toEqual([]);
   });
@@ -1471,15 +1492,13 @@ describe("SessionManager initial prompt", () => {
     const s = sm.create(undefined, { tool: "claude-code", args: "--verbose" });
     sm.start(s.id, "fix the auth bug");
     const spawn = term.spawns[0];
-    // The user's raw args always fold into the shell command line (shell
-    // semantics preserved). The prompt is a single opaque argument:
+    // The prompt is a single opaque argument on every platform.
     if (process.platform === "win32") {
-      // cmd.exe can't carry it in the /c line without risking mangling, so it
-      // rides as a DISCRETE argv element that terminal-session appends after
-      // the folded line — never folded into `command`.
-      expect(spawn.command!).toContain("--verbose");
-      expect(spawn.command!).not.toContain("fix the auth bug");
-      expect(spawn.args![spawn.args!.length - 1]).toBe("fix the auth bug");
+      // No cmd.exe: the raw args are split into argv and the agent is exec'd,
+      // so the prompt is the discrete last element behind the `--` guard.
+      expect(spawn.command).toBe("claude");
+      expect(spawn.invocationKind).toBe("exec");
+      expect(spawn.args!.slice(-3)).toEqual(["--verbose", "--", "fix the auth bug"]);
     } else {
       // POSIX `sh -c <line>` ignores trailing argv, so the prompt folds into the
       // line, shell-quoted as one unit (single-quoting preserves any newlines).
@@ -1490,9 +1509,9 @@ describe("SessionManager initial prompt", () => {
   });
 
   it("terminal + per-session args: a MULTI-LINE prompt reaches the child intact", () => {
-    // Shift+Enter in the composer inserts a literal newline. On win32 a raw
-    // newline folded into a `cmd.exe /c` line terminates the command mid-launch,
-    // truncating/garbling it — so the prompt must not be folded there.
+    // Shift+Enter in the composer inserts a literal newline. cmd.exe ends its
+    // command at a newline even when the prompt is a discrete argument, so on
+    // win32 the launch must not pass through cmd.exe at all.
     const term = makeFakeTerm();
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
@@ -1504,8 +1523,7 @@ describe("SessionManager initial prompt", () => {
     sm.start(s.id, prompt);
     const spawn = term.spawns[0];
     if (process.platform === "win32") {
-      // Discrete argv element, verbatim — cmd.exe never sees the newline in its
-      // command line.
+      expect(spawn.invocationKind).toBe("exec");
       expect(spawn.command!).not.toContain("line one");
       expect(spawn.args![spawn.args!.length - 1]).toBe(prompt);
     } else {
