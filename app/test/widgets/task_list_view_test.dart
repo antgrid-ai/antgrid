@@ -450,9 +450,11 @@ void main() {
     final container = _container(
       client: _serving(
         tasks: [
+          // `blocked`, because that is what the server turns a task into the
+          // moment its run reports attention.
           _task(
             number: 5,
-            status: 'in_progress',
+            status: 'blocked',
             assignee: const {'kind': 'member', 'userId': 'u-1'},
           ),
         ],
@@ -472,6 +474,34 @@ void main() {
     expect(find.byType(TaskRunMark), findsOneWidget);
     final mark = tester.widget<TaskRunMark>(find.byType(TaskRunMark));
     expect(mark.run.status, AgentWorkStatus.attention);
+  });
+
+  test('Running keeps a task whose agent is waiting on a person', () async {
+    final container = _container(
+      client: _serving(
+        tasks: [
+          _task(number: 5, title: 'Waiting on me', status: 'blocked'),
+          _task(number: 6, title: 'Working away', status: 'in_progress'),
+          _task(number: 7, title: 'No run at all', status: 'blocked'),
+        ],
+      ),
+      overrides: [
+        taskRunPresenceProvider.overrideWithValue(const {
+          5: TaskRunPresence(status: AgentWorkStatus.attention),
+          6: TaskRunPresence(status: AgentWorkStatus.working),
+        }),
+      ],
+    );
+    // After the fetch: the filter is keyed to the signed-in user and resets
+    // once that id resolves.
+    await container.read(taskListProvider.future);
+    container.read(taskFilterProvider.notifier).setScope(TaskScope.running);
+
+    final visible = container.read(visibleTasksProvider).requireValue;
+    expect(
+      visible.map((t) => t.title),
+      unorderedEquals(['Waiting on me', 'Working away']),
+    );
   });
 
   testWidgets('the attention mark is warning-toned and spells out the wait', (

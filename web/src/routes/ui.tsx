@@ -127,7 +127,11 @@ import {
   type InviteNotice,
 } from "../ui/invite.js";
 import { TeamPage } from "../ui/team.js";
-import { createGithubAppClient, githubAppConfig } from "../integrations/github-app.js";
+import {
+  createGithubAppClient,
+  githubAppConfig,
+  type GithubAppClient,
+} from "../integrations/github-app.js";
 import {
   completeGithubInstall,
   installDirectory,
@@ -216,6 +220,7 @@ export function uiRoutes(deps: {
   clientIp: ClientIpResolver;
   sendEmail: SendEmail;
   apple?: AppleTokenClient;
+  githubApp?: GithubAppClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
   const rateDatabase = deps.db;
@@ -2273,6 +2278,7 @@ export function uiRoutes(deps: {
       userId,
       headers: c.req.raw.headers,
       apple: deps.apple,
+      githubApp: deps.githubApp,
     });
     // Both blocked results land back on /account, which renders the reason.
     if (result === "blocked_subscription" || result === "blocked_team") {

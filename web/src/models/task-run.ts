@@ -144,7 +144,7 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
           sessionId: args.sessionId,
         },
       },
-      select: { id: true, taskId: true, endedAt: true },
+      select: { id: true, taskId: true, endedAt: true, status: true },
     });
     // A session belongs to one task for its whole life. Silently re-pointing it
     // would move a finished run's branch and PR onto a task that never ran it.
@@ -197,6 +197,7 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
       taskId: task.id,
       observed: task.status,
       runStatus: args.status,
+      previousRunStatus: existing ? parseRunStatus(existing.status) : null,
     });
 
     const updated = await getTaskByNumber(tx, args.accountId, args.number);
@@ -225,9 +226,27 @@ export async function recordTaskRun(db: DB, args: RecordTaskRunArgs): Promise<Ta
  * `blocked` all project onto GitHub `open`, so without these writers the
  * distinction between them is hand-maintained — and a hand-maintained status
  * field is the most reliably abandoned field in every tracker ever shipped.
+ *
+ * `blocked` is lifted only when THIS run's own previous report was `attention`:
+ * that is the block this function put there, and the agent moving on means a
+ * person answered it. A `blocked` set while the run was working is a human call
+ * about the task, which no run report may undo. `done` lifts it too — an
+ * answered prompt can finish the turn before any `working` report lands — and
+ * only as far as `in_progress`, never to a closed state.
  */
-export function autoTaskStatusFor(runStatus: TaskRunStatus, observed: string): TaskStatus | null {
+export function autoTaskStatusFor(
+  runStatus: TaskRunStatus,
+  observed: string,
+  previousRunStatus: TaskRunStatus | null = null
+): TaskStatus | null {
   if (runStatus === "working" && observed === TaskStatusSchema.enum.open) {
+    return TaskStatusSchema.enum.in_progress;
+  }
+  if (
+    (runStatus === "working" || runStatus === "done") &&
+    observed === TaskStatusSchema.enum.blocked &&
+    previousRunStatus === "attention"
+  ) {
     return TaskStatusSchema.enum.in_progress;
   }
   if (
@@ -254,9 +273,14 @@ export function autoTaskStatusFor(runStatus: TaskRunStatus, observed: string): T
  */
 export async function applyRunStatusToTask(
   tx: Tx,
-  args: { taskId: string; observed: string; runStatus: TaskRunStatus }
+  args: {
+    taskId: string;
+    observed: string;
+    runStatus: TaskRunStatus;
+    previousRunStatus?: TaskRunStatus | null;
+  }
 ): Promise<boolean> {
-  const next = autoTaskStatusFor(args.runStatus, args.observed);
+  const next = autoTaskStatusFor(args.runStatus, args.observed, args.previousRunStatus ?? null);
   if (next === null) return false;
   const result = await tx.task.updateMany({
     where: { id: args.taskId, status: args.observed, deletedAt: null },
@@ -278,8 +302,13 @@ export async function listTaskRuns(
   return rows.map(toRecord);
 }
 
+function parseRunStatus(raw: string): TaskRunStatus | null {
+  const status = TaskRunStatusSchema.safeParse(raw);
+  return status.success ? status.data : null;
+}
+
 function toRecord(row: TaskRunRow): TaskRunRecord {
-  const status = TaskRunStatusSchema.safeParse(row.status);
+  const status = parseRunStatus(row.status);
   return {
     deviceId: row.deviceId,
     localProjectId: row.localProjectId,
@@ -288,7 +317,7 @@ function toRecord(row: TaskRunRow): TaskRunRecord {
     tool: row.tool,
     // A status outside the vocabulary can only come from a hand-written UPDATE.
     // `done` is the reading that claims least about a run nobody can interpret.
-    status: status.success ? status.data : TaskRunStatusSchema.enum.done,
+    status: status ?? TaskRunStatusSchema.enum.done,
     branch: row.branch,
     prUrl: row.prUrl,
     startedAt: row.startedAt,

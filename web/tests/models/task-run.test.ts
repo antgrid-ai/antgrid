@@ -96,6 +96,26 @@ describe("autoTaskStatusFor", () => {
   test("an unrecognized observed status writes nothing", () => {
     expect(autoTaskStatusFor("working", "archived")).toBeNull();
   });
+
+  const afterAttention: [TaskRunStatus, TaskStatus, TaskStatus | null][] = [
+    ["working", "blocked", "in_progress"],
+    ["done", "blocked", "in_progress"],
+    ["error", "blocked", null],
+    ["attention", "blocked", null],
+    ["working", "done", null],
+    ["done", "cancelled", null],
+  ];
+
+  for (const [runStatus, observed, expected] of afterAttention) {
+    test(`${runStatus} after attention, observed at ${observed} -> ${expected ?? "no write"}`, () => {
+      expect(autoTaskStatusFor(runStatus, observed, "attention")).toBe(expected);
+    });
+  }
+
+  test("a block the run did not raise is never lifted", () => {
+    expect(autoTaskStatusFor("working", "blocked", "working")).toBeNull();
+    expect(autoTaskStatusFor("done", "blocked", "done")).toBeNull();
+  });
 });
 
 describe("recordTaskRun: the automatic status writes", () => {
@@ -172,6 +192,31 @@ describe("recordTaskRun: the automatic status writes", () => {
 
     const rows = await pg.db.taskRun.findMany({ select: { status: true } });
     expect(rows).toEqual([{ status: "working" }]);
+  });
+
+  test("the agent moving on after attention lifts the block it raised", async () => {
+    const account = await makeAccount();
+    const task = await makeTask(account);
+
+    expect(ok(await report(account, task.number, "attention")).task.status).toBe("blocked");
+    expect(ok(await report(account, task.number, "working")).task.status).toBe("in_progress");
+  });
+
+  test("a human block on a working run survives the next report", async () => {
+    const account = await makeAccount();
+    const task = await makeTask(account);
+    ok(await report(account, task.number, "working"));
+    ok(
+      await updateTask(pg.db, {
+        accountId: account.accountId,
+        number: task.number,
+        patch: { status: "blocked" },
+      })
+    );
+
+    const result = ok(await report(account, task.number, "working"));
+
+    expect(result.task.status).toBe("blocked");
   });
 });
 

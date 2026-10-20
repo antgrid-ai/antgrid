@@ -141,9 +141,12 @@ class TaskFilter {
   Set<TaskStatus> get scopeStatuses => switch (scope) {
     TaskScope.mine => kOpenStatuses,
     // The server has no notion of a live run, so the widest honest query is
-    // "in progress"; [visibleTasksProvider] narrows it to tasks that actually
-    // have a run.
-    TaskScope.running => const {TaskStatus.inProgress},
+    // every status a run can leave a task in; [visibleTasksProvider] narrows it
+    // to tasks that actually have a run. `blocked` is what an agent waiting on
+    // a person turns its task into (`autoTaskStatusFor` in
+    // web/src/models/task-run.ts) — dropping it hides exactly the row this
+    // view exists for.
+    TaskScope.running => const {TaskStatus.inProgress, TaskStatus.blocked},
     TaskScope.unassigned => kOpenStatuses,
     TaskScope.allOpen => kOpenStatuses,
     TaskScope.done => const {TaskStatus.done, TaskStatus.cancelled},

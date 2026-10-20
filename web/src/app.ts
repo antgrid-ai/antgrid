@@ -24,6 +24,11 @@ import { oauthHandoffRoutes } from "./routes/oauth-handoff.js";
 import { oauthStartRoutes } from "./routes/oauth-start.js";
 import { appleRoutes } from "./routes/apple.js";
 import { createAppleTokenClient, type AppleTokenClient } from "./auth/apple-tokens.js";
+import {
+  createGithubAppClient,
+  githubAppConfig,
+  type GithubAppClient,
+} from "./integrations/github-app.js";
 import { eventsRoutes } from "./routes/events.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { uiRoutes } from "./routes/ui.js";
@@ -51,11 +56,20 @@ export type AppDeps = {
   /** Replaces the client built from `env`, so tests need not reach Apple.
    *  An explicit undefined turns Apple's server calls off. */
   appleTokens?: AppleTokenClient;
+  /** Replaces the client built from `env`, same contract as `appleTokens`. */
+  githubApp?: GithubAppClient;
 };
 
 export function buildApp(deps: AppDeps) {
   const appleTokens =
     "appleTokens" in deps ? deps.appleTokens : createAppleTokenClient(deps.env);
+  const githubConfig = githubAppConfig(deps.env);
+  const githubApp =
+    "githubApp" in deps
+      ? deps.githubApp
+      : githubConfig
+        ? createGithubAppClient({ config: githubConfig })
+        : undefined;
   const app = new Hono();
   const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS);
   // Layout renders og:image, which a scraper fetches with no page to resolve a
@@ -156,7 +170,7 @@ export function buildApp(deps: AppDeps) {
   app.route("/", health);
   app.route("/", eventsRoutes({ db: deps.db, clientIp }));
   app.route("/", waitlistRoutes({ db: deps.db, clientIp }));
-  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens }));
+  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens, githubApp }));
   app.route("/", appleRoutes({ db: deps.db, auth: deps.auth, apple: appleTokens }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", projectRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
@@ -197,6 +211,7 @@ export function buildApp(deps: AppDeps) {
     clientIp,
     sendEmail: deps.sendEmail,
     apple: appleTokens,
+    githubApp,
   }));
 
   // Last-resort logger for anything thrown past a route handler — without this,

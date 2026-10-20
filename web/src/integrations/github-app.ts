@@ -279,6 +279,11 @@ export interface GithubAppClient {
   ): Promise<{ state: string; role: string } | null>;
   createInstallationToken(installationId: string): Promise<GithubInstallationToken>;
   listInstallationRepos(installationToken: string): Promise<GithubInstallationRepo[]>;
+  /** Uninstall the App from an installation, signed with the App JWT. Like
+   *  `getInstallation`, this authorizes nothing: call it only for an
+   *  installation the caller's account already owns. A 404 is success — the
+   *  installation is already gone. */
+  deleteInstallation(installationId: string): Promise<void>;
 }
 
 const ExternalIdSchema = z
@@ -537,6 +542,16 @@ export function createGithubAppClient(opts: {
         throw new GithubApiError("malformed", endpoint, res.status, "unreadable token expiry");
       }
       return { token: body.token, expiresAt };
+    },
+
+    async deleteInstallation(installationId: string): Promise<void> {
+      const endpoint = `/app/installations/${installationPathSegment(installationId)}`;
+      const res = await send(endpoint, `${API_BASE}${endpoint}`, {
+        method: "DELETE",
+        headers: apiHeaders(`Bearer ${appJwt()}`),
+      });
+      if (res.ok || res.status === 404) return;
+      throw new GithubApiError(statusFailure(res.status), endpoint, res.status, "failed");
     },
 
     async listInstallationRepos(installationToken: string): Promise<GithubInstallationRepo[]> {

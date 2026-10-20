@@ -4,7 +4,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
-import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember } from "../helpers/fixtures.js";
+import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember, createLinkedTestTask } from "../helpers/fixtures.js";
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../../src/services/account.js";
@@ -521,5 +521,79 @@ describe("webhook after deletion", () => {
     const second = await applySubscriptionEvent(pg.db, cfg, evt, {});
     expect(first.duplicate).toBe(false);
     expect(second.duplicate).toBe(true); // recorded on first → deduped on retry
+  });
+});
+
+describe("deleteUserAccount: tasks and integrations", () => {
+  async function seed(email: string) {
+    const user = await createTestUser(pg.db, email);
+    const account = await ensureProductAccount(pg.db, user.id);
+    await ensureFreeSubscription(pg.db, account.id);
+    const owner = { userId: user.id, accountId: account.id };
+    const { task } = await createLinkedTestTask(pg.db, owner, true, { body: "private notes" });
+    await pg.db.taskComment.create({ data: { taskId: await taskId(task.number, account.id), body: "a comment" } });
+    await pg.db.label.create({ data: { accountId: account.id, name: "bug", color: "d73a4a" } });
+    return { user, account };
+  }
+
+  async function taskId(number: number, accountId: string): Promise<string> {
+    const row = await pg.db.task.findFirstOrThrow({ where: { accountId, number }, select: { id: true } });
+    return row.id;
+  }
+
+  test("deletes the account's tasks, comments, labels and integrations, and uninstalls the App", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { user, account } = await seed("tasks-owner@example.com");
+    const installation = await pg.db.integration.findFirstOrThrow({ where: { accountId: account.id } });
+    const uninstalled: string[] = [];
+
+    const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
+      userId: user.id,
+      headers: new Headers(),
+      githubApp: { deleteInstallation: async (id) => { uninstalled.push(id); } },
+    });
+
+    expect(result).toBe("deleted");
+    expect(uninstalled).toEqual([installation.installationId!]);
+    expect(await pg.db.task.count({ where: { accountId: account.id } })).toBe(0);
+    expect(await pg.db.taskComment.count()).toBe(0);
+    expect(await pg.db.label.count({ where: { accountId: account.id } })).toBe(0);
+    expect(await pg.db.integration.count({ where: { accountId: account.id } })).toBe(0);
+    expect(await pg.db.integrationRepo.count()).toBe(0);
+  });
+
+  test("a failed uninstall does not stop the deletion", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { user, account } = await seed("tasks-uninstall-fails@example.com");
+
+    const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
+      userId: user.id,
+      headers: new Headers(),
+      githubApp: { deleteInstallation: async () => { throw new Error("github is down"); } },
+    });
+
+    expect(result).toBe("deleted");
+    expect(await pg.db.task.count({ where: { accountId: account.id } })).toBe(0);
+    expect(await pg.db.integration.count({ where: { accountId: account.id } })).toBe(0);
+  });
+
+  test("a member deleting themselves leaves the team's tasks alone", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { account: team } = await seed("team-owner@example.com");
+    const member = await createTestUser(pg.db, "team-member@example.com");
+    await ensureProductAccount(pg.db, member.id);
+    await addTestMember(pg.db, team.id, member.id);
+    const uninstalled: string[] = [];
+
+    const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
+      userId: member.id,
+      headers: new Headers(),
+      githubApp: { deleteInstallation: async (id) => { uninstalled.push(id); } },
+    });
+
+    expect(result).toBe("deleted");
+    expect(await pg.db.task.count({ where: { accountId: team.id } })).toBe(1);
+    expect(await pg.db.integration.count({ where: { accountId: team.id } })).toBe(1);
+    expect(uninstalled).toEqual([]);
   });
 });
