@@ -208,6 +208,43 @@ test("stops at the file's start and returns what is there", async () => {
   expect(await readLastClaudeMessages(path, 20)).toEqual(["one", "two", "three"]);
 });
 
+// Claude Code 2.1.300+ records every API request in the session transcript: an
+// `api-request` and `api-request-shape` per call, plus one `api-request-blob`
+// per distinct system prompt, tool list or replayed turn. Blobs carry a
+// `message` with text parts, so a reader that ignores `type` returns harness
+// text as conversation.
+function apiRequestRecords(sessionId: string, n: number): string[] {
+  const hash = (i: number) => i.toString(16).padStart(64, "0");
+  return [
+    JSON.stringify({ type: "api-request-blob", sessionId, hash: hash(n * 10 + 1),
+      message: { role: "system", content: [{ type: "text", text: `harness system prompt ${n}` }] } }),
+    JSON.stringify({ type: "api-request-blob", sessionId, hash: hash(n * 10 + 2),
+      message: { role: "user", content: [{ type: "text", text: `replayed reminder ${n}` }] } }),
+    JSON.stringify({ type: "api-request-blob", sessionId, hash: hash(n * 10 + 3),
+      message: { role: "assistant", content: [{ type: "text", text: `replayed reply ${n}` }] } }),
+    JSON.stringify({ type: "api-request-shape", sessionId, shapeHash: hash(n * 10 + 4),
+      timestamp: "2026-10-01T00:00:00.000Z", version: "2.1.300", shape: {} }),
+    JSON.stringify({ type: "api-request", sessionId, id: `req_${n}`, timestamp: "2026-10-01T00:00:00.000Z",
+      version: "2.1.300", querySource: "repl_main_thread", shapeHash: hash(n * 10 + 4), params: {},
+      keep: 0, tail: [hash(n * 10 + 1), hash(n * 10 + 2)], cacheControl: {}, requestDigest: hash(n) }),
+  ];
+}
+
+test("API request records are not conversation messages", async () => {
+  const sessionId = "0b7c5a2e-4f1d-4c8e-9a6b-3d2f1e0c9b8a";
+  const path = fixture([
+    JSON.stringify({ type: "user", message: { role: "user", content: "fix the parser" } }),
+    ...apiRequestRecords(sessionId, 1),
+    assistant("parser fixed"),
+    JSON.stringify({ type: "user", message: { role: "user", content: "now add a test" } }),
+    ...apiRequestRecords(sessionId, 2),
+    assistant("test added"),
+  ]);
+  expect(await readLastClaudeMessages(path, 20))
+    .toEqual(["fix the parser", "parser fixed", "now add a test", "test added"]);
+  expect(await lastAssistantText(path)).toBe("test added");
+});
+
 test("a window that already holds enough is the only one read", async () => {
   const path = fixture([assistant("a"), assistant("b"), assistant("c")]);
   expect(await readLastClaudeMessages(path, 2)).toEqual(["b", "c"]);

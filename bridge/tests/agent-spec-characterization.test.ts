@@ -1066,7 +1066,7 @@ const CODEX_THREAD = "019f8e9e-acc9-78a2-8f61-803e7bbabac3";
 
 function claudeTranscript(texts: string[]): string {
   const path = join(tmp("ab-spec-cl-"), "t.jsonl");
-  writeFileSync(path, texts.map((t) => JSON.stringify({ message: { content: t } })).join("\n"), "utf8");
+  writeFileSync(path, texts.map((t) => JSON.stringify({ type: "user", message: { content: t } })).join("\n"), "utf8");
   return path;
 }
 
