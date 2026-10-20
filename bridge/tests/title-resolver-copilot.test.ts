@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -71,6 +71,57 @@ describe("resolveCopilotSessionTitle", () => {
       { session_id: "sess-blank", turn_index: 3, user_message: "  real prompt  " },
     ]);
     expect(await resolveCopilotSessionTitle("sess-blank", home)).toEqual({ title: "real prompt", kind: "first-message" });
+  });
+
+  // The shape Copilot 1.0.83-1.0.95 leaves after one prompt: a sessions row,
+  // no turns row (written only at the next prompt or at shutdown), and the
+  // prompt in session-state/<id>/events.jsonl.
+  function seedEvents(home: string, id: string, events: unknown[]) {
+    const dir = join(home, "session-state", id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  }
+  const ID = "0f2b6c1e-4d7a-4c55-9a31-2e8d6b0c7f14";
+  const event = (type: string, data: object) =>
+    ({ type, data, id: crypto.randomUUID(), timestamp: "2026-10-12T09:00:00.000Z", parentId: null });
+
+  test("reads the first prompt from events.jsonl before Copilot writes its turns row", async () => {
+    const home = tmp();
+    seed(home, [{ id: ID, summary: null }]);
+    seedEvents(home, ID, [
+      event("session.start", { sessionId: ID, version: 1, producer: "copilot-agent", copilotVersion: "1.0.95", startTime: "2026-10-12T09:00:00.000Z", context: { cwd: "/work/demo" } }),
+      event("session.model_change", { cause: "initial_resolution", source: "automatic", newModel: "auto" }),
+      event("user.message", { content: "  rename the widget module  ", transformedContent: "<current_datetime>2026-10-12</current_datetime>\n\nrename the widget module", messageId: "m1", delivery: "idle", interactionId: "i1", turnId: "0" }),
+      event("system.message", { role: "system", content: "You are the GitHub Copilot CLI." }),
+      event("assistant.turn_start", { turnId: "0" }),
+      event("user.message", { content: "second prompt", transformedContent: "second prompt", messageId: "m2", delivery: "idle", interactionId: "i2", turnId: "1" }),
+    ]);
+    expect(await resolveCopilotSessionTitle(ID, home)).toEqual({ title: "rename the widget module", kind: "first-message" });
+  });
+
+  test("prefers the turns row over events.jsonl", async () => {
+    const home = tmp();
+    seed(home, [{ id: ID, summary: null }], [{ session_id: ID, turn_index: 0, user_message: "from the store" }]);
+    seedEvents(home, ID, [event("user.message", { content: "from the log", turnId: "0" })]);
+    expect(await resolveCopilotSessionTitle(ID, home)).toEqual({ title: "from the store", kind: "first-message" });
+  });
+
+  test("null when neither the store nor the event log holds a prompt", async () => {
+    const home = tmp();
+    seed(home, [{ id: ID, summary: null }]);
+    expect(await resolveCopilotSessionTitle(ID, home)).toBeNull();
+    seedEvents(home, ID, [event("session.start", { sessionId: ID }), event("user.message", { content: "   " })]);
+    expect(await resolveCopilotSessionTitle(ID, home)).toBeNull();
+  });
+
+  test("never builds an event-log path from a non-uuid session id", async () => {
+    const home = tmp();
+    const id = "../escape";
+    seed(home, [{ id, summary: null }]);
+    // Where session-state/../escape/events.jsonl would resolve to.
+    mkdirSync(join(home, "escape"));
+    writeFileSync(join(home, "escape", "events.jsonl"), JSON.stringify(event("user.message", { content: "outside" })) + "\n");
+    expect(await resolveCopilotSessionTitle(id, home)).toBeNull();
   });
 
   test("returns null for a missing session id", async () => {
