@@ -29,6 +29,10 @@ import * as cursorMcp from "./cursor-agent/mcp";
 import * as copilotHooks from "./github-copilot/hooks";
 import * as copilotMcp from "./github-copilot/mcp";
 import * as opencodeHooks from "./opencode/hooks";
+import * as kiloHooks from "./kilo/hooks";
+import * as kimiHooks from "./kimi/hooks";
+import { kiloFork } from "./kilo/fork";
+import { prepareKimiTerminal } from "./kimi/terminal";
 import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
@@ -479,15 +483,15 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     label: "Kilo",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
-    hookName: null,
+    hookName: "kilo",
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
-    resume: () => [],
-    initialPrompt: () => [],
-    // Kilo documents `--session <id> --fork`, but this integration does not
-    // observe a Kilo-native id. Do not advertise an unreachable native path.
-    fork: terminalForkHandoff("Kilo"),
+    resume: (id) => ["--session", id],
+    initialPrompt: (prompt) => ["--prompt", prompt],
+    fork: kiloFork,
+    augmentsDefaultSpec: true,
+    hooks: kiloHooks,
     mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
@@ -524,13 +528,16 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     label: "Kimi",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
-    hookName: null,
+    hookName: "kimi",
+    hooks: kimiHooks,
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
-    resume: () => [],
+    resume: (id) => ["--session", id],
+    augmentsDefaultSpec: true,
+    prepareTerminal: prepareKimiTerminal,
     initialPrompt: () => [],
-    fork: terminalForkHandoff("Kimi"),
+    fork: { ...terminalForkHandoff("Kimi"), kind: "native-fork", nativeForkKeepsWorkspace: true },
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
   // (DEC 1004-derived), so the default-blur drives it — no injection.
@@ -637,7 +644,7 @@ export function judgeCapable(tool: string): boolean {
  * Excludes both ends of the spectrum. Claude and codex each declare a real
  * turn-start hook, so guessing there could only be wrong. An agent with no
  * turn-end event — opencode and antigravity, whose out-of-band integrations
- * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —
+ * declare no `bridge hook` events, and kilo/kimi/mistral-vibe —
  * has nothing to close an inferred turn, so theirs would run until the session
  * stopped, which is worse than reading "done".
  *

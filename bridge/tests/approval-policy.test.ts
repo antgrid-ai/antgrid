@@ -68,6 +68,14 @@ describe("terminal approval policy", () => {
       tool: "codex", args: "--profile fast", approvalPolicy: "bypass",
     });
     sessions.start(entry.id);
+    if (process.platform === "win32") {
+      const args: string[] = tm.spawns[0].args;
+      expect(args.indexOf("--dangerously-bypass-approvals-and-sandbox")).toBeGreaterThan(-1);
+      expect(args.indexOf("--dangerously-bypass-approvals-and-sandbox"))
+        .toBeLessThan(args.indexOf("--profile"));
+      expect(args.slice(-2)).toEqual(["--profile", "fast"]);
+      return;
+    }
     const command: string = tm.spawns[0].command;
     expect(command.indexOf("--dangerously-bypass-approvals-and-sandbox"))
       .toBeLessThan(command.indexOf("--profile fast"));

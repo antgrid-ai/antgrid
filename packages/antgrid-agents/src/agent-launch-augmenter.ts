@@ -9,6 +9,7 @@ export type { LaunchAugmentation };
 export interface AugmentOptions {
   abDir?: string;
   cursorDir?: string;
+  kimiHome?: string;
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;

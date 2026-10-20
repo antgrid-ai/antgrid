@@ -116,6 +116,8 @@ export interface TerminalObservationAvailability {
 export interface HookInjectCtx {
   abDir: string;
   cursorDir?: string;
+  /** Isolates Kimi's user-level hook config in tests. */
+  kimiHome?: string;
   /** Overrides the machine-global `~/.gemini/config` that only antigravity
    *  writes into. Test seam, same role as `cursorDir`. */
   geminiConfigDir?: string;
@@ -213,6 +215,10 @@ export interface AgentForkSupport {
    * concrete native session. The handoff remains the safe fallback when that
    * native id was never observed. */
   kind: "native-fork" | "native-transcript" | "terminal-transcript";
+  /** The provider's native fork stays bound to the source conversation's
+   * working directory, so resumed in another checkout it would run against the
+   * source's tree. A fork into a new workspace takes the handoff instead. */
+  nativeForkKeepsWorkspace?: true;
   handoff: (opts: ForkHandoffOpts) => Promise<string>;
 }
 
