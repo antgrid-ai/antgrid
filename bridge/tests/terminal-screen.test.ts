@@ -153,7 +153,7 @@ describe("TerminalScreen", () => {
       .toEqual([
         "constructor", "dispose", "feed", "hasPendingTail", "isDisposed",
         "pendingTail",
-        "resize", "serializeNow", "settle", "snapshot",
+        "resize", "serializeNow", "settle", "snapshot", "visibleLines",
       ]);
     screen.feed(`${ESC}[c${ESC}[?1000$p`);
     // Reaching for the emitter's own listener count is the only way to prove a

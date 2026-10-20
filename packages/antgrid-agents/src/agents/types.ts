@@ -770,6 +770,22 @@ export interface AgentSpec {
    */
   gracefulExit?: GracefulExitAsk;
   /**
+   * Text that, on screen, means this agent is showing a startup prompt only
+   * the user may answer: folder trust, first-run setup.
+   *
+   * These screens enable bracketed paste and paint like a composer, so the
+   * bridge cannot tell them from one by modes alone, and every one of them
+   * reads Enter as a choice. A submit written into one picks the highlighted
+   * option, which is trust (saved, for some agents) or exit, and the prompt is
+   * lost. While one of them is on the visible screen the bridge holds every
+   * submit, past its readiness timeout, until the user has answered.
+   *
+   * Measured text only, each matched as a substring of one rendered row, so
+   * keep it short enough not to wrap at phone width. Plain strings rather
+   * than patterns because the registry freezes specs into plain data.
+   */
+  startupPrompts?: readonly string[];
+  /**
    * Verified non-interactive invocations of this agent's CLI, keyed by how far
    * each one may reach (see {@link HeadlessReach}). One capability, several
    * consumers: naming a session (./headless.ts via ./title-generate.ts) and the
