@@ -708,6 +708,14 @@ describe("capabilities discovery", () => {
     });
   });
 
+  it("sends an empty arguments string for an argument-less cmd:*", async () => {
+    const { driver, calls } = await startedDriver();
+    await tick();
+    await driver.prompt("", "cmd:review");
+    const cmd = calls.findLast((c) => c.m === "command");
+    expect(cmd?.args[1]).toEqual({ command: "review", arguments: "" });
+  });
+
   it("routes builtin:compact to summarize without opening a turn", async () => {
     const { driver, sent, calls, push } = await startedDriver();
     await tick();
