@@ -29,6 +29,7 @@ export const ROADMAP: readonly RoadmapEntry[] = [
     status: "done",
     update: "Completed: forking a session can switch to any installed agent. The new session gets the original agent's full transcript and a short summary of the task beside it in its own workspace, kept out of git.",
     updatedAt: "2026-10-21",
+    discussionUrl: "https://github.com/antgrid-ai/antgrid/pull/277",
   },
   {
     id: "agent-scheduling",
