@@ -14,6 +14,7 @@ import {
   writeText,
   type ExcerptMeta,
   type HandoffEventsFn,
+  type HandoffOriginalTask,
   type HandoffFile,
   type HandoffMethod,
   type HandoffSnapshot,
@@ -62,6 +63,13 @@ const ManifestSchema = z.object({
   projectId: z.string(),
   sourceSessionId: z.string(),
   sourceAgentLabel: z.string(),
+  // Degrades alone: a damaged task must not make the whole handoff unreadable.
+  originalTask: z.object({
+    text: z.string(),
+    at: z.string(),
+    sourceAgentLabel: z.string(),
+    inherited: z.boolean().optional(),
+  }).optional().catch(undefined),
 });
 
 export interface HandoffManifest extends Omit<HandoffSnapshot, "method"> {
@@ -71,6 +79,9 @@ export interface HandoffManifest extends Omit<HandoffSnapshot, "method"> {
   projectId: string;
   sourceSessionId: string;
   sourceAgentLabel: string;
+  /** The task the excerpt shows as original, carried into the next handoff's
+   *  excerpt when this session is forked in turn. */
+  originalTask?: HandoffOriginalTask;
 }
 
 /** The only part of a session row the handoff lifecycle reads. */
@@ -132,6 +143,43 @@ export function readPlacedHandoff(root: string, id: string): { dir: string; prim
 }
 
 /**
+ * The original task recorded by the handoff a fork source was itself launched
+ * from, so a chain of handoffs keeps the task its first session started with.
+ * The placed copy is read only through the same refusals as placing it (no link
+ * at any component, nothing resolving outside the source's checkout); staging
+ * is the fallback for a source that never launched. Anything missing, unsafe or
+ * unparseable answers undefined: the fork then proceeds as for any source.
+ */
+export async function readPredecessorTask(args: {
+  sessionsDir: string;
+  sourceId: string;
+  forkHandoff: { state: "staged" | "materialized"; root?: string };
+  /** The source's checkout: a placed handoff must resolve inside it. */
+  checkoutPath: string;
+}): Promise<HandoffOriginalTask | undefined> {
+  try {
+    assertSessionUuid(args.sourceId);
+  } catch {
+    return undefined;
+  }
+  const dirs: string[] = [];
+  if (args.forkHandoff.root) {
+    try {
+      const { root } = args.forkHandoff;
+      await assertNoLinks(root, [".antgrid", "handoff", args.sourceId, "manifest.json"]);
+      const dir = join(root, ".antgrid", "handoff", args.sourceId);
+      if (isUnder(await realpath(dir), await realpath(args.checkoutPath))) dirs.push(dir);
+    } catch { /* a placed copy that is gone or unsafe leaves only staging */ }
+  }
+  dirs.push(stagingDir(args.sessionsDir, args.sourceId));
+  for (const dir of dirs) {
+    const task = (await readManifest(dir))?.originalTask;
+    if (task) return task;
+  }
+  return undefined;
+}
+
+/**
  * Calls the source agent's snapshot into a staging dir, falls back to (and
  * always adds) the terminal scrollback, writes the bounded `excerpt.md`, and
  * writes `manifest.json` last. The dir only appears under its final name once
@@ -148,6 +196,8 @@ export async function stageHandoff(args: {
   /** The agent that will read the excerpt: its read tool sets the excerpt's size.
    *  Defaults to the source's own agent. */
   targetTool?: string;
+  /** The source's own handoff's original task, when the source was a fork. */
+  inheritedTask?: HandoffOriginalTask;
   deadlineMs?: number;
 }): Promise<HandoffManifest> {
   const finalDir = stagingDir(args.sessionsDir, args.newSessionId);
@@ -159,7 +209,7 @@ export async function stageHandoff(args: {
   try {
     const manifest = await capture(args, partial, controller.signal);
     try {
-      await writeExcerpt(partial, manifest, args.adapter.fork.events, args.targetTool ?? args.source.tool, controller.signal);
+      await writeExcerpt(partial, manifest, args.adapter.fork.events, args.targetTool ?? args.source.tool, controller.signal, args.inheritedTask);
       await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
       await rename(partial, finalDir);
     } catch (error) {
@@ -252,11 +302,14 @@ async function writeExcerpt(
   parse: HandoffEventsFn | undefined,
   targetTool: string,
   signal: AbortSignal,
+  inheritedTask?: HandoffOriginalTask,
 ): Promise<void> {
   const budget = excerptBudgetFor(targetTool);
   const meta: ExcerptMeta = { sourceLabel: manifest.sourceAgentLabel, capturedAt: manifest.capturedAt, files: manifest.files.map((file) => file.name) };
+  const newBuilder = () => new ExcerptBuilder(budget, { inheritedTask });
+  let builder = newBuilder();
   const render = async (events: HandoffEventsFn, forManifest: HandoffManifest, within: AbortSignal, withMeta: ExcerptMeta, readsOwnTranscript: boolean): Promise<string> => {
-    const builder = new ExcerptBuilder(budget);
+    builder = newBuilder();
     await events(outDir, asSnapshot(forManifest), builder.push, within);
     // A parser that reads a drifted format returns cleanly with nothing; that is
     // a failure to degrade from, not an empty conversation.
@@ -277,7 +330,8 @@ async function writeExcerpt(
     const reason = ownTranscript && signal.aborted ? "ran past its deadline" : errorText(error);
     log.warn("excerpt parse failed for %s: %s", manifest.agent, reason);
     const degradedMeta = { ...meta, degraded: `the agent's transcript could not be summarized; read ${manifest.primary} for the conversation` };
-    text = new ExcerptBuilder(budget).render(degradedMeta);
+    builder = newBuilder();
+    text = builder.render(degradedMeta);
     const scrollback = ownTranscript ? manifest.files.find((file) => file.name === SCROLLBACK_FILE) : undefined;
     if (scrollback) {
       try {
@@ -291,6 +345,10 @@ async function writeExcerpt(
     }
   }
   await writeFile(join(outDir, EXCERPT_FILE), text);
+  // Whatever the excerpt finally showed; a parse abandoned for the fallback
+  // proved nothing about the task.
+  const originalTask = builder.originalTask(manifest.sourceAgentLabel);
+  if (originalTask) manifest.originalTask = originalTask;
 }
 
 /**

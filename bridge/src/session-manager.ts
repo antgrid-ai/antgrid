@@ -51,7 +51,9 @@ import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 import { createKeyedLock } from "./keyed-lock";
 import { atomicWriteFile } from "./discovery";
 import { runGit } from "./worktrees/project-resolver";
-import { EXCERPT_FILE, materializeHandoff, readPlacedHandoff, removeHandoff, stageHandoff, stageLegacyText, sweepHandoffs } from "./handoff/handoff-dir";
+import {
+  EXCERPT_FILE, materializeHandoff, readPlacedHandoff, readPredecessorTask, removeHandoff, stageHandoff, stageLegacyText, sweepHandoffs,
+} from "./handoff/handoff-dir";
 import { handoffPrompt } from "./handoff/handoff-prompt";
 
 export interface AgentSpec {
@@ -1212,6 +1214,11 @@ export class SessionManager {
       staged.id = entry.id;
       this.stagingInFlight.add(entry.id);
       const scrollback = this.tm.getScrollback(source.id)?.text;
+      // A source that was itself handed off opens with Antgrid's prompt, so its
+      // own transcript no longer holds the task; its handoff recorded it.
+      const inheritedTask = source.forkHandoff
+        ? await readPredecessorTask({ sessionsDir: this.dir, sourceId: source.id, forkHandoff: source.forkHandoff, checkoutPath: sourcePath })
+        : undefined;
       await stageHandoff({
         sessionsDir: this.dir,
         projectId: this.opts.projectId,
@@ -1231,6 +1238,7 @@ export class SessionManager {
         // mostly CSI/OSC redraw that would read as keys once it is a prompt.
         scrollback: scrollback ? stripAnsi(scrollback) : undefined,
         targetTool: tool,
+        inheritedTask,
       });
       entry.forkHandoff = { state: "staged", sourceTool: tool };
     }

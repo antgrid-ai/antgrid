@@ -1,5 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PreparedTerminalLaunch, TerminalLaunchRequest } from "antgrid-agents/contracts";
@@ -352,6 +354,105 @@ test("a managed delete waits for the handoff placement before removing the workt
   expect(placedAtRemove).toBe(true);
   expect(f.spawns).toHaveLength(0);
   expect(existsSync(join(worktree, ".antgrid", "handoff", fork.id))).toBe(false);
+});
+
+describe("a chain of handoffs", () => {
+  const prompt = (text: string) => ({ type: "turn.prompt", prompt: text });
+  const said = (text: string) => ({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "text", text } } });
+  const ORIGINAL = { text: "Port the parser to Rust", at: "fixture.jsonl:1", sourceAgentLabel: "Kimi", inherited: true };
+
+  /** Each fork snapshots whatever transcript the test last set, in Kimi's format. */
+  function chain() {
+    const transcript: { lines: unknown[] } = { lines: [] };
+    const f = fixture({
+      snapshot: async (opts) => {
+        const body = transcript.lines.map((line) => JSON.stringify(line)).join("\n");
+        const file = await writeText(opts.outDir, "fixture.jsonl", `${body}\n`, "transcript", new ByteBudget());
+        return { agent: "kimi", method: "copy", primary: "fixture.jsonl", files: [file], references: [], redactions: [], warnings: [] };
+      },
+    });
+    /** Launches a fork and returns the session's transcript as its agent would
+     *  have written it: Antgrid's real handoff prompt, then the user's turns. */
+    const launch = async (id: string, ...turns: unknown[]) => {
+      const before = f.requests.length;
+      await f.manager.start(id);
+      return [prompt(f.requests[before]!.initialPrompt!), said("Read the excerpt."), ...turns];
+    };
+    const forkFrom = async (sourceId: string, lines: unknown[]) => {
+      transcript.lines = lines;
+      return f.manager.fork(sourceId, "current");
+    };
+    const staged = (id: string) => ({
+      excerpt: readFileSync(join(f.staging(id), "excerpt.md"), "utf8"),
+      manifest: JSON.parse(readFileSync(join(f.staging(id), "manifest.json"), "utf8")),
+    });
+    return { f, launch, forkFrom, staged };
+  }
+
+  const section = (excerpt: string, heading: string) => {
+    const start = excerpt.indexOf(`## ${heading}`);
+    if (start < 0) return "";
+    const next = excerpt.indexOf("\n## ", start + 3);
+    return excerpt.slice(start, next < 0 ? undefined : next);
+  };
+
+  test("the third session's excerpt and manifest carry the first session's task", async () => {
+    const { f, launch, forkFrom, staged } = chain();
+    const a = source(f);
+    const b = await forkFrom(a.id, [prompt("Port the parser to Rust"), said("Starting with the lexer.")]);
+    expect(staged(b.id).manifest.originalTask).toEqual({ ...ORIGINAL, inherited: undefined });
+    const c = await forkFrom(b.id, await launch(b.id, prompt("Now fix the flaky test"), said("Fixed.")));
+    const { excerpt, manifest } = staged(c.id);
+    const task = section(excerpt, "Original task");
+    expect(task).toContain("Port the parser to Rust");
+    expect(task).toContain("Carried over from the earlier Kimi session that started this task");
+    expect(excerpt).not.toContain("First instruction after an earlier handoff");
+    expect(section(excerpt, "First instruction after the handoff")).toContain("Now fix the flaky test");
+    expect(manifest.originalTask).toEqual(ORIGINAL);
+  });
+
+  test("the task survives the middle session's deletion once the next fork has staged", async () => {
+    const { f, launch, forkFrom, staged } = chain();
+    const a = source(f);
+    const b = await forkFrom(a.id, [prompt("Port the parser to Rust"), said("Starting with the lexer.")]);
+    const c = await forkFrom(b.id, await launch(b.id, prompt("Now fix the flaky test")));
+    f.manager.delete(b.id);
+    await f.manager.settleHandoffCleanup();
+    expect(existsSync(f.placed(b.id))).toBe(false);
+    const d = await forkFrom(c.id, await launch(c.id, prompt("Now ship it")));
+    const { excerpt, manifest } = staged(d.id);
+    expect(section(excerpt, "Original task")).toContain("Port the parser to Rust");
+    expect(section(excerpt, "First instruction after the handoff")).toContain("Now ship it");
+    expect(manifest.originalTask).toEqual(ORIGINAL);
+  });
+
+  test("a source whose own handoff is gone forks with today's heading and no recorded task", async () => {
+    const { f, launch, forkFrom, staged } = chain();
+    const a = source(f);
+    const b = await forkFrom(a.id, [prompt("Port the parser to Rust")]);
+    const lines = await launch(b.id, prompt("Now fix the flaky test"));
+    rmSync(f.placed(b.id), { recursive: true, force: true });
+    const c = await forkFrom(b.id, lines);
+    const { excerpt, manifest } = staged(c.id);
+    expect(excerpt).not.toContain("## Original task");
+    expect(section(excerpt, "First instruction after an earlier handoff")).toContain("Now fix the flaky test");
+    expect(manifest.originalTask).toBeUndefined();
+  });
+
+  test("a source handoff reached through a linked .antgrid is not read", async () => {
+    const { f, launch, forkFrom, staged } = chain();
+    const a = source(f);
+    const b = await forkFrom(a.id, [prompt("Port the parser to Rust")]);
+    const lines = await launch(b.id, prompt("Now fix the flaky test"));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "antgrid-fork-outside-")));
+    directories.push(outside);
+    renameSync(join(f.directory, ".antgrid"), join(outside, "moved"));
+    symlinkSync(join(outside, "moved"), join(f.directory, ".antgrid"), "junction");
+    expect(existsSync(join(f.placed(b.id), "manifest.json"))).toBe(true);
+    const c = await forkFrom(b.id, lines);
+    expect(staged(c.id).excerpt).not.toContain("## Original task");
+    expect(staged(c.id).manifest.originalTask).toBeUndefined();
+  });
 });
 
 test("a sessions.json that cannot be read in full is never swept against", async () => {
