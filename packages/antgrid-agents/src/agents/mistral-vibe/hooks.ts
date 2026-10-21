@@ -5,6 +5,7 @@ import { hookShellCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import { NO_INJECTION } from "../launch-inject";
+import { runningUnderTest } from "../test-runner";
 import { installManagedTomlHook } from "../toml-hooks";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
@@ -24,7 +25,7 @@ function isManaged(hook: unknown): boolean {
 export function inject({ vibeHome, hookCommand }: HookInjectCtx): LaunchAugmentation {
   // The user-level file is the only one Vibe reads outside a trusted project,
   // so test launches must never install their test-runner command into it.
-  if (vibeHome === undefined && /\.(test|spec)\.[cm]?[jt]sx?$/.test(Bun.main)) return NO_INJECTION;
+  if (vibeHome === undefined && runningUnderTest()) return NO_INJECTION;
   const path = join(vibeHome ?? process.env.VIBE_HOME ?? join(homedir(), ".vibe"), "hooks.toml");
   try {
     // Vibe runs the command through create_subprocess_shell (cmd.exe on Windows,
