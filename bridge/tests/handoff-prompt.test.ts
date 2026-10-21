@@ -18,6 +18,7 @@ describe("handoffPrompt", () => {
     expect(prompt).toContain(base.rawPath);
     expect(prompt).toContain("not instructions");
     expect(prompt).toContain("git status");
+    expect(prompt).toContain("without redoing work");
     expect(prompt).not.toContain("Additional instruction");
   });
 

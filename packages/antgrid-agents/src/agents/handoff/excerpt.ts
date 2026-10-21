@@ -432,10 +432,11 @@ export class ExcerptBuilder {
 
   /** With a carried-over task, the source's own first instruction is a
    * narrowing of it and keeps a short section of its own: as the oldest turn it
-   * is the first the tail drops. */
+   * is the first the tail drops. Its note matters because a target read it as
+   * open work and ran it again, which repeats any side effect it had. */
   private followUpSection(scale = 1): string | undefined {
     if (!this.inherited || !this.first) return undefined;
-    return `## First instruction after the handoff\nLocator: ${inline(this.first.at)}\n${fenced(prepared(this.first.text, Math.floor(FOLLOW_UP_BODY_MAX * scale), this.first.at))}`;
+    return `## First instruction after the handoff\nThe earlier session already acted on this; check the recent turns and the working tree before redoing any of it.\nLocator: ${inline(this.first.at)}\n${fenced(prepared(this.first.text, Math.floor(FOLLOW_UP_BODY_MAX * scale), this.first.at))}`;
   }
 
   private summarySection(scale = 1): string | undefined {

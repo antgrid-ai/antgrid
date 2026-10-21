@@ -169,6 +169,7 @@ describe("excerpt content", () => {
       expect(out).not.toContain("First instruction after an earlier handoff");
       const followUp = out.slice(out.indexOf("## First instruction after the handoff"), out.indexOf("## Recent turns"));
       expect(followUp).toContain("Now fix the flaky test");
+      expect(followUp).toContain("already acted on this");
       expect(followUp).toContain("Locator: t:3");
       expect(builder.originalTask("Claude Code")).toEqual({ ...INHERITED, inherited: true });
     });
