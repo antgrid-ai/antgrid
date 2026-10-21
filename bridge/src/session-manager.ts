@@ -125,6 +125,10 @@ function typeUncarriablePrompt(launch: PreparedTerminalLaunch, toolName: string)
   return { ...launch, args, promptArgCount: undefined, promptDelivery: "buffered" };
 }
 
+function bypassReach(risk: "bypasses-approvals" | "bypasses-approvals-and-sandbox" | undefined): number {
+  return risk === "bypasses-approvals-and-sandbox" ? 2 : risk === "bypasses-approvals" ? 1 : 0;
+}
+
 function scheduledLaunchError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
 }
@@ -1208,6 +1212,12 @@ export class SessionManager {
     let approvalPolicy = source.approvalPolicy;
     try {
       runtime.resolveApprovalPolicy(target, mode, approvalPolicy);
+      // A target whose bypass also drops the sandbox is wider than a source
+      // that only skipped approvals, and the fork dialog never asks about it.
+      if (approvalPolicy === "bypass"
+        && bypassReach(runtime.get(target)?.approvalPolicies.bypass?.risk) > bypassReach(adapter.approvalPolicies.bypass?.risk)) {
+        approvalPolicy = "default";
+      }
     } catch {
       // The target lacks the source's policy; its default is never looser.
       approvalPolicy = "default";

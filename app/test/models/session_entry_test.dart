@@ -29,6 +29,12 @@ void main() {
     expect(e.copyWith(running: true).handoffSupported, isTrue);
     expect(e, isNot(absent));
     expect(e.hashCode, isNot(absent.hashCode));
+
+    // Differs from `e` in agentKey alone, so dropping it from == or hashCode
+    // is what would make these equal.
+    final otherAgent = SessionEntry.fromJson({...e.toJson(), 'agentKey': 'claude-code'});
+    expect(otherAgent, isNot(e));
+    expect(otherAgent.hashCode, isNot(e.hashCode));
   });
 
   test('defaults mode to terminal when absent', () {

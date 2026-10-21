@@ -100,9 +100,12 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   }
 
   void _cancel() => Navigator.of(context).pop();
-  void _confirm() => Navigator.of(
-    context,
-  ).pop(SessionForkChoice(workspace: _workspace, targetTool: _tool));
+  void _confirm() => Navigator.of(context).pop(
+    SessionForkChoice(
+      workspace: _workspace,
+      targetTool: _showAgentRow ? _tool : null,
+    ),
+  );
 
   Future<void> _pickAgent(BuildContext chip) async {
     final anchor = abMenuAnchorRect(chip);
@@ -139,9 +142,13 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   /// the one thing here a user cannot recover by looking, so it is a sentence
   /// of its own and not a subordinate clause.
   String get _consequence => switch (_workspace) {
+    forkWorkspaceCurrent when _crossAgent && widget.isolatedSource =>
+      'The new agent continues in this one directory with your uncommitted '
+          'changes. Both sessions work in it at the same time — the same '
+          'files, the same branch.',
     forkWorkspaceCurrent when _crossAgent =>
       'The new agent continues in this workspace with your uncommitted '
-          'changes.',
+          'changes. Both sessions work in the same files at the same time.',
     forkWorkspaceCurrent when widget.isolatedSource =>
       'Both sessions work in this one directory at the same time — the same '
           'files, the same branch, the same commits.',

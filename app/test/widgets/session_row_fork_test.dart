@@ -2,6 +2,7 @@
 // that said it honours `targetTool`: an older bridge's schema would strip the
 // key and fork into the same agent while the dialog promised another.
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -28,12 +29,17 @@ SessionEntry _entry({required bool handoff}) => SessionEntry(
   running: true,
   forkSupported: true,
   handoffSupported: handoff,
-  agentKey: handoff ? 'codex' : null,
+  agentKey: 'codex',
 );
+
+final _detectedFor = <SessionTarget>[];
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  setUp(useInMemoryPrefs);
+  setUp(() {
+    useInMemoryPrefs();
+    _detectedFor.clear();
+  });
 
   Future<FakeAgentTransport> pumpRow(
     WidgetTester tester, {
@@ -55,12 +61,13 @@ void main() {
         ...stores.overrides,
         selectedRegistrationIdProvider.overrideWithValue(_projectId),
         projectSessionProvider.overrideWith((ref, id) async => session),
-        detectedToolsForProvider.overrideWith(
-          (ref, target) async => const <String, String?>{
+        detectedToolsForProvider.overrideWith((ref, target) async {
+          if (target != null) _detectedFor.add(target);
+          return const <String, String?>{
             'codex': 'Codex',
             'claude-code': 'Claude Code',
-          },
-        ),
+          };
+        }),
       ],
     );
     addTearDown(container.dispose);
@@ -140,6 +147,16 @@ void main() {
     final transport = await pumpRow(tester, handoff: true);
     await openFork(tester);
 
+    // Away to another agent and back, so the own-agent pick is a real choice
+    // and not the untouched default.
+    await tester.tap(find.byKey(const Key('fork-agent-selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Claude Code'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('fork-agent-selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Codex').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
 
@@ -149,6 +166,44 @@ void main() {
 
     await refuseFork(tester, transport);
     await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('agent detection is asked of the rows own machine', (
+    tester,
+  ) async {
+    final transport = await pumpRow(tester, handoff: true);
+    await openFork(tester);
+
+    expect(_detectedFor.map((t) => t.registrationId), contains(_projectId));
+
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    await refuseFork(tester, transport);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a fork reply that never comes is reported as outcome unknown', (
+    tester,
+  ) async {
+    final transport = await pumpRow(tester, handoff: true);
+    await openFork(tester);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+
+    // Past the 90 s fork wait; the later list request lapses on its own timer.
+    await tester.pump(const Duration(seconds: 91));
+    await tester.pump();
+
+    expect(
+      find.textContaining('The fork may still be in progress'),
+      findsOneWidget,
+    );
+    expect(transport.sent.where((m) => m['type'] == 'session:fork'), hasLength(1));
+    expect(transport.sent.where((m) => m['type'] == 'session:list'), isNotEmpty);
+
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 30));
   });
 
   testWidgets('an old bridge (handoffSupported false) never sends targetTool', (

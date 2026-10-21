@@ -68,7 +68,12 @@ void main() {
   });
 
   testWidgets('default copy for the same agent', (tester) async {
-    await _open(tester, isolatedSource: true);
+    await _open(
+      tester,
+      isolatedSource: true,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
     // The uncommitted-changes consequence is the one thing a user cannot
     // recover by looking, so the default arm has to say it outright.
     expect(
@@ -78,7 +83,29 @@ void main() {
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
     expect(_answer?.workspace, forkWorkspaceCopy);
-    expect(_answer?.targetTool, isNull);
+    expect(_answer?.targetTool, 'codex');
+  });
+
+  testWidgets('choosing another agent and then the source restores the copy default', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      isolatedSource: true,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
+    await _pickClaude(tester);
+    expect(find.text('Continue'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('fork-agent-selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Codex').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Fork'), findsOneWidget);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    expect(_answer?.workspace, forkWorkspaceCopy);
+    expect(_answer?.targetTool, 'codex');
   });
 
   testWidgets('picking this workspace names the concurrency it buys', (
@@ -136,9 +163,10 @@ void main() {
     );
     await _pickClaude(tester);
     expect(
-      find.textContaining('continues in this workspace with your uncommitted'),
+      find.textContaining('continues in this one directory with your uncommitted'),
       findsOneWidget,
     );
+    expect(find.textContaining('at the same time'), findsOneWidget);
     await tester.tap(find.text('Continue'));
     await tester.pumpAndSettle();
     expect(_answer?.workspace, forkWorkspaceCurrent);
@@ -168,6 +196,25 @@ void main() {
   testWidgets('no agent row when targets is empty', (tester) async {
     await _open(tester, isolatedSource: true, sourceTool: 'codex');
     expect(find.byKey(const Key('fork-agent-selector')), findsNothing);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+    expect(_answer?.targetTool, isNull);
+  });
+
+  testWidgets('a main-tree cross-agent fork still says the files are shared', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      isolatedSource: false,
+      sourceTool: 'codex',
+      targets: _targets,
+    );
+    await _pickClaude(tester);
+    expect(
+      find.textContaining('Both sessions work in the same files'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('no agent row when sourceTool is null', (tester) async {

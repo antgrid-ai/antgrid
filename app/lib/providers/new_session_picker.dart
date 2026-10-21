@@ -409,9 +409,9 @@ Future<List<({String tool, String label})>> handoffTargetsFor(
   } on TimeoutException {
     return const [];
   }
-  // Nothing detected is "nobody said", not "only the source": a lone entry
-  // would show an agent row with nothing to choose.
-  if (detected.isEmpty) return const [];
+  // Nothing detected is "nobody said", and a lone source is nothing to choose
+  // between: either would show an agent row offering only the current agent.
+  if (!detected.keys.any((key) => key != sourceTool)) return const [];
   final catalog = ref.read(agentCatalogProvider);
   String labelOf(String key) =>
       newSessionAgentLabel(KnownAgent(key), detected, catalog);

@@ -88,12 +88,13 @@ void main() {
               outcome = e;
               done = true;
             });
+        // Past the bridge's 60 s staging deadline, plus worktree creation.
+        async.elapse(const Duration(seconds: 65));
+        async.flushMicrotasks();
+        expect(done, isFalse, reason: 'still waiting at 65 s');
         async.elapse(const Duration(seconds: 30));
         async.flushMicrotasks();
-        expect(done, isFalse, reason: 'still waiting at 30 s');
-        async.elapse(const Duration(seconds: 70));
-        async.flushMicrotasks();
-        expect(done, isTrue, reason: 'lapsed by 100 s');
+        expect(done, isTrue, reason: 'lapsed by 95 s');
         expect(outcome, isA<TimeoutException>());
       });
       await svc.dispose();
