@@ -45,6 +45,13 @@ test("Kimi snapshot copies the main wire at the last newline and the state sidec
   void sessionDir;
 });
 
+test("Kimi snapshot fails on a sidecar it cannot write rather than leaving it out", async () => {
+  const { home } = store();
+  const outDir = temp("antgrid-kimi-out-");
+  mkdirSync(join(outDir, "kimi-state.json"));
+  await expect(run(home, { outDir })).rejects.toMatchObject({ code: "WRITE" });
+});
+
 test("Kimi snapshot lists subagent logs and tool results as references without copying them", async () => {
   const { home, sessionDir } = store();
   mkdirSync(join(sessionDir, "agents", "sub1"), { recursive: true });

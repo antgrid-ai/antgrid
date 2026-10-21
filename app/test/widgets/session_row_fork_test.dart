@@ -206,6 +206,23 @@ void main() {
     await tester.pump(const Duration(seconds: 30));
   });
 
+  testWidgets('a second Fork while the first awaits its reply sends nothing', (
+    tester,
+  ) async {
+    final transport = await pumpRow(tester, handoff: false);
+    await openFork(tester);
+    await tester.tap(find.text('Fork'));
+    await tester.pumpAndSettle();
+
+    await openFork(tester);
+
+    expect(find.textContaining('still being prepared'), findsOneWidget);
+    expect(transport.sent.where((m) => m['type'] == 'session:fork'), hasLength(1));
+
+    await refuseFork(tester, transport);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('an old bridge (handoffSupported false) never sends targetTool', (
     tester,
   ) async {

@@ -55,6 +55,17 @@ test("returns undefined for a session the store does not hold, or an unsafe id",
   expect(readdirSync(outDir)).toEqual([]);
 });
 
+test("returns undefined for a session that was opened but never prompted", async () => {
+  const dbPath = join(root, "opencode.db");
+  const db = createOpencodeDb(dbPath);
+  db.run("INSERT INTO session VALUES ('ses_empty', 'p1', NULL, '/work', 'New session', '1.0', NULL, NULL, 1, 1)");
+  db.close();
+  const outDir = join(root, "out");
+  mkdirSync(outDir);
+  expect(await opencodeSnapshot(snapshotOpts(outDir, { opencodeDbPath: dbPath, agentSessionId: "ses_empty" }))).toBeUndefined();
+  expect(readdirSync(outDir)).toEqual([]);
+});
+
 test("refuses the real store under test when no seam is given", async () => {
   const dbPath = join(root, "opencode.db");
   const db = createOpencodeDb(dbPath);

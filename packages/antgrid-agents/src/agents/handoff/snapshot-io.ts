@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, open, type FileHandle } from "node:fs/promises";
+import { lstat, open, unlink, type FileHandle } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
   HANDOFF_FILE_NAME,
@@ -95,12 +95,12 @@ export function safeJoin(outDir: string, name: string): string {
 class Sink {
   private readonly hash = createHash("sha256");
   private bytes = 0;
-  private constructor(private readonly handle: FileHandle, private readonly budget: ByteBudget) {}
+  private constructor(private readonly handle: FileHandle, private readonly path: string, private readonly budget: ByteBudget) {}
 
   static async create(path: string, budget: ByteBudget): Promise<Sink> {
     // "wx": the bridge hands over an empty directory, so an existing file means two writers.
     const handle = await retryLocked("open handoff output", () => open(path, "wx"), "WRITE");
-    return new Sink(handle, budget);
+    return new Sink(handle, path, budget);
   }
 
   async write(chunk: Uint8Array): Promise<void> {
@@ -122,8 +122,12 @@ class Sink {
     return { bytes: this.bytes, sha256: this.hash.digest("hex") };
   }
 
+  /** Also deletes the partial file: an adapter that treats a sidecar as optional
+   * carries on without it, and the handoff must not hold a file its manifest
+   * does not list. */
   async abandon(): Promise<void> {
     await this.handle.close().catch(() => {});
+    await unlink(this.path).catch(() => {});
   }
 }
 
@@ -245,6 +249,25 @@ export async function writePrefix(
   return { ...meta, name, sourceRange: meta.sourceRange ?? { start: 0, end }, ...(await sink.finish()) };
 }
 
+/** Written in read-sized slices, so hashing a large buffer never holds the loop
+ * in one piece. */
+export async function writeBytes(
+  outDir: string,
+  name: string,
+  bytes: Uint8Array,
+  role: HandoffFile["role"],
+  budget: ByteBudget,
+): Promise<HandoffFile> {
+  const sink = await Sink.create(safeJoin(outDir, name), budget);
+  try {
+    for (let at = 0; at < bytes.length; at += READ_CHUNK) await sink.write(bytes.subarray(at, at + READ_CHUNK));
+  } catch (error) {
+    await sink.abandon();
+    throw error;
+  }
+  return { name, role, ...(await sink.finish()) };
+}
+
 export async function writeText(
   outDir: string,
   name: string,
@@ -252,14 +275,7 @@ export async function writeText(
   role: HandoffFile["role"],
   budget: ByteBudget,
 ): Promise<HandoffFile> {
-  const sink = await Sink.create(safeJoin(outDir, name), budget);
-  try {
-    await sink.write(Buffer.from(text, "utf8"));
-  } catch (error) {
-    await sink.abandon();
-    throw error;
-  }
-  return { name, role, ...(await sink.finish()) };
+  return writeBytes(outDir, name, Buffer.from(text, "utf8"), role, budget);
 }
 
 /** Bun types lag its runtime: DecompressionStream accepts "zstd" and decodes it

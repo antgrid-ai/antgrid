@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureHandoffExcluded } from "../src/handoff/git-exclude";
@@ -88,6 +88,22 @@ describe("ensureHandoffExcluded", () => {
     expect(readFileSync(join(dir, ".antgrid", "handoff", ".gitignore"), "utf8")).toBe("*\n");
     dropHandoffFile(dir);
     expect(git(dir, "status", "--porcelain", "--", ".antgrid")).toBe("");
+  });
+
+  it("never writes the fallback .gitignore through a symlink the repository planted", async () => {
+    const dir = repo();
+    writeFileSync(join(dir, ".gitignore"), "!/.antgrid/handoff/\n");
+    const victim = join(tmp(), "victim.txt");
+    writeFileSync(victim, "keep me\n");
+    mkdirSync(join(dir, ".antgrid", "handoff"), { recursive: true });
+    try {
+      symlinkSync(victim, join(dir, ".antgrid", "handoff", ".gitignore"), "file");
+    } catch {
+      // Creating a file symlink on Windows needs Developer Mode or an elevated shell.
+      return;
+    }
+    expect(await ensureHandoffExcluded(dir, ID)).toBe("not-git");
+    expect(readFileSync(victim, "utf8")).toBe("keep me\n");
   });
 
   it("escapes glob characters in the prefix so the rule cannot widen to siblings", async () => {

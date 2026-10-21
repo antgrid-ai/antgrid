@@ -48,9 +48,11 @@ export const turnBoundaryEvents = { start: [], end: [] } as const;
 export const posts = ["/session-title"] as const;
 export const observation = { notifications: false, titles: true, handler: false, turnStart: false, turnEnd: false, hookAlive: false } as const;
 const Payload = z.object({ session_id: z.string().nullish(), transcript_path: z.string().nullish() });
-// A subagent's loop runs its own post_agent hooks with its log under agents/;
-// recording that identity would replace the parent's.
-const SUBAGENT_LOG = /[\\/]agents[\\/]/;
+// A subagent's loop runs its own post_agent hooks with its log at
+// <parent session>/agents/<child>/messages.jsonl; recording that identity would
+// replace the parent's. Only that position counts, since a home or save dir can
+// have an agents directory higher up.
+const SUBAGENT_LOG = /[\\/]agents[\\/][^\\/]+[\\/][^\\/]+$/;
 
 export async function toPosts(invocation: HookInvocation, { port, terminalId, readStdin }: HookPostCtx): Promise<HookPost[]> {
   if (invocation.event !== "post-agent" || !terminalId) return [];

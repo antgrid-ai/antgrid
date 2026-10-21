@@ -14,12 +14,12 @@ const temp = (prefix: string) => { const dir = mkdtempSync(join(tmpdir(), prefix
 const ID = "0123456789abcdef0123-abcdefabcdef";
 const MESSAGES = '{"role":"user","content":"hi"}\n{"role":"assistant","content":"hello"}\n';
 
-function session(saveDir: string, id: string, cwd: string, stamp = "20260101_120000") {
+function session(saveDir: string, id: string, cwd: string, stamp = "20260101_120000", start = "2026-01-01T12:00:00Z") {
   const dir = join(saveDir, `session_${stamp}_${id.slice(0, 8)}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "messages.jsonl"), `${MESSAGES}{"role":"us`);
   writeFileSync(join(dir, "meta.json"), JSON.stringify({
-    session_id: id, start_time: "2026-01-01T12:00:00Z", end_time: null, git_branch: "main", username: "someone",
+    session_id: id, start_time: start, end_time: null, git_branch: "main", username: "someone",
     environment: { working_directory: cwd, os: "win32" }, origin_directory: cwd, total_messages: 2,
     config: { api_key: "SECRET-CONFIG" }, system_prompt: "SECRET-PROMPT", tools_available: ["bash"],
   }, null, 2));
@@ -120,6 +120,15 @@ test("Vibe snapshot without an id accepts only a unique working-directory match"
   expect(unique?.agentSessionId).toBe(ID);
   session(saveDir, "cccccccc-dddd", "/repo", "20260102_120000");
   expect(await run(home, { agentSessionId: undefined })).toBeUndefined();
+});
+
+test("Vibe snapshot without an id never takes a session older than the source row", async () => {
+  const { home, saveDir } = store();
+  session(saveDir, "aaaaaaaa-bbbb", "/repo");
+  const sourceCreatedAt = Date.parse("2026-01-02T00:00:00Z");
+  expect(await run(home, { agentSessionId: undefined, sourceCreatedAt })).toBeUndefined();
+  session(saveDir, ID, "/repo", "20260102_120000", "2026-01-02T12:00:00.123456+00:00");
+  expect((await run(home, { agentSessionId: undefined, sourceCreatedAt }))?.agentSessionId).toBe(ID);
 });
 
 test("Vibe snapshot refuses unsafe ids and returns undefined for a missing store", async () => {

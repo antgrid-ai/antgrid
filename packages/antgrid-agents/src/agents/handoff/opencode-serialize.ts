@@ -235,12 +235,14 @@ function parseArgs(args: unknown): OpencodeSerializerArgs {
 
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
-/** A session that is not in the database yields no files, which the caller
- * reports as "no native store" and falls back to the scrollback. */
+/** A session that is not in the database, or one opened but never prompted (a
+ * row with no messages and no children), yields no files, which the caller
+ * reports as "no native store": it falls back to the scrollback, or refuses the
+ * fork when there is none. */
 export const opencodeFamilySerializer: DbSerializer = (db, rawArgs): DbSerializeOutput => {
   const args = parseArgs(rawArgs);
   const result = serializeOpencodeSession(db, args.sessionId, { includeKiloBoard: args.includeKiloBoard });
-  if (!result) return { files: [], references: [], redactions: [], warnings: [] };
+  if (!result || (!result.doc.messages.length && !result.children.length)) return { files: [], references: [], redactions: [], warnings: [] };
   const files: DbSerializeFile[] = [{ name: `${args.prefix}-session.json`, role: "transcript", text: json(result.doc) }];
   result.children.forEach((child, index) => {
     files.push({

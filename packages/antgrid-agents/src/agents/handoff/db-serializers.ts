@@ -19,7 +19,7 @@ export interface DbSerializeOutput {
 }
 
 /** Runs inside `withReadSnapshot`, so it must be synchronous and return text
- * only; the worker writes the files after the read transaction has closed, so
+ * only; the files are written after the read transaction has closed, so
  * a slow disk never holds a reader against the agent's checkpoint. */
 export type DbSerializer = (db: Database, args: unknown) => DbSerializeOutput;
 

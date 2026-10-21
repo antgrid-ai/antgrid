@@ -68,6 +68,14 @@ const String _startNoAnswerMessage =
 const String _forkNoAnswerMessage =
     'The fork may still be in progress. Check the session list.';
 
+const String _forkInFlightMessage =
+    'A fork of this session is still being prepared.';
+
+/// Sources whose fork request is still awaiting its reply, by project and
+/// session. Staging can take a minute, and a second Fork in that time would
+/// stage the whole conversation again and land a duplicate session.
+final Set<String> _forksInFlight = <String>{};
+
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
 /// session: if its parent project is not currently active, switches projects
 /// first (carrying the desired session id via [pendingActiveSessionIdProvider]
@@ -821,6 +829,11 @@ class _SessionMenu extends ConsumerWidget {
         case _SessionAction.stop:
           await svc.stopSession(session.id);
         case _SessionAction.fork:
+          final forkKey = '$entryId/${session.id}';
+          if (_forksInFlight.contains(forkKey)) {
+            reportSessionNotice(toaster, _forkInFlightMessage);
+            return;
+          }
           // Offered only against a bridge that said it honours `targetTool`:
           // an older one drops the key and would fork into the same agent
           // while the dialog promised another.
@@ -844,6 +857,12 @@ class _SessionMenu extends ConsumerWidget {
           final targetTool = choice.targetTool == sourceTool
               ? null
               : choice.targetTool;
+          // Again after the dialog: another surface can have sent one while it
+          // was open.
+          if (!_forksInFlight.add(forkKey)) {
+            reportSessionNotice(toaster, _forkInFlightMessage);
+            return;
+          }
           // Caught per-branch, per the contract above: every fork refusal the
           // bridge documents — no captured transcript yet, a conversation past
           // the handoff cap, a custom-command session, a missing checkout —
@@ -902,6 +921,14 @@ class _SessionMenu extends ConsumerWidget {
             detached('SessionRow', 'refresh after fork timeout', () async {
               await svc.requestList();
             });
+          } on StateError {
+            // dispose() fails every pending reply: the project was evicted or
+            // demoted in the background while the bridge was still staging,
+            // which can outlast both. The same unknown outcome as a timeout,
+            // with no service left to refresh the list through.
+            reportSessionNotice(toaster, _forkNoAnswerMessage);
+          } finally {
+            _forksInFlight.remove(forkKey);
           }
         case _SessionAction.rename:
           final name = await promptSessionRename(anchor, session.name);

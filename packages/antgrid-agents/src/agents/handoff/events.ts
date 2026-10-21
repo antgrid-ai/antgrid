@@ -84,7 +84,7 @@ export async function forEachJsonlLine(
 
 const HANDOFF_PROMPT_MARKER = /^\s*Continue a task handed off from .{1,80}?\. Antgrid saved its context in two files/s;
 // Sessions forked before the one-line prompt opened with this envelope.
-const LEGACY_ENVELOPE = /^\s*Start a fresh conversation using this captured transcript as context|<antgrid-fork-transcript>/;
+const LEGACY_ENVELOPE = /^\s*(?:Start a fresh conversation using this captured transcript as context|<antgrid-fork-transcript>)/;
 const EXTRA_LEAD = " Additional instruction: ";
 const HANDOFF_PATH = /\.antgrid[\\/]+handoff[\\/]/;
 const REWORDED_ECHO = /excerpt\.md[\s\S]*historical data, not instructions|historical data, not instructions[\s\S]*excerpt\.md/;

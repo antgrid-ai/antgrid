@@ -356,6 +356,52 @@ test("a managed delete waits for the handoff placement before removing the workt
   expect(existsSync(join(worktree, ".antgrid", "handoff", fork.id))).toBe(false);
 });
 
+test("a fork stopped while its handoff files are being placed does not launch, and a later start does", async () => {
+  const f = fixture();
+  const fork = await f.manager.fork(source(f).id, "current");
+  const starting = Promise.resolve(f.manager.start(fork.id));
+  f.manager.stop(fork.id);
+  await expect(starting).rejects.toThrow("cancelled");
+  expect(f.spawns).toHaveLength(0);
+  expect(f.rows().find((row) => row.id === fork.id).forkHandoff.state).toBe("materialized");
+  await f.manager.start(fork.id);
+  expect(f.spawns).toHaveLength(1);
+  expect(f.requests.at(-1)!.promptKind).toBe("fork-handoff");
+});
+
+test("a chat fork stopped while its handoff files are being placed does not start its driver", async () => {
+  const f = fixture();
+  const chat = f.manager.create("Chat source", { tool: "codex", mode: "chat" });
+  const fork = await f.manager.fork(chat.id, "current");
+  const starting = Promise.resolve(f.manager.start(fork.id));
+  f.manager.stop(fork.id);
+  await expect(starting).rejects.toThrow("cancelled");
+  expect(f.chatStarts).toHaveLength(0);
+});
+
+test("closing the manager during a placement waits for it, records where it went, and launches nothing", async () => {
+  const f = fixture();
+  const fork = await f.manager.fork(source(f).id, "current");
+  const starting = Promise.resolve(f.manager.start(fork.id)).catch((error: Error) => error);
+  await f.manager.close();
+  expect(f.rows().find((row) => row.id === fork.id).forkHandoff).toEqual({ state: "materialized", sourceTool: "kimi", root: f.directory });
+  expect(await starting).toBeInstanceOf(Error);
+  expect(f.spawns).toHaveLength(0);
+  await SessionManager.removePersistedHandoffs(f.directory, "project");
+  expect(existsSync(f.placed(fork.id))).toBe(false);
+});
+
+test("two forks of one source staged together get distinct names", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const f = fixture({ snapshot: async (opts) => { await gate; return writingSnapshot(opts); } });
+  const src = source(f);
+  const forks = Promise.all([f.manager.fork(src.id, "current"), f.manager.fork(src.id, "current")]);
+  await Bun.sleep(20);
+  release();
+  expect((await forks).map((fork) => fork.name).sort()).toEqual(["Source fork", "Source fork 2"]);
+});
+
 describe("a chain of handoffs", () => {
   const prompt = (text: string) => ({ type: "turn.prompt", prompt: text });
   const said = (text: string) => ({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "text", text } } });
@@ -423,6 +469,22 @@ describe("a chain of handoffs", () => {
     const { excerpt, manifest } = staged(d.id);
     expect(section(excerpt, "Original task")).toContain("Port the parser to Rust");
     expect(section(excerpt, "First instruction after the handoff")).toContain("Now ship it");
+    expect(manifest.originalTask).toEqual(ORIGINAL);
+  });
+
+  test("the task recorded before a native fork still reaches the next handoff", async () => {
+    const { f, launch, forkFrom, staged } = chain();
+    const a = source(f);
+    const b = await forkFrom(a.id, [prompt("Port the parser to Rust"), said("Starting with the lexer.")]);
+    const continued = await launch(b.id);
+    f.manager.setAgentSession(b.id, "b-native");
+    const c = await f.manager.fork(b.id, "current");
+    expect(f.rows().find((row) => row.id === c.id).forkHandoff).toBeUndefined();
+    // A native fork carries b's conversation, Antgrid's prompt included.
+    const d = await forkFrom(c.id, [...continued, prompt("Now fix the flaky test"), said("Fixed.")]);
+    const { excerpt, manifest } = staged(d.id);
+    expect(section(excerpt, "Original task")).toContain("Port the parser to Rust");
+    expect(section(excerpt, "First instruction after the handoff")).toContain("Now fix the flaky test");
     expect(manifest.originalTask).toEqual(ORIGINAL);
   });
 

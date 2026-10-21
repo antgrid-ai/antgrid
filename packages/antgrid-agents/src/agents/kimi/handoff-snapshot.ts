@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
-  ByteBudget, copyWholeLines, refusesRealStoreUnderTest, SAFE_NATIVE_ID, writeText,
+  ByteBudget, copyWholeLines, HandoffSnapshotError, refusesRealStoreUnderTest, SAFE_NATIVE_ID, writeText,
   type HandoffFile, type HandoffReference, type HandoffSnapshot, type HandoffSnapshotFn,
 } from "../handoff";
 
@@ -111,7 +111,10 @@ export const snapshotKimi: HandoffSnapshotFn = async (opts) => {
       if (text.length > MAX_STATE_BYTES) throw new Error("too large");
       JSON.parse(text);
       files.push({ ...(await writeText(opts.outDir, "kimi-state.json", text, "sidecar", budget)), sourcePath: state });
-    } catch {
+    } catch (error) {
+      // An unreadable sidecar is only a gap; a full budget or a failed write is
+      // the whole snapshot's to report.
+      if (error instanceof HandoffSnapshotError && error.code !== "UNREADABLE") throw error;
       warnings.push("Kimi's state.json could not be read, so the session title and flags were left out.");
     }
   }

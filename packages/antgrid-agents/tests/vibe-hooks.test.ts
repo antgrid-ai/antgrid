@@ -67,6 +67,11 @@ test("Vibe toPosts reports the session id and transcript path", async () => {
   expect(posts).toEqual([{ port: 1, path: "/session-title", body: { terminalId: "t1", sessionId: "s1", agent: "mistral-vibe", transcriptPath: "/v/session_x/messages.jsonl" } }]);
 });
 
+test("Vibe toPosts keeps a session whose store sits under an agents directory", async () => {
+  const posts = await toPosts(invocation("post-agent"), postCtx({ session_id: "s1", transcript_path: "C:\\Users\\u\\agents\\.vibe\\logs\\session\\session_x\\messages.jsonl" }));
+  expect(posts).toHaveLength(1);
+});
+
 test("Vibe toPosts keeps a cleared session that names a parent", async () => {
   const posts = await toPosts(invocation("post-agent"), postCtx({ session_id: "s2", transcript_path: "/v/s/messages.jsonl", parent_session_id: "s1" }));
   expect(posts).toHaveLength(1);

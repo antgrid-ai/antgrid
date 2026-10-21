@@ -49,6 +49,9 @@ export interface HandoffSnapshotOpts extends ForkHandoffOpts {
   outDir: string;
   /** Source launch cwd: resolve(checkoutPath, workingDir). */
   sourceCwd: string;
+  /** When the source row was created, epoch ms: a native session that started
+   * earlier cannot be the source's, whatever directory it ran in. */
+  sourceCreatedAt?: number;
   /** Aborted at HANDOFF_STAGE_DEADLINE_MS. */
   signal: AbortSignal;
   // Test seams; production leaves them undefined.

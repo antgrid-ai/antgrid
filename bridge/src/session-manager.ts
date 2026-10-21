@@ -523,6 +523,11 @@ export function isDefaultSessionName(name: string): boolean {
 }
 
 const FLUSH_DEBOUNCE_MS = 200;
+/** close()'s wait for handoff placements, kept inside the seconds a supervisor
+ *  gives a shutting-down host. A placement is one rename, or a copy across
+ *  volumes. */
+const CLOSE_PLACEMENT_WAIT_MS = 3_000;
+const PLACEMENT_LAUNCH_CANCELLED = "The launch was cancelled while the handoff files were being placed.";
 // Upper bound on how long a mode flip waits for the OLD runtime to be really
 // gone. A wedged PTY or a driver whose dispose never settles must fail the flip
 // rather than hang it forever.
@@ -792,6 +797,12 @@ export class SessionManager {
    *  share it, and a delete waits on it so it cannot race a half-done copy. */
   private readonly materializing = new Map<string, Promise<void>>();
   private readonly handoffCleanups = new Set<Promise<void>>();
+  /** Bumped by every stop(). A fork launches only once its handoff files are
+   *  placed, and a stop that lands while they are moving must win over that
+   *  launch, as it does over one still preparing. */
+  private readonly stopEpochs = new Map<string, number>();
+  /** Set by close(): nothing launches once the project's sessions are torn down. */
+  private closed = false;
   private loadedCompletely = true;
 
   constructor(private opts: SessionManagerOpts) {
@@ -1226,10 +1237,13 @@ export class SessionManager {
     const entry = this.buildEntry(undefined, { tool: target, mode, approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
-    // the user reads that. Assigned here instead of passed to buildEntry so
+    // the user reads that. Assigned instead of passed to buildEntry so
     // `manuallyRenamed` stays false — a derived name is not a name the user
     // chose, and the agent's own conversation title must still win over it.
-    entry.name = this.forkName(source.name);
+    // Taken at the commit, with no await before the row lands: staging can run
+    // for a minute, and two forks of one source staged together would
+    // otherwise both claim "<name> fork".
+    const nameFork = () => { entry.name = this.forkName(source.name); };
     entry.forkedFromSessionId = source.id;
     entry.conversationStart = "fork";
     entry.forkSourceSessionId = nativeSource;
@@ -1240,9 +1254,14 @@ export class SessionManager {
       this.stagingInFlight.add(entry.id);
       const scrollback = this.tm.getScrollback(source.id)?.text;
       // A source that was itself handed off opens with Antgrid's prompt, so its
-      // own transcript no longer holds the task; its handoff recorded it.
-      const inheritedTask = source.forkHandoff
-        ? await readPredecessorTask({ sessionsDir: this.dir, sourceId: source.id, forkHandoff: source.forkHandoff, checkoutPath: sourcePath })
+      // own transcript no longer holds the task; its handoff recorded it. A
+      // native fork carries its source's conversation, that prompt included, so
+      // the handoff can sit further up the chain.
+      const ancestor = this.handoffAncestor(source);
+      const ancestorPath = ancestor === source ? sourcePath
+        : ancestor && await this.checkoutPathForFork(ancestor).catch(() => undefined);
+      const inheritedTask = ancestor?.forkHandoff && ancestorPath
+        ? await readPredecessorTask({ sessionsDir: this.dir, sourceId: ancestor.id, forkHandoff: ancestor.forkHandoff, checkoutPath: ancestorPath })
         : undefined;
       await stageHandoff({
         sessionsDir: this.dir,
@@ -1257,6 +1276,7 @@ export class SessionManager {
           agentSessionId: capturedSourceId,
           transcriptPath: source.agentTranscriptPath,
           sourceCwd: sourceAgentSpec.workingDir ? resolve(sourcePath, sourceAgentSpec.workingDir) : sourcePath,
+          sourceCreatedAt: source.createdAt,
         },
         // Stripped here, at the single point every adapter's scrollback fallback
         // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
@@ -1277,6 +1297,7 @@ export class SessionManager {
         entry.checkoutKind = liveSource.checkoutKind;
         entry.checkoutBranch = liveSource.checkoutBranch;
         entry.checkoutState = liveSource.checkoutState;
+        nameFork();
         this.entries.set(entry.id, entry);
         try {
           await this.flushNowOrThrow();
@@ -1299,7 +1320,22 @@ export class SessionManager {
       // for a non-Git project that createWorktree's own preflight names
       // correctly as NOT_GIT_REPOSITORY.
       () => this.committedHead(sourcePath),
+      nameFork,
     );
+  }
+
+  /** The nearest session up `source`'s fork chain whose conversation opened
+   *  with a handoff. Only native forks are walked through: a fork row with no
+   *  handoff and no saved transcript continued its source's own conversation. */
+  private handoffAncestor(source: PersistedEntry): PersistedEntry | undefined {
+    const seen = new Set<string>();
+    for (let row: PersistedEntry | undefined = source; row && !seen.has(row.id); ) {
+      if (row.forkHandoff) return row;
+      if (row.forkTranscript || !row.forkedFromSessionId) return undefined;
+      seen.add(row.id);
+      row = this.entries.get(row.forkedFromSessionId);
+    }
+    return undefined;
   }
 
   private buildEntry(name: string | undefined, spec: SessionLaunchSpec | undefined): PersistedEntry {
@@ -1391,6 +1427,8 @@ export class SessionManager {
     spec: SessionLaunchSpec,
     preparedEntry?: PersistedEntry,
     resolveBaseCommit?: () => Promise<string>,
+    /** Runs on the commit's own tick, just before the row lands. */
+    beforeCommit?: () => void,
   ): Promise<SessionEntry> {
     if (!this.opts.worktreeSessionsSupported || !this.opts.worktreeManager) {
       throw new WorktreeError("WORKTREE_UNSUPPORTED", "This bridge cannot isolate sessions yet.");
@@ -1444,6 +1482,7 @@ export class SessionManager {
       const setup = declaresSetup
         ? this.beginSetup(entry.id, true, undefined, policy?.startAgent)
         : undefined;
+      beforeCommit?.();
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
@@ -1764,6 +1803,7 @@ export class SessionManager {
     this.resumableCache.delete(id);
     this.awaitingResumedIdentity.delete(id);
     this.setups.delete(id);
+    this.stopEpochs.delete(id);
   }
 
   /** Reclaims a dropped session's handoff files in the background: a delete must
@@ -1791,6 +1831,22 @@ export class SessionManager {
   /** Resolves once every handoff cleanup a delete has started has finished. */
   async settleHandoffCleanup(): Promise<void> {
     while (this.handoffCleanups.size > 0) await Promise.all([...this.handoffCleanups]);
+  }
+
+  /** Called before a shutdown kills the sessions. Refuses further fork launches
+   *  and waits, bounded, for the handoff placements already under way: one that
+   *  settled later would launch its agent after the kill, and would record where
+   *  its files went only after a forgotten project's sessions.json had been read
+   *  to find them. */
+  async close(timeoutMs = CLOSE_PLACEMENT_WAIT_MS): Promise<void> {
+    this.closed = true;
+    if (this.materializing.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.materializing.values()]),
+      new Promise<void>((settle) => { timer = setTimeout(settle, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
   }
 
   /** Flag a session's delete as in flight and announce it. Emits without
@@ -2532,6 +2588,7 @@ export class SessionManager {
       rows: this.entries,
       inFlight: this.stagingInFlight,
       extraRoots,
+      workingDir: this.agentSpec.workingDir,
     });
   }
 
@@ -2552,10 +2609,15 @@ export class SessionManager {
       // A delete that began while the checkout was resolving must not get files
       // placed into a workspace it is about to remove.
       if (this.deleting.has(id)) return;
+      if (this.closed) throw new Error(PLACEMENT_LAUNCH_CANCELLED);
+      const stopEpoch = this.stopEpochs.get(id);
       const launchCwd = sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath;
       return this.placeForkHandoff(entry, checkoutPath, launchCwd, sessionAgentSpec.name).then(() => {
         // Deleted while the files were moving: nothing is left to start.
         if (this.entries.get(id) !== entry || this.deleting.has(id)) return;
+        // Stopped, or torn down, while they were moving: the placement stands
+        // and a later start launches from it, but this one does not.
+        if (this.closed || this.stopEpochs.get(id) !== stopEpoch) throw new Error(PLACEMENT_LAUNCH_CANCELLED);
         return this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec);
       });
     }
@@ -2987,6 +3049,7 @@ export class SessionManager {
    *  slot on another runtime can wait it out (see stopAndAwait); every existing
    *  caller ignores it, exactly as before. */
   stop(id: string): void | Promise<void> {
+    this.stopEpochs.set(id, (this.stopEpochs.get(id) ?? 0) + 1);
     const scheduled = this.scheduledLaunches.get(id);
     if (scheduled && !scheduled.terminal) {
       scheduled.cancelled = true;

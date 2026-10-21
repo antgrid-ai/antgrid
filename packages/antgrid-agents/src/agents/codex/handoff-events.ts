@@ -7,6 +7,7 @@ import {
   type HandoffEvent,
   type HandoffEventsFn,
 } from "../handoff";
+import { retainedTurns } from "./rollout-read";
 
 // Codex wraps typed input in a template for some entry points; everything before
 // this marker is scaffolding, not the user's words.
@@ -54,6 +55,8 @@ function commandText(command: unknown): string {
   return Array.isArray(command) ? command.map((part) => String(part)).join(" ") : stringify(command);
 }
 
+const isOwnUserText = (text: string) => !INJECTED_USER_TEXT.test(text) && !isAntgridHandoffPrompt(text);
+
 /** The plaintext user messages Codex kept when it replaced the history; its own
  * summary item is encrypted. */
 function retainedUserTexts(payload: Json): string[] {
@@ -68,20 +71,24 @@ function retainedUserTexts(payload: Json): string[] {
       if (piece && typeof piece.text === "string") text += piece.text;
     }
     text = text.trim();
-    if (text && !INJECTED_USER_TEXT.test(text) && !isAntgridHandoffPrompt(text)) texts.push(text);
+    if (text && isOwnUserText(text)) texts.push(text);
   }
   return texts.slice(-MAX_RETAINED_USER_TEXTS);
+}
+
+/** Current checkpoints keep the recent turns of both sides in plaintext
+ * retained_context; older ones only the user messages in replacement_history. */
+function retainedSummary(payload: Json): string {
+  const turns = retainedTurns(payload).filter((turn) => turn.role === "assistant" || isOwnUserText(turn.text));
+  if (turns.length > 0) return turns.map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.text}`).join("\n\n");
+  return retainedUserTexts(payload).map((text) => `User: ${text}`).join("\n\n");
 }
 
 function emitCompaction(record: Json, payload: Json, at: string, sink: Sink): void {
   const stamp = typeof record.timestamp === "string" ? record.timestamp : "an unknown time";
   const message = typeof payload.message === "string" ? payload.message.trim() : "";
-  const retained = retainedUserTexts(payload);
-  const summary =
-    message || retained.length > 0
-      ? capEventText(message || retained.map((text) => `User: ${text}`).join("\n\n"))
-      : undefined;
-  sink({ kind: "compaction", note: `compacted at ${stamp}; Codex encrypts its summary`, ...(summary ? { summary } : {}), at });
+  const summary = message || retainedSummary(payload);
+  sink({ kind: "compaction", note: `compacted at ${stamp}; Codex encrypts its summary`, ...(summary ? { summary: capEventText(summary) } : {}), at });
 }
 
 function emitItem(item: Json, at: string, sink: Sink): void {

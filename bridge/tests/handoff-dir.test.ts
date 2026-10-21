@@ -567,6 +567,38 @@ describe("sweepHandoffs", () => {
     expect(existsSync(moving)).toBe(false);
   });
 
+  it("visits the configured working directory inside each checkout, where placements land", async () => {
+    const store = tmp();
+    const project = tmp();
+    const worktree = tmp();
+    const ids = ["dddddddd-0000-4000-8000-000000000001", "dddddddd-0000-4000-8000-000000000002"] as const;
+    const placed: string[] = [];
+    for (const [root, id] of [[project, ids[0]], [worktree, ids[1]]] as const) {
+      await stage(store, writingSnapshot, undefined, id);
+      const parent = join(root, "app", ".antgrid", "handoff");
+      mkdirSync(parent, { recursive: true });
+      await rename(stagingDir(store, id), join(parent, id));
+      placed.push(join(parent, id));
+    }
+    await sweepHandoffs({
+      sessionsDir: store, projectPath: project, projectId: "p1", rows: new Map(), inFlight: new Set(),
+      extraRoots: [worktree], workingDir: "app",
+    });
+    for (const dir of placed) expect(existsSync(dir)).toBe(false);
+  });
+
+  it("removes a linked handoff dir as a link, never the files it points at", async () => {
+    const store = tmp();
+    const project = tmp();
+    const outside = tmp();
+    await stage(store, writingSnapshot, undefined, ID);
+    await rename(stagingDir(store, ID), join(outside, ID));
+    mkdirSync(join(project, ".antgrid", "handoff"), { recursive: true });
+    symlinkSync(join(outside, ID), join(project, ".antgrid", "handoff", ID), "junction");
+    await sweepHandoffs({ sessionsDir: store, projectPath: project, projectId: "p1", rows: new Map(), inFlight: new Set() });
+    expect(readFileSync(join(outside, ID, "fixture.jsonl"), "utf8")).toBe('{"a":1}\n');
+  });
+
   it("never removes a partial dir or staged dir that is in flight", async () => {
     const store = tmp();
     const partial = `${stagingDir(store, ID)}.partial`;

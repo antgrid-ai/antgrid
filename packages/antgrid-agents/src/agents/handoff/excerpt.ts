@@ -344,12 +344,15 @@ export class ExcerptBuilder {
   }
 
   /** The window keeps twice what the tail can ever use, so the cut at render
-   * time always has whole turns to choose from. */
+   * time always has whole turns to choose from. An older turn goes whole only
+   * while what stays still covers the tail; otherwise it loses its oldest
+   * entries, or one long turn behind a short follow-up would leave the tail
+   * almost empty. */
   private trim(): void {
     const limit = this.budget.maxBytes * 2;
     while (this.windowSize > limit) {
       const oldest = this.turns[0]!;
-      if (this.turns.length > 1) {
+      if (this.turns.length > 1 && (this.windowSize - oldest.size >= this.budget.maxBytes || oldest.entries.length === 0)) {
         this.turns.shift();
         this.windowSize -= oldest.size;
         continue;

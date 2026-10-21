@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { logger } from "../logger";
 import { createKeyedLock } from "../keyed-lock";
@@ -47,7 +47,16 @@ async function appendPattern(excludePath: string, pattern: string): Promise<void
 async function writeFallbackIgnore(handoffRoot: string): Promise<"fallback-gitignore"> {
   const dir = join(handoffRoot, ".antgrid", "handoff");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, ".gitignore"), "*\n");
+  const path = join(dir, ".gitignore");
+  // lstat, never stat: a cloned repository can commit this path as a symlink,
+  // and writing through it would overwrite whatever file it names outside the
+  // checkout. The handoff is still placed; it is only left visible to git.
+  const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (existing && !existing.isFile()) throw new Error(`${path} is not a regular file; refusing to write through it.`);
+  await writeFile(path, "*\n");
   // Antigravity may refuse to read paths a .gitignore lists, which the
   // info/exclude route does not trigger.
   log.warn("handoff files are hidden from git through a .gitignore because info/exclude could not be used; an agent that skips gitignored paths may not read them");

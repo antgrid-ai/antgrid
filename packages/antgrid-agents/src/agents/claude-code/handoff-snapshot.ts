@@ -12,7 +12,7 @@ import {
 } from "../handoff";
 import { claudeProjectSlug } from "./transcript-read";
 
-const HEAD_BYTES = 256 * 1024;
+const CHUNK_BYTES = 256 * 1024;
 
 /** CLAUDE_CONFIG_DIR relocates the whole store; ignoring it would miss every session of a user who set it. */
 export function resolveClaudeProjectsRoot(seam: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
@@ -30,26 +30,28 @@ async function isRegularFile(path: string): Promise<boolean> {
 }
 
 /** A resumed session copies the prior history in under a fresh id, so the file's
- * own id can first appear far from the top. The basename already binds the file
- * to the id; this only rules out a file whose records never mention it, so both
- * ends are read rather than the whole of a transcript that can be very large. */
+ * own id can first appear far from the top, and one of its records can be longer
+ * than any fixed window. The basename already binds the file to the id; this only
+ * rules out a file whose records never mention it. Read from the end, where the
+ * file's own records are, matching raw bytes: Claude writes compact JSON, and a
+ * quote inside a string value is escaped, so the needle can only be a record's
+ * own field. */
 async function namesSession(path: string, id: string): Promise<boolean> {
+  const needle = Buffer.from(`"sessionId":${JSON.stringify(id)}`);
   try {
     const handle = await open(path, "r");
     try {
-      const { size } = await handle.stat();
-      const windows = size > HEAD_BYTES * 2 ? [0, size - HEAD_BYTES] : [0];
-      for (const position of windows) {
-        const buffer = Buffer.alloc(HEAD_BYTES);
-        const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, position);
-        for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
-          if (!line.includes(id)) continue;
-          try {
-            if ((JSON.parse(line) as { sessionId?: unknown } | null)?.sessionId === id) return true;
-          } catch {
-            // A window can begin or end mid-record.
-          }
-        }
+      let end = (await handle.stat()).size;
+      // The head of the later chunk, so a needle split across a boundary still matches.
+      let carry = Buffer.alloc(0);
+      while (end > 0) {
+        const start = Math.max(0, end - CHUNK_BYTES);
+        const chunk = Buffer.alloc(end - start);
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
+        const window = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
+        if (window.includes(needle)) return true;
+        carry = window.subarray(0, needle.length - 1);
+        end = start;
       }
     } finally {
       await handle.close();

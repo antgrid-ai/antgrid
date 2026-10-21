@@ -8,6 +8,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_dialog.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_segmented.dart';
+import '../util/detached.dart';
 import 'new_session/environment_menu.dart' show ComposerChip;
 
 /// The two workspaces a fork can run in, spelled the way `session:fork` spells
@@ -192,7 +193,11 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
                     key: const Key('fork-agent-selector'),
                     icon: AbIcons.terminal,
                     label: _toolLabel,
-                    onTap: (chip) => _pickAgent(chip),
+                    onTap: (chip) => detached(
+                      'SessionForkDialog',
+                      'pick fork agent',
+                      () => _pickAgent(chip),
+                    ),
                   ),
                 ),
                 const SizedBox(height: AbTokens.space12),

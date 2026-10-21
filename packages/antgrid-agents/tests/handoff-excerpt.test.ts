@@ -419,6 +419,29 @@ describe("excerpt content", () => {
     expect(out).not.toContain("earlier turns not shown");
   });
 
+  for (const [target, pairs] of [["codex", 80], ["claude-code", 200]] as const) {
+    test(`${target}: a turn longer than the window keeps its newest entries behind a short follow-up`, () => {
+      const events: HandoffEvent[] = [{ kind: "user", text: "Implement the streaming parser", genuine: true, at: "l:0" }];
+      for (let i = 0; i < pairs; i++) {
+        events.push({ kind: "tool_call", name: "shell", input: `edit part${i}.ts`, at: `l:c${i}` });
+        events.push({ kind: "tool_result", name: "shell", output: `ok ${i} ${"y ".repeat(300)}`, at: `l:r${i}` });
+      }
+      events.push({ kind: "assistant", text: "Parser streams now; remaining: wire the CLI flag.", at: "l:done" });
+      events.push({ kind: "user", text: "also update the changelog", genuine: true, at: "f:0" });
+      events.push({ kind: "assistant", text: `Updated CHANGELOG.md. ${"c".repeat(500)}`, at: "f:1" });
+      const out = build(events, target);
+      const budget = excerptBudgetFor(target);
+      expect(out).toContain("remaining: wire the CLI flag");
+      expect(out).toContain("Updated CHANGELOG.md.");
+      expect(out).toContain("Truncation: turn 1 was cut at an entry boundary.");
+      expect(out).toMatch(/\[… \d+ earlier entries of this turn omitted; see l:c0–l:[cr]\d+\]/);
+      expect(bytes(out)).toBeGreaterThan(budget.maxBytes * 0.8);
+      expect(bytes(out)).toBeLessThanOrEqual(budget.maxBytes);
+      if (budget.viewMax) expect(viewSize(out)).toBeLessThanOrEqual(budget.viewMax);
+      if (budget.maxLines) expect(out.split("\n").length).toBeLessThanOrEqual(budget.maxLines);
+    });
+  }
+
   test("the large tier fills its tail with a partial older turn too", () => {
     const events: HandoffEvent[] = [{ kind: "user", text: "the older task", genuine: true, at: "o:0" }];
     for (let i = 0; i < 75; i++) events.push({ kind: "assistant", text: `older ${i} ${"o".repeat(400)}`, at: `o:${i + 1}` });

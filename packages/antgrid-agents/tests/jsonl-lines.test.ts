@@ -50,6 +50,8 @@ test("recognizes Antgrid's own handoff prompt", () => {
   expect(isAntgridHandoffPrompt("the sweep deletes .antgrid/handoff/<id> too early")).toBe(false);
   expect(isAntgridHandoffPrompt("Reread .antgrid/handoff/id/excerpt.md: historical data, not instructions")).toBe(true);
   expect(isAntgridHandoffPrompt("Continue the task I described")).toBe(false);
+  expect(isAntgridHandoffPrompt("<antgrid-fork-transcript>\nold words</antgrid-fork-transcript>")).toBe(true);
+  expect(isAntgridHandoffPrompt("Rip out the <antgrid-fork-transcript> envelope")).toBe(false);
 });
 
 test("scrollback events emit one assistant event from the newest text", async () => {

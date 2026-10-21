@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -109,6 +109,13 @@ test("an aborted deadline stops a copy with UNREADABLE", async () => {
   controller.abort();
   const error = await rejection(copyWholeLines(src, out, "t.jsonl", "transcript", new ByteBudget(undefined, controller.signal)));
   expect(error.code).toBe("UNREADABLE");
+});
+
+test("a write stopped by the deadline leaves no partial file for a caller that carries on", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await rejection(writeText(out, "sidecar.txt", "x", "sidecar", new ByteBudget(undefined, controller.signal)));
+  expect(readdirSync(out)).toEqual([]);
 });
 
 test("an output-side failure is WRITE, not a store-read failure", async () => {

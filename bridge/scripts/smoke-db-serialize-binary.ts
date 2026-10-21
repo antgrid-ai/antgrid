@@ -19,7 +19,9 @@ try {
     { cwd: root, stdout: "inherit", stderr: "inherit" },
   );
   if (build.exitCode !== 0) throw new Error("compile failed");
-  const run = Bun.spawnSync([exe], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  // Run away from the repo: a binary missing the worker would otherwise resolve
+  // the relative worker path against the cwd and load the source file instead.
+  const run = Bun.spawnSync([exe], { cwd: out, stdout: "pipe", stderr: "pipe" });
   const stdout = run.stdout.toString();
   if (run.exitCode !== 0 || !stdout.includes("db serializer worker ok")) {
     throw new Error(`compiled worker smoke failed (exit ${run.exitCode}): ${stdout}${run.stderr.toString()}`);

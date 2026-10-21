@@ -96,6 +96,31 @@ test("a compaction emits the note and the plaintext retained user messages, neve
   expect(compaction.summary).not.toContain("dev text");
 });
 
+test("a compaction with retained_context summarises both sides of the kept turns in order", async () => {
+  const events = await run({
+    "codex-rollout-01.jsonl": [
+      rec("compacted", {
+        message: "",
+        retained_context: {
+          user_messages: [
+            { order: 0, text: "fix the bug" },
+            { order: 5, text: "## My request for Codex:\nand add a test" },
+          ],
+          assistant_messages: [
+            { order: 2, text: "looking" },
+            { order: 3, text: "fixed" },
+          ],
+        },
+        replacement_history: [{ type: "message", role: "user", content: [{ type: "input_text", text: "replayed context" }] }],
+      }),
+    ],
+  });
+  expect(events[0]).toMatchObject({
+    kind: "compaction",
+    summary: "User: fix the bug\n\nAssistant: looking\n\nAssistant: fixed\n\nUser: and add a test",
+  });
+});
+
 test("a non-empty compacted message is used as the summary", async () => {
   const events = await run({ "codex-rollout-01.jsonl": [rec("compacted", { message: "plain summary" })] });
   expect(events[0]).toMatchObject({ kind: "compaction", summary: "plain summary" });

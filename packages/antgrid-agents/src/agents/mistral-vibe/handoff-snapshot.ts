@@ -74,13 +74,15 @@ async function idSessionDir(saveDir: string, id: string): Promise<string | undef
 
 /** Only for a session whose identity was never captured: it counts when exactly
  * one session in the store ran in the source directory, because choosing among
- * several would hand the wrong conversation to the target. */
-async function uniqueDirectorySession(saveDir: string, sourceCwd: string): Promise<{ dir: string; id: string } | undefined> {
+ * several would hand the wrong conversation to the target. One that started
+ * before the source row existed cannot be its own, so it is not a candidate. */
+async function uniqueDirectorySession(saveDir: string, sourceCwd: string, notBefore: number | undefined): Promise<{ dir: string; id: string } | undefined> {
   let found: { dir: string; id: string } | undefined;
   for (const dir of (await sessionDirs(saveDir)).slice(0, MAX_SCANNED_SESSIONS)) {
     const meta = await readMeta(dir);
     const cwd = meta?.environment?.working_directory;
     if (!meta?.session_id || !cwd || !sameDirectory(cwd, sourceCwd)) continue;
+    if (notBefore !== undefined && !(Date.parse(String(meta.start_time)) >= notBefore)) continue;
     if (found) return undefined;
     found = { dir, id: meta.session_id };
   }
@@ -117,7 +119,7 @@ export const snapshotVibe: HandoffSnapshotFn = async (opts) => {
   if (id) {
     dir = await hintedSessionDir(saveDir, opts.transcriptPath, id) ?? await idSessionDir(saveDir, id);
   } else {
-    const match = await uniqueDirectorySession(saveDir, opts.sourceCwd);
+    const match = await uniqueDirectorySession(saveDir, opts.sourceCwd, opts.sourceCreatedAt);
     dir = match?.dir;
     resolvedId = match?.id;
   }

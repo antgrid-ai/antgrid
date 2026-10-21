@@ -73,17 +73,31 @@ test("a file whose records name another session is not accepted", async () => {
   expect(await claudeFork.snapshot(opts())).toBeUndefined();
 });
 
-test("accepts a resumed file whose own id only appears after the copied history", async () => {
+function resumed(copiedRecords: number, content: string): void {
   mkdirSync(join(projects, "dir"), { recursive: true });
   const filler = JSON.stringify({ type: "assistant", sessionId: "older", message: "x".repeat(4000) });
   const lines = [
-    ...Array.from({ length: 200 }, () => filler),
-    JSON.stringify({ type: "user", sessionId: ID, message: { role: "user", content: "after resume" } }),
+    ...Array.from({ length: copiedRecords }, () => filler),
+    JSON.stringify({ type: "user", sessionId: ID, message: { role: "user", content } }),
   ];
   writeFileSync(join(projects, "dir", `${ID}.jsonl`), `${lines.join("\n")}\n`);
+}
+
+test("accepts a resumed file whose own id only appears after the copied history", async () => {
+  resumed(200, "after resume");
   const snapshot = await claudeFork.snapshot(opts());
   expect(snapshot?.method).toBe("copy");
   expect(readFileSync(join(out, "claude-code.jsonl"), "utf8")).toContain("after resume");
+});
+
+test("accepts a resumed file under two reads long whose own id is past the first read", async () => {
+  resumed(75, "after resume");
+  expect((await claudeFork.snapshot(opts()))?.method).toBe("copy");
+});
+
+test("accepts a resumed file whose own record is longer than a read", async () => {
+  resumed(200, `after resume ${"y".repeat(300_000)}`);
+  expect((await claudeFork.snapshot(opts()))?.method).toBe("copy");
 });
 
 test("finds a worktree session by the sourceCwd slug, then projectPath slug, then glob", async () => {

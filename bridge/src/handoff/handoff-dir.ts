@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile, cp } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
 import {
@@ -115,8 +115,44 @@ function isUnder(child: string, parent: string): boolean {
   return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 }
 
+/** The wait before each retry of a delete or rename that a held handle failed:
+ *  a virus scanner opening files just written, or an agent still exiting. Bun
+ *  accepts fs.rm's own maxRetries/retryDelay and honours neither. */
+const BUSY_BACKOFF_MS = [100, 300, 700];
+const BUSY_CODES = new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
+
+async function retryBusy(run: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const wait = BUSY_BACKOFF_MS[attempt];
+      if (wait === undefined || !BUSY_CODES.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      await Bun.sleep(wait);
+    }
+  }
+}
+
 async function removeTree(path: string): Promise<void> {
-  await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  await retryBusy(() => rm(path, { recursive: true, force: true }));
+}
+
+/** Removes a placed handoff with its manifest last: a removal that a held file
+ *  stops partway must leave the manifest, which is what lets the sweep claim
+ *  the rest once no row names it. */
+async function removePlaced(dir: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  // A link is removed as itself, never listed through.
+  if (info.isDirectory()) {
+    for (const name of await readdir(dir)) if (name !== "manifest.json") await removeTree(join(dir, name));
+  }
+  await removeTree(dir);
 }
 
 async function readManifest(dir: string): Promise<HandoffManifest | undefined> {
@@ -211,7 +247,7 @@ export async function stageHandoff(args: {
     try {
       await writeExcerpt(partial, manifest, args.adapter.fork.events, args.targetTool ?? args.source.tool, controller.signal, args.inheritedTask);
       await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
-      await rename(partial, finalDir);
+      await retryBusy(() => rename(partial, finalDir));
     } catch (error) {
       throw snapshotFailure(error);
     }
@@ -389,7 +425,7 @@ export async function stageLegacyText(args: {
     };
     await writeExcerpt(partial, manifest, undefined, args.sourceTool, AbortSignal.timeout(EXCERPT_FALLBACK_MS));
     await writeFile(join(partial, "manifest.json"), JSON.stringify(manifest, null, 2));
-    await rename(partial, finalDir);
+    await retryBusy(() => rename(partial, finalDir));
     return manifest;
   } catch (error) {
     await removeTree(partial).catch(() => {});
@@ -436,8 +472,15 @@ async function moveDir(from: string, to: string, io: { rename: typeof rename }):
   const moving = `${to}.moving`;
   await removeTree(moving);
   await cp(from, moving, { recursive: true, errorOnExist: true });
-  await rename(moving, to);
-  await removeTree(from);
+  // The scanner that blocked the first rename may now be reading the copy.
+  await retryBusy(() => rename(moving, to));
+  await removeStagedCopy(from);
+}
+
+/** The handoff is already in place, so a staged copy that will not go yet must
+ *  not fail the launch; the startup sweep takes it once the row is materialized. */
+async function removeStagedCopy(staging: string): Promise<void> {
+  await removeTree(staging).catch((error) => log.warn("could not remove the staged copy %s: %s", staging, errorText(error)));
 }
 
 /**
@@ -470,7 +513,7 @@ export async function materializeHandoff(
   try {
     await ensureHandoffExcluded(root, id);
     if (placed) {
-      await removeTree(staging);
+      await removeStagedCopy(staging);
       return { root, dir, manifest: placed };
     }
     // A target with no manifest is a copy that died partway.
@@ -504,7 +547,7 @@ export async function removeHandoff(sessionsDir: string | undefined, handoffRoot
     try {
       await assertNoLinks(handoffRoot, [".antgrid", "handoff", id]);
       const target = join(handoffRoot, ".antgrid", "handoff", id);
-      await removeTree(target);
+      await removePlaced(target);
       await removeTree(`${target}.moving`);
     } catch (error) {
       log.warn("could not remove the handoff in %s: %s", handoffRoot, errorText(error));
@@ -525,6 +568,9 @@ export async function sweepHandoffs(args: {
   inFlight: ReadonlySet<string>;
   /** Checkouts other than the project folder that may hold a placed handoff. */
   extraRoots?: readonly string[];
+  /** The agent's configured working directory, relative to a checkout: a
+   *  placement lands under it when it resolves inside the checkout. */
+  workingDir?: string;
 }): Promise<void> {
   const stagingRoot = join(args.sessionsDir, "handoff");
   let names: string[] = [];
@@ -549,7 +595,15 @@ export async function sweepHandoffs(args: {
 
   // A launch cwd below the project, or a managed worktree, holds its own copy;
   // a removal that failed there is retried only if that root is visited here.
-  const roots = new Set([args.projectPath, ...(args.extraRoots ?? [])]);
+  const checkouts = [args.projectPath, ...(args.extraRoots ?? [])];
+  const roots = new Set(checkouts);
+  if (args.workingDir) {
+    for (const checkout of checkouts) {
+      try {
+        roots.add((await resolveHandoffRoot(checkout, resolve(checkout, args.workingDir))).root);
+      } catch { /* a checkout that is gone holds no handoff */ }
+    }
+  }
   for (const row of args.rows.values()) if (row.forkHandoff?.root) roots.add(row.forkHandoff.root);
   for (const root of roots) await sweepCheckoutRoot(root, args);
 }
@@ -573,7 +627,7 @@ async function sweepCheckoutRoot(root: string, args: Parameters<typeof sweepHand
       // A copy that died partway may not have reached its manifest yet.
       const unfinishedMove = entry !== name && !manifest;
       if (!unfinishedMove && manifest?.projectId !== args.projectId) continue;
-      await removeTree(dir);
+      await (unfinishedMove ? removeTree(dir) : removePlaced(dir));
     } catch (error) {
       log.warn("handoff sweep skipped %s: %s", entry, errorText(error));
     }
