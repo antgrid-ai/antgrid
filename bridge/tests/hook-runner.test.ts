@@ -231,6 +231,7 @@ describe("Claude hooks", () => {
     for (const error of [
       "authentication_failed", "oauth_org_not_allowed", "billing_error",
       "invalid_request", "model_not_found", "max_output_tokens",
+      "account_on_hold", "verification_required", "cloud_credential_error",
     ]) {
       const h = harness({
         agent: "claude",

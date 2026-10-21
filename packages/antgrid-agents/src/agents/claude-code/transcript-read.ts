@@ -47,7 +47,7 @@ const LOCAL_COMMAND_TAG = "command-name|command-message|command-args|command-con
 // entry that opens a wrapper but never cleanly closes it.
 const LOCAL_COMMAND_ELEMENT = new RegExp(`<(?:${LOCAL_COMMAND_TAG})>[\\s\\S]*?</(?:${LOCAL_COMMAND_TAG})>`, "g");
 
-function isLocalCommandNoise(entry: any): boolean {
+export function isLocalCommandNoise(entry: any): boolean {
   const c = entry?.message?.content;
   if (typeof c !== "string") return false;
   const s = c.trim();

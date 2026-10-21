@@ -2560,6 +2560,7 @@ export class SessionManager {
       this.handlerAvailabilities.set(id, launch.observation?.handler === false
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
+      const runtimeSpec = (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2592,7 +2593,8 @@ export class SessionManager {
           hookAliveProbeAgent: (launch.observation?.hookAlive ?? injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name))
             ? entry.tool ?? sessionAgentSpec.name
             : undefined,
-          gracefulAsk: (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
+          gracefulAsk: runtimeSpec?.gracefulExit,
+          startupPrompts: runtimeSpec?.startupPrompts,
         });
         const deliver = async () => {
           const terminal = {

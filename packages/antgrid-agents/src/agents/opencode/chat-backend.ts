@@ -40,7 +40,7 @@ export interface OpencodeClientLike {
   listCommands(): Promise<any[]>;
   listAgents(): Promise<any[]>;
   listProviders(): Promise<{ all: any[]; default: Record<string, string>; connected: string[] }>;
-  command(sessionId: string, opts: { command: string; arguments?: string; agent?: string; model?: string; variant?: string }): Promise<void>;
+  command(sessionId: string, opts: { command: string; arguments: string; agent?: string; model?: string; variant?: string }): Promise<void>;
   events(): AsyncIterable<OpencodeEvent>;
   // May be async: an in-app `opencode upgrade` replaces the on-disk binary that
   // the SDK server (the same binary) is still running, so teardown must resolve
@@ -178,7 +178,9 @@ export class OpencodeDriver extends ChatSession {
     if (commandId?.startsWith("cmd:")) {
       await this.client.command(this.rootSessionId, {
         command: commandId.slice("cmd:".length),
-        ...(text.trim() ? { arguments: text } : {}),
+        // The server's CommandInput.arguments is required: omitting it for an
+        // argument-less command is a 400, while "" validates.
+        arguments: text,
         ...(this.selMode ? { agent: this.selMode } : {}),
         // session.command takes the "provider/model" ref string, not the pair.
         ...(this.selModel ? { model: this.selModel } : {}),
