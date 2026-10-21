@@ -485,6 +485,60 @@ class _SessionOverflowMenu extends ConsumerWidget {
         const _HandlerMenuItem(),
         const _MessagesMenuItem(),
         const _OtherSessionsMenuItem(),
+        const _TerminalClipboardMenuItems(),
+      ],
+    );
+  }
+}
+
+/// Attach file, Select text, Paste and Copy host clipboard for the agent
+/// terminal. Absent when nothing is published, i.e. a session without a terminal
+/// on screen.
+class _TerminalClipboardMenuItems extends ConsumerWidget {
+  const _TerminalClipboardMenuItems();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final actions = ref.watch(terminalClipboardActionsProvider);
+    if (actions == null) return const SizedBox.shrink();
+    final copyHost = actions.copyHostClipboard();
+    final attach = actions.attach();
+
+    // The popup closes first so the action lands on the terminal, not under a
+    // modal barrier — the contract the rows above keep.
+    VoidCallback closing(VoidCallback action) => () {
+      Navigator.of(context).pop();
+      action();
+    };
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (attach != null)
+          AbLiveMenuRow(
+            label: 'Attach file',
+            icon: AbIcons.attach,
+            tooltip: 'Attach a file for the agent.',
+            onTap: closing(attach),
+          ),
+        AbLiveMenuRow(
+          label: 'Select text',
+          icon: AbIcons.selectText,
+          onTap: closing(actions.selectText),
+        ),
+        AbLiveMenuRow(
+          label: 'Paste',
+          icon: AbIcons.paste,
+          onTap: closing(actions.paste),
+        ),
+        if (copyHost != null)
+          AbLiveMenuRow(
+            label: 'Copy host clipboard',
+            icon: AbIcons.copy,
+            tooltip: 'Copy the host machine\'s clipboard to this device.',
+            onTap: closing(copyHost),
+          ),
       ],
     );
   }

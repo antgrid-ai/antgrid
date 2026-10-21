@@ -289,6 +289,10 @@ void main() {
     await tester.pump();
 
     expect(sentOfType('git:commit')?['message'], 'fix: the thing');
+    expect(find.text('Committing…'), findsOneWidget);
+    transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await tester.pump();
+    expect(find.text('Committing…'), findsNothing);
     expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
         isEmpty);
   });
@@ -316,6 +320,8 @@ void main() {
     await tester.pump();
 
     expect(sentOfType('git:commit')?['message'], 'feat: shortcut');
+    transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await tester.pump();
   });
 
   testWidgets('nothing staged leaves Commit dead', (tester) async {
@@ -433,6 +439,8 @@ void main() {
     await tester.tap(find.text('Commit (1)'));
     await tester.pump();
     expect(sentOfType('git:commit')?['message'], 'merge');
+    transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await tester.pump();
   });
 
   // Staging IS how git resolves a conflict, so Stage All has to reach one —

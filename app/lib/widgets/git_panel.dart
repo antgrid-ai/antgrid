@@ -273,7 +273,8 @@ class _GitBranchBar extends StatelessWidget {
 
   bool get _commitBlocked => counts.conflictPaths.isNotEmpty;
 
-  bool get _canCommit => !_commitBlocked && counts.stagedCount > 0;
+  bool get _canCommit =>
+      !_commitBlocked && counts.stagedCount > 0 && !git.committing;
 
   /// What gets committed is decided by staging, never re-asked here — the VS
   /// Code contract. An empty message sends the user to the box rather than
@@ -311,7 +312,7 @@ class _GitBranchBar extends StatelessWidget {
       if (sync.canPublish)
         Expanded(
           child: AbButton(
-            label: 'Publish Branch',
+            label: busy ? 'Publishing…' : 'Publish Branch',
             expand: true,
             fontSize: AbTokens.fontSm,
             leading: busy
@@ -381,18 +382,22 @@ class _GitBranchBar extends StatelessWidget {
   /// broken one.
   Widget _commitButton(BuildContext context) {
     final button = AbButton(
-      label: counts.stagedCount == 0
+      label: git.committing
+          ? 'Committing…'
+          : counts.stagedCount == 0
           ? 'Commit'
           : 'Commit (${counts.stagedCount})',
       expand: true,
       fontSize: AbTokens.fontSm,
       fontWeight: FontWeight.w600,
-      leading: AbIcon(
-        AbIcons.gitCommit,
-        size: AbTokens.iconButtonGlyph,
-        // Match the primary variant's accentForeground label.
-        color: context.antgrid.accentForeground,
-      ),
+      leading: git.committing
+          ? const AbLoadingDot(size: AbTokens.fontXs)
+          : AbIcon(
+              AbIcons.gitCommit,
+              size: AbTokens.iconButtonGlyph,
+              // Match the primary variant's accentForeground label.
+              color: context.antgrid.accentForeground,
+            ),
       variant: AbButtonVariant.primary,
       onTap: _canCommit ? _commit : null,
     );
@@ -641,7 +646,7 @@ class _SyncSplit extends StatelessWidget {
             Expanded(
               child: _SplitCell(
                 icon: AbIcons.arrowDown,
-                label: 'Pull',
+                label: syncing == GitSyncOp.pull ? 'Pulling…' : 'Pull',
                 count: sync.behind,
                 countColor: p.textMuted,
                 tooltip: sync.behind > 0
@@ -655,7 +660,7 @@ class _SyncSplit extends StatelessWidget {
             Expanded(
               child: _SplitCell(
                 icon: AbIcons.arrowUp,
-                label: 'Push',
+                label: syncing == GitSyncOp.push ? 'Pushing…' : 'Push',
                 count: sync.ahead,
                 countColor: sync.ahead > 0 ? p.accent : p.textMuted,
                 tooltip: sync.ahead > 0

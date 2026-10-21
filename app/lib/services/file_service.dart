@@ -185,6 +185,7 @@ class FileService {
   /// the only thing that clears the spinner against an older host.
   final Duration gitSyncTimeout;
   ReplyLatch? _syncLatch;
+  ReplyLatch? _commitLatch;
 
   /// In-flight `file:resolve-path` round trips, keyed by requestId — plural
   /// unlike [_diffLatch]/[_syncLatch] because more than one terminal link can
@@ -520,6 +521,13 @@ class FileService {
       return;
     }
     if (parsed is GitCommitResultMessage) {
+      _commitLatch?.settle();
+      _commitLatch = null;
+      if (_state.git.committing) {
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(committing: false)),
+        );
+      }
       _emitOpFeedback(
         parsed.success
             ? (parsed.sha != null ? 'Committed ${parsed.sha}' : 'Committed')
@@ -1789,11 +1797,27 @@ class FileService {
   /// Commit whatever is currently staged, with [message]. Which files land
   /// is decided by prior [stageFiles]/[unstageFiles] calls.
   void commit(String message) {
+    if (_state.git.committing) return;
+    _setState(_state.copyWith(git: _state.git.copyWith(committing: true)));
+    // A send dropped in a keyless relay window replies never, which would leave
+    // the button spinning for the life of the session.
+    _commitLatch?.settle();
+    final latch = _commitLatch = ReplyLatch();
     session.sendForCheckout(
       checkoutId,
       createAbMessage('git:commit', {
         'projectId': projectId,
         'message': message,
+      }),
+    );
+    unawaited(
+      latch.done.timeout(gitSyncTimeout).catchError((_) {
+        if (_disposed || _commitLatch != latch) return;
+        _commitLatch = null;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(committing: false)),
+        );
+        _emitOpFeedback('Commit timed out');
       }),
     );
   }
@@ -2238,6 +2262,8 @@ class FileService {
     _diffLatch = null;
     _syncLatch?.settle();
     _syncLatch = null;
+    _commitLatch?.settle();
+    _commitLatch = null;
     _historyLatch?.settle();
     _historyLatch = null;
     _pendingLogSkip = null;

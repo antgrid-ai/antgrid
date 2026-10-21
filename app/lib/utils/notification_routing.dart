@@ -57,6 +57,25 @@ bool isViewingSession({
   return activeSessionId == sessionId;
 }
 
+/// The headline of an alert about [sessionId]: the session's own title when it
+/// is not the one the user is working in, otherwise [taskLabel].
+///
+/// With several sessions running, a headline that only says "Agent" or
+/// "Task complete" leaves the user guessing which of them is asking. For the
+/// session already open the headline stays the task, since the name is known.
+/// An unresolved [sessionTitle] falls back to [taskLabel] rather than blanking.
+String notificationHeadline({
+  required String taskLabel,
+  required String? sessionId,
+  required String? activeSessionId,
+  required String? sessionTitle,
+}) {
+  final title = sessionTitle?.trim() ?? '';
+  if (title.isEmpty) return taskLabel;
+  if (sessionId != null && sessionId == activeSessionId) return taskLabel;
+  return title;
+}
+
 /// Whether the Handler is already announcing this agent notification, so the
 /// agent's own copy of it must not be surfaced a second time.
 ///

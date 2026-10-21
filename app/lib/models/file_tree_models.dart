@@ -419,6 +419,10 @@ class GitPaneState {
   /// disabled together while either runs, since both mutate the same branch.
   final GitSyncOp? syncing;
 
+  /// A commit has been sent and its result has not come back. Hooks and a slow
+  /// or remote machine can make that long enough to read as a dead button.
+  final bool committing;
+
   /// The last push/pull that failed, kept until the next sync attempt so the
   /// panel can offer the agent handoff after the toast has gone.
   final GitSyncFailure? lastSyncFailure;
@@ -434,6 +438,7 @@ class GitPaneState {
     this.historyCollapsed = false,
     this.sync = GitSyncState.empty,
     this.syncing,
+    this.committing = false,
     this.lastSyncFailure,
     this.history = GitHistoryState.empty,
   });
@@ -454,6 +459,7 @@ class GitPaneState {
     GitSyncState? sync,
     GitSyncOp? syncing,
     bool clearSyncing = false,
+    bool? committing,
     GitSyncFailure? lastSyncFailure,
     bool clearSyncFailure = false,
     GitHistoryState? history,
@@ -473,6 +479,7 @@ class GitPaneState {
       historyCollapsed: historyCollapsed ?? this.historyCollapsed,
       sync: sync ?? this.sync,
       syncing: clearSyncing ? null : (syncing ?? this.syncing),
+      committing: committing ?? this.committing,
       lastSyncFailure: clearSyncFailure
           ? null
           : (lastSyncFailure ?? this.lastSyncFailure),

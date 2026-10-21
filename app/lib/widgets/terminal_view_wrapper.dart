@@ -959,6 +959,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(focusAgentInputProvider.notifier).set(_publishedFocusInput);
+      // The agent pane carries no buttons of its own for these; the session
+      // menu does, on every device. See [_buildQuickActions].
+      ref
+          .read(terminalClipboardActionsProvider.notifier)
+          .set(_publishedClipboardActions);
     });
   }
 
@@ -1065,6 +1070,25 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   /// mode mounts the transcript before this one is disposed.
   late final VoidCallback _publishedFocusInput = _focusScope.requestFocus;
 
+  /// The exact object published to [terminalClipboardActionsProvider], held so
+  /// dispose retracts only its own.
+  late final TerminalClipboardActions _publishedClipboardActions =
+      TerminalClipboardActions(
+        selectText: _selectText,
+        paste: () => detached('TerminalView', 'clipboard paste failed', _paste),
+        copyHostClipboard: () =>
+            _canCopyHostClipboard ? _copyHostClipboard : null,
+        attach: () => _canAttachFromMenu
+            ? () => detached('TerminalView', 'attach failed', _pickAndUpload)
+            : null,
+      );
+
+  // Desktop's only attach route. Mobile already has one in the quick-actions
+  // bar, and a LOCAL session needs none: the agent reads the user's own disk,
+  // so a path typed by hand or dropped by the OS already works.
+  bool get _canAttachFromMenu =>
+      widget.terminalService.session.mode == ProjectSessionMode.relay;
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -1090,6 +1114,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         _publishedFocusInput,
       )) {
         _container.read(focusAgentInputProvider.notifier).set(null);
+      }
+      if (identical(
+        _container.read(terminalClipboardActionsProvider),
+        _publishedClipboardActions,
+      )) {
+        _container.read(terminalClipboardActionsProvider.notifier).set(null);
       }
     } on Object {
       // Nothing to retract from — the container is gone.
@@ -1838,12 +1868,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     // straight back.
     final showPaneChrome = !_historyOpen;
     final showSendButton = _hasSelection && agentTab != null && showPaneChrome;
-    // Desktop's only attach route. Mobile already has one in the quick-actions
-    // bar, and a LOCAL session needs none: the agent reads the user's own disk,
-    // so a path typed by hand or dropped by the OS already works.
     final showAttachButton =
+        !widget.isAgentSurface &&
         _hasPhysicalKeyboard &&
-        widget.terminalService.session.mode == ProjectSessionMode.relay;
+        _canAttachFromMenu;
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
@@ -2192,7 +2220,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                             compact: true,
                             onTap: _returnToLive,
                           ),
-                        ] else if (_hasPhysicalKeyboard)
+                        ] else if (_hasPhysicalKeyboard &&
+                            !widget.isAgentSurface)
                           AbButton(
                             label: 'Select text',
                             compact: true,
@@ -2202,6 +2231,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                     ),
                   ),
                 if (!_historyOpen &&
+                    !widget.isAgentSurface &&
                     _hasPhysicalKeyboard &&
                     _canCopyHostClipboard)
                   Positioned(
@@ -2660,9 +2690,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       composeOpen: _composeOpen,
       onToggleCompose: _toggleCompose,
       onDirectInput: _toggleDirectInput,
-      onSelectText: _selectText,
-      onPaste: () => detached('TerminalView', 'clipboard paste failed', _paste),
-      onCopyHostClipboard: _canCopyHostClipboard ? _copyHostClipboard : null,
+      // The agent panel's terminal offers these in the session menu instead;
+      // the workspace panel's terminals have no such menu, so keep their keys.
+      onSelectText: widget.isAgentSurface ? null : _selectText,
+      onPaste: widget.isAgentSurface
+          ? null
+          : () => detached('TerminalView', 'clipboard paste failed', _paste),
+      onCopyHostClipboard: !widget.isAgentSurface && _canCopyHostClipboard
+          ? _copyHostClipboard
+          : null,
     );
     return bar;
   }
