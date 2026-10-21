@@ -14,13 +14,22 @@ export type RoadmapEntry = RoadmapDetails & (
 );
 
 // Review dates record an editorial check, never a build timestamp.
-export const LAST_REVIEWED = "2026-10-08";
+export const LAST_REVIEWED = "2026-10-21";
 
 // Done shows only the most recent completions; the changelog is the full record
 // of what shipped, so the roadmap stays about direction rather than an archive.
 export const DONE_LIMIT = 5;
 
 export const ROADMAP: readonly RoadmapEntry[] = [
+  {
+    id: "cross-agent-handoff",
+    title: "Continue in another agent",
+    description: "When one agent hits its usage limit, carry the same task on in a different agent without losing its context.",
+    area: "Agent sessions",
+    status: "done",
+    update: "Completed: forking a session can switch to any installed agent. The new session gets the original agent's full transcript and a short summary of the task beside it in its own workspace, kept out of git.",
+    updatedAt: "2026-10-21",
+  },
   {
     id: "agent-scheduling",
     title: "Agents can schedule work",
