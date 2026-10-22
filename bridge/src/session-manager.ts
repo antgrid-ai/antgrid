@@ -796,6 +796,10 @@ export class SessionManager {
    *  starts (the app's start right after a fork, and the shell's auto-start)
    *  share it, and a delete waits on it so it cannot race a half-done copy. */
   private readonly materializing = new Map<string, Promise<void>>();
+  /** Managed deletes from the moment they are asked for. `deleting` is marked
+   *  only past the preflight, so a placement that finishes during it would
+   *  otherwise launch an agent into the worktree the delete is about to remove. */
+  private readonly requestedDeletes = new Map<string, Promise<boolean>>();
   private readonly handoffCleanups = new Set<Promise<void>>();
   /** Bumped by every stop(). A fork launches only once its handoff files are
    *  placed, and a stop that lands while they are moving must win over that
@@ -1766,7 +1770,7 @@ export class SessionManager {
       // remove`, so reading it outside lets a concurrent fork attach to the
       // checkout this call is about to destroy — and lets two member deletes
       // both see a survivor that the first one then removes.
-      return this.withCheckoutMembership(entry.checkoutId, async () => {
+      const deletion = this.withCheckoutMembership(entry.checkoutId, async () => {
         if (!this.entries.has(entry.id)) return false;
         const state = await this.checkoutStore().read();
         if (!state.healthy) throw new Error("Checkout storage could not be read completely");
@@ -1775,6 +1779,12 @@ export class SessionManager {
           ? this.deleteAttachedMemberLocked(entry)
           : this.deleteManaged(entry, options);
       });
+      this.requestedDeletes.set(id, deletion);
+      const settled = () => {
+        if (this.requestedDeletes.get(id) === deletion) this.requestedDeletes.delete(id);
+      };
+      deletion.then(settled, settled);
+      return deletion;
     }
     void Promise.resolve(this.stop(id)).catch((error) => log.warn("deleted session cleanup failed: %s", error));
     this.dropSession(id);
@@ -2612,7 +2622,10 @@ export class SessionManager {
       if (this.closed) throw new Error(PLACEMENT_LAUNCH_CANCELLED);
       const stopEpoch = this.stopEpochs.get(id);
       const launchCwd = sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath;
-      return this.placeForkHandoff(entry, checkoutPath, launchCwd, sessionAgentSpec.name).then(() => {
+      return this.placeForkHandoff(entry, checkoutPath, launchCwd, sessionAgentSpec.name).then(async () => {
+        // A delete asked for while the files were moving decides first; one its
+        // preflight refuses leaves the session to launch as normal.
+        await this.requestedDeletes.get(id)?.catch(() => {});
         // Deleted while the files were moving: nothing is left to start.
         if (this.entries.get(id) !== entry || this.deleting.has(id)) return;
         // Stopped, or torn down, while they were moving: the placement stands

@@ -332,6 +332,7 @@ test("a managed delete waits for the handoff placement before removing the workt
     branch: "antgrid/x", baseRef: "main", managed: true, sessionId: fork.id, createdAt: 1,
   };
   let placedAtRemove = false;
+  let placement: Promise<void> | undefined;
   const manager = f.makeManager({
     worktreeSessionsSupported: true,
     isGitRepository: async () => true,
@@ -339,17 +340,32 @@ test("a managed delete waits for the handoff placement before removing the workt
     resolveAgentSpec: async () => ({ name: "kimi", command: "kimi" }),
     worktreeManager: {
       recordFor: async () => record,
-      inspect: async () => ({ exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false }),
+      // The preflight outlasts the placement, as it does when Git is slow, so
+      // the placement ends before the delete has marked the session.
+      inspect: async () => {
+        await placement?.catch(() => {});
+        await Bun.sleep(20);
+        return { exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false };
+      },
       remove: async () => {
         placedAtRemove = existsSync(join(worktree, ".antgrid", "handoff", fork.id, "manifest.json"));
         await Bun.sleep(150);
       },
     },
   });
-  const starting = Promise.resolve(manager.start(fork.id)).catch(() => {});
-  for (let i = 0; i < 200 && !existsSync(join(worktree, ".antgrid", "handoff")); i++) await Bun.sleep(5);
-  const deleting = manager.delete(fork.id);
-  await Promise.all([starting, deleting]);
+  // The delete is asked for the instant the placement begins.
+  const placements = (manager as any).materializing as Map<string, Promise<void>>;
+  const register = placements.set.bind(placements);
+  let deleting: Promise<boolean> | undefined;
+  placements.set = (key, value) => {
+    register(key, value);
+    placement = value;
+    deleting ??= manager.delete(fork.id) as Promise<boolean>;
+    return placements;
+  };
+  await Promise.resolve(manager.start(fork.id)).catch(() => {});
+  expect(deleting).toBeDefined();
+  expect(await deleting!).toBe(true);
   await manager.settleHandoffCleanup();
   expect(placedAtRemove).toBe(true);
   expect(f.spawns).toHaveLength(0);
