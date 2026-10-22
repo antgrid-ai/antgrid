@@ -40,7 +40,7 @@ describe("hook profile declarations", () => {
       antigravity: ["/session-title", "/notify"],
       kilo: ["/session-title"],
       kimi: ["/session-title"],
-      "mistral-vibe": null,
+      "mistral-vibe": ["/session-title"],
     };
     for (const key of AGENT_KEYS) {
       expect(AGENTS[key].hooks?.posts ?? null).toEqual(expected[key] as never);

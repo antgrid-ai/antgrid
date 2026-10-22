@@ -44,6 +44,19 @@ List<RecentSessionRow> _known() => buildRecentSessions(
 );
 
 void main() {
+  group('splitRegistrationId', () {
+    test('a bare id is a local project', () {
+      expect(splitRegistrationId('projLocal'), const LocalProject('projLocal'));
+    });
+
+    test('a compound id is that machine\'s project', () {
+      expect(
+        splitRegistrationId('uuidA.projRemote'),
+        const RemoteProject(machineUuid: 'uuidA', projectId: 'projRemote'),
+      );
+    });
+  });
+
   group('resolveNotificationRoute', () {
     test('a bare pre-resolved registrationId is a local project', () {
       final loc = resolveNotificationRoute(

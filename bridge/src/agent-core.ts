@@ -2582,7 +2582,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const s = sessions;
         // The manager resolves the source session, transcript, native tool and
         // checkout. This handler intentionally forwards no path or native id.
-        void s.fork(msg.sourceSessionId, msg.workspace).then(
+        void s.fork(msg.sourceSessionId, msg.workspace, msg.targetTool).then(
           (entry) => sendAb(createMessage("session:result", {
             requestId: msg.requestId, ok: true, session: entry, checkoutId: entry.checkoutId,
           })),
@@ -5612,6 +5612,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // nulls `manager` — sequenced after it this could only ever see an empty
       // map, so no session was ever asked to exit on its own and the line below
       // reported 0 for a machine that had just killed a dozen agents.
+      // Ahead of the kill: a fork whose handoff files are still being placed
+      // would otherwise launch its agent once the kill had passed it by.
+      await sessions?.close();
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
       // Awaited: it ends in a `killChildTree` per running `command:run` child,
       // and those are spawned through a shell with no job around them — issuing
