@@ -169,22 +169,27 @@ function codexMessagesIn(raw: string): string[] {
   return out;
 }
 
+/** The turns a compaction checkpoint keeps verbatim in retained_context, user
+ * and assistant lists apart, so `order` (the thread-wide sequence) restores
+ * the interleaving. */
+export function retainedTurns(payload: any): { role: "user" | "assistant"; text: string }[] {
+  const retained = payload?.retained_context;
+  const entries = (list: unknown, role: "user" | "assistant") =>
+    (Array.isArray(list) ? list : [])
+      .filter((m: any) => typeof m?.text === "string" && typeof m?.order === "number")
+      .map((m: any) => ({ order: m.order as number, role, text: role === "user" ? withoutRequestWrapper(m.text) : m.text.trim() }));
+  return [...entries(retained?.user_messages, "user"), ...entries(retained?.assistant_messages, "assistant")]
+    .sort((a, b) => a.order - b.order)
+    .filter((e) => e.text)
+    .map(({ role, text }) => ({ role, text }));
+}
+
 // Legacy checkpoints carry a summary in `message`. Current ones (codex 0.162
-// and later at least) leave it empty and keep the recent turns verbatim in retained_context, user
-// and assistant lists apart, so `order` (the thread-wide sequence) restores
-// the interleaving.
+// and later at least) leave it empty and keep the recent turns instead.
 function compactedBase(payload: any): string[] {
   const summary = typeof payload?.message === "string" ? payload.message.trim() : "";
   if (summary) return [summary];
-  const retained = payload?.retained_context;
-  const entries = (list: unknown, user: boolean) =>
-    (Array.isArray(list) ? list : [])
-      .filter((m: any) => typeof m?.text === "string" && typeof m?.order === "number")
-      .map((m: any) => ({ order: m.order as number, text: user ? withoutRequestWrapper(m.text) : m.text.trim() }));
-  return [...entries(retained?.user_messages, true), ...entries(retained?.assistant_messages, false)]
-    .sort((a, b) => a.order - b.order)
-    .map((e) => e.text)
-    .filter(Boolean);
+  return retainedTurns(payload).map((turn) => turn.text);
 }
 
 function withoutRequestWrapper(message: string): string {

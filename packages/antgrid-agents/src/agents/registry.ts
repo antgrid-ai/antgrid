@@ -40,10 +40,15 @@ import { createDriver as createOpencodeDriver } from "./opencode/driver";
 import { isInterruptRecord as isClaudeInterruptRecord, lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { isInterruptRecord as isCodexInterruptRecord, readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
-import { claudeForkHandoff, claudeNativeForkArgs, claudeLegacyForkSource } from "./claude-code/fork";
-import { codexForkHandoff, codexNativeForkArgs, codexLegacyForkSource } from "./codex/fork";
-import { opencodeForkHandoff, opencodeNativeForkArgs, opencodeLegacyForkSource } from "./opencode/fork";
-import { terminalForkHandoff } from "./fork-handoff";
+import { claudeFork } from "./claude-code/fork";
+import { codexFork } from "./codex/fork";
+import { opencodeFork } from "./opencode/fork";
+import { cursorAgentFork } from "./cursor-agent/fork";
+import { copilotFork } from "./github-copilot/fork";
+import { antigravityFork } from "./antigravity/fork";
+import { kimiFork } from "./kimi/fork";
+import { vibeFork } from "./mistral-vibe/fork";
+import * as vibeHooks from "./mistral-vibe/hooks";
 import {
   readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
 } from "./usage-envelope";
@@ -76,12 +81,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
-    fork: {
-      kind: "native-fork",
-      handoff: claudeForkHandoff,
-      nativeForkArgs: claudeNativeForkArgs,
-      decodeLegacyArgs: claudeLegacyForkSource,
-    },
+    fork: claudeFork,
     hooks: claudeHooks,
     mcp: claudeMcp,
     notifyBodyFromTranscript: lastAssistantText,
@@ -187,12 +187,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,
     initialPrompt: (p) => ["--", p],
-    fork: {
-      kind: "native-fork",
-      handoff: codexForkHandoff,
-      nativeForkArgs: codexNativeForkArgs,
-      decodeLegacyArgs: codexLegacyForkSource,
-    },
+    fork: codexFork,
     hooks: codexHooks,
     mcp: codexMcp,
     driver: createCodexDriver,
@@ -278,12 +273,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--session", id],
     initialPrompt: (p) => ["--prompt", p],
-    fork: {
-      kind: "native-fork",
-      handoff: opencodeForkHandoff,
-      nativeForkArgs: opencodeNativeForkArgs,
-      decodeLegacyArgs: opencodeLegacyForkSource,
-    },
+    fork: opencodeFork,
     hooks: opencodeHooks,
     mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
@@ -358,7 +348,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "osc",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
-    fork: terminalForkHandoff("Cursor"),
+    fork: cursorAgentFork,
     // Shown only when `--trust` is unsupported (see ./cursor-agent/hooks.ts).
     // Measured against v2026.10.01: the dialog never enables bracketed paste,
     // so only the readiness timeout would have sent a submit into it.
@@ -386,7 +376,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // Copilot's optional-value --resume drops a space-separated value.
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
-    fork: terminalForkHandoff("GitHub Copilot"),
+    fork: copilotFork,
     // Measured against 1.0.95 in an untrusted folder: "Yes" is highlighted.
     startupPrompts: ["Confirm folder trust", "Do you trust the files in this folder?"],
     hooks: copilotHooks,
@@ -481,7 +471,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // folder" is highlighted.
     startupPrompts: ["Do you trust the contents of this project?", "Yes, I trust this folder"],
     initialPrompt: (p) => ["--prompt-interactive", p],
-    fork: terminalForkHandoff("Antigravity"),
+    fork: antigravityFork,
     hooks: antigravityHooks,
     augmentsDefaultSpec: true,
     resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
@@ -553,19 +543,21 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     augmentsDefaultSpec: true,
     prepareTerminal: prepareKimiTerminal,
     initialPrompt: () => [],
-    fork: { ...terminalForkHandoff("Kimi"), kind: "native-fork", nativeForkKeepsWorkspace: true },
+    fork: kimiFork,
     // Measured against 2.1.1 in a folder with project MCP config: "Trust this
     // folder" is highlighted, saved, and starts the project's MCP servers.
     startupPrompts: ["Trust this folder?"],
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
-  // (DEC 1004-derived), so the default-blur drives it — no injection.
+  // (DEC 1004-derived), so the default-blur drives it; the injected hook only
+  // reports session identity and titles.
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
     defaultApprovalGated: true,
     approvalPolicies: {},
-    hookName: null,
+    hookName: "mistral-vibe",
+    hooks: vibeHooks,
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
@@ -592,7 +584,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // — no approval is raised, so nothing is denied. Even `--agent plan` falls
     // to the same switch, so the best reach available here is "transcript", and
     // it stays unrun besides (no MISTRAL_API_KEY on any machine measured).
-    fork: terminalForkHandoff("Mistral Vibe"),
+    fork: vibeFork,
   },
 };
 
