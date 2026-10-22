@@ -35,6 +35,7 @@ import 'package:antgrid/screens/app_shell.dart';
 import 'package:antgrid/screens/new_session_screen.dart';
 import 'package:antgrid/screens/workspace_shell.dart';
 import 'package:antgrid/services/account_agents_api.dart';
+import 'package:antgrid/services/operational_notice.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -151,7 +152,7 @@ void main() {
   testWidgets(
     'errors and agent notifications toast while the New Session screen is up',
     (tester) async {
-      final errors = StreamController<ProjectScoped<String>>.broadcast();
+      final errors = StreamController<ProjectScoped<OperationalNotice>>.broadcast();
       final notifications =
           StreamController<
             ProjectScoped<TerminalNotificationMessage>
@@ -172,7 +173,10 @@ void main() {
       await pumpLanding(tester);
       expect(find.byType(NewSessionScreen), findsOneWidget);
 
-      errors.add((entryId: 'p', message: 'stop refused'));
+      errors.add((
+        entryId: 'p',
+        message: (message: 'stop refused', failed: true),
+      ));
       notifications.add((
         entryId: 'p',
         message: const TerminalNotificationMessage(

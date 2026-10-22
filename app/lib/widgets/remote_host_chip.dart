@@ -17,10 +17,15 @@ class RemoteHostChip extends StatelessWidget {
   final String hostMachineName;
   final String? platform;
 
+  /// `RAM 18.2 GB / 32.0 GB`, from the host's latest `machine:stats`; null
+  /// until a bridge new enough to send one has.
+  final String? ram;
+
   const RemoteHostChip({
     super.key,
     required this.hostMachineName,
     required this.platform,
+    this.ram,
   });
 
   /// Unstated reads as desktop, not unknown: every machine that can host an
@@ -37,7 +42,8 @@ class RemoteHostChip extends StatelessWidget {
     final antgrid = context.antgrid;
     final label = hostMachineName.isEmpty ? 'Remote host' : hostMachineName;
     return Tooltip(
-      message: 'Running on $label',
+      // The title bar is crowded enough; the figure is a hover-only detail.
+      message: ram == null ? 'Running on $label' : 'Running on $label\n$ram',
       child: Container(
         padding: const EdgeInsets.symmetric(
           horizontal: AbTokens.space8,

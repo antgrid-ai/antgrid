@@ -142,9 +142,26 @@ describe("git helpers", () => {
     expect((await gitCommit(dir, "  ")).success).toBe(false);
   });
 
-  it("rejects a commit with nothing staged", async () => {
+  it("rejects a commit with nothing staged, and says so", async () => {
     writeFileSync(join(dir, "tracked.txt"), "v2\n"); // modified but never staged
-    expect((await gitCommit(dir, "msg")).success).toBe(false);
+    expect(await gitCommit(dir, "msg")).toEqual({
+      success: false,
+      error: "Nothing staged to commit",
+    });
+  });
+
+  it("passes a rejecting hook's own explanation through", async () => {
+    writeFileSync(
+      join(dir, ".git", "hooks", "pre-commit"),
+      "#!/bin/sh\necho 'lint: 2 errors in tracked.txt' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    expect(await gitCommit(dir, "msg")).toEqual({
+      success: false,
+      error: "lint: 2 errors in tracked.txt",
+    });
   });
 
   it("commits everything staged, including files staged out-of-band", async () => {

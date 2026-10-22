@@ -266,6 +266,7 @@ class ProjectSession {
   void _markDown() {
     if (_down) return;
     _down = true;
+    status.clearMachineStats();
     for (final bundle in checkoutServiceBundles) {
       bundle.terminalService.suspendDisplay();
     }

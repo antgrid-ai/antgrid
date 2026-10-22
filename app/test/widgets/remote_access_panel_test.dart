@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/models/device_stats.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
@@ -35,6 +36,28 @@ class _FakeNotifier extends RemoteDevicesNotifier {
   Future<void> unpair({required String phonePubkey}) async {
     unpaired.add(phonePubkey);
   }
+}
+
+/// A device that has reported its hardware since the host started.
+class _ReportingNotifier extends RemoteDevicesNotifier {
+  @override
+  Future<PhonesList> build() async => const PhonesList(
+    phones: [
+      PairedPhoneSummary(
+        phonePubkey: 'pk-1',
+        phoneDeviceId: 'ph-1',
+        pairedAt: 'x',
+        lastSeenAt: 'y',
+        stats: DeviceStats(
+          model: 'iPhone 15 Pro',
+          ramTotalBytes: 8000000000,
+          ramAvailableBytes: 3000000000,
+          storageTotalBytes: 256000000000,
+        ),
+      ),
+    ],
+    knownProjects: [],
+  );
 }
 
 class _EmptyNotifier extends RemoteDevicesNotifier {
@@ -173,6 +196,28 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('forget-pk-1')));
     await tester.pump();
     expect(fake.unpaired, ['pk-1']);
+  });
+
+  testWidgets('a reporting device shows its model, RAM and storage', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, devices: _ReportingNotifier.new);
+
+    expect(find.text('iPhone 15 Pro · last seen y'), findsOneWidget);
+    // Storage reported its total alone, so it shows no made-up "used" half.
+    expect(
+      find.text('RAM 5.0 GB / 8.0 GB · Storage 256 GB'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a device that has not reported shows no usage line', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, devices: _FakeNotifier.new);
+
+    expect(find.text('last seen y'), findsOneWidget);
+    expect(find.byKey(const ValueKey('device-usage-pk-1')), findsNothing);
   });
 
   testWidgets('turning OFF needs no confirm', (tester) async {

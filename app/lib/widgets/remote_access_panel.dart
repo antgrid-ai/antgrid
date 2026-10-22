@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -14,10 +16,12 @@ import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
+import '../models/device_stats.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
 import '../providers/remote_access.dart';
 import '../services/devices_api.dart';
+import '../util/detached.dart';
 import '../util/relative_time.dart';
 
 /// The machine-wide remote-access switch, what it grants, and the roster of
@@ -299,11 +303,40 @@ String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
 // Device roster
 // ──────────────────────────────────────────────────────────────────────────────
 
-class _DevicesSection extends ConsumerWidget {
+class _DevicesSection extends ConsumerStatefulWidget {
   const _DevicesSection();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DevicesSection> createState() => _DevicesSectionState();
+}
+
+class _DevicesSectionState extends ConsumerState<_DevicesSection> {
+  /// Only while the roster is on screen: a device connecting or reporting its
+  /// stats reaches the bridge, and nothing tells this app it did.
+  static const _pollInterval = Duration(seconds: 30);
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    _poll = Timer.periodic(
+      _pollInterval,
+      (_) => detached(
+        'RemoteAccessPanel',
+        'roster poll',
+        () => ref.read(remoteDevicesProvider.notifier).refreshQuietly(),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final p = context.antgrid;
     final async = ref.watch(remoteDevicesProvider);
     // A mutation keeps the prior data (copyWithPrevious in the notifier), so a
@@ -467,14 +500,8 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
                 color: p.textPrimary,
               ),
       ),
-      subtitle: Text(
-        _lastSeen(),
-        overflow: TextOverflow.ellipsis,
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXxs,
-          color: p.textMuted,
-        ),
-      ),
+      subtitleMaxLines: 2,
+      subtitle: _subtitle(p),
       // Icon, not a labelled button: the row's job is to name a device, and a
       // word-wide action next to a name that can run long is the first thing to
       // squeeze it. What the glyph costs in explicitness the tooltip and the
@@ -511,6 +538,51 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
           onTap: _busy ? null : _forget,
         ),
       },
+    );
+  }
+
+  /// `Pixel 9 · last seen 2 mins ago`, then what that device last said about
+  /// its RAM and storage. The usage line is omitted, not zeroed, for a device
+  /// that hasn't reported since this host started.
+  Widget _subtitle(AbColors p) {
+    final stats = phone.stats;
+    final style = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXxs,
+      color: p.textMuted,
+    );
+    final model = stats?.model;
+    final usage = [
+      if (stats != null)
+        usageLine(
+          'RAM',
+          total: stats.ramTotalBytes,
+          free: stats.ramAvailableBytes,
+        ),
+      if (stats != null)
+        usageLine(
+          'Storage',
+          total: stats.storageTotalBytes,
+          free: stats.storageFreeBytes,
+        ),
+    ].nonNulls.join(' · ');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          model == null ? _lastSeen() : '$model · ${_lastSeen()}',
+          key: ValueKey('device-seen-${phone.phonePubkey}'),
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        ),
+        if (usage.isNotEmpty)
+          Text(
+            usage,
+            key: ValueKey('device-usage-${phone.phonePubkey}'),
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+      ],
     );
   }
 

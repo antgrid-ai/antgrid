@@ -78,6 +78,8 @@ class LocalNotificationService {
         windows: WindowsInitializationSettings(
           appName: 'Antgrid',
           appUserModelId: 'com.antgrid.app',
+          // Also the MSIX `toast_activator.clsid` in pubspec.yaml; if they
+          // drift, a Store toast click opens a second instance.
           guid: 'd49b0314-ee7a-4626-bf79-97cdb8a991ab',
         ),
         linux: LinuxInitializationSettings(defaultActionName: 'Open'),

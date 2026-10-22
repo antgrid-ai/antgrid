@@ -20,9 +20,11 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../models/device_stats.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../models/workspace_view.dart';
+import '../project/project_session_registry.dart';
 import '../providers/account_agents.dart';
 import '../providers/agent_coordinates.dart';
 import '../providers/agent_transport.dart';
@@ -742,8 +744,23 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
       RemoteHostChip(
         hostMachineName: remoteHost.name,
         platform: remoteHost.platform,
+        ram: _focusedHostRam(ref),
       ),
   ];
+}
+
+/// The focused project's host RAM as the chip shows it. A cold project reads
+/// the status cache, which never holds these figures, so it shows none.
+String? _focusedHostRam(WidgetRef ref) {
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  if (selectedId == null) return null;
+  final stats = ref.watch(projectStatusProvider(selectedId)).value?.machineStats;
+  if (stats == null) return null;
+  return usageLine(
+    'RAM',
+    total: stats.ramTotalBytes,
+    free: stats.ramAvailableBytes,
+  );
 }
 
 /// The machine hosting the focused project, or null when it is this one (or

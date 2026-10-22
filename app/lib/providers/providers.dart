@@ -18,6 +18,7 @@ import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/license_token_minter.dart';
+import '../services/operational_notice.dart';
 import '../services/storage_service.dart';
 import 'account_agents.dart';
 import 'auth.dart';
@@ -724,17 +725,22 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
 
 /// Git op, checkout and session-refusal feedback from every warm project, not
 /// just the focused one, or results landing after a focus switch are lost.
-final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(
+final operationalErrorsProvider =
+    Provider<Stream<ProjectScoped<OperationalNotice>>>(
   (ref) => _warmProjectEvents(
     ref,
     perProject: (session) => [
-      session.sessionsService.errors.map((m) => 'Session error: $m'),
+      session.sessionsService.errors.map(
+        (m) => (message: 'Session error: $m', failed: true),
+      ),
     ],
     // Checkout failures are already whole sentences ('Checkout failed' is the
     // service's own fallback), so they surface verbatim.
     perCheckout: (bundle) => [
       bundle.fileService.gitOpFeedback,
-      bundle.terminalService.gitErrors,
+      bundle.terminalService.gitErrors.map(
+        (m) => (message: m, failed: true),
+      ),
     ],
   ),
   name: 'operationalErrors',

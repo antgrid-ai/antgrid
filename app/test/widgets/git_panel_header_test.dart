@@ -297,6 +297,46 @@ void main() {
         isEmpty);
   });
 
+  testWidgets('a refused commit keeps its message for the retry', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+    ]);
+
+    await tester.enterText(find.byType(TextField), 'fix: the thing');
+    await tester.tap(find.text('Commit (1)'));
+    await tester.pump();
+    transport.emit('git:commit-result', {
+      'projectId': 'p',
+      'success': false,
+      'error': 'pre-commit: lint failed',
+    });
+    await tester.pump();
+
+    expect(find.text('Committing…'), findsNothing);
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'fix: the thing');
+  });
+
+  testWidgets('a message typed while committing survives the success', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+    ]);
+
+    await tester.enterText(find.byType(TextField), 'fix: the thing');
+    await tester.tap(find.text('Commit (1)'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'feat: the next thing');
+    transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    await tester.pump();
+
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'feat: the next thing');
+  });
+
   testWidgets('Commit with an empty message sends nothing', (tester) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': true},

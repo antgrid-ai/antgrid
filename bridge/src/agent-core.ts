@@ -69,6 +69,7 @@ import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSour
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
+import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } from "./device-stats";
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
@@ -428,6 +429,10 @@ export interface BuildAgentCoreOptions {
    *  store is loaded from abDir (single shared file, not per-project). Identity,
    *  labels and push routing only — it carries no authorization. */
   pairedPhones?: PairedPhonesStore;
+  /** Shared machine-level `device:stats` store the host's device roster reads.
+   *  A bare agent with no host omits it and drops the frames: nothing here
+   *  would ever show them. */
+  deviceStats?: DeviceStatsStore;
   /** Whether this machine is reachable from mobile — the sole authorization gate
    *  for a remote phone (see remote-access-policy.ts). Host-supplied; a bare
    *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
@@ -2319,7 +2324,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "git:commit": {
-        handleGitCommit(runtime, msg.projectId, msg.message).catch((err) =>
+        handleGitCommit(runtime, msg.projectId, msg.message, msg.requestId).catch((err) =>
           log.error("git:commit handler failed: %s", err)
         );
         break;
@@ -2924,6 +2929,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           pushUpdatedAt: new Date().toISOString(),
         });
         log.info("Registered push token for phone %s", phone.phoneDeviceId);
+        break;
+      }
+      case "device:stats": {
+        // Keyed to the ASKING device's row for the same reason as
+        // push:register: with two apps attached, anything else lets one
+        // overwrite the other's numbers.
+        const peer = peerId ? peerSessionProvider?.(peerId) ?? null : null;
+        if (!peer?.peerPubkey || !pairedPhones.has(peer.peerPubkey)) break;
+        opts.deviceStats?.record(peer.peerPubkey, {
+          model: msg.model,
+          ramTotalBytes: msg.ramTotalBytes,
+          ramAvailableBytes: msg.ramAvailableBytes,
+          storageTotalBytes: msg.storageTotalBytes,
+          storageFreeBytes: msg.storageFreeBytes,
+          reportedAt: new Date().toISOString(),
+        });
         break;
       }
     }
@@ -3603,13 +3624,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitCommit(runtime: CheckoutRuntime, projectId: string, message: string) {
+  async function handleGitCommit(runtime: CheckoutRuntime, projectId: string, message: string, requestId?: string) {
     const result = await gitCommit(runtime.checkout.path, message);
     sendFromRuntime(runtime, createMessage("git:commit-result", {
       projectId,
       success: result.success,
       ...(result.sha ? { sha: result.sha } : {}),
       ...(result.error ? { error: result.error } : {}),
+      ...(requestId ? { requestId } : {}),
     }));
     if (result.success) {
       await refreshGitStatusAttended(runtime);
@@ -5009,12 +5031,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  // Armed by a handshake and disarmed once no remote app is left (the client
+  // sweep and the tick both check), so a core nobody watches from another
+  // device reads no OS memory. Loopback does not count: a local desktop shares
+  // this machine and shows no remote-host figure.
+  let machineStatsTimer: ReturnType<typeof setInterval> | null = null;
+  function hasRemoteClient(): boolean {
+    for (const c of attachedClients) if (c !== "loopback") return true;
+    return false;
+  }
+  function stopMachineStats() {
+    if (machineStatsTimer) clearInterval(machineStatsTimer);
+    machineStatsTimer = null;
+  }
+  function emitMachineStats() {
+    sendAb(createMessage("machine:stats", readMachineStats()));
+    machineStatsTimer ??= setInterval(() => {
+      if (!hasRemoteClient()) { stopMachineStats(); return; }
+      // A backgrounded app renders nothing; its next handshake re-sends.
+      if (connState.suppressed) return;
+      sendAb(createMessage("machine:stats", readMachineStats()));
+    }, MACHINE_STATS_INTERVAL_MS);
+  }
+
   function onHandshakeComplete() {
     log.info("app:ready / owner-connect — emitting hello and (re)syncing state");
     // Re-emit hello on every handshake; app-side notifiers are
     // latest-wins, so this is a no-op when unchanged and self-healing
     // otherwise.
     sendAb(buildAgentHello(config, VERSION));
+    emitMachineStats();
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
     // A carrier just arrived: anything held for want of one goes now rather than
@@ -5602,6 +5648,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // has already removed. Mirrors the construction guard: whoever built it
       // stops it.
       sessionBus.setListener(project.id, null);
+      stopMachineStats();
       // A coalescing window that outlived the core would fire into a torn-down
       // transport, and on a host-injected coordinator it would also read a
       // mailbox for a project nothing is serving any more.
@@ -5746,6 +5793,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.dropSubscription(key);
         for (const fw of fileWatchers.values()) fw.dropSubscription(key);
       }
+      if (!hasRemoteClient()) stopMachineStats();
       focusedSessionByClient.delete(client);
       // A departed device declares nothing. Leaving its "paused" behind would
       // hold the core paused for good once the last unpaused sibling leaves,

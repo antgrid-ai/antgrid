@@ -196,6 +196,7 @@ const Set<String> _statusTypes = <String>{
   'agent:session-reset',
   'agent:turn-end',
   'agent:capabilities',
+  'machine:stats',
   'agent:updateAvailable',
   'agent:updateResult',
   'agent:permission-request',

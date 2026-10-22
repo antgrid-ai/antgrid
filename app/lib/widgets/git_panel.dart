@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -95,15 +97,31 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     super.dispose();
   }
 
+  /// The box empties only once the commit lands: a hook or git refusal leaves
+  /// the message for the retry. Text typed while it was in flight is a new
+  /// message and survives either way.
+  Future<void> _commitDraft(
+    FileService fileService,
+    TextEditingController draft,
+    String message,
+  ) async {
+    final committed = await fileService.commit(message);
+    if (!committed || !mounted || draft.text.trim() != message) return;
+    draft.clear();
+  }
+
   @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
       return const AbLoading(message: 'loading changes...');
     }
+    final draft = _drafts.putIfAbsent(fileService, TextEditingController.new);
     final panel = _PanelContext(
       fileService: fileService,
-      draft: _drafts.putIfAbsent(fileService, TextEditingController.new),
+      draft: draft,
+      onCommit: (message) =>
+          unawaited(_commitDraft(fileService, draft, message)),
       draftFocus: _draftFocus,
       changesCollapsed: _changesCollapsed,
       onToggleChanges: () =>
@@ -205,6 +223,7 @@ class _PanelContext {
   const _PanelContext({
     required this.fileService,
     required this.draft,
+    required this.onCommit,
     required this.draftFocus,
     required this.changesCollapsed,
     required this.onToggleChanges,
@@ -212,6 +231,7 @@ class _PanelContext {
 
   final FileService fileService;
   final TextEditingController draft;
+  final ValueChanged<String> onCommit;
   final FocusNode draftFocus;
   final bool changesCollapsed;
   final VoidCallback onToggleChanges;
@@ -286,8 +306,7 @@ class _GitBranchBar extends StatelessWidget {
       panel.draftFocus.requestFocus();
       return;
     }
-    _fileService.commit(message);
-    panel.draft.clear();
+    panel.onCommit(message);
   }
 
   /// Re-pulls everything the panel shows: the file tree (which, server-side,

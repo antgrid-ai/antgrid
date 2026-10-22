@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../models/agent_hello.dart';
+import '../models/device_stats.dart';
 import '../models/preview_models.dart';
 import '../models/service_status.dart';
 import '../models/ab_message.dart';
@@ -21,6 +22,11 @@ class ProjectStatus {
   final List<int> detectedPorts;
   final List<ServiceStatus> services;
   final AgentHello? agentHello;
+
+  /// The hosting machine's RAM from its latest `machine:stats`. Live only:
+  /// left out of [toJson], since a figure restored from the status cache would
+  /// describe a machine that may have moved on long since.
+  final DeviceStats? machineStats;
   final DateTime? lastUpdatedAt;
 
   const ProjectStatus({
@@ -30,6 +36,7 @@ class ProjectStatus {
     this.detectedPorts = const [],
     this.services = const [],
     this.agentHello,
+    this.machineStats,
     this.lastUpdatedAt,
   });
 
@@ -42,10 +49,12 @@ class ProjectStatus {
     List<int>? detectedPorts,
     List<ServiceStatus>? services,
     AgentHello? agentHello,
+    DeviceStats? machineStats,
     DateTime? lastUpdatedAt,
     bool clearConfigErrorMessage = false,
     bool clearActiveCommandName = false,
     bool clearAgentHello = false,
+    bool clearMachineStats = false,
   }) {
     return ProjectStatus(
       configError: configError ?? this.configError,
@@ -58,6 +67,9 @@ class ProjectStatus {
       detectedPorts: detectedPorts ?? this.detectedPorts,
       services: services ?? this.services,
       agentHello: clearAgentHello ? null : (agentHello ?? this.agentHello),
+      machineStats: clearMachineStats
+          ? null
+          : (machineStats ?? this.machineStats),
       lastUpdatedAt: lastUpdatedAt ?? this.lastUpdatedAt,
     );
   }
@@ -109,6 +121,7 @@ class ProjectStatus {
           listEquals(detectedPorts, other.detectedPorts) &&
           listEquals(services, other.services) &&
           agentHello == other.agentHello &&
+          machineStats == other.machineStats &&
           lastUpdatedAt == other.lastUpdatedAt;
 
   @override
@@ -119,6 +132,7 @@ class ProjectStatus {
     Object.hashAll(detectedPorts),
     Object.hashAll(services),
     agentHello,
+    machineStats,
     lastUpdatedAt,
   );
 }
@@ -146,6 +160,14 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
   void hydrate(ProjectStatus cached) {
     if (_disposed) return;
     value = cached;
+  }
+
+  /// The session went down: the last `machine:stats` no longer describes a
+  /// machine anyone can see, and nothing else would retract it until the next
+  /// handshake.
+  void clearMachineStats() {
+    if (_disposed || value.machineStats == null) return;
+    value = value.copyWith(clearMachineStats: true);
   }
 
   void _apply(InboundFrame frame) {
@@ -181,6 +203,15 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
           clearConfigErrorMessage: true,
           lastUpdatedAt: DateTime.now(),
         );
+      }
+    }
+
+    // Read off the raw envelope: the figures are display-only and arrive every
+    // 30s, so they get no parsed message class of their own.
+    if (type == 'machine:stats') {
+      final stats = DeviceStats.fromJson(frame.json);
+      if (stats != next.machineStats) {
+        next = next.copyWith(machineStats: stats);
       }
     }
 

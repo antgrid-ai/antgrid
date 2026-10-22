@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../services/devices_api.dart';
+import '../util/ab_log.dart';
 import 'auth.dart';
 import 'control_plane.dart';
 import 'device_provisioning.dart';
@@ -77,6 +78,20 @@ final remoteDevicesProvider =
 class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
   @override
   Future<PhonesList> build() async => _buildViaHost(ref, (c) => c.phonesList());
+
+  /// Re-reads the roster without a loading or error state. The bridge pushes
+  /// nothing when a device connects or reports its stats, so an open roster
+  /// polls; a failed poll keeps what is on screen rather than flashing an
+  /// error the next one will likely clear.
+  Future<void> refreshQuietly() async {
+    if (state.isLoading) return;
+    try {
+      final next = await _viaHost(ref, (c) => c.phonesList());
+      if (ref.mounted) state = AsyncData(next);
+    } catch (e) {
+      AbLog.warn('RemoteDevices', 'roster refresh failed', fields: {'error': '$e'});
+    }
+  }
 
   Future<void> _mutate(Future<void> Function(HostControlClient c) op) async {
     // Retain the current data under the loading flag so a toggle/refresh does

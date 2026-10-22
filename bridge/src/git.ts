@@ -646,7 +646,7 @@ export async function gitCommit(
 
   const commit = await runGit(cwd, ["commit", "-m", message]);
   if (commit.exitCode !== 0) {
-    return { success: false, error: commit.stderr.trim() || "git commit failed" };
+    return { success: false, error: await commitFailureReason(cwd, commit) };
   }
 
   // `git commit` prints "[<ref> <shorthash>] <subject>" on stdout (with an
@@ -656,6 +656,27 @@ export async function gitCommit(
   // summary format ever changes).
   const sha = commit.stdout.match(/^\[.+ ([0-9a-f]{7,40})\]/m)?.[1];
   return { success: true, sha };
+}
+
+/**
+ * Why `git commit` exited non-zero, worded for a toast. Hooks and most git
+ * refusals explain themselves on stderr; "nothing to commit" is the outlier —
+ * git prints it to STDOUT as a multi-line, localized status report, leaving
+ * stderr empty. Asked of the index directly rather than parsed from that
+ * report, and only on this failure path so a successful commit pays nothing.
+ * `diff --cached` is repo-wide, unlike [readPorcelain]'s subdirectory-scoped
+ * view, so a checkout below the repo root cannot misread it.
+ */
+async function commitFailureReason(
+  cwd: string,
+  commit: { stdout: string; stderr: string },
+): Promise<string> {
+  const stderr = commit.stderr.trim();
+  if (stderr) return stderr;
+  const staged = await runGit(cwd, ["diff", "--cached", "--quiet"]);
+  if (staged.exitCode === 0) return "Nothing staged to commit";
+  const lastLine = commit.stdout.trim().split(/\r?\n/).at(-1)?.trim();
+  return lastLine || "git commit failed";
 }
 
 /**
