@@ -387,6 +387,10 @@ Future<AgentTransport?> _buildRelayTransportFor(
   ref.onDispose(replacements.cancel);
 
   final session = await conn.awaitSession();
+  // Refresh and the eager kick invalidate the chain right after a restart that
+  // already rebuilt it; a build superseded here must not bind a stream that
+  // its dead ref can no longer register for disposal.
+  if (!ref.mounted) throw StateError('Transport provider disposed');
 
   final StreamTransport transport;
   if (projectId == base) {

@@ -217,8 +217,8 @@ void main() {
         () => stateOf(h.container) == RelayConnectionState.authenticated,
       );
 
-      // Pull-to-refresh and the eager control-plane kick both release the
-      // selected machine and dial it again under the same selection.
+      // A release, then a re-dial under the same selection, leaves a new
+      // connection object behind the provider's back.
       await h.mgr.release('m');
       final fresh = h.mgr.connectionFor('m');
       await _waitUntil(

@@ -52,6 +52,7 @@ import '../services/handler_service.dart';
 import '../services/sessions_service.dart';
 import '../services/upload_service.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import 'client_id.dart';
 import 'control_plane.dart'
     show RefreshRef, invalidateControlPlaneProviders;
@@ -1104,9 +1105,17 @@ class MachineConnectionNotifier extends Notifier<void> {
   /// that Cancel lands on pins every open connection, so an abandoned dial
   /// would keep retrying for as long as the picker shows.
   void cancelActiveAgent() {
-    final activeId = ref.read(selectedRegistrationIdProvider);
+    final target = ref.read(selectedTargetProvider);
     ref.read(selectedTargetProvider.notifier).set(null);
-    if (activeId == null) return;
+    if (target == null) return;
+    final activeId = target.registrationId;
+    // A local project has no machine connection, and invalidating its own
+    // transport here would let the evict below rebuild the session — and
+    // relaunch the agent — the user just cancelled.
+    if (target.isLocal) {
+      ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
+      return;
+    }
     final mgr = ref.read(relayConnectionManagerProvider);
     final machineUuid = baseDeviceUuid(activeId);
     // Read before the evict below, while the cancelled project is still in
@@ -1118,7 +1127,11 @@ class MachineConnectionNotifier extends Notifier<void> {
     // only abandons an attempt in flight.
     if (!otherOpenOnMachine &&
         mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
-      mgr.release(machineUuid);
+      detached(
+        'MachineConnection',
+        'release on cancel failed',
+        () => mgr.release(machineUuid),
+      );
       // The chain is non-autoDispose; left cached it rebuilds atop the
       // released transport (see invalidateControlPlaneProviders).
       invalidateControlPlaneProviders(

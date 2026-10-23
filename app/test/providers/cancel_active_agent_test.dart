@@ -63,6 +63,40 @@ void main() {
     expect(connection.isDisposed, isFalse);
   });
 
+  test('Cancel of a local project leaves its transport alone, so the evict '
+      'cannot rebuild the session the user just cancelled', () async {
+    var builds = 0;
+    final local = ProviderContainer(
+      overrides: [
+        relayConnectionManagerProvider.overrideWithValue(manager),
+        projectSessionRegistryProvider.overrideWith(
+          () => ProjectSessionRegistryController(registry),
+        ),
+        selectedTargetProvider.overrideWith(
+          () => ValueController(const LocalProject('local-p')),
+        ),
+        agentTransportForProvider('local-p').overrideWith((_) async {
+          builds++;
+          throw StateError('no host in tests');
+        }),
+      ],
+    );
+    addTearDown(local.dispose);
+    local.listen(agentTransportForProvider('local-p'), (_, _) {});
+    await pumpEventQueue();
+    expect(builds, 1);
+    local
+        .read(projectSessionRegistryProvider.notifier)
+        .touch('local-p', isLocal: true);
+
+    local.read(machineConnectionProvider.notifier).cancelActiveAgent();
+    await pumpEventQueue();
+
+    expect(local.read(selectedTargetProvider), isNull);
+    expect(registry.openProjects, isEmpty);
+    expect(builds, 1, reason: 'the cancelled transport must not rebuild');
+  });
+
   test('Cancel of the only open project on the machine releases the machine '
       'connection', () async {
     final connection = manager.connectionFor('M');

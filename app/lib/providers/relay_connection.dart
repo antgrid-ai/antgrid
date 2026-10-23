@@ -296,7 +296,7 @@ class MachineConnection {
     return _disposePending = _teardown(native, central);
   }
 
-  Future<NativeStopResult> _teardown(
+  Future<NativeStopResult> _stopLadder(
     NativeConnectionSupervisor? native,
     CentralControlSupervisor? central,
   ) async {
@@ -306,7 +306,14 @@ class MachineConnection {
     await Future.wait([for (final sub in _subs) sub.cancel()]);
     _subs.clear();
     await central?.stop();
-    final result = await nativeStop;
+    return nativeStop;
+  }
+
+  Future<NativeStopResult> _teardown(
+    NativeConnectionSupervisor? native,
+    CentralControlSupervisor? central,
+  ) async {
+    final result = await _stopLadder(native, central);
     _disposeResult = result;
     if (result == NativeStopResult.stopped) {
       _nativeSupervisor = null;
@@ -369,13 +376,7 @@ class MachineConnection {
     NativeConnectionSupervisor? native,
     CentralControlSupervisor? central,
   ) async {
-    final nativeStop =
-        native?.stop() ??
-        Future<NativeStopResult>.value(NativeStopResult.stopped);
-    await Future.wait([for (final sub in _subs) sub.cancel()]);
-    _subs.clear();
-    await central?.stop();
-    final result = await nativeStop;
+    final result = await _stopLadder(native, central);
     // A dispose that landed mid-restart owns the teardown from here.
     if (_disposed) return result;
     if (result == NativeStopResult.cleanupIncomplete) {
