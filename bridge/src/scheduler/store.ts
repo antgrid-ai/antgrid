@@ -54,7 +54,8 @@ export class SchedulerStore {
 
   private withDb<T>(fn: (db: Database) => T): T {
     if (this.closed) throw new Error("Scheduler is closed");
-    const db = new Database(this.path, { create: false, strict: true });
+    // Bun honours `create: false` only alongside `readwrite: true`; alone it creates an empty file in place of a lost store.
+    const db = new Database(this.path, { readwrite: true, create: false, strict: true });
     try {
       if (process.platform !== "win32") chmodSync(this.path, 0o600);
       db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 250; PRAGMA synchronous = FULL;");
