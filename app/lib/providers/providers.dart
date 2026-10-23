@@ -789,19 +789,29 @@ final agentSessionStateProvider = StreamProvider.family<AgentSessionState, Strin
 });
 
 final connectionStateProvider = StreamProvider<AppState>((ref) {
-  // Follow the selected remote connection's own socket (was the single
-  // `_shared` relay). Guard on the target TYPE, not the id string: a selected
-  // LOCAL project has no relay socket, and `connectionFor(localId)` would
-  // materialize a stray RelayService — so emit nothing for local targets.
+  // Guard on the target TYPE, not the id string: a selected LOCAL project has
+  // no relay socket, so emit nothing for local targets.
   final target = ref.watch(selectedTargetProvider);
   if (target == null || target.isLocal) {
     return const Stream<AppState>.empty();
   }
-  final relay = ref
+  // `peek`, never `connectionFor`: a UI read must not dial, and `connectionFor`
+  // throws once sign-out has blocked new work. Re-peeking on every change is
+  // what moves this off a released connection, whose relay stream is closed,
+  // onto the one the next dial builds for the same machine.
+  ref.watch(relayConnectionChangesProvider);
+  final conn = ref
       .read(relayConnectionManagerProvider)
-      .connectionFor(baseDeviceUuid(target.registrationId))
-      .relay;
-  // Prepend the current state so the UI has a value immediately.
+      .peek(baseDeviceUuid(target.registrationId));
+  // A disposed connection keeps its slot until its release settles, and for
+  // good when cleanup is incomplete; its relay never comes back up. The
+  // default state is what a freshly built relay reports, and an explicit emit
+  // replaces the previous machine's value instead of leaving it standing
+  // behind a loading state.
+  if (conn == null || conn.isDisposed) {
+    return Stream<AppState>.value(const AppState());
+  }
+  final relay = conn.relay;
   return seededStream(() => relay.currentState, relay.stateStream);
 });
 
