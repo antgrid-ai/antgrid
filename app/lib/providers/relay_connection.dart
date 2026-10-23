@@ -92,12 +92,15 @@ class MachineConnection {
       StreamController<void>.broadcast();
 
   /// Fires when this machine's [MachineSession] is swapped for a fresh one (a
-  /// redial produced a new payload link). Every project bound to this machine
-  /// must rebuild its transport: the swap disposed the [StreamTransport] each
-  /// of them holds.
+  /// redial produced a new payload link, or [restart] cleared the ladder).
+  /// Every project bound to this machine must rebuild its transport: the swap
+  /// disposed the [StreamTransport] each of them holds.
   ///
-  /// Deliberately NOT emitted on [dispose] — a released connection already has
-  /// the reaper and the registry's `onEvict` invalidating its transports.
+  /// Deliberately NOT emitted on [dispose]: only the reaper, Cancel, forget
+  /// and sign-out dispose, each only once nothing open still rides this
+  /// connection or while evicting whatever does, so a rebuild would only
+  /// redial a machine nobody wants. A caller that wants the machine back up
+  /// restarts it instead.
   Stream<void> get sessionReplacements => _sessionReplacements.stream;
 
   /// The live native [MachineSession] once payload establishment creates it.
@@ -318,6 +321,76 @@ class MachineConnection {
     return result;
   }
 
+  /// Stops this machine's ladder and lets the next [ensureStarted] build a
+  /// fresh one on this same connection, for a caller that wants the machine
+  /// back up rather than gone (pull-to-refresh, the eager resume kick).
+  ///
+  /// The connection object, its relay and its subscribers survive; only the
+  /// supervisors and their mechanisms go. That is what keeps every project
+  /// already bound here recoverable: they rebuild off [sessionReplacements],
+  /// and the first rebuild to reach [ensureStarted] after the stop settles
+  /// starts the new ladder with mechanisms read afresh. A release followed by
+  /// a new connection would instead leave them holding a disposed one that
+  /// nothing ever tells them about.
+  ///
+  /// Emitted as the restart begins rather than once it settles: a transport
+  /// parked in [awaitSession] is invalidated before the stopping supervisor's
+  /// stream closes under it, so its rebuild replaces it instead of it failing
+  /// first. Rebuilds cannot observe the stopping ladder, because the transport
+  /// build waits out [restarting] before it starts one.
+  ///
+  /// When native cleanup ends `cleanupIncomplete` a new ladder must not stack
+  /// on the unreleased one, so the connection becomes disposed with that
+  /// result, exactly as if [dispose] had been called.
+  Future<NativeStopResult> restart() {
+    if (_disposed) return dispose();
+    final pending = _restartPending;
+    if (pending != null) return pending;
+    final native = _nativeSupervisor;
+    final central = _centralSupervisor;
+    if (native == null && central == null) {
+      return Future<NativeStopResult>.value(NativeStopResult.stopped);
+    }
+    final stopping = _restartPending = _restart(
+      native,
+      central,
+    ).whenComplete(() => _restartPending = null);
+    if (!_sessionReplacements.isClosed) _sessionReplacements.add(null);
+    return stopping;
+  }
+
+  Future<NativeStopResult>? _restartPending;
+
+  /// Settles when a [restart] in flight does; null when none is. [ensureStarted]
+  /// during that window would be a no-op against the stopping supervisor.
+  Future<void>? get restarting => _restartPending;
+
+  Future<NativeStopResult> _restart(
+    NativeConnectionSupervisor? native,
+    CentralControlSupervisor? central,
+  ) async {
+    final nativeStop =
+        native?.stop() ??
+        Future<NativeStopResult>.value(NativeStopResult.stopped);
+    await Future.wait([for (final sub in _subs) sub.cancel()]);
+    _subs.clear();
+    await central?.stop();
+    final result = await nativeStop;
+    // A dispose that landed mid-restart owns the teardown from here.
+    if (_disposed) return result;
+    if (result == NativeStopResult.cleanupIncomplete) {
+      _disposed = true;
+      _disposeResult = result;
+      _disposePending = Future<NativeStopResult>.value(result);
+      return result;
+    }
+    _nativeSupervisor = null;
+    _centralSupervisor = null;
+    _mechanisms = null;
+    _publishStatus(null);
+    return result;
+  }
+
   bool get isDisposed => _disposed;
   bool get cleanupIncomplete =>
       _disposeResult == NativeStopResult.cleanupIncomplete;
@@ -423,6 +496,13 @@ class MachineConnectionManager {
       throw StateError('machine connection cleanup incomplete');
     }
   }
+
+  /// Restarts this machine's ladder in place — see [MachineConnection.restart].
+  /// For a caller that wants a fresh attempt at a machine it still wants; a
+  /// [release] here would strand every project bound to the connection.
+  /// Null when the machine has no connection, so there is nothing to restart.
+  Future<NativeStopResult?> restart(String machineDeviceId) async =>
+      peek(machineDeviceId)?.restart();
 
   MachineConnection? peek(String machineDeviceId) =>
       _connections[baseDeviceUuid(machineDeviceId)];

@@ -188,7 +188,7 @@ void main() {
         // The failed-at-launch shape: the dial materialized M's connection
         // before the provider chain settled on a rejection — a bare peek-skip
         // would strand that error until manual pull-to-refresh.
-        manager.connectionFor('M');
+        final connection = manager.connectionFor('M');
 
         var builds = 0;
         final c = ProviderContainer(
@@ -215,10 +215,12 @@ void main() {
 
         await kickEagerControlPlaneDials(RefreshRef.ofContainer(c));
 
-        // Never Connected (no supervisor started) → the stuck connection was
-        // released for a genuinely fresh attempt, and the chain re-dialed.
+        // Never Connected → restarted in place for a genuinely fresh attempt,
+        // keeping the connection that projects on M are bound to, and the
+        // chain re-dialed.
         expect(builds, 2);
-        expect(manager.peek('M'), isNull);
+        expect(manager.peek('M'), same(connection));
+        expect(connection.isDisposed, isFalse);
       },
     );
 

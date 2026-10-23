@@ -319,11 +319,19 @@ Future<AgentTransport?> _buildRelayTransportFor(
   final peerRuntime = await ref.read(peerRuntimeProvider.future);
   if (!ref.mounted) throw StateError('Transport provider disposed');
   // A release during the awaits above leaves the disposed connection in the
-  // slot until native cleanup settles, and ensureStarted on it is a silent
-  // no-op, so wait that release out and take a fresh one. Nothing is awaited
-  // between the loop's last check and ensureStarted.
-  while (mgr.connectionFor(base).isDisposed) {
-    await mgr.awaitRelease(base);
+  // slot until native cleanup settles, and a restart keeps its stopping
+  // supervisor in place until the stop settles; ensureStarted on either is a
+  // silent no-op. Wait both out. Nothing is awaited between the loop's last
+  // check and ensureStarted.
+  while (true) {
+    final current = mgr.connectionFor(base);
+    if (current.isDisposed) {
+      await mgr.awaitRelease(base);
+    } else if (current.restarting case final restarting?) {
+      await restarting;
+    } else {
+      break;
+    }
     if (!ref.mounted) throw StateError('Transport provider disposed');
   }
   final conn = mgr.connectionFor(base);
