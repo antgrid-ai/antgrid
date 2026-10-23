@@ -31,6 +31,7 @@ import '../../providers/scheduler_timezone.dart';
 import '../../util/detached.dart';
 import '../../utils/platform_utils.dart';
 import 'scheduler_format.dart';
+import '../ab_status_helpers.dart' show caughtErrorCopy;
 
 const schedulerPresets = <String, String>{
   'Hourly': '0 * * * *',
@@ -570,7 +571,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       drafts.removeIfCurrent(key, submittedDraft);
       if (mounted) widget.onSaved();
     } catch (error) {
-      if (mounted) setState(() => _error = 'Could not save schedule: $error');
+      if (mounted) {
+        setState(
+          () => _error =
+              "Couldn't save the schedule. ${caughtErrorCopy(error, 'Try again.')}",
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

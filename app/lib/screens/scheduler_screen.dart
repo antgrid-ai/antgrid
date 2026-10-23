@@ -43,6 +43,7 @@ import '../widgets/scheduler/scheduler_format.dart';
 import '../widgets/scheduler/scheduler_lanes.dart';
 import '../widgets/scheduler/scheduler_run_squares.dart';
 import '../widgets/scheduler/scheduler_runs_view.dart';
+import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 export '../widgets/scheduler/scheduler_format.dart' show schedulerTime;
 
 class SchedulerScreen extends ConsumerStatefulWidget {
@@ -98,6 +99,12 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   Future<void> _refresh() async {
     if (!mounted || _busy || _refreshToken != null) return;
+    // With no machine there is nothing to ask, and the failed request would put
+    // an error in front of a first-run user; the empty state explains instead.
+    if (ref.read(schedulerMachinesProvider).isEmpty) {
+      if (_loading) setState(() => _loading = false);
+      return;
+    }
     final generation = ++_generation;
     _refreshToken = generation;
     final request = ref.read(schedulerRequestProvider);
@@ -170,7 +177,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       }
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _actionError = 'Action failed: $error');
+        setState(
+          () => _actionError =
+              "That didn't work. ${schedulerError(error, machineName: _machineName)}",
+        );
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -280,6 +290,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     final snapshot = _snapshot;
     ref.watch(schedulerDraftsProvider.select((drafts) => drafts.length));
     final machineName = machines[machine ?? 'local'] ?? 'this machine';
+    final noMachine = machines.isEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= kMediumBreakpoint;
@@ -295,9 +306,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                 connected: connected,
                 onNew: _newScheduleTap(snapshot, machine, localTimezone),
               ),
-            if (_error != null)
+            if (_error != null && !noMachine)
               AbInlineBanner(text: _error!, color: context.antgrid.error),
-            if (!_loading && !connected && _error == null)
+            if (!_loading && !connected && _error == null && !noMachine)
               AbInlineBanner(
                 text:
                     '$machineName is offline. Changes are paused until it reconnects.',
@@ -344,15 +355,22 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                     : context.antgrid.error,
               ),
             Expanded(
-              child: _loading
+              child: noMachine
+                  ? const AbEmptyState(
+                      icon: AbIcons.calendar,
+                      title: 'Connect a machine to schedule tasks',
+                      subtitle:
+                          'Schedules run on your computer, in the Antgrid '
+                          'desktop app, at the times you set. Connect it to '
+                          'create and manage them here.',
+                    )
+                  : _loading
                   ? const Center(
                       child: AbLoading(message: 'Loading schedules…'),
                     )
                   : snapshot == null
                   ? AbEmptyState(
-                      title: machines.isEmpty
-                          ? 'No connected machines'
-                          : 'Machine unavailable',
+                      title: 'Machine unavailable',
                       subtitle: _error,
                     )
                   : !snapshot.capabilities.supported
@@ -1560,5 +1578,7 @@ String schedulerError(
   }.contains(code)) {
     return 'Update Antgrid on $machineName to use the scheduler.';
   }
-  return 'Machine unavailable or scheduler request failed: $error';
+  // The request provider's own messages are written for the user.
+  if (error is StateError) return error.message;
+  return caughtErrorCopy(error, "Couldn't reach the scheduler on $machineName.");
 }
