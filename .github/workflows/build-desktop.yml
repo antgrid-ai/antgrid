@@ -1218,11 +1218,3 @@ jobs:
             --notes-file release-notes.md \
             $prerelease \
             $assets
-
-  sync-changelog:
-    needs: publish
-    if: ${{ needs.publish.result == 'success' }}
-    permissions:
-      contents: write
-      pull-requests: write
-    uses: ./.github/workflows/sync-changelog.yml
