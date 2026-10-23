@@ -10,6 +10,7 @@ import '../../design/widgets/ab_text_field.dart';
 import '../../models/git_branch.dart';
 import '../../providers/new_session_picker.dart';
 import 'environment_menu.dart';
+import '../ab_status_helpers.dart' show caughtErrorCopy;
 
 class BranchChip extends ConsumerWidget {
   const BranchChip({super.key, this.enabled = true});
@@ -247,7 +248,7 @@ class _BranchPanelState extends ConsumerState<BranchPanel> {
                 ),
                 const SizedBox(height: AbTokens.space4),
                 Text(
-                  err.toString(),
+                  caughtErrorCopy(err, 'Try again in a moment.'),
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontSm,
                     color: p.textMuted,

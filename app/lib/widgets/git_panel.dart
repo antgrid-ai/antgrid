@@ -43,6 +43,8 @@ import '../widgets/file_tree_view.dart';
 import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
 import '../widgets/send_capture_to_agent.dart';
+import 'ab_status_helpers.dart' show caughtErrorCopy;
+import '../providers/demo_mode.dart';
 
 /// Anchors the Changes section header's diff totals for tests — a file row's
 /// own diff-stat badge carries the same numbers, so a test reading the totals
@@ -136,11 +138,9 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           panel: panel,
           counts: counts,
           git: git ?? GitPaneState.empty,
-          body: Center(
-            child: Text(
-              'Error: $error',
-              style: TextStyle(color: context.antgrid.textMuted),
-            ),
+          body: AbEmptyState.error(
+            title: "Couldn't load changes",
+            subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
           ),
         ),
         data: (state) =>
@@ -305,32 +305,30 @@ class _GitBranchBar extends StatelessWidget {
     final sync = git.sync;
     final busy = git.syncing != null;
     final actions = <Widget>[
-      if (counts.hasChanges) Expanded(child: _commitButton(context)),
+      if (counts.hasChanges) _commitButton(context),
       // A branch that has never been pushed has nothing to pull and no counts
       // to show — one action, named for what it does, matching VS Code.
       if (sync.canPublish)
-        Expanded(
-          child: AbButton(
-            label: 'Publish Branch',
-            expand: true,
-            fontSize: AbTokens.fontSm,
-            leading: busy
-                ? const AbLoadingDot(size: AbTokens.fontXs)
-                : AbIcon(
-                    AbIcons.upload,
-                    size: AbTokens.iconButtonGlyph,
-                    color: context.antgrid.textSecondary,
-                  ),
-            onTap: busy ? null : _fileService.push,
-          ),
+        AbButton(
+          label: 'Publish Branch',
+          expand: true,
+          wrapLabel: true,
+          maxLines: 1,
+          fontSize: AbTokens.fontSm,
+          leading: busy
+              ? const AbLoadingDot(size: AbTokens.fontXs)
+              : AbIcon(
+                  AbIcons.upload,
+                  size: AbTokens.iconButtonGlyph,
+                  color: context.antgrid.textSecondary,
+                ),
+          onTap: busy ? null : _fileService.push,
         )
       else if (sync.hasUpstream)
-        Expanded(
-          child: _SyncSplit(
-            sync: sync,
-            syncing: git.syncing,
-            fileService: _fileService,
-          ),
+        _SyncSplit(
+          sync: sync,
+          syncing: git.syncing,
+          fileService: _fileService,
         ),
     ];
 
@@ -354,17 +352,35 @@ class _GitBranchBar extends StatelessWidget {
             ],
             if (actions.isNotEmpty) ...[
               const SizedBox(height: AbTokens.space8),
-              SizedBox(
-                height: AbTokens.rowHeightXs,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final (i, action) in actions.indexed) ...[
-                      if (i > 0) const SizedBox(width: AbTokens.space6),
-                      action,
-                    ],
-                  ],
-                ),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  // Side by side, each action gets half the pane; on a
+                  // tablet with the sidebar docked that half cannot hold a
+                  // label, so they stack at full width instead.
+                  if (constraints.maxWidth < _kSideBySideActionsWidth) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final (i, action) in actions.indexed) ...[
+                          if (i > 0) const SizedBox(height: AbTokens.space6),
+                          SizedBox(height: AbTokens.rowHeightXs, child: action),
+                        ],
+                      ],
+                    );
+                  }
+                  return SizedBox(
+                    height: AbTokens.rowHeightXs,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final (i, action) in actions.indexed) ...[
+                          if (i > 0) const SizedBox(width: AbTokens.space6),
+                          Expanded(child: action),
+                        ],
+                      ],
+                    ),
+                  );
+                },
               ),
             ],
           ],
@@ -385,6 +401,10 @@ class _GitBranchBar extends StatelessWidget {
           ? 'Commit'
           : 'Commit (${counts.stagedCount})',
       expand: true,
+      // Ellipsize rather than overflow in a pane narrower still than the
+      // width the actions stack at.
+      wrapLabel: true,
+      maxLines: 1,
       fontSize: AbTokens.fontSm,
       fontWeight: FontWeight.w600,
       leading: AbIcon(
@@ -417,6 +437,8 @@ class _GitBranchBar extends StatelessWidget {
     );
   }
 }
+
+const double _kSideBySideActionsWidth = 280;
 
 /// Branch name, where it stands against the remote, and Refresh.
 class _BranchLine extends StatelessWidget {
@@ -1081,6 +1103,10 @@ class _SyncFailureStrip extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The sample project refuses every push and pull. Its toast already says
+    // why; a red "failed" strip offering to send the agent after it would
+    // present a sample with no remote as a broken one.
+    if (ref.watch(demoModeProvider)) return const SizedBox.shrink();
     return AbInlineBanner(
       text: '${failure.op.label} failed — ${failure.message}',
       color: context.antgrid.gitConflict,
