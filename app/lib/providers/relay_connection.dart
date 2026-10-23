@@ -410,6 +410,20 @@ class MachineConnectionManager {
     return conn;
   }
 
+  /// Waits out a [release] still tearing down this machine's connection, which
+  /// [release] keeps in its slot until native cleanup settles. Returns at once
+  /// when the slot is empty or live.
+  ///
+  /// Throws when that teardown ends `cleanupIncomplete`: the slot stays held so
+  /// sign-out can see it, and a new dial must not stack on an unreleased one.
+  Future<void> awaitRelease(String machineDeviceId) async {
+    if (!(peek(machineDeviceId)?.isDisposed ?? false)) return;
+    // Joins the release in flight: dispose is memoized, so this starts nothing.
+    if (await release(machineDeviceId) == NativeStopResult.cleanupIncomplete) {
+      throw StateError('machine connection cleanup incomplete');
+    }
+  }
+
   MachineConnection? peek(String machineDeviceId) =>
       _connections[baseDeviceUuid(machineDeviceId)];
 

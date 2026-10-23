@@ -276,7 +276,25 @@ Future<AgentTransport?> _buildRelayTransportFor(
     );
   }
 
-  final conn = mgr.connectionFor(base);
+  // Already disposed: released before this build began. The control-plane
+  // reaper releases a machine and then invalidates this chain, which AppShell's
+  // label subscription rebuilds at once, so dialling here would undo the reap.
+  // Fail instead, and mark this entry stale once the release settles: the
+  // label subscription lets go of the emptied slot before that refresh runs,
+  // so it redials only for a reader that still wants the machine, and a later
+  // reader gets a fresh dial rather than this failure.
+  if (mgr.connectionFor(base).isDisposed) {
+    unawaited(
+      mgr.awaitRelease(base).then(
+        (_) {
+          if (ref.mounted) ref.invalidateSelf();
+        },
+        // cleanupIncomplete keeps the slot held, so a rebuild would fail again.
+        onError: (Object _) {},
+      ),
+    );
+    throw StateError('machine connection released before this build');
+  }
 
   final epoch = await ref.read(relayEpochProvider.future);
   // Enrollment and its credentials are required before a remote connection is constructed.
@@ -300,6 +318,15 @@ Future<AgentTransport?> _buildRelayTransportFor(
 
   final peerRuntime = await ref.read(peerRuntimeProvider.future);
   if (!ref.mounted) throw StateError('Transport provider disposed');
+  // A release during the awaits above leaves the disposed connection in the
+  // slot until native cleanup settles, and ensureStarted on it is a silent
+  // no-op, so wait that release out and take a fresh one. Nothing is awaited
+  // between the loop's last check and ensureStarted.
+  while (mgr.connectionFor(base).isDisposed) {
+    await mgr.awaitRelease(base);
+    if (!ref.mounted) throw StateError('Transport provider disposed');
+  }
+  final conn = mgr.connectionFor(base);
   Future<ConnCoords?> resolveConnectionCoords() {
     final refresh = resolveCalls++ > 0;
     return coordsResolver.resolve(
