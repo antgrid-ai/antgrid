@@ -1,9 +1,12 @@
 // The workspace UI reads SupervisorStatus as its single source of truth
 // instead of the raw RelayConnectionState. Covered here: the provider that
 // carries the status to the UI (through a real container, in the ordering
-// production actually uses), the reachability mapping, app-resume fanning
-// `noteResume()` out to every live machine, and the control-plane reaper
-// toggling `wanted` around a release instead of only releasing.
+// production actually uses), the boot panel's relay-state provider following
+// the selected machine across a release, the reachability mapping, app-resume
+// fanning `noteResume()` out to every live machine, and the control-plane
+// reaper toggling `wanted` around a release instead of only releasing.
+import 'dart:convert';
+
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +14,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/connection/connection_supervisor.dart';
 import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
@@ -173,6 +178,82 @@ void main() {
       // screen's 'agent link — done' for a machine with no socket at all.
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(h.container.read(supervisorStatusProvider('m')).value, isNull);
+    });
+  });
+
+  group('connectionStateProvider (boot panel relay phases)', () {
+    const target = RemoteProject(machineUuid: 'm', projectId: 'p');
+    final welcome = jsonEncode({
+      'type': 'welcome',
+      'deviceId': 'd1',
+      'epoch': 1,
+      'serverTime': '2026-07-16T00:00:00.000Z',
+    });
+
+    ({MachineConnectionManager mgr, ProviderContainer container}) harness() {
+      final mgr = MachineConnectionManager(crypto: CryptoService());
+      final container = ProviderContainer(
+        overrides: [relayConnectionManagerProvider.overrideWithValue(mgr)],
+      );
+      addTearDown(mgr.disposeAll);
+      addTearDown(container.dispose);
+      container.read(selectedTargetProvider.notifier).set(target);
+      final sub = container.listen(
+        connectionStateProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(sub.close);
+      return (mgr: mgr, container: container);
+    }
+
+    RelayConnectionState? stateOf(ProviderContainer c) =>
+        c.read(connectionStateProvider).value?.connectionState;
+
+    test('follows the connection a re-dial builds after a release', () async {
+      final h = harness();
+      h.mgr.connectionFor('m').relay.debugHandleFrame(welcome);
+      await _waitUntil(
+        () => stateOf(h.container) == RelayConnectionState.authenticated,
+      );
+
+      // A release, then a re-dial under the same selection, leaves a new
+      // connection object behind the provider's back.
+      await h.mgr.release('m');
+      final fresh = h.mgr.connectionFor('m');
+      await _waitUntil(
+        () => stateOf(h.container) == RelayConnectionState.disconnected,
+      );
+      fresh.relay.debugHandleFrame(welcome);
+
+      await _waitUntil(
+        () => stateOf(h.container) == RelayConnectionState.authenticated,
+      );
+    });
+
+    test('reads as not-yet-connected without dialing the machine', () async {
+      final h = harness();
+      await _waitUntil(() => h.container.read(connectionStateProvider).hasValue);
+
+      expect(stateOf(h.container), RelayConnectionState.disconnected);
+      expect(h.mgr.peek('m'), isNull);
+      expect(h.mgr.openControlPlaneIds(), isEmpty);
+    });
+
+    test('does not throw once sign-out has blocked new work', () async {
+      final h = harness();
+      h.mgr.connectionFor('m');
+      await h.mgr.disposeAll();
+      // disposeAll closed the change stream, so nothing rebuilds the provider
+      // on its own; a selection change is what re-runs it after sign-out.
+      h.container
+          .read(selectedTargetProvider.notifier)
+          .set(const RemoteProject(machineUuid: 'm', projectId: 'q'));
+      await _waitUntil(() => !h.container.read(connectionStateProvider).isLoading);
+
+      final value = h.container.read(connectionStateProvider);
+      expect(value.hasError, isFalse, reason: '${value.error}');
+      expect(stateOf(h.container), RelayConnectionState.disconnected);
     });
   });
 
