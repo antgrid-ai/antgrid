@@ -11,8 +11,8 @@ import wordmark from "../../public/logo/antgrid-wordmark.svg" with { type: "text
 
 // Inlined rather than <img src="/logo/...">: the header sizes the lockup
 // `h-7 w-auto`, and an <img> has no aspect ratio to derive a width from until
-// the file arrives — so the browser reserves nothing and the beta badge and nav
-// slide right once it lands. Inline, the viewBox is in the HTML the shift would
+// the file arrives — so the browser reserves nothing and the nav slides right
+// once it lands. Inline, the viewBox is in the HTML the shift would
 // have happened during, and it costs one fewer request on the critical path.
 //
 // Sizing lives here rather than at the call site because there is one call
