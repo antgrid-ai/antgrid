@@ -535,7 +535,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             title,
             if (!_editing) segmented,
             const Spacer(),
-            ?machineButton,
+            // A long machine name gives way before the actions do.
+            if (machineButton != null) Flexible(child: machineButton),
             refresh,
             if (!_editing)
               AbButton(

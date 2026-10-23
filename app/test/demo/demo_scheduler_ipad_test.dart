@@ -94,22 +94,6 @@ Future<ProviderContainer> openScheduler(
   return container;
 }
 
-/// flutter test draws every glyph one font-size wide, roughly twice a real
-/// sans face, so the Scheduler's wide header row (title, tabs, machine button
-/// and actions in 828 px) overflows by a few pixels here and not on a device.
-/// Only a small horizontal overshoot of a Row built in the Scheduler screen
-/// file is waived; a Column overflow, a larger one, or one from any other file
-/// still fails the test.
-bool _isHeaderFontInflation(FlutterErrorDetails details) {
-  final text = details.toString();
-  final match = RegExp(r'overflowed by ([\d.]+) pixels on the right')
-      .firstMatch(text);
-  if (match == null) return false;
-  return text.contains('scheduler_screen.dart') &&
-      text.contains('A RenderFlex overflowed') &&
-      double.parse(match.group(1)!) <= 24;
-}
-
 void iosTest(
   String description,
   Future<void> Function(WidgetTester tester) body, {
@@ -288,20 +272,11 @@ void main() {
   });
 
   iosTest('landscape iPad gets the wide layout with no error', (tester) async {
-    final original = FlutterError.onError;
-    FlutterError.onError = (details) {
-      if (_isHeaderFontInflation(details)) return;
-      original!(details);
-    };
-    try {
-      await openScheduler(tester, size: _ipadLandscape);
+    await openScheduler(tester, size: _ipadLandscape);
 
-      expect(find.byType(SchedulerLaneStrip), findsWidgets);
-      expect(find.text(_nightly), findsWidgets);
-      expectNothingRed();
-    } finally {
-      FlutterError.onError = original;
-    }
+    expect(find.byType(SchedulerLaneStrip), findsWidgets);
+    expect(find.text(_nightly), findsWidgets);
+    expectNothingRed();
   });
 
   iosTest('desktop gets the wide layout with no error', (tester) async {
