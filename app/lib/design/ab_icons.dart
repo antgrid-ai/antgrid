@@ -49,6 +49,7 @@ abstract final class AbIcons {
   static const search = Codicon.search;
   static const arrowUp = Codicon.arrow_up;
   static const arrowDown = Codicon.arrow_down;
+  static const download = Codicon.desktop_download;
   // A double chevron, deliberately not `chevronUp`: the single chevron is this
   // app's fold/unfold mark everywhere it appears, and a list action borrowing it
   // teaches the glyph a second meaning one row above a real move arrow.

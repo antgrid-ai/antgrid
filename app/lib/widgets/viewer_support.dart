@@ -15,13 +15,6 @@ String viewerBasename(String path) {
   return i < 0 ? path : path.substring(i + 1);
 }
 
-/// Human-readable byte size (B / KB / MB).
-String formatFileSize(int bytes) {
-  if (bytes < 1024) return '$bytes B';
-  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-}
-
 /// Decodes base64 file content to bytes, returning null on absent or malformed
 /// input so callers can show a render-failure placeholder.
 Uint8List? decodeBase64Content(String? raw) {

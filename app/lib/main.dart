@@ -285,12 +285,16 @@ Future<void> main() async {
   // triggers as push: what is warm now, and whatever becomes warm later.
   {
     final statsReporter = DeviceStatsReporter();
-    void reportStats() => statsReporter.watch(
-      container
-          .read(projectSessionRegistryProvider)
-          .map((id) => container.read(projectSessionProvider(id)).value)
-          .whereType<ProjectSession>(),
-    );
+    // Awaits `.future`, not `.value`: projectSessionProvider touches the
+    // registry from inside its own build, so this listener fires while that
+    // session is still loading and `.value` would skip it for good.
+    void reportStats() {
+      for (final id in container.read(projectSessionRegistryProvider)) {
+        container
+            .read(projectSessionProvider(id).future)
+            .then((s) => statsReporter.watch([s]), onError: (Object _) {});
+      }
+    }
     container.listen(projectSessionRegistryProvider, (_, _) => reportStats());
     reportStats();
   }

@@ -132,38 +132,42 @@ void main() {
     expect(sentOfType('git:stage')?['files'], ['a.dart', 'c.dart']);
   });
 
-  testWidgets('Revert All reverts staged and unstaged paths, each named once', (
+  testWidgets('Discard All discards working-tree changes, each named once', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       // Staged then edited again: two entries, one path.
       {'path': 'a.dart', 'status': 'M', 'staged': true},
       {'path': 'a.dart', 'status': 'M', 'staged': false},
+      // Only staged: not this group's to discard.
       {'path': 'b.dart', 'status': 'A', 'staged': true},
-      // A conflict is not a safe restore to HEAD — it must stay out of scope.
+      {'path': 'n.dart', 'status': 'U', 'staged': false},
+      // A conflict is not a safe restore — it must stay out of scope.
       {'path': 'c.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(find.byTooltip('Revert All Changes'));
+    await tester.tap(find.byTooltip('Discard All Changes'));
     await tester.pumpAndSettle();
-    // The dialog's confirm button, which is the only 'Revert All' TEXT on
+    // The dialog's confirm button, which is the only 'Discard All' TEXT on
     // screen — the header affordance itself is an icon.
-    await tester.tap(find.text('Revert All'));
+    await tester.tap(find.text('Discard All'));
     await tester.pumpAndSettle();
 
     final msg = sentOfType('git:discard');
-    expect(msg?['files'], ['a.dart', 'b.dart']);
-    expect(msg?['includeStaged'], isTrue);
+    expect(msg?['files'], ['a.dart', 'n.dart']);
+    // Restored from the index, as VS Code's Discard All does: staged
+    // content survives.
+    expect(msg?['includeStaged'], isNull);
   });
 
-  testWidgets('Revert All sends nothing when the confirm is cancelled', (
+  testWidgets('Discard All sends nothing when the confirm is cancelled', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': false},
     ]);
 
-    await tester.tap(find.byTooltip('Revert All Changes'));
+    await tester.tap(find.byTooltip('Discard All Changes'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -171,104 +175,59 @@ void main() {
     expect(sentOfType('git:discard'), isNull);
   });
 
-  testWidgets('bulk actions stay mounted once everything is staged', (
+  testWidgets('Unstage All unstages every staged path, each named once', (
     tester,
   ) async {
-    // Stage All has nothing to do here, but it keeps its slot: dropping it
-    // would slide Commit sideways under a finger already on its way there.
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+      {'path': 'b.dart', 'status': 'A', 'staged': true},
+      {'path': 'c.dart', 'status': 'M', 'staged': false},
+    ]);
+
+    await tester.tap(find.byTooltip('Unstage All Changes'));
+    await tester.pump();
+
+    expect(sentOfType('git:unstage')?['files'], ['a.dart', 'b.dart']);
+  });
+
+  testWidgets('each group carries only its own bulk actions', (tester) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': true},
     ]);
 
-    expect(find.byTooltip('Stage All Changes'), findsOneWidget);
-    expect(find.byTooltip('Revert All Changes'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('Stage All Changes'));
-    await tester.pump();
-    expect(sentOfType('git:stage'), isNull);
+    // Nothing unstaged: no Changes group, so no Stage All or Discard All.
+    expect(find.byTooltip('Unstage All Changes'), findsOneWidget);
+    expect(find.byTooltip('Stage All Changes'), findsNothing);
+    expect(find.byTooltip('Discard All Changes'), findsNothing);
   });
 
-  testWidgets('the title yields before the actions do', (tester) async {
-    // Narrow enough that title + actions no longer fit: the title is what
-    // gives (Expanded + ellipsis), and a RenderFlex overflow — which fails this
-    // test on its own — is what happens if it ever stops being able to. The
-    // width is in test-font units, where every glyph is a full em square.
+  testWidgets('both group headers fit a narrow column', (tester) async {
+    // A RenderFlex overflow, which fails this test on its own, is what happens
+    // if a header ever stops fitting. The width is in test-font units, where
+    // every glyph is a full em square.
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': false},
       {'path': 'b.dart', 'status': 'M', 'staged': true},
     ], width: 300);
 
     expect(find.byTooltip('Stage All Changes'), findsOneWidget);
-    expect(find.byTooltip('Revert All Changes'), findsOneWidget);
+    expect(find.byTooltip('Unstage All Changes'), findsOneWidget);
     expect(find.text('Commit (1)'), findsOneWidget);
   });
 
-  testWidgets('a clean tree drops the commit box and the Changes section', (
+  testWidgets('a clean tree drops the commit box and the change groups', (
     tester,
   ) async {
     await pumpWithStatus(tester, const []);
 
     expect(find.byTooltip('Stage All Changes'), findsNothing);
-    expect(find.byTooltip('Revert All Changes'), findsNothing);
+    expect(find.byTooltip('Discard All Changes'), findsNothing);
     expect(find.text('Commit'), findsNothing);
     expect(find.byType(TextField), findsNothing);
     expect(find.text('CHANGES'), findsNothing);
+    expect(find.text('STAGED CHANGES'), findsNothing);
     expect(find.text('HISTORY'), findsOneWidget);
-  });
-
-  testWidgets('the header totals each changed path once', (tester) async {
-    // a.dart arrives twice — staged and unstaged — carrying the SAME
-    // combined-vs-HEAD counts on both, so summing entries would report +32.
-    await pumpWithStatus(tester, [
-      {
-        'path': 'a.dart',
-        'status': 'M',
-        'staged': false,
-        'additions': 10,
-        'deletions': 4,
-      },
-      {
-        'path': 'a.dart',
-        'status': 'M',
-        'staged': true,
-        'additions': 10,
-        'deletions': 4,
-      },
-      {
-        'path': 'b.dart',
-        'status': 'A',
-        'staged': false,
-        'additions': 2000,
-        'deletions': 0,
-      },
-    ]);
-
-    // Scoped to the header's own title row: a.dart's own row carries the
-    // same -4 badge, and the sub-tab strip above the header repeats the word
-    // "Changes" too — neither must be mistaken for the header's totals.
-    final header = find.byKey(gitChangesHeaderTitleKey);
-    expect(
-      find.descendant(of: header, matching: find.text('+2,010')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(of: header, matching: find.text('-4')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('a tree changed only by a rename shows no totals', (
-    tester,
-  ) async {
-    await pumpWithStatus(tester, [
-      {'path': 'a.dart', 'status': 'R', 'staged': true, 'oldPath': 'z.dart'},
-    ]);
-
-    final header = find.byKey(gitChangesHeaderTitleKey);
-    expect(
-      find.descendant(of: header, matching: find.textContaining('+')),
-      findsNothing,
-    );
   });
 
   // The commit box is inline, above the button that sends it — no dialog sits
@@ -293,8 +252,10 @@ void main() {
     transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
     await tester.pump();
     expect(find.text('Committing…'), findsNothing);
-    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        isEmpty);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
   });
 
   testWidgets('a refused commit keeps its message for the retry', (
@@ -315,8 +276,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Committing…'), findsNothing);
-    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'fix: the thing');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'fix: the thing',
+    );
   });
 
   testWidgets('a message typed while committing survives the success', (
@@ -333,8 +296,10 @@ void main() {
     transport.emit('git:commit-result', {'projectId': 'p', 'success': true});
     await tester.pump();
 
-    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'feat: the next thing');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'feat: the next thing',
+    );
   });
 
   testWidgets('Commit with an empty message sends nothing', (tester) async {
@@ -376,11 +341,12 @@ void main() {
     expect(sentOfType('git:commit'), isNull);
   });
 
-  testWidgets('folding Changes hides the tree but keeps its actions', (
+  testWidgets('folding a group hides its rows but keeps its actions', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': 'M', 'staged': false},
+      {'path': 'b.dart', 'status': 'M', 'staged': true},
     ]);
 
     await tester.tap(find.text('CHANGES'));
@@ -388,6 +354,13 @@ void main() {
 
     expect(find.text('a.dart'), findsNothing);
     expect(find.byTooltip('Stage All Changes'), findsOneWidget);
+    // The other group is untouched by the fold.
+    expect(find.text('b.dart'), findsOneWidget);
+
+    await tester.tap(find.text('STAGED CHANGES'));
+    await tester.pumpAndSettle();
+    expect(find.text('b.dart'), findsNothing);
+    expect(find.byTooltip('Unstage All Changes'), findsOneWidget);
   });
 
   testWidgets('phone width switches between Changes and History', (
@@ -400,7 +373,7 @@ void main() {
     // AbSegmented uppercases; with no commits loaded the History segment
     // reads the same as the section header, so count them.
     expect(find.text('CHANGES · 1'), findsOneWidget);
-    expect(find.text('CHANGES'), findsNothing);
+    expect(find.text('CHANGES'), findsOneWidget);
     expect(find.text('a.dart'), findsOneWidget);
     expect(find.byTooltip('Stage All Changes'), findsOneWidget);
     expect(find.text('HISTORY'), findsOneWidget);
@@ -413,6 +386,47 @@ void main() {
     expect(find.text('HISTORY'), findsNWidgets(2));
     // The commit box stays above the switch on either tab.
     expect(find.byType(TextField), findsOneWidget);
+  });
+
+  testWidgets('staged changes and changes are listed apart', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+      {'path': 'b.dart', 'status': 'M', 'staged': true},
+      {'path': 'b.dart', 'status': 'M', 'staged': false},
+      {'path': 'c.dart', 'status': 'U', 'staged': false},
+    ]);
+
+    // VS Code's order: Staged Changes above Changes.
+    expect(
+      tester.getRect(find.text('STAGED CHANGES')).top,
+      lessThan(tester.getRect(find.text('CHANGES')).top),
+    );
+    expect(find.text('a.dart'), findsOneWidget);
+    // Partially staged: one row in each group.
+    expect(find.text('b.dart'), findsNWidgets(2));
+    expect(find.text('c.dart'), findsOneWidget);
+  });
+
+  testWidgets('only the group that has changes is shown', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': true},
+    ]);
+
+    expect(find.text('STAGED CHANGES'), findsOneWidget);
+    expect(find.text('CHANGES'), findsNothing);
+  });
+
+  testWidgets('desktop lists the two groups apart too', (tester) async {
+    await withRowButtons(tester, () async {
+      await pumpWithStatus(tester, [
+        {'path': 'b.dart', 'status': 'M', 'staged': true},
+        {'path': 'b.dart', 'status': 'M', 'staged': false},
+      ]);
+
+      expect(find.text('STAGED CHANGES'), findsOneWidget);
+      expect(find.text('CHANGES'), findsOneWidget);
+      expect(find.text('b.dart'), findsNWidgets(2));
+    });
   });
 
   testWidgets('phone width with a clean tree shows History alone', (
@@ -484,16 +498,16 @@ void main() {
   });
 
   // Staging IS how git resolves a conflict, so Stage All has to reach one —
-  // Revert All does not, because restoring an unmerged path to HEAD is not
-  // what "revert" means anywhere else in this header.
-  testWidgets('a conflict-only tree can be staged but not reverted', (
+  // Discard All does not, because restoring an unmerged path is not what
+  // "discard" means anywhere else in this header.
+  testWidgets('a conflict-only tree can be staged but not discarded', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'a.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(find.byTooltip('Revert All Changes'));
+    await tester.tap(find.byTooltip('Discard All Changes'));
     await tester.pumpAndSettle();
     expect(sentOfType('git:discard'), isNull);
 
@@ -662,126 +676,51 @@ void main() {
     expect(find.byTooltip('Back to changed files'), findsOneWidget);
   });
 
-  testWidgets('Collapse All folds every folder the changes nest under', (
+  testWidgets('changes are a flat list, each file beside its folder', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
       {'path': 'bridge/src/b.ts', 'status': 'M', 'staged': false},
-      // Root-level: contributes no folder row at all.
       {'path': 'README.md', 'status': 'M', 'staged': false},
     ]);
 
-    await tester.tap(find.byTooltip('Collapse All Folders'));
-    await tester.pumpAndSettle();
-
-    // Every ancestor, not just the leaf directories — folding only the deepest
-    // level leaves the tree looking barely changed.
-    expect(find.text('app'), findsOneWidget);
-    expect(find.text('bridge'), findsOneWidget);
+    // No folder rows, and nothing to fold.
+    expect(find.text('app'), findsNothing);
     expect(find.text('lib'), findsNothing);
-    expect(find.text('src'), findsNothing);
-    expect(find.text('a.dart'), findsNothing);
+    expect(find.text('a.dart  app/lib'), findsOneWidget);
+    expect(find.text('b.ts  bridge/src'), findsOneWidget);
     expect(find.text('README.md'), findsOneWidget);
+    expect(find.byTooltip('Collapse All Folders'), findsNothing);
   });
 
-  testWidgets('the fold control flips to Expand All once everything is shut', (
-    tester,
-  ) async {
+  testWidgets('a conflict leads the flat list', (tester) async {
     await pumpWithStatus(tester, [
-      {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
+      {'path': 'a/first.dart', 'status': 'M', 'staged': false},
+      {'path': 'z/conflict.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(find.byTooltip('Collapse All Folders'));
-    await tester.pumpAndSettle();
-    expect(find.byTooltip('Collapse All Folders'), findsNothing);
-
-    await tester.tap(find.byTooltip('Expand All Folders'));
-    await tester.pumpAndSettle();
-    expect(find.text('a.dart'), findsOneWidget);
-    expect(find.byTooltip('Collapse All Folders'), findsOneWidget);
-  });
-
-  testWidgets('a flat change set offers no fold control', (tester) async {
-    await pumpWithStatus(tester, [
-      {'path': 'README.md', 'status': 'M', 'staged': false},
-    ]);
-
-    expect(find.byTooltip('Collapse All Folders'), findsNothing);
-    expect(find.byTooltip('Expand All Folders'), findsNothing);
+    expect(
+      tester.getRect(find.text('conflict.dart  z')).top,
+      lessThan(tester.getRect(find.text('first.dart  a')).top),
+    );
   });
 
   // git reports an untracked directory it did not walk into with a trailing
-  // slash, and the tree renders that path verbatim as a LEAF — so the name
-  // before the slash is not a folder row, and counting it as one puts a fold
-  // control on a tree with nothing to fold.
-  testWidgets('an untracked directory contributes no foldable folder', (
+  // slash; the row keeps that path verbatim, since every action hands it
+  // straight back to git.
+  testWidgets('an untracked directory is one row under its own name', (
     tester,
   ) async {
     await pumpWithStatus(tester, [
       {'path': 'build/', 'status': 'U', 'staged': false},
     ]);
 
-    expect(find.byTooltip('Collapse All Folders'), findsNothing);
-    expect(find.byTooltip('Expand All Folders'), findsNothing);
-  });
-
-  testWidgets('a conflict-only tree still offers the fold control', (
-    tester,
-  ) async {
-    // Gated on its own, not on the write group beside it (where only Stage All
-    // has anything to do on this tree) — a long conflict list is exactly when
-    // folding is wanted, and a conflict nests like anything else.
-    await pumpWithStatus(tester, [
-      {'path': 'app/lib/a.dart', 'status': '!', 'staged': false},
-    ]);
-
-    expect(find.byTooltip('Collapse All Folders'), findsOneWidget);
-  });
-
-  testWidgets('a conflict folder is foldable like any other', (tester) async {
-    await pumpWithStatus(tester, [
-      {'path': 'app/lib/a.dart', 'status': '!', 'staged': false},
-      {'path': 'bridge/src/b.ts', 'status': 'M', 'staged': false},
-    ]);
-
-    await tester.tap(find.byTooltip('Collapse All Folders'));
-    await tester.pumpAndSettle();
-    // Nothing is left unfolded, so the toggle can flip.
-    expect(find.byTooltip('Expand All Folders'), findsOneWidget);
-    expect(find.text('a.dart'), findsNothing);
-    // The conflict-bearing branch still leads.
-    expect(
-      tester.getRect(find.text('app')).top,
-      lessThan(tester.getRect(find.text('bridge')).top),
-    );
-  });
-
-  testWidgets('folding a folder does not disturb the Files tab', (
-    tester,
-  ) async {
-    await pumpWithStatus(tester, [
-      {'path': 'app/lib/a.dart', 'status': 'M', 'staged': false},
-    ]);
-
-    await tester.tap(find.byTooltip('Collapse All Folders'));
-    await tester.pumpAndSettle();
-
-    // The two tabs keep separate fold state; a Git fold writing into
-    // `expandedPaths` would close the folder the Explorer is sitting in.
-    expect(
-      session.fileService.currentState.expandedPaths,
-      isEmpty,
-      reason: 'the Git tab must not write the Files tab expansion set',
-    );
-    expect(
-      session.fileService.currentState.git.collapsedPaths,
-      contains('app/lib'),
-    );
+    expect(find.text('build'), findsOneWidget);
   });
 
   Finder changesHeader() => find.byWidgetPredicate(
-    (w) => w.runtimeType.toString() == '_ChangesSectionHeader',
+    (w) => w.runtimeType.toString() == '_UnstagedGroupHeader',
   );
 
   testWidgets('a new git status re-derives the header', (tester) async {

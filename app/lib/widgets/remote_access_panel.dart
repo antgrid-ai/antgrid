@@ -20,6 +20,7 @@ import '../models/device_stats.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
 import '../providers/remote_access.dart';
+import '../services/device_stats_reporter.dart';
 import '../services/devices_api.dart';
 import '../util/detached.dart';
 import '../util/relative_time.dart';
@@ -312,13 +313,24 @@ class _DevicesSection extends ConsumerStatefulWidget {
 
 class _DevicesSectionState extends ConsumerState<_DevicesSection> {
   /// Only while the roster is on screen: a device connecting or reporting its
-  /// stats reaches the bridge, and nothing tells this app it did.
-  static const _pollInterval = Duration(seconds: 30);
+  /// stats reaches the bridge, and nothing tells this app it did. A loopback
+  /// read of an in-memory list, so it can afford to track devices' 15s reports.
+  static const _pollInterval = Duration(seconds: 5);
   Timer? _poll;
 
   @override
   void initState() {
     super.initState();
+    // The provider outlives the panel, so reopening would otherwise show the
+    // roster as it stood when the panel last closed until the first tick.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      detached(
+        'RemoteAccessPanel',
+        'roster refresh on open',
+        () => ref.read(remoteDevicesProvider.notifier).refreshQuietly(),
+      );
+    });
     _poll = Timer.periodic(
       _pollInterval,
       (_) => detached(
@@ -542,8 +554,9 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
   }
 
   /// `Pixel 9 · last seen 2 mins ago`, then what that device last said about
-  /// its RAM and storage. The usage line is omitted, not zeroed, for a device
-  /// that hasn't reported since this host started.
+  /// its RAM and storage. The usage line shows only while the device is live:
+  /// the figures are a snapshot, so once it stops reporting they describe a
+  /// device nobody can see, and the bridge keeps them until it next connects.
   Widget _subtitle(AbColors p) {
     final stats = phone.stats;
     final style = AbTokens.monoStyle(
@@ -551,14 +564,11 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
       color: p.textMuted,
     );
     final model = stats?.model;
+    final live = stats != null && isLiveReport(stats.reportedAt);
     final usage = [
-      if (stats != null)
-        usageLine(
-          'RAM',
-          total: stats.ramTotalBytes,
-          free: stats.ramAvailableBytes,
-        ),
-      if (stats != null)
+      if (live)
+        ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes),
+      if (live)
         usageLine(
           'Storage',
           total: stats.storageTotalBytes,
@@ -572,6 +582,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
         Text(
           model == null ? _lastSeen() : '$model · ${_lastSeen()}',
           key: ValueKey('device-seen-${phone.phonePubkey}'),
+          maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: style,
         ),
@@ -579,6 +590,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
           Text(
             usage,
             key: ValueKey('device-usage-${phone.phonePubkey}'),
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: style,
           ),
@@ -589,10 +601,29 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
   /// `last seen 2 mins ago`, or the raw stamp if the bridge sent something we
   /// can't parse — an unreadable timestamp is still more use than dropping the
   /// line, which is the only thing distinguishing two same-model devices.
+  ///
+  /// `lastSeenAt` moves only on admission, so a device that has stayed
+  /// connected would read as seen when it connected; its latest stats report,
+  /// re-sent while connected, is the fresher sighting.
   String _lastSeen() {
-    final at = DateTime.tryParse(phone.lastSeenAt);
+    final admitted = DateTime.tryParse(phone.lastSeenAt);
+    final reported = DateTime.tryParse(phone.stats?.reportedAt ?? '');
+    final at = admitted == null || reported == null
+        ? admitted ?? reported
+        : (reported.isAfter(admitted) ? reported : admitted);
     return 'last seen ${at == null ? phone.lastSeenAt : relativeTime(at.toLocal())}';
   }
+}
+
+/// A connected device re-reports every [DeviceStatsReporter.defaultInterval];
+/// three missed reports read as gone. `reportedAt` is stamped by the bridge
+/// this roster is read from, so there is no cross-device clock skew to absorb.
+@visibleForTesting
+bool isLiveReport(String? reportedAt, {DateTime? now}) {
+  final at = DateTime.tryParse(reportedAt ?? '');
+  if (at == null) return false;
+  return (now ?? DateTime.now()).difference(at) <
+      DeviceStatsReporter.defaultInterval * 3;
 }
 
 /// Platform strings come from the account record (`DeviceSummary.platform`),

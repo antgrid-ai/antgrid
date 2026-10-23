@@ -754,13 +754,12 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
 String? _focusedHostRam(WidgetRef ref) {
   final selectedId = ref.watch(selectedRegistrationIdProvider);
   if (selectedId == null) return null;
-  final stats = ref.watch(projectStatusProvider(selectedId)).value?.machineStats;
+  final stats = ref
+      .watch(projectStatusProvider(selectedId))
+      .value
+      ?.machineStats;
   if (stats == null) return null;
-  return usageLine(
-    'RAM',
-    total: stats.ramTotalBytes,
-    free: stats.ramAvailableBytes,
-  );
+  return ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes);
 }
 
 /// The machine hosting the focused project, or null when it is this one (or

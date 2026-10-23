@@ -2,37 +2,81 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/widgets/file_download.dart';
 import 'package:antgrid/widgets/viewer_header.dart';
 
 import '../design/test_harness.dart';
 import '../helpers/clipboard.dart';
 
 void main() {
-  testWidgets('renders the path as a breadcrumb and size, fires close', (
-    tester,
-  ) async {
-    var closed = false;
+  testWidgets(
+    'renders the path as a breadcrumb, offers download, fires close',
+    (tester) async {
+      var closed = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: buildViewerHeader(
+              content: const FileContent(
+                path: 'assets/brand/logo.svg',
+                content: '<svg/>',
+                size: 2048,
+              ),
+              onClose: () => closed = true,
+            ),
+          ),
+        ),
+      );
+      // One crumb per segment, the file last.
+      expect(find.text('assets'), findsOneWidget);
+      expect(find.text('brand'), findsOneWidget);
+      expect(find.text('logo.svg'), findsOneWidget);
+      expect(find.text('2.0 KB'), findsNothing);
+      expect(find.byKey(const Key('file-download')), findsOneWidget);
+      // Close is the last button. AbIconButton avoids Material ripples, so do
+      // NOT match on InkWell.
+      await tester.tap(find.byType(AbIconButton).last);
+      await tester.pump();
+      expect(closed, isTrue);
+    },
+  );
+
+  testWidgets('a file with nothing held offers no download', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: buildViewerHeader(
-            path: 'assets/brand/logo.svg',
-            size: 2048,
-            onClose: () => closed = true,
+            content: const FileContent(
+              path: 'big.bin',
+              size: 9000000,
+              error: 'File too large',
+            ),
           ),
         ),
       ),
     );
-    // One crumb per segment, the file last.
-    expect(find.text('assets'), findsOneWidget);
-    expect(find.text('brand'), findsOneWidget);
-    expect(find.text('logo.svg'), findsOneWidget);
-    expect(find.text('2.0 KB'), findsOneWidget);
-    // Tap the close button by its widget type — AbIconButton avoids Material
-    // ripples, so do NOT match on InkWell.
-    await tester.tap(find.byType(AbIconButton));
-    await tester.pump();
-    expect(closed, isTrue);
+    expect(find.byKey(const Key('file-download')), findsNothing);
+  });
+
+  test('download saves exactly the bytes the viewer holds', () {
+    expect(
+      fileContentBytes(
+        const FileContent(path: 'a.txt', content: 'hé', size: 3),
+      ),
+      [0x68, 0xC3, 0xA9],
+    );
+    expect(
+      fileContentBytes(
+        const FileContent(
+          path: 'a.png',
+          content: 'AQID',
+          size: 3,
+          encoding: 'base64',
+        ),
+      ),
+      [1, 2, 3],
+    );
   });
 
   testWidgets('clicking the breadcrumb offers relative and absolute copies', (
@@ -61,6 +105,32 @@ void main() {
     expect(copied, ['docs/protocol/peer-session.md']);
     expect(find.text('Path copied'), findsOneWidget);
     // Let the toast run out.
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('an image outside the checkout offers only its absolute path', (
+    tester,
+  ) async {
+    const path =
+        r'C:\Users\me\Temp\claude\66dd53be-1f2a-4b3c-9d8e-0f1a2b3a8631\scratchpad\shot.png';
+    final copied = captureClipboard(tester);
+    await pumpAntgrid(
+      tester,
+      const SizedBox(width: 2000, child: ViewerPathBreadcrumb(path: path)),
+    );
+
+    // A long folder keeps its ends on screen; the file name is never cut.
+    expect(find.text('66dd53be…a8631'), findsOneWidget);
+    expect(find.text('shot.png'), findsOneWidget);
+
+    await tester.tap(find.text('scratchpad'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Copy relative path'), findsNothing);
+    await tester.tap(find.text('Copy absolute path'));
+    await tester.pumpAndSettle();
+
+    expect(copied, [path]);
     await tester.pump(const Duration(seconds: 5));
   });
 

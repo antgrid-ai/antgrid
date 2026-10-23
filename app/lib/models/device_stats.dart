@@ -80,13 +80,16 @@ class DeviceStats {
   );
 }
 
-/// `3.2 GB`. Decimal units, as phones label their own storage.
-String formatBytes(int bytes) {
+/// `3.2 GB`. Decimal units by default, as phones label their own storage;
+/// [binary] counts in 1024s under the same labels, which is how every OS
+/// labels RAM: a 32 GiB machine counted in 1000s reads "34.4 GB".
+String formatBytes(int bytes, {bool binary = false}) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  final step = binary ? 1024 : 1000;
   var value = bytes.toDouble();
   var unit = 0;
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000;
+  while (value >= step && unit < units.length - 1) {
+    value /= step;
     unit++;
   }
   final digits = unit == 0 || value >= 100 ? 0 : 1;
@@ -95,8 +98,20 @@ String formatBytes(int bytes) {
 
 /// `RAM 7.8 / 12.0 GB` (used / total) when both halves are known, the total
 /// alone when only it is, null when the device said nothing about it.
-String? usageLine(String label, {int? total, int? free}) {
+String? usageLine(String label, {int? total, int? free, bool binary = false}) {
   if (total == null || total <= 0) return null;
-  if (free == null || free > total) return '$label ${formatBytes(total)}';
-  return '$label ${formatBytes(total - free)} / ${formatBytes(total)}';
+  String fmt(int b) => formatBytes(b, binary: binary);
+  if (free == null || free > total) return '$label ${fmt(total)}';
+  final used = fmt(total - free);
+  final all = fmt(total);
+  // The unit once when both halves share it: the roster row is one line wide.
+  final unit = all.substring(all.lastIndexOf(' '));
+  final shown = used.endsWith(unit)
+      ? used.substring(0, used.length - unit.length)
+      : used;
+  return '$label $shown / $all';
 }
+
+/// [usageLine] for RAM, in the binary units the device's own OS shows.
+String? ramLine({int? total, int? free}) =>
+    usageLine('RAM', total: total, free: free, binary: true);

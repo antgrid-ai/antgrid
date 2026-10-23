@@ -5540,7 +5540,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // whose traffic is only `state.snapshot` still receives every broadcast
       // `tree:update`, and the delta filter's roster must account for it (see
       // [attachedClients]).
-      attachedClients.add(clientKeyOf(source, peerId));
+      const clientKey = clientKeyOf(source, peerId);
+      const newRemoteClient = clientKey !== "loopback" && !attachedClients.has(clientKey);
+      attachedClients.add(clientKey);
+      // A remote stream gets no handshake of its own: a remote-mode core primes
+      // its one handshake before the stream subscribes, and a stream re-attaching
+      // to a warm core fires none. machine:stats is not replayed, so a new
+      // remote viewer is told here, which also re-arms a timer that stopped
+      // when the last one left.
+      if (newRemoteClient) emitMachineStats();
       if (msg.type === "request") {
         if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only

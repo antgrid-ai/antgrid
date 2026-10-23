@@ -389,17 +389,6 @@ class GitPaneState {
   /// per-commit file lists. See [GitHistoryState].
   final GitHistoryState history;
 
-  /// Folders the user has collapsed in the changed-files tree.
-  ///
-  /// COLLAPSED, not expanded — the inverse of `FileTreeState.expandedPaths` —
-  /// because the Git tab's default is "show me everything that changed" and an
-  /// expanded-set default of empty would open on a list of shut folders. It is
-  /// also deliberately not the Files tab's set: the two tabs answer different
-  /// questions about the same paths, and collapsing a folder to get a long
-  /// change list under control must not fold away the file the Explorer is
-  /// sitting on.
-  final Set<String> collapsedPaths;
-
   /// Whether the History section itself is folded shut in the side-by-side
   /// layout's fixed Changes/History split (`_GitPanelBody._buildLeftColumn`).
   /// Distinct from [GitHistoryState.expandedShas], which folds individual
@@ -434,7 +423,6 @@ class GitPaneState {
     this.diffDeletions,
     this.diffLoading = false,
     this.diffCommitSha,
-    this.collapsedPaths = const {},
     this.historyCollapsed = false,
     this.sync = GitSyncState.empty,
     this.syncing,
@@ -454,7 +442,6 @@ class GitPaneState {
     String? diffCommitSha,
     bool clearDiffCommitSha = false,
     bool clearDiff = false,
-    Set<String>? collapsedPaths,
     bool? historyCollapsed,
     GitSyncState? sync,
     GitSyncOp? syncing,
@@ -473,9 +460,6 @@ class GitPaneState {
       diffCommitSha: (clearDiff || clearDiffCommitSha)
           ? null
           : (diffCommitSha ?? this.diffCommitSha),
-      // Survives clearDiff: closing a diff is not a reason to
-      // reopen every folder the user shut to find it.
-      collapsedPaths: collapsedPaths ?? this.collapsedPaths,
       historyCollapsed: historyCollapsed ?? this.historyCollapsed,
       sync: sync ?? this.sync,
       syncing: clearSyncing ? null : (syncing ?? this.syncing),

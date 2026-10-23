@@ -46,17 +46,11 @@ import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
 import '../widgets/send_capture_to_agent.dart';
 
-/// Anchors the Changes section header's diff totals for tests — a file row's
-/// own diff-stat badge carries the same numbers, so a test reading the totals
-/// has to scope its finder to this.
-@visibleForTesting
-const gitChangesHeaderTitleKey = Key('gitChangesHeaderTitle');
-
 /// Standalone git-changes panel extracted from FileExplorerScreen.
 ///
 /// The branch bar (branch, inline commit box, Commit beside the remote action)
 /// tops the column at every width, so no commit control moves across the
-/// breakpoint. Wide enough, the Changes tree and commit History follow as two
+/// breakpoint. Wide enough, the Changes list and commit History follow as two
 /// foldable sections and the column docks beside the diff/file viewer;
 /// narrower, they become a Changes ⇄ History switch and the viewer replaces
 /// the column while a file is open.
@@ -78,6 +72,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
 
   /// Pure view state, so it lives here rather than in [GitPaneState] the way
   /// `historyCollapsed` does: nothing outside this widget reads it.
+  bool _stagedCollapsed = false;
   bool _changesCollapsed = false;
 
   @override
@@ -123,7 +118,10 @@ class _GitPanelState extends ConsumerState<GitPanel> {
       onCommit: (message) =>
           unawaited(_commitDraft(fileService, draft, message)),
       draftFocus: _draftFocus,
+      stagedCollapsed: _stagedCollapsed,
       changesCollapsed: _changesCollapsed,
+      onToggleStaged: () =>
+          setState(() => _stagedCollapsed = !_stagedCollapsed),
       onToggleChanges: () =>
           setState(() => _changesCollapsed = !_changesCollapsed),
     );
@@ -218,14 +216,16 @@ class _GitPanelState extends ConsumerState<GitPanel> {
 }
 
 /// What [_GitPanelState] owns and every branch of the panel threads through:
-/// the service, the commit draft, and the Changes fold.
+/// the service, the commit draft, and the two change groups' folds.
 class _PanelContext {
   const _PanelContext({
     required this.fileService,
     required this.draft,
     required this.onCommit,
     required this.draftFocus,
+    required this.stagedCollapsed,
     required this.changesCollapsed,
+    required this.onToggleStaged,
     required this.onToggleChanges,
   });
 
@@ -233,7 +233,9 @@ class _PanelContext {
   final TextEditingController draft;
   final ValueChanged<String> onCommit;
   final FocusNode draftFocus;
+  final bool stagedCollapsed;
   final bool changesCollapsed;
+  final VoidCallback onToggleStaged;
   final VoidCallback onToggleChanges;
 }
 
@@ -881,60 +883,115 @@ class _SectionHeaderBand extends StatelessWidget {
   }
 }
 
-/// The Changes section's header: its fold, the diff totals, and the
-/// whole-tree actions — fold all folders, Revert All, Stage All.
-///
-/// The two write actions are icons in the order and vocabulary every SCM
-/// panel uses (revert, then +). Both stay mounted while anything is changed,
-/// even when one has nothing to do — a Stage All that vanishes the moment the
-/// last file is staged slides its neighbour under the finger travelling
-/// toward it. Each is gated on its OWN scope for the same reason: a tree of
-/// nothing but conflicts has nothing safe to revert, and is exactly where
-/// Stage All is the way out.
-class _ChangesSectionHeader extends StatelessWidget {
-  const _ChangesSectionHeader({
-    required this.counts,
+/// The header of one of the change list's two groups, laid out the way VS
+/// Code's Source Control view lays out its own: a fold, the group's name and
+/// count, then the group's bulk actions as icons on the right.
+class _ChangeGroupHeader extends StatelessWidget {
+  const _ChangeGroupHeader({
+    required this.label,
+    required this.count,
+    required this.expanded,
+    required this.onToggle,
+    required this.actions,
+  });
+
+  final String label;
+  final int count;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SectionHeaderBand(
+      children: [
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: _SectionToggle(
+              label: label,
+              count: '$count',
+              expanded: expanded,
+              onTap: onToggle,
+            ),
+          ),
+        ),
+        ...actions,
+      ],
+    );
+  }
+}
+
+/// Staged Changes' one bulk action, Unstage All. Never destructive: the
+/// working tree keeps every edit, so it asks nothing first.
+class _StagedGroupHeader extends StatelessWidget {
+  const _StagedGroupHeader({
+    required this.staged,
     required this.fileService,
-    required this.collapsedPaths,
     required this.expanded,
     required this.onToggle,
   });
 
-  final GitStatusIndex counts;
+  final GitStatusIndex staged;
   final FileService fileService;
-
-  /// Folders currently folded shut. Only used to decide which way the fold
-  /// toggle points, so an unhydrated Git pane (empty set) correctly offers to
-  /// collapse rather than to expand.
-  final Set<String> collapsedPaths;
   final bool expanded;
+  final VoidCallback onToggle;
 
-  /// Null in the compact layout's Changes tab, which the switcher above
-  /// already names and which has nothing to fold into.
-  final VoidCallback? onToggle;
+  @override
+  Widget build(BuildContext context) {
+    return _ChangeGroupHeader(
+      label: 'Staged Changes',
+      count: staged.changedCount,
+      expanded: expanded,
+      onToggle: onToggle,
+      actions: [
+        AbIconButton(
+          icon: AbIcons.gitUnstage,
+          tooltip: 'Unstage All Changes',
+          onTap: () => fileService.unstageFiles(staged.byPath.keys.toList()),
+        ),
+      ],
+    );
+  }
+}
 
-  // Collapse All hands this very set to FileService, so until a folder is
-  // reopened the answer is identity rather than a walk over every folder.
-  bool get _allFoldersCollapsed =>
-      counts.changedFolders.isNotEmpty &&
-      (identical(collapsedPaths, counts.changedFolders) ||
-          collapsedPaths.containsAll(counts.changedFolders));
+/// Changes' bulk actions, in VS Code's order and vocabulary: Discard All,
+/// then Stage All.
+///
+/// Each is gated on its OWN scope: a group of nothing but conflicts has
+/// nothing safe to discard, and is exactly where Stage All is the way out.
+class _UnstagedGroupHeader extends StatelessWidget {
+  const _UnstagedGroupHeader({
+    required this.unstaged,
+    required this.fileService,
+    required this.expanded,
+    required this.onToggle,
+  });
 
-  Future<void> _revertAll(BuildContext context) async {
-    final paths = counts.revertablePaths;
+  /// This group's half of the status — its paths are what both actions take.
+  final GitStatusIndex unstaged;
+  final FileService fileService;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  /// Working-tree changes only, as VS Code's Discard All in this group does:
+  /// the bridge restores each path from the index, so whatever is staged
+  /// survives, and an untracked file is deleted.
+  Future<void> _discardAll(BuildContext context) async {
+    final paths = unstaged.revertablePaths;
     if (paths.isEmpty) return;
     final count = paths.length;
     final confirmed = await AbConfirmDialog.show(
       context: context,
-      title: 'Revert all changes',
+      title: 'Discard all changes',
       body:
-          'Revert $count file${count == 1 ? '' : 's'} to the last commit? '
-          'Staged changes are reverted too and new files are deleted. '
+          'Discard the unstaged changes in $count file${count == 1 ? '' : 's'}? '
+          'New files are deleted; staged changes are kept. '
           'This cannot be undone.',
-      confirmLabel: 'Revert All',
+      confirmLabel: 'Discard All',
       destructive: true,
     );
-    if (confirmed) fileService.discard(paths, includeStaged: true);
+    if (confirmed) fileService.discard(paths);
   }
 
   /// Stage All, with the question VS Code asks before the same thing: an
@@ -947,9 +1004,9 @@ class _ChangesSectionHeader extends StatelessWidget {
   /// A conflict with no markers left is not asked about, the same split VS
   /// Code makes: the everyday "I fixed them all, now stage" stays one tap.
   Future<void> _stageAll(BuildContext context) async {
-    final paths = counts.unstagedPaths;
+    final paths = unstaged.unstagedPaths;
     if (paths.isEmpty) return;
-    final unresolved = counts.unresolvedConflictPaths;
+    final unresolved = unstaged.unresolvedConflictPaths;
     if (unresolved.isNotEmpty) {
       final confirmed = await AbConfirmDialog.show(
         context: context,
@@ -970,68 +1027,23 @@ class _ChangesSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final showStat = counts.additions > 0 || counts.deletions > 0;
-    final allFoldersCollapsed = _allFoldersCollapsed;
-    return _SectionHeaderBand(
-      children: [
-        if (onToggle != null) ...[
-          _SectionToggle(
-            label: 'Changes',
-            count: '${counts.changedCount}',
-            expanded: expanded,
-            onTap: onToggle,
-          ),
-          const SizedBox(width: AbTokens.space6),
-        ],
-        // The one part of the band that may give way: the totals are also on
-        // the workspace menu, while every control here is the only way to do
-        // what it does. Clipped by a non-scrolling view rather than overflowing.
-        Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            physics: const NeverScrollableScrollPhysics(),
-            child: Row(
-              key: gitChangesHeaderTitleKey,
-              children: [
-                if (showStat)
-                  AbDiffStat(
-                    additions: counts.additions,
-                    deletions: counts.deletions,
-                    fontSize: AbTokens.fontXs,
-                  ),
-              ],
-            ),
-          ),
-        ),
-        // Its own control, gated separately from the write pair: a tree of
-        // nothing but conflicts is exactly when folding a long list is wanted.
-        // It names the RESULT of pressing it (the VS Code convention), not the
-        // current state — the tree itself already shows which folders are open.
-        if (counts.changedFolders.isNotEmpty)
-          AbIconButton(
-            icon: allFoldersCollapsed
-                ? AbIcons.expandAll
-                : AbIcons.collapseAll,
-            tooltip: allFoldersCollapsed
-                ? 'Expand All Folders'
-                : 'Collapse All Folders',
-            onTap: () => fileService.setGitCollapsedFolders(
-              allFoldersCollapsed ? const {} : counts.changedFolders,
-            ),
-          ),
+    return _ChangeGroupHeader(
+      label: 'Changes',
+      count: unstaged.changedCount,
+      expanded: expanded,
+      onToggle: onToggle,
+      actions: [
         AbIconButton(
           icon: AbIcons.revert,
-          tooltip: 'Revert All Changes',
-          onTap: counts.revertablePaths.isEmpty
+          tooltip: 'Discard All Changes',
+          onTap: unstaged.revertablePaths.isEmpty
               ? null
-              : () => _revertAll(context),
+              : () => _discardAll(context),
         ),
         AbIconButton(
           icon: AbIcons.gitStage,
           tooltip: 'Stage All Changes',
-          onTap: counts.unstagedPaths.isEmpty
-              ? null
-              : () => _stageAll(context),
+          onTap: () => _stageAll(context),
         ),
       ],
     );
@@ -1280,20 +1292,7 @@ class _GitPanelBody extends ConsumerWidget {
         hasChanges: counts.hasChanges,
         changedCount: counts.changedCount,
         changes: counts.hasChanges
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _ChangesSectionHeader(
-                    counts: counts,
-                    fileService: fileService,
-                    collapsedPaths: git.collapsedPaths,
-                    expanded: true,
-                    onToggle: null,
-                  ),
-                  const AbSeparator.horizontal(),
-                  Expanded(child: _buildFileList(context)),
-                ],
-              )
+            ? _buildChangeGroups(context)
             : const SizedBox.shrink(),
         history: history,
       ),
@@ -1312,7 +1311,7 @@ class _GitPanelBody extends ConsumerWidget {
   Widget _buildColumn(BuildContext context) {
     final git = state.git;
     final hasChanges = counts.hasChanges;
-    final changesOpen = hasChanges && !panel.changesCollapsed;
+    final changesOpen = hasChanges && _anyChangeGroupOpen;
     final historyOpen = !git.historyCollapsed;
 
     return _GitPanelScaffold(
@@ -1323,18 +1322,13 @@ class _GitPanelBody extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (hasChanges) ...[
-            _ChangesSectionHeader(
-              counts: counts,
-              fileService: fileService,
-              collapsedPaths: git.collapsedPaths,
-              expanded: changesOpen,
-              onToggle: panel.onToggleChanges,
-            ),
             if (changesOpen)
               Expanded(
                 flex: historyOpen ? 3 : 1,
-                child: _buildFileList(context),
-              ),
+                child: _buildChangeGroups(context),
+              )
+            else
+              _buildChangeGroups(context),
             const AbSeparator.horizontal(),
           ],
           _GitHistorySectionHeader(
@@ -1356,12 +1350,69 @@ class _GitPanelBody extends ConsumerWidget {
     );
   }
 
+  bool get _anyChangeGroupOpen =>
+      (counts.staged.entries.isNotEmpty && !panel.stagedCollapsed) ||
+      (counts.unstaged.entries.isNotEmpty && !panel.changesCollapsed);
+
+  /// VS Code's two groups, Staged Changes over Changes, each shown only while
+  /// it holds something; a partially staged file is listed in both. A row
+  /// alone cannot say which side it is on — touch rows carry no Stage/Unstage
+  /// buttons, and desktop's appear only on hover — so the group is what says.
+  ///
+  /// An open group's rows take a share of the height by how many it holds, so
+  /// one staged file does not take half the column from a long list. With
+  /// every group folded this is headers only, and must not be placed in an
+  /// [Expanded] ([_anyChangeGroupOpen]).
+  Widget _buildChangeGroups(BuildContext context) {
+    final staged = counts.staged;
+    final unstaged = counts.unstaged;
+    final groups = [
+      if (staged.entries.isNotEmpty)
+        (
+          header: _StagedGroupHeader(
+            staged: staged,
+            fileService: fileService,
+            expanded: !panel.stagedCollapsed,
+            onToggle: panel.onToggleStaged,
+          ),
+          index: staged,
+          open: !panel.stagedCollapsed,
+        ),
+      if (unstaged.entries.isNotEmpty)
+        (
+          header: _UnstagedGroupHeader(
+            unstaged: unstaged,
+            fileService: fileService,
+            expanded: !panel.changesCollapsed,
+            onToggle: panel.onToggleChanges,
+          ),
+          index: unstaged,
+          open: !panel.changesCollapsed,
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final (i, group) in groups.indexed) ...[
+          if (i > 0) const AbSeparator.horizontal(),
+          group.header,
+          if (group.open)
+            Expanded(
+              flex: group.index.changedCount,
+              child: _buildFileList(context, group.index),
+            ),
+        ],
+      ],
+    );
+  }
+
   // The same widget the Files tab renders, in its [changesOnly] mode: decorated,
-  // and nesting the changed paths under folders of their own rather than
-  // pruning the file tree down to them. [state.root] is passed for the
-  // signature's sake and goes unread there (see FileTreeView's own doc), which
-  // is what keeps this list from rearranging itself when the tree lands.
-  Widget _buildFileList(BuildContext context) {
+  // and a flat list of the changed paths rather than a tree. [state.root] is
+  // passed for the signature's sake and goes unread there (see FileTreeView's
+  // own doc), which is what keeps this list from rearranging itself when the
+  // tree lands.
+  Widget _buildFileList(BuildContext context, GitStatusIndex gitStatus) {
     return RefreshIndicator(
       onRefresh: () async {
         fileService.requestFullTree();
@@ -1371,12 +1422,10 @@ class _GitPanelBody extends ConsumerWidget {
         root: state.root,
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.git.diffPath,
-        gitStatus: state.gitStatus,
+        gitStatus: gitStatus,
         changesOnly: true,
-        collapsedPaths: state.git.collapsedPaths,
-        // The Git tab's own fold state, never the Files tab's `toggleExpanded`
-        // — see [GitPaneState.collapsedPaths].
-        onToggleExpanded: (path) => fileService.toggleGitFolder(path),
+        // A flat list has no folder rows to toggle.
+        onToggleExpanded: (_) {},
         onFileSelected: (path) => fileService.requestDiff(path),
         onStage: (path) => fileService.stageFiles([path]),
         onUnstage: (path) => fileService.unstageFiles([path]),

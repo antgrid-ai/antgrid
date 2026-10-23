@@ -100,6 +100,20 @@ test("a handshake tells the app this machine's RAM", async () => {
   expect(ramAvailableBytes).toBeLessThanOrEqual(ramTotalBytes!);
 });
 
+test("a remote app that attaches after the handshake is told this machine's RAM", async () => {
+  const { sent, send } = await boot();
+  sent.length = 0;
+
+  send(PEER_ID, {});
+  await waitFor(() => sent.some((m) => m.type === "machine:stats"), "machine:stats for the new remote client");
+
+  // Only a NEW remote client triggers it; its later frames do not.
+  sent.length = 0;
+  send(PEER_ID, {});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sent.some((m) => m.type === "machine:stats")).toBe(false);
+});
+
 test("device:stats from a known device is recorded on its row", async () => {
   const { stats, send } = await boot();
 

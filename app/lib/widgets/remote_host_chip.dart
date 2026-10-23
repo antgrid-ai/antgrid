@@ -17,7 +17,7 @@ class RemoteHostChip extends StatelessWidget {
   final String hostMachineName;
   final String? platform;
 
-  /// `RAM 18.2 GB / 32.0 GB`, from the host's latest `machine:stats`; null
+  /// `RAM 18.2 / 32.0 GB`, from the host's latest `machine:stats`; null
   /// until a bridge new enough to send one has.
   final String? ram;
 
