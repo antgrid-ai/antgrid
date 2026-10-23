@@ -53,6 +53,8 @@ import '../services/sessions_service.dart';
 import '../services/upload_service.dart';
 import '../util/ab_log.dart';
 import 'client_id.dart';
+import 'control_plane.dart'
+    show RefreshRef, invalidateControlPlaneProviders;
 import 'value_controller.dart';
 
 /// Extract project name from compound agentDeviceId (uuid.projectId).
@@ -1090,28 +1092,41 @@ class MachineConnectionNotifier extends Notifier<void> {
   }
 
   /// User-initiated escape from the workspace boot screen — clears the
-  /// active registration id (so `app_shell` routes back to the project list)
-  /// and tears down the in-flight relay
-  /// connection so we don't keep retrying in the background.
+  /// active registration id (so `app_shell` routes back to the project list),
+  /// evicts the cancelled project, and stops its machine's dial when nothing
+  /// else on that machine is open.
+  ///
+  /// The machine connection is shared by every project open on it, and a
+  /// release disposes all of their streams with nothing to rebind them, so it
+  /// is released here only when the cancelled project was its last. Otherwise
+  /// the remaining projects keep it wanted and the control-plane reaper owns it.
+  /// The reaper cannot be left the sole-project case: the New Session picker
+  /// that Cancel lands on pins every open connection, so an abandoned dial
+  /// would keep retrying for as long as the picker shows.
   void cancelActiveAgent() {
     final activeId = ref.read(selectedRegistrationIdProvider);
     ref.read(selectedTargetProvider.notifier).set(null);
-    // Drop the in-flight machine socket + warm session for the cancelled agent
-    // so re-selecting this id from the home screen rebuilds a fresh connection
-    // rather than reusing the half-closed one. The connection is machine-level
-    // (bare uuid) — reduce the compound focus id to its base.
-    if (activeId != null) {
-      final mgr = ref.read(relayConnectionManagerProvider);
-      final machineUuid = baseDeviceUuid(activeId);
-      // Same guard, and the same reason, as the control-plane reaper's: the
-      // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
-      // one from here would kill the live peer session and every other project
-      // stream riding it. Cancel only ever abandons an attempt in flight.
-      if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
-        mgr.release(machineUuid);
-      }
-      ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
+    if (activeId == null) return;
+    final mgr = ref.read(relayConnectionManagerProvider);
+    final machineUuid = baseDeviceUuid(activeId);
+    // Read before the evict below, while the cancelled project is still in
+    // the registry — it is excluded by id rather than by its absence.
+    final otherOpenOnMachine = ref
+        .read(projectSessionRegistryProvider)
+        .any((id) => id != activeId && baseDeviceUuid(id) == machineUuid);
+    // An ESTABLISHED connection is never released from here either: Cancel
+    // only abandons an attempt in flight.
+    if (!otherOpenOnMachine &&
+        mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
+      mgr.release(machineUuid);
+      // The chain is non-autoDispose; left cached it rebuilds atop the
+      // released transport (see invalidateControlPlaneProviders).
+      invalidateControlPlaneProviders(
+        RefreshRef.ofContainer(ref.container),
+        machineUuid,
+      );
     }
+    ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
   }
 
   /// User-initiated retry from the boot panel or the connection-error screen.
