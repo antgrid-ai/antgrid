@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
@@ -10,7 +11,10 @@ import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/navigation/nav_serialization.dart';
+import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
+import 'package:antgrid/providers/control_plane.dart' show hostControllerProvider;
+import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
@@ -131,18 +135,44 @@ void main() {
   });
 
   test(
-    'demo scheduler rejects requests before touching host or account providers',
+    'demo scheduler answers from memory without touching host or account providers',
     () async {
-      final c = ProviderContainer();
+      final c = ProviderContainer(
+        overrides: [
+          schedulerLocalTimezoneProvider.overrideWith((_) async => null),
+        ],
+      );
       addTearDown(c.dispose);
       c.read(demoModeProvider.notifier).set(true);
-      expect(c.read(schedulerMachinesProvider), isEmpty);
-      await expectLater(
-        c.read(schedulerRequestProvider)('scheduler.create', {
-          'schedule': _settings,
-        }),
-        throwsStateError,
-      );
+      expect(c.read(schedulerMachinesProvider), {'local': 'Sample machine'});
+      expect(c.read(schedulerTargetProvider), isNull);
+      expect(c.read(schedulerConnectedProvider), isTrue);
+      final request = c.read(schedulerRequestProvider);
+      final created = await request('scheduler.create', {
+        'schedule': {
+          'name': 'Daily review',
+          'prompt': 'Review the open changes',
+          'projectId': kDemoProjectId,
+          'agentId': 'claude-code',
+          'mode': 'chat',
+          'chatMode': 'acceptEdits',
+          'approvalPolicy': 'default',
+          'workspace': 'worktree',
+          'cron': '0 9 * * *',
+          'timezone': 'UTC',
+          'catchUp': 'skip',
+          'enabled': true,
+        },
+      });
+      final id = (created['schedule'] as Map)['id'];
+      final listed = await request('scheduler.list');
+      final ids = [
+        for (final row in listed['schedules'] as List) (row as Map)['id'],
+      ];
+      expect(ids, contains(id));
+      expect(c.exists(hostControllerProvider), isFalse);
+      expect(c.exists(accountAgentsProvider), isFalse);
+      expect(c.exists(recentAgentsProvider), isFalse);
     },
   );
 
@@ -250,7 +280,6 @@ void main() {
       expect(newSessionRow.horizontalPadding, schedulerRow.horizontalPadding);
       expect(newSessionRow.selectionStyle, AbRowSelection.surface);
       expect(newSessionRow.hoverable, isTrue);
-      expect(schedulerRow.enabled, isFalse);
       expect(tester.getSize(newSession).height, greaterThanOrEqualTo(48));
       expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
       expect(
