@@ -48,7 +48,7 @@ describe("context budgets", () => {
     const path = join(mkdtempSync(join(tmpdir(), "ab-ctx-")), "t.jsonl");
     const total = DECIDE_MAX_MSGS + 10;
     const lines = Array.from({ length: total }, (_, i) =>
-      JSON.stringify({ message: { content: `msg-${i}` } }));
+      JSON.stringify({ type: "user", message: { content: `msg-${i}` } }));
     writeFileSync(path, lines.join("\n"), "utf8");
     const r = await assembleContext({ tool: "claude-code", transcriptPath: path, recentPty: "", purpose: "decide" });
     expect(r.source).toBe("transcript");

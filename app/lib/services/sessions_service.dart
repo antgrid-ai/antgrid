@@ -25,6 +25,13 @@ const _kPendingReplyTimeout = Duration(seconds: 15);
 /// a failure that did not happen.
 const _kModeReplyTimeout = Duration(seconds: 25);
 
+/// `session:fork` stages the source agent's transcript before it answers, and a
+/// long conversation makes that the slow part. Keep this strictly greater than
+/// the bridge's staging bound (`HANDOFF_STAGE_DEADLINE_MS`, 60s) plus worktree
+/// creation, or the client gives up on a fork the bridge is still about to
+/// complete. A lapse means the outcome is unknown, never that the fork failed.
+const _kForkReplyTimeout = Duration(seconds: 90);
+
 /// What a `session:setup` request asks of an isolated session's provisioning
 /// run: [skip] releases the queued agent start and leaves setup running,
 /// [cancel] kills the run, [rerun] starts a fresh one from a finished state.
@@ -400,13 +407,19 @@ class SessionsService {
 
   /// Forks from bridge-owned transcript and workspace state. The app supplies
   /// no command, native conversation id, transcript, or filesystem path.
+  ///
+  /// [targetTool] is a registry key naming a different agent to continue in.
+  /// Pass it only for a session whose bridge reported `handoffSupported`: an
+  /// older bridge drops the key and forks into the same agent without a word.
   Future<SessionEntry?> fork(
     String sourceSessionId, {
     required String workspace,
+    String? targetTool,
   }) {
     final requestId = _newRequestId();
     final pending = _newPending<SessionEntry?>(
       () => _pendingCreates.remove(requestId),
+      timeout: _kForkReplyTimeout,
     );
     _pendingCreates[requestId] = pending;
     unawaited(
@@ -415,6 +428,7 @@ class SessionsService {
           'requestId': requestId,
           'sourceSessionId': sourceSessionId,
           'workspace': workspace,
+          'targetTool': ?targetTool,
         }),
       ),
     );

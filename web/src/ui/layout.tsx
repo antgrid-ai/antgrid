@@ -4,7 +4,6 @@
 import { tryGetContext } from "hono/context-storage";
 import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
-import { BETA } from "../billing/plans.js";
 import { Wordmark } from "./wordmark.js";
 import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
@@ -110,18 +109,9 @@ export function Layout({ title, user, section, children, analytics = true, conte
       <body class="min-h-screen bg-page font-sans text-ink">
         <header class="border-b border-edge bg-group">
           <div class={`${contentWidth === "wide" ? "max-w-[1600px]" : "max-w-5xl"} mx-auto px-4 sm:px-6 h-14 flex items-center gap-3 sm:gap-6`}>
-            {/* Badge sits INSIDE the home link so it reads as part of the
-                lockup rather than a second announcement — and stays a span:
-                an anchor here would nest, which is invalid, and a status
-                marker is not a navigation target. */}
             <a href="/" class="flex shrink-0 items-center gap-2">
               <Mark />
               <Wordmark />
-              {BETA && (
-                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-signalink">
-                  beta
-                </span>
-              )}
             </a>
             {user && (
               // `min-w-0` + `overflow-x-auto`: four labels plus the wordmark and

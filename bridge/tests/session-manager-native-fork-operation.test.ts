@@ -137,6 +137,8 @@ test("a Kimi fork into a new worktree takes the transcript handoff, and only a f
   try {
     const manager = new SessionManager({ projectId: "project", projectPath: directory, storeDir: directory,
       agentSpec: { name: "kimi", command: "kimi" }, terminalManager: terminal as any, sendMessage() {},
+      // An empty home, so the snapshot never reads the machine's real Kimi store.
+      adapterOptions: { kimi: { kimiHome: join(directory, "kimi-home") } },
       worktreeSessionsSupported: true, isGitRepository: async () => true, worktreeManager: worktreeManager as any,
       resolveAgentSpec: async () => ({ name: "kimi", command: "kimi" }) });
     managers.push(manager);
@@ -148,7 +150,11 @@ test("a Kimi fork into a new worktree takes the transcript handoff, and only a f
     const copied = rows().find(row => row.id === copy.id);
     expect(copied.checkoutId).toBe("checkout-1");
     expect(copied.forkSourceSessionId).toBeUndefined();
-    expect(copied.forkTranscript).toContain("fix the parser");
+    expect(copied.forkTranscript).toBeUndefined();
+    expect(copied.forkHandoff).toEqual({ state: "staged", sourceTool: "kimi" });
+    const staged = join(directory, "agents", "project", "handoff", copy.id);
+    expect(readFileSync(join(staged, "terminal-scrollback.txt"), "utf8")).toContain("fix the parser");
+    expect(readFileSync(join(staged, "excerpt.md"), "utf8")).toContain("fix the parser");
 
     const inPlace = await manager.fork(source.id, "current");
     expect(rows().find(row => row.id === inPlace.id).forkSourceSessionId).toBe("source");

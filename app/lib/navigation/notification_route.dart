@@ -184,7 +184,7 @@ SessionTarget? _resolveTarget(
       (r) => r.origin.registrationId == registrationId,
     );
     if (row != null) return _targetOf(row.origin);
-    return _splitRegistrationId(registrationId);
+    return splitRegistrationId(registrationId);
   }
 
   final machineUuid = namedOrNull(route.machineUuid);
@@ -223,7 +223,9 @@ SessionTarget _targetOf(RecentOrigin origin) {
   return RemoteProject(machineUuid: machineUuid, projectId: origin.projectId);
 }
 
-SessionTarget _splitRegistrationId(String registrationId) {
+/// The target a drawer entry id addresses: a bare project id is local, a
+/// compound `<deviceUuid>.<projectId>` id is that machine's project.
+SessionTarget splitRegistrationId(String registrationId) {
   final machineUuid = baseDeviceUuid(registrationId);
   if (machineUuid == registrationId) return LocalProject(registrationId);
   return RemoteProject(

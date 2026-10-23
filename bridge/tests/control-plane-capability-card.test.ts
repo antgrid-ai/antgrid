@@ -16,7 +16,7 @@ function session(over: Partial<SessionEntry> & { id: string }): SessionEntry {
     archived: false,
     running: true,
     deleting: false,
-    forkSupported: false,
+    forkSupported: false, handoffSupported: false,
     mode: "terminal",
     approvalPolicy: "default",
     agentSessionResumable: true,

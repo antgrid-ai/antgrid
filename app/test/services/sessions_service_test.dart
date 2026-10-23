@@ -34,6 +34,74 @@ void main() {
     );
   }
 
+  group('fork', () {
+    test('sends targetTool only when given', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final pending = svc.fork(
+        's1',
+        workspace: 'current',
+        targetTool: 'claude-code',
+      );
+      await Future<void>.delayed(Duration.zero);
+      final msg = t.sent.firstWhere((m) => m['type'] == 'session:fork');
+      expect(msg['targetTool'], 'claude-code');
+      expect(msg['workspace'], 'current');
+
+      final expectation = expectLater(pending, throwsA(isA<StateError>()));
+      await svc.dispose();
+      await expectation;
+      await session.close();
+    });
+
+    test('without targetTool omits the key', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final pending = svc.fork('s1', workspace: 'copy');
+      await Future<void>.delayed(Duration.zero);
+      final msg = t.sent.firstWhere((m) => m['type'] == 'session:fork');
+      expect(msg.containsKey('targetTool'), isFalse);
+
+      final expectation = expectLater(pending, throwsA(isA<StateError>()));
+      await svc.dispose();
+      await expectation;
+      await session.close();
+    });
+
+    test('waits past the generic 15 s timeout', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+      fakeAsync((async) {
+        var done = false;
+        Object? outcome;
+        svc
+            .fork('s1', workspace: 'copy')
+            .then<void>((_) => done = true, onError: (Object e) {
+              outcome = e;
+              done = true;
+            });
+        // Past the bridge's 60 s staging deadline, plus worktree creation.
+        async.elapse(const Duration(seconds: 65));
+        async.flushMicrotasks();
+        expect(done, isFalse, reason: 'still waiting at 65 s');
+        async.elapse(const Duration(seconds: 30));
+        async.flushMicrotasks();
+        expect(done, isTrue, reason: 'lapsed by 95 s');
+        expect(outcome, isA<TimeoutException>());
+      });
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
   test(
     'fromSession ctor subscribes to status (subscribed before message arrives)',
     () async {
