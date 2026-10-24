@@ -54,6 +54,7 @@ import 'screens/app_shell.dart';
 import 'screens/demo_home.dart';
 import 'screens/device_cap_dialog.dart';
 import 'screens/sign_in_screen.dart';
+import 'services/device_stats_reporter.dart';
 import 'services/devices_api.dart' show DeviceCapInfo;
 import 'services/app_settings_service.dart';
 import 'services/local_notification_service.dart';
@@ -277,6 +278,31 @@ Future<void> main() async {
   // That host is often the first to see this machine's device revoked; see the
   // provider for why it probes rather than acting on the event itself.
   container.listen(hostRevocationWatchProvider, (_, _) {});
+
+  // Report this device's RAM/storage to every warm RELAY session, for the
+  // remote machine's device roster. Every platform, unlike push below: a
+  // desktop controlling another machine sits in that roster too. Same two
+  // triggers as push: what is warm now, and whatever becomes warm later.
+  {
+    final statsReporter = DeviceStatsReporter();
+    // Held for the app's lifetime, like the reporter it drives.
+    AppLifecycleListener(
+      onPause: statsReporter.pause,
+      onResume: statsReporter.resume,
+    );
+    // Awaits `.future`, not `.value`: projectSessionProvider touches the
+    // registry from inside its own build, so this listener fires while that
+    // session is still loading and `.value` would skip it for good.
+    void reportStats() {
+      for (final id in container.read(projectSessionRegistryProvider)) {
+        container
+            .read(projectSessionProvider(id).future)
+            .then((s) => statsReporter.watch([s]), onError: (Object _) {});
+      }
+    }
+    container.listen(projectSessionRegistryProvider, (_, _) => reportStats());
+    reportStats();
+  }
 
   // Register the push token on every warm RELAY session (Android + iOS).
   // requestPermission/token can throw on a device without Google Play Services;

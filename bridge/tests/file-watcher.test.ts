@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { FileWatcher } from "../src/file-watcher";
 import { createConnState } from "../src/conn-state";
 import { PathStatCache } from "../src/terminal-links/stat-cache";
-import type { AbMessage } from "../src/protocol";
+import { parseMessage, type AbMessage } from "../src/protocol";
 import * as fsp from "node:fs/promises";
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +24,29 @@ describe("FileWatcher", () => {
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("carries UTF-8 validity through the file content wire response", () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+    try {
+      for (const valid of [false, true]) {
+        writeFileSync(join(tempDir, "a.txt"), valid ? "\ufffd" : Buffer.from([0xf0, 0x90, 0x80]));
+        watcher.handleFileReadRequest("a.txt");
+        expect(parseMessage(JSON.stringify(messages.at(-1)))).toMatchObject({
+          type: "file:content",
+          content: "\ufffd",
+          size: 3,
+          utf8Valid: valid,
+        });
+      }
+    } finally {
+      watcher.stop();
+    }
   });
 
   it("detects file additions", async () => {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus } from "./git-branches";
+import type { DeviceStats } from "./device-stats";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
@@ -244,6 +245,9 @@ export interface PairedPhoneSummary {
   label?: string;
   pairedAt: string;
   lastSeenAt: string;
+  /** What the device last reported about its hardware this process lifetime;
+   *  absent until it connects after a host start. */
+  stats?: DeviceStats;
 }
 
 /** One project the machine knows about (warm core or seen-catalog hint).

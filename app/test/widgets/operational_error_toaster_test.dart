@@ -3,21 +3,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_icons.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/services/operational_notice.dart';
 import 'package:antgrid/widgets/operational_error_toaster.dart';
 
 import '../helpers/toast_host.dart';
 
 void main() {
-  late StreamController<ProjectScoped<String>> sourceA;
-  late StreamController<ProjectScoped<String>> sourceB;
+  late StreamController<ProjectScoped<OperationalNotice>> sourceA;
+  late StreamController<ProjectScoped<OperationalNotice>> sourceB;
 
   setUp(() {
-    sourceA = StreamController<ProjectScoped<String>>.broadcast();
-    sourceB = StreamController<ProjectScoped<String>>.broadcast();
+    sourceA = StreamController<ProjectScoped<OperationalNotice>>.broadcast();
+    sourceB = StreamController<ProjectScoped<OperationalNotice>>.broadcast();
   });
   tearDown(() async {
     await sourceA.close();
@@ -70,7 +73,10 @@ void main() {
   testWidgets('an error from a background project names it', (tester) async {
     await pumpToaster(tester);
 
-    sourceA.add((entryId: 'p2', message: 'pre-commit hook failed'));
+    sourceA.add((
+      entryId: 'p2',
+      message: (message: 'pre-commit hook failed', failed: true),
+    ));
     await deliver(tester);
 
     expect(find.text('pre-commit hook failed'), findsOneWidget);
@@ -88,10 +94,40 @@ void main() {
     expect(find.text('pre-commit hook failed'), findsOneWidget);
     expect(find.text('Alpha'), findsNothing);
   });
+
+  testWidgets('a failure is marked as one and outlasts a success', (
+    tester,
+  ) async {
+    await pumpToaster(tester);
+
+    sourceA.add(_focusedError('pre-commit hook failed'));
+    sourceA.add((
+      entryId: 'p1',
+      message: (message: 'Committed abc123', failed: false),
+    ));
+    await deliver(tester);
+
+    expect(_iconCount(AbIcons.error), 1);
+    expect(_iconCount(AbIcons.info), 1);
+
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Committed abc123'), findsNothing);
+    expect(find.text('pre-commit hook failed'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('pre-commit hook failed'), findsNothing);
+  });
 }
 
-ProjectScoped<String> _focusedError(String message) =>
-    (entryId: 'p1', message: message);
+int _iconCount(String icon) => find
+    .byWidgetPredicate((w) => w is AbIcon && w.icon == icon)
+    .evaluate()
+    .length;
+
+ProjectScoped<OperationalNotice> _focusedError(String message) =>
+    (entryId: 'p1', message: (message: message, failed: true));
 
 final _source = NotifierProvider<ValueController<String>, String>(
   () => ValueController('a'),

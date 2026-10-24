@@ -10,6 +10,7 @@ import '../services/control_plane_client.dart'
         parseSessionStatuses;
 import '../models/agent_descriptor.dart';
 import '../models/branch_remote_status.dart';
+import '../models/device_stats.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 
@@ -113,12 +114,17 @@ class PairedPhoneSummary {
   final String? label;
   final String pairedAt;
   final String lastSeenAt;
+
+  /// What the device last reported about its hardware since the host started;
+  /// null until it next connects.
+  final DeviceStats? stats;
   const PairedPhoneSummary({
     required this.phonePubkey,
     required this.phoneDeviceId,
     this.label,
     required this.pairedAt,
     required this.lastSeenAt,
+    this.stats,
   });
 
   factory PairedPhoneSummary.fromJson(Map<String, dynamic> json) {
@@ -141,6 +147,10 @@ class PairedPhoneSummary {
       label: json['label'] as String?,
       pairedAt: pairedAt,
       lastSeenAt: lastSeenAt,
+      stats: switch (json['stats']) {
+        final Map<String, dynamic> s => DeviceStats.fromJson(s),
+        _ => null,
+      },
     );
   }
 }

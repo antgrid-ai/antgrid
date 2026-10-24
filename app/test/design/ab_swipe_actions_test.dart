@@ -160,9 +160,22 @@ void main() {
     // One tray, not two — the second row's.
     expect(find.text('Stage'), findsOneWidget);
     expect(
-      tester.getRect(find.text('row 1')).left,
-      lessThan(tester.getRect(find.text('row 0')).left),
+      tester.getCenter(find.text('Stage')).dy,
+      moreOrLessEquals(tester.getCenter(find.text('row 1')).dy, epsilon: 1),
     );
+  });
+
+  // A row's name leads it, and a tray may take half the row: sliding the row
+  // by the tray pushed the name off screen, leaving actions with no file.
+  testWidgets('an open tray keeps the row where it was', (tester) async {
+    await tester.pumpWidget(rowsUnderTest(width: 390));
+    final before = tester.getRect(find.text('row 0')).left;
+
+    await tester.drag(find.text('row 0'), const Offset(-120, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Stage'), findsOneWidget);
+    expect(tester.getRect(find.text('row 0')).left, before);
   });
 
   testWidgets('closeAny closes the open tray', (tester) async {

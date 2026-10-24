@@ -7,6 +7,7 @@ import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/file_service.dart';
+import 'package:antgrid/services/operational_notice.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/counting_file_node.dart';
 import '../helpers/fake_agent_transport.dart';
@@ -1372,7 +1373,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
-    final feedback = <String>[];
+    final feedback = <OperationalNotice>[];
     svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:discard-result', {
@@ -1381,8 +1382,17 @@ void main() {
       'files': ['a.dart'],
     });
     t.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    t.emit('git:commit-result', {
+      'projectId': 'p',
+      'success': false,
+      'error': 'pre-commit: lint failed',
+    });
     await Future<void>.delayed(Duration.zero);
-    expect(feedback, ['Discarded changes', 'Committed']);
+    expect(feedback, [
+      (message: 'Discarded changes', failed: false),
+      (message: 'Committed', failed: false),
+      (message: 'pre-commit: lint failed', failed: true),
+    ]);
 
     await svc.dispose();
     await session.close();
@@ -1428,7 +1438,7 @@ void main() {
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
 
-    svc.commit('msg');
+    unawaited(svc.commit('msg'));
     await Future<void>.delayed(Duration.zero);
 
     final msg = t.sent.firstWhere((m) => m['type'] == 'git:commit');
@@ -1437,6 +1447,31 @@ void main() {
     expect(msg.containsKey('files'), isFalse);
 
     await svc.dispose();
+    await session.close();
+  });
+
+  test('commit resolves with whether the commit landed', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    final refused = svc.commit('msg');
+    t.emit('git:commit-result', {
+      'projectId': 'p',
+      'success': false,
+      'error': 'hook failed',
+    });
+    expect(await refused, isFalse);
+
+    final landed = svc.commit('msg');
+    t.emit('git:commit-result', {'projectId': 'p', 'success': true});
+    expect(await landed, isTrue);
+
+    // Disposing mid-flight must not leave the caller awaiting forever.
+    final abandoned = svc.commit('msg');
+    await svc.dispose();
+    expect(await abandoned, isFalse);
+
     await session.close();
   });
 
@@ -1476,7 +1511,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
-    final feedback = <String>[];
+    final feedback = <OperationalNotice>[];
     svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
@@ -1486,7 +1521,7 @@ void main() {
       'error': 'boom',
     });
     await Future<void>.delayed(Duration.zero);
-    expect(feedback, ['boom']);
+    expect(feedback, [(message: 'boom', failed: true)]);
 
     await svc.dispose();
     await session.close();
@@ -1496,7 +1531,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
-    final feedback = <String>[];
+    final feedback = <OperationalNotice>[];
     svc.gitOpFeedback.listen(feedback.add);
 
     t.emit('git:stage-result', {
@@ -1714,6 +1749,31 @@ void main() {
   });
 
   group('attachment preview', () {
+    test('UTF-8 validity reaches both file and preview content', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+      svc.selectFile('a.txt');
+      svc.openPreview('a.txt');
+      await Future<void>.delayed(Duration.zero);
+
+      for (final valid in [false, true, null]) {
+        t.emit('file:content', {
+          'projectId': 'p',
+          'path': 'a.txt',
+          'content': '\uFFFD',
+          'size': 3,
+          'utf8Valid': ?valid,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.files.viewingFile?.utf8Valid, valid);
+        expect(svc.currentState.preview.content?.utf8Valid, valid);
+      }
+
+      await svc.dispose();
+      await session.close();
+    });
+
     // The preview is a THIRD file:content consumer beside the Files and Git
     // panes. It shares the verb and the viewers, but not the slot — routing it
     // through the Files pane would evict the file the user has open there.

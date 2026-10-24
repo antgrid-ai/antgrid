@@ -77,8 +77,7 @@ class _PreviewWithSourceToggleState extends State<PreviewWithSourceToggle> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         buildViewerHeader(
-          path: widget.content.path,
-          size: widget.content.size,
+          content: widget.content,
           onClose: widget.onClose,
           trailing: [
             ...widget.extraActions,

@@ -19,18 +19,20 @@ class GitStatusIndex {
   /// Entries grouped by path, in arrival order within a path.
   late final Map<String, List<GitFileStatusEntry>> byPath = _byPath();
 
-  /// The ancestors of every CONFLICTED path: what lets a folder sort ahead of
-  /// its siblings for holding one somewhere below.
-  late final Set<String> dirsWithConflicts = _dirsWithConflicts();
-
-  /// Every directory prefix of every changed path, which is exactly the set of
-  /// folder rows the changed-files tree produces. Derived from the paths rather
-  /// than the rendered tree because the header exists before any tree does.
-  late final Set<String> changedFolders = {
-    for (final e in entries) ..._ancestorsOf(e.path),
-  };
-
   late final int stagedCount = entries.where((e) => e.staged).length;
+
+  /// The index side and the working-tree side, for a list that shows them
+  /// apart. Held rather than rebuilt: a tree reuses its rows while its index
+  /// is identical.
+  late final GitStatusIndex staged = GitStatusIndex([
+    for (final e in entries)
+      if (e.staged) e,
+  ]);
+
+  late final GitStatusIndex unstaged = GitStatusIndex([
+    for (final e in entries)
+      if (!e.staged) e,
+  ]);
 
   /// A conflict ("!") is included — staging one IS how git resolves it, so
   /// Stage All has to reach it.
@@ -84,34 +86,5 @@ class GitStatusIndex {
       out.putIfAbsent(e.path, () => []).add(e);
     }
     return out;
-  }
-
-  Set<String> _dirsWithConflicts() {
-    final out = <String>{};
-    for (final e in entries) {
-      if (e.status != '!') continue;
-      var dir = e.path;
-      var slash = dir.lastIndexOf('/');
-      while (slash >= 0) {
-        dir = dir.substring(0, slash);
-        // Already recorded => every ancestor above it was too.
-        if (!out.add(dir)) break;
-        slash = dir.lastIndexOf('/');
-      }
-    }
-    return out;
-  }
-
-  /// The trailing slash git puts on an untracked directory it did not walk
-  /// into is dropped first: the tree renders that path as a LEAF, so the name
-  /// before the slash is not a folder row.
-  static Iterable<String> _ancestorsOf(String path) sync* {
-    var dir = path.endsWith('/') ? path.substring(0, path.length - 1) : path;
-    var slash = dir.lastIndexOf('/');
-    while (slash >= 0) {
-      dir = dir.substring(0, slash);
-      yield dir;
-      slash = dir.lastIndexOf('/');
-    }
   }
 }

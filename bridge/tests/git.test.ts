@@ -142,9 +142,26 @@ describe("git helpers", () => {
     expect((await gitCommit(dir, "  ")).success).toBe(false);
   });
 
-  it("rejects a commit with nothing staged", async () => {
+  it("rejects a commit with nothing staged, and says so", async () => {
     writeFileSync(join(dir, "tracked.txt"), "v2\n"); // modified but never staged
-    expect((await gitCommit(dir, "msg")).success).toBe(false);
+    expect(await gitCommit(dir, "msg")).toEqual({
+      success: false,
+      error: "Nothing staged to commit",
+    });
+  });
+
+  it("passes a rejecting hook's own explanation through", async () => {
+    writeFileSync(
+      join(dir, ".git", "hooks", "pre-commit"),
+      "#!/bin/sh\necho 'lint: 2 errors in tracked.txt' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    expect(await gitCommit(dir, "msg")).toEqual({
+      success: false,
+      error: "lint: 2 errors in tracked.txt",
+    });
   });
 
   it("commits everything staged, including files staged out-of-band", async () => {
@@ -582,9 +599,23 @@ describe("git helpers", () => {
 
   it("discarding a rename restores the old path and removes the new one", async () => {
     await run(dir, ["mv", "tracked.txt", "renamed.txt"]);
-    const res = await gitDiscard(dir, ["renamed.txt"]);
+    const res = await gitDiscard(dir, ["renamed.txt"], { includeStaged: true });
     expect(res.success).toBe(true);
     expect(await getGitStatus(dir)).toEqual([]);
+  });
+
+  // The Changes row's discard: its dialog promises the staged changes are
+  // kept, and a staged rename is one.
+  it("discarding only the unstaged edit of a renamed file keeps the rename", async () => {
+    await run(dir, ["mv", "tracked.txt", "renamed.txt"]);
+    writeFileSync(join(dir, "renamed.txt"), "v2\n");
+    const res = await gitDiscard(dir, ["renamed.txt"]);
+    expect(res.success).toBe(true);
+    expect(readText(dir, "renamed.txt")).toBe("v1\n");
+    expect(existsSync(join(dir, "tracked.txt"))).toBe(false);
+    expect(await getGitStatus(dir)).toEqual([
+      expect.objectContaining({ path: "renamed.txt", status: "R", staged: true }),
+    ]);
   });
 
   it("unstaging a rename restores both the old and new path index entries cleanly", async () => {
@@ -668,7 +699,7 @@ describe("git helpers", () => {
   it("gitDiscard still handles a rename beside untracked noise", async () => {
     await run(dir, ["mv", "tracked.txt", "renamed.txt"]);
     writeFileSync(join(dir, "noise.txt"), "n\n");
-    expect((await gitDiscard(dir, ["renamed.txt"])).success).toBe(true);
+    expect((await gitDiscard(dir, ["renamed.txt"], { includeStaged: true })).success).toBe(true);
     expect(readText(dir, "tracked.txt")).toBe("v1\n");
     expect(existsSync(join(dir, "renamed.txt"))).toBe(false);
     // Untracked files it was never asked about are untouched.
@@ -782,7 +813,7 @@ describe("git helpers in a repo SUBDIRECTORY", () => {
 
   it("discarding a rename inside the project restores the old path", async () => {
     await run(project, ["mv", "inside.txt", "moved.txt"]);
-    const res = await gitDiscard(project, ["moved.txt"]);
+    const res = await gitDiscard(project, ["moved.txt"], { includeStaged: true });
     expect(res.success).toBe(true);
     expect(await getGitStatus(project)).toEqual([]);
   });

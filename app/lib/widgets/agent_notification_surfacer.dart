@@ -168,12 +168,23 @@ class _AgentNotificationSurfacerState
     // A session terminal's id IS the session id (service PTYs use their own,
     // which never matches an active session).
     if (_isViewingSession(msg.terminalId)) return;
-    final body = (msg.body != null && msg.body!.isNotEmpty)
+    final hasBody = msg.body != null && msg.body!.isNotEmpty;
+    final hasTitle = msg.title != null && msg.title!.isNotEmpty;
+    final taskLabel = hasTitle ? msg.title! : 'Agent';
+    final title = notificationHeadline(
+      taskLabel: taskLabel,
+      sessionId: msg.terminalId,
+      activeSessionId: ref.read(activeSessionIdProvider),
+      sessionTitle: _sessionTitle(entryId, msg.terminalId),
+    );
+    // The agent's own title is the task; once the session name takes the
+    // headline it moves to the body so it is not lost — and only then, or the
+    // toast says the same thing twice.
+    final body = hasBody
         ? msg.body!
-        : 'Notification';
-    final title = (msg.title != null && msg.title!.isNotEmpty)
+        : hasTitle && title != taskLabel
         ? msg.title!
-        : 'Agent';
+        : 'Notification';
     _onAgentNotification(
       title: title,
       body: body,
@@ -198,6 +209,19 @@ class _AgentNotificationSurfacerState
     agentSurfaceVisible: ref.read(agentSurfaceVisibleProvider),
     lifecycle: _lifecycle,
   );
+
+  /// The name of [sessionId] in [entryId]'s project, or null when it is not
+  /// listed. Reads the notification's own project: this spans every warm one.
+  String? _sessionTitle(String entryId, String? sessionId) {
+    if (sessionId == null || sessionId.isEmpty) return null;
+    final session = ref.read(projectSessionProvider(entryId)).value;
+    final sessions = session?.sessionsService.currentState.sessions;
+    if (sessions == null) return null;
+    for (final s in sessions) {
+      if (s.id == sessionId) return s.name;
+    }
+    return null;
+  }
 
   /// Whether [entryId]'s Handler holds an armed slot for [sessionId]. Reads the
   /// notification's own project: this spans every warm project.
@@ -227,11 +251,18 @@ class _AgentNotificationSurfacerState
       'error': 'Agent error',
     };
     final label = labels[msg.notificationType] ?? 'Agent';
-    // Keep in lockstep with bridge/src/push/compose.ts: both must agree.
     // body deliberately does not fall back to sessionTitle, or title == body.
-    final title = (msg.sessionTitle != null && msg.sessionTitle!.isNotEmpty)
-        ? msg.sessionTitle!
-        : label;
+    // Unlike the OS push composed by bridge/src/push/compose.ts, the session
+    // being worked in is not named: the user already knows which it is.
+    final title = notificationHeadline(
+      taskLabel: label,
+      sessionId: msg.sessionId,
+      activeSessionId: ref.read(activeSessionIdProvider),
+      sessionTitle:
+          (msg.sessionTitle != null && msg.sessionTitle!.isNotEmpty)
+          ? msg.sessionTitle
+          : _sessionTitle(entryId, msg.sessionId),
+    );
     final body = (msg.message != null && msg.message!.isNotEmpty)
         ? msg.message!
         : label;
@@ -252,13 +283,21 @@ class _AgentNotificationSurfacerState
     if (_isViewingSession(esc.terminalId)) return;
     // Route through the shared surfacer so an escalation from ANY warm project
     // is surfaced, not just the focused one.
-    final title = handlerEscalationTitle(esc);
-    final body = esc.question.isNotEmpty
+    final label = handlerEscalationTitle(esc);
+    final question = esc.question.isNotEmpty
         ? esc.question
         : handlerFallbackQuestion;
+    final title = notificationHeadline(
+      taskLabel: label,
+      sessionId: esc.terminalId,
+      activeSessionId: ref.read(activeSessionIdProvider),
+      sessionTitle: _sessionTitle(entryId, esc.terminalId),
+    );
     _onAgentNotification(
       title: title,
-      body: body,
+      // The headline names the session, so the escalation's own title moves
+      // down with the question.
+      body: title == label ? question : '$label — $question',
       route: NotificationRoute(
         registrationId: entryId,
         terminalId: esc.terminalId,
