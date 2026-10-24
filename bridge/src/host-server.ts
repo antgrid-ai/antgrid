@@ -37,6 +37,7 @@ import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
+import { removeHandoff } from "./handoff/handoff-dir";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
@@ -2956,6 +2957,11 @@ export class HostServer {
     }
     await this.stop(projectId);
     await this.reclaimManagedCheckouts(projectId);
+    // Before the store dies: sessions.json is the only record of which checkouts
+    // hold handoff files.
+    await SessionManager.removePersistedHandoffs(resolveAbDir(), projectId).catch((e) => {
+      log.warn("host: forget(%s) could not remove handoff files: %s", projectId, e instanceof Error ? e.message : String(e));
+    });
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
     this.repoKeys.forgetProject(projectId);
@@ -3230,7 +3236,7 @@ export class HostServer {
    *  lines are undeliverable and hold a slot against `MAX_QUEUED_LINES` until
    *  the project next warms — a bounded, per-project residue, unlike the
    *  machine-wide hydration the two sweeps above prevent. */
-  private deleteColdSessionBusThenRow(projectId: string, sessionId: string): Promise<boolean> {
+  private async deleteColdSessionBusThenRow(projectId: string, sessionId: string): Promise<boolean> {
     this.sessionBus.forget(sessionId);
     this.sessionIndex.forgetSession(projectId, sessionId);
     try {
@@ -3238,7 +3244,11 @@ export class HostServer {
     } catch (err) {
       log.warn("could not remove the session-bus store for %s: %s", sessionId, err);
     }
-    return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+    const removed = await SessionManager.deletePersistedRow(resolveAbDir(), projectId, sessionId);
+    // After the row, like the worktree: a failed row removal leaves the files
+    // for the retry that still has something to name them by.
+    if (removed) await removeHandoff(join(resolveAbDir(), "agents", projectId), removed.forkHandoff?.root, sessionId);
+    return removed !== undefined;
   }
 
   private async evictIfNeeded(justOpened: string): Promise<void> {

@@ -3,6 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
+import { windowsShellLimit } from "../src/terminal-invocation";
+import { handoffPrompt } from "../src/handoff/handoff-prompt";
+import { escapeCmdArg } from "../../packages/antgrid-agents/src/agents/windows-argv";
 import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import { prepareTerminalLaunch, type PreparedTerminalLaunch } from "../../packages/antgrid-agents/src/agents/terminal-launch";
 import { createAgentRuntime } from "antgrid-agents/runtime";
@@ -332,5 +335,61 @@ describe("native fork durable intent", () => {
     const rejected = f.createManager();
     expect(() => rejected.start(fork.id)).toThrow("cannot be migrated safely");
     rejected.flushNow();
+  });
+});
+
+describe("fork-handoff prompt delivery", () => {
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  afterEach(() => { Object.defineProperty(process, "platform", realPlatform); });
+
+  const prompt = handoffPrompt({
+    sourceLabel: "Codex",
+    excerptPath: String.raw`C:\work\%PATH%\.antgrid\handoff\id\excerpt.md`,
+    rawPath: String.raw`C:\work\%PATH%\.antgrid\handoff\id\codex-rollout-01.jsonl`,
+  });
+
+  async function launch(tool: string, adapterOptions?: Record<string, unknown>, initialPrompt = prompt) {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-handoff-launch-"));
+    dirs.push(dir);
+    const scope = createAgentRunScope({ runId: "run", isCurrent: () => true, emit: () => {} });
+    return agentRuntime.prepareTerminal({
+      tool, configured: { name: tool, command: tool }, conversation: { kind: "fresh" },
+      initialPrompt, promptKind: "fork-handoff", approvalPolicy: "default",
+      storeDir: dir, adapterOptions, cwd: dir, signal: scope.signal, scope,
+    });
+  }
+
+  it("stays an included argv on a Windows cmd agent and carries % through escapeCmdArg", async () => {
+    Object.defineProperty(process, "platform", { ...realPlatform, value: "win32" });
+    const prepared = await launch("claude-code");
+    expect(prepared.promptDelivery).toBe("included");
+    expect(prompt).toContain(String.raw`.antgrid\handoff\id\excerpt.md`);
+    expect(prepared.args.at(-1)).toBe(prompt);
+    expect(escapeCmdArg(prompt, true)).toContain("^^^%PATH^^^%");
+  });
+
+  it("fits the batch shim's command line even with a full-length instruction of cmd metacharacters", async () => {
+    Object.defineProperty(process, "platform", { ...realPlatform, value: "win32" });
+    const worst = handoffPrompt({
+      sourceLabel: "Codex",
+      excerptPath: String.raw`C:\work\%PATH%\.antgrid\handoff\id\excerpt.md`,
+      rawPath: String.raw`C:\work\%PATH%\.antgrid\handoff\id\codex-rollout-01.jsonl`,
+      extra: '%&|<>()^!," '.repeat(300),
+    });
+    expect(worst.length).toBeGreaterThan(1_400);
+    const prepared = await launch("claude-code", undefined, worst);
+    expect(prepared.args.at(-1)).toBe(worst);
+    const limit = windowsShellLimit(
+      { command: "claude.cmd", args: prepared.args, invocationKind: "exec" },
+      { platform: "win32", shell: "cmd.exe", resolveWindowsExecutable: () => null, requiresWindowsShell: () => true },
+    );
+    expect(limit).toBeUndefined();
+  });
+
+  it("is typed for an agent with no prompt argv", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kimi-home-"));
+    dirs.push(dir);
+    const prepared = await launch("kimi", { kimiHome: dir });
+    expect(prepared.promptDelivery).toBe("buffered");
   });
 });

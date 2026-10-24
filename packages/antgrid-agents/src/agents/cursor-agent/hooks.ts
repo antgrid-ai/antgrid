@@ -6,6 +6,7 @@ import { atomicWriteFile } from "../../atomic-file";
 import type { HookCommand } from "../../hook-command";
 import { logger } from "../../host";
 import { compact, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
+import { runningUnderTest } from "../test-runner";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 import { cursorSupportsFlag } from "./help";
 import {
@@ -29,11 +30,7 @@ function ensureGlobalCursorHooks(
   cursorDir?: string,
 ): boolean {
   if (cursorDir === undefined) {
-    // Structural guard, not a convention: under `bun test` Bun.main is the
-    // TEST FILE, so a default-resolved hook command is junk — refuse to write
-    // it into the developer's real ~/.cursor. Tests exercising the write path
-    // inject an isolated cursorDir, which skips this guard.
-    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(Bun.main)) return false;
+    if (runningUnderTest()) return false;
     cursorDir = join(homedir(), ".cursor");
   }
   const hooksPath = join(cursorDir, "hooks.json");

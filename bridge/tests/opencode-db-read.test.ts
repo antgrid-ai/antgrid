@@ -22,10 +22,10 @@ function makeDb(): string {
 }
 
 let seq = 0;
-function addMessage(path: string, role: "user" | "assistant", parts: object[], t?: number): string {
+function addMessage(path: string, role: "user" | "assistant", parts: object[], t?: number, info: object = {}): string {
   const db = new Database(path);
   const id = `msg_${String(seq++).padStart(4, "0")}`;
-  db.query("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(id, SES, t ?? seq, seq, JSON.stringify({ role, time: { created: t ?? seq } }));
+  db.query("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(id, SES, t ?? seq, seq, JSON.stringify({ role, time: { created: t ?? seq }, ...info }));
   parts.forEach((p, i) =>
     db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(`prt_${id}_${i}`, id, SES, seq, seq, JSON.stringify(p)));
   db.close();
@@ -53,13 +53,53 @@ test("filters synthetic and ignored text parts and tool-only messages", () => {
   expect(readLastOpencodeMessages(SES, 10, db)).toEqual(["real", "answer"]);
 });
 
-test("a compaction part on a user message drops everything older", () => {
+// opencode's compaction shape (session/compaction.ts): a user message carrying
+// the compaction part, then the summary assistant parented to it, then a
+// synthetic continue prompt.
+function addCompaction(db: string, part: object, summary: { finish: string; error?: object; text?: string }): void {
+  const compaction = addMessage(db, "user", [{ type: "compaction", auto: true, ...part }]);
+  addMessage(db, "assistant", summary.text ? [{ type: "text", text: summary.text }] : [], undefined, {
+    parentID: compaction, mode: "compaction", agent: "compaction", summary: true,
+    finish: summary.finish, ...(summary.error ? { error: summary.error } : {}),
+  });
+  addMessage(db, "user", [{ type: "text", text: "Continue if you have next steps", synthetic: true, metadata: { compaction_continue: true } }]);
+}
+
+test("a completed compaction without a retained tail drops everything older", () => {
   const db = makeDb();
   addMessage(db, "user", [{ type: "text", text: "ancient" }]);
-  addMessage(db, "user", [{ type: "compaction", auto: true }]);
-  addMessage(db, "assistant", [{ type: "text", text: "the summary" }]); // summary child, inside kept range
+  addCompaction(db, {}, { finish: "stop", text: "the summary" });
   addMessage(db, "user", [{ type: "text", text: "fresh" }]);
   expect(readLastOpencodeMessages(SES, 10, db)).toEqual(["the summary", "fresh"]);
+});
+
+test("a compaction with tail_start_id keeps the retained tail turns", () => {
+  const db = makeDb();
+  addMessage(db, "user", [{ type: "text", text: "head question" }]);
+  addMessage(db, "assistant", [{ type: "text", text: "head answer" }], undefined, { finish: "stop" });
+  const tail = addMessage(db, "user", [{ type: "text", text: "tail question" }]);
+  addMessage(db, "assistant", [{ type: "text", text: "tail answer" }], undefined, { finish: "stop" });
+  addCompaction(db, { tail_start_id: tail }, { finish: "stop", text: "the summary" });
+  addMessage(db, "assistant", [{ type: "text", text: "after" }], undefined, { finish: "stop" });
+  expect(readLastOpencodeMessages(SES, 10, db)).toEqual(["tail question", "tail answer", "the summary", "after"]);
+});
+
+test("a failed compaction is not a boundary", () => {
+  const db = makeDb();
+  addMessage(db, "user", [{ type: "text", text: "earlier" }]);
+  addCompaction(db, {}, { finish: "error", error: { name: "ContextOverflowError", data: { message: "too long" } } });
+  addMessage(db, "user", [{ type: "text", text: "later" }]);
+  expect(readLastOpencodeMessages(SES, 10, db)).toEqual(["earlier", "later"]);
+});
+
+test("the newest completed compaction wins over a newer failed one", () => {
+  const db = makeDb();
+  addMessage(db, "user", [{ type: "text", text: "ancient" }]);
+  addCompaction(db, {}, { finish: "stop", text: "the summary" });
+  addMessage(db, "user", [{ type: "text", text: "middle" }]);
+  addCompaction(db, {}, { finish: "error", error: { name: "UnknownError", data: { message: "boom" } } });
+  addMessage(db, "user", [{ type: "text", text: "fresh" }]);
+  expect(readLastOpencodeMessages(SES, 10, db)).toEqual(["the summary", "middle", "fresh"]);
 });
 
 test("returns [] for a missing db, an unknown session, and malformed row data", () => {

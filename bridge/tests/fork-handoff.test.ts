@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeForkHandoff, claudeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/claude-code/fork";
+import { claudeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/claude-code/fork";
 import { codexNativeForkArgs } from "../../packages/antgrid-agents/src/agents/codex/fork";
 import { opencodeNativeForkArgs } from "../../packages/antgrid-agents/src/agents/opencode/fork";
-import { terminalForkHandoff } from "../../packages/antgrid-agents/src/agents/fork-handoff";
+import { terminalOnlyFork } from "../../packages/antgrid-agents/src/agents/fork-handoff";
+import type { HandoffEvent, HandoffSnapshot } from "antgrid-agents/handoff";
 
 const dirs: string[] = [];
 
@@ -14,29 +15,21 @@ afterEach(async () => {
 });
 
 describe("agent fork handoffs", () => {
-  test("Claude adapter normalizes its captured hook transcript", async () => {
+  test("terminal-only adapters have no store to snapshot and summarize the scrollback", async () => {
     const dir = await mkdtemp(join(tmpdir(), "antgrid-fork-"));
     dirs.push(dir);
-    const transcriptPath = join(dir, "session.jsonl");
-    await writeFile(transcriptPath, [
-      JSON.stringify({ type: "user", message: { content: "Inspect the failing test." } }),
-      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "I found the regression." }] } }),
-    ].join("\n"));
+    await writeFile(join(dir, "terminal-scrollback.txt"), "Existing terminal context");
+    const adapter = terminalOnlyFork();
+    await expect(adapter.snapshot({
+      maxMsgs: 20, projectPath: "/project", sourceCwd: "/project", outDir: dir, signal: new AbortController().signal,
+    })).resolves.toBeUndefined();
 
-    await expect(claudeForkHandoff({
-      maxMsgs: 20,
-      projectPath: dir,
-      transcriptPath,
-    })).resolves.toBe("[Claude Code conversation]\nInspect the failing test.\n\nI found the regression.");
-  });
-
-  test("terminal-only adapters never invent provider ids or paths", async () => {
-    const adapter = terminalForkHandoff("Kimi");
-    await expect(adapter.handoff({
-      maxMsgs: 20,
-      projectPath: "/project",
-      terminalTranscript: "Existing terminal context",
-    })).resolves.toBe("[Kimi conversation]\nExisting terminal context");
+    const manifest: HandoffSnapshot = {
+      agent: "kimi", method: "copy", primary: "terminal-scrollback.txt", files: [], references: [], redactions: [], warnings: [],
+    };
+    const events: HandoffEvent[] = [];
+    await adapter.events(dir, manifest, (event) => events.push(event), new AbortController().signal);
+    expect(events).toEqual([{ kind: "assistant", text: "Existing terminal context", at: "terminal-scrollback.txt" }]);
   });
 
   test("native providers use fork rather than resume", () => {

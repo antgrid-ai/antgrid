@@ -3,6 +3,41 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/task_ref.dart';
 
 void main() {
+  test('handoffSupported and agentKey round-trip, copyWith and equality', () {
+    final base = {
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+    };
+    final absent = SessionEntry.fromJson(base);
+    expect(absent.handoffSupported, isFalse);
+    expect(absent.agentKey, isNull);
+    expect(absent.toJson().containsKey('handoffSupported'), isFalse);
+    expect(absent.toJson().containsKey('agentKey'), isFalse);
+
+    final e = SessionEntry.fromJson({
+      ...base,
+      'handoffSupported': true,
+      'agentKey': 'codex',
+    });
+    expect(e.handoffSupported, isTrue);
+    expect(e.agentKey, 'codex');
+    expect(SessionEntry.fromJson(e.toJson()), e);
+    expect(e.copyWith(running: true).agentKey, 'codex');
+    expect(e.copyWith(running: true).handoffSupported, isTrue);
+    expect(e, isNot(absent));
+    expect(e.hashCode, isNot(absent.hashCode));
+
+    // Differs from `e` in agentKey alone, so dropping it from == or hashCode
+    // is what would make these equal.
+    final otherAgent = SessionEntry.fromJson({...e.toJson(), 'agentKey': 'claude-code'});
+    expect(otherAgent, isNot(e));
+    expect(otherAgent.hashCode, isNot(e.hashCode));
+  });
+
   test('defaults mode to terminal when absent', () {
     final e = SessionEntry.fromJson({
       'id': 'a',

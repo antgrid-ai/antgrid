@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "../../atomic-file";
 import { logger } from "../../host";
 import type { HookPost } from "../hook-posts";
+import { runningUnderTest } from "../test-runner";
 import type { HookInjectCtx, LaunchAugmentation } from "../types";
 import {
   antigravityHookCommand,
@@ -58,16 +59,21 @@ function withFallbackRoots(existing: string | undefined): string {
  * bridge-spawned PTY sets. Additive: any other hook groups already in the file
  * are preserved. No-ops / never throws so a read-only home doesn't block the
  * launch. `geminiConfigDir` is injectable for tests; production always resolves
- * to `~/.gemini/config`.
+ * to `~/.gemini/config`, and a test that omits it writes nothing.
  *
  * Returns whether the hooks are (now, or already) present, mirroring
  * ensureGlobalCursorHooks's contract — false means the write failed, so the
  * caller must not suppress the OSC fallback for this spawn.
  */
 export function ensureAntigravityHook(
-  geminiConfigDir: string = join(homedir(), ".gemini", "config"),
-  assetDirectory: string = geminiConfigDir,
+  geminiConfigDir?: string,
+  assetDirectory?: string,
 ): boolean {
+  if (geminiConfigDir === undefined) {
+    if (runningUnderTest()) return false;
+    geminiConfigDir = join(homedir(), ".gemini", "config");
+  }
+  assetDirectory ??= geminiConfigDir;
   const hooksPath = join(geminiConfigDir, "hooks.json");
   try {
     const scriptPath = antigravityScriptPath(assetDirectory);

@@ -14,6 +14,7 @@ import '../models/ab_config.dart';
 import '../providers/providers.dart';
 import '../services/app_settings_service.dart';
 import '../services/config_service.dart';
+import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
 class ProjectSettingsScreen extends ConsumerStatefulWidget {
   const ProjectSettingsScreen({super.key});
@@ -63,7 +64,9 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
         _detected = results[1] as List<DetectedTool>;
       });
     } catch (e) {
-      _failLoad('Failed to load settings: $e');
+      _failLoad(
+        "Couldn't load settings. ${caughtErrorCopy(e, 'Try again in a moment.')}",
+      );
     }
   }
 
@@ -104,7 +107,10 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
       if (errors == null && mounted) Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _saveError = 'Save failed: $e');
+      setState(
+        () => _saveError =
+            "Couldn't save. ${caughtErrorCopy(e, 'Try again in a moment.')}",
+      );
     } finally {
       if (mounted) setState(() => _saving = false);
     }

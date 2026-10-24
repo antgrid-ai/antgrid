@@ -64,17 +64,17 @@ seven come from the Flutter SDK, four are the git-pinned forks (all MIT — the
 `push` fork plus the three `dart_terminal` packages, covered under "Forked
 source"), and one is `antgrid_relay_client`, which is first-party and resolved by
 path. On the TypeScript side, every `package.json` in the
-installed dependency trees of the Bun workspaces and of `site/`.
+installed dependency trees of the Bun workspaces.
 
 Exactly one LGPL component exists anywhere in the tree, and it does not ship:
 
 | Package | Version | Licence | Reached via | Ships? |
 |---|---|---|---|---|
-| `@img/sharp-win32-x64` | 0.34.5 | `Apache-2.0 AND LGPL-3.0-or-later` | `site/` — the Astro image pipeline | No. Build-time image processing for the static marketing site. |
+| `@img/sharp-win32-x64` | 0.35.3 | `Apache-2.0 AND LGPL-3.0-or-later` | the repository root's `sharp` dev dependency | No. Build-time rasterising in `scripts/gen-brand-icons.ts`. |
 
 `sharp` itself is Apache-2.0; the LGPL component is the platform-specific prebuilt
-binary. `site/` is not one of the root Bun workspaces and produces a static site, so
-this is never linked into the bridge, relay, app or web service.
+binary. Only `scripts/gen-brand-icons.ts` loads it, so it is never linked into the
+bridge, relay, app or web service.
 
 ### MPL-2.0 — two packages ship, one does not
 
@@ -87,7 +87,7 @@ a pointer to upstream is the whole obligation.
 |---|---|---|---|
 | `gtk` | 2.2.0 | `app_links` → `app_links_linux` → `gtk` | Yes, in Linux desktop builds |
 | `dbus` | 0.7.14 | `flutter_local_notifications` → `flutter_local_notifications_linux` → `dbus` | Yes, in Linux desktop builds |
-| `lightningcss` | 1.32.0 | `@tailwindcss/vite` → `@tailwindcss/node` → `lightningcss`, in `web/` and `site/` | No. Build-time CSS compiler; its output carries no MPL obligation. |
+| `lightningcss` | 1.32.0 | `@tailwindcss/vite` → `@tailwindcss/node` → `lightningcss`, in `web/` | No. Build-time CSS compiler; its output carries no MPL obligation. |
 
 ### Proprietary — one package, and it is redistributed
 
@@ -526,23 +526,6 @@ None of this is distributed in an Antgrid artefact.
   Copyright (c) 2019-present, VoidZero Inc. and Vite contributors)
 - repository root — `jscpd` 5.0.9 (MIT, declared in `package.json`; no licence file
   shipped)
-
-### `site/` — the marketing site
-
-Not a root Bun workspace; builds a static site.
-
-| Package | Version | Licence | Copyright holder |
-|---|---|---|---|
-| `@astrojs/sitemap` | 3.7.3 | MIT | Copyright (c) 2021 Fred K. Schott |
-| `@iconify-json/tabler` | 1.2.35 | MIT | declared in `package.json`; no licence file shipped |
-| `astro` | 5.18.2 | MIT | Copyright (c) 2021 Fred K. Schott |
-| `astro-icon` | 1.1.5 | MIT | Copyright (c) 2021 Nate Moore |
-| `@astrojs/check` | 0.9.9 | MIT | Copyright (c) 2021 Fred K. Schott |
-| `@playwright/test` | 1.61.0 | Apache-2.0 | not stated in `LICENSE` |
-| `@tailwindcss/vite`, `tailwindcss` | 4.3.1 | MIT | Copyright (c) Tailwind Labs, Inc. |
-
-`sharp` 0.34.5 (Apache-2.0) reaches this tree through Astro's image pipeline; its
-Windows platform binary is the one LGPL component in the repository, covered above.
 
 ### `aspire/` — local stack orchestration
 

@@ -103,7 +103,7 @@ describe("session:* messages", () => {
       sessions: [{
         id: "s1", name: "Session 1",
         createdAt: 1, lastUsedAt: 2, archived: false, running: true, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const,
-        agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
+        agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
         checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
       }],
     });
@@ -133,10 +133,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -189,7 +189,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: false, command: "my-agent --serve", mode: "terminal" as const, approvalPolicy: "default" as const,
-      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
+      agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
@@ -204,7 +204,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const,
-      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
+      agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
@@ -277,7 +277,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: true, mode: "terminal" as const, approvalPolicy: "default" as const,
-      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
+      agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "c1", checkoutKind: "managed-worktree" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
@@ -552,3 +552,32 @@ describe("the session object is unchanged and unextended", () => {
   });
 });
 
+
+describe("session:fork targetTool", () => {
+  const fork = (extra: Record<string, unknown>) => AbMessageSchema.safeParse(JSON.parse(JSON.stringify(
+    createMessage("session:fork", { requestId: "r", sourceSessionId: "s", workspace: "copy", ...extra } as any),
+  )));
+
+  it("accepts targetTool and rejects a non-key string", () => {
+    const ok = fork({ targetTool: "claude-code" });
+    expect(ok.success).toBe(true);
+    expect((ok.data as any).targetTool).toBe("claude-code");
+    expect(fork({}).success).toBe(true);
+    for (const bad of ["../x", "Claude", "a b", "", "a".repeat(65)]) expect(fork({ targetTool: bad }).success).toBe(false);
+  });
+
+  it("defaults SessionEntry handoffSupported to false", () => {
+    const parsed = AbMessageSchema.safeParse(JSON.parse(JSON.stringify(createMessage("session:list:result", {
+      requestId: "r",
+      sessions: [{
+        id: "s1", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal",
+        approvalPolicy: "default", agentSessionResumable: true, sharedWorkspace: false, workspaceMemberCount: 1,
+        checkoutId: "main", checkoutKind: "main", checkoutState: "ready",
+      }],
+    } as any))));
+    expect(parsed.success).toBe(true);
+    const row = (parsed.data as any).sessions[0];
+    expect(row.handoffSupported).toBe(false);
+    expect(row.agentKey).toBeUndefined();
+  });
+});

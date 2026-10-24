@@ -1058,7 +1058,7 @@ Future<bool> activateDrawerEntryById(
       } catch (ex) {
         ref.read(selectedTargetProvider.notifier).set(priorTarget);
         if (context.mounted) {
-          showAbToast(context, 'Connect failed: $ex');
+          showAbToast(context, connectFailureMessage(ex));
         }
         ok = false;
       }
@@ -1127,7 +1127,7 @@ Future<bool> _openColdRemoteProject(
   } catch (e) {
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
-      showAbToast(context, 'Connect failed: $e');
+      showAbToast(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -1235,7 +1235,10 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       enterNewSession(container, retarget: true);
     } catch (e) {
       if (mounted) {
-        showAbToast(context, 'New session failed: $e');
+        showAbToast(
+          context,
+          "Couldn't start a new session. ${caughtErrorCopy(e, 'Try again.')}",
+        );
       }
     }
   }

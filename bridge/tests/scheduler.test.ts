@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -512,10 +512,40 @@ describe("scheduler durable store", () => {
     const ids = f.service.runs().map((r) => r.id);
     expect(ids).toHaveLength(501); expect(ids).not.toContain("r4"); expect(ids).toContain("r5");
   });
-  test("storage disappearance latches fault and never recreates or dispatches", async () => {
-    const f = fixture(); const schedule = await f.service.create(input); unlinkSync(f.service.store.path);
-    expect(() => f.service.runs()).toThrow(); await expect(f.service.runNow(schedule.id)).rejects.toThrow("storage failed");
-    expect((await f.service.capabilities()).error).toContain("storage failed"); expect(f.delivered).toHaveLength(0);
+  test("storage disappearance is reported, never recreated or dispatched, and recovers once readable", async () => {
+    const f = fixture(); const schedule = await f.service.create(input);
+    const saved = readFileSync(f.service.store.path); unlinkSync(f.service.store.path);
+    expect(() => f.service.runs()).toThrow("could not be read"); await expect(f.service.runNow(schedule.id)).rejects.toThrow("could not be read");
+    expect(await f.service.capabilities()).toMatchObject({ supported: true, error: expect.stringContaining("could not be read") });
+    expect(existsSync(f.service.store.path)).toBe(false); expect(f.delivered).toHaveLength(0);
+    writeFileSync(f.service.store.path, saved);
+    expect((await f.service.capabilities()).error).toBeUndefined();
+    await f.service.runNow(schedule.id); await settle(); expect(f.delivered).toHaveLength(1);
+  });
+  test("a sweep read that fails once does not stop the next tick running a due occurrence", async () => {
+    const f = fixture(); const schedule = await f.service.create(input);
+    const { store } = f.service; const real = store.schedules.bind(store); let failures = 1;
+    store.schedules = (includeDeleted?: boolean) => { if (failures-- > 0) throw new Error("out of memory"); return real(includeDeleted); };
+    f.setTime(schedule.nextOccurrence);
+    await expect(f.service.tick()).rejects.toThrow("could not be read");
+    await f.service.tick(); await settle();
+    expect(f.delivered).toHaveLength(1);
+    expect(await f.service.capabilities()).toMatchObject({ supported: true }); expect((await f.service.capabilities()).error).toBeUndefined();
+  });
+  test("a failed write, or a lost completion read, still latches until restart", async () => {
+    const writer = fixture(); const written = await writer.service.create(input);
+    writer.service.store.saveSchedule = () => { throw new Error("disk I/O error"); };
+    await expect(writer.service.update(written.id, { prompt: "Again" })).rejects.toThrow("storage failed");
+    expect(() => writer.service.schedules()).toThrow("storage failed");
+    expect(await writer.service.capabilities()).toMatchObject({ supported: false, error: expect.stringContaining("storage failed") });
+
+    const observer = fixture(); const observed = await observer.service.create(input);
+    const run = await observer.service.runNow(observed.id); await settle();
+    const bound = observer.service.runs().find((r) => r.id === run.id)!;
+    expect(bound.status).toBe("running");
+    observer.service.store.runs = () => { throw new Error("out of memory"); };
+    observer.service.observe({ projectId: bound.projectId, sessionId: bound.sessionId!, runtimeGeneration: bound.runtimeGeneration!, status: "completed" });
+    expect((await observer.service.capabilities()).supported).toBe(false);
   });
   test("failed durable association prevents prompt delivery", async () => {
     const dir = fresh(); let deliveries = 0;

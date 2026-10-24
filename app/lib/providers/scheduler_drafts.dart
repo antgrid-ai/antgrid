@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/scheduler.dart';
 import '../widgets/scheduler/scheduler_format.dart';
 import 'auth.dart';
+import 'demo_mode.dart';
 import 'scheduler.dart';
 
 typedef SchedulerDraftKey = ({String machine, String? scheduleId});
@@ -127,6 +128,7 @@ final schedulerDraftsProvider =
 /// Prompts live only in this account's running app session.
 class SchedulerDrafts extends Notifier<Map<SchedulerDraftKey, SchedulerDraft>> {
   String? _account;
+  Map<SchedulerDraftKey, SchedulerDraft>? _realWhileDemo;
   @override
   Map<SchedulerDraftKey, SchedulerDraft> build() {
     _account = ref.read(currentUserProvider).value?.userId;
@@ -135,6 +137,17 @@ class SchedulerDrafts extends Notifier<Map<SchedulerDraftKey, SchedulerDraft>> {
       final account = next.value?.userId;
       if (account == null || (_account != null && account != _account)) clear();
       _account = account;
+    });
+    // Listen, never watch: a rebuild would recreate this notifier and lose the
+    // real drafts held here while the sample is open.
+    ref.listen(demoModeProvider, (prev, next) {
+      if (next && prev != true) {
+        _realWhileDemo = state;
+        state = const {};
+      } else if (!next && prev == true) {
+        state = _realWhileDemo ?? const {};
+        _realWhileDemo = null;
+      }
     });
     return const {};
   }
@@ -161,5 +174,8 @@ class SchedulerDrafts extends Notifier<Map<SchedulerDraftKey, SchedulerDraft>> {
     if (identical(state[key], draft)) remove(key);
   }
 
-  void clear() => state = const {};
+  void clear() {
+    _realWhileDemo = null;
+    state = const {};
+  }
 }

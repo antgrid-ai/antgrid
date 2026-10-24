@@ -10,6 +10,7 @@ export interface AugmentOptions {
   abDir?: string;
   cursorDir?: string;
   kimiHome?: string;
+  vibeHome?: string;
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;

@@ -45,16 +45,19 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
 
     const partQ = db.query("SELECT data FROM part WHERE message_id = ? ORDER BY id");
     const texts: (string | null)[] = [];
-    let boundary = 0; // index of the newest compaction marker; older rows left the model's context
+    const infos: any[] = [];
+    const compactions = new Map<number, any>(); // row index -> its compaction part
     for (let i = 0; i < rows.length; i++) {
-      let role: unknown;
-      try { role = JSON.parse(rows[i].data)?.role; } catch { texts.push(null); continue; }
+      let info: any;
+      try { info = JSON.parse(rows[i].data); } catch { texts.push(null); infos.push(null); continue; }
+      infos.push(info);
+      const role = info?.role;
       if (role !== "user" && role !== "assistant") { texts.push(null); continue; }
       const chunks: string[] = [];
       for (const part of partQ.all(rows[i].id) as Array<{ data: string }>) {
         let d: any;
         try { d = JSON.parse(part.data); } catch { continue; }
-        if (role === "user" && d?.type === "compaction") boundary = i;
+        if (role === "user" && d?.type === "compaction") compactions.set(i, d);
         // synthetic/ignored text is injected machinery ("Continue if you have
         // next steps…"); opencode's own TUI filters both the same way.
         if (d?.type === "text" && typeof d.text === "string" && !d.synthetic && !d.ignored) chunks.push(d.text);
@@ -62,6 +65,7 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
       const t = chunks.join("\n").trim();
       texts.push(t || null);
     }
+    const boundary = compactionBoundary(rows, infos, compactions);
     const out: string[] = [];
     for (let i = boundary; i < texts.length; i++) if (texts[i]) out.push(texts[i]!);
     return out.slice(-n);
@@ -70,4 +74,28 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
   } finally {
     db?.close();
   }
+}
+
+/**
+ * Index of the oldest row still in the model's context, mirroring opencode's
+ * MessageV2.filterCompacted: walking newest-first, a compaction user message
+ * counts only once a newer summary assistant (parentID = its id) finished
+ * without error — a failed compaction leaves the whole history in context.
+ * The newest counted compaction cuts there, or at its tail_start_id when
+ * opencode retained a tail of recent turns from before the compaction; a tail
+ * id not found among older rows keeps everything, as opencode does.
+ */
+function compactionBoundary(rows: Array<{ id: string }>, infos: any[], compactions: Map<number, any>): number {
+  const completed = new Set<unknown>();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const info = infos[i];
+    const part = compactions.get(i);
+    if (part && completed.has(rows[i].id)) {
+      if (!part.tail_start_id) return i;
+      for (let j = i; j >= 0; j--) if (rows[j].id === part.tail_start_id) return j;
+      return 0;
+    }
+    if (info?.role === "assistant" && info.summary && info.finish && !info.error) completed.add(info.parentID);
+  }
+  return 0;
 }

@@ -14,6 +14,11 @@ on:
       - 'web/**'
       - 'package.json'
       - 'bun.lock'
+  # The lockstep tests read the antgrid-site repo, which can drift with no
+  # change on this side to trigger a run.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 # Newer pushes to the same PR/branch supersede in-flight runs.
 concurrency:
@@ -42,9 +47,21 @@ jobs:
 
     env:
       PG_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      ANTGRID_SITE_REPO: ${{ github.workspace }}/.antgrid-site
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check out the site files web's lockstep tests read
+        uses: actions/checkout@v7
+        with:
+          repository: antgrid-ai/antgrid-site
+          ref: main
+          path: .antgrid-site
+          sparse-checkout: |
+            /src/data/pricing.ts
+            /src/styles/global.css
+          sparse-checkout-cone-mode: false
 
       - uses: oven-sh/setup-bun@v2
         with:

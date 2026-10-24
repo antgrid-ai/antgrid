@@ -236,7 +236,6 @@ class _NavActions extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final surface = ref.watch(workbenchSurfaceProvider);
     final demo = ref.watch(demoModeProvider);
-    final schedulerEnabled = !demo;
     // Tasks are account data: the row is absent signed out, not disabled. The
     // demo carries its own sample backlog, so it shows the row either way.
     final showTasks = demo || ref.watch(currentUserProvider).value != null;
@@ -311,7 +310,6 @@ class _NavActions extends ConsumerWidget {
               label: 'Scheduler',
               icon: AbIcons.calendar,
               selected: surface == WorkbenchSurface.scheduler,
-              enabled: schedulerEnabled,
               onTap: openScheduler,
             ),
             if (showTasks) ...[

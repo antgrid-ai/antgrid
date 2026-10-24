@@ -3,8 +3,11 @@ import { type MissedOccurrences, missedOccurrences, nextOccurrences, validateCro
 import { MISSED_COUNT_CAP, SCHEDULE_INPUT_KEYS, ScheduleInputSchema, SchedulePatchSchema, isActiveRun, type Schedule, type ScheduleInput, type SchedulePatch,
   type SchedulerCapabilities, type SchedulerRun, type RunStatus } from "./models";
 import { agentSpec } from "antgrid-agents/builtins";
+import { logger } from "../logger";
 import { SchedulerRefusal } from "./agent";
 import { SchedulerStore } from "./store";
+
+const log = logger.child({ component: "scheduler" });
 
 const LAUNCH_FAILURE_REASONS = {
   PROJECT_UNAVAILABLE: "Project is unavailable. Open it from the desktop before running this schedule.",
@@ -41,6 +44,8 @@ const MISSED_REASONS = {
   shortLead: `${UNAVAILABLE_REASON}; not caught up because the next run is due within 15 minutes`,
 } as const;
 const OWNERSHIP_CLEANUP_ERROR = "A deleted schedule still owns its workspace. Restore checkout metadata and reopen the desktop app to retry ownership release.";
+const STORAGE_FAULT = "Scheduler storage failed; execution is disabled until the desktop host restarts";
+const STORAGE_UNREADABLE = "Scheduler storage could not be read; schedules resume once it can be read again";
 
 export type SchedulerAuthor =
   | { kind: "device"; deviceId: string | null }
@@ -97,6 +102,7 @@ export class SchedulerService {
   private timer?: ReturnType<typeof setInterval>;
   private ticking = false;
   private fault?: string;
+  private readFailure?: string;
   private readonly cleanupFailures = new Set<string>();
   private readonly cancelling = new Set<string>();
   private closed = false;
@@ -117,7 +123,7 @@ export class SchedulerService {
   start(): void {
     if (this.timer || this.closed) return;
     void this.cleanupDeleted().catch(() => {});
-    this.carryOver ??= this.resolveCarryOver().catch(() => {});
+    void this.settleCarryOver().catch(() => {});
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 1_000);
     this.timer.unref?.();
   }
@@ -150,13 +156,42 @@ export class SchedulerService {
       }
     }
   }
+  /** A pass that failed is dropped and run again by the next tick or run, so a marked schedule never dispatches first. */
+  private settleCarryOver(): Promise<void> {
+    return this.carryOver ??= this.resolveCarryOver().catch((error) => { this.carryOver = undefined; throw error; });
+  }
+  /**
+   * For any storage step whose failure can leave a run recorded as active when it is not: every write, and the reads on
+   * a run's own lifecycle (dispatch, observe, interruptProject). Only the constructor's restart pass settles such a run,
+   * and while it stays active every later occurrence of its schedule is skipped, so execution stops until the restart.
+   */
   private guarded<T>(fn: () => T): T {
     if (this.closed) throw new Error("Scheduler is closed");
     if (this.fault) throw new Error(this.fault);
     try { return fn(); }
     catch (error) {
-      this.fault = "Scheduler storage failed; execution is disabled until the desktop host restarts";
+      log.error({ err: error }, "scheduler storage failed; execution disabled until the desktop host restarts");
+      this.fault = STORAGE_FAULT;
       throw new Error(this.fault);
+    }
+  }
+  /**
+   * For reads that only answer a question or decide whether to start something: a failure there leaves nothing behind,
+   * so it is reported until the next successful read instead of latching. A transient one (SQLITE_NOMEM while another
+   * process exhausts commit memory) would otherwise disable the scheduler for the rest of the host's life.
+   */
+  private read<T>(fn: () => T): T {
+    if (this.closed) throw new Error("Scheduler is closed");
+    if (this.fault) throw new Error(this.fault);
+    try {
+      const result = fn();
+      if (this.readFailure) { this.readFailure = undefined; log.info("scheduler storage is readable again"); }
+      return result;
+    } catch (error) {
+      // Logged once per outage: the tick reads every second, and a store that stays unreadable would flood the log.
+      if (!this.readFailure) log.warn({ err: error }, "scheduler storage read failed; retrying on the next read");
+      this.readFailure = STORAGE_UNREADABLE;
+      throw new Error(this.readFailure);
     }
   }
   private executable(): void {
@@ -164,7 +199,9 @@ export class SchedulerService {
     if (this.closed || this.fault) throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", this.fault ?? "Scheduler is closed");
   }
   async capabilities(): Promise<SchedulerCapabilities> {
-    const error = this.fault ?? (this.cleanupFailures.size ? OWNERSHIP_CLEANUP_ERROR : undefined);
+    // Only a successful read clears a read failure, so probe rather than report an outage that has already passed.
+    if (this.readFailure) { try { this.read(() => this.store.schedules()); } catch { /* still unreadable; reported below */ } }
+    const error = this.fault ?? this.readFailure ?? (this.cleanupFailures.size ? OWNERSHIP_CLEANUP_ERROR : undefined);
     const agents = await this.options.supportedAgents();
     const chatModes = Object.fromEntries(agents.filter((a) => a.modes.includes("chat")).flatMap((a) => {
       const modes = agentSpec(a.agentId)?.chatPermissionModes;
@@ -173,8 +210,8 @@ export class SchedulerService {
     return { supported: this.options.desktopOwned && !this.closed && !this.fault, timezone: this.timezone, supportsBaseBranchClear: true, supportsCatchUp: true, supportsOneOff: true,
             agents, ...(Object.keys(chatModes).length ? { chatModes } : {}), ...(error ? { error } : {}) };
   }
-  schedules(): Schedule[] { return this.guarded(() => this.store.schedules()); }
-  runs(scheduleId?: string): SchedulerRun[] { return this.guarded(() => this.store.runs(scheduleId)); }
+  schedules(): Schedule[] { return this.read(() => this.store.schedules()); }
+  runs(scheduleId?: string): SchedulerRun[] { return this.read(() => this.store.runs(scheduleId)); }
   preview(cron: string, timezone = this.timezone): number[] { return nextOccurrences(cron, timezone, this.now()); }
   // Capped so a minute-level cron stays small on the wire; the app reads a full cap as "at least".
   upcoming(schedule: Schedule, windowMs = 86_400_000, cap = 48): number[] {
@@ -198,7 +235,7 @@ export class SchedulerService {
     if (runAt < now + ONE_OFF_FLOOR_MS) throw new SchedulerRefusal("INVALID_RUN_AT", "The one-off time has already passed; set a new time.");
   }
   private assertNameFree(projectId: string, name: string, exceptId?: string): void {
-    const clash = this.guarded(() => this.store.schedules()).find((s) => s.projectId === projectId && s.id !== exceptId && sameName(s.name, name));
+    const clash = this.read(() => this.store.schedules()).find((s) => s.projectId === projectId && s.id !== exceptId && sameName(s.name, name));
     if (clash) throw new SchedulerRefusal("SCHEDULE_EXISTS", `A schedule named "${clash.name}" already exists in this project (id ${clash.id}); update it instead.`);
   }
   private async validated(input: unknown): Promise<ScheduleInput> {
@@ -278,7 +315,7 @@ export class SchedulerService {
   }
   async delete(id: string): Promise<void> {
     this.executable();
-    const schedule = this.guarded(() => this.store.schedules(true)).find((s) => s.id === id);
+    const schedule = this.read(() => this.store.schedules(true)).find((s) => s.id === id);
     if (!schedule) throw new SchedulerRefusal("SCHEDULE_NOT_FOUND", "Schedule no longer exists");
     const deleted = schedule.deletedAt === undefined ? { ...schedule, enabled: false, deletedAt: this.now(), updatedAt: this.now() } : schedule;
     if (schedule.deletedAt === undefined) this.guarded(() => this.store.saveSchedule(deleted));
@@ -294,7 +331,7 @@ export class SchedulerService {
     }
   }
   private async cleanupDeleted(): Promise<void> {
-    for (const schedule of this.guarded(() => this.store.schedules(true)).filter((s) => s.deletedAt !== undefined)) {
+    for (const schedule of this.read(() => this.store.schedules(true)).filter((s) => s.deletedAt !== undefined)) {
       if (this.closed || this.fault) return;
       try { await this.releaseDeleted(schedule); } catch { /* One unavailable checkout store must not block other ownership releases. */ }
     }
@@ -322,7 +359,7 @@ export class SchedulerService {
   resume(): void { this.executable(); void this.tick().catch(() => {}); }
   async runNow(id: string, options: Pick<SchedulerWriteOptions, "guard"> = {}): Promise<SchedulerRun> {
     this.executable();
-    await this.carryOver;
+    await this.settleCarryOver();
     const schedule = this.find(id);
     options.guard?.({ op: "runNow", patchKeys: [], original: schedule, next: schedule });
     const run = this.guarded(() => this.store.claim(schedule, this.newRun(schedule, this.now(), "manual")));
@@ -361,7 +398,7 @@ export class SchedulerService {
     if (this.ticking || this.closed || this.fault || !this.options.desktopOwned) return;
     this.ticking = true;
     try {
-      await this.carryOver;
+      await this.settleCarryOver();
       const now = this.now();
       for (const schedule of this.schedules()) {
         if (!schedule.enabled || schedule.nextOccurrence > now || schedule.firedRunId !== undefined) continue;
@@ -387,7 +424,7 @@ export class SchedulerService {
       }
       const prepared = await this.options.prepare(schedule, run, (identity) => {
         reservation = { ...run, ...identity };
-        if (this.cancelling.has(run.id) || !this.runs().some((r) => r.id === run.id && isActiveRun(r))) throw new Error("Scheduled preparation was stopped");
+        if (this.cancelling.has(run.id) || !this.guarded(() => this.store.runs()).some((r) => r.id === run.id && isActiveRun(r))) throw new Error("Scheduled preparation was stopped");
         this.guarded(() => this.store.bind(run.id, identity));
       });
       reservation = { ...run, sessionId: prepared.sessionId, runtimeGeneration: prepared.runtimeGeneration, checkoutId: prepared.checkoutId };
@@ -430,7 +467,7 @@ export class SchedulerService {
   observe(event: SchedulerObservation): void {
     if (this.closed || this.fault) return;
     try {
-      const run = this.runs().find((r) => isActiveRun(r) && r.projectId === event.projectId && r.sessionId === event.sessionId
+      const run = this.guarded(() => this.store.runs()).find((r) => isActiveRun(r) && r.projectId === event.projectId && r.sessionId === event.sessionId
         && r.runtimeGeneration === event.runtimeGeneration);
       if (run && !this.cancelling.has(run.id)) this.finish(run.id, event.status, event.reason);
     } catch { /* Storage failure is surfaced by capabilities without breaking agent event delivery. */ }
@@ -448,7 +485,7 @@ export class SchedulerService {
   interruptProject(projectId: string, reason: string): void {
     if (this.closed || this.fault) return;
     try {
-      for (const run of this.runs().filter((r) => r.projectId === projectId && isActiveRun(r))) this.finish(run.id, "interrupted", reason);
+      for (const run of this.guarded(() => this.store.runs()).filter((r) => r.projectId === projectId && isActiveRun(r))) this.finish(run.id, "interrupted", reason);
     } catch { /* Restart reconciliation records interruption if storage could not accept shutdown. */ }
   }
   hasActiveProject(projectId: string): boolean {

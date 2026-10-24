@@ -387,6 +387,41 @@ final detectedToolsForProvider =
       return {for (final t in tools) t.tool: t.label};
     });
 
+/// The agents a session on [target]'s machine can be continued in, labelled for
+/// the fork dialog: every tool installed there, plus [sourceTool] itself so the
+/// same-agent choice survives the source agent having been uninstalled.
+///
+/// Empty when detection does not answer within [timeout], which makes the fork
+/// dialog fall back to a same-agent fork rather than wait on a machine that may
+/// be offline. Takes a [ProviderContainer] because the caller is an activation
+/// handler that must not hold a `WidgetRef` across the await.
+Future<List<({String tool, String label})>> handoffTargetsFor(
+  ProviderContainer ref,
+  SessionTarget target, {
+  required String sourceTool,
+  Duration timeout = const Duration(seconds: 8),
+}) async {
+  final Map<String, String?> detected;
+  try {
+    detected = await ref
+        .read(detectedToolsForProvider(target).future)
+        .timeout(timeout);
+  } on TimeoutException {
+    return const [];
+  }
+  // Nothing detected is "nobody said", and a lone source is nothing to choose
+  // between: either would show an agent row offering only the current agent.
+  if (!detected.keys.any((key) => key != sourceTool)) return const [];
+  final catalog = ref.read(agentCatalogProvider);
+  String labelOf(String key) =>
+      newSessionAgentLabel(KnownAgent(key), detected, catalog);
+  return [
+    for (final key in detected.keys) (tool: key, label: labelOf(key)),
+    if (!detected.containsKey(sourceTool))
+      (tool: sourceTool, label: labelOf(sourceTool)),
+  ];
+}
+
 /// Wire-advertised chat-capable tool keys for the selected target's MACHINE, or
 /// `null` when the bridge hasn't told us (older bridge pre-dating the
 /// `chatCapable` field, or no data yet — offline target / loading / error).

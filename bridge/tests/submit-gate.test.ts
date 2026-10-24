@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { SubmitGate } from "../src/submit-gate";
+import { setLogLevel } from "../src/logger";
+import { StartupScreenCheck, SubmitGate } from "../src/submit-gate";
+
+setLogLevel("error");
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -151,4 +154,298 @@ test("a respawn is a cold start again", async () => {
   await new Promise((resolve) => setTimeout(resolve, 40));
 
   expect(sent).toEqual([]);
+});
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Measured: every agent's folder-trust dialog enables bracketed paste and
+// paints, which is exactly what readiness looks for, and reads Enter as an
+// answer. A submit let go into one picks the highlighted option for the user.
+test("readiness alone does not release a guest that may open on a startup prompt", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.markReady("t1");
+  await tick();
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+test("a startup prompt on screen holds a submit past the readiness bound until it is answered", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(5, 5);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.markReady("t1");
+  gate.startupScreen("t1", true);
+  await wait(40);
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+// Cursor's dialog never enables the mode, so the guest is not reading when the
+// prompt goes away; the bound is what lets the submit go, and it starts over.
+test("the readiness bound resumes once the prompt is gone", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(5);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.startupScreen("t1", true);
+  await wait(40);
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await wait(40);
+  expect(sent).toEqual(["handoff"]);
+});
+
+test("a clear screen before the guest reads keeps the hold", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.startupScreen("t1", false);
+  gate.markReady("t1");
+  await tick();
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+test("once the composer has been seen, prompt text on screen holds nothing", () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+  gate.holdForStartup("t1");
+  gate.markReady("t1");
+  gate.startupScreen("t1", false);
+
+  // The agent quoting the dialog's words mid-session is not the dialog.
+  gate.startupScreen("t1", true);
+  gate.run("t1", () => sent.push("reply"));
+
+  expect(gate.awaitingStartup("t1")).toBe(false);
+  expect(sent).toEqual(["reply"]);
+});
+
+test("a respawn drops the previous guest's startup hold", () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(60_000);
+  gate.holdForStartup("t1");
+  gate.startupScreen("t1", true);
+  gate.reset("t1");
+  gate.markReady("t1");
+
+  gate.run("t1", () => sent.push("card"));
+
+  expect(sent).toEqual(["card"]);
+});
+
+// Cursor's dialog never enables the mode; with `--trust` there is no dialog at
+// all, and the screen would otherwise be read for the life of the session.
+test("a guest that never reads and shows no prompt is past its startup after the cold bound", async () => {
+  const gate = new SubmitGate(5);
+  gate.holdForStartup("t1");
+  gate.startupScreen("t1", false);
+  await wait(40);
+
+  expect(gate.awaitingStartup("t1")).toBe(false);
+});
+
+test("a guest that never reads keeps its hold while a prompt is up", async () => {
+  const gate = new SubmitGate(5);
+  gate.holdForStartup("t1");
+  gate.startupScreen("t1", true);
+  await wait(40);
+
+  expect(gate.awaitingStartup("t1")).toBe(true);
+});
+
+test("a reading guest's screen is judged before the bound may send", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(5, 5);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.markReady("t1");
+  await wait(40);
+  expect(sent).toEqual([]);
+
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+// The answer is followed by the guest swapping its composer in, mode off for
+// the gap; a bound that began before the answer would send into it.
+test("the bound restarts from the answer, not from before it", async () => {
+  const sent: string[] = [];
+  const gate = new SubmitGate(40);
+  gate.holdForStartup("t1");
+
+  gate.run("t1", () => sent.push("handoff"));
+  gate.startupScreen("t1", true);
+  await wait(30);
+  gate.startupScreen("t1", false);
+  await wait(25);
+  expect(sent).toEqual([]);
+
+  gate.markReady("t1");
+  gate.startupScreen("t1", false);
+  await tick();
+  expect(sent).toEqual(["handoff"]);
+});
+
+test("a startup screen check reads the screen only once output settles", async () => {
+  const reports: boolean[] = [];
+  let reads = 0;
+  let rows = ["╭────╮"];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => { reads++; return rows; },
+    report: (showing) => reports.push(showing),
+    settleMs: 20,
+    maxDeferMs: 1_000,
+  });
+
+  // A dialog drawn in two reads: the first holds only its border.
+  check.noteOutput();
+  await wait(5);
+  rows = ["╭────╮", "│ Trust this folder? │"];
+  check.noteOutput();
+  await wait(60);
+
+  expect(reads).toBe(1);
+  expect(reports).toEqual([true]);
+  check.dispose();
+});
+
+test("a startup screen check still reads a screen whose output never pauses", async () => {
+  const reports: boolean[] = [];
+  let now = 0;
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => ["⠋ loading", "> composer"],
+    report: (showing) => reports.push(showing),
+    settleMs: 1_000,
+    maxDeferMs: 30,
+    clearMs: 0,
+    now: () => now,
+  });
+
+  check.noteOutput();
+  now = 25;
+  check.noteOutput();
+  await wait(40);
+
+  expect(reports).toEqual([false]);
+  check.dispose();
+});
+
+// Codex 0.163's order: the composer, bracketed paste on, then the trust dialog
+// over it some 600ms later.
+test("a composer painted before the trust dialog is not taken for no dialog", async () => {
+  const reports: boolean[] = [];
+  let rows = ["› Ask Codex to do anything"];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => rows,
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 200,
+  });
+
+  check.noteOutput();
+  await wait(60);
+  expect(reports).toEqual([]);
+
+  rows = ["Trust this folder? Codex can read, edit, and run files here", "› 1. Trust and continue"];
+  check.noteOutput();
+  await wait(40);
+  expect(reports).toEqual([true]);
+  check.dispose();
+});
+
+// A slow cold start: the blank pre-TUI screen outlasts the window, and only
+// then does Codex paint its composer ahead of the dialog.
+test("the clear window starts once the guest is reading", async () => {
+  const reports: boolean[] = [];
+  let reading = false;
+  let rows = [""];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => rows,
+    reading: () => reading,
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 200,
+  });
+
+  check.noteOutput();
+  await wait(260);
+  expect(reports).toEqual([]);
+
+  reading = true;
+  rows = ["› Ask Codex to do anything"];
+  check.noteOutput();
+  await wait(60);
+  expect(reports).toEqual([]);
+
+  rows = ["Trust this folder? Codex can read, edit, and run files here"];
+  check.noteOutput();
+  await wait(40);
+  expect(reports).toEqual([true]);
+  check.dispose();
+});
+
+test("a screen that stays clear through the window is reported clear once", async () => {
+  const reports: boolean[] = [];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => ["> composer"],
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 30,
+  });
+
+  check.noteOutput();
+  await wait(15);
+  check.noteOutput();
+  await wait(80);
+
+  expect(reports).toEqual([false]);
+  check.dispose();
+});
+
+test("a prompt that was answered reports the clear screen at once", async () => {
+  const reports: boolean[] = [];
+  let rows = ["Trust this folder?"];
+  const check = new StartupScreenCheck({
+    prompts: ["Trust this folder?"],
+    read: () => rows,
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 60_000,
+  });
+
+  check.noteOutput();
+  await wait(30);
+  rows = ["> composer"];
+  check.noteOutput();
+  await wait(30);
+
+  expect(reports).toEqual([true, false]);
+  check.dispose();
 });

@@ -1,7 +1,15 @@
+import 'dart:async';
+
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
+
 import '../connection/supervisor_state.dart';
 import '../design/ab_status_tone.dart';
+import '../launcher/host_control_client.dart' show HostControlException;
 import '../models/terminal_models.dart';
 import '../project/checkout_readiness.dart';
+import '../services/pending_reply.dart' show SessionDownException;
+import '../services/sessions_service.dart' show SessionOperationException;
 
 /// Maps [SupervisorStatus] to a (tone, label) pair for status surfaces —
 /// the ladder itself, not the raw socket phase, since only the ladder knows
@@ -169,6 +177,36 @@ String? friendlyErrorCopy(String? code) => switch (code) {
 /// transport-shaped refusal carrying neither.
 String sessionRefusalCopy(String? code, String? message, String fallback) =>
     friendlyErrorCopy(code) ?? message ?? fallback;
+
+/// [sessionRefusalCopy] for whatever a `catch` or an `AsyncError` holds: the
+/// refusal a machine sent, a sentence for a reply that never came, else
+/// [fallback].
+///
+/// Never the error's `toString()`, which for most exceptions is a class name
+/// wrapped around a developer string. Codes the app mints itself carry such a
+/// string as their message (`BAD_RESPONSE` holds the malformed JSON), so those
+/// fall back too: only a message the bridge wrote for the user is shown.
+String caughtErrorCopy(Object error, String fallback) => switch (error) {
+  RpcException(code: 'E_TIMEOUT') || TimeoutException() => _noAnswerCopy,
+  RpcException(:final code, :final message) ||
+  HostControlException(:final code, :final message)
+      when !_appMintedCodes.contains(code) =>
+    sessionRefusalCopy(code, message.isEmpty ? null : message, fallback),
+  SessionOperationException(:final errorCode, :final message) =>
+    sessionRefusalCopy(errorCode, message, fallback),
+  // Its toString is written as a sentence for exactly this use.
+  SessionDownException() => error.toString(),
+  _ => fallback,
+};
+
+const _noAnswerCopy = "The machine didn't answer. Try again.";
+
+const _appMintedCodes = {
+  'BAD_RESPONSE',
+  'TRANSPORT',
+  'UNKNOWN',
+  'E_SEND_FAILED',
+};
 
 /// Copy for a machine whose advert lists no projects, keyed by the tri-state
 /// machine-level `remoteAccessEnabled` flag: `false` is the machine's

@@ -20,10 +20,12 @@ import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
+import '../navigation/notification_route.dart' show splitRegistrationId;
 import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/chat_composer_drafts.dart';
+import '../providers/new_session_picker.dart' show handoffTargetsFor;
 import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
@@ -71,6 +73,18 @@ final drawerRevealedSessionIdProvider =
     NotifierProvider<ValueController<String?>, String?>(
       () => ValueController(null),
     );
+/// Shown when a `session:fork` gets no reply: the bridge may still be staging
+/// the conversation, so the fork may yet appear.
+const String _forkNoAnswerMessage =
+    'The fork may still be in progress. Check the session list.';
+
+const String _forkInFlightMessage =
+    'A fork of this session is still being prepared.';
+
+/// Sources whose fork request is still awaiting its reply, by project and
+/// session. Staging can take a minute, and a second Fork in that time would
+/// stage the whole conversation again and land a duplicate session.
+final Set<String> _forksInFlight = <String>{};
 
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
 /// session: if its parent project is not currently active, switches projects
@@ -772,7 +786,7 @@ class _SessionMenu extends ConsumerWidget {
               // the user the tool cannot do it at all.
               //
               // What the bridge actually reads is a native conversation id or the
-              // live terminal's scrollback (`captureForkTranscript`), and both
+              // live terminal's scrollback, and both
               // inputs are already on the wire — so this mirrors the precondition
               // rather than asking for it. Drift costs a refusal the branch below
               // now reports, never a silence.
@@ -867,18 +881,51 @@ class _SessionMenu extends ConsumerWidget {
         case _SessionAction.stop:
           await svc.stopSession(session.id);
         case _SessionAction.fork:
-          final workspace = await promptSessionFork(
+          final forkKey = '$entryId/${session.id}';
+          if (_forksInFlight.contains(forkKey)) {
+            reportSessionNotice(toaster, _forkInFlightMessage);
+            return;
+          }
+          // Offered only against a bridge that said it honours `targetTool`:
+          // an older one drops the key and would fork into the same agent
+          // while the dialog promised another.
+          final sourceTool = session.handoffSupported ? session.agentKey : null;
+          final targets = sourceTool == null
+              ? const <({String tool, String label})>[]
+              : await handoffTargetsFor(
+                  ref,
+                  splitRegistrationId(entryId),
+                  sourceTool: sourceTool,
+                );
+          if (!anchor.mounted) return;
+          final choice = await promptSessionFork(
             anchor,
             isolatedSource: sessionIsIsolated(session),
+            sourceTool: sourceTool,
+            targets: targets,
           );
-          if (workspace == null || !anchor.mounted) return;
+          if (choice == null || !anchor.mounted) return;
+          final workspace = choice.workspace;
+          final targetTool = choice.targetTool == sourceTool
+              ? null
+              : choice.targetTool;
+          // Again after the dialog: another surface can have sent one while it
+          // was open.
+          if (!_forksInFlight.add(forkKey)) {
+            reportSessionNotice(toaster, _forkInFlightMessage);
+            return;
+          }
           // Caught per-branch, per the contract above: every fork refusal the
           // bridge documents — no captured transcript yet, a conversation past
           // the handoff cap, a custom-command session, a missing checkout —
           // arrives as a typed exception carrying the bridge's own sentence,
           // and without this the menu item just appears to do nothing.
           try {
-            final fork = await svc.fork(session.id, workspace: workspace);
+            final fork = await svc.fork(
+              session.id,
+              workspace: workspace,
+              targetTool: targetTool,
+            );
             // An `ok` carrying no session: there is nothing to start and
             // nothing to land in, so say so rather than returning as though the
             // fork had happened. The same answer the New Session canvas treats
@@ -918,6 +965,22 @@ class _SessionMenu extends ConsumerWidget {
               toaster,
               sessionForkRefusalCopy(error.errorCode, error.message),
             );
+          } on TimeoutException {
+            // Not a failure: staging a long conversation can outlast even the
+            // extended wait, and the fork may still land. Never retried here,
+            // since a second request would duplicate a large fork.
+            reportSessionNotice(toaster, _forkNoAnswerMessage);
+            detached('SessionRow', 'refresh after fork timeout', () async {
+              await svc.requestList();
+            });
+          } on StateError {
+            // dispose() fails every pending reply: the project was evicted or
+            // demoted in the background while the bridge was still staging,
+            // which can outlast both. The same unknown outcome as a timeout,
+            // with no service left to refresh the list through.
+            reportSessionNotice(toaster, _forkNoAnswerMessage);
+          } finally {
+            _forksInFlight.remove(forkKey);
           }
         case _SessionAction.rename:
           final name = await promptSessionRename(anchor, session.name);
