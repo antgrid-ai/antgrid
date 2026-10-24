@@ -886,6 +886,51 @@ void main() {
     );
   });
 
+  group('Chat ALPHA marker', () {
+    // App Review rejected the iOS build for pre-release wording.
+    for (final (platform, shown) in [
+      (TargetPlatform.iOS, false),
+      (TargetPlatform.android, true),
+    ]) {
+      testWidgets('${shown ? 'shown' : 'hidden'} on ${platform.name}', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          await tester.pumpWidget(
+            _host(
+              overrides: [
+                ..._baseOverrides(),
+                newSessionAgentProvider.overrideWith(
+                  () => ValueController(const KnownAgent('codex')),
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+          final alpha = shown ? findsOneWidget : findsNothing;
+
+          await _pickMode(tester, 'chat');
+          expect(_selectedMode(tester), 'chat');
+          expect(find.text('ALPHA'), alpha);
+
+          await _openModeMenu(tester);
+          expect(
+            find.descendant(
+              of: find.byKey(const Key('new-session-mode-chat')),
+              matching: find.text('ALPHA'),
+            ),
+            alpha,
+          );
+          await tester.tapAt(const Offset(5, 5));
+          await tester.pumpAndSettle();
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+    }
+  });
+
   group('isolation chip', () {
     // The key addresses the isolation toggle, not the word printed on it.
     Finder chip() => find.byKey(const Key('new-session-worktree-chip'));
