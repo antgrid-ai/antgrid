@@ -29,7 +29,8 @@ import '../models/scheduler.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
-import '../providers/agent_catalog.dart';
+import '../demo/demo_identity.dart';
+import '../providers/demo_mode.dart';
 import '../providers/scheduler.dart';
 import '../providers/scheduler_drafts.dart';
 import '../providers/scheduler_timezone.dart';
@@ -356,13 +357,20 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
               ),
             Expanded(
               child: noMachine
-                  ? const AbEmptyState(
+                  ? AbEmptyState(
                       icon: AbIcons.calendar,
                       title: 'Connect a machine to schedule tasks',
                       subtitle:
                           'Schedules run on your computer, in the Antgrid '
                           'desktop app, at the times you set. Connect it to '
                           'create and manage them here.',
+                      // The one Scheduler a machine-less viewer can use: an
+                      // App Review iPad has no machine. The container, not
+                      // ref, because entering swaps this screen out.
+                      action: AbButton(
+                        label: kDemoEntryLabel,
+                        onTap: () => enterDemoScheduler(ref.container),
+                      ),
                     )
                   : _loading
                   ? const Center(
@@ -372,6 +380,16 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                   ? AbEmptyState(
                       title: 'Machine unavailable',
                       subtitle: _error,
+                      // A phone signed in to an account whose only machine is
+                      // offline has no other way to see the Scheduler work.
+                      // Desktop is left alone: its local host is a different
+                      // failure.
+                      action: isMobilePlatform
+                          ? AbButton(
+                              label: kDemoEntryLabel,
+                              onTap: () => enterDemoScheduler(ref.container),
+                            )
+                          : null,
                     )
                   : !snapshot.capabilities.supported
                   ? AbEmptyState(
@@ -517,7 +535,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             title,
             if (!_editing) segmented,
             const Spacer(),
-            ?machineButton,
+            // A long machine name gives way before the actions do.
+            if (machineButton != null) Flexible(child: machineButton),
             refresh,
             if (!_editing)
               AbButton(
@@ -600,7 +619,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           ),
       ],
     );
-    if (!mounted || picked == null) return;
+    // The selection outlives the demo: a 'local' pick made in the sample would
+    // leave a phone's real Scheduler target null after exit.
+    if (!mounted || picked == null || ref.read(demoModeProvider)) return;
     ref.read(schedulerMachineProvider.notifier).set(picked);
   }
 
@@ -874,7 +895,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   }
 
   String _agentLabel(String agentId) =>
-      ref.read(agentCatalogProvider)[agentId]?.label ?? agentId;
+      ref.read(schedulerAgentLabelsProvider)[agentId] ?? agentId;
 
   Widget _identity(SchedulerSnapshot snapshot, AgentSchedule s, bool muted) {
     final p = context.antgrid;
