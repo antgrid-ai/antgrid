@@ -776,6 +776,8 @@ const FileContentMessage = BaseMessage.extend({
   content: z.string().nullable(),
   size: z.number(),
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
+  // Equal decoded/re-encoded lengths cannot prove that UTF-8 decoding was lossless.
+  utf8Valid: z.boolean().optional(),
   mimeType: z.string().optional(),
   error: z.string().optional(),
   ...CheckoutScoped,

@@ -1620,6 +1620,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         size: json['size'] as int? ?? 0,
         error: json['error'] as String?,
         encoding: json['encoding'] as String? ?? 'utf8',
+        utf8Valid: json['utf8Valid'] as bool?,
         mimeType: json['mimeType'] as String?,
       );
 

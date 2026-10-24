@@ -645,6 +645,7 @@ export class FileWatcher {
         content: result.content,
         size: result.size,
         encoding: result.encoding ?? "utf8",
+        utf8Valid: result.utf8Valid,
         mimeType: result.mimeType,
         error: result.error,
       }),

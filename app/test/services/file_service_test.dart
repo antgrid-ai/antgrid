@@ -1749,6 +1749,31 @@ void main() {
   });
 
   group('attachment preview', () {
+    test('UTF-8 validity reaches both file and preview content', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+      svc.selectFile('a.txt');
+      svc.openPreview('a.txt');
+      await Future<void>.delayed(Duration.zero);
+
+      for (final valid in [false, true, null]) {
+        t.emit('file:content', {
+          'projectId': 'p',
+          'path': 'a.txt',
+          'content': '\uFFFD',
+          'size': 3,
+          'utf8Valid': ?valid,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.files.viewingFile?.utf8Valid, valid);
+        expect(svc.currentState.preview.content?.utf8Valid, valid);
+      }
+
+      await svc.dispose();
+      await session.close();
+    });
+
     // The preview is a THIRD file:content consumer beside the Files and Git
     // panes. It shares the verb and the viewers, but not the slot — routing it
     // through the Files pane would evict the file the user has open there.

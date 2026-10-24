@@ -1227,6 +1227,7 @@ class FileService {
       size: msg.size,
       error: msg.error,
       encoding: msg.encoding,
+      utf8Valid: msg.utf8Valid,
       mimeType: msg.mimeType,
     );
     final files = msg.path == _state.files.selectedFilePath

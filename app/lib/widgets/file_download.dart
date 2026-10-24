@@ -18,14 +18,17 @@ import 'viewer_support.dart';
 /// (an error, or a file the bridge refused as too large) or cannot give back
 /// exactly. Nothing is re-read: what saves is exactly what is on screen.
 ///
-/// Text arrives already decoded as UTF-8, which replaces every invalid byte
-/// with U+FFFD — so a Latin-1 or Windows-1252 file re-encodes to different
-/// bytes. That shows as a length unlike the file's on-disk [FileContent.size],
-/// and a silently altered copy is worse than no copy.
+/// UTF-8 decoding can replace malformed sequences without changing the byte
+/// count. Only the bridge can distinguish those replacements from literal
+/// U+FFFD characters, so older bridges' ambiguous text is refused too.
 Uint8List? fileContentBytes(FileContent content) {
   final raw = content.content;
   if (raw == null) return null;
   if (content.encoding == 'base64') return decodeBase64Content(raw);
+  if (content.utf8Valid == false ||
+      (content.utf8Valid == null && raw.contains('\uFFFD'))) {
+    return null;
+  }
   final bytes = Uint8List.fromList(utf8.encode(raw));
   return bytes.length == content.size ? bytes : null;
 }

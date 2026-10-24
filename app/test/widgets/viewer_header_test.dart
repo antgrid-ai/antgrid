@@ -90,6 +90,31 @@ void main() {
     );
   });
 
+  test('download refuses equal-length lossy text from older bridges', () {
+    expect(
+      fileContentBytes(
+        const FileContent(path: 'a.txt', content: '\uFFFD', size: 3),
+      ),
+      isNull,
+    );
+  });
+
+  test('download distinguishes malformed bytes from a literal replacement', () {
+    for (final valid in [false, true]) {
+      expect(
+        fileContentBytes(
+          FileContent(
+            path: 'a.txt',
+            content: '\uFFFD',
+            size: 3,
+            utf8Valid: valid,
+          ),
+        ),
+        valid ? [0xEF, 0xBF, 0xBD] : isNull,
+      );
+    }
+  });
+
   testWidgets('clicking the breadcrumb offers relative and absolute copies', (
     tester,
   ) async {

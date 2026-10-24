@@ -224,6 +224,9 @@ class FileContent {
   final int size;
   final String? error;
   final String encoding; // 'utf8' | 'base64'
+
+  /// Whether the bridge validated the original bytes; null on older bridges.
+  final bool? utf8Valid;
   final String? mimeType;
 
   const FileContent({
@@ -232,6 +235,7 @@ class FileContent {
     required this.size,
     this.error,
     this.encoding = 'utf8',
+    this.utf8Valid,
     this.mimeType,
   });
 }
@@ -624,6 +628,7 @@ class FileContentMessage {
   final int size;
   final String? error;
   final String encoding; // 'utf8' | 'base64'
+  final bool? utf8Valid;
   final String? mimeType;
 
   const FileContentMessage({
@@ -635,6 +640,7 @@ class FileContentMessage {
     required this.size,
     this.error,
     this.encoding = 'utf8',
+    this.utf8Valid,
     this.mimeType,
   });
 }
