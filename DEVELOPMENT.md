@@ -28,7 +28,6 @@ straight to a pull request, anything deeper wants an issue first, and `relay/`,
 | `relay/` — routing, auth, epochs, rate limiting, the licence gate | Bun |
 | `bridge/` — PTYs, file watching, git, port scanning, tunnelling | Bun |
 | `web/` — accounts, subscriptions, JWT minting | Bun + Postgres |
-| `site/` — the Astro marketing site | Bun (not a root workspace: `cd site && bun install`) |
 | `app/` — all Flutter UI | Flutter SDK |
 | `packages/antgrid_relay_client`, `packages/antgrid_eval_client` | Dart SDK |
 | A **Windows desktop build** of the app | Flutter + Visual Studio C++ workload + a JDK |
@@ -538,9 +537,9 @@ The `.env.example` files are documentation and drift.
 `CORS_ORIGINS`.
 
 `CORS_ORIGINS` must list the **marketing site's** origin in staging and
-production, not just the app's: `site/` is a static build on another host and its
-founding-price capture POSTs to `/api/waitlist` here (`WEB_URL` in
-`site/src/config.ts`). Omit it and every submit fails in the browser as a network
+production, not just the app's: the site (antgrid-ai/antgrid-site) is a static
+build on another host and its founding-price capture POSTs to `/api/waitlist`
+here (`WEB_URL` in its `src/config.ts`). Omit it and every submit fails in the browser as a network
 error, with nothing in the web service's logs to say why.
 
 **`web/.env` — defaulted, safe to omit:** `NODE_ENV` (`development`),
@@ -756,9 +755,7 @@ release APK — enough to prove Dart AOT, tree-shaking, R8 and manifest merge,
 which `flutter test` never exercises because it runs on the JIT VM. Push to
 `main` always takes the full path.
 
-**Deploy marketing site** builds and tests `site/` on pull requests targeting
-`main`; only its deploy step is skipped on a fork PR, because GitHub correctly
-withholds the credential. **Claude Code Review** is mention-triggered — comment
+**Claude Code Review** is mention-triggered — comment
 `/code-review` on a PR. It never runs on push, and a clean review posts nothing
 at all, so silence from it means "no findings", not "did not run".
 
@@ -768,9 +765,7 @@ server; the deployment pipeline meets this repo only at the container registry.
 
 **Not covered by CI:** `evals/`, which spawns real agents, relays and PTYs and so
 cannot run on a fork — it stays on `bun run --filter antgrid-evals test:evals`.
-`site/` is gated only on pull requests targeting `main`. For those your local run
-is the only thing between the change and a broken integration branch. The
-workflow set itself is the source of truth: `.github/workflows/`.
+The workflow set itself is the source of truth: `.github/workflows/`.
 
 ### Roughly how long each suite takes
 
@@ -892,7 +887,6 @@ migrations. A `postgres:16-alpine` container is enough.
 | `packages/antgrid-wire` | TypeScript. Session-frame type names, stream-open records, relay control-envelope schemas, shared client-IP resolver. Consumed by bridge, relay, web and evals. |
 | `packages/antgrid_relay_client` | Pure Dart central-control, E2E and session protocol, no Flutter. Native payload links are injected by the ELv2 peer transport. |
 | `packages/antgrid_eval_client` | Dart end-to-end test fixtures. |
-| `site/` | Astro. The static marketing site at `antgrid.ai`. Its own Bun project, **not** a root workspace — `bun install` from the root does not cover it. |
 | `evals/` | End-to-end suite: real bridge processes, an in-process relay, real PTYs. |
 | `aspire/` | The Aspire orchestrator used by `npm run aspire`. |
 | `scripts/` | Setup, the fallback dev runner, the Android PTY build, and other one-off tooling. |

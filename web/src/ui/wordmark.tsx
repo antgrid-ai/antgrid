@@ -4,9 +4,10 @@
 import { raw } from "hono/html";
 // The master file itself, not a copy of its path data — hand-copying the markup
 // into this file is how the header and the URL handed out for external brand
-// use drift apart silently. Same reason site/src/components/ui/Wordmark.astro
-// imports it out of public/ rather than inlining it. Bun's text import resolves
-// at load, so a rename fails at boot instead of rendering a blank header.
+// use drift apart silently. Same reason antgrid-site's
+// src/components/ui/Wordmark.astro imports it out of public/ rather than
+// inlining it. Bun's text import resolves at load, so a rename fails at boot
+// instead of rendering a blank header.
 import wordmark from "../../public/logo/antgrid-wordmark.svg" with { type: "text" };
 
 // Inlined rather than <img src="/logo/...">: the header sizes the lockup

@@ -47,7 +47,7 @@ const ENTERPRISE_FEATURES = [
   "Run agents on up to {workers} — per person",
   // Roadmap, not shipped: the capability flags exist on the plan model but
   // nothing reads them yet. Keep in lockstep with the Enterprise strip on the
-  // marketing site (site/src/pages/pricing.astro) and support.md.
+  // marketing site (antgrid-site's src/pages/pricing.astro) and support.md.
   "SSO, audit log & IP allowlist — on the roadmap",
   "Invoiced annually",
 ] as const;

@@ -21,8 +21,6 @@ application identifiers, and product-identifying artwork at these paths:
 - `app/macos/Runner/Assets.xcassets/AppIcon.appiconset/**`
 - `app/web/favicon.png` and `app/web/icons/**`
 - `app/windows/runner/resources/app_icon.ico`
-- `site/public/favicon.ico`, `site/public/logo/*.ico`,
-  `site/public/logo/*.png`, and `site/public/logo/*.svg`
 - `web/public/logo/*.ico`, `web/public/logo/*.png`,
   `web/public/logo/*.svg`, and `web/public/og/antgrid-card.png`
 

@@ -24,7 +24,6 @@ const componentDefinitions = [
   ["antgrid-wire", "SPDXRef-Package-Wire", "packages/antgrid-wire/", "MPL-2.0"],
   ["antgrid-relay", "SPDXRef-Package-Relay", "relay/", "LicenseRef-Elastic-2.0"],
   ["antgrid-web", "SPDXRef-Package-Web", "web/", "LicenseRef-Elastic-2.0"],
-  ["antgrid-site", "SPDXRef-Package-Site", "site/", "MPL-2.0"],
   ["antgrid-aspire", "SPDXRef-Package-Aspire", "aspire/", "MPL-2.0"],
   ["antgrid-root-sources", "SPDXRef-Package-Root", "", "MPL-2.0"],
 ] as const;
@@ -124,11 +123,6 @@ const sbom = {
       licenseId: "LicenseRef-Antgrid-Brand",
       name: "Antgrid Brand Assets License",
       extractedText: await Bun.file("LICENSES/LicenseRef-Antgrid-Brand.txt").text(),
-    },
-    {
-      licenseId: "LicenseRef-Third-Party-Trademark",
-      name: "Third-party trademark material",
-      extractedText: await Bun.file("LICENSES/LicenseRef-Third-Party-Trademark.txt").text(),
     },
   ],
   packages,

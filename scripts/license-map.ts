@@ -9,8 +9,6 @@ export const brandPatterns = [
   /^app\/linux\/packaging\/antgrid\.png$/,
   /^app\/web\/(favicon\.png|icons\/)/,
   /^app\/windows\/runner\/resources\/app_icon\.ico$/,
-  /^site\/public\/favicon\.ico$/,
-  /^site\/public\/logo\/[^/]+\.(ico|png|svg)$/,
   /^web\/public\/logo\/[^/]+\.(ico|png|svg)$/,
   /^web\/public\/og\/antgrid-card\.png$/,
 ];
@@ -21,7 +19,6 @@ export const thirdPartyPatterns = [
   /^app\/\.prebuilt\//,
   /^app\/android\/gradle\/wrapper\//,
   /^app\/android\/gradlew(?:\.bat)?$/,
-  /^site\/src\/icons\//,
 ];
 
 export function licenseForPath(path: string): string {
@@ -31,7 +28,6 @@ export function licenseForPath(path: string): string {
   if (path.startsWith("app/assets/fonts/")) return "OFL-1.1";
   if (path.startsWith("app/.prebuilt/") || path.startsWith("packages/auto_updater_macos/")) return "MIT";
   if (/^app\/android\/(gradle\/wrapper\/|gradlew)/.test(path)) return "Apache-2.0";
-  if (path.startsWith("site/src/icons/")) return "LicenseRef-Third-Party-Trademark";
   if (path.startsWith("relay/") || path.startsWith("web/")) {
     return "LicenseRef-Elastic-2.0";
   }
