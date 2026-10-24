@@ -85,6 +85,17 @@ void enterDemoMode(ProviderContainer ref) {
     );
 }
 
+/// Enters the sample on its Scheduler. [enterDemoMode] forces the workspace
+/// surface, so the scheduler surface is set after it, with the same writes as
+/// the drawer's Scheduler row.
+void enterDemoScheduler(ProviderContainer ref) {
+  enterDemoMode(ref);
+  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.scheduler);
+  ref
+      .read(navControllerProvider.notifier)
+      .commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+}
+
 /// Leaves the demo and drops everything it built.
 ///
 /// Mirrors `ProjectsController.cancelActiveAgent`: clear the focus, then evict —

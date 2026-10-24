@@ -122,7 +122,7 @@ else
   printf "## What's Changed\n\nNo user-facing changes in this build — pipeline and maintenance work only. The full changelog below lists everything that landed.\n\n"
 fi
 
-# The Store LISTING, not site/src/config.ts's get.microsoft.com installer
+# The Store LISTING, not antgrid-site's src/config.ts get.microsoft.com installer
 # handoff. Nothing pins this file to the site (contracts.spec.ts pins the site
 # itself), and the site URL carries `cid=site` — reusing it here would report
 # every install driven from a release page as website-driven. A release-page

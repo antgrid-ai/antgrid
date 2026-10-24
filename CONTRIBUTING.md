@@ -7,12 +7,15 @@ properly than collect a queue we cannot answer.
 
 | | |
 |---|---|
-| **Straight to a PR** | `docs/`, `site/`, `README.md`, `DEVELOPMENT.md`, typos, dead links, tests for existing behaviour |
+| **Straight to a PR** | `docs/`, `README.md`, `DEVELOPMENT.md`, typos, dead links, tests for existing behaviour |
 | **Issue first** | `bridge/`, `app/`, `packages/`, `evals/`, `scripts/` — we agree the approach, then the PR is welcome |
 | **Closed** | `relay/`, `web/`, `packages/antgrid-wire` — see [Contribution terms](#contribution-terms) |
 
 Issue-first is not a formality: the architecture still moves, and several
 contracts are mirrored by hand with no test spanning both sides.
+
+The antgrid.ai site, its blog, changelog and roadmap live in
+[antgrid-ai/antgrid-site](https://github.com/antgrid-ai/antgrid-site).
 
 Bug reports with a clear reproduction are the most useful thing you can send.
 Please read the [Code of Conduct](CODE_OF_CONDUCT.md) first.

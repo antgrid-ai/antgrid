@@ -1,6 +1,12 @@
+import 'dart:async';
+
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
 
 void main() {
@@ -51,6 +57,49 @@ void main() {
       expect(
         sessionRefusalCopy(null, null, 'Could not do that'),
         'Could not do that',
+      );
+    });
+  });
+
+  group('caughtErrorCopy', () {
+    const fallback = 'Try again.';
+
+    test('shows what the machine said, never the exception class', () {
+      final copy = caughtErrorCopy(
+        RpcException('E_GIT', 'not a git repository'),
+        fallback,
+      );
+      expect(copy, 'not a git repository');
+      expect(
+        caughtErrorCopy(RpcException('NOT_ALLOWED', 'raw'), fallback),
+        friendlyErrorCopy('NOT_ALLOWED'),
+      );
+    });
+
+    test('codes the app mints carry developer text, so they fall back', () {
+      for (final error in <Object>[
+        RpcException('BAD_RESPONSE', 'malformed git.branches response: {}'),
+        RpcException('E_SEND_FAILED', 'request git.branches: SocketException'),
+        HostControlException('TRANSPORT', 'control POST failed: x'),
+        StateError('Bad state: no element'),
+        const FormatException('Unexpected character'),
+      ]) {
+        expect(caughtErrorCopy(error, fallback), fallback, reason: '$error');
+      }
+    });
+
+    test('a reply that never came says so', () {
+      expect(
+        caughtErrorCopy(TimeoutException('t'), fallback),
+        "The machine didn't answer. Try again.",
+      );
+      expect(
+        caughtErrorCopy(RpcException('E_TIMEOUT', 'request x timed out'), ''),
+        "The machine didn't answer. Try again.",
+      );
+      expect(
+        caughtErrorCopy(const SessionDownException(), fallback),
+        const SessionDownException().toString(),
       );
     });
   });

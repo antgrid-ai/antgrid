@@ -2,7 +2,7 @@
 Thanks for this. Two rules — CONTRIBUTING.md has the reasoning:
 https://github.com/antgrid-ai/antgrid/blob/development/CONTRIBUTING.md
 
-1. Docs, site, typos and tests can come straight here. Anything else in
+1. Docs, typos and tests can come straight here. Anything else in
    bridge/, app/, packages/, evals/ or scripts/ wants an issue first.
 2. relay/, web/ and packages/antgrid-wire are closed to outside patches —
    a licensing constraint, not a judgement on the change. Open an issue.

@@ -24,13 +24,13 @@ import '../../design/widgets/ab_tooltip.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
 import '../../launcher/host_control_client.dart';
 import '../../models/scheduler.dart';
-import '../../providers/agent_catalog.dart';
 import '../../providers/scheduler.dart';
 import '../../providers/scheduler_drafts.dart';
 import '../../providers/scheduler_timezone.dart';
 import '../../util/detached.dart';
 import '../../utils/platform_utils.dart';
 import 'scheduler_format.dart';
+import '../ab_status_helpers.dart' show caughtErrorCopy;
 
 const schedulerPresets = <String, String>{
   'Hourly': '0 * * * *',
@@ -570,7 +570,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       drafts.removeIfCurrent(key, submittedDraft);
       if (mounted) widget.onSaved();
     } catch (error) {
-      if (mounted) setState(() => _error = 'Could not save schedule: $error');
+      if (mounted) {
+        setState(
+          () => _error =
+              "Couldn't save the schedule. ${caughtErrorCopy(error, 'Try again.')}",
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -1089,14 +1094,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     final machineName =
         ref.watch(schedulerMachinesProvider)[widget.machineId] ??
         'this machine';
-    final catalog = ref.watch(agentCatalogProvider);
+    final labels = ref.watch(schedulerAgentLabelsProvider);
     final localZone =
         localTimezone.value ?? widget.snapshot.capabilities.timezone;
     final agents = widget.snapshot.capabilities.agents;
     final modes =
         agents.where((a) => a.agentId == _agent).firstOrNull?.modes ??
         const <String>[];
-    String agentName(String id) => catalog[id]?.label ?? id;
+    String agentName(String id) => labels[id] ?? id;
     final isGit =
         widget.snapshot.projects
             .where((p) => p.projectId == _project)

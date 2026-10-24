@@ -46,7 +46,7 @@ Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent c
 
 - **Environment is Windows + PowerShell.** Prefer the Bash tool for documented commands; in PS 5.1 `&&` fails (use `;`), paths are backslashed.
 - **Git commits via the Bash tool: use `-m` flags (repeat per paragraph), never PowerShell `@'...'@` here-strings** — the Bash tool is bash, so `@'...'@` leaves a stray `@` in the subject (has shipped to remote more than once). For the same reason a message quoting an identifier in backticks needs `-F <file>`: inside a double-quoted `-m` bash substitutes the backticked word away and the commit lands with a hole where the name was.
-- **Bun workspace filter names ≠ directory names**: `antgrid-bridge`/`-relay`/`-web`/`-wire`/`-evals`, not `bridge`/`relay`/etc. `bridge/integrations` breaks even that pattern — it is `@antgrid/integrations`. One root `bun install` covers every workspace — but **not** `site/` or `aspire/`, which are separate Bun projects with their own lockfiles and need their own install.
+- **Bun workspace filter names ≠ directory names**: `antgrid-bridge`/`-relay`/`-web`/`-wire`/`-evals`, not `bridge`/`relay`/etc. `bridge/integrations` breaks even that pattern — it is `@antgrid/integrations`. One root `bun install` covers every workspace — but **not** `aspire/`, a separate Bun project with its own lockfile that needs its own install.
 - **NEVER run `flutter analyze` (or `dart analyze`) concurrently — it deadlocks silently.** `flutter/bin/internal/shared.bat` takes a startup lock in a sleepless `GOTO` retry loop with stderr sent to `NUL`, so the second invocation spins forever emitting nothing and never times out; `dart.bat` calls the same script. Two agents analyzing at once is enough, and **starting a `dart mcp-server` counts**: `.mcp.json` resolves `dart` to `flutter/bin/dart.bat`, which `CALL`s the same `shared.bat`, so a session coming up while an analyze runs can hang on that lock. Only calls into an already-running server are exempt — its analyzer is also per-session and retained, not shared (see Test, typecheck, lint).
 - **No Material visual artifacts in the app.** Use the Antgrid design system (`app/lib/design/`) exclusively — see Design Rules.
 - **`copyWith`: never combine `clearX: true` with an explicit value for the same field.** It's ambiguous and bug-prone.
@@ -59,7 +59,7 @@ Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent c
 
 Bun workspace: one root `bun install` covers every workspace listed in the root `package.json`'s `workspaces` array. Workspace scripts run from root via `bun run --filter <name> <script>`; the `cd <subdir>` forms also work (Bun walks up to the workspace root).
 
-`site/` and `aspire/` are **outside** that array — each is its own Bun project with its own lockfile, so a root install leaves them empty. Install in the directory (`aspire/` also needs a one-time `aspire init`; see `npm run aspire`).
+`aspire/` is **outside** that array — its own Bun project with its own lockfile, so a root install leaves it empty. Install in the directory (it also needs a one-time `aspire init`; see `npm run aspire`). The antgrid.ai site is a separate repo, [antgrid-ai/antgrid-site](https://github.com/antgrid-ai/antgrid-site).
 
 ### Dev & setup
 ```bash
@@ -136,14 +136,16 @@ here because they are easy to break from outside that tree:
 
 ## Public roadmap maintenance
 
-Keep `site/src/data/roadmap.ts` aligned with user-facing work. After agreeing a
-new feature spec, offer a PR containing the spec and its roadmap entry; proceed
-without asking again when PR creation is already authorized. Follow existing
-spec conventions and reference agreed specifications rather than duplicating them.
-Update the corresponding entry in the implementation PR. Set completed features
-to `done` in that PR so merging it records completion; link the implementation PR
-for context. Published release links can be added during release follow-up and
-are not required for completion.
+The public roadmap is `src/data/roadmap-entries.ts` in [antgrid-ai/antgrid-site](https://github.com/antgrid-ai/antgrid-site);
+keep it aligned with user-facing work. After agreeing a new feature spec, offer a
+PR containing the spec here and a companion antgrid-site PR adding its roadmap
+entry; proceed without asking again when PR creation is already authorized.
+Follow existing spec conventions and reference agreed specifications rather than
+duplicating them. Update the corresponding entry in an antgrid-site PR opened
+alongside the implementation PR. Set completed features to `done` there once the
+implementation PR merges; link the implementation PR for context. Published
+release links can be added during release follow-up and are not required for
+completion.
 Internal changes and routine fixes need no new entry unless they materially affect
 an existing item. Refresh review dates only after checking the relevant plans;
 write public outcomes without speculative delivery promises.

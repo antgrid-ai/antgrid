@@ -42,7 +42,8 @@ const String kDemoRefusalText =
     'The sample project has no computer attached. Connect yours to do this.';
 
 /// Label on every affordance that opens the demo (sign-in, the desktop setup
-/// checklist, the Recent tab's empty state). One definition because it is the
+/// checklist, the Recent tab's empty state, the Scheduler's no-machine and
+/// machine-unavailable empty states). One definition because it is the
 /// same promise in each place, and a reviewer meeting two wordings would read
 /// them as two different things.
 const String kDemoEntryLabel = 'Explore a sample project';

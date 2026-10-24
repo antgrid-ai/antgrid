@@ -53,7 +53,10 @@ import '../services/handler_service.dart';
 import '../services/sessions_service.dart';
 import '../services/upload_service.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import 'client_id.dart';
+import 'control_plane.dart'
+    show RefreshRef, invalidateControlPlaneProviders;
 import 'value_controller.dart';
 
 /// Extract project name from compound agentDeviceId (uuid.projectId).
@@ -795,19 +798,29 @@ final agentSessionStateProvider = StreamProvider.family<AgentSessionState, Strin
 });
 
 final connectionStateProvider = StreamProvider<AppState>((ref) {
-  // Follow the selected remote connection's own socket (was the single
-  // `_shared` relay). Guard on the target TYPE, not the id string: a selected
-  // LOCAL project has no relay socket, and `connectionFor(localId)` would
-  // materialize a stray RelayService — so emit nothing for local targets.
+  // Guard on the target TYPE, not the id string: a selected LOCAL project has
+  // no relay socket, so emit nothing for local targets.
   final target = ref.watch(selectedTargetProvider);
   if (target == null || target.isLocal) {
     return const Stream<AppState>.empty();
   }
-  final relay = ref
+  // `peek`, never `connectionFor`: a UI read must not dial, and `connectionFor`
+  // throws once sign-out has blocked new work. Re-peeking on every change is
+  // what moves this off a released connection, whose relay stream is closed,
+  // onto the one the next dial builds for the same machine.
+  ref.watch(relayConnectionChangesProvider);
+  final conn = ref
       .read(relayConnectionManagerProvider)
-      .connectionFor(baseDeviceUuid(target.registrationId))
-      .relay;
-  // Prepend the current state so the UI has a value immediately.
+      .peek(baseDeviceUuid(target.registrationId));
+  // A disposed connection keeps its slot until its release settles, and for
+  // good when cleanup is incomplete; its relay never comes back up. The
+  // default state is what a freshly built relay reports, and an explicit emit
+  // replaces the previous machine's value instead of leaving it standing
+  // behind a loading state.
+  if (conn == null || conn.isDisposed) {
+    return Stream<AppState>.value(const AppState());
+  }
+  final relay = conn.relay;
   return seededStream(() => relay.currentState, relay.stateStream);
 });
 
@@ -1123,28 +1136,53 @@ class MachineConnectionNotifier extends Notifier<void> {
   }
 
   /// User-initiated escape from the workspace boot screen — clears the
-  /// active registration id (so `app_shell` routes back to the project list)
-  /// and tears down the in-flight relay
-  /// connection so we don't keep retrying in the background.
+  /// active registration id (so `app_shell` routes back to the project list),
+  /// evicts the cancelled project, and stops its machine's dial when nothing
+  /// else on that machine is open.
+  ///
+  /// The machine connection is shared by every project open on it, and a
+  /// release disposes all of their streams with nothing to rebind them, so it
+  /// is released here only when the cancelled project was its last. Otherwise
+  /// the remaining projects keep it wanted and the control-plane reaper owns it.
+  /// The reaper cannot be left the sole-project case: the New Session picker
+  /// that Cancel lands on pins every open connection, so an abandoned dial
+  /// would keep retrying for as long as the picker shows.
   void cancelActiveAgent() {
-    final activeId = ref.read(selectedRegistrationIdProvider);
+    final target = ref.read(selectedTargetProvider);
     ref.read(selectedTargetProvider.notifier).set(null);
-    // Drop the in-flight machine socket + warm session for the cancelled agent
-    // so re-selecting this id from the home screen rebuilds a fresh connection
-    // rather than reusing the half-closed one. The connection is machine-level
-    // (bare uuid) — reduce the compound focus id to its base.
-    if (activeId != null) {
-      final mgr = ref.read(relayConnectionManagerProvider);
-      final machineUuid = baseDeviceUuid(activeId);
-      // Same guard, and the same reason, as the control-plane reaper's: the
-      // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
-      // one from here would kill the live peer session and every other project
-      // stream riding it. Cancel only ever abandons an attempt in flight.
-      if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
-        mgr.release(machineUuid);
-      }
+    if (target == null) return;
+    final activeId = target.registrationId;
+    // A local project has no machine connection, and invalidating its own
+    // transport here would let the evict below rebuild the session — and
+    // relaunch the agent — the user just cancelled.
+    if (target.isLocal) {
       ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
+      return;
     }
+    final mgr = ref.read(relayConnectionManagerProvider);
+    final machineUuid = baseDeviceUuid(activeId);
+    // Read before the evict below, while the cancelled project is still in
+    // the registry — it is excluded by id rather than by its absence.
+    final otherOpenOnMachine = ref
+        .read(projectSessionRegistryProvider)
+        .any((id) => id != activeId && baseDeviceUuid(id) == machineUuid);
+    // An ESTABLISHED connection is never released from here either: Cancel
+    // only abandons an attempt in flight.
+    if (!otherOpenOnMachine &&
+        mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
+      detached(
+        'MachineConnection',
+        'release on cancel failed',
+        () => mgr.release(machineUuid),
+      );
+      // The chain is non-autoDispose; left cached it rebuilds atop the
+      // released transport (see invalidateControlPlaneProviders).
+      invalidateControlPlaneProviders(
+        RefreshRef.ofContainer(ref.container),
+        machineUuid,
+      );
+    }
+    ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
   }
 
   /// User-initiated retry from the boot panel or the connection-error screen.

@@ -95,7 +95,6 @@ const packageLicenses: Record<string, string> = {
   "packages/antgrid-agents/package.json": "MPL-2.0",
   "packages/antgrid-wire/package.json": "MPL-2.0",
   "relay/package.json": "LicenseRef-Elastic-2.0",
-  "site/package.json": "MPL-2.0",
   "web/package.json": "LicenseRef-Elastic-2.0",
 };
 for (const [path, license] of Object.entries(packageLicenses)) {
@@ -104,7 +103,7 @@ for (const [path, license] of Object.entries(packageLicenses)) {
 }
 
 const reuse = await Bun.file("REUSE.toml").text();
-const declaredIds = ["MPL-2.0", "LicenseRef-Elastic-2.0", "LicenseRef-Antgrid-Brand", "LicenseRef-Third-Party-Trademark", "OFL-1.1", "Apache-2.0", "MIT"];
+const declaredIds = ["MPL-2.0", "LicenseRef-Elastic-2.0", "LicenseRef-Antgrid-Brand", "OFL-1.1", "Apache-2.0", "MIT"];
 for (const id of declaredIds) {
   if (!reuse.includes(`SPDX-License-Identifier = "${id}"`)) {
     errors.push(`REUSE.toml: missing annotation for ${id}`);

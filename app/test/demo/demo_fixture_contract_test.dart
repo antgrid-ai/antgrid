@@ -9,6 +9,7 @@
 import 'dart:typed_data';
 
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/demo/demo_scheduler.dart';
 import 'package:antgrid/demo/demo_script.dart';
 import 'package:antgrid/demo/demo_transport.dart';
 import 'package:antgrid/demo/fixtures/demo_transcript_fixtures.dart';
@@ -17,6 +18,7 @@ import 'package:antgrid/models/ab_config.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_message_classification.dart';
+import 'package:antgrid/providers/scheduler.dart' show SchedulerSnapshot;
 import 'package:antgrid/services/config_service.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -401,6 +403,66 @@ void main() {
             .having((e) => e.message, 'message', isNotEmpty),
       ),
     );
+  });
+
+  group('the sample Scheduler', () {
+    // The Scheduler screen parses every answer with the same models a real
+    // machine's answers go through; a key those models reject surfaces as the
+    // red "Machine unavailable" state this sample exists to avoid.
+    late SchedulerSnapshot snapshot;
+
+    setUp(() async {
+      snapshot = await SchedulerSnapshot.load(
+        DemoSchedulerBackend(now: () => now).request,
+      );
+    });
+
+    test('parses and is supported with no error', () {
+      expect(snapshot.capabilities.supported, isTrue);
+      expect(snapshot.capabilities.error, isNull);
+      expect(snapshot.schedules, isNotEmpty);
+      expect(snapshot.runs, isNotEmpty);
+    });
+
+    test('lists exactly the sample project', () {
+      expect(snapshot.projects.map((p) => p.projectId), [kDemoProjectId]);
+    });
+
+    test('every run belongs to the sample project and one of its sessions', () {
+      final sessions = demoSessionEntries(now).map((s) => s['id']).toSet();
+      for (final run in snapshot.runs) {
+        expect(run.projectId, kDemoProjectId);
+        expect(sessions, contains(run.sessionId));
+        expect(run.scheduleName, isNotNull);
+      }
+    });
+
+    test('every schedule is one the capabilities say can run', () {
+      final caps = snapshot.capabilities;
+      for (final s in snapshot.schedules) {
+        final agent = caps.agents.where((a) => a.agentId == s.agentId);
+        expect(agent, hasLength(1), reason: s.id);
+        expect(agent.single.modes, contains(s.mode), reason: s.id);
+        expect(s.timezone, caps.timezone, reason: s.id);
+        expect(s.projectId, kDemoProjectId, reason: s.id);
+      }
+    });
+
+    test('enabled timetables are waiting on a future occurrence', () {
+      final anchor = now.toUtc();
+      for (final s in snapshot.schedules.where((s) => s.enabled && !s.isOneOff)) {
+        expect(s.nextOccurrence!.isAfter(anchor), isTrue, reason: s.id);
+      }
+    });
+
+    test('every fired one-off resolves to a run', () {
+      final runIds = snapshot.runs.map((r) => r.id).toSet();
+      final fired = snapshot.schedules.where((s) => s.firedRunId != null);
+      expect(fired, isNotEmpty);
+      for (final s in fired) {
+        expect(runIds, contains(s.firedRunId), reason: s.id);
+      }
+    });
   });
 
   test('the sessions the list advertises are the ones with transcripts', () {

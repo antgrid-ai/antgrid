@@ -12,8 +12,8 @@ This file explains what that means in practice, so you do not have to guess.
 
 - **The name "Antgrid"**, alone or as part of another name.
 - **The logo, monogram and wordmark.** Sources live in `app/assets/logo/` and
-  `app/assets/icon/`, are mirrored at `site/public/logo/` and `web/public/logo/`,
-  and are compiled into the per-platform icon sets under
+  `app/assets/icon/`, are mirrored at `web/public/logo/` and at `public/logo/` in
+  antgrid-ai/antgrid-site, and are compiled into the per-platform icon sets under
   `app/android/app/src/main/res/mipmap-*/`,
   `app/ios/Runner/Assets.xcassets/AppIcon.appiconset/`,
   `app/macos/Runner/Assets.xcassets/AppIcon.appiconset/`,

@@ -2,51 +2,39 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
+import { SITE_REPO, siteFile } from "../helpers/site-checkout.js";
 import { PRICING, TRIAL_DAYS } from "../../src/billing/plans.js";
 import { PLAN_SLUG_FREE } from "../../src/models/plan.js";
 
 /**
- * The marketing site keeps its own copy of the catalog (`site/src/data/pricing.ts`)
- * because it is a separate Bun project with no import path into `web/`. Its own
- * Playwright suite pins the rendered page to that copy, which catches a broken
- * card but never a stale one — Free sat at 2 machines and Pro at 3 for a whole
+ * The marketing site keeps its own copy of the catalog (`src/data/pricing.ts` in
+ * antgrid-ai/antgrid-site) because it is a separate repo with no import path into
+ * `web/`. Its own Playwright suite pins the rendered page to that copy, which
+ * catches a broken card but never a stale one — Free sat at 2 machines and Pro at 3 for a whole
  * release after the catalog moved to 1 and 10, and every site test passed.
  * This is the only place the two sides are compared.
  *
  * The site file is read rather than imported: it pulls in `../config`, which is
  * Astro-resolved, and the numbers are the whole contract.
  */
-const SITE_PRICING = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "site",
-  "src",
-  "data",
-  "pricing.ts"
-);
+const SITE_PRICING = "src/data/pricing.ts";
 
 function siteConstant(name: string): number {
-  const source = readFileSync(SITE_PRICING, "utf8");
-  const match = source.match(new RegExp(`export const ${name} = (\\d+);`));
-  if (!match) throw new Error(`site/src/data/pricing.ts no longer exports ${name}`);
+  const match = siteFile(SITE_PRICING).match(new RegExp(`export const ${name} = (\\d+);`));
+  if (!match) throw new Error(`antgrid-site's ${SITE_PRICING} no longer exports ${name}`);
   return Number(match[1]);
 }
 
-let pg: PgHandle;
-beforeAll(async () => {
-  pg = await startTestPg();
-});
-afterAll(async () => {
-  await pg.stop();
-});
+describe.skipIf(!SITE_REPO)("site marketing constants track the shipped catalog", () => {
+  let pg: PgHandle;
+  beforeAll(async () => {
+    pg = await startTestPg();
+  });
+  afterAll(async () => {
+    await pg.stop();
+  });
 
-describe("site marketing constants track the shipped catalog", () => {
   test("machine allowances match every plan row they quote", async () => {
     const [free, trial, pro] = await Promise.all([
       pg.db.plan.findUniqueOrThrow({ where: { slug: PLAN_SLUG_FREE } }),
