@@ -596,4 +596,51 @@ describe("deleteUserAccount: tasks and integrations", () => {
     expect(await pg.db.integration.count({ where: { accountId: team.id } })).toBe(1);
     expect(uninstalled).toEqual([]);
   });
+
+  test("erases the account's projects and the user's bindings, and unlinks their identities", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { user, account } = await seed("projects-owner@example.com");
+    const { account: team } = await seed("projects-team@example.com");
+    const own = await pg.db.project.create({
+      data: { accountId: account.id, repoKey: "github.com/me/solo", displayName: "solo" },
+    });
+    const shared = await pg.db.project.create({
+      data: { accountId: team.id, repoKey: "github.com/team/shared", displayName: "shared" },
+    });
+    const binding = (projectId: string, localProjectId: string) => ({
+      projectId,
+      userId: user.id,
+      deviceId: "machine-1",
+      localProjectId,
+      localPath: `C:\\Users\\me\\${localProjectId}`,
+    });
+    await pg.db.projectBinding.create({ data: binding(own.id, "solo") });
+    await pg.db.projectBinding.create({ data: binding(shared.id, "shared") });
+    const teamIntegration = await pg.db.integration.findFirstOrThrow({ where: { accountId: team.id } });
+    await pg.db.integrationIdentity.create({
+      data: {
+        integrationId: teamIntegration.id,
+        provider: "github",
+        externalUserId: "4242",
+        externalLogin: "me",
+        userId: user.id,
+      },
+    });
+
+    const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
+      userId: user.id,
+      headers: new Headers(),
+    });
+
+    expect(result).toBe("deleted");
+    expect(await pg.db.project.count({ where: { accountId: account.id } })).toBe(0);
+    expect(await pg.db.project.count({ where: { accountId: team.id } })).toBe(1);
+    expect(await pg.db.projectBinding.count({ where: { userId: user.id } })).toBe(0);
+    expect(
+      await pg.db.integrationIdentity.findMany({
+        where: { integrationId: teamIntegration.id },
+        select: { externalLogin: true, userId: true },
+      })
+    ).toEqual([{ externalLogin: "me", userId: null }]);
+  });
 });

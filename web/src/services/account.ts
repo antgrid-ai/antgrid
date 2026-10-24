@@ -147,18 +147,21 @@ export async function deleteUserAccount(
   //
   // Apple's revocation rides the same fan-out for the same reasons, and must
   // finish before the transaction deletes the account rows holding its tokens.
-  const devices = await listActiveDevices(db, userId);
+  //
   // Only installations still live: a revoked one is already uninstalled on
   // GitHub's side. Best-effort like the device teardown — the transaction below
   // deletes the integration rows regardless, which is what stops every import
   // and push; a failed uninstall only leaves the App installed with nothing
   // routing its deliveries anywhere.
-  const installations = args.githubApp
-    ? await db.integration.findMany({
-        where: { accountId: account.id, revokedAt: null, installationId: { not: null } },
-        select: { installationId: true },
-      })
-    : [];
+  const [devices, installations] = await Promise.all([
+    listActiveDevices(db, userId),
+    args.githubApp
+      ? db.integration.findMany({
+          where: { accountId: account.id, revokedAt: null, installationId: { not: null } },
+          select: { installationId: true },
+        })
+      : [],
+  ]);
   await Promise.all([
     args.apple ? revokeAppleAuthorizations(db, auth, args.apple, userId) : undefined,
     ...installations.map(async ({ installationId }) => {
@@ -232,6 +235,16 @@ export async function deleteUserAccount(
     await tx.task.deleteMany({ where: { accountId: account.id } });
     await tx.label.deleteMany({ where: { accountId: account.id } });
     await tx.integration.deleteMany({ where: { accountId: account.id } });
+    await tx.project.deleteMany({ where: { accountId: account.id } });
+    // Bindings are this user's machines and the folder paths on them, on
+    // whichever account holds the project — a member's too. One left behind
+    // also keeps its global (device, folder) key owned by the tombstone, so the
+    // same machine signing in as a new user would be refused as a stranger.
+    await tx.projectBinding.deleteMany({ where: { userId } });
+    // The column's ON DELETE SET NULL never fires for a scrubbed user row, so
+    // the unlink it promises — a team's GitHub login no longer resolving to
+    // this person — has to be done here.
+    await tx.integrationIdentity.updateMany({ where: { userId }, data: { userId: null } });
 
     // Cancel every residual subscription (free, pending-cancel, or already
     // provider-canceled) and detach provider ids; the block rule guarantees no

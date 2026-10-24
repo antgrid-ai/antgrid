@@ -483,12 +483,15 @@ void main() {
           _task(number: 5, title: 'Waiting on me', status: 'blocked'),
           _task(number: 6, title: 'Working away', status: 'in_progress'),
           _task(number: 7, title: 'No run at all', status: 'blocked'),
+          // No `working` report has moved it yet.
+          _task(number: 8, title: 'Just started', status: 'open'),
         ],
       ),
       overrides: [
         taskRunPresenceProvider.overrideWithValue(const {
           5: TaskRunPresence(status: AgentWorkStatus.attention),
           6: TaskRunPresence(status: AgentWorkStatus.working),
+          8: TaskRunPresence(status: AgentWorkStatus.working),
         }),
       ],
     );
@@ -500,7 +503,7 @@ void main() {
     final visible = container.read(visibleTasksProvider).requireValue;
     expect(
       visible.map((t) => t.title),
-      unorderedEquals(['Waiting on me', 'Working away']),
+      unorderedEquals(['Waiting on me', 'Working away', 'Just started']),
     );
   });
 

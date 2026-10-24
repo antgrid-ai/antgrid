@@ -2031,7 +2031,7 @@ export function uiRoutes(deps: {
     // earlier membership lookup found nothing for.
     const { id: accountId } = await provisionProductAccountForUser(deps.db, userId);
 
-    const directory = installDirectory(createGithubAppClient({ config }));
+    const directory = installDirectory(deps.githubApp ?? createGithubAppClient({ config }));
     const result = await completeGithubInstall(deps.db, directory, {
       accountId,
       userId,

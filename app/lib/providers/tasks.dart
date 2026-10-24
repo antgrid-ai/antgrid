@@ -140,13 +140,13 @@ class TaskFilter {
   /// The statuses a row must hold to survive this filter.
   Set<TaskStatus> get scopeStatuses => switch (scope) {
     TaskScope.mine => kOpenStatuses,
-    // The server has no notion of a live run, so the widest honest query is
-    // every status a run can leave a task in; [visibleTasksProvider] narrows it
-    // to tasks that actually have a run. `blocked` is what an agent waiting on
-    // a person turns its task into (`autoTaskStatusFor` in
-    // web/src/models/task-run.ts) — dropping it hides exactly the row this
-    // view exists for.
-    TaskScope.running => const {TaskStatus.inProgress, TaskStatus.blocked},
+    // The server has no notion of a live run, so this scope gates on nothing
+    // but the open set and [visibleTasksProvider] narrows it to tasks that
+    // actually have a run. A live run's task can sit at any open status: still
+    // `open` until a `working` report lands (or after a person reopens it), and
+    // `blocked` while its agent waits on a person (`autoTaskStatusFor` in
+    // web/src/models/task-run.ts).
+    TaskScope.running => kOpenStatuses,
     TaskScope.unassigned => kOpenStatuses,
     TaskScope.allOpen => kOpenStatuses,
     TaskScope.done => const {TaskStatus.done, TaskStatus.cancelled},

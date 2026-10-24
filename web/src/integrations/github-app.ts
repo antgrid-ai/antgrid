@@ -42,6 +42,10 @@ const CLOCK_SKEW_SECONDS = 60;
 /** GitHub's hard maximum for an App JWT; a longer `exp` is refused outright, so
  *  this is a limit rather than a tuning knob. */
 const APP_JWT_TTL_SECONDS = 600;
+/** The uninstall sits on account deletion's response path, ahead of the
+ *  transaction that erases the account, so a GitHub that never answers must not
+ *  hold the request past Bun's idle timeout and leave nothing deleted. */
+const UNINSTALL_TIMEOUT_MS = 5_000;
 
 export const GITHUB_PER_PAGE = 100;
 /**
@@ -549,6 +553,7 @@ export function createGithubAppClient(opts: {
       const res = await send(endpoint, `${API_BASE}${endpoint}`, {
         method: "DELETE",
         headers: apiHeaders(`Bearer ${appJwt()}`),
+        signal: AbortSignal.timeout(UNINSTALL_TIMEOUT_MS),
       });
       if (res.ok || res.status === 404) return;
       throw new GithubApiError(statusFailure(res.status), endpoint, res.status, "failed");
