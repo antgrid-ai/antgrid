@@ -30,7 +30,8 @@ import { createAgentRunScope, TerminalAgentEventSchema, type TerminalAgentEvent 
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus, HandlerAvailability } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
-import { AGENT_GRACE_MS } from "./terminal-session";
+import { AGENT_GRACE_MS, terminalInvocationHost } from "./terminal-session";
+import { windowsShellLimit } from "./terminal-invocation";
 import type { AbMessage, SessionEntry } from "./protocol";
 import {
   CHECKOUT_KINDS,
@@ -50,6 +51,10 @@ import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 import { createKeyedLock } from "./keyed-lock";
 import { atomicWriteFile } from "./discovery";
 import { runGit } from "./worktrees/project-resolver";
+import {
+  EXCERPT_FILE, materializeHandoff, readPlacedHandoff, readPredecessorTask, removeHandoff, stageHandoff, stageLegacyText, sweepHandoffs,
+} from "./handoff/handoff-dir";
+import { handoffPrompt } from "./handoff/handoff-prompt";
 
 export interface AgentSpec {
   command: string;
@@ -104,15 +109,31 @@ export interface ScheduledSessionObservation extends ScheduledSessionIdentity {
   reason?: string;
 }
 
+/** A Windows command line cannot carry a NUL or exceed its length limit, and
+ * cmd.exe cannot carry a newline, so an opening prompt that would trip one of
+ * those is typed into the terminal instead of passed in argv.
+ * Left alone when dropping the prompt would not cure it, so the spawn still fails loudly. */
+function typeUncarriablePrompt(launch: PreparedTerminalLaunch, toolName: string): PreparedTerminalLaunch {
+  const count = launch.promptArgCount;
+  if (process.platform !== "win32" || launch.promptDelivery !== "included" || !count) return launch;
+  const host = terminalInvocationHost({ ...process.env, ...launch.env });
+  const reason = windowsShellLimit({ command: launch.command, args: launch.args, invocationKind: launch.invocationKind }, host);
+  if (!reason) return launch;
+  const args = launch.args.slice(0, launch.args.length - count);
+  if (windowsShellLimit({ command: launch.command, args, invocationKind: launch.invocationKind }, host)) return launch;
+  log.info({ reason, agent: toolName }, "opening prompt will be typed into the terminal because the Windows command line cannot carry it");
+  return { ...launch, args, promptArgCount: undefined, promptDelivery: "buffered" };
+}
+
+function bypassReach(risk: "bypasses-approvals" | "bypasses-approvals-and-sandbox" | undefined): number {
+  return risk === "bypasses-approvals-and-sandbox" ? 2 : risk === "bypasses-approvals" ? 1 : 0;
+}
+
 function scheduledLaunchError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
 }
 
 export type ForkWorkspace = "copy" | "current";
-
-// The handoff is deliberately bounded before any durable row or worktree is
-// created. A fork must preserve context, never silently trim a conversation.
-export const MAX_FORK_TRANSCRIPT_BYTES = 128 * 1024;
 
 export interface DeleteSessionOptions {
   force?: boolean;
@@ -219,6 +240,12 @@ export interface SessionManagerOpts {
   resolveAgentSpec?: (checkoutId: string) => Promise<AgentSpec>;
 }
 
+export interface PersistedForkHandoff {
+  state: "staged" | "materialized";
+  sourceTool: string;
+  root?: string;
+}
+
 interface PersistedEntry {
   id: string;
   name: string;
@@ -263,11 +290,16 @@ interface PersistedEntry {
   checkoutKind: CheckoutKind;
   checkoutBranch?: string | null;
   checkoutState: CheckoutState;
-  /** A one-shot normalized conversation handoff, deleted after first launch. */
+  /** Persisted by older builds; read only so such a row can still be staged as a handoff file, then deleted. */
   forkTranscript?: string;
   /** Captured provider identity; never resolved again from the mutable source row. */
   forkSourceSessionId?: string;
   forkNativeMigrationError?: boolean;
+  /** Raw-transcript files for a fork: staged beside sessions.json until the
+   *  first launch, then placed in the checkout (`root` is the directory holding
+   *  `.antgrid/handoff/`). Kept for the session's life so every delete path can
+   *  find them without resolving the checkout again. */
+  forkHandoff?: PersistedForkHandoff;
   /** Committed before dispatch: a restart must not repeat an uncertain native fork. */
   forkNativeAttempted?: boolean;
   conversationStart?: "fresh" | "resume" | "fork";
@@ -324,6 +356,13 @@ const PersistedEntrySchema = z
     forkSourceSessionId: z.string().min(1).optional().catch(undefined),
     forkNativeMigrationError: z.boolean().optional().catch(undefined),
     forkNativeAttempted: z.boolean().optional().catch(undefined),
+    // Each field degrades alone: a damaged `state` re-materializes (which is
+    // idempotent) rather than losing the marker and with it the files' owner.
+    forkHandoff: z.object({
+      state: z.enum(["staged", "materialized"]).catch("staged"),
+      sourceTool: z.string().catch(""),
+      root: z.string().optional().catch(undefined),
+    }).optional().catch(undefined),
     conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
     forkedFromSessionId: z.string().optional().catch(undefined),
     // Deliberately no `.catch(undefined)`: that would turn a damaged marker into
@@ -372,6 +411,7 @@ const PersistedEntrySchema = z
       forkSourceSessionId: s.forkSourceSessionId ?? legacySource,
       forkNativeMigrationError: s.forkNativeMigrationError || (!!s.forkNativeArgs?.length && !legacySource && !s.forkSourceSessionId) || undefined,
       forkNativeAttempted: s.forkNativeAttempted,
+      forkHandoff: s.forkHandoff && { ...s.forkHandoff, sourceTool: s.forkHandoff.sourceTool || s.tool || "" },
       conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
       forkedFromSessionId: s.forkedFromSessionId,
       launchedByScheduleId: s.launchedByScheduleId === undefined ? undefined
@@ -390,19 +430,28 @@ const PersistedFileSchema = z.object({
  *  two never drift. A malformed row is skipped; a missing/corrupt/wrong-version
  *  file yields []. Never throws. */
 function parsePersistedContent(raw: string | null): PersistedEntry[] {
-  if (raw === null) return [];
+  return parsePersistedDetailed(raw).entries;
+}
+
+/** `complete` is false whenever anything was dropped or unreadable, so a caller
+ *  that deletes what the rows do not name can tell "no rows" from "rows we could
+ *  not read". */
+function parsePersistedDetailed(raw: string | null): { entries: PersistedEntry[]; complete: boolean } {
+  if (raw === null) return { entries: [], complete: true };
   try {
     const file = PersistedFileSchema.safeParse(JSON.parse(raw));
-    if (!file.success) return [];
+    if (!file.success) return { entries: [], complete: false };
     const out: PersistedEntry[] = [];
+    let complete = true;
     for (const s of file.data.sessions) {
       const entry = PersistedEntrySchema.safeParse(s);
       if (entry.success) out.push(entry.data);
+      else complete = false;
     }
-    return out;
+    return { entries: out, complete };
   } catch (err) {
     log.warn("sessions.json unreadable, treating as empty: %s", err);
-    return [];
+    return { entries: [], complete: false };
   }
 }
 
@@ -474,6 +523,11 @@ export function isDefaultSessionName(name: string): boolean {
 }
 
 const FLUSH_DEBOUNCE_MS = 200;
+/** close()'s wait for handoff placements, kept inside the seconds a supervisor
+ *  gives a shutting-down host. A placement is one rename, or a copy across
+ *  volumes. */
+const CLOSE_PLACEMENT_WAIT_MS = 3_000;
+const PLACEMENT_LAUNCH_CANCELLED = "The launch was cancelled while the handoff files were being placed.";
 // Upper bound on how long a mode flip waits for the OLD runtime to be really
 // gone. A wedged PTY or a driver whose dispose never settles must fail the flip
 // rather than hang it forever.
@@ -735,6 +789,25 @@ export class SessionManager {
    *  changed(). */
   private readonly setups = new Map<string, SetupRuntime>();
   private nextSetupRunId = 1;
+  /** Forks whose snapshot is being written or whose row is not yet committed;
+   *  the startup sweep must not take a dir a live fork is about to claim. */
+  private readonly stagingInFlight = new Set<string>();
+  /** The one placement of a session's staged handoff into its checkout. Two
+   *  starts (the app's start right after a fork, and the shell's auto-start)
+   *  share it, and a delete waits on it so it cannot race a half-done copy. */
+  private readonly materializing = new Map<string, Promise<void>>();
+  /** Managed deletes from the moment they are asked for. `deleting` is marked
+   *  only past the preflight, so a placement that finishes during it would
+   *  otherwise launch an agent into the worktree the delete is about to remove. */
+  private readonly requestedDeletes = new Map<string, Promise<boolean>>();
+  private readonly handoffCleanups = new Set<Promise<void>>();
+  /** Bumped by every stop(). A fork launches only once its handoff files are
+   *  placed, and a stop that lands while they are moving must win over that
+   *  launch, as it does over one still preparing. */
+  private readonly stopEpochs = new Map<string, number>();
+  /** Set by close(): nothing launches once the project's sessions are torn down. */
+  private closed = false;
+  private loadedCompletely = true;
 
   constructor(private opts: SessionManagerOpts) {
     this.dir = join(opts.storeDir, "agents", opts.projectId);
@@ -743,6 +816,11 @@ export class SessionManager {
     this.projectPath = opts.projectPath;
     this.agentSpec = opts.agentSpec;
     this.load();
+    // A sessions.json that could not be read in full names no reliable set of
+    // rows, and the sweep deletes whatever the rows do not name.
+    if (this.loadedCompletely) {
+      void this.sweepHandoffFiles().catch((err) => log.warn("handoff sweep failed: %s", err));
+    }
     void this.recoverSetupStates().catch((err) => {
       log.warn("recovering checkout setup states failed: %s", err);
     });
@@ -837,6 +915,7 @@ export class SessionManager {
         // that cannot resolve the checkout's agent spec is a menu item that can
         // only fail.
         forkSupported: false,
+        handoffSupported: false,
         sharedWorkspace: false,
         workspaceMemberCount: 1,
         // Optimistic, like `running: false` above: the peek has no live core,
@@ -874,6 +953,16 @@ export class SessionManager {
     projectId: string,
     sessionId: string,
   ): Promise<boolean> {
+    return (await SessionManager.deletePersistedRow(storeDir, projectId, sessionId)) !== undefined;
+  }
+
+  /** `deletePersisted`, answering with what it removed so a caller can reclaim
+   *  what the row owned outside sessions.json. */
+  static async deletePersistedRow(
+    storeDir: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<{ id: string; forkHandoff?: PersistedForkHandoff } | undefined> {
     const path = join(storeDir, "agents", projectId, "sessions.json");
     // The read and the write are one transaction: two deletes on the same cold
     // project overlap otherwise, and the second republishes the set it read
@@ -883,14 +972,26 @@ export class SessionManager {
       try {
         raw = await readFile(path, "utf8");
       } catch {
-        return false; // missing/unreadable → nothing to delete
+        return undefined; // missing/unreadable → nothing to delete
       }
       const entries = parsePersistedContent(raw);
-      const next = entries.filter((e) => e.id !== sessionId);
-      if (next.length === entries.length) return false; // id not present
-      writePersistedAtomic(path, next);
-      return true;
+      const removed = entries.find((e) => e.id === sessionId);
+      if (!removed) return undefined; // id not present
+      writePersistedAtomic(path, entries.filter((e) => e.id !== sessionId));
+      return removed;
     });
+  }
+
+  /** Removes every handoff file a project's rows own, for a project being
+   *  forgotten: the staging dirs die with the store, but the copies in the
+   *  checkouts do not, and nothing can name them once sessions.json is gone. */
+  static async removePersistedHandoffs(storeDir: string, projectId: string): Promise<void> {
+    let raw: string | null = null;
+    try { raw = await readFile(join(storeDir, "agents", projectId, "sessions.json"), "utf8"); }
+    catch { return; }
+    for (const row of parsePersistedContent(raw)) {
+      if (row.forkHandoff) await removeHandoff(undefined, row.forkHandoff.root, row.id);
+    }
   }
 
   get(id: string): SessionEntry | undefined {
@@ -1087,7 +1188,21 @@ export class SessionManager {
   }
 
   /** Create a fresh registry-agent conversation from bridge-owned context. */
-  async fork(sourceSessionId: string, workspace: ForkWorkspace): Promise<SessionEntry> {
+  async fork(sourceSessionId: string, workspace: ForkWorkspace, targetTool?: string): Promise<SessionEntry> {
+    const staged: { id?: string } = {};
+    try {
+      return await this.forkCore(sourceSessionId, workspace, staged, targetTool);
+    } catch (error) {
+      // A fork that refuses must leave nothing behind, and the staging dir is
+      // the one durable thing it may already have written.
+      if (staged.id) await removeHandoff(this.dir, undefined, staged.id);
+      throw error;
+    } finally {
+      if (staged.id) this.stagingInFlight.delete(staged.id);
+    }
+  }
+
+  private async forkCore(sourceSessionId: string, workspace: ForkWorkspace, staged: { id?: string }, targetTool?: string): Promise<SessionEntry> {
     const source = this.entries.get(sourceSessionId);
     if (!source) throw new Error(`session not found: ${sourceSessionId}`);
     if (source.command) throw new Error("Custom-command sessions cannot be forked.");
@@ -1099,27 +1214,83 @@ export class SessionManager {
     const tool = source.tool ?? sourceAgentSpec.name;
     const adapter = (this.opts.agentRuntime ?? agentRuntime).get(tool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
-    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
+    const runtime = this.opts.agentRuntime ?? agentRuntime;
+    const target = targetTool ?? tool;
+    // Before any staging, so an unknown key leaves nothing durable.
+    if (!runtime.get(target)) throw new Error(`Antgrid does not know the agent ${target}.`);
+    // A native fork resumes the source agent's own store, which no other agent can read.
+    const nativeSource = target === tool && source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
+      && (workspace === "current" || !adapter.fork.nativeForkKeepsWorkspace)
       ? capturedSourceId : undefined;
-    const transcript = nativeSource
-      ? undefined
-      : await this.captureForkTranscript(source, adapter, sourcePath);
-    if (transcript && Buffer.byteLength(transcript, "utf8") > MAX_FORK_TRANSCRIPT_BYTES) {
-      throw new Error("This conversation is too large to fork. Compact or summarize it first.");
+    // A chat conversation cannot continue in an agent with no chat surface.
+    const mode = source.mode === "chat" && runtime.isChatCapable(target) ? "chat" : "terminal";
+    let approvalPolicy = source.approvalPolicy;
+    try {
+      runtime.resolveApprovalPolicy(target, mode, approvalPolicy);
+      // A target whose bypass also drops the sandbox is wider than a source
+      // that only skipped approvals, and the fork dialog never asks about it.
+      if (approvalPolicy === "bypass"
+        && bypassReach(runtime.get(target)?.approvalPolicies.bypass?.risk) > bypassReach(adapter.approvalPolicies.bypass?.risk)) {
+        approvalPolicy = "default";
+      }
+    } catch {
+      // The target lacks the source's policy; its default is never looser.
+      approvalPolicy = "default";
     }
-
     // Never inherit raw command/args. A fork launches the registry default.
-    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy: source.approvalPolicy });
+    const entry = this.buildEntry(undefined, { tool: target, mode, approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
-    // the user reads that. Assigned here instead of passed to buildEntry so
+    // the user reads that. Assigned instead of passed to buildEntry so
     // `manuallyRenamed` stays false — a derived name is not a name the user
     // chose, and the agent's own conversation title must still win over it.
-    entry.name = this.forkName(source.name);
+    // Taken at the commit, with no await before the row lands: staging can run
+    // for a minute, and two forks of one source staged together would
+    // otherwise both claim "<name> fork".
+    const nameFork = () => { entry.name = this.forkName(source.name); };
     entry.forkedFromSessionId = source.id;
     entry.conversationStart = "fork";
-    entry.forkTranscript = transcript;
     entry.forkSourceSessionId = nativeSource;
+    if (!nativeSource) {
+      // Before the row or any worktree exists, so a refusal here leaves nothing
+      // durable.
+      staged.id = entry.id;
+      this.stagingInFlight.add(entry.id);
+      const scrollback = this.tm.getScrollback(source.id)?.text;
+      // A source that was itself handed off opens with Antgrid's prompt, so its
+      // own transcript no longer holds the task; its handoff recorded it. A
+      // native fork carries its source's conversation, that prompt included, so
+      // the handoff can sit further up the chain.
+      const ancestor = this.handoffAncestor(source);
+      const ancestorPath = ancestor === source ? sourcePath
+        : ancestor && await this.checkoutPathForFork(ancestor).catch(() => undefined);
+      const inheritedTask = ancestor?.forkHandoff && ancestorPath
+        ? await readPredecessorTask({ sessionsDir: this.dir, sourceId: ancestor.id, forkHandoff: ancestor.forkHandoff, checkoutPath: ancestorPath })
+        : undefined;
+      await stageHandoff({
+        sessionsDir: this.dir,
+        projectId: this.opts.projectId,
+        newSessionId: entry.id,
+        source: { id: source.id, name: source.name, tool, agentSessionId: capturedSourceId },
+        adapter,
+        snapshotOpts: {
+          ...this.opts.adapterOptions?.[tool],
+          maxMsgs: 500,
+          projectPath: sourcePath,
+          agentSessionId: capturedSourceId,
+          transcriptPath: source.agentTranscriptPath,
+          sourceCwd: sourceAgentSpec.workingDir ? resolve(sourcePath, sourceAgentSpec.workingDir) : sourcePath,
+          sourceCreatedAt: source.createdAt,
+        },
+        // Stripped here, at the single point every adapter's scrollback fallback
+        // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
+        // mostly CSI/OSC redraw that would read as keys once it is a prompt.
+        scrollback: scrollback ? stripAnsi(scrollback) : undefined,
+        targetTool: target,
+        inheritedTask,
+      });
+      entry.forkHandoff = { state: "staged", sourceTool: tool };
+    }
     if (workspace === "current") {
       return this.withCheckoutMembership(source.checkoutId, async () => {
         // Re-read under the membership lock: a concurrent delete may have
@@ -1130,6 +1301,7 @@ export class SessionManager {
         entry.checkoutKind = liveSource.checkoutKind;
         entry.checkoutBranch = liveSource.checkoutBranch;
         entry.checkoutState = liveSource.checkoutState;
+        nameFork();
         this.entries.set(entry.id, entry);
         try {
           await this.flushNowOrThrow();
@@ -1145,14 +1317,29 @@ export class SessionManager {
 
     return this.createWorktree(
       undefined,
-      { tool, mode: source.mode, approvalPolicy: source.approvalPolicy, isolation: "worktree" },
+      { tool: target, mode, approvalPolicy, isolation: "worktree" },
       entry,
       // A thunk, not a value: an argument expression is evaluated before the
       // call, so resolving HEAD eagerly here would answer "no committed HEAD"
       // for a non-Git project that createWorktree's own preflight names
       // correctly as NOT_GIT_REPOSITORY.
       () => this.committedHead(sourcePath),
+      nameFork,
     );
+  }
+
+  /** The nearest session up `source`'s fork chain whose conversation opened
+   *  with a handoff. Only native forks are walked through: a fork row with no
+   *  handoff and no saved transcript continued its source's own conversation. */
+  private handoffAncestor(source: PersistedEntry): PersistedEntry | undefined {
+    const seen = new Set<string>();
+    for (let row: PersistedEntry | undefined = source; row && !seen.has(row.id); ) {
+      if (row.forkHandoff) return row;
+      if (row.forkTranscript || !row.forkedFromSessionId) return undefined;
+      seen.add(row.id);
+      row = this.entries.get(row.forkedFromSessionId);
+    }
+    return undefined;
   }
 
   private buildEntry(name: string | undefined, spec: SessionLaunchSpec | undefined): PersistedEntry {
@@ -1233,27 +1420,6 @@ export class SessionManager {
     throw new WorktreeError("WORKTREE_CONFLICT", "The source checkout has no committed HEAD to copy.");
   }
 
-  private async captureForkTranscript(source: PersistedEntry, adapter: RegistryAgentSpec, projectPath: string): Promise<string> {
-    const scrollback = this.tm.getScrollback(source.id)?.text;
-    const text = await adapter.fork.handoff({
-      ...this.opts.adapterOptions?.[source.tool ?? this.agentSpec.name],
-      maxMsgs: 500,
-      projectPath,
-      agentSessionId: source.agentSessionId,
-      transcriptPath: source.agentTranscriptPath,
-      // Stripped here, at the single point every adapter's terminal fallback
-      // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
-      // mostly CSI/OSC redraw. It becomes an agent's opening prompt — and for
-      // the no-argv agents it is typed back into a PTY, where those bytes read
-      // as keys.
-      terminalTranscript: scrollback ? stripAnsi(scrollback) : undefined,
-    });
-    if (!text.trim()) {
-      throw new Error("This session has no captured transcript to fork yet.");
-    }
-    return text;
-  }
-
   /**
    * Isolated creation deliberately has no visible session until all host-owned
    * state is usable and durable. The old synchronous shared API remains intact
@@ -1265,6 +1431,8 @@ export class SessionManager {
     spec: SessionLaunchSpec,
     preparedEntry?: PersistedEntry,
     resolveBaseCommit?: () => Promise<string>,
+    /** Runs on the commit's own tick, just before the row lands. */
+    beforeCommit?: () => void,
   ): Promise<SessionEntry> {
     if (!this.opts.worktreeSessionsSupported || !this.opts.worktreeManager) {
       throw new WorktreeError("WORKTREE_UNSUPPORTED", "This bridge cannot isolate sessions yet.");
@@ -1318,6 +1486,7 @@ export class SessionManager {
       const setup = declaresSetup
         ? this.beginSetup(entry.id, true, undefined, policy?.startAgent)
         : undefined;
+      beforeCommit?.();
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
@@ -1601,7 +1770,7 @@ export class SessionManager {
       // remove`, so reading it outside lets a concurrent fork attach to the
       // checkout this call is about to destroy — and lets two member deletes
       // both see a survivor that the first one then removes.
-      return this.withCheckoutMembership(entry.checkoutId, async () => {
+      const deletion = this.withCheckoutMembership(entry.checkoutId, async () => {
         if (!this.entries.has(entry.id)) return false;
         const state = await this.checkoutStore().read();
         if (!state.healthy) throw new Error("Checkout storage could not be read completely");
@@ -1610,6 +1779,12 @@ export class SessionManager {
           ? this.deleteAttachedMemberLocked(entry)
           : this.deleteManaged(entry, options);
       });
+      this.requestedDeletes.set(id, deletion);
+      const settled = () => {
+        if (this.requestedDeletes.get(id) === deletion) this.requestedDeletes.delete(id);
+      };
+      deletion.then(settled, settled);
+      return deletion;
     }
     void Promise.resolve(this.stop(id)).catch((error) => log.warn("deleted session cleanup failed: %s", error));
     this.dropSession(id);
@@ -1628,6 +1803,8 @@ export class SessionManager {
    *  exit lands: `forget` tombstones a still-live terminal so the exit cannot
    *  re-create the rows it just dropped. */
   private dropSession(id: string): void {
+    const dropped = this.entries.get(id);
+    if (dropped?.forkHandoff || this.materializing.has(id)) this.releaseHandoff(dropped, id);
     this.hookSessionIds.add(id);
     this.tm.forget(id);
     this.entries.delete(id);
@@ -1636,6 +1813,50 @@ export class SessionManager {
     this.resumableCache.delete(id);
     this.awaitingResumedIdentity.delete(id);
     this.setups.delete(id);
+    this.stopEpochs.delete(id);
+  }
+
+  /** Reclaims a dropped session's handoff files in the background: a delete must
+   *  never wait on, or fail because of, leftover files. It does wait for a
+   *  placement already under way, or that copy would land after the cleanup. */
+  private releaseHandoff(entry: PersistedEntry | undefined, id: string): void {
+    const placing = this.materializing.get(id);
+    const cleanup: Promise<void> = (async () => {
+      await placing?.catch(() => {});
+      await removeHandoff(this.dir, entry?.forkHandoff?.root, id);
+    })().catch((error) => log.warn("handoff cleanup failed: %s", error))
+      .finally(() => this.handoffCleanups.delete(cleanup));
+    this.handoffCleanups.add(cleanup);
+  }
+
+  /** A delete waits out a placement already under way: that copy would
+   *  otherwise finish inside a checkout being removed, and the start that follows
+   *  it would spawn an agent there. Callers guard on `materializing.has` rather
+   *  than awaiting unconditionally: even an empty await yields a turn, and an
+   *  exit delivered in that turn lands before `stopAndAwait` is listening. */
+  private async settlePlacement(id: string): Promise<void> {
+    await this.materializing.get(id)?.catch(() => {});
+  }
+
+  /** Resolves once every handoff cleanup a delete has started has finished. */
+  async settleHandoffCleanup(): Promise<void> {
+    while (this.handoffCleanups.size > 0) await Promise.all([...this.handoffCleanups]);
+  }
+
+  /** Called before a shutdown kills the sessions. Refuses further fork launches
+   *  and waits, bounded, for the handoff placements already under way: one that
+   *  settled later would launch its agent after the kill, and would record where
+   *  its files went only after a forgotten project's sessions.json had been read
+   *  to find them. */
+  async close(timeoutMs = CLOSE_PLACEMENT_WAIT_MS): Promise<void> {
+    this.closed = true;
+    if (this.materializing.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.materializing.values()]),
+      new Promise<void>((settle) => { timer = setTimeout(settle, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
   }
 
   /** Flag a session's delete as in flight and announce it. Emits without
@@ -1673,6 +1894,7 @@ export class SessionManager {
       // WORKTREE_MISSING would — makes that row permanently undeletable.
       this.markDeleting(entry);
       try {
+        if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
         if (!await this.stopAndAwait(entry.id)) throw new Error("The session runtime could not be stopped; deletion was refused.");
         await this.cancelSetupForDelete(entry);
         // Still torn down even though there is no worktree left to unlock: the
@@ -1728,6 +1950,7 @@ export class SessionManager {
       // refusals, which destroy nothing and are still answerable — but before
       // everything that does, because a live setup process holding the checkout
       // as its cwd is what makes `git worktree remove` fail on Windows.
+      if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
       await this.cancelSetupForDelete(entry);
       if (!await this.stopAndAwait(entry.id)) {
         throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
@@ -2359,12 +2582,58 @@ export class SessionManager {
     return new CheckoutStore(this.opts.storeDir, this.opts.projectId);
   }
 
+  /** Managed worktrees and launch cwds below the project hold their own handoff
+   *  copies; a failed removal there is only ever retried if the sweep looks. */
+  private async sweepHandoffFiles(): Promise<void> {
+    let extraRoots: string[] = [];
+    try {
+      extraRoots = (await this.checkoutStore().list()).map((record) => record.path);
+    } catch (err) {
+      log.warn("checkout list unreadable for the handoff sweep: %s", err);
+    }
+    await sweepHandoffs({
+      sessionsDir: this.dir,
+      projectPath: this.projectPath,
+      projectId: this.opts.projectId,
+      rows: this.entries,
+      inFlight: this.stagingInFlight,
+      extraRoots,
+      workingDir: this.agentSpec.workingDir,
+    });
+  }
+
   private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void | Promise<void> {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
     if (entry.archived) throw new Error(`cannot start archived session: ${id}`);
     const cleanup = this.terminalCleanup.get(id);
     if (cleanup) return cleanup.then(() => this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec));
+    if (entry.conversationStart === "fork" && !entry.forkNativeMigrationError
+      && !entry.forkHandoff && !entry.forkTranscript && !entry.forkSourceSessionId) {
+      throw new Error("This fork lost its saved context. Create a new fork from its source.");
+    }
+    // Ahead of every already-running guard below, which all assume the
+    // checkout already holds what the opening prompt points at. A fork saved as
+    // text before file handoffs existed is staged here, from that text.
+    if (entry.forkHandoff?.state === "staged" || (!entry.forkHandoff && entry.forkTranscript)) {
+      // A delete that began while the checkout was resolving must not get files
+      // placed into a workspace it is about to remove.
+      if (this.deleting.has(id)) return;
+      if (this.closed) throw new Error(PLACEMENT_LAUNCH_CANCELLED);
+      const stopEpoch = this.stopEpochs.get(id);
+      const launchCwd = sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath;
+      return this.placeForkHandoff(entry, checkoutPath, launchCwd, sessionAgentSpec.name).then(async () => {
+        // A delete asked for while the files were moving decides first; one its
+        // preflight refuses leaves the session to launch as normal.
+        await this.requestedDeletes.get(id)?.catch(() => {});
+        // Deleted while the files were moving: nothing is left to start.
+        if (this.entries.get(id) !== entry || this.deleting.has(id)) return;
+        // Stopped, or torn down, while they were moving: the placement stands
+        // and a later start launches from it, but this one does not.
+        if (this.closed || this.stopEpochs.get(id) !== stopEpoch) throw new Error(PLACEMENT_LAUNCH_CANCELLED);
+        return this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec);
+      });
+    }
     if (entry.mode === "chat") {
       // Chat sessions have no PTY. Delegate to the structured manager; the
       // persisted agentSessionId (claude session / codex threadId / opencode
@@ -2475,7 +2744,7 @@ export class SessionManager {
         ? { kind: "fork" as const, sourceSessionId: entry.forkSourceSessionId }
         : resumeId ? { kind: "resume" as const, sessionId: resumeId } : { kind: "fresh" as const },
       initialPrompt: launchPrompt,
-      promptKind: entry.forkTranscript ? "fork-handoff" as const : "initial" as const,
+      promptKind: entry.forkHandoff && entry.conversationStart === "fork" ? "fork-handoff" as const : "initial" as const,
       approvalPolicy: entry.approvalPolicy,
       storeDir: this.opts.storeDir,
       adapterOptions: this.opts.adapterOptions?.[tool],
@@ -2489,7 +2758,9 @@ export class SessionManager {
       if (launch.dispose) scope.registerCleanup(launch.dispose);
       return launch;
     };
-    const dispatch = (launch: PreparedTerminalLaunch): void | Promise<void> => {
+    const dispatch = (prepared: PreparedTerminalLaunch): void | Promise<void> => {
+      // Replaced up front so the delivery, readiness and scheduled checks below all see the typed-prompt launch.
+      const launch = typeUncarriablePrompt(prepared, tool);
       if (launch.promptDelivery === "adapter" && !launch.deliverPrompt) throw new Error("Adapter prompt delivery requires a delivery operation");
       if (controller.signal.aborted || this.entries.get(id) !== entry || entry.archived || entry.mode !== "terminal" || entry.checkoutId !== launchCheckoutId) {
         const cleanup = this.releaseTerminalPreparation(id);
@@ -2518,6 +2789,20 @@ export class SessionManager {
           throw error;
         }
       }
+      if (launch.createNativeFork) {
+        if (!this.awaitingNativeForkIdentity(entry)) throw new Error("Native fork preparation requires a pending fork.");
+        return scope.track(launch.createNativeFork()).then(({ nativeId, launch: resumedLaunch }) => {
+          ownLaunch(resumedLaunch);
+          if (controller.signal.aborted || this.entries.get(id) !== entry) throw new Error("Terminal launch cancelled during native fork.");
+          if (!nativeId || nativeId === entry.forkSourceSessionId || resumedLaunch.createNativeFork || !resumedLaunch.resumed) {
+            throw new Error("The provider did not return an independent resumable fork.");
+          }
+          if (!this.setAgentSession(id, nativeId)) throw new Error("The provider fork identity could not be saved.");
+          // A PTY failure must retry the known fork, never clone its source again.
+          writePersistedAtomic(this.path, Array.from(this.entries.values()));
+          return dispatch(resumedLaunch);
+        });
+      }
       this.noteConversationStart(entry, launch.resumed);
       const notificationsInjected = launch.observation ?? launch.notificationsInjected;
       // A fresh launch is not bound by the last one's verdict.
@@ -2526,6 +2811,7 @@ export class SessionManager {
       this.handlerAvailabilities.set(id, launch.observation?.handler === false
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
+      const runtimeSpec = (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2558,7 +2844,8 @@ export class SessionManager {
           hookAliveProbeAgent: (launch.observation?.hookAlive ?? injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name))
             ? entry.tool ?? sessionAgentSpec.name
             : undefined,
-          gracefulAsk: (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
+          gracefulAsk: runtimeSpec?.gracefulExit,
+          startupPrompts: runtimeSpec?.startupPrompts,
         });
         const deliver = async () => {
           const terminal = {
@@ -2641,6 +2928,7 @@ export class SessionManager {
     // under a message saying their workspace is being deleted.
     this.markDeleting(entry, null);
     try {
+      if (this.materializing.has(entry.id)) await this.settlePlacement(entry.id);
       // Checked, as deleteManaged does: dropSession() tombstones the terminal,
       // so forgetting a member whose agent never died leaves that process alive
       // inside the shared worktree with no row and nothing able to kill it.
@@ -2679,19 +2967,78 @@ export class SessionManager {
     }
   }
 
+  private placeForkHandoff(entry: PersistedEntry, checkoutPath: string, launchCwd: string, defaultTool: string): Promise<void> {
+    const existing = this.materializing.get(entry.id);
+    if (existing) return existing;
+    const placement = (async () => {
+      try {
+        if (!entry.forkHandoff && entry.forkTranscript) await this.stageLegacyFork(entry, defaultTool);
+        const placed = await materializeHandoff(this.dir, checkoutPath, launchCwd, entry.id);
+        if (this.entries.get(entry.id) !== entry) {
+          await removeHandoff(this.dir, placed.root, entry.id);
+          return;
+        }
+        const staged = entry.forkHandoff;
+        entry.forkHandoff = { sourceTool: staged?.sourceTool ?? entry.tool ?? "", state: "materialized", root: placed.root };
+        try {
+          await this.flushNowOrThrow();
+        } catch (error) {
+          // Not durable: leave it staged so a retry places it again, but keep
+          // where the files are so a delete before that retry can find them.
+          entry.forkHandoff = staged && { ...staged, root: placed.root };
+          throw error;
+        }
+      } catch (error) {
+        const root = (error as { handoffRoot?: string }).handoffRoot;
+        if (root && entry.forkHandoff?.state === "staged" && !entry.forkHandoff.root) {
+          entry.forkHandoff = { ...entry.forkHandoff, root };
+        }
+        throw new Error(`Could not place the handoff files in the workspace: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        this.materializing.delete(entry.id);
+      }
+    })();
+    this.materializing.set(entry.id, placement);
+    return placement;
+  }
+
+  /** Stages the saved text of a fork created before file handoffs existed. Only
+   *  that text: the source has moved on since and is never read again. */
+  private async stageLegacyFork(entry: PersistedEntry, defaultTool: string): Promise<void> {
+    const sourceTool = entry.tool ?? defaultTool;
+    this.stagingInFlight.add(entry.id);
+    try {
+      await stageLegacyText({
+        sessionsDir: this.dir,
+        projectId: this.opts.projectId,
+        newSessionId: entry.id,
+        text: entry.forkTranscript!,
+        sourceTool,
+        sourceLabel: (this.opts.agentRuntime ?? agentRuntime).get(sourceTool)?.label ?? sourceTool,
+        sourceSessionId: entry.forkedFromSessionId,
+      });
+    } finally {
+      this.stagingInFlight.delete(entry.id);
+    }
+    entry.forkHandoff = { state: "staged", sourceTool };
+  }
+
   /** Returns [initialPrompt] UNCHANGED for a non-fork start — `undefined` must
    *  stay `undefined`, not collapse to `""`: it is what every existing caller
    *  passes to `onStartChat` for "no opening prompt". */
   private forkInitialPrompt(entry: PersistedEntry, initialPrompt?: string): string | undefined {
-    if (!entry.forkTranscript) return initialPrompt;
-    const extra = initialPrompt?.trim();
-    return [
-      "Start a fresh conversation using this captured transcript as context. Continue the work; do not resume its native session.",
-      "<antgrid-fork-transcript>",
-      entry.forkTranscript,
-      "</antgrid-fork-transcript>",
-      extra,
-    ].filter((part): part is string => !!part).join("\n\n");
+    if (!entry.forkHandoff || entry.conversationStart !== "fork") return initialPrompt;
+    const placed = entry.forkHandoff.state === "materialized" && entry.forkHandoff.root
+      ? readPlacedHandoff(entry.forkHandoff.root, entry.id)
+      : undefined;
+    if (!placed) throw new Error("This fork's handoff files are missing. Create a new fork from its source.");
+    const sourceTool = entry.forkHandoff.sourceTool;
+    return handoffPrompt({
+      sourceLabel: (this.opts.agentRuntime ?? agentRuntime).get(sourceTool)?.label ?? sourceTool,
+      excerptPath: join(placed.dir, EXCERPT_FILE),
+      rawPath: join(placed.dir, placed.primary),
+      extra: initialPrompt,
+    });
   }
 
   private completeForkLaunch(entry: PersistedEntry): void {
@@ -2715,6 +3062,7 @@ export class SessionManager {
    *  slot on another runtime can wait it out (see stopAndAwait); every existing
    *  caller ignores it, exactly as before. */
   stop(id: string): void | Promise<void> {
+    this.stopEpochs.set(id, (this.stopEpochs.get(id) ?? 0) + 1);
     const scheduled = this.scheduledLaunches.get(id);
     if (scheduled && !scheduled.terminal) {
       scheduled.cancelled = true;
@@ -2983,6 +3331,7 @@ export class SessionManager {
   // withholding it leaves a session started on another device rendering empty.
   private toWire(e: PersistedEntry): SessionEntry {
     const memberCount = this.countMembersForCheckout(e.checkoutId);
+    const forkSupported = !e.command && !!(this.opts.agentRuntime ?? agentRuntime).get(e.tool ?? this.agentSpec.name);
     return {
       id: e.id,
       name: e.name,
@@ -2993,7 +3342,9 @@ export class SessionManager {
       deleting: this.deleting.has(e.id),
       tool: e.tool,
       command: e.command,
-      forkSupported: !e.command && !!(this.opts.agentRuntime ?? agentRuntime).get(e.tool ?? this.agentSpec.name),
+      forkSupported,
+      handoffSupported: forkSupported,
+      ...(forkSupported ? { agentKey: e.tool ?? this.agentSpec.name } : {}),
       forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,
@@ -3160,12 +3511,16 @@ export class SessionManager {
 
   private load(): void {
     let raw: string | null = null;
+    let readable = true;
     try {
       if (existsSync(this.path)) raw = readFileSync(this.path, "utf8");
     } catch (err) {
       log.warn("sessions.json unreadable, treating as empty: %s", err);
+      readable = false;
     }
-    for (const e of parsePersistedContent(raw)) this.entries.set(e.id, e);
+    const parsed = parsePersistedDetailed(raw);
+    this.loadedCompletely = readable && parsed.complete;
+    for (const e of parsed.entries) this.entries.set(e.id, e);
   }
 
   private scheduleFlush(): void {

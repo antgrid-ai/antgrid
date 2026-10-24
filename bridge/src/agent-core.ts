@@ -14,7 +14,7 @@ import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "agent-core" });
 // A machine's project streams share each physical viewer's terminal budget.
 const terminalConnectionBudgets = new Map<ClientKey, { bytes: number; users: number }>();
-import { TerminalManager } from "./terminal-manager";
+import { TerminalManager, type TerminalSpawnConfig } from "./terminal-manager";
 import { StatusShadowTracker } from "./status-shadow-tracker";
 import { shadowAgent } from "./status-shadow";
 import {
@@ -2582,7 +2582,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const s = sessions;
         // The manager resolves the source session, transcript, native tool and
         // checkout. This handler intentionally forwards no path or native id.
-        void s.fork(msg.sourceSessionId, msg.workspace).then(
+        void s.fork(msg.sourceSessionId, msg.workspace, msg.targetTool).then(
           (entry) => sendAb(createMessage("session:result", {
             requestId: msg.requestId, ok: true, session: entry, checkoutId: entry.checkoutId,
           })),
@@ -4037,7 +4037,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (diff.servicesModified.some((candidate) => candidate.name === changed.name)) {
           manager.kill(terminalId);
         }
-        manager.spawn({
+        spawnService({
           terminalId,
           name: service.name,
           command: service.command,
@@ -4113,12 +4113,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     startGitAutofetch(runtime);
   }
 
+  /** One service whose launch throws (a command Windows cannot carry, a binary
+   *  that will not start) must not stop the services after it or project setup,
+   *  nor, from a config-watch timer, reach the uncaught-exception shutdown. */
+  function spawnService(service: TerminalSpawnConfig): void {
+    try {
+      manager?.spawn(service);
+    } catch (error) {
+      log.warn(`Service "${service.name}" could not start: %s`, error);
+    }
+  }
+
   /** Spawn the checkout's `services` block. Manual-start slots stay listed in
    *  status rather than running, same as the main project's own pass. */
   function startCheckoutServices(runtime: CheckoutRuntime): void {
     for (const service of runtime.config.services ?? []) {
       if (service.autoStart === false) continue;
-      manager?.spawn({
+      spawnService({
         terminalId: internalTerminalId(runtime, service.name),
         name: service.name,
         command: service.command,
@@ -4793,7 +4804,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Start services (respecting autoStart; manual-start ones stay listed in status)
     for (const s of getServices()) {
       if (s.autoStart === false) continue;
-      manager.spawn({
+      spawnService({
         terminalId: s.name,
         name: s.name,
         command: s.command,
@@ -4822,7 +4833,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         for (const svc of diff.servicesAdded) {
           const def = result.config.services?.find((s) => s.name === svc.name);
           if (!def || !manager) continue;
-          manager.spawn({
+          spawnService({
             terminalId: def.name,
             name: def.name,
             command: def.command,
@@ -4836,7 +4847,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           const def = result.config.services?.find((s) => s.name === svc.name);
           if (!def || !manager) continue;
           manager.kill(def.name);
-          manager.spawn({
+          spawnService({
             terminalId: def.name,
             name: def.name,
             command: def.command,
@@ -5253,6 +5264,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }).catch((err) => log.error("Handler event failed: %s", err));
     },
     onSessionTitle: async (body) => {
+      // A hook installed machine-wide (Kimi's SessionStart) also fires for an
+      // agent that another agent's shell tool runs inside this PTY, carrying the
+      // slot's inherited ids. That conversation is not the slot's: its id would
+      // be resumed on the next Start and its prompt would name the slot.
+      const runAgent = body.runId ? sessions?.liveRunAgent(body.terminalId, body.runId) : undefined;
+      if (body.agent && runAgent && agentSpec(runAgent) && BY_HOOK_NAME[body.agent] !== runAgent) return;
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
@@ -5595,6 +5612,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // nulls `manager` — sequenced after it this could only ever see an empty
       // map, so no session was ever asked to exit on its own and the line below
       // reported 0 for a machine that had just killed a dozen agents.
+      // Ahead of the kill: a fork whose handoff files are still being placed
+      // would otherwise launch its agent once the kill had passed it by.
+      await sessions?.close();
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
       // Awaited: it ends in a `killChildTree` per running `command:run` child,
       // and those are spawned through a shell with no job around them — issuing

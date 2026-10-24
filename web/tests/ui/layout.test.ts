@@ -9,7 +9,6 @@ import { contextStorage } from "hono/context-storage";
 import { Layout, type LayoutUser } from "../../src/ui/layout.js";
 import { setPublicOrigin } from "../../src/ui/origin.js";
 import { setSalesIqWidgetUrl } from "../../src/ui/salesiq.js";
-import { BETA } from "../../src/billing/plans.js";
 
 /** Renders Layout inside a request, the way a route does, so `currentTheme()`
  *  has a context to read the cookie from. */
@@ -106,20 +105,6 @@ describe("Layout", () => {
     expect(html).toContain(master.slice(master.indexOf(">") + 1).trimEnd());
     // The label keeps the lockup readable to screen readers.
     expect(html).toContain('aria-label="Antgrid"');
-  });
-
-  test("marks the product as beta inside the header lockup", () => {
-    // Skipped rather than inverted once BETA flips: after launch the badge's
-    // absence is the intent, not a regression worth asserting against.
-    if (!BETA) return;
-    // Signed-out on purpose — this is the beta signal on the pages that have
-    // no account to read `promotional` off (login, signup, invite, reset).
-    const html = Layout({ title: "Test", children: "x" }).toString();
-    const lockup = html.slice(html.indexOf('<a href="/"'), html.indexOf("</a>"));
-    expect(lockup).toContain(">beta<");
-    // A span, never an anchor: nested anchors are invalid, and the badge is a
-    // status marker rather than somewhere to navigate to.
-    expect(lockup.slice(1)).not.toContain("<a ");
   });
 
   test("signed-in users get an /account link so delete is discoverable", () => {

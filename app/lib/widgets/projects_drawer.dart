@@ -245,7 +245,6 @@ class _NavActions extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final surface = ref.watch(workbenchSurfaceProvider);
-    final schedulerEnabled = !ref.watch(demoModeProvider);
     void openScheduler() {
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -327,7 +326,6 @@ class _NavActions extends ConsumerWidget {
               label: 'Scheduler',
               icon: AbIcons.calendar,
               selected: surface == WorkbenchSurface.scheduler,
-              enabled: schedulerEnabled,
               onTap: openScheduler,
             ),
           ],

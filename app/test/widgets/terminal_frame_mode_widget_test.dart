@@ -33,6 +33,7 @@ import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart'
     show selectedTargetProvider;
 import 'package:antgrid/providers/client_id.dart';
@@ -159,7 +160,7 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
     cachedSessionsStore: cache,
     onClose: () async => await transport.dispose(),
   );
-  final service = TerminalService.fromSession(session);
+  final service = session.servicesForCheckout('main').terminalService;
   if (inputReady) {
     service.setDisplayInterest('input-fixture', 't1');
     transport.emit('agent:status', {
@@ -208,7 +209,6 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   }
 
   registerTearDown(() async {
-    await service.dispose();
     await session.close();
   });
   return (service: service, transport: transport);
@@ -354,11 +354,14 @@ Widget _pane(TerminalTab tab, TerminalService service, {double width = 300}) =>
 Widget _wrap(
   Widget child, {
   required Stream<TerminalState> terminalState,
+  ProjectSession? session,
   TerminalTab? agentTab,
   Key? key,
 }) => ProviderScope(
   key: key,
   overrides: [
+    if (session != null)
+      projectSessionProvider(session.projectId).overrideWith((ref) => session),
     clientIdProvider.overrideWith((ref) => Future.value(_myClientId)),
     agentTerminalProvider.overrideWith((ref) => agentTab),
     appSettingsServiceProvider.overrideWith(
@@ -2181,6 +2184,7 @@ void main() {
           _wrap(
             _pane(tab, h.service),
             terminalState: Stream.value(_stateWith()),
+            session: h.service.session,
           ),
         );
         await tester.pump();
@@ -2198,6 +2202,10 @@ void main() {
                 ),
           );
           await tester.pump();
+          // Readiness awaits stream cancellation, which completes outside the
+          // widget binding's fake async zone.
+          await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+          expect(h.transport.uploadCalls, isNotEmpty);
           final exchange = h.transport.uploadCalls.last;
           if (openReaderMidUpload) {
             await tester.tap(_historyScrollbar);

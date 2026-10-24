@@ -61,6 +61,47 @@ void main() {
     expect(identical(a, a2), isFalse, reason: 'released → rebuilt fresh');
   });
 
+  test('awaitRelease waits out a release in flight, and a later joiner of that '
+      'release leaves the connection taken after it in place', () async {
+    final mgr = MachineConnectionManager(crypto: CryptoService());
+    addTearDown(mgr.disposeAll);
+    final old = mgr.connectionFor('uuid');
+    final first = mgr.release('uuid');
+    expect(
+      mgr.peek('uuid'),
+      same(old),
+      reason: 'the slot still holds the disposing connection',
+    );
+
+    MachineConnection? fresh;
+    final waited = mgr
+        .awaitRelease('uuid.proj')
+        .then((_) => fresh = mgr.connectionFor('uuid'));
+    // Joins the same teardown after the waiter, as a reaper pass re-releasing a
+    // machine still tearing down does: its slot check runs once the waiter has
+    // already taken a fresh connection.
+    final second = mgr.release('uuid');
+    await waited;
+
+    expect(fresh, isNot(same(old)));
+    expect(fresh!.isDisposed, isFalse);
+    expect(await first, NativeStopResult.stopped);
+    expect(await second, NativeStopResult.stopped);
+    expect(mgr.peek('uuid'), same(fresh));
+  });
+
+  test('awaitRelease leaves an empty or live slot as it is', () async {
+    final mgr = MachineConnectionManager(crypto: CryptoService());
+    addTearDown(mgr.disposeAll);
+    await mgr.awaitRelease('uuid');
+    expect(mgr.peek('uuid'), isNull);
+
+    final live = mgr.connectionFor('uuid');
+    await mgr.awaitRelease('uuid');
+    expect(mgr.peek('uuid'), same(live));
+    expect(live.isDisposed, isFalse);
+  });
+
   test('two DIFFERENT projects on one machine resolve to the identical '
       'connection — the provider-wiring half of "one MachineSession per '
       'machine" (the session/RelayService itself is proven at '

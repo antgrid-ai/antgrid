@@ -36,6 +36,7 @@ import '../keyboard/app_command_registry.dart';
 import '../keyboard/app_shortcuts.dart';
 import '../util/detached.dart';
 import '../widgets/file_search_bar.dart';
+import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
 /// The main file explorer screen with an inline search panel that can be
 /// toggled via a search icon. When search is inactive, shows the file tree.
@@ -244,8 +245,10 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
           onBack: _backFromSearch,
           child: treeStateAsync.when(
             loading: () => const AbLoading(message: 'loading files...'),
-            error: (error, _) =>
-                AbEmptyState.error(title: 'Error loading files: $error'),
+            error: (error, _) => AbEmptyState.error(
+              title: "Couldn't load files",
+              subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
+            ),
             data: (state) => _FileExplorerBody(
               state: state,
               fileService: fileService,
@@ -456,7 +459,10 @@ class _FileExplorerBody extends ConsumerWidget {
 
     return stateAsync.when(
       loading: () => const AbLoading(),
-      error: (error, _) => Center(child: Text('Error: $error')),
+      error: (error, _) => AbEmptyState.error(
+        title: 'Search failed',
+        subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
+      ),
       data: (searchState) => _SearchPanel(
         key: searchPanelKey,
         searchState: searchState,

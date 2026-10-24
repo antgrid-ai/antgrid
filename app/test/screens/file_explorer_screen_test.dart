@@ -163,7 +163,10 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.textContaining('Error loading files'), findsOneWidget);
+      expect(find.text("Couldn't load files"), findsOneWidget);
+      // The error object is not copy; only errors that carry a message for
+      // the user are shown.
+      expect(find.textContaining('Connection failed'), findsNothing);
     });
 
     testWidgets('shows empty state when root is null', (tester) async {

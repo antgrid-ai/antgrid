@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { logger } from "../../host";
+import { runningUnderTest } from "../test-runner";
 
 const log = logger.child({ component: "agent-launch" });
 
@@ -12,6 +13,9 @@ let helpText: string | null | undefined;
 function readHelp(): string | null {
   if (helpText !== undefined) return helpText;
   helpText = null;
+  // The developer's own cursor-agent writes its ~/.cursor/cli-config.json even
+  // when asked only for `--help`; tests set the text with overrideCursorHelp.
+  if (runningUnderTest()) return helpText;
   try {
     const bin = Bun.which("cursor-agent");
     if (bin) {

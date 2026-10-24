@@ -418,6 +418,16 @@ class SessionEntry {
   final String? command;
   final bool forkSupported;
 
+  /// True when this bridge honours `targetTool` on `session:fork`. The version
+  /// gate: an older bridge's schema strips the key and would silently fork into
+  /// the SAME agent, so the app must never send it unless this is true.
+  final bool handoffSupported;
+
+  /// The resolved registry key of this session's agent, present only alongside
+  /// [handoffSupported]. [tool] is set only when it overrode the project's
+  /// agent, so it cannot tell a same-agent pick from a cross-agent one.
+  final String? agentKey;
+
   /// The session this one was forked from, or null for every session that was
   /// not. Provenance, not a link: the source may since have been renamed,
   /// archived or deleted, so nothing may resolve it and render its name.
@@ -467,6 +477,8 @@ class SessionEntry {
     this.tool,
     this.command,
     this.forkSupported = false,
+    this.handoffSupported = false,
+    this.agentKey,
     this.forkedFromSessionId,
     this.args,
     this.mode = 'terminal',
@@ -496,6 +508,8 @@ class SessionEntry {
     if (tool != null) 'tool': tool,
     if (command != null) 'command': command,
     if (forkSupported) 'forkSupported': true,
+    if (handoffSupported) 'handoffSupported': true,
+    if (handoffSupported && agentKey != null) 'agentKey': agentKey,
     if (forkedFromSessionId != null) 'forkedFromSessionId': forkedFromSessionId,
     if (args != null) 'args': args,
     'mode': mode,
@@ -529,6 +543,8 @@ class SessionEntry {
     tool: j['tool'] as String?,
     command: j['command'] as String?,
     forkSupported: j['forkSupported'] as bool? ?? false,
+    handoffSupported: j['handoffSupported'] as bool? ?? false,
+    agentKey: j['agentKey'] as String?,
     forkedFromSessionId: j['forkedFromSessionId'] as String?,
     args: j['args'] as String?,
     mode: j['mode'] as String? ?? 'terminal',
@@ -584,6 +600,8 @@ class SessionEntry {
     tool: tool,
     command: command,
     forkSupported: forkSupported,
+    handoffSupported: handoffSupported,
+    agentKey: agentKey,
     forkedFromSessionId: forkedFromSessionId,
     args: args,
     mode: mode,
@@ -614,6 +632,8 @@ class SessionEntry {
           other.tool == tool &&
           other.command == command &&
           other.forkSupported == forkSupported &&
+          other.handoffSupported == handoffSupported &&
+          other.agentKey == agentKey &&
           other.forkedFromSessionId == forkedFromSessionId &&
           other.args == args &&
           other.mode == mode &&
@@ -642,6 +662,8 @@ class SessionEntry {
     tool,
     command,
     forkSupported,
+    handoffSupported,
+    agentKey,
     forkedFromSessionId,
     args,
     mode,

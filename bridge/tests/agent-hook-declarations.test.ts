@@ -38,9 +38,9 @@ describe("hook profile declarations", () => {
       // Posted by the bare-`node` hook script agy's global hooks.json runs, so
       // this list is not derivable from its (empty) `events` either.
       antigravity: ["/session-title", "/notify"],
-      kilo: null,
-      kimi: null,
-      "mistral-vibe": null,
+      kilo: ["/session-title"],
+      kimi: ["/session-title"],
+      "mistral-vibe": ["/session-title"],
     };
     for (const key of AGENT_KEYS) {
       expect(AGENTS[key].hooks?.posts ?? null).toEqual(expected[key] as never);

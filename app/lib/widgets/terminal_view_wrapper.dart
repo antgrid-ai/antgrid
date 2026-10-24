@@ -28,9 +28,11 @@ import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
 import '../providers/terminal_compose_drafts.dart';
+import '../providers/upload_target.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
+import '../services/upload_service.dart';
 import '../services/terminal_clipboard_coordinator.dart';
 import '../util/detached.dart';
 import '../util/wrapped_url.dart';
@@ -832,6 +834,35 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   /// focused-* provider: the file has to be staged into the tree the terminal
   /// writes to, and focus can move during a multi-second upload.
   late final TerminalAttachmentUploader _uploader;
+  AbToaster? _attachmentToaster;
+  UploadTarget? _pickerTarget;
+  String? _pickerTerminalId;
+
+  Future<void> _pickAndUpload() async {
+    _attachmentToaster = AbToaster.maybeOf(context);
+    _pickerTarget = UploadTarget(
+      _container,
+      widget.terminalService.session.projectId,
+      widget.terminalService.checkoutId,
+    );
+    _pickerTerminalId = widget.tab.terminalId;
+    final uploader = _uploader;
+    final toaster = _attachmentToaster;
+    try {
+      await uploader.keepAliveDuring(
+        () => runFilePick(
+          pick: pickUploadFile,
+          onPicked: (picked) =>
+              uploader.attach(bytes: picked.bytes, fileName: picked.name),
+          onError: (message) =>
+              toaster?.show(AbToast(icon: AbIcons.warning, title: message)),
+        ),
+      );
+    } finally {
+      _pickerTarget = null;
+      _pickerTerminalId = null;
+    }
+  }
 
   @override
   void initState() {
@@ -843,14 +874,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       transformInput: _transformInput,
       onGuestPointer: _onGuestPointer,
     );
+    UploadService? activeUploadService;
+    String? uploadTerminalId;
     _uploader = TerminalAttachmentUploader(
-      // `existingServicesForCheckout`, not `servicesForCheckout` — the latter
-      // creates and broadcasts a bundle as a side effect.
       resolveUpload: () {
-        final service = widget.terminalService.session
-            .existingServicesForCheckout(widget.terminalService.checkoutId)
-            ?.uploadService;
-        if (service == null) return null;
+        final uploadTarget =
+            _pickerTarget ??
+            UploadTarget(
+              _container,
+              widget.terminalService.session.projectId,
+              widget.terminalService.checkoutId,
+            );
+        uploadTerminalId = _pickerTerminalId ?? widget.tab.terminalId;
         // Adapted rather than torn off: the terminal types the absolute path
         // and nothing else, while the rest of [UploadResult] exists for the
         // preview surface, which has no consumer on this path.
@@ -859,20 +894,46 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
           required bytes,
           mimeType,
           onProgress,
-        }) async => (await service.upload(
-          fileName: fileName,
-          bytes: bytes,
-          mimeType: mimeType,
-          onProgress: onProgress,
-        )).path;
+        }) async {
+          final service = await uploadTarget.ready();
+          activeUploadService = service;
+          return (await service.upload(
+            fileName: fileName,
+            bytes: bytes,
+            mimeType: mimeType,
+            onProgress: onProgress,
+          )).path;
+        };
       },
       // Routed through the shared refusal so a staged upload whose path the
       // transport could not carry says so: the bytes are on the machine but
       // the line the user needs was dropped, not queued, and silence there
       // reads as a finished attach.
-      insert: _typeIntoTerminal,
+      insert: (text) {
+        final service = activeUploadService!;
+        final terminal = service.session
+            .servicesForCheckout(service.checkoutId)
+            .terminalService;
+        if (mounted &&
+            identical(terminal, widget.terminalService) &&
+            uploadTerminalId == widget.tab.terminalId) {
+          if (!_typeIntoTerminal(text)) {
+            throw const UploadException('OFFLINE', 'Terminal disconnected');
+          }
+          return;
+        }
+        if (!terminal.sendInput(uploadTerminalId!, text)) {
+          throw const UploadException('OFFLINE', 'Terminal disconnected');
+        }
+      },
       onError: (message) {
-        if (mounted) showAbToast(context, message);
+        if (mounted) {
+          showAbToast(context, message);
+        } else {
+          _attachmentToaster?.show(
+            AbToast(icon: AbIcons.warning, title: message),
+          );
+        }
       },
     );
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
@@ -2245,6 +2306,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                       children: [
                         if (showAttachButton)
                           TerminalAttachOverlayButton(
+                            onAttach: _pickAndUpload,
                             pick: pickUploadFile,
                             onPicked: (picked) => _dropAttach(
                               bytes: picked.bytes,
@@ -2587,6 +2649,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   /// Keep the key strip mounted so entering history cannot resize the PTY.
   Widget _buildQuickActions(bool uploadBusy) {
     final bar = TerminalQuickActionsBar(
+      onAttach: _pickAndUpload,
       onPick: pickUploadFile,
       onPicked: (picked) =>
           _dropAttach(bytes: picked.bytes, fileName: picked.name),

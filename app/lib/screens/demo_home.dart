@@ -29,12 +29,13 @@ import 'workspace_shell.dart';
 /// switch, minus the control-plane reaper (the demo opens no control plane).
 /// All three arms matter: without the surface branch the drawer's "New Session"
 /// button — its primary action, two taps from the first screen — sets a surface
-/// nothing reads and appears dead; without the no-project branch a surface that
-/// deselects the sample project (a blocking error's Back, which clears
-/// `selectedTargetProvider`) leaves WorkspaceShell on its boot spinner with
-/// nothing left to resolve; and without the [Scaffold] the mouse-desktop layout
-/// is a bare `Row` with no [Material] ancestor, which every `InkWell` in the
-/// drawer throws on.
+/// nothing reads and appears dead, and so does its Scheduler row, because
+/// `WorkspaceShell` has no body for the scheduler surface; without the
+/// no-project branch a surface that deselects the sample project (a blocking
+/// error's Back, which clears `selectedTargetProvider`) leaves WorkspaceShell
+/// on its boot spinner with nothing left to resolve; and without the [Scaffold]
+/// the mouse-desktop layout is a bare `Row` with no [Material] ancestor, which
+/// every `InkWell` in the drawer throws on.
 class DemoHome extends ConsumerStatefulWidget {
   const DemoHome({super.key});
 
@@ -86,7 +87,9 @@ class _DemoHomeState extends ConsumerState<DemoHome> {
       navControllerProvider.select((s) => s.canBack),
     );
     final Widget body;
-    if (id == null || surface == WorkbenchSurface.newSession) {
+    if (id == null ||
+        surface == WorkbenchSurface.newSession ||
+        surface == WorkbenchSurface.scheduler) {
       body = const NewSessionScreen();
       // Landing trap, identical to AppShell's: with no focused project the New
       // Session screen renders while the surface may still read `workspace`, and

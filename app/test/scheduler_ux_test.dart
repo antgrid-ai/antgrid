@@ -7,6 +7,7 @@ import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_inline_banner.dart';
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -367,6 +368,44 @@ void main() {
     expect(
       schedulerTime(DateTime.parse('2026-11-01T06:00:00Z'), 'Moon/Base'),
       contains('UTC (unknown zone: Moon/Base)'),
+    );
+  });
+
+  schedulerTestWidgets(
+    'a phone with no machine explains the scheduler without asking any host',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(820, 1180));
+      final host = Host();
+      final container = ProviderContainer(
+        overrides: [
+          schedulerLocalTimezoneProvider.overrideWith(
+            (ref) async => 'Asia/Kolkata',
+          ),
+          schedulerMachinesProvider.overrideWithValue(const {}),
+          schedulerTargetProvider.overrideWithValue(null),
+          schedulerConnectedProvider.overrideWithValue(false),
+          schedulerRequestProvider.overrideWithValue(host.request),
+        ],
+      );
+      addTearDown(container.dispose);
+      await pumpScreen(tester, container);
+      // Past the 5s poll, which must not ask either.
+      await tester.pump(const Duration(seconds: 6));
+      expect(find.text('Connect a machine to schedule tasks'), findsOneWidget);
+      expect(find.byType(AbInlineBanner), findsNothing);
+      expect(find.textContaining('offline'), findsNothing);
+      expect(host.calls, isEmpty);
+    },
+  );
+
+  test('scheduler errors show the request provider message as written', () {
+    expect(
+      schedulerError(
+        StateError('Machine unavailable. Connect it to manage schedules.'),
+      ),
+      'Machine unavailable. Connect it to manage schedules.',
     );
   });
 

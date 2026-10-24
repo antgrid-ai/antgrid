@@ -333,7 +333,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bridge/dist
-          bun build bridge/src/index.ts --compile \
+          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile \
             --target bun-darwin-arm64 \
             --outfile bridge/dist/antgrid-bridge \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
@@ -347,6 +347,9 @@ jobs:
         run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled db serializer worker
+        run: bun run bridge/scripts/smoke-db-serialize-binary.ts
 
       - name: Build macOS app
         id: build
@@ -780,7 +783,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force bridge/dist | Out-Null
-          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --windows-title 'antgrid' --windows-description 'antgrid bridge' --windows-publisher 'Radha AI Products' --windows-copyright 'Copyright (C) 2026 Radha AI Products. All rights reserved.' --windows-version '${{ needs.version.outputs.msix }}' --windows-icon app/windows/runner/resources/app_icon.ico --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --windows-title 'antgrid' --windows-description 'antgrid bridge' --windows-publisher 'Radha AI Products' --windows-copyright 'Copyright (C) 2026 Radha AI Products. All rights reserved.' --windows-version '${{ needs.version.outputs.msix }}' --windows-icon app/windows/runner/resources/app_icon.ico --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
 
       - name: Smoke test compiled bridge hook
         shell: pwsh
@@ -791,6 +794,10 @@ jobs:
       - name: Smoke test compiled bridge mcp
         shell: pwsh
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge.exe
+
+      - name: Smoke test compiled db serializer worker
+        shell: pwsh
+        run: bun run bridge/scripts/smoke-db-serialize-binary.ts
 
       - name: Build Windows app
         id: build
@@ -1021,7 +1028,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p bridge/dist
-          bun build bridge/src/index.ts --compile \
+          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile \
             --target bun-linux-x64 \
             --outfile bridge/dist/antgrid-bridge \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
@@ -1035,6 +1042,9 @@ jobs:
         run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled db serializer worker
+        run: bun run bridge/scripts/smoke-db-serialize-binary.ts
 
       - name: Build Linux app
         id: build
@@ -1208,11 +1218,3 @@ jobs:
             --notes-file release-notes.md \
             $prerelease \
             $assets
-
-  sync-changelog:
-    needs: publish
-    if: ${{ needs.publish.result == 'success' }}
-    permissions:
-      contents: write
-      pull-requests: write
-    uses: ./.github/workflows/sync-changelog.yml

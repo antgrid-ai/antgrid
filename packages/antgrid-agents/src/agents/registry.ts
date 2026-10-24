@@ -29,6 +29,10 @@ import * as cursorMcp from "./cursor-agent/mcp";
 import * as copilotHooks from "./github-copilot/hooks";
 import * as copilotMcp from "./github-copilot/mcp";
 import * as opencodeHooks from "./opencode/hooks";
+import * as kiloHooks from "./kilo/hooks";
+import * as kimiHooks from "./kimi/hooks";
+import { kiloFork } from "./kilo/fork";
+import { prepareKimiTerminal } from "./kimi/terminal";
 import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
@@ -36,10 +40,15 @@ import { createDriver as createOpencodeDriver } from "./opencode/driver";
 import { isInterruptRecord as isClaudeInterruptRecord, lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { isInterruptRecord as isCodexInterruptRecord, readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
-import { claudeForkHandoff, claudeNativeForkArgs, claudeLegacyForkSource } from "./claude-code/fork";
-import { codexForkHandoff, codexNativeForkArgs, codexLegacyForkSource } from "./codex/fork";
-import { opencodeForkHandoff, opencodeNativeForkArgs, opencodeLegacyForkSource } from "./opencode/fork";
-import { terminalForkHandoff } from "./fork-handoff";
+import { claudeFork } from "./claude-code/fork";
+import { codexFork } from "./codex/fork";
+import { opencodeFork } from "./opencode/fork";
+import { cursorAgentFork } from "./cursor-agent/fork";
+import { copilotFork } from "./github-copilot/fork";
+import { antigravityFork } from "./antigravity/fork";
+import { kimiFork } from "./kimi/fork";
+import { vibeFork } from "./mistral-vibe/fork";
+import * as vibeHooks from "./mistral-vibe/hooks";
 import {
   readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
 } from "./usage-envelope";
@@ -72,12 +81,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
-    fork: {
-      kind: "native-fork",
-      handoff: claudeForkHandoff,
-      nativeForkArgs: claudeNativeForkArgs,
-      decodeLegacyArgs: claudeLegacyForkSource,
-    },
+    fork: claudeFork,
     hooks: claudeHooks,
     mcp: claudeMcp,
     notifyBodyFromTranscript: lastAssistantText,
@@ -99,6 +103,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // `TerminateProcess` nor `SIGKILL` runs. A stale entry auto-disables that
     // renderer MACHINE-WIDE until the file is hand-edited.
     gracefulExit: { keystrokes: [ETX, ETX, ETX] },
+    // Measured against 2.1.304 in an untrusted folder: the trust dialog
+    // highlights "No, exit", so a submit typed into it ends the session.
+    startupPrompts: ["Is this a project you created or one you trust?", "Yes, I trust this folder"],
     // No "sealed" entry: an allowlist naming this agent's read tools is what a
     // sealed argv would have to omit, and `--allowedTools` with an empty value
     // has not been run against the real CLI. Until it is, naming takes the
@@ -180,12 +187,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,
     initialPrompt: (p) => ["--", p],
-    fork: {
-      kind: "native-fork",
-      handoff: codexForkHandoff,
-      nativeForkArgs: codexNativeForkArgs,
-      decodeLegacyArgs: codexLegacyForkSource,
-    },
+    fork: codexFork,
     hooks: codexHooks,
     mcp: codexMcp,
     driver: createCodexDriver,
@@ -196,16 +198,20 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // agent leaves. A single Ctrl+C on an IDLE prompt exits the CLI instead,
     // but that is a different case from a turn to confirm closed.
     transcriptInterrupt: isCodexInterruptRecord,
+    // Measured against 0.163.0 in an untrusted folder: "Trust and continue" is
+    // highlighted, and the decision is saved for the whole repository.
+    startupPrompts: ["Trust this folder?", "Trust and continue"],
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
     //
-    // "gpt-5.4-mini", the lowest-priority tier in this account's own
-    // ~/.codex/models_cache.json, verified against the readonly argv below: the
-    // CLI's own plain-mode banner echoed "model: gpt-5.4-mini" and the call
-    // completed. A dated, account-scoped slug rather than an alias — codex has
-    // none — so it is the likeliest of the declared entries to need re-verifying
-    // first if a title call starts failing for this vendor.
-    cheapNamingModel: "gpt-5.4-mini",
+    // "gpt-5.6-luna", the lowest-priority listed tier in a ChatGPT account's
+    // ~/.codex/models_cache.json (codex-cli 0.163.0), run through the readonly
+    // argv below with --json: exit 0 and a completed turn. An account-scoped
+    // slug rather than an alias — codex has none — so it ages out: its
+    // predecessor gpt-5.4-mini left the catalog and the API answered it 400
+    // "not supported when using Codex with a ChatGPT account". Re-check this
+    // first when the model-calls log shows codex title calls exiting 1.
+    cheapNamingModel: "gpt-5.6-luna",
     headless: {
       readonly: {
         // --skip-git-repo-check because a project need not be a git repo:
@@ -267,12 +273,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--session", id],
     initialPrompt: (p) => ["--prompt", p],
-    fork: {
-      kind: "native-fork",
-      handoff: opencodeForkHandoff,
-      nativeForkArgs: opencodeNativeForkArgs,
-      decodeLegacyArgs: opencodeLegacyForkSource,
-    },
+    fork: opencodeFork,
     hooks: opencodeHooks,
     mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
@@ -347,7 +348,11 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     titleSource: "osc",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
-    fork: terminalForkHandoff("Cursor"),
+    fork: cursorAgentFork,
+    // Shown only when `--trust` is unsupported (see ./cursor-agent/hooks.ts).
+    // Measured against v2026.10.01: the dialog never enables bracketed paste,
+    // so only the readiness timeout would have sent a submit into it.
+    startupPrompts: ["Workspace Trust Required", "Trust this workspace"],
     hooks: cursorHooks,
     mcp: cursorMcp,
     augmentsDefaultSpec: true,
@@ -371,7 +376,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // Copilot's optional-value --resume drops a space-separated value.
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
-    fork: terminalForkHandoff("GitHub Copilot"),
+    fork: copilotFork,
+    // Measured against 1.0.95 in an untrusted folder: "Yes" is highlighted.
+    startupPrompts: ["Confirm folder trust", "Do you trust the files in this folder?"],
     hooks: copilotHooks,
     mcp: copilotMcp,
     augmentsDefaultSpec: true,
@@ -460,8 +467,11 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // `agy --conversation <uuid>` is a global flag, so it goes before any raw
     // args. See `agy --help`.
     resume: (id) => ["--conversation", id],
+    // Measured against 1.4.3 in an untrusted folder: "Yes, I trust this
+    // folder" is highlighted.
+    startupPrompts: ["Do you trust the contents of this project?", "Yes, I trust this folder"],
     initialPrompt: (p) => ["--prompt-interactive", p],
-    fork: terminalForkHandoff("Antigravity"),
+    fork: antigravityFork,
     hooks: antigravityHooks,
     augmentsDefaultSpec: true,
     resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
@@ -479,15 +489,15 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     label: "Kilo",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
-    hookName: null,
+    hookName: "kilo",
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
-    resume: () => [],
-    initialPrompt: () => [],
-    // Kilo documents `--session <id> --fork`, but this integration does not
-    // observe a Kilo-native id. Do not advertise an unreachable native path.
-    fork: terminalForkHandoff("Kilo"),
+    resume: (id) => ["--session", id],
+    initialPrompt: (prompt) => ["--prompt", prompt],
+    fork: kiloFork,
+    augmentsDefaultSpec: true,
+    hooks: kiloHooks,
     mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
@@ -524,27 +534,41 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     label: "Kimi",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
-    hookName: null,
+    hookName: "kimi",
+    hooks: kimiHooks,
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
-    resume: () => [],
+    resume: (id) => ["--session", id],
+    augmentsDefaultSpec: true,
+    prepareTerminal: prepareKimiTerminal,
     initialPrompt: () => [],
-    fork: terminalForkHandoff("Kimi"),
+    fork: kimiFork,
+    // Measured against 2.1.1 in a folder with project MCP config: "Trust this
+    // folder" is highlighted, saved, and starts the project's MCP servers.
+    startupPrompts: ["Trust this folder?"],
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
-  // (DEC 1004-derived), so the default-blur drives it — no injection.
+  // (DEC 1004-derived), so the default-blur drives it; the injected hook only
+  // reports session identity and titles.
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
     defaultApprovalGated: true,
     approvalPolicies: {},
-    hookName: null,
+    hookName: "mistral-vibe",
+    hooks: vibeHooks,
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    // v2.24.5. The trust dialog (shown for a folder with AGENTS.md or .vibe/)
+    // highlights "Trust folder", read from setup/trusted_folders/
+    // trust_folder_dialog.py; first-run setup, measured on screen, takes Enter
+    // to continue. Its welcome line is onboarding-only: the project's own
+    // tests/e2e/test_cli_tui_streaming.py asserts the main TUI never shows it.
+    startupPrompts: ["Trust this folder?", "Trust folder or repository?", "Welcome to Mistral Vibe"],
     // No headless entry, and `-p --agent ask` must not come back as one. Read
     // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated
     // profile ("Requires approval for tool executions"), not a read-only one —
@@ -560,7 +584,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // — no approval is raised, so nothing is denied. Even `--agent plan` falls
     // to the same switch, so the best reach available here is "transcript", and
     // it stays unrun besides (no MISTRAL_API_KEY on any machine measured).
-    fork: terminalForkHandoff("Mistral Vibe"),
+    fork: vibeFork,
   },
 };
 
@@ -637,7 +661,7 @@ export function judgeCapable(tool: string): boolean {
  * Excludes both ends of the spectrum. Claude and codex each declare a real
  * turn-start hook, so guessing there could only be wrong. An agent with no
  * turn-end event — opencode and antigravity, whose out-of-band integrations
- * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —
+ * declare no `bridge hook` events, and kilo/kimi/mistral-vibe —
  * has nothing to close an inferred turn, so theirs would run until the session
  * stopped, which is worse than reading "done".
  *

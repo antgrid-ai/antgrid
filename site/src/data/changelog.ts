@@ -87,6 +87,18 @@ export type Note = {
  * typo'd tag would otherwise cost someone their writing with no error anywhere.
  */
 export const NOTES: Record<string, Note> = {
+  "v1.20746.1035": {
+    lines: [
+      ["fixed", "We've fixed Windows launches that mangled quoted arguments, failed on paths with spaces or cut an opening prompt short. Prompts that won't fit the Windows command line are sent through the terminal after launch."],
+      ["security", "Opening prompts passed through the Windows command shell are now escaped so their punctuation reaches the agent as text instead of running as shell commands."],
+      ["changed", "Extra agent arguments on Windows are now treated as arguments. Shell operators, redirections and dynamic variables such as %CD% stay literal; ordinary environment variables still expand."],
+      ["new", "We've added conversation resume and native forks for Kimi and Kilo terminal sessions. A Kimi fork into a new workspace uses a transcript handoff instead, because Kimi's native fork keeps the original workspace."],
+      ["fixed", "Opening your phone's notification shade or a system dialog no longer resets an otherwise healthy connection when you return."],
+      ["fixed", "File attachments keep their original destination while the file picker is open and wait for the connection to recover before uploading. Rebuilding the terminal view during a reconnect no longer discards the pending picker operation."],
+      ["new", "Markdown links printed in the terminal can now open a preview of files outside the session's workspace, including plans and reports an agent saves elsewhere."],
+    ],
+  },
+
   "v1.20738.1034": {
     lines: [
       ["new", "We've added terminal clipboard sharing. In a remote terminal, you can copy text from the host's clipboard to the device you're using. A setting on that device lets you turn off copies initiated by terminal programs."],

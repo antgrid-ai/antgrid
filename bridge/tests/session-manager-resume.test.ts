@@ -253,6 +253,13 @@ describe("start() resume wiring", () => {
     sm.setAgentSession(s.id, "sess-fold", tp);
     sm.start(s.id);
     const spawn = tm.__spawns.at(-1);
+    if (process.platform === "win32") {
+      // Windows execs with the raw args as argv; the resume pair stays ahead of them.
+      expect(spawn.command).toBe("claude");
+      expect(spawn.invocationKind).toBe("exec");
+      expect(spawn.args.slice(-4)).toEqual(["--resume", "sess-fold", "--model", "opus"]);
+      return;
+    }
     // folded path: everything in `command`, spawnArgs empty
     expect(spawn.command).toContain("--resume sess-fold");
     expect(spawn.command).toContain("--model opus");
@@ -266,9 +273,13 @@ describe("start() resume wiring", () => {
     const s = sm.create("Slot", { tool: "codex", args: "--model gpt-5" });
     sm.setAgentSession(s.id, "uuid-1"); // no path → preflight via codexHome (null → optimistic)
     sm.start(s.id);
-    const cmd: string = tm.__spawns.at(-1).command;
     // codex requires `… <global flags> <user flags> resume <uuid>`: the
     // subcommand must be last, never followed by the user's flags.
+    if (process.platform === "win32") {
+      expect(tm.__spawns.at(-1).args.slice(-4)).toEqual(["--model", "gpt-5", "resume", "uuid-1"]);
+      return;
+    }
+    const cmd: string = tm.__spawns.at(-1).command;
     expect(cmd.indexOf("--model gpt-5")).toBeLessThan(cmd.indexOf("resume uuid-1"));
     expect(cmd.trimEnd().endsWith("resume uuid-1")).toBe(true);
     expect(tm.__spawns.at(-1).args).toEqual([]);

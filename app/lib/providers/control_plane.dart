@@ -268,12 +268,13 @@ Future<void> refreshMachineInventoryAndControlPlanes(
 
       // A machine can sit Connected UNDER a stale cached rejection (a failed
       // eager launch dial that later self-recovered via peer presence).
-      // Releasing it would kill the live peer session and every project stream
+      // Restarting it would kill the live peer session and every project stream
       // riding the socket — and the invalidate + re-read below succeeds on the
       // live connection anyway, so only a not-connected machine is torn down
-      // for its fresh attempt.
+      // for its fresh attempt. Restarted, never released: the machine is still
+      // wanted, and a release would strand every open project bound to it.
       if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
-        await relayManager.release(uuid);
+        await relayManager.restart(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       await refreshControlPlanes(ref, [
@@ -298,8 +299,9 @@ Future<void> refreshMachineInventoryAndControlPlanes(
 ///     the dial materialized the connection before awaitSession threw, so a
 ///     bare peek-skip would strand the cached error forever. A Connected
 ///     machine keeps its socket (the rebuilt read rides the live session); a
-///     stuck ladder is released first so the redial is a genuinely fresh
+///     stuck ladder is restarted first so the redial is a genuinely fresh
 ///     attempt — resume/presence never re-enter a Blocked ladder on their own.
+///     Restarted rather than released, so projects open on it rebind.
 ///
 /// Failures are swallowed per machine: the drawer still renders from cache,
 /// and pull-to-refresh remains the manual retry — the eager targets sit in the
@@ -320,7 +322,7 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
         // isLoading covers a rebuild in flight — Riverpod retains the previous
         // error while refreshing, so hasError alone would misread it as stale.
         if (cached.isLoading || !cached.hasError) return;
-        if (existing.supervisor?.status is! Connected) await mgr.release(uuid);
+        if (existing.supervisor?.status is! Connected) await mgr.restart(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
       try {

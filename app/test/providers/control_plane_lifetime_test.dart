@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:antgrid/connection/peer_connection.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -12,6 +13,7 @@ import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/fixed_peer_connector.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
@@ -374,11 +376,20 @@ void main() {
     );
 
     test(
-      'drops a stale manager connection before retrying a machine',
+      'restarts a stuck connection in place before retrying a machine, so '
+      'projects bound to it can rebind',
       () async {
         final manager = MachineConnectionManager(crypto: CryptoService());
         addTearDown(manager.disposeAll);
-        final stale = manager.connectionFor('M');
+        final stale = manager.connectionFor('M')
+          ..ensureStarted(
+            mechanisms: PeerConnectionMechanisms(
+              peerRuntime: FixedPeerConnector.stub(),
+              machineDeviceId: 'M',
+              resolveCoords: () async => null,
+            ),
+          );
+        final stuckLadder = stale.supervisor;
 
         final c = ProviderContainer(
           overrides: [
@@ -394,7 +405,9 @@ void main() {
           ['M'],
         );
 
-        expect(manager.peek('M'), isNot(same(stale)));
+        expect(manager.peek('M'), same(stale));
+        expect(stale.isDisposed, isFalse);
+        expect(stale.supervisor, isNot(same(stuckLadder)));
       },
     );
 

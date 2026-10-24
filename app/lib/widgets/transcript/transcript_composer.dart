@@ -23,6 +23,7 @@ import '../../providers/composer_handoff.dart';
 import '../../providers/demo_mode.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
+import '../../providers/upload_target.dart';
 import '../../services/agent_session_service.dart';
 import '../../services/clipboard_image_reader.dart';
 import '../../services/file_service.dart';
@@ -221,6 +222,8 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
   }
 
   Future<void> _pickAndAttach() async {
+    final target = _uploadTarget();
+    if (target == null) return;
     final XFile? file;
     try {
       file = await openFile();
@@ -248,7 +251,7 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
       if (mounted) showAbToast(context, uploadErrorText(e, file.name));
       return;
     }
-    await _attachBytes(fileName: file.name, bytes: bytes);
+    await _attachBytes(fileName: file.name, bytes: bytes, target: target);
   }
 
   /// Shared tail of every attach route (file picker, clipboard paste): caps,
@@ -257,6 +260,7 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
     required String fileName,
     required Uint8List bytes,
     String? mimeType,
+    UploadTarget? target,
   }) async {
     if (!mounted) return;
     if (bytes.length > UploadService.kMaxUploadBytes) {
@@ -280,7 +284,7 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
       if (thumbnail == null || !mounted) return;
       setState(() => attachment.thumbnail = thumbnail);
     });
-    await _runUpload(attachment);
+    await _runUpload(attachment, target: target);
   }
 
   /// Takes the one capture parked for the composer (a preview element pick, a
@@ -335,26 +339,29 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
     });
   }
 
-  Future<void> _runUpload(ComposerAttachment attachment) async {
-    final service = serviceWhenReady(ref, uploadServiceProvider);
-    if (service == null) {
-      setState(() => _attachments.remove(attachment));
-      if (mounted) {
-        showAbToast(
-          context,
-          uploadErrorText(
-            const UploadException('OFFLINE', ''),
-            attachment.fileName,
-          ),
-        );
-      }
-      return;
-    }
+  UploadTarget? _uploadTarget() {
+    final projectId = _container.read(selectedRegistrationIdProvider);
+    if (projectId == null) return null;
+    return UploadTarget(
+      _container,
+      projectId,
+      _container.read(focusedCheckoutIdProvider),
+    );
+  }
+
+  Future<void> _runUpload(
+    ComposerAttachment attachment, {
+    UploadTarget? target,
+  }) async {
+    target ??= _uploadTarget();
     setState(() {
       attachment.status = AttachmentStatus.uploading;
       attachment.progress = 0;
     });
     try {
+      if (target == null) throw const UploadException('OFFLINE', '');
+      final service = await target.ready();
+      if (!mounted) return;
       final result = await service.upload(
         fileName: attachment.fileName,
         bytes: attachment.bytes!,

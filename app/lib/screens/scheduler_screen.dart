@@ -29,7 +29,8 @@ import '../models/scheduler.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
-import '../providers/agent_catalog.dart';
+import '../demo/demo_identity.dart';
+import '../providers/demo_mode.dart';
 import '../providers/scheduler.dart';
 import '../providers/scheduler_drafts.dart';
 import '../providers/scheduler_timezone.dart';
@@ -43,6 +44,7 @@ import '../widgets/scheduler/scheduler_format.dart';
 import '../widgets/scheduler/scheduler_lanes.dart';
 import '../widgets/scheduler/scheduler_run_squares.dart';
 import '../widgets/scheduler/scheduler_runs_view.dart';
+import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 export '../widgets/scheduler/scheduler_format.dart' show schedulerTime;
 
 class SchedulerScreen extends ConsumerStatefulWidget {
@@ -98,6 +100,12 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   Future<void> _refresh() async {
     if (!mounted || _busy || _refreshToken != null) return;
+    // With no machine there is nothing to ask, and the failed request would put
+    // an error in front of a first-run user; the empty state explains instead.
+    if (ref.read(schedulerMachinesProvider).isEmpty) {
+      if (_loading) setState(() => _loading = false);
+      return;
+    }
     final generation = ++_generation;
     _refreshToken = generation;
     final request = ref.read(schedulerRequestProvider);
@@ -170,7 +178,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       }
     } catch (error) {
       if (mounted && generation == _generation) {
-        setState(() => _actionError = 'Action failed: $error');
+        setState(
+          () => _actionError =
+              "That didn't work. ${schedulerError(error, machineName: _machineName)}",
+        );
       }
     } finally {
       if (mounted && generation == _generation) {
@@ -280,6 +291,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     final snapshot = _snapshot;
     ref.watch(schedulerDraftsProvider.select((drafts) => drafts.length));
     final machineName = machines[machine ?? 'local'] ?? 'this machine';
+    final noMachine = machines.isEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= kMediumBreakpoint;
@@ -295,9 +307,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                 connected: connected,
                 onNew: _newScheduleTap(snapshot, machine, localTimezone),
               ),
-            if (_error != null)
+            if (_error != null && !noMachine)
               AbInlineBanner(text: _error!, color: context.antgrid.error),
-            if (!_loading && !connected && _error == null)
+            if (!_loading && !connected && _error == null && !noMachine)
               AbInlineBanner(
                 text:
                     '$machineName is offline. Changes are paused until it reconnects.',
@@ -344,16 +356,40 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                     : context.antgrid.error,
               ),
             Expanded(
-              child: _loading
+              child: noMachine
+                  ? AbEmptyState(
+                      icon: AbIcons.calendar,
+                      title: 'Connect a machine to schedule tasks',
+                      subtitle:
+                          'Schedules run on your computer, in the Antgrid '
+                          'desktop app, at the times you set. Connect it to '
+                          'create and manage them here.',
+                      // The one Scheduler a machine-less viewer can use: an
+                      // App Review iPad has no machine. The container, not
+                      // ref, because entering swaps this screen out.
+                      action: AbButton(
+                        label: kDemoEntryLabel,
+                        onTap: () => enterDemoScheduler(ref.container),
+                      ),
+                    )
+                  : _loading
                   ? const Center(
                       child: AbLoading(message: 'Loading schedules…'),
                     )
                   : snapshot == null
                   ? AbEmptyState(
-                      title: machines.isEmpty
-                          ? 'No connected machines'
-                          : 'Machine unavailable',
+                      title: 'Machine unavailable',
                       subtitle: _error,
+                      // A phone signed in to an account whose only machine is
+                      // offline has no other way to see the Scheduler work.
+                      // Desktop is left alone: its local host is a different
+                      // failure.
+                      action: isMobilePlatform
+                          ? AbButton(
+                              label: kDemoEntryLabel,
+                              onTap: () => enterDemoScheduler(ref.container),
+                            )
+                          : null,
                     )
                   : !snapshot.capabilities.supported
                   ? AbEmptyState(
@@ -499,7 +535,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             title,
             if (!_editing) segmented,
             const Spacer(),
-            ?machineButton,
+            // A long machine name gives way before the actions do.
+            if (machineButton != null) Flexible(child: machineButton),
             refresh,
             if (!_editing)
               AbButton(
@@ -582,7 +619,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           ),
       ],
     );
-    if (!mounted || picked == null) return;
+    // The selection outlives the demo: a 'local' pick made in the sample would
+    // leave a phone's real Scheduler target null after exit.
+    if (!mounted || picked == null || ref.read(demoModeProvider)) return;
     ref.read(schedulerMachineProvider.notifier).set(picked);
   }
 
@@ -856,7 +895,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   }
 
   String _agentLabel(String agentId) =>
-      ref.read(agentCatalogProvider)[agentId]?.label ?? agentId;
+      ref.read(schedulerAgentLabelsProvider)[agentId] ?? agentId;
 
   Widget _identity(SchedulerSnapshot snapshot, AgentSchedule s, bool muted) {
     final p = context.antgrid;
@@ -1560,5 +1599,7 @@ String schedulerError(
   }.contains(code)) {
     return 'Update Antgrid on $machineName to use the scheduler.';
   }
-  return 'Machine unavailable or scheduler request failed: $error';
+  // The request provider's own messages are written for the user.
+  if (error is StateError) return error.message;
+  return caughtErrorCopy(error, "Couldn't reach the scheduler on $machineName.");
 }

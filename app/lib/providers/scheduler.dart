@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_scheduler.dart';
+import '../demo/fixtures/demo_scheduler_fixtures.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../connection/supervisor_state.dart' show Connected;
@@ -7,9 +9,11 @@ import '../models/scheduler.dart';
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import 'account_agents.dart';
+import 'agent_catalog.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'recent_agents.dart';
+import 'scheduler_timezone.dart';
 import 'value_controller.dart';
 import 'host_status.dart';
 import 'supervisor_status.dart';
@@ -20,8 +24,30 @@ final schedulerMachineProvider =
       () => ValueController(null),
     );
 
+/// Agent display names for scheduler rows and the editor. The sample is canned
+/// data with no bridge to advertise names, and the catalog is persisted, so the
+/// sample's names must not be merged into it.
+final schedulerAgentLabelsProvider = Provider<Map<String, String>>((ref) {
+  if (ref.watch(demoModeProvider)) return kDemoSchedulerAgentLabels;
+  return {
+    for (final e in ref.watch(agentCatalogProvider).entries) e.key: e.value.label,
+  };
+});
+
+/// Rebuilt whenever the flag flips, so every entry into the sample starts from
+/// the seed and nothing made inside it survives leaving.
+final demoSchedulerBackendProvider = Provider<DemoSchedulerBackend>((ref) {
+  ref.watch(demoModeProvider);
+  final container = ref.container;
+  return DemoSchedulerBackend(
+    localTimezone: () => container.read(schedulerLocalTimezoneProvider.future),
+  );
+});
+
 final schedulerMachinesProvider = Provider<Map<String, String>>((ref) {
-  if (ref.watch(demoModeProvider)) return const {};
+  if (ref.watch(demoModeProvider)) {
+    return const {'local': kDemoSchedulerMachineName};
+  }
   final machines = <String, String>{
     if (!isMobilePlatform) 'local': 'Local machine',
   };
@@ -48,7 +74,8 @@ final schedulerTargetProvider = Provider<String?>((ref) {
 });
 
 final schedulerConnectedProvider = Provider<bool>((ref) {
-  if (ref.watch(demoModeProvider)) return false;
+  // The sample has no connection to wait for, and every action is gated on this.
+  if (ref.watch(demoModeProvider)) return true;
   final target = ref.watch(schedulerTargetProvider);
   if (target != null) {
     return ref.watch(supervisorStatusProvider(target)).value is Connected;
@@ -66,11 +93,15 @@ typedef SchedulerRequest =
 /// Captures the target before an action starts, so changing the selector cannot
 /// send the remainder of an editor operation to a different host.
 final schedulerRequestProvider = Provider<SchedulerRequest>((ref) {
+  if (ref.watch(demoModeProvider)) {
+    return ref.watch(demoSchedulerBackendProvider).request;
+  }
   final target = ref.watch(schedulerTargetProvider);
-  final demo = ref.watch(demoModeProvider);
   final container = ref.container;
   return (method, [params = const {}]) async {
-    if (demo || container.read(demoModeProvider)) {
+    // A closure captured before the sample opened must not send a real host
+    // the sample's edits.
+    if (container.read(demoModeProvider)) {
       throw StateError('Scheduler is unavailable in the demo');
     }
     if (target == null) {

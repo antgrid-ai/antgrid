@@ -6,7 +6,7 @@ import type { ResolvedTitle } from "../types";
 import { firstMessage } from "../title-read";
 
 /** Parse the schema-version <N> out of a `state_<N>.sqlite` filename, or -1. */
-function stateDbVersion(filename: string): number {
+export function stateDbVersion(filename: string): number {
   const m = /^state_(\d+)\.sqlite$/.exec(filename);
   return m ? Number(m[1]) : -1;
 }

@@ -20,7 +20,6 @@ function makeFakeEndpoint(opts?: { onRequest?: (method: string, params: any) => 
     "turn/start": { turn: { id: "tn1" } },
     "turn/interrupt": {},
     "thread/compact/start": {},
-    "thread/rollback": { thread: { id: "th1", turns: [] } },
     "initialize": { userAgent: "codex" },
     "model/list": { data: [
       { id: "gpt-5.2", model: "gpt-5.2", displayName: "GPT-5.2", isDefault: true,
@@ -600,18 +599,92 @@ describe("CodexDriver", () => {
     expect(await driver.getTranscriptSnapshot()).toEqual([]);
   });
 
-  it("reverts conversation by rolling back from the selected turn and replaying the returned thread", async () => {
-    const { driver, fire, requests, sent } = await startedDriver();
-    fire("turn/started", { threadId: "th1", turn: { id: "tn1" } });
-    fire("turn/completed", { threadId: "th1", turn: { id: "tn1", status: "completed" } });
-    fire("turn/started", { threadId: "th1", turn: { id: "tn2" } });
-    fire("turn/completed", { threadId: "th1", turn: { id: "tn2", status: "completed" } });
+  // A driver whose thread holds turns t-a, t-b, t-c (seen live); `script`
+  // answers every request after thread/start, undefined meaning `{}`.
+  async function threeTurnDriver(script: (method: string, params: any) => any) {
+    const sent: AbMessage[] = [];
+    const { ep, requests, fire } = makeFakeEndpoint({
+      onRequest: (method, params) => {
+        if (method === "thread/start") return { thread: { id: "th1" } };
+        return script(method, params) ?? {};
+      },
+    });
+    const driver = new CodexDriver({ sessionId: "s1", endpoint: ep, sendMessage: (m) => sent.push(m), cwd: "/x" });
+    await driver.start();
+    for (const id of ["t-a", "t-b", "t-c"]) {
+      fire("turn/started", { threadId: "th1", turn: { id } });
+      fire("turn/completed", { threadId: "th1", turn: { id, status: "completed" } });
+    }
+    return { driver, requests, sent };
+  }
 
-    await driver.revert({ turnId: "tn1" });
+  const retainedTurn = (id: string, text: string) => ({
+    id, status: "completed", itemsView: "full", startedAt: 1_700_000_000, completedAt: 1_700_000_005,
+    items: [{ id: `${id}-msg`, type: "agentMessage", text }],
+  });
 
-    const rollback = requests.find((r) => r.method === "thread/rollback");
-    expect(rollback?.params).toEqual({ threadId: "th1", numTurns: 2 });
+  const replayedTurnIds = (sent: AbMessage[]) => {
+    const replay = sent.find((m) => m.type === "agent:transcript-replay") as any;
+    return (replay?.frames ?? []).filter((f: any) => f.type === "agent:turn-start").map((f: any) => f.turnId);
+  };
+
+  it("reverts via thread/revert before the target turn and replays the retained turns paged from thread/turns/list", async () => {
+    const { driver, requests, sent } = await threeTurnDriver((method, params) => {
+      if (method === "thread/revert") {
+        return { thread: { id: "th1", turns: [] }, turnsBackwardsCursor: "tc-1", itemsBackwardsCursor: "ic-1" };
+      }
+      if (method === "thread/turns/list") {
+        return params.cursor === undefined
+          ? { data: [retainedTurn("t-a", "first answer")], nextCursor: "page-2", backwardsCursor: "bc-1" }
+          : { data: [], nextCursor: null, backwardsCursor: null };
+      }
+      return undefined;
+    });
+
+    await driver.revert({ turnId: "t-b" });
+
+    expect(requests.find((r) => r.method === "thread/revert")?.params).toEqual({ threadId: "th1", beforeTurnId: "t-b" });
+    expect(requests.some((r) => r.method === "thread/rollback")).toBe(false);
+    const pages = requests.filter((r) => r.method === "thread/turns/list").map((r) => r.params);
+    expect(pages).toEqual([
+      { threadId: "th1", sortDirection: "asc", itemsView: "full", limit: 100 },
+      { threadId: "th1", sortDirection: "asc", itemsView: "full", limit: 100, cursor: "page-2" },
+    ]);
     expect(sent.some((m) => m.type === "agent:session-reset")).toBe(true);
+    expect(replayedTurnIds(sent)).toEqual(["t-a"]);
+  });
+
+  it("falls back to thread/rollback when codex predates thread/revert", async () => {
+    const { driver, requests, sent } = await threeTurnDriver((method) => {
+      if (method === "thread/revert") {
+        throw new Error("Invalid request: unknown variant `thread/revert`, expected one of `initialize`, `thread/rollback`");
+      }
+      if (method === "thread/rollback") return { thread: { id: "th1", turns: [retainedTurn("t-a", "first answer")] } };
+      return undefined;
+    });
+
+    await driver.revert({ turnId: "t-b" });
+
+    expect(requests.find((r) => r.method === "thread/rollback")?.params).toEqual({ threadId: "th1", numTurns: 2 });
+    expect(replayedTurnIds(sent)).toEqual(["t-a"]);
+  });
+
+  it("surfaces the thread/revert refusal when no rollback exists either, and never rolls back after other failures", async () => {
+    const legacy = await threeTurnDriver((method) => {
+      if (method === "thread/revert") throw new Error("thread/revert only supports paginated threads");
+      if (method === "thread/rollback") throw new Error("Invalid request: unknown variant `thread/rollback`, expected one of `thread/revert`");
+      return undefined;
+    });
+    await expect(legacy.driver.revert({ turnId: "t-b" })).rejects.toThrow("only supports paginated threads");
+    expect(legacy.sent.some((m) => m.type === "agent:session-reset")).toBe(false);
+
+    // A timed-out revert may still have landed; rolling back on top of it would drop turns twice.
+    const timedOut = await threeTurnDriver((method) => {
+      if (method === "thread/revert") throw new Error("json-rpc request timed out after 120000ms: thread/revert");
+      return undefined;
+    });
+    await expect(timedOut.driver.revert({ turnId: "t-b" })).rejects.toThrow("timed out");
+    expect(timedOut.requests.some((r) => r.method === "thread/rollback")).toBe(false);
   });
 
   it("elicitation form collects typed answers and accepts", async () => {

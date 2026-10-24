@@ -6,6 +6,8 @@
 import type { BridgeCommand, HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
+import type { HandoffEventsFn } from "./handoff/events";
+import type { HandoffSnapshotFn } from "./handoff/types";
 import type { StructuredDriver } from "../structured/structured-driver";
 import type { TerminalLaunchRequest, PreparedTerminalLaunch } from "./terminal-launch";
 
@@ -116,6 +118,10 @@ export interface TerminalObservationAvailability {
 export interface HookInjectCtx {
   abDir: string;
   cursorDir?: string;
+  /** Isolates Kimi's user-level hook config in tests. */
+  kimiHome?: string;
+  /** Isolates Vibe's user-level hook config in tests. */
+  vibeHome?: string;
   /** Overrides the machine-global `~/.gemini/config` that only antigravity
    *  writes into. Test seam, same role as `cursorDir`. */
   geminiConfigDir?: string;
@@ -198,7 +204,7 @@ export interface TranscriptOpts {
   opencodeDbPath?: string;
 }
 
-/** The bridge-owned source material an agent adapter may turn into a fork
+/** The bridge-owned source material an agent adapter may snapshot for a fork
  * handoff. Neither field is ever client supplied. */
 export interface ForkHandoffOpts extends TranscriptOpts {
   projectPath: string;
@@ -213,7 +219,18 @@ export interface AgentForkSupport {
    * concrete native session. The handoff remains the safe fallback when that
    * native id was never observed. */
   kind: "native-fork" | "native-transcript" | "terminal-transcript";
-  handoff: (opts: ForkHandoffOpts) => Promise<string>;
+  /** The provider's native fork stays bound to the source conversation's
+   * working directory, so resumed in another checkout it would run against the
+   * source's tree. A fork into a new workspace takes the handoff instead. */
+  nativeForkKeepsWorkspace?: true;
+  /** Copies the provider's own transcript into `opts.outDir`. Required so a new
+   * agent cannot ship without deciding; an agent with no readable store
+   * resolves `undefined` and the bridge hands off the terminal scrollback. */
+  snapshot: HandoffSnapshotFn;
+  /** Normalizes the snapshot in `dir` into events for the excerpt. Required so
+   * an agent cannot ship a snapshot nothing can summarize; an agent with no
+   * parser of its own uses the scrollback one. */
+  events: HandoffEventsFn;
 }
 
 /** Inputs to a spec's `resolveTitle`. The `*Home` fields are test seams. */
@@ -763,6 +780,22 @@ export interface AgentSpec {
    * invented keystroke count is latency on every stop of that agent.
    */
   gracefulExit?: GracefulExitAsk;
+  /**
+   * Text that, on screen, means this agent is showing a startup prompt only
+   * the user may answer: folder trust, first-run setup.
+   *
+   * These screens enable bracketed paste and paint like a composer, so the
+   * bridge cannot tell them from one by modes alone, and every one of them
+   * reads Enter as a choice. A submit written into one picks the highlighted
+   * option, which is trust (saved, for some agents) or exit, and the prompt is
+   * lost. While one of them is on the visible screen the bridge holds every
+   * submit, past its readiness timeout, until the user has answered.
+   *
+   * Measured text only, each matched as a substring of one rendered row, so
+   * keep it short enough not to wrap at phone width. Plain strings rather
+   * than patterns because the registry freezes specs into plain data.
+   */
+  startupPrompts?: readonly string[];
   /**
    * Verified non-interactive invocations of this agent's CLI, keyed by how far
    * each one may reach (see {@link HeadlessReach}). One capability, several

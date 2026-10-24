@@ -216,6 +216,21 @@ describe("carry-over from the pre-mode store", () => {
     expect(f.prepared[0]!.chatMode).toBe("auto");
   });
 
+  test("a pass that cannot read the store is retried before the marked schedule dispatches", async () => {
+    const { dir } = await seed();
+    const f = fixture({ resolveChatModeCarryOver: async () => "auto" }, dir);
+    const { store } = f.service; const real = store.schedules.bind(store); let failures = 1;
+    // Only the live listing fails: start()'s deleted-schedule sweep reads with includeDeleted and must not absorb it.
+    store.schedules = (includeDeleted?: boolean) => { if (!includeDeleted && failures-- > 0) throw new Error("out of memory"); return real(includeDeleted); };
+    f.service.start();
+    f.advance(120_000);
+    await expect(f.service.tick()).rejects.toThrow("could not be read");
+    expect(f.prepared).toHaveLength(0);
+    await f.service.tick(); await settle();
+    expect(f.prepared).toHaveLength(1);
+    expect(f.prepared[0]!.chatMode).toBe("auto");
+  });
+
   test("an explicit edit made during the pass wins over the carried-over mode", async () => {
     const { dir, made } = await seed();
     let resolveMode!: (mode: string) => void;

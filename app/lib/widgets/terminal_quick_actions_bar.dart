@@ -23,6 +23,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
     super.key,
     required this.onPick,
     required this.onPicked,
+    this.onAttach,
     required this.uploadBusy,
     required this.onUploadError,
     required this.onSendInput,
@@ -60,6 +61,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
   final VoidCallback? onCopyHostClipboard;
   final Future<PickedUpload?> Function() onPick;
   final Future<void> Function(PickedUpload picked) onPicked;
+  final Future<void> Function()? onAttach;
 
   /// True while the shared attachment pipeline is busy with ANY gesture, so a
   /// paste or drop already in flight disables the bar's attach key too.
@@ -95,6 +97,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
               child: Row(
                 children: [
                   TerminalUploadButton(
+                    onAttach: onAttach,
                     pick: onPick,
                     onPicked: onPicked,
                     busy: uploadBusy,
