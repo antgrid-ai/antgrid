@@ -224,12 +224,14 @@ void main() {
     expect(fake.unpaired, ['pk-1']);
   });
 
-  testWidgets('a live device shows its model, RAM and storage', (tester) async {
+  testWidgets('a live device shows its model and RAM, not storage', (
+    tester,
+  ) async {
     await _pumpPanel(tester, devices: _ReportingNotifier.new);
 
     expect(find.textContaining('iPhone 15 Pro · last seen'), findsOneWidget);
-    // Storage reported its total alone, so it shows no made-up "used" half.
-    expect(find.text('RAM 5.0 / 8.0 GB · Storage 256 GB'), findsOneWidget);
+    expect(find.text('RAM 5.0 / 8.0 GB'), findsOneWidget);
+    expect(find.textContaining('Storage'), findsNothing);
   });
 
   testWidgets('a device that stopped reporting shows no RAM or storage', (

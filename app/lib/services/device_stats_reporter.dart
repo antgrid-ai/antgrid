@@ -5,6 +5,7 @@ import '../models/agent_hello.dart';
 import '../models/device_stats.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
+import '../util/device_id.dart';
 import 'device_stats_reader.dart';
 
 /// Tells each remote machine this device's model, RAM and storage, so its
@@ -14,9 +15,13 @@ import 'device_stats_reader.dart';
 /// (`PushMessagingService`): the warm-set listener never re-fires for a
 /// session that merely reconnects, so each session also gets a handshake
 /// listener. Free RAM moves by the second and the bridge pushes nothing back,
-/// so a connected session is also re-told every [interval]; each send re-reads
-/// the stats, and the bridge stamps it, which is what keeps the roster's
-/// "last seen" current for a device that stays connected.
+/// so a connected machine is also re-told every [interval]; the bridge stamps
+/// each report, which is what keeps the roster's "last seen" current for a
+/// device that stays connected.
+///
+/// The periodic re-tell goes once per MACHINE, not per project session: the
+/// bridge files every report under the one peer the machine's connection
+/// belongs to, so a second project on the same machine only repeats it.
 class DeviceStatsReporter {
   DeviceStatsReporter({
     Future<DeviceStats> Function()? read,
@@ -33,6 +38,11 @@ class DeviceStatsReporter {
   final Expando<AgentHello> _sent = Expando<AgentHello>();
   final Set<ProjectSession> _watched = {};
   Timer? _tick;
+  bool _paused = false;
+
+  /// One read shared by every send that asks while it is in flight, so a
+  /// reconnect handshaking several sessions at once reads the OS once.
+  Future<DeviceStats>? _reading;
 
   void watch(Iterable<ProjectSession> sessions) {
     for (final s in sessions) {
@@ -43,7 +53,24 @@ class DeviceStatsReporter {
       s.status.addListener(onStatus);
       onStatus();
     }
-    _tick ??= Timer.periodic(interval, (_) => _resendAll());
+    if (!_paused) _startTicking();
+  }
+
+  /// Stops the periodic re-tell while the app is backgrounded: nobody reads a
+  /// roster for a device that is not in use, and each tick wakes the radio.
+  void pause() {
+    _paused = true;
+    _tick?.cancel();
+    _tick = null;
+  }
+
+  /// Resumes the re-tell, reporting at once so the roster is current again
+  /// rather than one [interval] later.
+  void resume() {
+    if (!_paused) return;
+    _paused = false;
+    _startTicking();
+    _resendAll();
   }
 
   void dispose() {
@@ -52,11 +79,17 @@ class DeviceStatsReporter {
     _watched.clear();
   }
 
+  void _startTicking() {
+    _tick ??= Timer.periodic(interval, (_) => _resendAll());
+  }
+
   void _resendAll() {
     _watched.removeWhere((s) => s.isClosed);
+    final machines = <String>{};
     for (final s in _watched) {
       final hello = s.status.value.agentHello;
       if (hello == null || s.isDown) continue;
+      if (!machines.add(baseDeviceUuid(s.projectId))) continue;
       unawaited(_send(s, hello));
     }
   }
@@ -69,9 +102,12 @@ class DeviceStatsReporter {
     await _send(s, hello);
   }
 
+  Future<DeviceStats> _readShared() =>
+      _reading ??= _read().whenComplete(() => _reading = null);
+
   Future<void> _send(ProjectSession s, AgentHello hello) async {
     try {
-      final stats = await _read();
+      final stats = await _readShared();
       if (stats.isEmpty) return;
       await s.send(createAbMessage('device:stats', stats.toWire()));
     } catch (e) {

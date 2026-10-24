@@ -6,7 +6,9 @@
 // The conflict cases at the bottom pin the other half of that contract: what
 // the header refuses while a merge is unresolved, and the one action that
 // clears it.
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -762,5 +764,73 @@ void main() {
 
       expect(sentOfType('git:stage'), isNull);
     });
+  });
+
+  // A partially staged file is listed in both groups, and each row discards
+  // its own group's half — as that group's Discard All does.
+  testWidgets('a Changes row discards only the unstaged half', (tester) async {
+    await withRowButtons(tester, () async {
+      await pumpWithStatus(tester, [
+        {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'a.dart', 'status': 'M', 'staged': false},
+      ], width: 500);
+
+      // Staged Changes is listed first, so the Changes row is the last.
+      await hoverRow(tester, find.text('a.dart').last);
+      await tester.tap(find.byTooltip('Discard Changes').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('staged changes are kept'), findsOneWidget);
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+
+      final msg = sentOfType('git:discard');
+      expect(msg?['files'], ['a.dart']);
+      expect(msg?['includeStaged'], isNull);
+    });
+  });
+
+  testWidgets('a Staged row reverts the file to HEAD', (tester) async {
+    await withRowButtons(tester, () async {
+      await pumpWithStatus(tester, [
+        {'path': 'a.dart', 'status': 'M', 'staged': true},
+        {'path': 'a.dart', 'status': 'M', 'staged': false},
+      ], width: 500);
+
+      await hoverRow(tester, find.text('a.dart').first);
+      await tester.tap(find.byTooltip('Discard Changes').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Revert'));
+      await tester.pumpAndSettle();
+
+      expect(sentOfType('git:discard')?['includeStaged'], isTrue);
+    });
+  });
+
+  // Both groups share one scroll, so a small group above a long one is never
+  // squeezed out of reach by it.
+  testWidgets('one staged file beside many changes stays usable', (
+    tester,
+  ) async {
+    await pumpWithStatus(tester, [
+      {'path': 'staged.dart', 'status': 'M', 'staged': true},
+      for (var i = 0; i < 300; i++)
+        {'path': 'f$i.dart', 'status': 'M', 'staged': false},
+    ]);
+
+    expect(find.text('staged.dart').hitTestable(), findsOneWidget);
+  });
+
+  // A widget test runs as Android, so this is the touch layout: each change
+  // row is a swipe target and must be finger-sized.
+  testWidgets('change rows are touch-sized on touch', (tester) async {
+    await pumpWithStatus(tester, [
+      {'path': 'a.dart', 'status': 'M', 'staged': false},
+    ]);
+
+    final row = find.ancestor(
+      of: find.text('a.dart'),
+      matching: find.byType(AbSwipeActions),
+    );
+    expect(tester.getSize(row).height, greaterThanOrEqualTo(AbTokens.rowHeightLg));
   });
 }

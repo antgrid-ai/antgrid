@@ -79,6 +79,17 @@ void main() {
     );
   });
 
+  // The bridge decodes text as UTF-8, so a Latin-1 file's 'é' (one byte, 0xE9)
+  // arrives as U+FFFD and would re-encode to three bytes that were never there.
+  test('download refuses text the bridge could not decode losslessly', () {
+    expect(
+      fileContentBytes(
+        const FileContent(path: 'a.txt', content: 'h�', size: 2),
+      ),
+      isNull,
+    );
+  });
+
   testWidgets('clicking the breadcrumb offers relative and absolute copies', (
     tester,
   ) async {

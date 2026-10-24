@@ -5044,13 +5044,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (machineStatsTimer) clearInterval(machineStatsTimer);
     machineStatsTimer = null;
   }
-  function emitMachineStats() {
+  function sendMachineStats() {
     sendAb(createMessage("machine:stats", readMachineStats()));
+  }
+  /** `onAttach` is a remote client's first frame rather than a handshake, so
+   *  it is held to the tick's rule: nothing for a backgrounded app. The timer
+   *  is armed either way, so that app is told once it is foregrounded. It is
+   *  NOT deduped against the handshake's report: a remote stream subscribes
+   *  after that report went out, so this is the only one it receives. */
+  function emitMachineStats(onAttach = false) {
+    if (!onAttach || !connState.suppressed) sendMachineStats();
     machineStatsTimer ??= setInterval(() => {
       if (!hasRemoteClient()) { stopMachineStats(); return; }
       // A backgrounded app renders nothing; its next handshake re-sends.
       if (connState.suppressed) return;
-      sendAb(createMessage("machine:stats", readMachineStats()));
+      sendMachineStats();
     }, MACHINE_STATS_INTERVAL_MS);
   }
 
@@ -5548,7 +5556,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // to a warm core fires none. machine:stats is not replayed, so a new
       // remote viewer is told here, which also re-arms a timer that stopped
       // when the last one left.
-      if (newRemoteClient) emitMachineStats();
+      if (newRemoteClient) emitMachineStats(true);
       if (msg.type === "request") {
         if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only

@@ -9,11 +9,17 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../models/file_tree_models.dart';
 
-/// Last path segment, splitting on `/` only (file:read paths are POSIX-style).
+/// Last path segment. Checkout paths are POSIX-style, where a backslash is a
+/// legal filename character; only an image outside the checkout arrives as the
+/// host's own absolute path, which on Windows is backslashed — so a backslash
+/// separates only in a drive- or UNC-rooted path.
 String viewerBasename(String path) {
-  final i = path.lastIndexOf('/');
-  return i < 0 ? path : path.substring(i + 1);
+  final separator = _windowsAbsolute.hasMatch(path) ? r'[\\/]' : '/';
+  final segments = path.split(RegExp(separator)).where((s) => s.isNotEmpty);
+  return segments.isEmpty ? path : segments.last;
 }
+
+final _windowsAbsolute = RegExp(r'^([A-Za-z]:[\\/]|\\\\)');
 
 /// Decodes base64 file content to bytes, returning null on absent or malformed
 /// input so callers can show a render-failure placeholder.

@@ -26,6 +26,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
+import '../design/widgets/ab_swipe_actions.dart';
 import '../models/ab_message.dart'
     show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
 import '../models/git_status_index.dart';
@@ -469,7 +470,10 @@ class _BranchLine extends StatelessWidget {
         child: Text(
           '→ $remote',
           maxLines: 1,
-          style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
         ),
       );
     } else {
@@ -742,11 +746,7 @@ class _SplitCellState extends State<_SplitCell> {
           if (widget.running)
             const AbLoadingDot(size: AbTokens.fontXs)
           else
-            AbIcon(
-              widget.icon,
-              size: AbTokens.fontSm,
-              color: p.textSecondary,
-            ),
+            AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
           const SizedBox(width: AbTokens.space4),
           Flexible(
             child: Text(
@@ -958,8 +958,9 @@ class _StagedGroupHeader extends StatelessWidget {
 /// Changes' bulk actions, in VS Code's order and vocabulary: Discard All,
 /// then Stage All.
 ///
-/// Each is gated on its OWN scope: a group of nothing but conflicts has
+/// Only Discard All is ever disabled: a group of nothing but conflicts has
 /// nothing safe to discard, and is exactly where Stage All is the way out.
+/// Stage All needs no gate — the group exists only while it holds a path.
 class _UnstagedGroupHeader extends StatelessWidget {
   const _UnstagedGroupHeader({
     required this.unstaged,
@@ -1231,10 +1232,7 @@ class _GitPanelBody extends ConsumerWidget {
         if (showSideBySide) {
           return Row(
             children: [
-              SizedBox(
-                width: _columnWidth,
-                child: _buildColumn(context),
-              ),
+              SizedBox(width: _columnWidth, child: _buildColumn(context)),
               const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1246,10 +1244,7 @@ class _GitPanelBody extends ConsumerWidget {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _CompactViewerBar(
-                path: diffPath,
-                onBack: fileService.clearDiff,
-              ),
+              _CompactViewerBar(path: diffPath, onBack: fileService.clearDiff),
               const AbSeparator.horizontal(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1359,10 +1354,13 @@ class _GitPanelBody extends ConsumerWidget {
   /// alone cannot say which side it is on — touch rows carry no Stage/Unstage
   /// buttons, and desktop's appear only on hover — so the group is what says.
   ///
-  /// An open group's rows take a share of the height by how many it holds, so
-  /// one staged file does not take half the column from a long list. With
-  /// every group folded this is headers only, and must not be placed in an
-  /// [Expanded] ([_anyChangeGroupOpen]).
+  /// Both groups share ONE scroll, headers included: a scroll region per group
+  /// left each a sliver of a short column, and a swipe landing in the wrong
+  /// one. With every group folded this is headers only, and must not be placed
+  /// in an [Expanded] ([_anyChangeGroupOpen]).
+  ///
+  /// Keyed per group: when Staged appears ahead of Changes, matching by slot
+  /// would hand it Changes' list state.
   Widget _buildChangeGroups(BuildContext context) {
     final staged = counts.staged;
     final unstaged = counts.unstaged;
@@ -1375,6 +1373,7 @@ class _GitPanelBody extends ConsumerWidget {
             expanded: !panel.stagedCollapsed,
             onToggle: panel.onToggleStaged,
           ),
+          key: 'staged',
           index: staged,
           open: !panel.stagedCollapsed,
         ),
@@ -1386,24 +1385,62 @@ class _GitPanelBody extends ConsumerWidget {
             expanded: !panel.changesCollapsed,
             onToggle: panel.onToggleChanges,
           ),
+          key: 'changes',
           index: unstaged,
           open: !panel.changesCollapsed,
         ),
     ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (final (i, group) in groups.indexed) ...[
-          if (i > 0) const AbSeparator.horizontal(),
-          group.header,
-          if (group.open)
-            Expanded(
-              flex: group.index.changedCount,
-              child: _buildFileList(context, group.index),
+    if (!groups.any((g) => g.open)) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final (i, group) in groups.indexed) ...[
+            if (i > 0)
+              AbSeparator.horizontal(key: ValueKey('${group.key}-sep')),
+            KeyedSubtree(
+              key: ValueKey('${group.key}-header'),
+              child: group.header,
             ),
+          ],
         ],
-      ],
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () async {
+        fileService.requestFullTree();
+        await Future.delayed(const Duration(milliseconds: 500));
+      },
+      // A row whose tray is open slides out from under the finger the moment
+      // the list moves; nothing else in the app can close it from here.
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (_) {
+          AbSwipeActions.closeAny();
+          return false;
+        },
+        child: CustomScrollView(
+          slivers: [
+            for (final (i, group) in groups.indexed) ...[
+              if (i > 0)
+                SliverToBoxAdapter(
+                  key: ValueKey('${group.key}-sep'),
+                  child: const AbSeparator.horizontal(),
+                ),
+              SliverToBoxAdapter(
+                key: ValueKey('${group.key}-header'),
+                child: group.header,
+              ),
+              if (group.open)
+                _buildFileList(
+                  context,
+                  group.index,
+                  key: ValueKey('${group.key}-list'),
+                  staged: group.key == 'staged',
+                ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -1412,26 +1449,27 @@ class _GitPanelBody extends ConsumerWidget {
   // passed for the signature's sake and goes unread there (see FileTreeView's
   // own doc), which is what keeps this list from rearranging itself when the
   // tree lands.
-  Widget _buildFileList(BuildContext context, GitStatusIndex gitStatus) {
-    return RefreshIndicator(
-      onRefresh: () async {
-        fileService.requestFullTree();
-        await Future.delayed(const Duration(milliseconds: 500));
-      },
-      child: FileTreeView(
-        root: state.root,
-        expandedPaths: state.expandedPaths,
-        selectedFilePath: state.git.diffPath,
-        gitStatus: gitStatus,
-        changesOnly: true,
-        // A flat list has no folder rows to toggle.
-        onToggleExpanded: (_) {},
-        onFileSelected: (path) => fileService.requestDiff(path),
-        onStage: (path) => fileService.stageFiles([path]),
-        onUnstage: (path) => fileService.unstageFiles([path]),
-        onDiscard: (path) => _confirmDiscard(context, path),
-        onResolveConflict: (path) => _confirmResolve(context, path),
-      ),
+  Widget _buildFileList(
+    BuildContext context,
+    GitStatusIndex gitStatus, {
+    required Key key,
+    required bool staged,
+  }) {
+    return FileTreeView(
+      key: key,
+      sliver: true,
+      root: state.root,
+      expandedPaths: state.expandedPaths,
+      selectedFilePath: state.git.diffPath,
+      gitStatus: gitStatus,
+      changesOnly: true,
+      // A flat list has no folder rows to toggle.
+      onToggleExpanded: (_) {},
+      onFileSelected: (path) => fileService.requestDiff(path),
+      onStage: (path) => fileService.stageFiles([path]),
+      onUnstage: (path) => fileService.unstageFiles([path]),
+      onDiscard: (path) => _confirmDiscard(context, path, staged: staged),
+      onResolveConflict: (path) => _confirmResolve(context, path),
     );
   }
 
@@ -1475,39 +1513,52 @@ class _GitPanelBody extends ConsumerWidget {
     if (confirmed) fileService.stageFiles([path]);
   }
 
-  Future<void> _confirmDiscard(BuildContext context, String path) async {
+  /// Scoped to the group the row sits in, as that group's bulk action is: a
+  /// Changes row restores the file from the index, so whatever is staged
+  /// survives; a Staged row reverts all the way to HEAD.
+  Future<void> _confirmDiscard(
+    BuildContext context,
+    String path, {
+    required bool staged,
+  }) async {
     // Read the per-entry list, not the deduped `gitFileStatuses` map: a path
     // with BOTH a staged and an unstaged change collapses to one letter there,
     // which cannot answer the question the copy below turns on.
     final entries = state.gitStatus.byPath[path] ?? const [];
-    // Nothing at HEAD to restore, whether the file is untracked or already in
-    // the index — reverting one means deleting it.
-    final isNew = entries.any(
-      (e) => e.status == 'U' || (e.status == 'A' && e.staged),
-    );
     final hasStaged = entries.any((e) => e.staged);
+    final hasUnstaged = entries.any((e) => !e.staged);
+    // Nothing to restore the file to — discarding it means deleting it. From
+    // Changes that is an untracked file (an added one restores from the
+    // index); from Staged it is one added since HEAD.
+    final isNew = staged
+        ? entries.any((e) => e.status == 'A' && e.staged)
+        : entries.any((e) => e.status == 'U' && !e.staged);
     final String body;
     if (isNew) {
       body = 'Permanently delete the new file "$path"? This cannot be undone.';
-    } else if (hasStaged) {
-      body =
-          'Revert "$path" to the last commit? Its staged changes are reverted '
-          'too. This cannot be undone.';
+    } else if (!staged) {
+      body = hasStaged
+          ? 'Discard the unstaged changes to "$path"? Its staged changes are '
+                'kept. This cannot be undone.'
+          : 'Discard all changes to "$path"? This cannot be undone.';
     } else {
-      body = 'Discard all changes to "$path"? This cannot be undone.';
+      body = hasUnstaged
+          ? 'Revert "$path" to the last commit? Its unstaged changes are '
+                'discarded too. This cannot be undone.'
+          : 'Revert "$path" to the last commit? This cannot be undone.';
     }
     final confirmed = await AbConfirmDialog.show(
       context: context,
-      title: hasStaged && !isNew ? 'Revert changes' : 'Discard changes',
+      title: staged && !isNew ? 'Revert changes' : 'Discard changes',
       body: body,
       confirmLabel: isNew
           ? 'Delete'
-          : hasStaged
+          : staged
           ? 'Revert'
           : 'Discard',
       destructive: true,
     );
-    if (confirmed) fileService.discard([path], includeStaged: true);
+    if (confirmed) fileService.discard([path], includeStaged: staged);
   }
 
   Widget _buildContentArea(BuildContext context, WidgetRef ref) {
@@ -1627,10 +1678,7 @@ class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
                     value: _GitCompactTab.changes,
                     label: 'Changes · ${widget.changedCount}',
                   ),
-                  AbSegment(
-                    value: _GitCompactTab.history,
-                    label: 'History',
-                  ),
+                  AbSegment(value: _GitCompactTab.history, label: 'History'),
                 ],
                 selected: _tab,
                 onSelect: (value) => setState(() => _tab = value),

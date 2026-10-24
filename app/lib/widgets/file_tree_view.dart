@@ -56,6 +56,13 @@ class FileTreeView extends StatefulWidget {
   /// terminal link to a directory reveals.
   final String? revealedDirectoryPath;
   final bool changesOnly;
+
+  /// Builds a sliver for a [CustomScrollView] the caller owns instead of a
+  /// list with its own scroll — how several lists share one scroll. The host
+  /// then owns closing an open swipe tray when it scrolls, and the highlighted
+  /// row is never scrolled to: sibling slivers can each hold a row for the same
+  /// path (a partially staged file), and two reveals on one viewport fight.
+  final bool sliver;
   final void Function(String path) onToggleExpanded;
   final void Function(String path) onFileSelected;
   final void Function(String path)? onStage;
@@ -77,6 +84,7 @@ class FileTreeView extends StatefulWidget {
     GitStatusIndex? gitStatus,
     this.revealedDirectoryPath,
     this.changesOnly = false,
+    this.sliver = false,
     required this.onToggleExpanded,
     required this.onFileSelected,
     this.onStage,
@@ -125,7 +133,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     super.initState();
     // A link that switches to the Files tab can build this tree with its
     // target already set, so there is no change for didUpdateWidget to see.
-    _pendingReveal = _highlightPath;
+    if (!widget.sliver) _pendingReveal = _highlightPath;
   }
 
   @override
@@ -138,7 +146,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     final target = _highlightPath;
     final previous =
         oldWidget.revealedDirectoryPath ?? oldWidget.selectedFilePath;
-    if (target != previous) _pendingReveal = target;
+    if (target != previous && !widget.sliver) _pendingReveal = target;
   }
 
   @override
@@ -226,10 +234,11 @@ class _FileTreeViewState extends State<FileTreeView> {
     // while `root` waits on a lazy per-checkout tree hydration), and the Git
     // tab must render the same list either way.
     if (widget.root == null && !widget.changesOnly) {
-      return const AbEmptyState(
+      const empty = AbEmptyState(
         icon: AbIcons.folder,
         title: 'No files available',
       );
+      return widget.sliver ? const SliverToBoxAdapter(child: empty) : empty;
     }
 
     final entriesByPath = widget.gitStatus.byPath;
@@ -247,9 +256,18 @@ class _FileTreeViewState extends State<FileTreeView> {
     }
 
     if (flatList.isEmpty) {
-      return AbEmptyState(
+      final empty = AbEmptyState(
         icon: widget.changesOnly ? AbIcons.check : AbIcons.folder,
         title: widget.changesOnly ? 'No changed files' : 'This folder is empty',
+      );
+      return widget.sliver ? SliverToBoxAdapter(child: empty) : empty;
+    }
+
+    if (widget.sliver) {
+      return SliverList.builder(
+        itemCount: flatList.length,
+        itemBuilder: (context, index) =>
+            _buildRow(flatList, entriesByPath, index),
       );
     }
 
@@ -263,52 +281,57 @@ class _FileTreeViewState extends State<FileTreeView> {
       child: ListView.builder(
         controller: _scrollController,
         itemCount: flatList.length,
-        itemBuilder: (context, index) {
-          final (:node, :depth, :truncationNotice, :loadingNotice) =
-              flatList[index];
-          if (truncationNotice) {
-            return _TruncationRow(
-              key: ValueKey(('truncated', node.path)),
-              depth: depth,
-            );
-          }
-          if (loadingNotice) {
-            return _LoadingRow(
-              key: ValueKey(('loading', node.path)),
-              depth: depth,
-            );
-          }
-          final isDirectory = node.type == FileNodeType.directory;
-          Widget row = _FileTreeRow(
-            // Typed, because one path can produce two rows: replacing a file
-            // with a directory of the same name leaves a deletion and an
-            // addition that share it, and a bare path key would be a duplicate.
-            key: ValueKey((node.path, node.type)),
-            node: node,
-            depth: depth,
-            isExpanded: widget.expandedPaths.contains(node.path),
-            isSelected: node.path == _highlightPath,
-            changeEntries: entriesByPath[node.path] ?? const [],
-            folder: widget.changesOnly ? _changeFolder(node.path) : null,
-            onTap: isDirectory
-                ? () => widget.onToggleExpanded(node.path)
-                : () => widget.onFileSelected(node.path),
-            onStage: widget.onStage,
-            onUnstage: widget.onUnstage,
-            onDiscard: widget.onDiscard,
-            onResolveConflict: widget.onResolveConflict,
-          );
-          if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
-          // Matched on kind as well as path: a file replaced by a folder of
-          // the same name yields two rows here, and a GlobalKey takes one.
-          if (node.path == _highlightPath &&
-              isDirectory == (widget.revealedDirectoryPath != null)) {
-            row = KeyedSubtree(key: _selectedRowKey, child: row);
-          }
-          return row;
-        },
+        itemBuilder: (context, index) =>
+            _buildRow(flatList, entriesByPath, index),
       ),
     );
+  }
+
+  Widget _buildRow(
+    List<_TreeRow> flatList,
+    Map<String, List<GitFileStatusEntry>> entriesByPath,
+    int index,
+  ) {
+    final (:node, :depth, :truncationNotice, :loadingNotice, :folder) =
+        flatList[index];
+    if (truncationNotice) {
+      return _TruncationRow(
+        key: ValueKey(('truncated', node.path)),
+        depth: depth,
+      );
+    }
+    if (loadingNotice) {
+      return _LoadingRow(key: ValueKey(('loading', node.path)), depth: depth);
+    }
+    final isDirectory = node.type == FileNodeType.directory;
+    Widget row = _FileTreeRow(
+      // Typed, because one path can produce two rows: replacing a file
+      // with a directory of the same name leaves a deletion and an
+      // addition that share it, and a bare path key would be a duplicate.
+      key: ValueKey((node.path, node.type)),
+      node: node,
+      depth: depth,
+      isExpanded: widget.expandedPaths.contains(node.path),
+      isSelected: node.path == _highlightPath,
+      changeEntries: entriesByPath[node.path] ?? const [],
+      folder: folder,
+      touchSized: widget.changesOnly,
+      onTap: isDirectory
+          ? () => widget.onToggleExpanded(node.path)
+          : () => widget.onFileSelected(node.path),
+      onStage: widget.onStage,
+      onUnstage: widget.onUnstage,
+      onDiscard: widget.onDiscard,
+      onResolveConflict: widget.onResolveConflict,
+    );
+    if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
+    // Matched on kind as well as path: a file replaced by a folder of
+    // the same name yields two rows here, and a GlobalKey takes one.
+    if (node.path == _highlightPath &&
+        isDirectory == (widget.revealedDirectoryPath != null)) {
+      row = KeyedSubtree(key: _selectedRowKey, child: row);
+    }
+    return row;
   }
 }
 
@@ -323,6 +346,7 @@ typedef _TreeRow = ({
   int depth,
   bool truncationNotice,
   bool loadingNotice,
+  String? folder,
 });
 
 /// Flatten the tree into a list of rows for rendering.
@@ -341,6 +365,7 @@ List<_TreeRow> _flattenVisibleNodes(FileNode root, Set<String> expandedPaths) {
       depth: 0,
       truncationNotice: true,
       loadingNotice: false,
+      folder: null,
     ));
   }
 
@@ -358,6 +383,7 @@ void _flattenNormal(
     depth: depth,
     truncationNotice: false,
     loadingNotice: false,
+    folder: null,
   ));
 
   if (node.type == FileNodeType.directory &&
@@ -374,6 +400,7 @@ void _flattenNormal(
         depth: depth + 1,
         truncationNotice: false,
         loadingNotice: true,
+        folder: null,
       ));
     }
     // After the children, where the missing ones would have been.
@@ -383,6 +410,7 @@ void _flattenNormal(
         depth: depth + 1,
         truncationNotice: true,
         loadingNotice: false,
+        folder: null,
       ));
     }
   }
@@ -405,11 +433,14 @@ void _flattenNormal(
 List<_TreeRow> _flattenChangesOnly(
   Map<String, List<GitFileStatusEntry>> entriesByPath,
 ) {
-  bool conflicted(String path) =>
-      entriesByPath[path]!.any((e) => e.status == '!');
+  final conflicted = {
+    for (final MapEntry(:key, :value) in entriesByPath.entries)
+      if (value.any((e) => e.status == '!')) key,
+  };
   final paths = entriesByPath.keys.toList()
     ..sort((a, b) {
-      final byConflict = (conflicted(a) ? 0 : 1) - (conflicted(b) ? 0 : 1);
+      final byConflict =
+          (conflicted.contains(a) ? 0 : 1) - (conflicted.contains(b) ? 0 : 1);
       if (byConflict != 0) return byConflict;
       final byName = a.toLowerCase().compareTo(b.toLowerCase());
       // Case-only twins: lowercase first, as the Files tab orders them, and
@@ -418,30 +449,21 @@ List<_TreeRow> _flattenChangesOnly(
     });
   return [
     for (final path in paths)
-      if (_changeSegments(path).isNotEmpty)
+      // Empty segments dropped: a leading slash, and the trailing one git puts
+      // on an untracked directory it did not walk into.
+      if (path.split('/').where((s) => s.isNotEmpty).toList() case [
+        ...final dirs,
+        final name,
+      ])
         (
-          node: FileNode(
-            name: _changeSegments(path).last,
-            path: path,
-            type: FileNodeType.file,
-          ),
+          node: FileNode(name: name, path: path, type: FileNodeType.file),
           depth: 0,
           truncationNotice: false,
           loadingNotice: false,
+          // Split here, once, rather than on every row build.
+          folder: dirs.isEmpty ? null : dirs.join('/'),
         ),
   ];
-}
-
-/// Empty segments dropped: a leading slash, and the trailing one git puts on
-/// an untracked directory it did not walk into.
-List<String> _changeSegments(String path) =>
-    path.split('/').where((s) => s.isNotEmpty).toList();
-
-/// The folder a flat change row names beside its file, or null at the root.
-String? _changeFolder(String path) {
-  final segments = _changeSegments(path);
-  if (segments.length < 2) return null;
-  return segments.sublist(0, segments.length - 1).join('/');
 }
 
 /// Stands in for entries the bridge never sent. Its directory's listing stopped
@@ -562,6 +584,9 @@ class _FileTreeRow extends StatefulWidget {
   final void Function(String path)? onDiscard;
   final void Function(String path)? onResolveConflict;
 
+  /// Floors the row at a touch target's height on a touch platform.
+  final bool touchSized;
+
   const _FileTreeRow({
     super.key,
     required this.node,
@@ -570,6 +595,7 @@ class _FileTreeRow extends StatefulWidget {
     required this.isSelected,
     this.changeEntries = const [],
     this.folder,
+    this.touchSized = false,
     this.onTap,
     this.onStage,
     this.onUnstage,
@@ -609,11 +635,8 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     widget.onTap!();
   }
 
-  void _openMenuAt(Offset position) => detached(
-    'FileTreeRow',
-    'row menu failed',
-    () => _showMenu(position),
-  );
+  void _openMenuAt(Offset position) =>
+      detached('FileTreeRow', 'row menu failed', () => _showMenu(position));
 
   /// The row's context menu: right-click on desktop, long-press on touch.
   /// The path is project-relative — what an agent prompt or a terminal in the
@@ -805,6 +828,14 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             : null,
       ),
     );
+    // A change row is a finger's swipe target on touch, and the dense desktop
+    // height left little to land a swipe on without hitting its neighbour.
+    if (isMobilePlatform && widget.touchSized) {
+      row = ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: AbTokens.rowHeightLg),
+        child: row,
+      );
+    }
 
     // On touch this tray is the ONLY per-file affordance, which is why discard
     // rides in it beside stage/unstage rather than keeping a button of its own.

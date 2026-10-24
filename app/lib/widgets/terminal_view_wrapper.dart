@@ -287,6 +287,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     }
   }
 
+  /// A mouse press freezes the screen so a drag can select over it; a click
+  /// that selected nothing returns to live rather than leaving output frozen
+  /// behind a click. Post-frame, so the view's selection report for this
+  /// gesture has landed first.
+  void _onSelectionPointerUp(PointerUpEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _historyOpen || _touchSelection) return;
+      if (_presentation.selecting && !_hasSelection) _returnToLive();
+    });
+  }
+
   TerminalService? _displayService;
   int _displayUpdate = 0;
 
@@ -1869,9 +1881,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     final showPaneChrome = !_historyOpen;
     final showSendButton = _hasSelection && agentTab != null && showPaneChrome;
     final showAttachButton =
-        !widget.isAgentSurface &&
-        _hasPhysicalKeyboard &&
-        _canAttachFromMenu;
+        !widget.isAgentSurface && _hasPhysicalKeyboard && _canAttachFromMenu;
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
@@ -2062,6 +2072,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onSelectionPointerDown,
+      onPointerUp: _onSelectionPointerUp,
       onPointerSignal: (event) {
         if (!_historyOpen &&
             event is PointerScrollEvent &&
@@ -2200,47 +2211,27 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                       _onSendToAgent,
                     ),
                   ),
-                if (!_historyOpen)
+                // Only for the explicit Select text: a mouse selection copies
+                // with Ctrl+C and leaves on any key, and a click that selected
+                // nothing never stays frozen ([_onSelectionPointerUp]).
+                if (!_historyOpen && _presentation.selecting && _touchSelection)
                   Positioned(
                     top: AbTokens.space4,
                     right: AbTokens.space4,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (_presentation.selecting) ...[
-                          AbButton(
-                            label: 'Copy',
-                            compact: true,
-                            onTap: _hasSelection
-                                ? _copySelectionAndClear
-                                : null,
-                          ),
-                          AbButton(
-                            label: 'Return to live',
-                            compact: true,
-                            onTap: _returnToLive,
-                          ),
-                        ] else if (_hasPhysicalKeyboard &&
-                            !widget.isAgentSurface)
-                          AbButton(
-                            label: 'Select text',
-                            compact: true,
-                            onTap: _selectText,
-                          ),
+                        AbButton(
+                          label: 'Copy',
+                          compact: true,
+                          onTap: _hasSelection ? _copySelectionAndClear : null,
+                        ),
+                        AbButton(
+                          label: 'Return to live',
+                          compact: true,
+                          onTap: _returnToLive,
+                        ),
                       ],
-                    ),
-                  ),
-                if (!_historyOpen &&
-                    !widget.isAgentSurface &&
-                    _hasPhysicalKeyboard &&
-                    _canCopyHostClipboard)
-                  Positioned(
-                    bottom: AbTokens.space4,
-                    right: AbTokens.space4,
-                    child: AbButton(
-                      label: 'Copy host clipboard to this device',
-                      compact: true,
-                      onTap: _copyHostClipboard,
                     ),
                   ),
                 if (_historyOpen)
@@ -2690,15 +2681,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       composeOpen: _composeOpen,
       onToggleCompose: _toggleCompose,
       onDirectInput: _toggleDirectInput,
-      // The agent panel's terminal offers these in the session menu instead;
-      // the workspace panel's terminals have no such menu, so keep their keys.
-      onSelectText: widget.isAgentSurface ? null : _selectText,
-      onPaste: widget.isAgentSurface
-          ? null
-          : () => detached('TerminalView', 'clipboard paste failed', _paste),
-      onCopyHostClipboard: !widget.isAgentSurface && _canCopyHostClipboard
-          ? _copyHostClipboard
-          : null,
     );
     return bar;
   }

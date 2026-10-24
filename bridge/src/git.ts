@@ -731,7 +731,12 @@ export async function gitDiscard(
   if (opts.includeStaged && porcelain === null) {
     return { success: false, error: "Could not read git status" };
   }
-  const renames = porcelain?.renames ?? new Map<string, string>();
+  // A rename lives in the index, so only a discard that reaches the index may
+  // undo it. Without `includeStaged` a renamed path is restored from the index
+  // like any other, keeping the staged rename the caller promised to keep.
+  const renames = opts.includeStaged
+    ? (porcelain?.renames ?? new Map<string, string>())
+    : new Map<string, string>();
   const renamedNewPaths = files.filter((f) => renames.has(f));
 
   if (renamedNewPaths.length) {

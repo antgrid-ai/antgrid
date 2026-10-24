@@ -554,9 +554,9 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
   }
 
   /// `Pixel 9 · last seen 2 mins ago`, then what that device last said about
-  /// its RAM and storage. The usage line shows only while the device is live:
-  /// the figures are a snapshot, so once it stops reporting they describe a
-  /// device nobody can see, and the bridge keeps them until it next connects.
+  /// its RAM. The RAM line shows only while the device is live: the figure is
+  /// a snapshot, so once it stops reporting it describes a device nobody can
+  /// see, and the bridge keeps it until it next connects.
   Widget _subtitle(AbColors p) {
     final stats = phone.stats;
     final style = AbTokens.monoStyle(
@@ -565,16 +565,9 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     );
     final model = stats?.model;
     final live = stats != null && isLiveReport(stats.reportedAt);
-    final usage = [
-      if (live)
-        ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes),
-      if (live)
-        usageLine(
-          'Storage',
-          total: stats.storageTotalBytes,
-          free: stats.storageFreeBytes,
-        ),
-    ].nonNulls.join(' · ');
+    final usage = live
+        ? ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes)
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -586,7 +579,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
           overflow: TextOverflow.ellipsis,
           style: style,
         ),
-        if (usage.isNotEmpty)
+        if (usage != null)
           Text(
             usage,
             key: ValueKey('device-usage-${phone.phonePubkey}'),
