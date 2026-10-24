@@ -1,15 +1,20 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_agent_mark.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_dialog.dart';
-import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_segmented.dart';
-import '../util/detached.dart';
-import 'new_session/environment_menu.dart' show ComposerChip;
+import '../design/widgets/ab_separator.dart';
+import '../design/widgets/ab_touch_sizing.dart';
 
 /// The two workspaces a fork can run in, spelled the way `session:fork` spells
 /// them, so nothing has to translate between the control the user touched and
@@ -30,6 +35,8 @@ class SessionForkChoice {
 /// A tool the fork may continue in: registry key and display label.
 typedef SessionForkTarget = ({String tool, String label});
 
+typedef _TargetsAnswer = ({List<SessionForkTarget> targets, bool failed});
+
 /// Asks which workspace, and optionally which agent, a fork of this session
 /// should run in. Returns null if the user cancelled or dismissed.
 ///
@@ -44,20 +51,26 @@ typedef SessionForkTarget = ({String tool, String label});
 /// agents somewhere only they can see, while sharing a main-tree session's puts
 /// the fork where every ordinary session already lives.
 ///
-/// The agent row appears only when [sourceTool] is known and [targets] is not
-/// empty. Both are empty against a bridge that cannot hand off to another
-/// agent, where offering the row would fork silently into the same one.
+/// The agent row appears whenever [source] is given, which a caller does only
+/// for a bridge that can hand off to another agent: against any other, offering
+/// the row would fork silently into the same one. Whether a session can hand
+/// off is known up front and whether its machine has another agent is not, so
+/// the row never waits on [targets] to exist; the dialog opens at once and
+/// the agent list fills in when [targets] answers.
 Future<SessionForkChoice?> promptSessionFork(
   BuildContext context, {
   required bool isolatedSource,
-  required String? sourceTool,
-  required List<SessionForkTarget> targets,
+  SessionForkTarget? source,
+  Future<List<SessionForkTarget>>? targets,
 }) {
+  // The dialog attaches its handler when it first builds; a route that never
+  // does would leave a failed lookup to the zone as an uncaught error.
+  targets?.ignore();
   return showDialog<SessionForkChoice>(
     context: context,
     builder: (_) => _SessionForkDialog(
       isolatedSource: isolatedSource,
-      sourceTool: sourceTool,
+      source: source,
       targets: targets,
     ),
   );
@@ -66,38 +79,71 @@ Future<SessionForkChoice?> promptSessionFork(
 class _SessionForkDialog extends StatefulWidget {
   const _SessionForkDialog({
     required this.isolatedSource,
-    required this.sourceTool,
+    required this.source,
     required this.targets,
   });
 
   final bool isolatedSource;
-  final String? sourceTool;
-  final List<SessionForkTarget> targets;
+  final SessionForkTarget? source;
+  final Future<List<SessionForkTarget>>? targets;
 
   @override
   State<_SessionForkDialog> createState() => _SessionForkDialogState();
 }
 
 class _SessionForkDialogState extends State<_SessionForkDialog> {
-  // The workspace nothing else is standing in. A fork that lands beside a
-  // running agent is the answer the user has to ask for.
-  String _workspace = forkWorkspaceCopy;
+  // A fork usually carries on the work in progress, and a new workspace starts
+  // from the last commit without it.
+  String _workspace = forkWorkspaceCurrent;
 
-  // A deliberate segment pick outranks the default an agent change implies.
-  bool _workspaceTouched = false;
+  late String? _tool = widget.source?.tool;
 
-  late String? _tool = widget.sourceTool;
+  // Null until [_SessionForkDialog.targets] answers.
+  _TargetsAnswer? _answer;
 
-  bool get _showAgentRow =>
-      widget.sourceTool != null && widget.targets.isNotEmpty;
+  final _agentScroll = ScrollController();
 
-  bool get _crossAgent => _showAgentRow && _tool != widget.sourceTool;
+  @override
+  void initState() {
+    super.initState();
+    final targets = widget.targets;
+    if (targets == null) return;
+    unawaited(
+      targets.then(
+        (t) => _answered((targets: t, failed: false)),
+        onError: (Object _) => _answered((targets: const [], failed: true)),
+      ),
+    );
+  }
 
-  String get _toolLabel {
-    for (final t in widget.targets) {
-      if (t.tool == _tool) return t.label;
-    }
-    return _tool ?? '';
+  void _answered(_TargetsAnswer answer) {
+    if (mounted) setState(() => _answer = answer);
+  }
+
+  @override
+  void dispose() {
+    _agentScroll.dispose();
+    super.dispose();
+  }
+
+  bool get _showAgentRow => widget.source != null;
+
+  bool get _crossAgent => _showAgentRow && _tool != widget.source!.tool;
+
+  List<SessionForkTarget> get _known {
+    final answer = _answer;
+    if (answer == null || answer.failed) return [?widget.source];
+    return answer.targets;
+  }
+
+  /// Why the list offers no other agent, or null when it offers one. Never
+  /// says "this machine": on a phone, the machine in hand is not the one asked.
+  String? get _agentNote {
+    final answer = _answer;
+    if (answer == null) return 'Checking installed agents…';
+    if (answer.failed) return "Couldn't list installed agents.";
+    if (answer.targets.any((t) => t.tool != widget.source?.tool)) return null;
+    return 'No other agent installed.';
   }
 
   void _cancel() => Navigator.of(context).pop();
@@ -108,70 +154,108 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
     ),
   );
 
-  Future<void> _pickAgent(BuildContext chip) async {
-    final anchor = abMenuAnchorRect(chip);
-    if (anchor == null) return;
-    final picked = await showAbMenu<String>(
-      context: chip,
-      anchorRect: anchor,
-      bounds: MenuBoundsScope.maybeOf(chip),
-      entries: [
-        for (final t in widget.targets)
-          AbMenuItem(
-            label: t.label,
-            value: t.tool,
-            icon: t.tool == _tool ? AbIcons.check : null,
+  // Inline rather than behind a dropdown: the list is short, picking is one
+  // tap, and a lookup still running shows where the answer will land instead
+  // of inside a menu the user has to open to find out.
+  Widget _agentList(BuildContext context) {
+    final colors = context.antgrid;
+    final note = _agentNote;
+    final touchMin = AbTouchSizing.extentOf(context);
+    return Container(
+      key: const Key('fork-agent-selector'),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        border: Border.all(color: colors.borderDefault),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // The one part of the dialog that gives way on a short screen: the
+          // workspace choice and the buttons below it must stay in view, and a
+          // row cut part-way plus the thumb say the list goes on.
+          Flexible(
+            child: AbScrollbar(
+              controller: _agentScroll,
+              child: SingleChildScrollView(
+                controller: _agentScroll,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final t in _known)
+                      Semantics(
+                        inMutuallyExclusiveGroup: true,
+                        selected: t.tool == _tool,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(minHeight: touchMin),
+                          child: AbListRow(
+                            density: AbRowDensity.sm,
+                            selected: t.tool == _tool,
+                            selectionStyle: AbRowSelection.surface,
+                            leading: AbAgentMark(
+                              toolKey: t.tool,
+                              label: t.label,
+                              size: AbTokens.space16,
+                              color: t.tool == _tool
+                                  ? colors.textPrimary
+                                  : null,
+                            ),
+                            title: Text(t.label),
+                            trailing: t.tool == _tool
+                                ? AbIcon(
+                                    AbIcons.check,
+                                    size: AbTokens.iconButtonGlyph,
+                                    color: colors.accent,
+                                  )
+                                : null,
+                            onTap: () => setState(() => _tool = t.tool),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
           ),
-      ],
+          if (note != null) ...[
+            const AbSeparator.horizontal(),
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AbTokens.space12,
+                vertical: AbTokens.space8,
+              ),
+              child: Text(
+                note,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: colors.textMuted,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
-    if (picked == null || !mounted) return;
-    setState(() {
-      _tool = picked;
-      // Another agent means the work in progress is what is being handed over,
-      // so the default follows the agent rather than staying on a checkout the
-      // new agent would start without those edits.
-      if (!_workspaceTouched) {
-        _workspace = picked == widget.sourceTool
-            ? forkWorkspaceCopy
-            : forkWorkspaceCurrent;
-      }
-    });
   }
 
-  /// The consequence of the CURRENT pick, stated as what happens to the user's
-  /// work rather than as what Antgrid does. The uncommitted-changes clause is
-  /// the one thing here a user cannot recover by looking, so it is a sentence
-  /// of its own and not a subordinate clause.
+  /// What the CURRENT pick does to the user's work, in one line. Whether
+  /// uncommitted changes come along is the one thing a user cannot see by
+  /// looking, so every line says it.
   String get _consequence => switch (_workspace) {
-    forkWorkspaceCurrent when _crossAgent && widget.isolatedSource =>
-      'The new agent continues in this one directory with your uncommitted '
-          'changes. Both sessions work in it at the same time — the same '
-          'files, the same branch.',
-    forkWorkspaceCurrent when _crossAgent =>
-      'The new agent continues in this workspace with your uncommitted '
-          'changes. Both sessions work in the same files at the same time.',
     forkWorkspaceCurrent when widget.isolatedSource =>
-      'Both sessions work in this one directory at the same time — the same '
-          'files, the same branch, the same commits.',
+      "Same files as this session, uncommitted changes included.",
     forkWorkspaceCurrent =>
-      'The fork works in your main directory, alongside every other session '
-          'there — the same files, the same branch.',
-    _ when _crossAgent =>
-      'The new workspace starts from the last commit; uncommitted changes stay '
-          'behind.',
-    _ when widget.isolatedSource =>
-      'A workspace of its own, taken from this session\'s last commit. Work '
-          'you have not committed stays here and the fork never sees it.',
-    _ =>
-      'A workspace of its own, taken from your last commit. Work you have not '
-          'committed stays in your main directory and the fork never sees it.',
+      'Your main directory, uncommitted changes included.',
+    _ => 'Starts from the last commit, without uncommitted changes.',
   };
 
   @override
   Widget build(BuildContext context) {
-    final subtle = AbTokens.sansStyle(
+    final label = AbTokens.sansStyle(
       fontSize: AbTokens.fontSm,
-      color: context.antgrid.textSecondary,
+      fontWeight: FontWeight.w600,
     );
     return Dialog(
       child: ConstrainedBox(
@@ -185,32 +269,13 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
               abDialogTitle('Fork session', onClose: _cancel),
               const SizedBox(height: AbTokens.space12),
               if (_showAgentRow) ...[
-                Text('The fork continues in:', style: subtle),
-                const SizedBox(height: AbTokens.space8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: ComposerChip(
-                    key: const Key('fork-agent-selector'),
-                    icon: AbIcons.terminal,
-                    label: _toolLabel,
-                    onTap: (chip) => detached(
-                      'SessionForkDialog',
-                      'pick fork agent',
-                      () => _pickAgent(chip),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: AbTokens.space12),
+                Text('Agent', style: label),
+                const SizedBox(height: AbTokens.space6),
+                Flexible(child: _agentList(context)),
+                const SizedBox(height: AbTokens.space16),
               ],
-              Text(
-                _showAgentRow
-                    ? 'It picks the conversation up where this session left '
-                          'it, and runs in:'
-                    : 'The fork picks the conversation up where this session '
-                          'left it, and runs in:',
-                style: subtle,
-              ),
-              const SizedBox(height: AbTokens.space12),
+              Text('Workspace', style: label),
+              const SizedBox(height: AbTokens.space6),
               // Left-aligned rather than stretched: [AbSegmented]'s own Row is
               // `mainAxisSize.min`, so the surrounding Column's stretch hands it
               // tight constraints it cannot use — a border box wider than its
@@ -220,22 +285,16 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
                 child: AbSegmented<String>(
                   segments: const [
                     AbSegment(
-                      value: forkWorkspaceCopy,
-                      label: 'New workspace',
-                    ),
-                    AbSegment(
                       value: forkWorkspaceCurrent,
                       label: 'This workspace',
                     ),
+                    AbSegment(value: forkWorkspaceCopy, label: 'New workspace'),
                   ],
                   selected: _workspace,
-                  onSelect: (v) => setState(() {
-                    _workspace = v;
-                    _workspaceTouched = true;
-                  }),
+                  onSelect: (v) => setState(() => _workspace = v),
                 ),
               ),
-              const SizedBox(height: AbTokens.space8),
+              const SizedBox(height: AbTokens.space6),
               Text(
                 _consequence,
                 style: AbTokens.sansStyle(
