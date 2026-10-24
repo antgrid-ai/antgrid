@@ -4,6 +4,7 @@
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { SITE_REPO, siteFile } from "../helpers/site-checkout.js";
 
 // Parsed out of the shipped stylesheets rather than restated here: a test
 // carrying its own copy of the palette passes while the real colours drift.
@@ -11,19 +12,17 @@ import { resolve } from "node:path";
 // The marketing site is read from here too. Someone signing in crosses from
 // antgrid.ai into this service mid-flow — the same reason the font faces above
 // are duplicated verbatim — so the two accent ramps are one palette in two
-// files, and only a test that reads both can catch them diverging.
-const SHEETS = {
-  web: resolve(import.meta.dir, "../../src/ui/styles.css"),
-  site: resolve(import.meta.dir, "../../../site/src/styles/global.css"),
-} as const;
-type Sheet = keyof typeof SHEETS;
+// files, and only a test that reads both can catch them diverging. The site's
+// sheet comes from an antgrid-site checkout; without one only web's is held.
+const css = {
+  web: readFileSync(resolve(import.meta.dir, "../../src/ui/styles.css"), "utf8"),
+  site: SITE_REPO ? siteFile("src/styles/global.css") : "",
+};
+type Sheet = keyof typeof css;
+const SHEETS: Sheet[] = SITE_REPO ? ["web", "site"] : ["web"];
 
 const SCHEMES = ["light", "dark"] as const;
 type Scheme = (typeof SCHEMES)[number];
-
-const css = Object.fromEntries(
-  Object.entries(SHEETS).map(([k, p]) => [k, readFileSync(p, "utf8")]),
-) as Record<Sheet, string>;
 
 const HEX = "#[0-9a-fA-F]{6}";
 
@@ -62,7 +61,7 @@ function ratio(sheet: Sheet, scheme: Scheme, a: string, b: string): number {
 }
 
 describe("Signal accent ramp", () => {
-  for (const sheet of Object.keys(SHEETS) as Sheet[]) {
+  for (const sheet of SHEETS) {
     for (const scheme of SCHEMES) {
       const t = `${sheet}/${scheme}`;
 
@@ -140,23 +139,23 @@ describe("Signal accent ramp", () => {
 
   // The Readout marks sit on chrome, the tightest site surface.
   for (const scheme of SCHEMES) {
-    test(`site/${scheme}: ok reads as text on chrome`, () => {
+    test.skipIf(!SITE_REPO)(`site/${scheme}: ok reads as text on chrome`, () => {
       expect(ratio("site", scheme, "ok", "chrome")).toBeGreaterThanOrEqual(4.5);
     });
 
     // The two status hues that carry words inside an app window get a text
     // tier on the window's surface; the dot/chip hues themselves are the
     // app's and are not held to it.
-    test(`site/${scheme}: status ink tiers read on ab-surface`, () => {
+    test.skipIf(!SITE_REPO)(`site/${scheme}: status ink tiers read on ab-surface`, () => {
       for (const ink of ["ab-attn-ink", "ab-run-ink"]) {
         expect(ratio("site", scheme, ink, "ab-surface")).toBeGreaterThanOrEqual(4.5);
       }
     });
 
     // The mock window's own quiet tiers. These are the entries LIFTED off the
-    // app palette in site/tests/unit/ab-ramp.test.ts; that file proves they no
-    // longer match the app, and this one says what they were lifted TO.
-    test(`site/${scheme}: the mock's quiet tiers read on its surfaces`, () => {
+    // app palette in antgrid-site's tests/unit/ab-ramp.test.ts; that file proves
+    // they no longer match the app, and this one says what they were lifted TO.
+    test.skipIf(!SITE_REPO)(`site/${scheme}: the mock's quiet tiers read on its surfaces`, () => {
       for (const tier of ["ab-mute", "ab-dim", "ab-err"]) {
         for (const surface of ["ab-surface", "ab-deep", "ab-deepest"]) {
           expect(ratio("site", scheme, tier, surface)).toBeGreaterThanOrEqual(4.5);
@@ -164,7 +163,7 @@ describe("Signal accent ramp", () => {
       }
     });
 
-    test(`site/${scheme}: the mock's text ramp is strictly ordered`, () => {
+    test.skipIf(!SITE_REPO)(`site/${scheme}: the mock's text ramp is strictly ordered`, () => {
       const steps = ["ab-text", "ab-text2", "ab-mute", "ab-dim"]
         .map((n) => ratio("site", scheme, n, "ab-deep"));
       for (let i = 1; i < steps.length; i++) {
@@ -199,7 +198,7 @@ describe("Signal accent ramp", () => {
   // windows and stays zinc. The signal ramp is the contract a reader carries
   // across the sign-in crossing, so only it is held byte-identical, in both
   // halves. The site's third tint and second deep have no surface here.
-  test("both sheets ship the same accent ramp", () => {
+  test.skipIf(!SITE_REPO)("both sheets ship the same accent ramp", () => {
     for (const name of ["signal", "signal2", "signalbtn", "signaldeep"]) {
       for (const scheme of SCHEMES) {
         expect(`${name}/${scheme}=${token("web", name)[scheme]}`).toBe(
