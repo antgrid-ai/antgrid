@@ -117,9 +117,11 @@ class _AbSwitchState extends State<AbSwitch> {
       );
     }
 
+    // APG switch: on/off state, never also a button — a screen reader would
+    // announce "button" and drop the switch role.
     return Semantics(
       toggled: on,
-      button: true,
+      enabled: true,
       label: widget.semanticLabel,
       child: FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,

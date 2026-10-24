@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/widgets.dart';
 
 import '../ab_colors.dart';
@@ -10,7 +12,11 @@ import '../ab_colors.dart';
 /// the track is the whole widget, and a hairline in a border colour is
 /// indistinguishable from the row dividers around it.
 class AbProgressRule extends StatelessWidget {
-  const AbProgressRule({super.key, required this.fraction});
+  const AbProgressRule({super.key, required this.fraction, this.semanticLabel});
+
+  /// What is progressing, for assistive tech. The rule is exposed as a
+  /// progress bar (APG `progressbar`/meter: value within a min..max range).
+  final String? semanticLabel;
 
   /// 0..1, or null for indeterminate — a step whose size is unknown (a request
   /// round trip). Indeterminate fills the whole rule in the muted accent, one
@@ -24,6 +30,22 @@ class AbProgressRule extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = context.antgrid;
     final f = fraction;
+    // Indeterminate has no value to report, so it is a busy indicator rather
+    // than a progress bar with a made-up number.
+    return Semantics(
+      role: f == null
+          ? SemanticsRole.loadingSpinner
+          : SemanticsRole.progressBar,
+      label: semanticLabel,
+      value: f == null ? null : '${(f.clamp(0.0, 1.0) * 100).round()}',
+      minValue: f == null ? null : '0',
+      maxValue: f == null ? null : '100',
+      container: true,
+      child: _rule(p, f),
+    );
+  }
+
+  Widget _rule(AbColors p, double? f) {
     return SizedBox(
       height: 3,
       child: Stack(

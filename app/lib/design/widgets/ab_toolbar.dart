@@ -147,18 +147,25 @@ class AbToolbar extends StatelessWidget {
       // Expanded eats the same slack the Spacer did, so short titles are
       // laid out identically.
       Expanded(
-        child: Text(
-          title!.toUpperCase(),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            fontFamily: AbTokens.fontSans,
-            fontFamilyFallback: AbTokens.fontSansFallbacks,
-            fontSize: AbTokens.fontXxs,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 1.5,
-            color: context.antgrid.textSecondary,
-            height: 1.0, // line-metric centers caps inside the row
+        // A panel's heading (APG landmark/heading structure), read in its own
+        // case: the painted caps would be spelled out letter by letter.
+        child: Semantics(
+          header: true,
+          label: title,
+          excludeSemantics: true,
+          child: Text(
+            title!.toUpperCase(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: AbTokens.fontSans,
+              fontFamilyFallback: AbTokens.fontSansFallbacks,
+              fontSize: AbTokens.fontXxs,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 1.5,
+              color: context.antgrid.textSecondary,
+              height: 1.0, // line-metric centers caps inside the row
+            ),
           ),
         ),
       ),

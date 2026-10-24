@@ -1,12 +1,18 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../design/ab_colors.dart';
 
 /// A two-pane layout with a draggable divider between [left] and [right].
 /// On drag, the split ratio updates smoothly. Double-tap the handle to
 /// reset to 50/50.
+///
+/// The divider is an APG window splitter: a Tab stop that Left/Right nudge,
+/// Home/End send to the [left] pane's smallest/largest allowed width, and
+/// Enter collapses [left] to its minimum or restores it to where it was.
+/// Assistive tech sees it as an adjustable value (the [left] pane's share).
 class ResizablePane extends StatefulWidget {
   final Widget left;
   final Widget right;
@@ -27,6 +33,10 @@ class ResizablePane extends StatefulWidget {
   final double? minLeftWidth;
   final double? minRightWidth;
 
+  /// The divider's accessible name — what the panes are, since nothing
+  /// visible labels them.
+  final String semanticLabel;
+
   const ResizablePane({
     super.key,
     required this.left,
@@ -37,6 +47,7 @@ class ResizablePane extends StatefulWidget {
     this.minLeftWidth,
     this.minRightWidth,
     this.onRatioChanged,
+    this.semanticLabel = 'Resize panes',
   });
 
   @override
@@ -45,9 +56,17 @@ class ResizablePane extends StatefulWidget {
 
 const double _handleWidth = 4.0;
 
+/// One arrow press, as a share of the width. Coarse enough that a keyboard
+/// user crosses the whole range in a few dozen presses, fine enough to land
+/// where a drag would.
+const double _keyStep = 0.02;
+
 class _ResizablePaneState extends State<ResizablePane> {
   late double _ratio;
   bool _isDragging = false;
+
+  /// Where Enter restores to after collapsing; null while not collapsed.
+  double? _beforeCollapse;
 
   @override
   void initState() {
@@ -77,11 +96,42 @@ class _ResizablePaneState extends State<ResizablePane> {
     minRightWidth: widget.minRightWidth,
   );
 
+  /// Applies a keyboard or assistive-tech move and persists it at once — a
+  /// key press has no drag-end to commit on.
+  void _commit(double ratio) {
+    final available = _available;
+    final next = _layout.clampRatio(available, ratio);
+    setState(() => _ratio = next);
+    widget.onRatioChanged?.call(next);
+  }
+
+  void _step(int direction) {
+    _beforeCollapse = null;
+    _commit(_layout.clampRatio(_available) + direction * _keyStep);
+  }
+
+  void _toEnd({required bool max}) {
+    _beforeCollapse = null;
+    _commit(max ? 1 : 0);
+  }
+
+  void _toggleCollapse() {
+    final restore = _beforeCollapse;
+    if (restore != null) {
+      _beforeCollapse = null;
+      _commit(restore);
+      return;
+    }
+    _beforeCollapse = _layout.clampRatio(_available);
+    _commit(0);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Children must mount during build: a LayoutBuilder would reparent the
     // panels' live OverlayPortals during layout and dirty the root Overlay.
     // The delegate only sizes existing children, using this frame's width.
+    final current = _layout.clampRatio(_available);
     return CustomMultiChildLayout(
       delegate: _layout,
       children: [
@@ -91,7 +141,15 @@ class _ResizablePaneState extends State<ResizablePane> {
           child: _DragHandle(
             width: _handleWidth,
             isDragging: _isDragging,
-            onDragStart: () => setState(() => _isDragging = true),
+            semanticLabel: widget.semanticLabel,
+            percent: (current * 100).round(),
+            onStep: _step,
+            onToEnd: _toEnd,
+            onToggleCollapse: _toggleCollapse,
+            onDragStart: () => setState(() {
+              _isDragging = true;
+              _beforeCollapse = null;
+            }),
             onDragEnd: () {
               setState(() => _isDragging = false);
               widget.onRatioChanged?.call(_layout.clampRatio(_available));
@@ -106,6 +164,7 @@ class _ResizablePaneState extends State<ResizablePane> {
               });
             },
             onDoubleTap: () {
+              _beforeCollapse = null;
               setState(() => _ratio = 0.5);
               widget.onRatioChanged?.call(_layout.clampRatio(_available));
             },
@@ -181,6 +240,13 @@ class _PaneLayout extends MultiChildLayoutDelegate {
 class _DragHandle extends StatefulWidget {
   final double width;
   final bool isDragging;
+  final String semanticLabel;
+
+  /// The left pane's share of the width, 0–100.
+  final int percent;
+  final ValueChanged<int> onStep;
+  final void Function({required bool max}) onToEnd;
+  final VoidCallback onToggleCollapse;
   final VoidCallback onDragStart;
   final VoidCallback onDragEnd;
   final ValueChanged<double> onDragUpdate;
@@ -189,6 +255,11 @@ class _DragHandle extends StatefulWidget {
   const _DragHandle({
     required this.width,
     required this.isDragging,
+    required this.semanticLabel,
+    required this.percent,
+    required this.onStep,
+    required this.onToEnd,
+    required this.onToggleCollapse,
     required this.onDragStart,
     required this.onDragEnd,
     required this.onDragUpdate,
@@ -201,30 +272,74 @@ class _DragHandle extends StatefulWidget {
 
 class _DragHandleState extends State<_DragHandle> {
   bool _isHovered = false;
+  bool _isFocused = false;
+
+  KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      widget.onStep(-1);
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      widget.onStep(1);
+    } else if (key == LogicalKeyboardKey.home) {
+      widget.onToEnd(max: false);
+    } else if (key == LogicalKeyboardKey.end) {
+      widget.onToEnd(max: true);
+    } else if (event is KeyDownEvent &&
+        (key == LogicalKeyboardKey.enter ||
+            key == LogicalKeyboardKey.numpadEnter)) {
+      widget.onToggleCollapse();
+    } else {
+      return KeyEventResult.ignored;
+    }
+    return KeyEventResult.handled;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isActive = widget.isDragging || _isHovered;
+    final isActive = widget.isDragging || _isHovered || _isFocused;
+    final percent = widget.percent;
 
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeColumn,
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragStart: (_) => widget.onDragStart(),
-        onHorizontalDragEnd: (_) => widget.onDragEnd(),
-        onHorizontalDragUpdate: (d) => widget.onDragUpdate(d.delta.dx),
-        onDoubleTap: widget.onDoubleTap,
-        child: SizedBox(
-          width: widget.width,
-          child: Center(
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: isActive ? 2 : 1,
-              color: isActive
-                  ? context.antgrid.borderStrong
-                  : context.antgrid.borderDefault,
+    // No separator role exists natively, so the splitter is an adjustable
+    // value — the same increase/decrease gestures a slider answers to.
+    return Semantics(
+      container: true,
+      label: widget.semanticLabel,
+      value: '$percent%',
+      increasedValue: '${math.min(100, percent + 2)}%',
+      decreasedValue: '${math.max(0, percent - 2)}%',
+      onIncrease: () => widget.onStep(1),
+      onDecrease: () => widget.onStep(-1),
+      child: Focus(
+        onKeyEvent: _onKeyEvent,
+        onFocusChange: (v) {
+          if (_isFocused != v) setState(() => _isFocused = v);
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.resizeColumn,
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragStart: (_) => widget.onDragStart(),
+            onHorizontalDragEnd: (_) => widget.onDragEnd(),
+            onHorizontalDragUpdate: (d) => widget.onDragUpdate(d.delta.dx),
+            onDoubleTap: widget.onDoubleTap,
+            child: SizedBox(
+              width: widget.width,
+              child: Center(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  width: isActive ? 2 : 1,
+                  color: _isFocused
+                      ? context.antgrid.accent
+                      : isActive
+                      ? context.antgrid.borderStrong
+                      : context.antgrid.borderDefault,
+                ),
+              ),
             ),
           ),
         ),

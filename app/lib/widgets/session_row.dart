@@ -37,6 +37,7 @@ import '../services/control_plane_client.dart';
 import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
+import '../keyboard/focus_regions.dart';
 import '../util/external_open_target.dart';
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
@@ -100,6 +101,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   // Keep kebab mounted and visible while the action menu is actively open.
   bool _menuOpen = false;
+  final _menuOpener = _MenuOpener();
 
   // A collapsed kebab is unreachable without a pointer, so the row's own focus
   // highlight has to reveal it too.
@@ -300,123 +302,132 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // without shifting the dot's screen position: all but the last space6 sits
     // on the outer Padding (which also keeps the L/R strips non-hover-reactive),
     // and the last space6 is the row's own horizontalPadding.
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerSessionIndent - AbTokens.space6,
-        0,
-        AbTokens.space6,
-        0,
-      ),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: _onEnter,
-        onExit: _onExit,
-        child: AbListRow(
-          leadingGapOverride: AbTokens.drawerSessionLeadingGap,
-          leading: SizedBox(
-            width: AbTokens.drawerSessionLeadingSlot,
-            height: AbTokens.drawerLeadingSlot,
-            // Bias the dot slightly below its box centre. Row-centring lines up
-            // the dot with the title's line-box centre, but the visible glyphs
-            // of a text line sit a hair lower (the font reserves more space
-            // above the baseline than below), so a geometrically-centred dot
-            // reads as too high. The small downward nudge matches the optical
-            // centre of the text.
-            child: Align(
-              alignment: const Alignment(0, _dotOpticalYBias),
-              child: _leadingDot(work, deleting: deleting),
+    // Shift+F10 opens the kebab menu, which is on screen whenever the row
+    // has focus.
+    return ContextMenuKeys(
+      onOpen: (_) {
+        if (!_editing && !deleting) _menuOpener.open?.call();
+      },
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AbTokens.drawerSessionIndent - AbTokens.space6,
+          0,
+          AbTokens.space6,
+          0,
+        ),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: _onEnter,
+          onExit: _onExit,
+          child: AbListRow(
+            leadingGapOverride: AbTokens.drawerSessionLeadingGap,
+            leading: SizedBox(
+              width: AbTokens.drawerSessionLeadingSlot,
+              height: AbTokens.drawerLeadingSlot,
+              // Bias the dot slightly below its box centre. Row-centring lines up
+              // the dot with the title's line-box centre, but the visible glyphs
+              // of a text line sit a hair lower (the font reserves more space
+              // above the baseline than below), so a geometrically-centred dot
+              // reads as too high. The small downward nudge matches the optical
+              // centre of the text.
+              child: Align(
+                alignment: const Alignment(0, _dotOpticalYBias),
+                child: _leadingDot(work, deleting: deleting),
+              ),
             ),
-          ),
-          title: (_editing && !deleting)
-              ? _buildEditor()
-              : Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        session.name,
-                        // The payload of the drawer, and so still its largest
-                        // text — but at fontMd against the project row's
-                        // fontSm, not fontBody at textPrimary, which made every
-                        // session outshout the project containing it. The
-                        // active row is the one thing in the panel that goes
-                        // primary.
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontMd,
-                          fontWeight: selected
-                              ? FontWeight.w500
-                              : FontWeight.normal,
-                          color: selected
-                              ? context.antgrid.textPrimary
-                              : context.antgrid.textSecondary,
+            title: (_editing && !deleting)
+                ? _buildEditor()
+                : Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          session.name,
+                          // The payload of the drawer, and so still its largest
+                          // text — but at fontMd against the project row's
+                          // fontSm, not fontBody at textPrimary, which made every
+                          // session outshout the project containing it. The
+                          // active row is the one thing in the panel that goes
+                          // primary.
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontMd,
+                            fontWeight: selected
+                                ? FontWeight.w500
+                                : FontWeight.normal,
+                            color: selected
+                                ? context.antgrid.textPrimary
+                                : context.antgrid.textSecondary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    SessionIsolationBadge(
-                      session: session,
-                      // The live list's answer, never `session.setup`: a row
-                      // for a project that isn't focused is served from the
-                      // persisted cache, which carries no setup state at all.
-                      setup: ref.watch(sessionSetupProvider(session.id)),
-                    ),
-                    SessionApprovalBadge(session: session),
-                    SessionSharedWorkspaceBadge(session: session),
-                    SessionHandlerBadge(
-                      entryId: widget.entryId,
-                      sessionId: session.id,
-                    ),
-                    SessionDeletingBadge(deleting: deleting),
-                  ],
-                ),
-          // Hover-only kebab (always visible on mobile touch devices). Does
-          // not take trailing width when unhovered, leaving the full width
-          // for session titles. Kept mounted while the menu is open.
-          // Hidden entirely while deleting rather than partly disabled: every
-          // item on it (start/stop/rename/archive/delete, and the
-          // working-directory rows pointing into a checkout that is going away)
-          // acts on a session being removed.
-          trailing:
-              ((_hovered || _menuOpen || _focused) && !_editing && !deleting)
-              ? AbRowTrailingCell(
-                  child: _SessionMenu(
-                    entryId: widget.entryId,
-                    session: session,
-                    onMenuOpened: () {
-                      if (mounted) setState(() => _menuOpen = true);
-                    },
-                    onMenuClosed: () {
-                      if (mounted) setState(() => _menuOpen = false);
-                    },
+                      SessionIsolationBadge(
+                        session: session,
+                        // The live list's answer, never `session.setup`: a row
+                        // for a project that isn't focused is served from the
+                        // persisted cache, which carries no setup state at all.
+                        setup: ref.watch(sessionSetupProvider(session.id)),
+                      ),
+                      SessionApprovalBadge(session: session),
+                      SessionSharedWorkspaceBadge(session: session),
+                      SessionHandlerBadge(
+                        entryId: widget.entryId,
+                        sessionId: session.id,
+                      ),
+                      SessionDeletingBadge(deleting: deleting),
+                    ],
                   ),
-                )
-              : null,
-          selected: selected,
-          enabled: !deleting,
-          contentFloor: AbRowContentFloor.iconButton,
-          onFocusChange: (v) {
-            if (mounted) setState(() => _focused = v);
-          },
-          selectionStyle: AbRowSelection.surface,
-          hoverable: true,
-          density: AbRowDensity.sm,
-          horizontalPadding: AbTokens.space6,
-          verticalPadding: 1,
-          // Small vertical margin so adjacent rows don't touch.
-          margin: const EdgeInsets.symmetric(vertical: 1),
-          // Disable activation while editing so taps stay in the field.
-          onTap: (_editing || deleting)
-              ? null
-              : () => detached(
-                  'SessionRow',
-                  'session activate failed',
-                  () => _activate(context, ref.container),
-                ),
-          // Desktop: double-tap a running session (in any warm project) to
-          // rename it inline. The row's SerialTap recognizer keeps single-tap
-          // selection instant, so wiring this on many rows costs no latency.
-          onDoubleTap: (isMobilePlatform || _editing || deleting || !canRename)
-              ? null
-              : _enterEdit,
+            // Hover-only kebab (always visible on mobile touch devices). Does
+            // not take trailing width when unhovered, leaving the full width
+            // for session titles. Kept mounted while the menu is open.
+            // Hidden entirely while deleting rather than partly disabled: every
+            // item on it (start/stop/rename/archive/delete, and the
+            // working-directory rows pointing into a checkout that is going away)
+            // acts on a session being removed.
+            trailing:
+                ((_hovered || _menuOpen || _focused) && !_editing && !deleting)
+                ? AbRowTrailingCell(
+                    child: _SessionMenu(
+                      opener: _menuOpener,
+                      entryId: widget.entryId,
+                      session: session,
+                      onMenuOpened: () {
+                        if (mounted) setState(() => _menuOpen = true);
+                      },
+                      onMenuClosed: () {
+                        if (mounted) setState(() => _menuOpen = false);
+                      },
+                    ),
+                  )
+                : null,
+            selected: selected,
+            enabled: !deleting,
+            contentFloor: AbRowContentFloor.iconButton,
+            onFocusChange: (v) {
+              if (mounted) setState(() => _focused = v);
+            },
+            selectionStyle: AbRowSelection.surface,
+            hoverable: true,
+            density: AbRowDensity.sm,
+            horizontalPadding: AbTokens.space6,
+            verticalPadding: 1,
+            // Small vertical margin so adjacent rows don't touch.
+            margin: const EdgeInsets.symmetric(vertical: 1),
+            // Disable activation while editing so taps stay in the field.
+            onTap: (_editing || deleting)
+                ? null
+                : () => detached(
+                    'SessionRow',
+                    'session activate failed',
+                    () => _activate(context, ref.container),
+                  ),
+            // Desktop: double-tap a running session (in any warm project) to
+            // rename it inline. The row's SerialTap recognizer keeps single-tap
+            // selection instant, so wiring this on many rows costs no latency.
+            onDoubleTap:
+                (isMobilePlatform || _editing || deleting || !canRename)
+                ? null
+                : _enterEdit,
+          ),
         ),
       ),
     );
@@ -623,13 +634,23 @@ final class _CopyPath extends _SessionMenuChoice {
   const _CopyPath();
 }
 
+/// Lets [SessionRow] open its [_SessionMenu] from the keyboard.
+class _MenuOpener {
+  VoidCallback? open;
+}
+
 class _SessionMenu extends ConsumerWidget {
   final String entryId;
   final SessionEntry session;
   final VoidCallback? onMenuOpened;
   final VoidCallback? onMenuClosed;
 
+  /// Handed this menu's open action while it is mounted, so the row can open
+  /// it from the keyboard.
+  final _MenuOpener? opener;
+
   const _SessionMenu({
+    this.opener,
     required this.entryId,
     required this.session,
     this.onMenuOpened,
@@ -648,6 +669,7 @@ class _SessionMenu extends ConsumerWidget {
           'session menu failed',
           () => _openMenu(anchor, ref.container),
         );
+        opener?.open = open;
         // The parent row drives single/double tap through a
         // [SerialTapGestureRecognizer] that eagerly claims the gesture arena on
         // pointer-up (to keep single-tap selection instant). A plain button

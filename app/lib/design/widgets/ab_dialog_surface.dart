@@ -45,9 +45,16 @@ class AbDialogSurface extends StatelessWidget {
                 Row(
                   children: [
                     Expanded(
-                      child: Text(
-                        title,
-                        style: AbTokens.sansStyle(fontSize: AbTokens.fontBody),
+                      // Names the dialog (APG dialog `aria-labelledby`).
+                      child: Semantics(
+                        header: true,
+                        namesRoute: true,
+                        child: Text(
+                          title,
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontBody,
+                          ),
+                        ),
                       ),
                     ),
                     AbIconButton(

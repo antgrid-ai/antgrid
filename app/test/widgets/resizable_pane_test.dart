@@ -12,6 +12,8 @@
 // the panel from. See `workspace_panel_reparent_test.dart` for the reparent
 // itself.
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SemanticsAction;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/widgets/resizable_pane.dart';
@@ -147,5 +149,62 @@ void main() {
       ),
       findsNothing,
     );
+  });
+
+  group('keyboard (APG window splitter)', () {
+    double leftWidth(WidgetTester tester) =>
+        tester.getSize(find.byKey(_leftKey)).width;
+
+    Future<void> focusHandle(WidgetTester tester) async {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+
+    testWidgets('arrows nudge the split', (tester) async {
+      await pumpPane(tester, ratio: 0.5);
+      await focusHandle(tester);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.52, 0.01));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.48, 0.01));
+    });
+
+    testWidgets('Home and End reach the allowed extremes', (tester) async {
+      await pumpPane(tester, ratio: 0.5);
+      await focusHandle(tester);
+      await tester.sendKeyEvent(LogicalKeyboardKey.home);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.2, 0.01));
+      await tester.sendKeyEvent(LogicalKeyboardKey.end);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.8, 0.01));
+    });
+
+    testWidgets('Enter collapses the left pane, then restores it', (
+      tester,
+    ) async {
+      await pumpPane(tester, ratio: 0.4);
+      await focusHandle(tester);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.2, 0.01));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(leftWidth(tester), closeTo(_available * 0.4, 0.01));
+    });
+
+    testWidgets('is announced as an adjustable value', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpPane(tester, ratio: 0.5);
+      await tester.pump();
+      final node = tester.getSemantics(find.bySemanticsLabel('Resize panes'));
+      expect(node.value, '50%');
+      expect(node.getSemanticsData().hasAction(SemanticsAction.increase), true);
+      expect(node.getSemanticsData().hasAction(SemanticsAction.decrease), true);
+      handle.dispose();
+    });
   });
 }

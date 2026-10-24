@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' show ImageFilter, lerpDouble;
+import 'dart:ui' show ImageFilter, SemanticsRole, lerpDouble;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -158,77 +158,110 @@ class AbMenu extends StatelessWidget {
             // popup route is on top.
             FocusTraversalGroup(
               policy: OrderedTraversalPolicy(),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final entry in items)
-                    if (entry is AbMenuDivider)
-                      Container(
-                        margin: const EdgeInsets.symmetric(
-                          vertical: 4,
-                          horizontal: 2,
-                        ),
-                        height: 1,
-                        color: p.borderSubtle,
-                      )
-                    else if (entry is AbMenuInfo)
-                      Padding(
-                        padding: _menuRowPadding,
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                entry.label,
-                                style: AbTokens.sansStyle(
-                                  fontSize: AbTokens.fontSm,
-                                  color: p.textMuted,
+              child: _menuSemantics(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final entry in items)
+                      if (entry is AbMenuDivider)
+                        Container(
+                          margin: const EdgeInsets.symmetric(
+                            vertical: 4,
+                            horizontal: 2,
+                          ),
+                          height: 1,
+                          color: p.borderSubtle,
+                        )
+                      else if (entry is AbMenuInfo)
+                        Padding(
+                          padding: _menuRowPadding,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  entry.label,
+                                  style: AbTokens.sansStyle(
+                                    fontSize: AbTokens.fontSm,
+                                    color: p.textMuted,
+                                  ),
                                 ),
                               ),
-                            ),
-                            Flexible(child: entry.value),
-                          ],
+                              Flexible(child: entry.value),
+                            ],
+                          ),
+                        )
+                      else if (entry is AbMenuSubmenu)
+                        Builder(
+                          builder: (_) {
+                            final autofocus = !didAutofocus;
+                            didAutofocus = true;
+                            return _SubmenuTile(
+                              entry: entry,
+                              focusNode: _submenuFocus?.putIfAbsent(
+                                entry,
+                                FocusNode.new,
+                              ),
+                              open: _openSubmenu,
+                              expanded: identical(entry, _activeSubmenu),
+                              autofocus: autofocus,
+                            );
+                          },
+                        )
+                      else if (entry is AbMenuItem)
+                        Builder(
+                          builder: (_) {
+                            // Skip disabled rows: landing the keyboard on one that
+                            // can only answer with its reason costs the user an
+                            // arrow press before anything is pickable.
+                            final autofocus = !didAutofocus && entry.enabled;
+                            didAutofocus |= autofocus;
+                            return _MenuItemTile(
+                              key: entry.key,
+                              item: entry,
+                              autofocus: autofocus,
+                            );
+                          },
                         ),
-                      )
-                    else if (entry is AbMenuSubmenu)
-                      Builder(
-                        builder: (_) {
-                          final autofocus = !didAutofocus;
-                          didAutofocus = true;
-                          return _SubmenuTile(
-                            entry: entry,
-                            focusNode: _submenuFocus?.putIfAbsent(
-                              entry,
-                              FocusNode.new,
-                            ),
-                            open: _openSubmenu,
-                            expanded: identical(entry, _activeSubmenu),
-                            autofocus: autofocus,
-                          );
-                        },
-                      )
-                    else if (entry is AbMenuItem)
-                      Builder(
-                        builder: (_) {
-                          // Skip disabled rows: landing the keyboard on one that
-                          // can only answer with its reason costs the user an
-                          // arrow press before anything is pickable.
-                          final autofocus = !didAutofocus && entry.enabled;
-                          didAutofocus |= autofocus;
-                          return _MenuItemTile(
-                            key: entry.key,
-                            item: entry,
-                            autofocus: autofocus,
-                          );
-                        },
-                      ),
-                ],
+                  ],
+                ),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  /// APG menu: the rows sit in a `menu` container, and Home/End jump to the
+  /// first/last item (Up/Down are wired on the route).
+  Widget _menuSemantics(Widget rows) {
+    final hasItems = items.any((e) => e is AbMenuItem || e is AbMenuSubmenu);
+    if (!hasItems) return rows;
+    return Semantics(
+      role: SemanticsRole.menu,
+      container: true,
+      explicitChildNodes: true,
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: _onHomeEnd,
+        child: rows,
+      ),
+    );
+  }
+
+  static KeyEventResult _onHomeEnd(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key != LogicalKeyboardKey.home && key != LogicalKeyboardKey.end) {
+      return KeyEventResult.ignored;
+    }
+    final targets = node.traversalDescendants.toList();
+    if (targets.isEmpty) return KeyEventResult.ignored;
+    (key == LogicalKeyboardKey.home ? targets.first : targets.last)
+        .requestFocus();
+    return KeyEventResult.handled;
   }
 }
 
@@ -965,33 +998,31 @@ class _SubmenuTileState extends State<_SubmenuTile> {
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      expanded: widget.expanded,
-      child: MouseRegion(
-        onEnter: (_) {
-          if (!isMobilePlatform) {
-            _hoverTimer = Timer(AbTokens.menuHoverOpen, () => _open(false));
-          }
+    return MouseRegion(
+      onEnter: (_) {
+        if (!isMobilePlatform) {
+          _hoverTimer = Timer(AbTokens.menuHoverOpen, () => _open(false));
+        }
+      },
+      onExit: (_) => _hoverTimer?.cancel(),
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+              _open(true),
         },
-        onExit: (_) => _hoverTimer?.cancel(),
-        child: CallbackShortcuts(
-          bindings: {
-            const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-                _open(true),
-          },
-          child: _MenuItemTile(
-            focusNode: _focusNode,
-            autofocus: widget.autofocus,
-            item: AbMenuItem(
-              label: widget.entry.label,
-              icon: widget.entry.icon,
-              onTap: () => _open(true),
-            ),
-            trailing: AbIcon(
-              AbIcons.chevronRight,
-              size: _menuRowIconSize,
-              color: context.antgrid.textMuted,
-            ),
+        child: _MenuItemTile(
+          focusNode: _focusNode,
+          autofocus: widget.autofocus,
+          expanded: widget.expanded,
+          item: AbMenuItem(
+            label: widget.entry.label,
+            icon: widget.entry.icon,
+            onTap: () => _open(true),
+          ),
+          trailing: AbIcon(
+            AbIcons.chevronRight,
+            size: _menuRowIconSize,
+            color: context.antgrid.textMuted,
           ),
         ),
       ),
@@ -1379,11 +1410,15 @@ class _MenuItemTile extends StatefulWidget {
     this.autofocus = false,
     this.focusNode,
     this.trailing,
+    this.expanded,
   });
   final AbMenuItem item;
   final bool autofocus;
   final FocusNode? focusNode;
   final Widget? trailing;
+
+  /// Set only for a row that opens a submenu: whether that submenu is open.
+  final bool? expanded;
 
   @override
   State<_MenuItemTile> createState() => _MenuItemTileState();
@@ -1498,8 +1533,17 @@ class _MenuItemTileState extends State<_MenuItemTile> {
         ),
       ),
     );
+    // APG menuitem: its own node inside the menu, reporting disabled and — for
+    // a submenu row — whether its submenu is open.
+    final item = Semantics(
+      role: SemanticsRole.menuItem,
+      container: true,
+      enabled: i.enabled,
+      expanded: widget.expanded,
+      child: tile,
+    );
     final reason = i.enabled ? null : i.disabledReason;
-    if (reason == null) return tile;
-    return AbTooltip(message: reason, child: tile);
+    if (reason == null) return item;
+    return AbTooltip(message: reason, child: item);
   }
 }

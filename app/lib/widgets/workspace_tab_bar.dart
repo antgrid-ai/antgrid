@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -216,19 +218,26 @@ class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
                   controller: _scrollController,
                   scrollDirection: Axis.horizontal,
                   physics: const ClampingScrollPhysics(),
-                  child: Row(
-                    children: [
-                      for (final view in views)
-                        _TabItem(
-                          key: _tabKeys[view],
-                          view: view,
-                          isActive: view == widget.selected,
-                          keyboardFocused:
-                              _stripFocused && view == widget.selected,
-                          onTap: () => widget.onSelected(view),
-                          badgeCount: widget.badges[view] ?? 0,
-                        ),
-                    ],
+                  // APG tabs: the strip is the tablist (the keyboard model
+                  // lives on _stripFocus above).
+                  child: Semantics(
+                    role: SemanticsRole.tabBar,
+                    container: true,
+                    explicitChildNodes: true,
+                    child: Row(
+                      children: [
+                        for (final view in views)
+                          _TabItem(
+                            key: _tabKeys[view],
+                            view: view,
+                            isActive: view == widget.selected,
+                            keyboardFocused:
+                                _stripFocused && view == widget.selected,
+                            onTap: () => widget.onSelected(view),
+                            badgeCount: widget.badges[view] ?? 0,
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -370,7 +379,8 @@ class _TabItemState extends State<_TabItem> {
         : context.antgrid.textSecondary;
 
     return Semantics(
-      button: true,
+      role: SemanticsRole.tab,
+      container: true,
       selected: widget.isActive,
       // The badge is drawn as a bare number, which announces as a stray digit
       // after the tab name; folding it into the label is what makes it read as

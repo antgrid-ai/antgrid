@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -90,6 +91,8 @@ void main() {
           hasExpandedState: true,
           isExpanded: false,
           hasTapAction: true,
+          isFocusable: true,
+          hasFocusAction: true,
         ),
       );
 
@@ -102,10 +105,27 @@ void main() {
           hasExpandedState: true,
           isExpanded: true,
           hasTapAction: true,
+          isFocusable: true,
+          hasFocusAction: true,
         ),
       );
 
       handle.dispose();
     });
+
+    testWidgets('is a Tab stop that Enter and Space toggle (APG disclosure)', (
+      tester,
+    ) async {
+      var toggles = 0;
+      await pumpAntgrid(
+        tester,
+        _harness(expanded: false, onToggle: () => toggles++),
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(toggles, 2);
+    }, variant: _desktop);
   });
 }

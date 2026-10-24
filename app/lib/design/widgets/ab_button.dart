@@ -163,11 +163,18 @@ class _AbButtonState extends State<AbButton> {
           );
 
     if (!interactive) {
-      return sized(Opacity(opacity: AbTokens.opacityDisabled, child: visual));
+      // Still announced as a button: an unavailable action is reported as
+      // disabled (APG button pattern), not hidden from assistive tech.
+      return Semantics(
+        button: true,
+        enabled: false,
+        child: sized(Opacity(opacity: AbTokens.opacityDisabled, child: visual)),
+      );
     }
 
     return Semantics(
       button: true,
+      enabled: true,
       child: FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: (v) {

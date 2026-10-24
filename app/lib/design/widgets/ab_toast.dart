@@ -107,16 +107,10 @@ class AbToast extends StatelessWidget {
             height: 22,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: (iconColor ?? p.statusRunning).withValues(
-                alpha: 0.15,
-              ),
+              color: (iconColor ?? p.statusRunning).withValues(alpha: 0.15),
               borderRadius: AbTokens.borderRadiusFull,
             ),
-            child: AbIcon(
-              icon,
-              size: 12,
-              color: iconColor ?? p.statusRunning,
-            ),
+            child: AbIcon(icon, size: 12, color: iconColor ?? p.statusRunning),
           ),
           const SizedBox(width: 10),
           // Both flex so long text WRAPS under the host's width cap instead
@@ -379,11 +373,9 @@ void showAbToast(
   String message, {
   Duration? duration,
   bool clearPrevious = false,
-}) => AbToaster.maybeOf(context)?.showMessage(
-  message,
-  duration: duration,
-  clearPrevious: clearPrevious,
-);
+}) => AbToaster.maybeOf(
+  context,
+)?.showMessage(message, duration: duration, clearPrevious: clearPrevious);
 
 /// [AbToaster.show] on the toaster of [context]'s [AbToastHost]. A no-op
 /// outside one.

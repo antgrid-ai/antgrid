@@ -33,10 +33,15 @@ enum AppCommand {
 
   moveFocus('Move between rows and tabs', AppCommandGroup.keyboard),
   expandCollapse(
-    'Expand / collapse a folder or project',
+    'Expand / collapse, or go to the parent / first child',
     AppCommandGroup.keyboard,
   ),
   activate('Open the focused row / enter a tab', AppCommandGroup.keyboard),
+  openContextMenu("Open the focused row's menu", AppCommandGroup.keyboard),
+  resizePane(
+    'Move the focused pane divider (Enter collapses)',
+    AppCommandGroup.keyboard,
+  ),
   focusAgent('Focus the agent', AppCommandGroup.keyboard),
   focusNextArea(
     'Focus the next area (projects, agent, context panel)',
@@ -228,6 +233,10 @@ class KeyChord {
       LogicalKeyboardKey.arrowDown: ('↓', '↓'),
       LogicalKeyboardKey.pageUp: ('PgUp', '⇞'),
       LogicalKeyboardKey.pageDown: ('PgDn', '⇟'),
+      LogicalKeyboardKey.home: ('Home', '↖'),
+      LogicalKeyboardKey.end: ('End', '↘'),
+      LogicalKeyboardKey.space: ('Space', 'Space'),
+      LogicalKeyboardKey.contextMenu: ('Menu', 'Menu'),
       LogicalKeyboardKey.insert: ('Ins', 'Ins'),
       LogicalKeyboardKey.comma: (',', ','),
       LogicalKeyboardKey.slash: ('/', '/'),
@@ -310,6 +319,8 @@ const _fixedCommands = {
   AppCommand.moveFocus,
   AppCommand.expandCollapse,
   AppCommand.activate,
+  AppCommand.openContextMenu,
+  AppCommand.resizePane,
   AppCommand.terminalCopy,
   AppCommand.terminalPaste,
   AppCommand.terminalHistory,
@@ -451,6 +462,8 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
     KeyChord(LogicalKeyboardKey.arrowDown, reach: _local),
     KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
     KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+    KeyChord(LogicalKeyboardKey.home, reach: _local),
+    KeyChord(LogicalKeyboardKey.end, reach: _local),
   ],
   AppCommand.expandCollapse: const [
     KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
@@ -458,6 +471,16 @@ final Map<AppCommand, List<KeyChord>> _otherChords = {
   ],
   AppCommand.activate: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),
+    KeyChord(LogicalKeyboardKey.space, reach: _local),
+  ],
+  // Shift+F10 and the Menu key are the WAI-ARIA keys for a context menu.
+  AppCommand.openContextMenu: const [
+    KeyChord(LogicalKeyboardKey.f10, shift: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.contextMenu, reach: _local),
+  ],
+  AppCommand.resizePane: const [
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
   ],
   AppCommand.goBack: const [
     KeyChord(LogicalKeyboardKey.arrowLeft, alt: true, reach: _focused),
@@ -676,6 +699,8 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
     KeyChord(LogicalKeyboardKey.arrowDown, reach: _local),
     KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
     KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
+    KeyChord(LogicalKeyboardKey.home, reach: _local),
+    KeyChord(LogicalKeyboardKey.end, reach: _local),
   ],
   AppCommand.expandCollapse: const [
     KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
@@ -683,6 +708,16 @@ final Map<AppCommand, List<KeyChord>> _appleChords = {
   ],
   AppCommand.activate: const [
     KeyChord(LogicalKeyboardKey.enter, reach: _local),
+    KeyChord(LogicalKeyboardKey.space, reach: _local),
+  ],
+  // Shift+F10 and the Menu key are the WAI-ARIA keys for a context menu.
+  AppCommand.openContextMenu: const [
+    KeyChord(LogicalKeyboardKey.f10, shift: true, reach: _local),
+    KeyChord(LogicalKeyboardKey.contextMenu, reach: _local),
+  ],
+  AppCommand.resizePane: const [
+    KeyChord(LogicalKeyboardKey.arrowLeft, reach: _local),
+    KeyChord(LogicalKeyboardKey.arrowRight, reach: _local),
   ],
   AppCommand.goBack: const [
     KeyChord(LogicalKeyboardKey.bracketLeft, meta: true),

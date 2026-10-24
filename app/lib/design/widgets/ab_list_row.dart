@@ -89,6 +89,7 @@ class AbListRow extends StatefulWidget {
     this.leadingGapOverride,
     this.contentFloor = AbRowContentFloor.none,
     this.onFocusChange,
+    this.focusNode,
   }) : assert(
          actions == null || trailing == null,
          'AbListRow: pass actions or trailing, not both.',
@@ -188,6 +189,10 @@ class AbListRow extends StatefulWidget {
   /// hover-revealed actions has to know it can be reached by keyboard as well
   /// as by pointer, or those actions become unreachable without a mouse.
   final ValueChanged<bool>? onFocusChange;
+
+  /// The row's own focus node, for a list that moves the keyboard between
+  /// rows itself (a tree's parent/child keys) rather than by traversal.
+  final FocusNode? focusNode;
 
   @override
   State<AbListRow> createState() => _AbListRowState();
@@ -362,8 +367,12 @@ class _AbListRowState extends State<AbListRow> {
         : inner;
 
     if (!widget.enabled) {
-      // Disabled: visual only, dimmed, no interaction.
-      return Opacity(opacity: AbTokens.opacityDisabled, child: content);
+      // Disabled: visual only, dimmed, no interaction — but still reported as
+      // disabled rather than vanishing from assistive tech.
+      return Semantics(
+        enabled: false,
+        child: Opacity(opacity: AbTokens.opacityDisabled, child: content),
+      );
     }
 
     if (_tracksFocus) {
@@ -408,6 +417,7 @@ class _AbListRowState extends State<AbListRow> {
               child: focusChild,
             );
       content = FocusableActionDetector(
+        focusNode: widget.focusNode,
         mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: (v) {
           if (_focused != v) setState(() => _focused = v);
@@ -434,6 +444,9 @@ class _AbListRowState extends State<AbListRow> {
       );
     }
 
-    return content;
+    // A row that shows selection reports it (APG listbox/option
+    // `aria-selected`); a flat row has no selected state to report at all.
+    if (widget.selectionStyle == AbRowSelection.none) return content;
+    return Semantics(selected: widget.selected, child: content);
   }
 }

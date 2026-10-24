@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../ab_colors.dart';
 import '../ab_icons.dart';
 import '../ab_tokens.dart';
+import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
 import 'ab_tap_target.dart';
 
@@ -24,7 +25,7 @@ import 'ab_tap_target.dart';
 /// Pattern shared with `widgets/transcript/rows/reasoning_block.dart`'s
 /// inline "Thought" disclosure; built here so a second caller does not
 /// hand-roll its own chevron+label+padding.
-class AbDisclosure extends StatelessWidget {
+class AbDisclosure extends StatefulWidget {
   const AbDisclosure({
     super.key,
     required this.label,
@@ -39,54 +40,85 @@ class AbDisclosure extends StatelessWidget {
   final Widget child;
 
   @override
+  State<AbDisclosure> createState() => _AbDisclosureState();
+}
+
+class _AbDisclosureState extends State<AbDisclosure> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Semantics(
-          button: true,
-          label: label,
-          expanded: expanded,
-          // The real tap lands on AbTapTarget's own GestureDetector below;
-          // this is the ACCESSIBLE action a screen reader invokes instead.
-          // Excluding the subtree takes that GestureDetector's tap action
-          // with it, and the chevron+label Text nodes too — without it a
-          // screen reader reads "Why, Why" (this node's label, then the
-          // descendant Text's own) and the un-excluded GestureDetector is a
-          // button assistive tech can see and cannot press.
-          onTap: onToggle,
-          excludeSemantics: true,
-          child: AbTapTarget(
-            onTap: onToggle,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AbIcon(
-                  expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
-                  size: AbTokens.fontSm,
-                  color: p.textMuted,
+        // APG disclosure: the toggle is a focusable button that Enter and
+        // Space operate, so a keyboard user can reach the hidden text too.
+        // The detector sits outside the Semantics below so its focus state
+        // survives that node's `excludeSemantics`.
+        FocusableActionDetector(
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: (v) {
+            if (_focused != v) setState(() => _focused = v);
+          },
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                widget.onToggle();
+                return null;
+              },
+            ),
+          },
+          child: Semantics(
+            button: true,
+            label: widget.label,
+            expanded: widget.expanded,
+            // The real tap lands on AbTapTarget's own GestureDetector below;
+            // this is the ACCESSIBLE action a screen reader invokes instead.
+            // Excluding the subtree takes that GestureDetector's tap action
+            // with it, and the chevron+label Text nodes too — without it a
+            // screen reader reads "Why, Why" (this node's label, then the
+            // descendant Text's own) and the un-excluded GestureDetector is a
+            // button assistive tech can see and cannot press.
+            onTap: widget.onToggle,
+            excludeSemantics: true,
+            child: AbTapTarget(
+              onTap: widget.onToggle,
+              child: AbFocusRing(
+                focused: _focused,
+                borderRadius: AbTokens.borderRadius3,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AbIcon(
+                      widget.expanded
+                          ? AbIcons.chevronDown
+                          : AbIcons.chevronRight,
+                      size: AbTokens.fontSm,
+                      color: p.textMuted,
+                    ),
+                    const SizedBox(width: AbTokens.space4),
+                    Text(
+                      widget.label,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textMuted,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: AbTokens.space4),
-                Text(
-                  label,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: p.textMuted,
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),
-        if (expanded)
+        if (widget.expanded)
           Padding(
             padding: const EdgeInsets.only(
               left: AbTokens.space16,
               top: AbTokens.space4,
             ),
-            child: child,
+            child: widget.child,
           ),
       ],
     );

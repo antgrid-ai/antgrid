@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/material.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
@@ -61,32 +63,41 @@ class _AbLoadingState extends State<AbLoading>
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AnimatedBuilder(
-            animation: _opacity,
-            builder: (context, _) => Container(
-              width: widget.size,
-              height: widget.size * 1.4,
-              decoration: BoxDecoration(
-                color: context.antgrid.accent.withValues(alpha: _opacity.value),
-                borderRadius: AbTokens.borderRadius3,
+    // A busy indicator (APG `aria-busy` region): announced by its message, or
+    // as "Loading" when it has none, never as an unlabelled animation.
+    return Semantics(
+      role: SemanticsRole.loadingSpinner,
+      container: true,
+      label: widget.message == null ? 'Loading' : null,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedBuilder(
+              animation: _opacity,
+              builder: (context, _) => Container(
+                width: widget.size,
+                height: widget.size * 1.4,
+                decoration: BoxDecoration(
+                  color: context.antgrid.accent.withValues(
+                    alpha: _opacity.value,
+                  ),
+                  borderRadius: AbTokens.borderRadius3,
+                ),
               ),
             ),
-          ),
-          if (widget.message != null) ...[
-            const SizedBox(height: AbTokens.space12),
-            Text(
-              widget.message!,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
+            if (widget.message != null) ...[
+              const SizedBox(height: AbTokens.space12),
+              Text(
+                widget.message!,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: context.antgrid.textMuted,
+                ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

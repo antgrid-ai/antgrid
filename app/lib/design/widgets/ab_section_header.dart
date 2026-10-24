@@ -79,11 +79,18 @@ class AbSectionHeader extends StatelessWidget {
           // Flexible, not bare Text: a project name lands here on the drawer's
           // grouped list and has no bound of its own.
           Flexible(
-            child: Text(
-              label.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: style,
+            // Groups below it are found by heading navigation; read in its own
+            // case, since the painted caps would be spelled out.
+            child: Semantics(
+              header: true,
+              label: label,
+              excludeSemantics: true,
+              child: Text(
+                label.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: style,
+              ),
             ),
           ),
           if (count != null) ...[

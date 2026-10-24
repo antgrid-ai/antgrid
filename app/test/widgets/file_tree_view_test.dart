@@ -1,6 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
+import 'dart:ui' show Tristate;
+
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
@@ -238,43 +241,44 @@ void main() {
       expect(find.text('This folder is empty'), findsOneWidget);
     });
 
-    testWidgets('selecting a file off the current viewport scrolls to reveal it', (
-      tester,
-    ) async {
-      tester.view.physicalSize = const Size(400, 300);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.reset);
+    testWidgets(
+      'selecting a file off the current viewport scrolls to reveal it',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 300);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
 
-      final tree = FileNode(
-        name: 'project',
-        path: 'project',
-        type: FileNodeType.directory,
-        children: [
-          for (var i = 0; i < 60; i++)
-            FileNode(
-              name: 'file$i.dart',
-              path: 'project/file$i.dart',
-              type: FileNodeType.file,
-              extension: 'dart',
-            ),
-        ],
-      );
+        final tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            for (var i = 0; i < 60; i++)
+              FileNode(
+                name: 'file$i.dart',
+                path: 'project/file$i.dart',
+                type: FileNodeType.file,
+                extension: 'dart',
+              ),
+          ],
+        );
 
-      // Nothing selected yet: the tree renders from the top, so a file far
-      // down the (unscrolled) list is not yet built.
-      await tester.pumpWidget(buildTestWidget(root: tree));
-      expect(find.text('file59.dart'), findsNothing);
+        // Nothing selected yet: the tree renders from the top, so a file far
+        // down the (unscrolled) list is not yet built.
+        await tester.pumpWidget(buildTestWidget(root: tree));
+        expect(find.text('file59.dart'), findsNothing);
 
-      // Selecting it (as opening it from an agent transcript link does)
-      // should scroll the tree down to reveal its row, not just open the
-      // file's content off in another pane.
-      await tester.pumpWidget(
-        buildTestWidget(root: tree, selectedFilePath: 'project/file59.dart'),
-      );
-      await tester.pumpAndSettle();
+        // Selecting it (as opening it from an agent transcript link does)
+        // should scroll the tree down to reveal its row, not just open the
+        // file's content off in another pane.
+        await tester.pumpWidget(
+          buildTestWidget(root: tree, selectedFilePath: 'project/file59.dart'),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.text('file59.dart'), findsOneWidget);
-    });
+        expect(find.text('file59.dart'), findsOneWidget);
+      },
+    );
 
     group('reveal', () {
       FileNode longTree({bool deepLoaded = true}) => FileNode(
@@ -333,53 +337,55 @@ void main() {
         addTearDown(tester.view.reset);
       }
 
-      testWidgets('a revealed folder off the viewport is scrolled to and marked', (
-        tester,
-      ) async {
-        smallView(tester);
-        await tester.pumpWidget(themed(root: longTree()));
-        expect(find.text('zdeep'), findsNothing);
+      testWidgets(
+        'a revealed folder off the viewport is scrolled to and marked',
+        (tester) async {
+          smallView(tester);
+          await tester.pumpWidget(themed(root: longTree()));
+          expect(find.text('zdeep'), findsNothing);
 
-        await tester.pumpWidget(
-          themed(
-            root: longTree(),
-            selectedFilePath: 'project/file0.dart',
-            revealedDirectoryPath: 'project/zdeep',
-          ),
-        );
-        await tester.pumpAndSettle();
+          await tester.pumpWidget(
+            themed(
+              root: longTree(),
+              selectedFilePath: 'project/file0.dart',
+              revealedDirectoryPath: 'project/zdeep',
+            ),
+          );
+          await tester.pumpAndSettle();
 
-        expect(find.text('zdeep'), findsOneWidget);
-        expect(_labelColor(tester, 'zdeep'), kDefaultPalette.accent);
-      });
+          expect(find.text('zdeep'), findsOneWidget);
+          expect(_labelColor(tester, 'zdeep'), kDefaultPalette.accent);
+        },
+      );
 
-      testWidgets('a target whose row loads after it was selected is still scrolled to', (
-        tester,
-      ) async {
-        smallView(tester);
-        await tester.pumpWidget(themed(root: longTree(deepLoaded: false)));
+      testWidgets(
+        'a target whose row loads after it was selected is still scrolled to',
+        (tester) async {
+          smallView(tester);
+          await tester.pumpWidget(themed(root: longTree(deepLoaded: false)));
 
-        // The link selects the file while its folder's children are still in
-        // flight, so on this frame there is no row to scroll to.
-        await tester.pumpWidget(
-          themed(
-            root: longTree(deepLoaded: false),
-            selectedFilePath: 'project/zdeep/target.dart',
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('target.dart'), findsNothing);
+          // The link selects the file while its folder's children are still in
+          // flight, so on this frame there is no row to scroll to.
+          await tester.pumpWidget(
+            themed(
+              root: longTree(deepLoaded: false),
+              selectedFilePath: 'project/zdeep/target.dart',
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('target.dart'), findsNothing);
 
-        await tester.pumpWidget(
-          themed(
-            root: longTree(),
-            selectedFilePath: 'project/zdeep/target.dart',
-          ),
-        );
-        await tester.pumpAndSettle();
+          await tester.pumpWidget(
+            themed(
+              root: longTree(),
+              selectedFilePath: 'project/zdeep/target.dart',
+            ),
+          );
+          await tester.pumpAndSettle();
 
-        expect(find.text('target.dart'), findsOneWidget);
-      });
+          expect(find.text('target.dart'), findsOneWidget);
+        },
+      );
 
       testWidgets('a tree built with its target already set scrolls to it', (
         tester,
@@ -388,7 +394,10 @@ void main() {
         // A link that switches to the Files tab builds the tree fresh, with
         // the selection already in place: there is no change to react to.
         await tester.pumpWidget(
-          themed(root: longTree(), selectedFilePath: 'project/zdeep/target.dart'),
+          themed(
+            root: longTree(),
+            selectedFilePath: 'project/zdeep/target.dart',
+          ),
         );
         await tester.pumpAndSettle();
 
@@ -577,33 +586,32 @@ void main() {
       expect(find.text('README.md'), findsOneWidget);
     });
 
-    testWidgets(
-      'a folded folder hides its files rather than relocating them',
-      (tester) async {
-        // A fold must not push a file anywhere else in the list: reappearing
-        // at depth 0 under its full path is the fold undone, and the same file
-        // listed twice the moment the folder reopens.
-        await tester.pumpWidget(
-          buildTestWidget(
-            root: makeTree(),
-            changesOnly: true,
-            collapsedPaths: const {'project/lib'},
-            gitFileEntries: const [
-              GitFileStatusEntry(
-                path: 'project/lib/main.dart',
-                status: 'M',
-                staged: false,
-                additions: 3,
-                deletions: 1,
-              ),
-            ],
-          ),
-        );
+    testWidgets('a folded folder hides its files rather than relocating them', (
+      tester,
+    ) async {
+      // A fold must not push a file anywhere else in the list: reappearing
+      // at depth 0 under its full path is the fold undone, and the same file
+      // listed twice the moment the folder reopens.
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          changesOnly: true,
+          collapsedPaths: const {'project/lib'},
+          gitFileEntries: const [
+            GitFileStatusEntry(
+              path: 'project/lib/main.dart',
+              status: 'M',
+              staged: false,
+              additions: 3,
+              deletions: 1,
+            ),
+          ],
+        ),
+      );
 
-        expect(find.text('project/lib/main.dart'), findsNothing);
-        expect(find.text('main.dart'), findsNothing);
-      },
-    );
+      expect(find.text('project/lib/main.dart'), findsNothing);
+      expect(find.text('main.dart'), findsNothing);
+    });
 
     testWidgets('a folded folder totals what it is hiding', (tester) async {
       await tester.pumpWidget(
@@ -1240,7 +1248,11 @@ void main() {
         path: 'project',
         type: FileNodeType.directory,
         children: [
-          FileNode(name: 'lib', path: 'project/lib', type: FileNodeType.directory),
+          FileNode(
+            name: 'lib',
+            path: 'project/lib',
+            type: FileNodeType.directory,
+          ),
           FileNode(
             name: 'build',
             path: 'project/build',
@@ -1694,10 +1706,7 @@ void main() {
 
     testWidgets('a complete tree carries none', (tester) async {
       await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          expandedPaths: const {'project/lib'},
-        ),
+        buildTestWidget(root: makeTree(), expandedPaths: const {'project/lib'}),
       );
 
       expect(find.text('more items not shown'), findsNothing);
@@ -1891,44 +1900,46 @@ void main() {
       ),
     ];
 
-    testWidgets('a fold or a file-tree update reuses the change tree and its rollups', (
-      tester,
-    ) async {
-      final entries = mainEntries(3);
-      final folded = {'project/lib'};
-      Widget build({FileNode? root, Set<String> collapsed = const {}}) =>
-          buildTestWidget(
-            root: root,
-            changesOnly: true,
-            gitFileEntries: entries,
-            collapsedPaths: collapsed,
-          );
-      FileNode libRow() => (rowFor(tester, 'project/lib', FileNodeType.directory)
-              as dynamic)
-          .node as FileNode;
+    testWidgets(
+      'a fold or a file-tree update reuses the change tree and its rollups',
+      (tester) async {
+        final entries = mainEntries(3);
+        final folded = {'project/lib'};
+        Widget build({FileNode? root, Set<String> collapsed = const {}}) =>
+            buildTestWidget(
+              root: root,
+              changesOnly: true,
+              gitFileEntries: entries,
+              collapsedPaths: collapsed,
+            );
+        FileNode libRow() =>
+            (rowFor(tester, 'project/lib', FileNodeType.directory) as dynamic)
+                    .node
+                as FileNode;
 
-      await tester.pumpWidget(build());
-      final tree = libRow();
+        await tester.pumpWidget(build());
+        final tree = libRow();
 
-      await tester.pumpWidget(build(collapsed: folded));
-      expect(find.text('main.dart'), findsNothing);
-      expect(identical(libRow(), tree), isTrue);
-      final before = rowFor(tester, 'project/lib', FileNodeType.directory);
+        await tester.pumpWidget(build(collapsed: folded));
+        expect(find.text('main.dart'), findsNothing);
+        expect(identical(libRow(), tree), isTrue);
+        final before = rowFor(tester, 'project/lib', FileNodeType.directory);
 
-      await tester.pumpWidget(build(root: makeTree(), collapsed: folded));
-      final after = rowFor(tester, 'project/lib', FileNodeType.directory);
-      // The row widget is rebuilt; what it carries is not re-derived.
-      expect(identical(before, after), isFalse);
-      expect(identical(libRow(), tree), isTrue);
-      expect(
-        identical(
-          (before as dynamic).rollupEntries,
-          (after as dynamic).rollupEntries,
-        ),
-        isTrue,
-      );
-      expect(find.text('+3'), findsOneWidget);
-    });
+        await tester.pumpWidget(build(root: makeTree(), collapsed: folded));
+        final after = rowFor(tester, 'project/lib', FileNodeType.directory);
+        // The row widget is rebuilt; what it carries is not re-derived.
+        expect(identical(before, after), isFalse);
+        expect(identical(libRow(), tree), isTrue);
+        expect(
+          identical(
+            (before as dynamic).rollupEntries,
+            (after as dynamic).rollupEntries,
+          ),
+          isTrue,
+        );
+        expect(find.text('+3'), findsOneWidget);
+      },
+    );
 
     testWidgets('a replaced change list is never served stale', (tester) async {
       final tree = makeTree();
@@ -1985,6 +1996,86 @@ void main() {
 
       expect(root.childrenReads, reads);
       expect(find.text('main.dart'), findsOneWidget);
+    });
+  });
+
+  group('keyboard (APG treeview)', () {
+    String? focusedRow() => FocusManager.instance.primaryFocus?.debugLabel;
+
+    Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await tester.pump();
+    }
+
+    testWidgets('arrows move between parent and child, Home/End to the ends', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildTestWidget(root: makeTree(), expandedPaths: {'project/lib'}),
+      );
+      await press(tester, LogicalKeyboardKey.tab);
+      expect(focusedRow(), 'file-tree-row project/lib');
+
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(
+        focusedRow(),
+        'file-tree-row project/lib/main.dart',
+        reason: 'right on an open folder enters its first child',
+      );
+
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      expect(
+        focusedRow(),
+        'file-tree-row project/lib',
+        reason: 'left on a file returns to its folder',
+      );
+
+      await press(tester, LogicalKeyboardKey.end);
+      expect(focusedRow(), 'file-tree-row project/README.md');
+      await press(tester, LogicalKeyboardKey.home);
+      expect(focusedRow(), 'file-tree-row project/lib');
+    });
+
+    testWidgets('right on a closed folder expands it rather than moving', (
+      tester,
+    ) async {
+      final toggled = <String>[];
+      await tester.pumpWidget(
+        buildTestWidget(root: makeTree(), onToggleExpanded: toggled.add),
+      );
+      await press(tester, LogicalKeyboardKey.tab);
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(toggled, ['project/lib']);
+      expect(focusedRow(), 'file-tree-row project/lib');
+    });
+
+    testWidgets('Shift+F10 and the Menu key open the row menu', (tester) async {
+      for (final open in <Future<void> Function()>[
+        () async {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        },
+        () => tester.sendKeyEvent(LogicalKeyboardKey.contextMenu),
+      ]) {
+        await tester.pumpWidget(buildTestWidget(root: makeTree()));
+        await press(tester, LogicalKeyboardKey.tab);
+        await open();
+        await tester.pumpAndSettle();
+        expect(find.text('Copy path'), findsOneWidget);
+        await press(tester, LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+      }
+    });
+
+    testWidgets('a folder row reports whether it is expanded', (tester) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        buildTestWidget(root: makeTree(), expandedPaths: {'project/lib'}),
+      );
+      final data = tester.getSemantics(find.text('lib')).getSemanticsData();
+      expect(data.flagsCollection.isExpanded, Tristate.isTrue);
+      handle.dispose();
     });
   });
 }

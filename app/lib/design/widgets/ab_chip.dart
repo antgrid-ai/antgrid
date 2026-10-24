@@ -122,18 +122,30 @@ class _AbChipState extends State<AbChip> {
         child: Center(widthFactor: 1, heightFactor: 1, child: chip),
       );
     }
+    final isToggle = widget._variant == _AbChipVariant.toggle;
+    final isChoice = widget._variant == _AbChipVariant.choice;
     if (!widget.enabled) {
-      return Opacity(opacity: AbTokens.opacityDisabled, child: chip);
+      chip = Opacity(opacity: AbTokens.opacityDisabled, child: chip);
+      // A disabled control is still reported, as unavailable.
+      return widget.onTap == null
+          ? chip
+          : Semantics(
+              button: true,
+              enabled: false,
+              toggled: isToggle ? widget.selected : null,
+              selected: isChoice ? widget.selected : null,
+              child: chip,
+            );
     }
     if (!interactive) return chip;
 
+    // APG button: a toggle chip is a toggle button (pressed state); a choice
+    // chip is one pick of several, so it reports selection instead.
     return Semantics(
       button: true,
-      selected:
-          widget._variant == _AbChipVariant.toggle ||
-              widget._variant == _AbChipVariant.choice
-          ? widget.selected
-          : null,
+      enabled: true,
+      toggled: isToggle ? widget.selected : null,
+      selected: isChoice ? widget.selected : null,
       child: FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: (v) {

@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
@@ -185,7 +187,10 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
 
   Widget _buildDialog(BuildContext context) {
     final controller = _controller;
+    // APG alert dialog: it interrupts to ask for a confirmation, named by its
+    // title and described by its body.
     return Dialog(
+      semanticsRole: SemanticsRole.alertDialog,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 380),
         child: Padding(
@@ -197,12 +202,20 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      widget.title,
-                      style: AbTokens.sansStyle(fontSize: AbTokens.fontBody),
+                    child: Semantics(
+                      header: true,
+                      namesRoute: true,
+                      child: Text(
+                        widget.title,
+                        style: AbTokens.sansStyle(fontSize: AbTokens.fontBody),
+                      ),
                     ),
                   ),
-                  AbIconButton(icon: AbIcons.close, onTap: _cancel),
+                  AbIconButton(
+                    icon: AbIcons.close,
+                    tooltip: 'Close',
+                    onTap: _cancel,
+                  ),
                 ],
               ),
               const SizedBox(height: AbTokens.space12),

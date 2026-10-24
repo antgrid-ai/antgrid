@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/material.dart';
 
 import '../ab_colors.dart';
@@ -105,6 +107,12 @@ class AbBreadcrumb extends StatelessWidget {
               ),
       );
     }
-    return Row(mainAxisSize: MainAxisSize.min, children: children);
+    // APG breadcrumb: a labelled navigation landmark.
+    return Semantics(
+      role: SemanticsRole.navigation,
+      label: 'Breadcrumb',
+      container: true,
+      child: Row(mainAxisSize: MainAxisSize.min, children: children),
+    );
   }
 }

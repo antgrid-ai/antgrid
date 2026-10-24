@@ -1,3 +1,6 @@
+import 'dart:ui' show SemanticsRole;
+
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../ab_colors.dart';
@@ -50,7 +53,12 @@ class AbSegment<T> {
 /// Disabled cells diverge from the AbChip disabled contract on purpose: they
 /// keep hit-testing (no 0.4-opacity dead zone) so [AbSegment.disabledReason]
 /// stays reachable — tooltip on hover, toast on tap (see [onDisabledTap]).
-class AbSegmented<T> extends StatelessWidget {
+///
+/// Behaves as an APG radio group: the cells are radios in one mutually
+/// exclusive group, Tab enters at the checked cell (only it is a tab stop),
+/// and the arrow keys move to the next or previous enabled cell — wrapping at
+/// either end — and select it.
+class AbSegmented<T> extends StatefulWidget {
   const AbSegmented({
     super.key,
     required this.segments,
@@ -60,6 +68,7 @@ class AbSegmented<T> extends StatelessWidget {
     this.iconOnly = false,
     this.inactive = false,
     this.expand = false,
+    this.semanticLabel,
   });
 
   final List<AbSegment<T>> segments;
@@ -94,57 +103,144 @@ class AbSegmented<T> extends StatelessWidget {
   /// platforms, clicks before the tooltip dwell). Provide this to override.
   final ValueChanged<AbSegment<T>>? onDisabledTap;
 
+  /// Names the radio group for assistive tech — the question the cells
+  /// answer ("Mode"). Leave null only where a visible label beside the control
+  /// already says it.
+  final String? semanticLabel;
+
+  @override
+  State<AbSegmented<T>> createState() => _AbSegmentedState<T>();
+}
+
+class _AbSegmentedState<T> extends State<AbSegmented<T>> {
+  final List<FocusNode> _nodes = [];
+
+  @override
+  void dispose() {
+    for (final n in _nodes) {
+      n.dispose();
+    }
+    super.dispose();
+  }
+
+  void _syncNodes() {
+    while (_nodes.length < widget.segments.length) {
+      _nodes.add(FocusNode(debugLabel: 'AbSegmented[${_nodes.length}]'));
+    }
+    while (_nodes.length > widget.segments.length) {
+      _nodes.removeLast().dispose();
+    }
+  }
+
+  /// The one cell Tab lands on: the checked one, else the first enabled one.
+  int get _tabStop {
+    final segs = widget.segments;
+    final checked = segs.indexWhere(
+      (s) => s.enabled && s.value == widget.selected,
+    );
+    if (checked != -1) return checked;
+    final firstEnabled = segs.indexWhere((s) => s.enabled);
+    return firstEnabled == -1 ? 0 : firstEnabled;
+  }
+
+  KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final int step;
+    if (key == LogicalKeyboardKey.arrowRight ||
+        key == LogicalKeyboardKey.arrowDown) {
+      step = 1;
+    } else if (key == LogicalKeyboardKey.arrowLeft ||
+        key == LogicalKeyboardKey.arrowUp) {
+      step = -1;
+    } else {
+      return KeyEventResult.ignored;
+    }
+    final from = _nodes.indexWhere((n) => n.hasPrimaryFocus);
+    if (from == -1) return KeyEventResult.ignored;
+    final segs = widget.segments;
+    for (var i = 1; i < segs.length; i++) {
+      final to = (from + step * i) % segs.length;
+      if (!segs[to].enabled) continue;
+      _nodes[to].requestFocus();
+      if (segs[to].value != widget.selected) widget.onSelect(segs[to].value);
+      break;
+    }
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
     // Not a constructor assert: a const constructor's initializer list can't
     // reach a parameter's fields.
     assert(
-      !iconOnly || segments.every((s) => s.icon != null),
+      !widget.iconOnly || widget.segments.every((s) => s.icon != null),
       'an icon-only segment has nothing to paint without an icon',
     );
-    return Container(
-      decoration: BoxDecoration(
-        border: Border.all(color: p.borderDefault),
-        borderRadius: AbTokens.borderRadius3,
-      ),
-      // Clip so the selected cell's fill doesn't bleed past the rounded
-      // corner; IntrinsicHeight lets the 1px dividers stretch to cell height.
-      child: ClipRRect(
-        borderRadius: AbTokens.borderRadius3,
-        child: IntrinsicHeight(
-          child: Row(
-            mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (var i = 0; i < segments.length; i++) ...[
-                if (i > 0) Container(width: 1, color: p.borderDefault),
-                _expanded(
-                  _SegmentCell<T>(
-                    key: segments[i].key,
-                    segment: segments[i],
-                    selected: segments[i].value == selected,
-                    onSelect: onSelect,
-                    onDisabledTap: onDisabledTap,
-                    iconOnly: iconOnly,
-                    inactive: inactive,
-                  ),
-                ),
-              ],
-            ],
+    _syncNodes();
+    final tabStop = _tabStop;
+    final segments = widget.segments;
+    return Semantics(
+      role: SemanticsRole.radioGroup,
+      label: widget.semanticLabel,
+      container: true,
+      explicitChildNodes: true,
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: _onKeyEvent,
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: p.borderDefault),
+            borderRadius: AbTokens.borderRadius3,
+          ),
+          // Clip so the selected cell's fill doesn't bleed past the rounded
+          // corner; IntrinsicHeight lets the 1px dividers stretch to cell
+          // height.
+          child: ClipRRect(
+            borderRadius: AbTokens.borderRadius3,
+            child: IntrinsicHeight(
+              child: Row(
+                mainAxisSize: widget.expand
+                    ? MainAxisSize.max
+                    : MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var i = 0; i < segments.length; i++) ...[
+                    if (i > 0) Container(width: 1, color: p.borderDefault),
+                    _expanded(
+                      _SegmentCell<T>(
+                        key: segments[i].key,
+                        segment: segments[i],
+                        focusNode: _nodes[i]..skipTraversal = i != tabStop,
+                        selected: segments[i].value == widget.selected,
+                        onSelect: widget.onSelect,
+                        onDisabledTap: widget.onDisabledTap,
+                        iconOnly: widget.iconOnly,
+                        inactive: widget.inactive,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _expanded(Widget cell) => expand ? Expanded(child: cell) : cell;
+  Widget _expanded(Widget cell) => widget.expand ? Expanded(child: cell) : cell;
 }
 
 class _SegmentCell<T> extends StatefulWidget {
   const _SegmentCell({
     super.key,
     required this.segment,
+    required this.focusNode,
     required this.selected,
     required this.onSelect,
     required this.onDisabledTap,
@@ -153,6 +249,7 @@ class _SegmentCell<T> extends StatefulWidget {
   });
 
   final AbSegment<T> segment;
+  final FocusNode focusNode;
   final bool selected;
   final ValueChanged<T> onSelect;
   final ValueChanged<AbSegment<T>>? onDisabledTap;
@@ -241,15 +338,15 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
     final tooltip =
         (s.enabled ? null : s.disabledReason) ??
         (widget.iconOnly ? s.label : null);
-    if (tooltip != null) cell = AbTooltip(message: tooltip, child: cell);
-
-    return Semantics(
-      button: true,
+    // APG radio: one of a mutually exclusive group, reporting checked.
+    Widget result = Semantics(
+      inMutuallyExclusiveGroup: true,
+      checked: widget.selected,
       enabled: s.enabled,
-      selected: widget.selected,
       // Only when unpainted — with the label on screen this would double it up.
       label: widget.iconOnly ? s.label : null,
       child: FocusableActionDetector(
+        focusNode: widget.focusNode,
         // enabled:false drops the tab stop and keyboard actions but keeps the
         // detector mounted: its didUpdateWidget fires the highlight callbacks
         // false when a cell flips disabled mid-hover/focus, so no stale hover
@@ -288,5 +385,15 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         ),
       ),
     );
+    // Outside the focus detector, so keyboard focus on the cell shows it.
+    if (tooltip != null) {
+      result = AbTooltip(
+        message: tooltip,
+        // An icon-only cell's tooltip IS its name, already given above.
+        excludeFromSemantics: tooltip == s.label,
+        child: result,
+      );
+    }
+    return result;
   }
 }

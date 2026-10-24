@@ -2,6 +2,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'app_shortcuts.dart';
+
 /// The three areas F6 moves the keyboard between, in screen order.
 enum AppFocusArea { projects, agent, context }
 
@@ -114,6 +116,11 @@ class TreeArrowKeys extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // APG treeview: a parent node reports whether it is open.
+    return Semantics(expanded: expanded, child: _keys());
+  }
+
+  Widget _keys() {
     return Focus(
       canRequestFocus: false,
       skipTraversal: true,
@@ -140,6 +147,42 @@ class TreeArrowKeys extends StatelessWidget {
           return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
+      },
+      child: child,
+    );
+  }
+}
+
+/// Opens a row's context menu from the keyboard: Shift+F10 or the Menu key,
+/// the WAI-ARIA convention for whatever right-click (or a long-press) opens.
+/// Without it a menu reachable only by pointer is out of reach of anyone not
+/// using one.
+///
+/// [onOpen] gets the row's global rect to anchor the menu on, since there is
+/// no pointer position to open it at.
+class ContextMenuKeys extends StatelessWidget {
+  const ContextMenuKeys({super.key, required this.onOpen, required this.child});
+
+  final void Function(Rect anchor) onOpen;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final keyboard = HardwareKeyboard.instance;
+        final chords =
+            appShortcutChords()[AppCommand.openContextMenu] ?? const [];
+        if (!chords.any((c) => c.accepts(event, keyboard))) {
+          return KeyEventResult.ignored;
+        }
+        final box = context.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) return KeyEventResult.ignored;
+        onOpen(box.localToGlobal(Offset.zero) & box.size);
+        return KeyEventResult.handled;
       },
       child: child,
     );

@@ -1,9 +1,13 @@
+import 'dart:ui' show SemanticsRole;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../ab_colors.dart';
 import '../ab_icons.dart';
 import '../ab_status_tone.dart';
 import '../ab_tokens.dart';
+import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
 import 'ab_status_pill.dart';
 import 'ab_tap_target.dart';
@@ -35,6 +39,7 @@ class AbAgentTab extends StatefulWidget {
 class _AbAgentTabState extends State<AbAgentTab>
     with SingleTickerProviderStateMixin {
   bool _hover = false;
+  bool _focused = false;
   late final AnimationController _ctrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
@@ -91,89 +96,132 @@ class _AbAgentTabState extends State<AbAgentTab>
         ? p.textPrimary
         : (_hover ? p.textSecondary : p.textMuted);
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: widget.active ? p.accent : Colors.transparent,
-                width: 1.5,
-              ),
-            ),
+    // APG tab: selected state, focusable, Enter/Space activate, and Delete
+    // closes it (the pattern's optional deletion key).
+    return Semantics(
+      role: SemanticsRole.tab,
+      container: true,
+      selected: widget.active,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowHoverHighlight: (v) {
+          if (_hover != v) setState(() => _hover = v);
+        },
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        shortcuts: const {
+          SingleActivator(LogicalKeyboardKey.delete): _CloseTabIntent(),
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onTap();
+              return null;
+            },
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 14,
-                height: 14,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: p.bgRaised,
-                  border: Border.all(color: p.borderDefault),
-                  borderRadius: AbTokens.borderRadius3,
-                ),
-                child: Text(
-                  widget.glyph,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXxs,
-                    fontWeight: FontWeight.w600,
-                    color: p.textMuted,
+          _CloseTabIntent: CallbackAction<_CloseTabIntent>(
+            onInvoke: (_) {
+              widget.onClose();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AbFocusRing(
+            focused: _focused,
+            child: Container(
+              height: 36,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: widget.active ? p.accent : Colors.transparent,
+                    width: 1.5,
                   ),
                 ),
               ),
-              const SizedBox(width: 6),
-              AnimatedBuilder(
-                animation: _ctrl,
-                builder: (_, _) => Opacity(
-                  opacity: _pulses ? 1.0 - _ctrl.value * 0.7 : 1.0,
-                  child: Container(
-                    width: 6,
-                    height: 6,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 14,
+                    height: 14,
+                    alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: _tone.color(context),
-                      borderRadius: AbTokens.borderRadiusFull,
+                      color: p.bgRaised,
+                      border: Border.all(color: p.borderDefault),
+                      borderRadius: AbTokens.borderRadius3,
+                    ),
+                    child: Text(
+                      widget.glyph,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXxs,
+                        fontWeight: FontWeight.w600,
+                        color: p.textMuted,
+                      ),
                     ),
                   ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                widget.name,
-                style: TextStyle(fontSize: AbTokens.fontMd, color: fg),
-              ),
-              if (widget.duration != null) ...[
-                const SizedBox(width: 6),
-                Text(
-                  widget.duration!,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXs,
-                    // Inactive tabs de-emphasize via the name color; the
-                    // duration stays muted so it remains readable.
-                    color: p.textMuted,
+                  const SizedBox(width: 6),
+                  AnimatedBuilder(
+                    animation: _ctrl,
+                    builder: (_, _) => Opacity(
+                      opacity: _pulses ? 1.0 - _ctrl.value * 0.7 : 1.0,
+                      child: Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: _tone.color(context),
+                          borderRadius: AbTokens.borderRadiusFull,
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              ],
-              const SizedBox(width: 6),
-              // AbTapTarget owns the tap: inflates the 11px glyph's target on
-              // touch platforms (capped by the tab's height constraint) and is
-              // an opaque same-size hit area on desktop.
-              if (_hover)
-                AbTapTarget(
-                  onTap: widget.onClose,
-                  child: AbIcon(AbIcons.close, size: 11, color: p.textMuted),
-                ),
-            ],
+                  const SizedBox(width: 6),
+                  Text(
+                    widget.name,
+                    style: TextStyle(fontSize: AbTokens.fontMd, color: fg),
+                  ),
+                  if (widget.duration != null) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      widget.duration!,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        // Inactive tabs de-emphasize via the name color; the
+                        // duration stays muted so it remains readable.
+                        color: p.textMuted,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 6),
+                  // AbTapTarget owns the tap: inflates the 11px glyph's target on
+                  // touch platforms (capped by the tab's height constraint) and is
+                  // an opaque same-size hit area on desktop.
+                  if (_hover || _focused)
+                    Semantics(
+                      button: true,
+                      label: 'Close ${widget.name}',
+                      child: AbTapTarget(
+                        onTap: widget.onClose,
+                        child: AbIcon(
+                          AbIcons.close,
+                          size: 11,
+                          color: p.textMuted,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
   }
+}
+
+class _CloseTabIntent extends Intent {
+  const _CloseTabIntent();
 }

@@ -163,7 +163,147 @@ class _FileTreeViewState extends State<FileTreeView> {
   @override
   void dispose() {
     _scrollController.dispose();
+    for (final node in _rowFocus.values) {
+      node.dispose();
+    }
     super.dispose();
+  }
+
+  /// One node per row, keyed like the row itself, so the tree can put the
+  /// keyboard on a row it computed (a parent, a first child) rather than only
+  /// on whichever row directional traversal happens to reach.
+  final Map<(String, FileNodeType), FocusNode> _rowFocus = {};
+
+  FocusNode _rowNode(FileNode node) => _rowFocus.putIfAbsent((
+    node.path,
+    node.type,
+  ), () => FocusNode(debugLabel: 'file-tree-row ${node.path}'));
+
+  /// Drops nodes for rows gone from [rows]. Deferred a frame: a row leaving
+  /// the list this build still holds its node until it unmounts.
+  void _pruneRowFocus(List<_TreeRow> rows) {
+    final live = {
+      for (final r in rows)
+        if (!r.truncationNotice && !r.loadingNotice) (r.node.path, r.node.type),
+    };
+    final stale = [
+      for (final key in _rowFocus.keys)
+        if (!live.contains(key)) key,
+    ];
+    if (stale.isEmpty) return;
+    final nodes = [for (final key in stale) _rowFocus.remove(key)!];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (final node in nodes) {
+        node.dispose();
+      }
+    });
+  }
+
+  bool _isOpen(FileNode node) => widget.changesOnly
+      ? !widget.collapsedPaths.contains(node.path)
+      : widget.expandedPaths.contains(node.path);
+
+  /// The APG treeview keys the rows' own [TreeArrowKeys] leave unhandled:
+  /// ← on a closed folder or a file goes to its parent, → on an open folder
+  /// goes to its first child, and Home/End go to the first/last row. ↑/↓
+  /// stay with directional traversal, which also carries them across areas.
+  KeyEventResult _onTreeKey(FocusNode _, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final rows = _lastFlatList;
+    bool isRow(int i) => !rows[i].truncationNotice && !rows[i].loadingNotice;
+    final key = event.logicalKey;
+
+    if (key == LogicalKeyboardKey.home || key == LogicalKeyboardKey.end) {
+      final home = key == LogicalKeyboardKey.home;
+      final indices = home
+          ? List.generate(rows.length, (i) => i)
+          : List.generate(rows.length, (i) => rows.length - 1 - i);
+      final target = indices.where(isRow).firstOrNull;
+      if (target == null) return KeyEventResult.ignored;
+      _focusRow(target, scrollTo: home ? 0 : double.infinity);
+      return KeyEventResult.handled;
+    }
+
+    if (key != LogicalKeyboardKey.arrowLeft &&
+        key != LogicalKeyboardKey.arrowRight) {
+      return KeyEventResult.ignored;
+    }
+    // Only from a row itself — not from a stage/discard button inside one.
+    final primary = FocusManager.instance.primaryFocus;
+    final from = rows.indexed
+        .where(
+          (e) =>
+              isRow(e.$1) &&
+              _rowFocus[(e.$2.node.path, e.$2.node.type)] == primary,
+        )
+        .map((e) => e.$1)
+        .firstOrNull;
+    if (from == null) return KeyEventResult.ignored;
+    final row = rows[from];
+    final isDir = row.node.type == FileNodeType.directory;
+
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (isDir && _isOpen(row.node)) return KeyEventResult.ignored;
+      for (var i = from - 1; i >= 0; i--) {
+        if (isRow(i) && rows[i].depth < row.depth) {
+          _focusRow(i);
+          return KeyEventResult.handled;
+        }
+      }
+      return KeyEventResult.ignored;
+    }
+
+    if (!isDir || !_isOpen(row.node)) return KeyEventResult.ignored;
+    final next = from + 1;
+    if (next < rows.length && isRow(next) && rows[next].depth > row.depth) {
+      _focusRow(next);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// Focuses the row at [index], scrolling it into view. A row the list has
+  /// not built yet is scrolled to first ([scrollTo], or its estimated offset)
+  /// and focused on the frame that builds it.
+  void _focusRow(int index, {double? scrollTo}) {
+    final row = _lastFlatList[index].node;
+    final node = _rowNode(row);
+    final ctx = node.context;
+    if (ctx != null) {
+      node.requestFocus();
+      Scrollable.ensureVisible(
+        ctx,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      );
+      Scrollable.ensureVisible(
+        ctx,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtStart,
+      );
+      return;
+    }
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final offset = scrollTo ?? index * (_rowExtent ?? 0);
+    _scrollController.jumpTo(
+      offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final built = _rowFocus[(row.path, row.type)];
+      if (built?.context == null) return;
+      built!.requestFocus();
+      Scrollable.ensureVisible(
+        built.context!,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      );
+    });
   }
 
   @override
@@ -269,6 +409,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     _syncIndex();
     final entriesByPath = widget.gitStatus.byPath;
     final flatList = _rows();
+    _pruneRowFocus(flatList);
     final pending = _pendingReveal;
     if (pending != null &&
         flatList.any(
@@ -295,64 +436,68 @@ class _FileTreeViewState extends State<FileTreeView> {
         AbSwipeActions.closeAny();
         return false;
       },
-      child: ListView.builder(
-        controller: _scrollController,
-        itemCount: flatList.length,
-        itemBuilder: (context, index) {
-          final (:node, :depth, :truncationNotice, :loadingNotice) =
-              flatList[index];
-          if (truncationNotice) {
-            return _TruncationRow(
-              key: ValueKey(('truncated', node.path)),
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: _onTreeKey,
+        child: ListView.builder(
+          controller: _scrollController,
+          itemCount: flatList.length,
+          itemBuilder: (context, index) {
+            final (:node, :depth, :truncationNotice, :loadingNotice) =
+                flatList[index];
+            if (truncationNotice) {
+              return _TruncationRow(
+                key: ValueKey(('truncated', node.path)),
+                depth: depth,
+              );
+            }
+            if (loadingNotice) {
+              return _LoadingRow(
+                key: ValueKey(('loading', node.path)),
+                depth: depth,
+              );
+            }
+            final isDirectory = node.type == FileNodeType.directory;
+            Widget row = _FileTreeRow(
+              // Typed, because one path can produce two rows: replacing a file
+              // with a directory of the same name leaves a deletion and an
+              // addition that share it, and a bare path key would be a duplicate.
+              key: ValueKey((node.path, node.type)),
+              node: node,
               depth: depth,
+              focusNode: _rowNode(node),
+              isExpanded: _isOpen(node),
+              isSelected: node.path == _highlightPath,
+              changeEntries: entriesByPath[node.path] ?? const [],
+              // A folded folder answers for what it hides, so it carries the
+              // rollup its children can no longer show; an open one stays bare
+              // (its rows are right there, and a second stat over them is noise).
+              rollupEntries:
+                  isDirectory && widget.collapsedPaths.contains(node.path)
+                  ? _rollups.putIfAbsent(
+                      node.path,
+                      () => _descendantEntries(node, entriesByPath),
+                    )
+                  : const [],
+              onTap: isDirectory
+                  ? () => widget.onToggleExpanded(node.path)
+                  : () => widget.onFileSelected(node.path),
+              onStage: widget.onStage,
+              onUnstage: widget.onUnstage,
+              onDiscard: widget.onDiscard,
+              onResolveConflict: widget.onResolveConflict,
             );
-          }
-          if (loadingNotice) {
-            return _LoadingRow(
-              key: ValueKey(('loading', node.path)),
-              depth: depth,
-            );
-          }
-          final isDirectory = node.type == FileNodeType.directory;
-          Widget row = _FileTreeRow(
-            // Typed, because one path can produce two rows: replacing a file
-            // with a directory of the same name leaves a deletion and an
-            // addition that share it, and a bare path key would be a duplicate.
-            key: ValueKey((node.path, node.type)),
-            node: node,
-            depth: depth,
-            isExpanded: widget.changesOnly
-                ? !widget.collapsedPaths.contains(node.path)
-                : widget.expandedPaths.contains(node.path),
-            isSelected: node.path == _highlightPath,
-            changeEntries: entriesByPath[node.path] ?? const [],
-            // A folded folder answers for what it hides, so it carries the
-            // rollup its children can no longer show; an open one stays bare
-            // (its rows are right there, and a second stat over them is noise).
-            rollupEntries:
-                isDirectory && widget.collapsedPaths.contains(node.path)
-                ? _rollups.putIfAbsent(
-                    node.path,
-                    () => _descendantEntries(node, entriesByPath),
-                  )
-                : const [],
-            onTap: isDirectory
-                ? () => widget.onToggleExpanded(node.path)
-                : () => widget.onFileSelected(node.path),
-            onStage: widget.onStage,
-            onUnstage: widget.onUnstage,
-            onDiscard: widget.onDiscard,
-            onResolveConflict: widget.onResolveConflict,
-          );
-          if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
-          // Matched on kind as well as path: a file replaced by a folder of
-          // the same name yields two rows here, and a GlobalKey takes one.
-          if (node.path == _highlightPath &&
-              isDirectory == (widget.revealedDirectoryPath != null)) {
-            row = KeyedSubtree(key: _selectedRowKey, child: row);
-          }
-          return row;
-        },
+            if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
+            // Matched on kind as well as path: a file replaced by a folder of
+            // the same name yields two rows here, and a GlobalKey takes one.
+            if (node.path == _highlightPath &&
+                isDirectory == (widget.revealedDirectoryPath != null)) {
+              row = KeyedSubtree(key: _selectedRowKey, child: row);
+            }
+            return row;
+          },
+        ),
       ),
     );
   }
@@ -697,6 +842,9 @@ class _FileTreeRow extends StatefulWidget {
   /// can stand in for the rows it is holding shut. Empty on every other row.
   final List<GitFileStatusEntry> rollupEntries;
   final VoidCallback? onTap;
+
+  /// Owned by [FileTreeView], which moves the keyboard between rows itself.
+  final FocusNode? focusNode;
   final void Function(String path)? onStage;
   final void Function(String path)? onUnstage;
   final void Function(String path)? onDiscard;
@@ -711,6 +859,7 @@ class _FileTreeRow extends StatefulWidget {
     this.changeEntries = const [],
     this.rollupEntries = const [],
     this.onTap,
+    this.focusNode,
     this.onStage,
     this.onUnstage,
     this.onDiscard,
@@ -842,6 +991,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
       onEnter: _onEnter,
       onExit: _onExit,
       child: AbListRow(
+        focusNode: widget.focusNode,
         onTap: widget.onTap == null ? null : _handleTap,
         hoverable: true,
         selected: widget.isSelected,
@@ -985,12 +1135,15 @@ class _FileTreeRowState extends State<_FileTreeRow> {
 
     // A void gesture callback discards the future it starts — see
     // util/detached.dart.
-    return GestureDetector(
-      onSecondaryTapUp: (d) => _openMenuAt(d.globalPosition),
-      onLongPressStart: isMobilePlatform
-          ? (d) => _openMenuAt(d.globalPosition)
-          : null,
-      child: row,
+    return ContextMenuKeys(
+      onOpen: (anchor) => _openMenuAt(anchor.bottomLeft),
+      child: GestureDetector(
+        onSecondaryTapUp: (d) => _openMenuAt(d.globalPosition),
+        onLongPressStart: isMobilePlatform
+            ? (d) => _openMenuAt(d.globalPosition)
+            : null,
+        child: row,
+      ),
     );
   }
 }

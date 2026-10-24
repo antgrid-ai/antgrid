@@ -27,16 +27,21 @@ Widget abDialogTitle(
   return Row(
     children: [
       Expanded(
-        child: Text(
-          title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontBody,
-            fontWeight: FontWeight.w600,
-            // AbListRow's own leading for wrapped chrome text, so a title and
-            // the rows under it break at the same rhythm.
-            height: wraps ? 1.2 : 1.0,
+        // Names the dialog (APG dialog `aria-labelledby`).
+        child: Semantics(
+          header: true,
+          namesRoute: true,
+          child: Text(
+            title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontBody,
+              fontWeight: FontWeight.w600,
+              // AbListRow's own leading for wrapped chrome text, so a title
+              // and the rows under it break at the same rhythm.
+              height: wraps ? 1.2 : 1.0,
+            ),
           ),
         ),
       ),

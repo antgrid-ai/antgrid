@@ -30,6 +30,12 @@ class AbInlineBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.antgrid;
+    // APG alert/status: a strip that appears mid-task is announced without
+    // taking focus from what the user is doing.
+    return Semantics(liveRegion: true, container: true, child: _strip(colors));
+  }
+
+  Widget _strip(AbColors colors) {
     return Container(
       decoration: BoxDecoration(
         color: colors.bgElevated,

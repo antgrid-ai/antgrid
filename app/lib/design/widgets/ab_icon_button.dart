@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart' show Tooltip;
 import 'package:flutter/widgets.dart';
 
 import '../ab_tokens.dart';
@@ -8,6 +7,7 @@ import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
 import 'ab_tap_target.dart';
+import 'ab_tooltip.dart';
 
 /// Tone variants — replace the deprecated `size` param.
 enum AbIconButtonTone { normal, muted, accent, danger, success }
@@ -193,9 +193,24 @@ class _AbIconButtonState extends State<AbIconButton> {
     }
 
     if (widget.tooltip != null) {
-      button = Tooltip(message: widget.tooltip!, child: button);
+      button = AbTooltip(
+        message: widget.tooltip!,
+        // The tooltip text is this button's accessible name, given once by the
+        // Semantics below; announcing it again as a tooltip reads it twice.
+        excludeFromSemantics: true,
+        child: button,
+      );
     }
 
-    return button;
+    // APG button: role button, a name, disabled state, and — for a latched
+    // control — its pressed state. Only a lit button reports one, since an
+    // unlatched one is indistinguishable here from a plain action button.
+    return Semantics(
+      button: true,
+      enabled: !disabled,
+      toggled: on ? true : null,
+      label: widget.tooltip,
+      child: button,
+    );
   }
 }
