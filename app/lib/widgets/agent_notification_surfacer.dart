@@ -171,20 +171,22 @@ class _AgentNotificationSurfacerState
     final hasBody = msg.body != null && msg.body!.isNotEmpty;
     final hasTitle = msg.title != null && msg.title!.isNotEmpty;
     final taskLabel = hasTitle ? msg.title! : 'Agent';
+    final title = notificationHeadline(
+      taskLabel: taskLabel,
+      sessionId: msg.terminalId,
+      activeSessionId: ref.read(activeSessionIdProvider),
+      sessionTitle: _sessionTitle(entryId, msg.terminalId),
+    );
     // The agent's own title is the task; once the session name takes the
-    // headline it moves to the body so it is not lost.
+    // headline it moves to the body so it is not lost — and only then, or the
+    // toast says the same thing twice.
     final body = hasBody
         ? msg.body!
-        : hasTitle
+        : hasTitle && title != taskLabel
         ? msg.title!
         : 'Notification';
     _onAgentNotification(
-      title: notificationHeadline(
-        taskLabel: taskLabel,
-        sessionId: msg.terminalId,
-        activeSessionId: ref.read(activeSessionIdProvider),
-        sessionTitle: _sessionTitle(entryId, msg.terminalId),
-      ),
+      title: title,
       body: body,
       route: NotificationRoute(
         registrationId: entryId,

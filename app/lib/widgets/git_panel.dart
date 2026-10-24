@@ -297,7 +297,10 @@ class _GitBranchBar extends StatelessWidget {
   bool get _commitBlocked => counts.conflictPaths.isNotEmpty;
 
   bool get _canCommit =>
-      !_commitBlocked && counts.stagedCount > 0 && !git.committing;
+      !_commitBlocked &&
+      counts.stagedCount > 0 &&
+      !git.committing &&
+      git.syncing == null;
 
   /// What gets committed is decided by staging, never re-asked here — the VS
   /// Code contract. An empty message sends the user to the box rather than
@@ -326,19 +329,22 @@ class _GitBranchBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sync = git.sync;
-    final busy = git.syncing != null;
+    final syncBusy = git.syncing != null;
+    // A commit and a push both move the same branch; neither may start while
+    // the other runs.
+    final busy = syncBusy || git.committing;
     final actions = <Widget>[
       if (counts.hasChanges) _commitButton(context),
       // A branch that has never been pushed has nothing to pull and no counts
       // to show — one action, named for what it does, matching VS Code.
       if (sync.canPublish)
         AbButton(
-          label: busy ? 'Publishing…' : 'Publish Branch',
+          label: syncBusy ? 'Publishing…' : 'Publish Branch',
           expand: true,
           wrapLabel: true,
           maxLines: 1,
           fontSize: AbTokens.fontSm,
-          leading: busy
+          leading: syncBusy
               ? const AbLoadingDot(size: AbTokens.fontXs)
               : AbIcon(
                   AbIcons.upload,
@@ -351,6 +357,7 @@ class _GitBranchBar extends StatelessWidget {
         _SyncSplit(
           sync: sync,
           syncing: git.syncing,
+          committing: git.committing,
           fileService: _fileService,
         ),
     ];
@@ -666,19 +673,22 @@ class _SyncSplit extends StatelessWidget {
   const _SyncSplit({
     required this.sync,
     required this.syncing,
+    required this.committing,
     required this.fileService,
   });
 
   final GitSyncState sync;
   final GitSyncOp? syncing;
+  final bool committing;
   final FileService fileService;
 
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    // Both are disabled while either runs: they mutate the same branch, and a
-    // pull racing a push is a state neither result can describe.
-    final busy = syncing != null;
+    // Both are disabled while either runs, or while a commit does: they all
+    // mutate the same branch, and a pull racing a push is a state neither
+    // result can describe.
+    final busy = syncing != null || committing;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: p.bgSurface,
@@ -693,7 +703,7 @@ class _SyncSplit extends StatelessWidget {
             Expanded(
               child: _SplitCell(
                 icon: AbIcons.arrowDown,
-                label: syncing == GitSyncOp.pull ? 'Pulling…' : 'Pull',
+                label: 'Pull',
                 count: sync.behind,
                 countColor: p.textMuted,
                 tooltip: sync.behind > 0
@@ -707,7 +717,7 @@ class _SyncSplit extends StatelessWidget {
             Expanded(
               child: _SplitCell(
                 icon: AbIcons.arrowUp,
-                label: syncing == GitSyncOp.push ? 'Pushing…' : 'Push',
+                label: 'Push',
                 count: sync.ahead,
                 countColor: sync.ahead > 0 ? p.accent : p.textMuted,
                 tooltip: sync.ahead > 0
@@ -847,14 +857,19 @@ class _SectionToggle extends StatelessWidget {
                 AbDisclosureChevron(expanded: expanded),
                 const SizedBox(width: AbTokens.space6),
               ],
-              Text(
-                label.toUpperCase(),
-                maxLines: 1,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXxs,
-                  fontWeight: FontWeight.w600,
-                  color: p.textSecondary,
-                  letterSpacing: 0.8,
+              // The label yields before the count does: in a narrow pane the
+              // size is the part still worth reading.
+              Flexible(
+                child: Text(
+                  label.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXxs,
+                    fontWeight: FontWeight.w600,
+                    color: p.textSecondary,
+                    letterSpacing: 0.8,
+                  ),
                 ),
               ),
               if (count != null) ...[
