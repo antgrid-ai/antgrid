@@ -9,9 +9,9 @@ import {
   type JWTPayload,
 } from "jose";
 import type { Auth } from "./better-auth.js";
+import type { DB } from "../db/index.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "./middleware.js";
-import type { DB } from "../db/index.js";
 import { z } from "zod";
 import { parseDeviceOAuthMetadata } from "../models/device-oauth.js";
 
@@ -35,6 +35,24 @@ export function requireDeviceBearerJwt(deps: { auth: Auth; env: Env; db: DB }) {
  */
 function expectedIssuer(env: Env): string {
   return `${env.BETTER_AUTH_URL.replace(/\/+$/, "")}/api/auth`;
+}
+
+/**
+ * The only scope `auth/oauth-provider.ts` declares, and the only one a device
+ * client is registered with — the token endpoint refuses any other value, so a
+ * JWT lacking it did not come from that provider.
+ */
+const REQUIRED_SCOPE = "agent";
+
+/**
+ * Better-Auth stamps `scope` as the space-delimited OAuth string. The array
+ * form is tolerated as well, so a library-side shape change degrades to a
+ * working gate rather than a 401 for every device in the field.
+ */
+function tokenScopes(claim: unknown): string[] {
+  if (typeof claim === "string") return claim.split(" ").filter((s) => s.length > 0);
+  if (Array.isArray(claim)) return claim.filter((s): s is string => typeof s === "string");
+  return [];
 }
 
 interface CachedJwks {
@@ -76,8 +94,16 @@ async function fetchJwks(auth: Auth, env: Env): Promise<JSONWebKeySet> {
  *  - Issuer pinned to `${BETTER_AUTH_URL}/api/auth` (oauth-provider's default
  *    audience and the issuer Better-Auth stamps onto the token).
  *  - `uid` (verified claim) is the only source of `userId` set on the context.
- *  - On any verify failure (missing header, bad shape, expired, bad signature,
- *    wrong issuer, missing uid) responds 401 — no claims are trusted.
+ *  - `scope` must carry `agent`.
+ *  - With `deviceDb` (`requireDeviceBearerJwt`), the token's `azp` must
+ *    resolve to a live, unrevoked device OWNED BY `uid` whose key matches
+ *    `pk`. Device tokens live an hour (`m2mAccessTokenExpiresIn`), so without
+ *    this a revoked device keeps its access until the token expires on its own.
+ *    Only that arm sets `deviceId`, which routes read as the actor-type signal —
+ *    so a route that needs either must be gated by `requireDeviceBearerJwt`.
+ *  - On any failure (missing header, bad shape, expired, bad signature,
+ *    wrong issuer, missing uid, missing scope, dead device) responds 401 — no
+ *    claims are trusted.
  *
  * Returns 401 with `{ error: "UNAUTHENTICATED" }` to match `requireUser`'s
  * shape so client error handling is uniform across the two auth modes.
@@ -142,6 +168,11 @@ export function requireBearerJwt(deps: {
       return c.json({ error: "UNAUTHENTICATED" }, 401);
     }
 
+    if (!tokenScopes(claims.scope).includes(REQUIRED_SCOPE)) {
+      return c.json({ error: "UNAUTHENTICATED" }, 401);
+    }
+
+    let deviceId: string | undefined;
     if (deps.deviceDb) {
       const parsed = DeviceClaims.safeParse(payload);
       if (!parsed.success) return c.json({ error: "UNAUTHENTICATED" }, 401);
@@ -163,11 +194,13 @@ export function requireBearerJwt(deps: {
         id: device.id, deviceId: device.deviceId, enrollmentId: claims.azp,
         publicKey: device.publicKey, kind: device.kind,
       });
+      deviceId = device.deviceId;
     }
 
     c.set("userId", uid);
     c.set("sessionId", "");
     c.set("userEmail", typeof claims.email === "string" ? claims.email : null);
+    if (deviceId !== undefined) c.set("deviceId", deviceId);
     await next();
   };
 }

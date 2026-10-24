@@ -27,11 +27,10 @@ import { join } from "node:path";
 // Hooks run SYNCHRONOUSLY and block agy's loop (every PreInvocation + Stop, every
 // turn), so we don't wait on the HTTP *response* — the body carries nothing we
 // need. But we DO wait for each request to finish flushing before exiting: the
-// POSTs go to 127.0.0.1, which round-trips in single-digit ms, and exiting the
-// instant they're queued (the earlier unref'd-socket approach) let the process
-// tear down before libuv flushed the TCP write, silently dropping title/notify
-// updates. A hard 4.5s timeout is the backstop so a stuck socket can never hold
-// agy's loop hostage.
+// POSTs go to 127.0.0.1, which round-trips in single-digit ms, but exiting the
+// instant they're queued would let the process tear down before libuv flushes
+// the TCP write, silently dropping title/notify updates. A hard 4.5s timeout is
+// the backstop so a stuck socket can never hold agy's loop hostage.
 //
 // agy has no per-spawn hook flag, so the hook is machine-global; a non-bridge
 // `agy` run also triggers it but no-ops immediately (no ANTGRID_TERMINAL_ID).

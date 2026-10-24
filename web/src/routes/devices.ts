@@ -26,6 +26,7 @@ import { countActiveSeatHolders, findActiveMembership } from "../models/account-
 import { tokenBucket } from "../util/rate-limit.js";
 import type { RelayPushConfig } from "../relay/push.js";
 import type { AppleTokenClient } from "../auth/apple-tokens.js";
+import type { GithubAppClient } from "../integrations/github-app.js";
 
 const UuidSchema = z.uuid();
 
@@ -43,6 +44,7 @@ export function deviceRoutes(deps: {
   auth: Auth;
   relay: RelayPushConfig;
   apple?: AppleTokenClient;
+  githubApp?: GithubAppClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
   // Scoped narrowly to the routes this router actually defines. Using a
@@ -240,6 +242,7 @@ export function deviceRoutes(deps: {
       userId,
       headers: c.req.raw.headers,
       apple: deps.apple,
+      githubApp: deps.githubApp,
     });
     if (result === "blocked_subscription") {
       return c.json({ error: "SUBSCRIPTION_ACTIVE" }, 409);

@@ -5,11 +5,13 @@
 // sitting in their drawer after a relaunch.
 import 'package:antgrid/analytics/analytics_service.dart';
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/demo/demo_tasks.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
 import 'package:antgrid/main.dart' show telemetryAllowed;
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/models/task.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/control_plane.dart';
@@ -30,6 +32,9 @@ import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/open_checkout.dart';
 import 'package:antgrid/providers/preview_site_data.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/task_launcher.dart' show appTaskLauncherProvider;
+import 'package:antgrid/providers/tasks.dart';
+import 'package:antgrid/services/auth_service.dart' show CurrentUser;
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/services/preview_site_data.dart';
@@ -478,6 +483,55 @@ void main() {
     demo = false;
     await service.flush();
     expect(posted.where((p) => p.endsWith('/events')), hasLength(1));
+  });
+
+  group('tasks', () {
+    ProviderContainer signedIn() {
+      final container = ProviderContainer(
+        overrides: [
+          // Signed in on purpose: the real account is right there, and the
+          // demo must still neither read its backlog nor act as its user.
+          currentUserProvider.overrideWith(
+            (_) async => CurrentUser(userId: 'user-1', email: 'dev@test'),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    test('answer from the sample backlog, never the account service', () async {
+      final container = signedIn();
+      await container.read(currentUserProvider.future);
+      container.read(demoModeProvider.notifier).set(true);
+
+      expect(container.read(tasksApiProvider).client, isA<DemoTasksClient>());
+      expect(container.read(taskUserIdProvider), kDemoTaskUserId);
+    });
+
+    test('are handed back to the real account when the demo is left', () async {
+      final container = signedIn();
+      await container.read(currentUserProvider.future);
+      container.read(demoModeProvider.notifier).set(true);
+      container.read(tasksApiProvider);
+      container.read(demoModeProvider.notifier).set(false);
+
+      expect(
+        container.read(tasksApiProvider).client,
+        isNot(isA<DemoTasksClient>()),
+      );
+      expect(container.read(taskUserIdProvider), 'user-1');
+    });
+
+    test('never launch a session', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(demoModeProvider.notifier).set(true);
+
+      final launcher = container.read(appTaskLauncherProvider)!;
+      final task = Task.fromJson(const {'number': 1, 'title': 'x'})!;
+      expect(launcher.unavailableReason(task), kDemoRefusalText);
+    });
   });
 
   test('nothing the demo opens asks for the bridge host', () async {

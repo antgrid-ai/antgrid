@@ -1,5 +1,8 @@
 name: antgrid
 
+agent:
+  tool: claude-code
+
 worktree:
   setup:
     steps:

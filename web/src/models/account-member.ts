@@ -84,6 +84,31 @@ export async function isBillingAccountOwner(db: Tx, userId: string): Promise<boo
   return membership.role === AccountMemberRoleSchema.enum.owner;
 }
 
+export type BillingAccountAccess = { accountId: string | null; isOwner: boolean };
+
+/**
+ * `resolveBillingAccountId` and `isBillingAccountOwner` off one membership read,
+ * for the callers (install callback, repo-sync toggle) that need both answers
+ * for the same user in the same request.
+ */
+export async function resolveBillingAccountAccess(
+  db: Tx,
+  userId: string
+): Promise<BillingAccountAccess> {
+  const membership = await findActiveMembership(db, userId);
+  if (membership) {
+    return {
+      accountId: membership.accountId,
+      isOwner: membership.role === AccountMemberRoleSchema.enum.owner,
+    };
+  }
+  const account = await db.productAccount.findUnique({
+    where: { userId },
+    select: { id: true },
+  });
+  return { accountId: account?.id ?? null, isOwner: true };
+}
+
 /**
  * Active members of `accountId` other than `userId`.
  *
@@ -151,6 +176,7 @@ export async function countActiveSeatHolders(db: Tx, accountId: string): Promise
 export type ActiveMember = {
   userId: string;
   email: string;
+  name: string;
   role: AccountMemberRole | null;
   joinedAt: Date;
 };
@@ -172,12 +198,13 @@ export async function listActiveMembers(db: Tx, accountId: string): Promise<Acti
       userId: true,
       role: true,
       joinedAt: true,
-      user: { select: { email: true } },
+      user: { select: { email: true, name: true } },
     },
   });
   return rows.map((row) => ({
     userId: row.userId,
     email: row.user.email,
+    name: row.user.name,
     role: AccountMemberRoleSchema.safeParse(row.role).data ?? null,
     joinedAt: row.joinedAt,
   }));

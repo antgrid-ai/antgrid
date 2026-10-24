@@ -1,5 +1,6 @@
 import os from "node:os";
 import { runGitRemote } from "./git-branches";
+import { DEFAULT_PORTS } from "./repo-key";
 
 /**
  * The machine half of the Capability Card: what a human needs to
@@ -56,7 +57,6 @@ const REMOTE_CACHE_TTL_MS = 5 * 60_000;
  *  hanging the card for every other project in the same request. */
 const GIT_PROBE_TIMEOUT_MS = 5_000;
 
-const DEFAULT_PORTS = new Set(["22", "80", "443"]);
 
 /** Transports that can name the same repository from another machine. `file`
  *  is deliberately absent — see [normalizeRemoteUrl]. */

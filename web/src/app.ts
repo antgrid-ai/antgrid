@@ -11,6 +11,8 @@ import { serveStatic } from "hono/bun";
 import { health } from "./routes/health.js";
 import { deviceRoutes } from "./routes/devices.js";
 import { agentRoutes } from "./routes/agents.js";
+import { projectRoutes } from "./routes/projects.js";
+import { taskRoutes } from "./routes/tasks.js";
 import { peerAuthorizationRoutes } from "./routes/peer-authorization.js";
 import { irohAccessRoutes } from "./routes/iroh-access.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
@@ -22,6 +24,11 @@ import { oauthHandoffRoutes } from "./routes/oauth-handoff.js";
 import { oauthStartRoutes } from "./routes/oauth-start.js";
 import { appleRoutes } from "./routes/apple.js";
 import { createAppleTokenClient, type AppleTokenClient } from "./auth/apple-tokens.js";
+import {
+  createGithubAppClient,
+  githubAppConfig,
+  type GithubAppClient,
+} from "./integrations/github-app.js";
 import { eventsRoutes } from "./routes/events.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { uiRoutes } from "./routes/ui.js";
@@ -49,11 +56,20 @@ export type AppDeps = {
   /** Replaces the client built from `env`, so tests need not reach Apple.
    *  An explicit undefined turns Apple's server calls off. */
   appleTokens?: AppleTokenClient;
+  /** Replaces the client built from `env`, same contract as `appleTokens`. */
+  githubApp?: GithubAppClient;
 };
 
 export function buildApp(deps: AppDeps) {
   const appleTokens =
     "appleTokens" in deps ? deps.appleTokens : createAppleTokenClient(deps.env);
+  const githubConfig = githubAppConfig(deps.env);
+  const githubApp =
+    "githubApp" in deps
+      ? deps.githubApp
+      : githubConfig
+        ? createGithubAppClient({ config: githubConfig })
+        : undefined;
   const app = new Hono();
   const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS);
   // Layout renders og:image, which a scraper fetches with no page to resolve a
@@ -99,7 +115,9 @@ export function buildApp(deps: AppDeps) {
       origin: (origin) => (deps.corsOrigins.includes(origin) ? origin : null),
       credentials: true,
       allowHeaders: ["content-type", "authorization"],
-      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+      // PATCH edits a task and PUT replaces its label set; a browser client
+      // cannot reach either without them being listed here.
+      allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
       // Without this the fetch spec caches a preflight for 5 seconds, so every
       // retry on a cross-origin JSON POST (the marketing site's waitlist form)
       // pays a second round trip before the one that carries the body.
@@ -152,9 +170,11 @@ export function buildApp(deps: AppDeps) {
   app.route("/", health);
   app.route("/", eventsRoutes({ db: deps.db, clientIp }));
   app.route("/", waitlistRoutes({ db: deps.db, clientIp }));
-  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens }));
+  app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay, apple: appleTokens, githubApp }));
   app.route("/", appleRoutes({ db: deps.db, auth: deps.auth, apple: appleTokens }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
+  app.route("/", projectRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
+  app.route("/", taskRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", peerAuthorizationRoutes(deps));
   app.route("/", irohAccessRoutes(deps));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
@@ -164,8 +184,10 @@ export function buildApp(deps: AppDeps) {
     webhookRoutes({
       db: deps.db,
       relay: deps.relay,
+      clientIp,
       paddleWebhookSecret: deps.env.PADDLE_WEBHOOK_SECRET,
       razorpayWebhookSecret: deps.env.RAZORPAY_WEBHOOK_SECRET,
+      githubWebhookSecret: deps.env.GITHUB_APP_WEBHOOK_SECRET,
     })
   );
   app.route("/", emailWebhookRoutes({ db: deps.db, webhookSecret: deps.env.ZEPTOMAIL_WEBHOOK_SECRET }));
@@ -189,6 +211,7 @@ export function buildApp(deps: AppDeps) {
     clientIp,
     sendEmail: deps.sendEmail,
     apple: appleTokens,
+    githubApp,
   }));
 
   // Last-resort logger for anything thrown past a route handler — without this,

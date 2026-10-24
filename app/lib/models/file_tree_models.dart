@@ -409,6 +409,12 @@ class GitPaneState {
   /// nothing to show for it.
   final bool historyCollapsed;
 
+  /// Whether the Changes section itself is folded shut in the side-by-side
+  /// layout's fixed Changes/History split (`_GitPanelBody._buildLeftColumn`).
+  /// Mirrors [historyCollapsed], and — unlike it — never drops out: Changes
+  /// stays the top section of the split regardless of which side is folded.
+  final bool changesCollapsed;
+
   /// How the branch stands against its upstream. Replayed on reconnect (it is
   /// in `kCheckoutDurableReplayTypes`), so this is durable state rather than a
   /// one-shot — an app that reconnects must not show a synced branch until the
@@ -432,6 +438,7 @@ class GitPaneState {
     this.diffCommitSha,
     this.collapsedPaths = const {},
     this.historyCollapsed = false,
+    this.changesCollapsed = false,
     this.sync = GitSyncState.empty,
     this.syncing,
     this.lastSyncFailure,
@@ -451,6 +458,7 @@ class GitPaneState {
     bool clearDiff = false,
     Set<String>? collapsedPaths,
     bool? historyCollapsed,
+    bool? changesCollapsed,
     GitSyncState? sync,
     GitSyncOp? syncing,
     bool clearSyncing = false,
@@ -471,6 +479,7 @@ class GitPaneState {
       // reopen every folder the user shut to find it.
       collapsedPaths: collapsedPaths ?? this.collapsedPaths,
       historyCollapsed: historyCollapsed ?? this.historyCollapsed,
+      changesCollapsed: changesCollapsed ?? this.changesCollapsed,
       sync: sync ?? this.sync,
       syncing: clearSyncing ? null : (syncing ?? this.syncing),
       lastSyncFailure: clearSyncFailure

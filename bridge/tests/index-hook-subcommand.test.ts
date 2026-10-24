@@ -13,11 +13,15 @@ test("hook subcommand posts through the source entrypoint without reading bootst
   });
   try {
     const entry = join(import.meta.dir, "..", "src", "index.ts");
+    // Strip ANTGRID_RUN_ID: this suite's own host process may be an Antgrid-managed
+    // terminal (dogfooding), which would otherwise leak a real run id into the
+    // spawned hook and stamp it onto the posted body the test asserts against.
+    const { ANTGRID_RUN_ID: _hostRunId, ...hostEnv } = process.env;
     const proc = Bun.spawn(
       [process.execPath, entry, "hook", "cursor", "session-start"],
       {
         env: {
-          ...process.env,
+          ...hostEnv,
           ANTGRID_API_PORT: String(server.port),
           ANTGRID_TERMINAL_ID: "term-cli",
         },

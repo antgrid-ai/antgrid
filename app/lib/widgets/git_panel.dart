@@ -32,6 +32,7 @@ import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
+import '../providers/tasks.dart' show focusedSessionTaskProvider;
 import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
 import '../util/detached.dart';
@@ -43,6 +44,8 @@ import '../widgets/file_tree_view.dart';
 import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
 import '../widgets/send_capture_to_agent.dart';
+import '../widgets/tasks/task_status_view.dart';
+import '../widgets/tasks/tasks_surface.dart';
 import 'ab_status_helpers.dart' show caughtErrorCopy;
 import '../providers/demo_mode.dart';
 
@@ -217,6 +220,54 @@ class _PanelContext {
   final VoidCallback onToggleChanges;
 }
 
+/// Names the task the active session's changes belong to, when it was
+/// launched from one — the reverse of the task detail view's own Changes
+/// section, which shows a task's diff FROM the task side. Renders nothing for
+/// a session started outside a task, which is most of them.
+class _TaskContextStrip extends ConsumerWidget {
+  const _TaskContextStrip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final task = ref.watch(focusedSessionTaskProvider);
+    if (task == null) return const SizedBox.shrink();
+    final t = context.antgrid;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space6),
+      child: AbListRow(
+        density: AbRowDensity.sm,
+        hoverable: true,
+        title: Row(
+          children: [
+            Text(
+              task.ref,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: t.textMuted,
+              ),
+            ),
+            const SizedBox(width: AbTokens.space6),
+            Expanded(
+              child: Text(
+                task.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: t.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        trailing: TaskStatusPill(status: task.status, compact: true),
+        margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+        onTap: () => openTasks(context, ref, select: task.number),
+      ),
+    );
+  }
+}
+
 /// The loading/error chrome: the branch bar over a placeholder body, so the
 /// bar is already in place when the data branch takes over.
 class _GitPanelScaffold extends StatelessWidget {
@@ -237,6 +288,9 @@ class _GitPanelScaffold extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Above the branch bar: it says whose changes the rest of the panel
+        // is about, so it has to be read before anything the bar counts.
+        const _TaskContextStrip(),
         _GitBranchBar(panel: panel, counts: counts, git: git),
         if (git.lastSyncFailure case final failure?)
           _SyncFailureStrip(
@@ -465,7 +519,10 @@ class _BranchLine extends StatelessWidget {
         child: Text(
           '→ $remote',
           maxLines: 1,
-          style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
         ),
       );
     } else {
@@ -738,11 +795,7 @@ class _SplitCellState extends State<_SplitCell> {
           if (widget.running)
             const AbLoadingDot(size: AbTokens.fontXs)
           else
-            AbIcon(
-              widget.icon,
-              size: AbTokens.fontSm,
-              color: p.textSecondary,
-            ),
+            AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
           const SizedBox(width: AbTokens.space4),
           Flexible(
             child: Text(
@@ -1007,9 +1060,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         // current state — the tree itself already shows which folders are open.
         if (counts.changedFolders.isNotEmpty)
           AbIconButton(
-            icon: allFoldersCollapsed
-                ? AbIcons.expandAll
-                : AbIcons.collapseAll,
+            icon: allFoldersCollapsed ? AbIcons.expandAll : AbIcons.collapseAll,
             tooltip: allFoldersCollapsed
                 ? 'Expand All Folders'
                 : 'Collapse All Folders',
@@ -1027,9 +1078,7 @@ class _ChangesSectionHeader extends StatelessWidget {
         AbIconButton(
           icon: AbIcons.gitStage,
           tooltip: 'Stage All Changes',
-          onTap: counts.unstagedPaths.isEmpty
-              ? null
-              : () => _stageAll(context),
+          onTap: counts.unstagedPaths.isEmpty ? null : () => _stageAll(context),
         ),
       ],
     );
@@ -1221,10 +1270,7 @@ class _GitPanelBody extends ConsumerWidget {
         if (showSideBySide) {
           return Row(
             children: [
-              SizedBox(
-                width: _columnWidth,
-                child: _buildColumn(context),
-              ),
+              SizedBox(width: _columnWidth, child: _buildColumn(context)),
               const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1236,10 +1282,7 @@ class _GitPanelBody extends ConsumerWidget {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _CompactViewerBar(
-                path: diffPath,
-                onBack: fileService.clearDiff,
-              ),
+              _CompactViewerBar(path: diffPath, onBack: fileService.clearDiff),
               const AbSeparator.horizontal(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
@@ -1580,10 +1623,7 @@ class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
                     value: _GitCompactTab.changes,
                     label: 'Changes · ${widget.changedCount}',
                   ),
-                  AbSegment(
-                    value: _GitCompactTab.history,
-                    label: 'History',
-                  ),
+                  AbSegment(value: _GitCompactTab.history, label: 'History'),
                 ],
                 selected: _tab,
                 onSelect: (value) => setState(() => _tab = value),

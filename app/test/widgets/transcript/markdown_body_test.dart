@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+import 'package:antgrid/widgets/markdown_document_config.dart';
 import 'package:antgrid/widgets/transcript/markdown_body.dart';
 
 void main() {
@@ -32,5 +33,29 @@ void main() {
 
     expect(find.textContaining('hi', findRichText: true), findsWidgets);
     expect(find.byTooltip('Copy'), findsOneWidget);
+  });
+
+  testWidgets('a task list renders its items with app markers', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TranscriptMarkdown(
+                data: '## Tasks\n- [ ] Design the form.\n- [x] Add fields.',
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(MarkdownTaskMarker), findsNWidgets(2));
+    expect(
+      find.textContaining('Design the form.', findRichText: true),
+      findsWidgets,
+    );
   });
 }

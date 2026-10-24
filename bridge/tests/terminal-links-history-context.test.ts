@@ -142,7 +142,9 @@ describe("the budget a page shares with the rows around it", () => {
 
     expect(alone.count).toBeGreaterThan(0);
     expect(withAfter.count).toBe(alone.count);
-  });
+  // Pure CPU over ~500 dense rows: well under a second alone, past bun's 5s
+  // default late in a full suite run on a loaded Windows machine.
+  }, 30_000);
 
   it("never asks the filesystem about a row that only follows the page", async () => {
     const files: string[] = [];

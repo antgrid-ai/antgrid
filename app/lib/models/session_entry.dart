@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'agent_work_status.dart';
+import 'task_ref.dart';
 
 /// Provisioning of an isolated session's own checkout (`worktree.setup` in the
 /// project's `antgrid.yaml`).
@@ -464,6 +465,12 @@ class SessionEntry {
   /// mean "nothing to report", which is today's behaviour exactly.
   final SessionSetup? setup;
 
+  /// The task this session was launched for, echoed by the bridge from its own
+  /// persisted state. Null for a session created outside a task, and for any
+  /// session created before the bridge carried the field — so a null is "no
+  /// task here", never "the task is still loading".
+  final TaskRef? taskRef;
+
   const SessionEntry({
     required this.id,
     required this.name,
@@ -491,6 +498,7 @@ class SessionEntry {
     this.sharedWorkspace = false,
     this.workspaceMemberCount = 1,
     this.setup,
+    this.taskRef,
   });
 
   Map<String, dynamic> toJson() => {
@@ -522,6 +530,7 @@ class SessionEntry {
     if (sharedWorkspace) 'sharedWorkspace': true,
     if (workspaceMemberCount > 1) 'workspaceMemberCount': workspaceMemberCount,
     if (setup != null) 'setup': setup!.toJson(),
+    if (taskRef != null) 'taskRef': taskRef!.toJson(),
   };
 
   factory SessionEntry.fromJson(Map<String, dynamic> j) => SessionEntry(
@@ -565,6 +574,7 @@ class SessionEntry {
       final Map<String, dynamic> m => SessionSetup.fromJson(m),
       _ => null,
     },
+    taskRef: TaskRef.fromJson(j['taskRef']),
   );
 
   /// Parse a JSON array of session maps, skipping any non-map element. Shared by
@@ -614,6 +624,7 @@ class SessionEntry {
     sharedWorkspace: sharedWorkspace,
     workspaceMemberCount: workspaceMemberCount,
     setup: clearSetup ? null : (setup ?? this.setup),
+    taskRef: taskRef,
   );
 
   @override
@@ -645,7 +656,8 @@ class SessionEntry {
           other.checkoutState == checkoutState &&
           other.sharedWorkspace == sharedWorkspace &&
           other.workspaceMemberCount == workspaceMemberCount &&
-          other.setup == setup;
+          other.setup == setup &&
+          other.taskRef == taskRef;
 
   @override
   // hashAll, not hash: the field list is past Object.hash's 20-argument ceiling.
@@ -676,5 +688,6 @@ class SessionEntry {
     sharedWorkspace,
     workspaceMemberCount,
     setup,
+    taskRef,
   ]);
 }
