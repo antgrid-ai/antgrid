@@ -49,6 +49,8 @@ import '../design/widgets/ab_loading.dart';
 import 'preview_context_menu_script.dart';
 import 'preview_element_picker_script.dart';
 import 'preview_screenshot_script.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
 /// The browser preview screen. A URL bar at the top of the panel with
 /// refresh/external-browser/element-picker actions, a popup tab switcher
@@ -640,11 +642,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       onBack: _backFromPreview,
       child: previewStateAsync.when(
         loading: () => const AbLoading(message: 'loading preview...'),
-        error: (error, _) => Center(
-          child: Text(
-            'Error: $error',
-            style: const TextStyle(color: Colors.grey),
-          ),
+        error: (error, _) => AbEmptyState.error(
+          title: "Couldn't load the preview",
+          subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
         ),
         data: (state) => _buildContent(state),
       ),
@@ -701,9 +701,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // openTab binds a real socket; a failure (interface down, handles
       // exhausted) throws here. These calls are fire-and-forget at the
       // callers, so surface the error ourselves instead of letting it become
-      // an unobserved async error.
+      // an unobserved async error. The cause goes to the log, not the toast:
+      // it is a socket error string, not something the reader can act on.
+      AbLog.warn(
+        'PreviewScreen',
+        'open tab failed',
+        fields: {'port': port, 'error': '$e'},
+      );
       if (!mounted) return;
-      showAbToast(context, 'Could not open preview on port $port: $e');
+      showAbToast(context, "Couldn't open a preview on port $port. Try again.");
     }
   }
 

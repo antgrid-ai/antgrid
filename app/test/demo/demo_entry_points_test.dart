@@ -1,10 +1,12 @@
 // The demo exists because a reviewer with no account, and a tester whose
 // desktop isn't set up yet, both land on a screen where nothing works. These
-// tests pin the three doors into it and the one way back out; a door that
-// stops rendering is the whole rejection again.
+// tests pin the doors into it and the one way back out; a door that stops
+// rendering is the whole rejection again.
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -12,7 +14,11 @@ import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/providers/scheduler.dart';
+import 'package:antgrid/providers/scheduler_timezone.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/screens/demo_home.dart';
+import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/screens/sign_in_screen.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
@@ -41,6 +47,24 @@ Widget _wrapRecent(List<Override> overrides) => ProviderScope(
     home: const Scaffold(body: RecentSessionsTab()),
   ),
 );
+
+/// Stands in for a host: answers every verb with `{}` unless told to fail, and
+/// remembers what it was asked so a test can prove the screen asked nothing.
+class _Recorder {
+  _Recorder({this.error});
+
+  final Object? error;
+  final calls = <String>[];
+
+  Future<Map<String, dynamic>> request(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) async {
+    calls.add(method);
+    if (error != null) throw error!;
+    return {};
+  }
+}
 
 ProviderContainer _containerOf(WidgetTester tester) =>
     ProviderScope.containerOf(tester.element(find.byType(RecentSessionsTab)));
@@ -150,6 +174,99 @@ void main() {
 
       expect(find.text('No recent sessions'), findsOneWidget);
       expect(find.text(_kDemoLink), findsNothing);
+    });
+  });
+
+  group('the Scheduler with no machine', () {
+    // Mirrors scheduler_ux_test.dart: on android `schedulerTargetProvider`
+    // would otherwise read `recentAgentsProvider`, whose store throws when it
+    // is not overridden.
+    Future<ProviderContainer> pumpScheduler(
+      WidgetTester tester, {
+      required Map<String, String> machines,
+      required String? target,
+      required _Recorder recorder,
+    }) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            schedulerLocalTimezoneProvider.overrideWith((_) async => null),
+            currentUserProvider.overrideWith((_) async => null),
+            schedulerMachinesProvider.overrideWithValue(machines),
+            schedulerTargetProvider.overrideWithValue(target),
+            schedulerConnectedProvider.overrideWithValue(false),
+            schedulerRequestProvider.overrideWithValue(recorder.request),
+          ],
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: const Scaffold(body: SchedulerScreen()),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return ProviderScope.containerOf(tester.element(find.byType(SchedulerScreen)));
+    }
+
+    testWidgets('a viewer with none lands on the sample Scheduler', (
+      tester,
+    ) async {
+      useInMemoryPrefs();
+      final recorder = _Recorder();
+      final container = await pumpScheduler(
+        tester,
+        machines: const {},
+        target: null,
+        recorder: recorder,
+      );
+
+      expect(find.text('Connect a machine to schedule tasks'), findsOneWidget);
+      await tester.ensureVisible(find.text(_kDemoLink));
+      await tester.tap(find.text(_kDemoLink));
+      await tester.pump();
+
+      expect(container.read(demoModeProvider), isTrue);
+      expect(
+        container.read(workbenchSurfaceProvider),
+        WorkbenchSurface.scheduler,
+      );
+      expect(
+        container.read(navControllerProvider).current?.surface,
+        WorkbenchSurface.scheduler,
+      );
+      expect(
+        container.read(selectedTargetProvider),
+        const LocalProject(kDemoProjectId),
+      );
+      expect(recorder.calls, isEmpty);
+    });
+
+    testWidgets('a phone whose machine is offline can still reach it', (
+      tester,
+    ) async {
+      useInMemoryPrefs();
+      final recorder = _Recorder(
+        error: StateError('Machine unavailable. Connect it to manage schedules.'),
+      );
+      final container = await pumpScheduler(
+        tester,
+        machines: const {'m1': 'Studio'},
+        target: 'm1',
+        recorder: recorder,
+      );
+
+      expect(find.text('Machine unavailable'), findsOneWidget);
+      expect(find.text(_kDemoLink), findsOneWidget);
+
+      await tester.ensureVisible(find.text(_kDemoLink));
+      await tester.tap(find.text(_kDemoLink));
+      await tester.pump();
+
+      expect(container.read(demoModeProvider), isTrue);
+      expect(
+        container.read(workbenchSurfaceProvider),
+        WorkbenchSurface.scheduler,
+      );
     });
   });
 

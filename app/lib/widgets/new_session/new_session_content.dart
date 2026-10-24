@@ -22,6 +22,7 @@ import 'new_session_composer.dart';
 import 'picker_sources.dart';
 import 'remote_access_nudge_banner.dart';
 import 'worktree_setup_nudge.dart';
+import '../ab_status_helpers.dart' show caughtErrorCopy;
 
 /// Canvas for the New Session page: recent sessions fill the space above a
 /// bottom-anchored composer (chip row + prompt input). The composer is the
@@ -201,7 +202,10 @@ class NewSessionContent extends ConsumerWidget {
       id = await openFolderPicker(container, select: false);
     } catch (e) {
       if (context.mounted) {
-        showAbToast(context, 'Could not open folder: $e');
+        showAbToast(
+          context,
+          "Couldn't open the folder. ${caughtErrorCopy(e, 'Try again.')}",
+        );
       }
       return;
     }
