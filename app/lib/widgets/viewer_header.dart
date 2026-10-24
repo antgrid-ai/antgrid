@@ -9,37 +9,30 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import 'copy_path.dart';
-import 'viewer_support.dart';
+import 'file_download.dart';
 
 /// Shared header for media/preview viewers. [trailing] holds optional actions
-/// (e.g. a preview/source toggle) placed left of the close button.
+/// (e.g. a preview/source toggle) placed left of Download and close.
 Widget buildViewerHeader({
-  required String path,
-  required int size,
+  required FileContent content,
   VoidCallback? onClose,
   List<Widget> trailing = const [],
 }) {
-  return Builder(
-    builder: (context) => AbToolbar.custom(
-      children: [
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(child: ViewerPathBreadcrumb(path: path)),
-              const SizedBox(width: AbTokens.space6),
-              Text(
-                formatFileSize(size),
-                style: AbTokens.monoStyle(color: context.antgrid.textMuted),
-              ),
-            ],
-          ),
+  return AbToolbar.custom(
+    children: [
+      Expanded(
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: ViewerPathBreadcrumb(path: content.path),
         ),
-        ...trailing,
-        if (onClose != null) AbIconButton(icon: AbIcons.close, onTap: onClose),
-      ],
-    ),
+      ),
+      ...trailing,
+      FileDownloadButton(content: content),
+      if (onClose != null) AbIconButton(icon: AbIcons.close, onTap: onClose),
+    ],
   );
 }
 
@@ -91,11 +84,14 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
       context: context,
       anchorRect: box.localToGlobal(Offset.zero) & box.size,
       entries: [
-        AbMenuItem(
-          label: 'Copy relative path',
-          icon: AbIcons.copy,
-          value: widget.path,
-        ),
+        // An image outside the checkout has no relative form, so the only
+        // copy on offer is the absolute path it already is.
+        if (!isAbsoluteViewerPath(widget.path))
+          AbMenuItem(
+            label: 'Copy relative path',
+            icon: AbIcons.copy,
+            value: widget.path,
+          ),
         AbMenuItem(
           label: 'Copy absolute path',
           icon: AbIcons.copy,
@@ -127,7 +123,10 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
             padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
             child: AbIcon(AbIcons.chevronRight, size: 12, color: p.textMuted),
           ),
-        Text(part, style: i == parts.length - 1 ? file : folder),
+        Text(
+          i == parts.length - 1 ? part : _shortenFolder(part),
+          style: i == parts.length - 1 ? file : folder,
+        ),
       ],
     ];
     return AbTooltip(
@@ -171,6 +170,13 @@ final _trailingSeparators = RegExp(r'[\\/]+$');
 
 Iterable<String> _segments(String path) =>
     path.split(_separator).where((s) => s.isNotEmpty);
+
+/// A folder name too long to scan, such as the session UUID in an agent's
+/// scratchpad path, kept to its ends: `66dd53be…a8631`. Display only — every
+/// copy gives the full path.
+String _shortenFolder(String name) => name.length <= 24
+    ? name
+    : '${name.substring(0, 8)}…${name.substring(name.length - 5)}';
 
 /// True for a path that already names its own root: POSIX, a Windows drive,
 /// or UNC. The viewer is handed one for an image outside the checkout

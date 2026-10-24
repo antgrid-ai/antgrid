@@ -14,8 +14,8 @@
  * Run: `npm run gen:icons` (add `--preview` to write contact sheets to
  * `.icon-preview/` instead of touching the committed assets).
  *
- * Geometry is the recipe in `site/public/logo/README.md`; this script is its
- * executable form, so move them together.
+ * Geometry is the recipe in `public/logo/README.md` in antgrid-ai/antgrid-site;
+ * this script is its executable form, so move them together.
  */
 import sharp from "sharp";
 import { writeFileSync, mkdirSync } from "node:fs";
@@ -485,7 +485,10 @@ if (process.argv.includes("--preview")) {
 } else {
   console.log("brand icons:");
 
-  const PUBLIC = ["site/public", "web/public"];
+  // The site lives in antgrid-ai/antgrid-site, so its set is staged here to be
+  // copied over that repo's public/ rather than written into a tree we own.
+  const SITE_PUBLIC = ".tmp/antgrid-site/public";
+  const PUBLIC = [SITE_PUBLIC, "web/public"];
 
   // Browser tabs. The SVG is what Chromium and Firefox actually fetch; the ICO
   // and the PNGs are the fallback for everything that will not take an SVG.
@@ -497,7 +500,7 @@ if (process.argv.includes("--preview")) {
     put(`${pub}/logo/antgrid-favicon-solid.svg`, faviconSolidSvg);
     for (const px of [16, 32, 48]) put(`${pub}/logo/favicon-${px}.png`, await render(px, TILE_RX));
   }
-  put("site/public/favicon.ico", favIco);
+  put(`${SITE_PUBLIC}/favicon.ico`, favIco);
   put("web/public/logo/favicon.ico", favIco);
 
   // Windows taskbar, title bar and Alt-Tab, via Runner.rc's IDI_APP_ICON.
@@ -552,9 +555,9 @@ if (process.argv.includes("--preview")) {
   }
 
   // Social card for the licensing service. The marketing site shoots its own
-  // from a real page (site/scripts/shoot-og.mjs); this service has no page worth
-  // photographing and no per-page art direction, so a centred lockup on the page
-  // colour is the honest version rather than a staged screenshot.
+  // from a real page (scripts/shoot-og.mjs in antgrid-site); this service has no
+  // page worth photographing and no per-page art direction, so a centred lockup
+  // on the page colour is the honest version rather than a staged screenshot.
   put("web/public/og/antgrid-card.png", await ogCardPng(lockupSvg(PAPER), 1200, 630, 0.55, PAGE));
 
   // Splash art. Both land on the near-black splash colour, so both knock out.

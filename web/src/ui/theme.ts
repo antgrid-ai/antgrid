@@ -9,7 +9,8 @@ export type Theme = "light" | "dark";
 
 /** Written by the marketing site's footer toggle on the antgrid.ai apex, so a
  *  reader who crosses into this service mid sign-in keeps their choice. The
- *  name and scope are the whole contract with site/src/scripts/theme.ts. */
+ *  name and scope are the whole contract with antgrid-site's
+ *  src/scripts/theme.ts. */
 export const THEME_COOKIE = "antgrid-theme";
 
 /** The override for the request being rendered, read through Hono's context
@@ -37,7 +38,7 @@ export function themeColorMedia(scheme: Theme, theme: Theme | undefined): string
 
 /**
  * The client half: the same logic as the marketing site's
- * site/src/scripts/theme.ts, carried here as an inline string across the
+ * src/scripts/theme.ts (antgrid-site), carried here as an inline string across the
  * licence boundary for the same reason the font faces are copied verbatim —
  * this service has no bundle the site's module could be shared into. Keep the
  * two in step by hand: same cookie name, same scope, same meta flip.

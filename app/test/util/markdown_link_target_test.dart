@@ -17,23 +17,58 @@ void main() {
       expect(resolve('mailto:hi@antgrid.ai').kind, MarkdownLinkKind.external);
     });
 
-    test('non-web schemes are refused', () {
-      // A doc is repository content; `file:` would hand out local paths and a
-      // custom scheme could deep-link into another installed app.
-      expect(resolve('file:///etc/passwd'), MarkdownLinkTarget.unsupported);
+    test('custom schemes are refused', () {
+      // A custom scheme could deep-link into another installed app.
       expect(resolve('antgrid://session/1'), MarkdownLinkTarget.unsupported);
     });
 
-    test('a drive letter is a path, not a scheme', () {
-      expect(resolve(r'C:/notes.md').kind, isNot(MarkdownLinkKind.external));
-      // And not a repo file either — joining it onto the open file's directory
-      // would name `docs/C:/notes.md`.
-      expect(resolve(r'C:/notes.md'), MarkdownLinkTarget.unsupported);
+    test('a file URL is a local path for the bridge to judge', () {
+      expect(
+        resolve('file:///home/me/notes.md'),
+        const MarkdownLinkTarget(
+          MarkdownLinkKind.localPath,
+          '/home/me/notes.md',
+        ),
+      );
+      expect(
+        resolve('file:///C:/Users/me/my%20notes.md').value,
+        'C:/Users/me/my notes.md',
+      );
+      expect(
+        resolve('file://localhost/home/me/a.md').kind,
+        MarkdownLinkKind.localPath,
+      );
+    });
+
+    test('a file URL naming another host is refused', () {
+      // That is a network share; opening it would send credentials.
+      expect(
+        resolve('file://evil.example/share/a.md'),
+        MarkdownLinkTarget.unsupported,
+      );
+    });
+
+    test('a drive letter is a local path, not a scheme', () {
+      expect(
+        resolve(r'C:/notes.md'),
+        const MarkdownLinkTarget(MarkdownLinkKind.localPath, 'C:/notes.md'),
+      );
+      expect(
+        resolve(r'C:\Users\me\notes.md#top'),
+        const MarkdownLinkTarget(
+          MarkdownLinkKind.localPath,
+          r'C:\Users\me\notes.md',
+        ),
+      );
+      expect(resolve(r'C:\Users\me\'), MarkdownLinkTarget.unsupported);
     });
 
     test('a scheme matches however it is cased', () {
       expect(resolve('HTTPS://antgrid.ai').kind, MarkdownLinkKind.external);
-      expect(resolve('FILE:///etc/passwd'), MarkdownLinkTarget.unsupported);
+      expect(
+        resolve('FILE:///etc/notes.md').kind,
+        MarkdownLinkKind.localPath,
+      );
     });
 
     test('a protocol-relative URL is not a path in the checkout', () {
@@ -64,8 +99,15 @@ void main() {
       );
     });
 
-    test('a leading slash means the project root', () {
-      expect(resolve('/AGENTS.md', from: 'docs/a.md').value, 'AGENTS.md');
+    test('a leading slash is a local path that may mean the project root', () {
+      expect(
+        resolve('/AGENTS.md', from: 'docs/a.md'),
+        const MarkdownLinkTarget(
+          MarkdownLinkKind.localPath,
+          '/AGENTS.md',
+          repoFallback: 'AGENTS.md',
+        ),
+      );
     });
 
     test('a link climbing past the project root has no destination', () {

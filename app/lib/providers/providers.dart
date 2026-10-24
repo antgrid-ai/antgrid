@@ -18,6 +18,7 @@ import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/license_token_minter.dart';
+import '../services/operational_notice.dart';
 import '../services/storage_service.dart';
 import 'account_agents.dart';
 import 'auth.dart';
@@ -727,17 +728,22 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
 
 /// Git op, checkout and session-refusal feedback from every warm project, not
 /// just the focused one, or results landing after a focus switch are lost.
-final operationalErrorsProvider = Provider<Stream<ProjectScoped<String>>>(
+final operationalErrorsProvider =
+    Provider<Stream<ProjectScoped<OperationalNotice>>>(
   (ref) => _warmProjectEvents(
     ref,
     perProject: (session) => [
-      session.sessionsService.errors.map((m) => 'Session error: $m'),
+      session.sessionsService.errors.map(
+        (m) => (message: 'Session error: $m', failed: true),
+      ),
     ],
     // Checkout failures are already whole sentences ('Checkout failed' is the
     // service's own fallback), so they surface verbatim.
     perCheckout: (bundle) => [
       bundle.fileService.gitOpFeedback,
-      bundle.terminalService.gitErrors,
+      bundle.terminalService.gitErrors.map(
+        (m) => (message: m, failed: true),
+      ),
     ],
   ),
   name: 'operationalErrors',
@@ -915,6 +921,43 @@ final focusAgentInputProvider =
     NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
       () => ValueController(null),
     );
+
+/// What the agent terminal's session menu offers: attach a file, select text,
+/// paste, and copy the host's clipboard to this device.
+///
+/// These used to be floating buttons over the pane and keys in the touch
+/// quick-action strip; they are menu rows instead, so they live with the rest of
+/// the session's options. The terminal owns the behaviour, so it hands the menu
+/// these closures.
+class TerminalClipboardActions {
+  const TerminalClipboardActions({
+    required this.selectText,
+    required this.paste,
+    required this.copyHostClipboard,
+    required this.attach,
+  });
+
+  final VoidCallback selectText;
+  final VoidCallback paste;
+
+  /// Null when attaching is not offered, as for a local session whose agent
+  /// reads the user's own disk. Resolved when the menu opens.
+  final VoidCallback? Function() attach;
+
+  /// Null when this terminal has no host clipboard to copy. Resolved when the
+  /// menu opens, because support is learned from the bridge after mount.
+  final VoidCallback? Function() copyHostClipboard;
+}
+
+/// Published only by the agent panel's terminal, and retracted
+/// by identity on dispose — the same rule as [focusAgentInputProvider], for the
+/// same reason: a session flipping mode mounts the incoming view before the
+/// outgoing one is disposed.
+final terminalClipboardActionsProvider =
+    NotifierProvider<
+      ValueController<TerminalClipboardActions?>,
+      TerminalClipboardActions?
+    >(() => ValueController(null));
 
 /// Callback that toggles the projects drawer open/closed — the agent bar's
 /// hamburger button. Set by whichever mobile route is mounted (WorkspaceShell

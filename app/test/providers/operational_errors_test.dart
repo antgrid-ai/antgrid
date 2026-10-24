@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/services/operational_notice.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -39,11 +40,13 @@ void main() {
     registry.touch('A', isLocal: true);
     registry.touch('B', isLocal: true);
 
-    final seen = <(String, String)>[];
-    StreamSubscription<ProjectScoped<String>>? errors;
+    final seen = <(String, String, bool)>[];
+    StreamSubscription<ProjectScoped<OperationalNotice>>? errors;
     final sub = container.listen(operationalErrorsProvider, (_, next) {
       errors?.cancel();
-      errors = next.listen((e) => seen.add((e.entryId, e.message)));
+      errors = next.listen(
+        (e) => seen.add((e.entryId, e.message.message, e.message.failed)),
+      );
     }, fireImmediately: true);
     addTearDown(() {
       sub.close();
@@ -75,8 +78,8 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(seen, [
-      ('B', 'Session error: no such session'),
-      ('A', 'pre-commit hook failed'),
+      ('B', 'Session error: no such session', true),
+      ('A', 'pre-commit hook failed', true),
     ]);
   });
 
@@ -104,10 +107,10 @@ void main() {
     registry.touch('A', isLocal: true);
 
     final seen = <String>[];
-    StreamSubscription<ProjectScoped<String>>? errors;
+    StreamSubscription<ProjectScoped<OperationalNotice>>? errors;
     final sub = container.listen(operationalErrorsProvider, (_, next) {
       errors?.cancel();
-      errors = next.listen((e) => seen.add(e.message));
+      errors = next.listen((e) => seen.add(e.message.message));
     }, fireImmediately: true);
     addTearDown(() {
       sub.close();
@@ -152,10 +155,10 @@ void main() {
         .touch('A', isLocal: true);
 
     final seen = <String>[];
-    StreamSubscription<ProjectScoped<String>>? errors;
+    StreamSubscription<ProjectScoped<OperationalNotice>>? errors;
     final sub = container.listen(operationalErrorsProvider, (_, next) {
       errors?.cancel();
-      errors = next.listen((e) => seen.add(e.message));
+      errors = next.listen((e) => seen.add(e.message.message));
     }, fireImmediately: true);
     addTearDown(() {
       sub.close();

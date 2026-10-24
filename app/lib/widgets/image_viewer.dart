@@ -21,11 +21,7 @@ class ImageViewer extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        buildViewerHeader(
-          path: content.path,
-          size: content.size,
-          onClose: onClose,
-        ),
+        buildViewerHeader(content: content, onClose: onClose),
         Expanded(
           child: Container(
             color: c.bgDeepest,

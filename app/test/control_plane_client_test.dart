@@ -237,6 +237,23 @@ void main() {
     await client.dispose();
   });
 
+  // An empty tool list is both "not heard yet" and "nothing installed"; only
+  // this flag lets a one-shot reader wait for the first.
+  test('an agent:tools advert marks tools received until cleared', () async {
+    final transport = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: transport);
+    addTearDown(client.dispose);
+    expect(client.currentState.toolsReceived, isFalse);
+
+    transport.emit('agent:tools', {'tools': <Object>[]});
+    await Future<void>.delayed(Duration.zero);
+    expect(client.currentState.toolsReceived, isTrue);
+    expect(client.currentState.tools, isEmpty);
+
+    client.clearAdvert();
+    expect(client.currentState.toolsReceived, isFalse);
+  });
+
   test('parses agent:tools into the tools set', () async {
     final transport = FakeAgentTransport();
     final client = ControlPlaneClient(transport: transport);

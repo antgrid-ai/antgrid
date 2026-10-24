@@ -20,9 +20,11 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../models/device_stats.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../models/workspace_view.dart';
+import '../project/project_session_registry.dart';
 import '../providers/account_agents.dart';
 import '../providers/agent_coordinates.dart';
 import '../providers/agent_transport.dart';
@@ -485,6 +487,60 @@ class _SessionOverflowMenu extends ConsumerWidget {
         const _HandlerMenuItem(),
         const _MessagesMenuItem(),
         const _OtherSessionsMenuItem(),
+        const _TerminalClipboardMenuItems(),
+      ],
+    );
+  }
+}
+
+/// Attach file, Select text, Paste and Copy host clipboard for the agent
+/// terminal. Absent when nothing is published, i.e. a session without a terminal
+/// on screen.
+class _TerminalClipboardMenuItems extends ConsumerWidget {
+  const _TerminalClipboardMenuItems();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final actions = ref.watch(terminalClipboardActionsProvider);
+    if (actions == null) return const SizedBox.shrink();
+    final copyHost = actions.copyHostClipboard();
+    final attach = actions.attach();
+
+    // The popup closes first so the action lands on the terminal, not under a
+    // modal barrier — the contract the rows above keep.
+    VoidCallback closing(VoidCallback action) => () {
+      Navigator.of(context).pop();
+      action();
+    };
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (attach != null)
+          AbLiveMenuRow(
+            label: 'Attach file',
+            icon: AbIcons.attach,
+            tooltip: 'Attach a file for the agent.',
+            onTap: closing(attach),
+          ),
+        AbLiveMenuRow(
+          label: 'Select text',
+          icon: AbIcons.selectText,
+          onTap: closing(actions.selectText),
+        ),
+        AbLiveMenuRow(
+          label: 'Paste',
+          icon: AbIcons.paste,
+          onTap: closing(actions.paste),
+        ),
+        if (copyHost != null)
+          AbLiveMenuRow(
+            label: 'Copy host clipboard',
+            icon: AbIcons.copy,
+            tooltip: 'Copy the host machine\'s clipboard to this device.',
+            onTap: closing(copyHost),
+          ),
       ],
     );
   }
@@ -688,8 +744,22 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
       RemoteHostChip(
         hostMachineName: remoteHost.name,
         platform: remoteHost.platform,
+        ram: _focusedHostRam(ref),
       ),
   ];
+}
+
+/// The focused project's host RAM as the chip shows it. A cold project reads
+/// the status cache, which never holds these figures, so it shows none.
+String? _focusedHostRam(WidgetRef ref) {
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  if (selectedId == null) return null;
+  final stats = ref
+      .watch(projectStatusProvider(selectedId))
+      .value
+      ?.machineStats;
+  if (stats == null) return null;
+  return ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes);
 }
 
 /// The machine hosting the focused project, or null when it is this one (or

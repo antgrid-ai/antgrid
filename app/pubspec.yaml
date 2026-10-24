@@ -240,6 +240,16 @@ msix_config:
   architecture: x64
   capabilities: internetClient
   protocol_activation: antgrid
+  # A packaged app's toast click is routed by the manifest's activator, not the
+  # unpackaged AppUserModelId key the notifications plugin writes, so without
+  # this Windows answers every click by launching a fresh antgrid.exe. With it,
+  # COM hands the click to the running instance's registered class object and
+  # starts the exe only when none is running. The clsid MUST equal the `guid`
+  # in WindowsInitializationSettings (lib/services/local_notification_service.dart).
+  toast_activator:
+    clsid: d49b0314-ee7a-4626-bf79-97cdb8a991ab
+    arguments: -ToastActivated
+    display_name: Antgrid notifications
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

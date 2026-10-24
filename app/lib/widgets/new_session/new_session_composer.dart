@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1062,12 +1063,15 @@ class _ModeSelector extends ConsumerWidget {
               'it may still be connecting, or its bridge may be too old to '
               'answer'
         : "$label doesn't support chat sessions";
+    // App Review rejected the iOS build under 2.2 for pre-release wording, so
+    // the App Store build carries no ALPHA marker; other platforms keep it.
+    final markChatAlpha = defaultTargetPlatform != TargetPlatform.iOS;
 
     return _ModeChip(
       key: const Key('new-session-mode-chip'),
       icon: isChat ? AbIcons.comment : AbIcons.terminal,
       label: isChat ? 'Chat' : 'Terminal',
-      alpha: isChat,
+      alpha: isChat && markChatAlpha,
       enabled: enabled,
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
@@ -1090,7 +1094,7 @@ class _ModeSelector extends ConsumerWidget {
               label: 'Chat',
               value: 'chat',
               icon: displayMode == 'chat' ? AbIcons.check : null,
-              badge: 'Alpha',
+              badge: markChatAlpha ? 'Alpha' : null,
               badgeColor: context.antgrid.warning,
               enabled: chatEnabled,
               disabledReason: chatEnabled ? null : chatDisabledReason,

@@ -4,6 +4,8 @@
 *.pyc
 *.swp
 .tmp/
+# antgrid-site sparse checkout read by web's lockstep tests in CI
+.antgrid-site/
 
 # Android signing keys — never commit
 *.jks

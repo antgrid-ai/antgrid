@@ -13,6 +13,7 @@ import '../project/inbound_frame.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import 'operational_notice.dart';
 import 'pending_reply.dart';
 import 'reply_latch.dart';
 
@@ -133,8 +134,10 @@ class FileService {
 
   /// One message per finished git op, with no replay; see
   /// `OperationalErrorToaster` for why it is not a field on [FileTreeState].
-  final _gitOpFeedbackController = StreamController<String>.broadcast();
-  Stream<String> get gitOpFeedback => _gitOpFeedbackController.stream;
+  final _gitOpFeedbackController =
+      StreamController<OperationalNotice>.broadcast();
+  Stream<OperationalNotice> get gitOpFeedback =>
+      _gitOpFeedbackController.stream;
 
   String get projectId => session.projectId;
 
@@ -185,6 +188,9 @@ class FileService {
   /// the only thing that clears the spinner against an older host.
   final Duration gitSyncTimeout;
   ReplyLatch? _syncLatch;
+  ReplyLatch? _commitLatch;
+  Completer<bool>? _commitOutcome;
+  String? _commitRequestId;
 
   /// In-flight `file:resolve-path` round trips, keyed by requestId — plural
   /// unlike [_diffLatch]/[_syncLatch] because more than one terminal link can
@@ -520,10 +526,24 @@ class FileService {
       return;
     }
     if (parsed is GitCommitResultMessage) {
+      // A keyed result for another app's commit on this checkout is still
+      // reported, but must not settle ours: the message box is cleared off
+      // that outcome. An unkeyed one is an older bridge's and settles whatever
+      // is in flight.
+      final requestId = parsed.requestId;
+      if (requestId == null || requestId == _commitRequestId) {
+        _settleCommit(committed: parsed.success);
+        if (_state.git.committing) {
+          _setState(
+            _state.copyWith(git: _state.git.copyWith(committing: false)),
+          );
+        }
+      }
       _emitOpFeedback(
         parsed.success
             ? (parsed.sha != null ? 'Committed ${parsed.sha}' : 'Committed')
             : (parsed.error ?? 'Commit failed'),
+        failed: !parsed.success,
       );
       return;
     }
@@ -532,6 +552,7 @@ class FileService {
         parsed.success
             ? 'Discarded changes'
             : (parsed.error ?? 'Discard failed'),
+        failed: !parsed.success,
       );
       return;
     }
@@ -539,11 +560,15 @@ class FileService {
     // git:status refresh is what moves the UI); only a failure needs
     // surfacing, since nothing else would explain it.
     if (parsed is GitStageResultMessage) {
-      if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Stage failed');
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Stage failed', failed: true);
+      }
       return;
     }
     if (parsed is GitUnstageResultMessage) {
-      if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Unstage failed', failed: true);
+      }
       return;
     }
     if (parsed is GitSyncResultMessage) {
@@ -596,12 +621,13 @@ class FileService {
       failure == null
           ? (msg.summary ?? '${msg.op.label} complete')
           : failure.message,
+      failed: failure != null,
     );
   }
 
-  void _emitOpFeedback(String message) {
+  void _emitOpFeedback(String message, {required bool failed}) {
     if (_disposed) return;
-    _gitOpFeedbackController.add(message);
+    _gitOpFeedbackController.add((message: message, failed: failed));
   }
 
   /// Applies a `tree:update` frame via [applyTreeDelta], then raises the open
@@ -1201,6 +1227,7 @@ class FileService {
       size: msg.size,
       error: msg.error,
       encoding: msg.encoding,
+      utf8Valid: msg.utf8Valid,
       mimeType: msg.mimeType,
     );
     final files = msg.path == _state.files.selectedFilePath
@@ -1788,14 +1815,47 @@ class FileService {
 
   /// Commit whatever is currently staged, with [message]. Which files land
   /// is decided by prior [stageFiles]/[unstageFiles] calls.
-  void commit(String message) {
+  ///
+  /// Resolves true only once the bridge reports the commit landed; a refusal,
+  /// timeout, superseded send or dispose resolves false. Callers key the
+  /// message box off this so a hook rejection doesn't eat the message.
+  Future<bool> commit(String message) {
+    if (_state.git.committing) return Future.value(false);
+    _setState(_state.copyWith(git: _state.git.copyWith(committing: true)));
+    // A send dropped in a keyless relay window replies never, which would leave
+    // the button spinning for the life of the session.
+    _settleCommit(committed: false);
+    final latch = _commitLatch = ReplyLatch();
+    final outcome = _commitOutcome = Completer<bool>();
+    final requestId = _commitRequestId = const Uuid().v4();
     session.sendForCheckout(
       checkoutId,
       createAbMessage('git:commit', {
         'projectId': projectId,
         'message': message,
+        'requestId': requestId,
       }),
     );
+    unawaited(
+      latch.done.timeout(gitSyncTimeout).catchError((_) {
+        if (_disposed || _commitLatch != latch) return;
+        _settleCommit(committed: false);
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(committing: false)),
+        );
+        _emitOpFeedback('Commit timed out', failed: true);
+      }),
+    );
+    return outcome.future;
+  }
+
+  void _settleCommit({required bool committed}) {
+    _commitLatch?.settle();
+    _commitLatch = null;
+    _commitRequestId = null;
+    final outcome = _commitOutcome;
+    _commitOutcome = null;
+    if (outcome != null && !outcome.isCompleted) outcome.complete(committed);
   }
 
   /// Discard working-tree changes for [files] (tracked -> restore, untracked ->
@@ -1866,7 +1926,7 @@ class FileService {
         _setState(
           _state.copyWith(git: _state.git.copyWith(clearSyncing: true)),
         );
-        _emitOpFeedback('${op.label} timed out');
+        _emitOpFeedback('${op.label} timed out', failed: true);
       }),
     );
   }
@@ -2186,25 +2246,6 @@ class FileService {
     _setState(_state.copyWith(showChangedOnly: !_state.showChangedOnly));
   }
 
-  /// Git pane: fold a changed-files folder shut, or open it again.
-  ///
-  /// Separate from [toggleExpanded], which owns the Files tab's tree — see
-  /// [GitPaneState.collapsedPaths] for why the two states are not shared.
-  void toggleGitFolder(String path) {
-    final collapsed = Set<String>.from(_state.git.collapsedPaths);
-    if (!collapsed.remove(path)) collapsed.add(path);
-    _setState(
-      _state.copyWith(git: _state.git.copyWith(collapsedPaths: collapsed)),
-    );
-  }
-
-  /// Git pane: fold every folder in [paths] shut at once, or (with an empty
-  /// set) open them all. The caller supplies the folder list because only the
-  /// rendered tree knows which directories the current change set produced.
-  void setGitCollapsedFolders(Set<String> paths) {
-    _setState(_state.copyWith(git: _state.git.copyWith(collapsedPaths: paths)));
-  }
-
   void clearDiff() {
     // Superseded by the user closing the diff — a clean end, not a strand.
     _diffLatch?.settle();
@@ -2238,6 +2279,7 @@ class FileService {
     _diffLatch = null;
     _syncLatch?.settle();
     _syncLatch = null;
+    _settleCommit(committed: false);
     _historyLatch?.settle();
     _historyLatch = null;
     _pendingLogSkip = null;

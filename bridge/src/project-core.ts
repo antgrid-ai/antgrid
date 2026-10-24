@@ -466,6 +466,7 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
+      deviceStats: this.deps.deviceStats,
       remoteAccessEnabled: this.deps.remoteAccessEnabled,
       agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,

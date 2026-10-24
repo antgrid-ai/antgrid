@@ -24,7 +24,8 @@ import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/chat_composer_drafts.dart';
-import '../providers/new_session_picker.dart' show handoffTargetsFor;
+import '../providers/new_session_picker.dart'
+    show handoffSourceFor, handoffTargetsFor;
 import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
@@ -838,19 +839,22 @@ class _SessionMenu extends ConsumerWidget {
           // an older one drops the key and would fork into the same agent
           // while the dialog promised another.
           final sourceTool = session.handoffSupported ? session.agentKey : null;
-          final targets = sourceTool == null
-              ? const <({String tool, String label})>[]
-              : await handoffTargetsFor(
-                  ref,
-                  splitRegistrationId(entryId),
-                  sourceTool: sourceTool,
-                );
-          if (!anchor.mounted) return;
+          // Not awaited: the dialog opens now and fills its agent menu when
+          // the machine answers, which a cold host or a remote machine still
+          // connecting can take seconds to do.
           final choice = await promptSessionFork(
             anchor,
             isolatedSource: sessionIsIsolated(session),
-            sourceTool: sourceTool,
-            targets: targets,
+            source: sourceTool == null
+                ? null
+                : handoffSourceFor(ref, sourceTool),
+            targets: sourceTool == null
+                ? null
+                : handoffTargetsFor(
+                    ref,
+                    splitRegistrationId(entryId),
+                    sourceTool: sourceTool,
+                  ),
           );
           if (choice == null || !anchor.mounted) return;
           final workspace = choice.workspace;

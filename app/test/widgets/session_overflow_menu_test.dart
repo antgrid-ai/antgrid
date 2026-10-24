@@ -12,6 +12,8 @@ import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
+import 'package:antgrid/providers/providers.dart'
+    show TerminalClipboardActions, terminalClipboardActionsProvider;
 import 'package:antgrid/providers/session_bus_inbox.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -115,6 +117,7 @@ Future<void> _pump(
   required Size size,
   required TargetPlatform platform,
   SessionBusChannel? busChannel,
+  TerminalClipboardActions? clipboard,
 }) async {
   debugDefaultTargetPlatformOverride = platform;
   tester.view.physicalSize = size;
@@ -139,6 +142,10 @@ Future<void> _pump(
         ),
         if (busChannel != null)
           sessionBusChannelProvider.overrideWithValue(busChannel),
+        if (clipboard != null)
+          terminalClipboardActionsProvider.overrideWith(
+            () => ValueController<TerminalClipboardActions?>(clipboard),
+          ),
       ],
       child: const MaterialApp(home: Scaffold(body: AgentPanel())),
     ),
@@ -160,6 +167,101 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(useInMemoryPrefs);
+
+  group('terminal clipboard rows', () {
+    testWidgets('a published terminal adds select, paste and host copy', (
+      tester,
+    ) async {
+      final calls = <String>[];
+      await _pump(
+        tester,
+        session: _session(),
+        target: const LocalProject(_leadProjectId),
+        size: const Size(400, 800),
+        platform: TargetPlatform.android,
+        clipboard: TerminalClipboardActions(
+          selectText: () => calls.add('select'),
+          paste: () => calls.add('paste'),
+          copyHostClipboard: () =>
+              () => calls.add('host'),
+          attach: () =>
+              () => calls.add('attach'),
+        ),
+      );
+      await _openKebab(tester);
+
+      expect(find.text('Attach file'), findsOneWidget);
+      expect(find.text('Select text'), findsOneWidget);
+      expect(find.text('Paste'), findsOneWidget);
+      expect(find.text('Copy host clipboard'), findsOneWidget);
+
+      await tester.tap(find.text('Paste'));
+      await tester.pump();
+      expect(calls, ['paste']);
+      // The popup closes on the way.
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Paste'), findsNothing);
+    });
+
+    testWidgets('the desktop kebab carries them too', (tester) async {
+      await _pump(
+        tester,
+        session: _session(),
+        target: const LocalProject(_leadProjectId),
+        size: const Size(1400, 900),
+        platform: TargetPlatform.windows,
+        clipboard: TerminalClipboardActions(
+          selectText: () {},
+          paste: () {},
+          copyHostClipboard: () => () {},
+          attach: () => () {},
+        ),
+      );
+      await _openKebab(tester);
+
+      expect(find.text('Attach file'), findsOneWidget);
+      expect(find.text('Select text'), findsOneWidget);
+      expect(find.text('Paste'), findsOneWidget);
+      expect(find.text('Copy host clipboard'), findsOneWidget);
+    });
+
+    testWidgets('no host clipboard leaves only select and paste', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        session: _session(),
+        target: const LocalProject(_leadProjectId),
+        size: const Size(400, 800),
+        platform: TargetPlatform.android,
+        clipboard: TerminalClipboardActions(
+          selectText: () {},
+          paste: () {},
+          copyHostClipboard: () => null,
+          attach: () => null,
+        ),
+      );
+      await _openKebab(tester);
+
+      expect(find.text('Select text'), findsOneWidget);
+      expect(find.text('Copy host clipboard'), findsNothing);
+      expect(find.text('Attach file'), findsNothing);
+    });
+
+    testWidgets('nothing published adds no rows', (tester) async {
+      await _pump(
+        tester,
+        session: _session(),
+        target: const LocalProject(_leadProjectId),
+        size: const Size(400, 800),
+        platform: TargetPlatform.android,
+      );
+      await _openKebab(tester);
+
+      expect(find.text('Select text'), findsNothing);
+      expect(find.text('Paste'), findsNothing);
+    });
+  });
 
   group('desktop', () {
     testWidgets('the desktop kebab carries mode and Handler', (tester) async {

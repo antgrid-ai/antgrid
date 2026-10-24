@@ -98,6 +98,12 @@ class ProjectSession {
   /// Drives [newPending]'s immediate-fail path; see [_markDown]/[_markUp].
   bool _down;
 
+  /// [close] has run; nothing sent on this session will be carried again.
+  bool get isClosed => _closed;
+
+  /// See [_down].
+  bool get isDown => _down;
+
   /// Set while this project's stream is down (relay mode only) so the next
   /// rebind knows to re-issue the in-flight requests every [FileService] in
   /// [checkoutServiceBundles] dropped mid-flight, instead of on every ordinary
@@ -266,6 +272,7 @@ class ProjectSession {
   void _markDown() {
     if (_down) return;
     _down = true;
+    status.clearMachineStats();
     for (final bundle in checkoutServiceBundles) {
       bundle.terminalService.suspendDisplay();
     }
