@@ -450,13 +450,15 @@ export const STARTUP_SCREEN_SETTLE_MS = 250;
 const STARTUP_SCREEN_MAX_DEFER_MS = 1_000;
 
 /**
- * How long a screen must stay clear of every startup prompt, before any has
- * been seen, to count as having none.
+ * How long a screen must stay clear of every startup prompt to count as
+ * having none.
  *
  * Codex 0.163 paints its composer, bracketed paste on, and opens the trust
  * dialog over it about 600ms later (measured on an idle machine), so the first
- * clear screen of a reading guest is not yet an answer. A prompt that was seen
- * and then cleared needs no wait: the user answered it.
+ * clear screen of a reading guest is not yet an answer. An answered prompt
+ * waits the same window, because Codex 0.164 can chain its update prompt, the
+ * trust dialog and the hooks review (`run_ratatui_app` in codex-rs/tui), and
+ * the composer shows between them.
  */
 export const STARTUP_SCREEN_CLEAR_MS = 2_000;
 
@@ -468,7 +470,6 @@ export class StartupScreenCheck {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private deferredSince: number | undefined;
   private clearSince: number | undefined;
-  private promptSeen = false;
 
   constructor(
     private readonly opts: {
@@ -505,13 +506,8 @@ export class StartupScreenCheck {
     this.deferredSince = undefined;
     const rows = this.opts.read();
     if (rows.some((row) => this.opts.prompts.some((prompt) => row.includes(prompt)))) {
-      this.promptSeen = true;
       this.clearSince = undefined;
       this.opts.report(true);
-      return;
-    }
-    if (this.promptSeen) {
-      this.opts.report(false);
       return;
     }
     // The window is measured on a guest that is reading. A blank pre-TUI screen

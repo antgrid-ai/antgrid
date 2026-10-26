@@ -2,6 +2,7 @@ import { logger } from "../logger";
 import { capturePrompt } from "../modelwatch";
 import { headlessScratchCwd, logBorrow, resolveHeadless, executeHeadless } from "./headless";
 import { detectAvailableTools } from "../tool-detector";
+import { authoredText } from "antgrid-agents/handoff";
 import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
 import { agentSpec } from "../agent-runtime";
 
@@ -95,7 +96,9 @@ export async function buildTitleContext(opts: {
         transcriptPath: opts.transcriptPath,
         agentSessionId: opts.agentSessionId,
       });
-      context = t.msgs.join("\n---\n");
+      // A handoff target's transcript opens with Antgrid's prompt, and a model
+      // handed that template names the session after the handoff, not the task.
+      context = t.msgs.flatMap((msg) => authoredText(msg) ?? []).join("\n---\n");
     } catch (err) {
       log.warn("transcript read failed for %s: %s", opts.tool, err);
     }

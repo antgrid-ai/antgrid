@@ -7,15 +7,9 @@ import {
   type HandoffEvent,
   type HandoffEventsFn,
 } from "../handoff";
-import { retainedTurns } from "./rollout-read";
+import { isInjectedUserText, replacementUserTexts, retainedTurns, withoutRequestWrapper } from "./rollout-read";
 
-// Codex wraps typed input in a template for some entry points; everything before
-// this marker is scaffolding, not the user's words.
-const USER_MESSAGE_BEGIN = "## My request for Codex:";
 const MAX_RETAINED_USER_TEXTS = 3;
-// Injected user-role messages (AGENTS.md dumps, environment context, plugin
-// lists) are not something the user said and must not stand in for a summary.
-const INJECTED_USER_TEXT = /^\s*(?:<|# AGENTS)/;
 
 type Sink = (event: HandoffEvent) => void;
 type Json = Record<string, unknown>;
@@ -36,11 +30,6 @@ function itemText(item: Json): string {
   return out;
 }
 
-function stripRequestWrapper(message: string): string {
-  const index = message.indexOf(USER_MESSAGE_BEGIN);
-  return (index >= 0 ? message.slice(index + USER_MESSAGE_BEGIN.length) : message).trim();
-}
-
 function stringify(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined || value === null) return "";
@@ -55,25 +44,10 @@ function commandText(command: unknown): string {
   return Array.isArray(command) ? command.map((part) => String(part)).join(" ") : stringify(command);
 }
 
-const isOwnUserText = (text: string) => !INJECTED_USER_TEXT.test(text) && !isAntgridHandoffPrompt(text);
+const isOwnUserText = (text: string) => !isInjectedUserText(text) && !isAntgridHandoffPrompt(text);
 
-/** The plaintext user messages Codex kept when it replaced the history; its own
- * summary item is encrypted. */
 function retainedUserTexts(payload: Json): string[] {
-  if (!Array.isArray(payload.replacement_history)) return [];
-  const texts: string[] = [];
-  for (const entry of payload.replacement_history) {
-    const record = asRecord(entry);
-    if (!record || record.type !== "message" || record.role !== "user" || !Array.isArray(record.content)) continue;
-    let text = "";
-    for (const part of record.content) {
-      const piece = asRecord(part);
-      if (piece && typeof piece.text === "string") text += piece.text;
-    }
-    text = text.trim();
-    if (text && isOwnUserText(text)) texts.push(text);
-  }
-  return texts.slice(-MAX_RETAINED_USER_TEXTS);
+  return replacementUserTexts(payload).filter((text) => !isAntgridHandoffPrompt(text)).slice(-MAX_RETAINED_USER_TEXTS);
 }
 
 /** Current checkpoints keep the recent turns of both sides in plaintext
@@ -94,7 +68,7 @@ function emitCompaction(record: Json, payload: Json, at: string, sink: Sink): vo
 function emitItem(item: Json, at: string, sink: Sink): void {
   switch (item.type) {
     case "UserMessage": {
-      const text = stripRequestWrapper(itemText(item));
+      const text = withoutRequestWrapper(itemText(item));
       if (!text) return;
       sink(userEvent(text, at));
       return;
@@ -167,7 +141,7 @@ function handleRecord(record: Json, at: string, sink: Sink): void {
     if (item) emitItem(item, at, sink);
   } else if (payload.type === "user_message" && typeof payload.message === "string") {
     // Rollouts written before paginated history keep messages in these two events.
-    const text = stripRequestWrapper(payload.message);
+    const text = withoutRequestWrapper(payload.message);
     if (text) sink(userEvent(text, at));
   } else if (payload.type === "agent_message" && typeof payload.message === "string") {
     const text = payload.message.trim();

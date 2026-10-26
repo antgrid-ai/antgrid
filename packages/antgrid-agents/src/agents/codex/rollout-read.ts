@@ -184,15 +184,41 @@ export function retainedTurns(payload: any): { role: "user" | "assistant"; text:
     .map(({ role, text }) => ({ role, text }));
 }
 
-// Legacy checkpoints carry a summary in `message`. Current ones (codex 0.162
-// and later at least) leave it empty and keep the recent turns instead.
+// Injected user-role messages (AGENTS.md dumps, environment context, plugin
+// lists) are not something the user said.
+const INJECTED_USER_TEXT = /^\s*(?:<|# AGENTS)/;
+export const isInjectedUserText = (text: string) => INJECTED_USER_TEXT.test(text);
+
+/** The user's own messages from a checkpoint's replacement_history, the only
+ * plaintext an older checkpoint (empty `message`, no retained turns) keeps:
+ * its summary item is encrypted and its agent_message entries are traffic
+ * between sub-agents, not replies to the user. */
+export function replacementUserTexts(payload: any): string[] {
+  if (!Array.isArray(payload?.replacement_history)) return [];
+  const texts: string[] = [];
+  for (const entry of payload.replacement_history) {
+    if (entry?.type !== "message" || entry.role !== "user" || !Array.isArray(entry.content)) continue;
+    const raw = entry.content.map((part: any) => (typeof part?.text === "string" ? part.text : "")).join("");
+    if (isInjectedUserText(raw)) continue;
+    const text = withoutRequestWrapper(raw);
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+// Legacy checkpoints carry a summary in `message`. Later ones leave it empty
+// and keep the recent turns in retained_context (codex 0.162 and later at
+// least); those in between keep only the user's messages, in
+// replacement_history.
 function compactedBase(payload: any): string[] {
   const summary = typeof payload?.message === "string" ? payload.message.trim() : "";
   if (summary) return [summary];
-  return retainedTurns(payload).map((turn) => turn.text);
+  const turns = retainedTurns(payload);
+  if (turns.length > 0) return turns.map((turn) => turn.text);
+  return replacementUserTexts(payload);
 }
 
-function withoutRequestWrapper(message: string): string {
+export function withoutRequestWrapper(message: string): string {
   const idx = message.indexOf(USER_MESSAGE_BEGIN);
   return (idx >= 0 ? message.slice(idx + USER_MESSAGE_BEGIN.length) : message).trim();
 }

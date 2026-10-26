@@ -82,12 +82,14 @@ test("serializes header, archive and message blobs in order and never emits blob
   const m2 = chat.blob(JSON.stringify({ role: "assistant", content: [{ type: "text", text: "hi" }] }));
   const multiline = chat.blob('{"role":"user",\n"content":"split"}');
   const notJson = chat.blob(Buffer.from([0x0a, 0x03, 0x61, 0x62, 0x63]));
-  const archive = [
+  // The root names an archive by blob id, as it names messages: the archive's
+  // own protobuf (ConversationSummaryArchive) is a blob of its own.
+  const archive = chat.blob(Buffer.from([
     ...lengthDelimited(1, archived),
     ...lengthDelimited(2, Buffer.from("the summary")),
     ...varintField(3, 4),
     ...lengthDelimited(4, summaryMsg),
-  ];
+  ]));
   const rootBlob = chat.blob(Buffer.from([
     ...lengthDelimited(1, m1),
     ...lengthDelimited(1, multiline),
@@ -122,6 +124,23 @@ test("serializes header, archive and message blobs in order and never emits blob
   // The message blob is spliced as stored, not re-serialized.
   expect(text).toContain(`"message":{"role":"user","content":[{"type":"text","text":"hello \\"world\\""}]}`);
   expect(snapshot?.warnings.join("\n")).toContain("Skipped 2 message blobs");
+});
+
+test("skips a summary archive whose blob is missing and keeps the rest of the chat", async () => {
+  const cfg = join(root, "cfg");
+  const chat = createChat(cfg, "/work");
+  const m1 = chat.blob(JSON.stringify({ role: "user", content: "live" }));
+  setMeta(chat, chat.blob(Buffer.from([...lengthDelimited(13, sha("never stored")), ...lengthDelimited(1, m1)])));
+  const outDir = join(root, "out");
+  mkdirSync(outDir);
+
+  const snapshot = await cursorSnapshot(opts(outDir, cfg));
+  chat.db.close();
+
+  const lines = readFileSync(join(outDir, "cursor-chat.jsonl"), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  expect(lines.map((l) => l.type)).toEqual(["header", "message"]);
+  expect(lines[1].blobId).toBe(m1.toString("hex"));
+  expect(snapshot?.warnings.join("\n")).toContain("Skipped 1 summary archive");
 });
 
 test("sees WAL-only rows and never writes the chat directory", async () => {

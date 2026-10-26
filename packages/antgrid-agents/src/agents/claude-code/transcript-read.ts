@@ -47,6 +47,14 @@ const LOCAL_COMMAND_TAG = "command-name|command-message|command-args|command-con
 // entry that opens a wrapper but never cleanly closes it.
 const LOCAL_COMMAND_ELEMENT = new RegExp(`<(?:${LOCAL_COMMAND_TAG})>[\\s\\S]*?</(?:${LOCAL_COMMAND_TAG})>`, "g");
 
+/** A record Claude Code wrote on someone else's behalf, such as a background
+ * task's `<task-notification>`. Records without an origin predate the field
+ * and were typed by a person. */
+export function isNonHumanOrigin(entry: any): boolean {
+  const origin = entry?.origin;
+  return typeof origin === "object" && origin !== null && !Array.isArray(origin) && origin.kind !== "human";
+}
+
 export function isLocalCommandNoise(entry: any): boolean {
   const c = entry?.message?.content;
   if (typeof c !== "string") return false;

@@ -11,6 +11,7 @@ import {
   resolveAntigravityTranscriptTitle,
 } from "../../packages/antgrid-agents/src/agents/antigravity/title";
 import { resolveStructuredTitle } from "../../packages/antgrid-agents/src/agents/title-dispatch";
+import { handoffPrompt } from "../src/handoff/handoff-prompt";
 
 const dirs: string[] = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), "ab-tr-")); dirs.push(d); return d; }
@@ -334,5 +335,44 @@ describe("resolveStructuredTitle dispatch", () => {
   });
   test("antigravity without transcriptPath → null", async () => {
     expect(await resolveStructuredTitle("antigravity", { sessionId: "x" })).toBeNull();
+  });
+});
+
+describe("resolveStructuredTitle on a handoff target", () => {
+  // Built by the real template, so rewording it past the classifier fails here
+  // rather than naming every handoff in the field after the handoff.
+  const prompt = (extra?: string) => handoffPrompt({
+    sourceLabel: "Codex",
+    excerptPath: "C:\\repo\\.antgrid\\handoff\\h1\\excerpt.md",
+    rawPath: "C:\\repo\\.antgrid\\handoff\\h1\\rollout.jsonl",
+    ...(extra ? { extra } : {}),
+  });
+  const claudeTranscript = (...lines: object[]) => {
+    const p = join(tmp(), "t.jsonl");
+    writeFileSync(p, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+    return p;
+  };
+
+  test("the handoff prompt names nothing, so the row keeps its fork name", async () => {
+    const p = claudeTranscript({ type: "user", message: { content: prompt() } });
+    expect(await resolveStructuredTitle("claude", { sessionId: "x", transcriptPath: p })).toBeNull();
+  });
+  test("an instruction the user added to the handoff is the first message", async () => {
+    const p = claudeTranscript({ type: "user", message: { content: prompt("migrate the schema") } });
+    expect(await resolveStructuredTitle("claude", { sessionId: "x", transcriptPath: p }))
+      .toEqual({ title: "migrate the schema", kind: "first-message" });
+  });
+  test("is dropped for every agent's resolver, not only Claude's", async () => {
+    const home = tmp();
+    writeStateDb(home, 5, [{ id: "abc", first_user_message: prompt() }]);
+    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home })).toBeNull();
+  });
+  test("a rename still wins", async () => {
+    const p = claudeTranscript(
+      { type: "user", message: { content: prompt() } },
+      { type: "custom-title", customTitle: "Schema work", sessionId: "x" },
+    );
+    expect(await resolveStructuredTitle("claude", { sessionId: "x", transcriptPath: p }))
+      .toEqual({ title: "Schema work", kind: "manual" });
   });
 });
