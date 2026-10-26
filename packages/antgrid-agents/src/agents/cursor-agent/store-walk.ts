@@ -3,9 +3,11 @@ import type { DbSerializeOutput, DbSerializer } from "../handoff/db-serializers"
 import { HandoffSnapshotError, SAFE_NATIVE_ID } from "../handoff/types";
 
 // Cursor keeps a chat as a content-addressed blob graph: a protobuf root blob
-// names JSON message blobs by sha256. The field numbers come from the shipped
-// CLI bundle, not a published schema, so every read is defensive and a root
-// that no longer parses is reported rather than guessed at.
+// (ConversationStateStructure) names JSON message blobs by sha256, and names
+// each summary archive the same way — an archive is its own protobuf blob, not
+// a message inlined in the root. The field numbers come from the shipped CLI
+// bundle, not a published schema, so every read is defensive and a root that
+// no longer parses is reported rather than guessed at.
 const ROOT_MESSAGES_FIELD = 1;
 const SUMMARY_ARCHIVES_FIELD = 13;
 const ARCHIVE_SUMMARIZED_MESSAGES_FIELD = 1;
@@ -74,26 +76,26 @@ export interface SummaryArchive {
 
 export interface RootWalk {
   messageIds: string[];
-  archives: SummaryArchive[];
+  archiveIds: string[];
 }
 
 export function walkRootBlob(root: Uint8Array): RootWalk {
   const fields = walkProto(root);
-  const archives = fields
-    .filter((f) => f.field === SUMMARY_ARCHIVES_FIELD && f.bytes)
-    .map((f): SummaryArchive => {
-      const inner = walkProto(f.bytes!);
-      const summary = inner.find((i) => i.field === ARCHIVE_SUMMARY_FIELD && i.bytes);
-      const windowTail = inner.find((i) => i.field === ARCHIVE_WINDOW_TAIL_FIELD)?.varint;
-      const summaryMessage = blobIdsOf(inner, ARCHIVE_SUMMARY_MESSAGE_FIELD)[0];
-      return {
-        summarizedMessageIds: blobIdsOf(inner, ARCHIVE_SUMMARIZED_MESSAGES_FIELD),
-        ...(summary ? { summary: Buffer.from(summary.bytes!).toString("utf8") } : {}),
-        ...(windowTail !== undefined ? { windowTail } : {}),
-        ...(summaryMessage ? { summaryMessageId: summaryMessage } : {}),
-      };
-    });
-  return { messageIds: blobIdsOf(fields, ROOT_MESSAGES_FIELD), archives };
+  return { messageIds: blobIdsOf(fields, ROOT_MESSAGES_FIELD), archiveIds: blobIdsOf(fields, SUMMARY_ARCHIVES_FIELD) };
+}
+
+/** One ConversationSummaryArchive blob, as the root's field-13 id names it. */
+export function walkArchiveBlob(archive: Uint8Array): SummaryArchive {
+  const inner = walkProto(archive);
+  const summary = inner.find((i) => i.field === ARCHIVE_SUMMARY_FIELD && i.bytes);
+  const windowTail = inner.find((i) => i.field === ARCHIVE_WINDOW_TAIL_FIELD)?.varint;
+  const summaryMessage = blobIdsOf(inner, ARCHIVE_SUMMARY_MESSAGE_FIELD)[0];
+  return {
+    summarizedMessageIds: blobIdsOf(inner, ARCHIVE_SUMMARIZED_MESSAGES_FIELD),
+    ...(summary ? { summary: Buffer.from(summary.bytes!).toString("utf8") } : {}),
+    ...(windowTail !== undefined ? { windowTail } : {}),
+    ...(summaryMessage ? { summaryMessageId: summaryMessage } : {}),
+  };
 }
 
 export interface CursorStoreMeta {
@@ -188,7 +190,19 @@ export const cursorChatSerializer: DbSerializer = (db, rawArgs): DbSerializeOutp
     }),
   ];
   const skipped = { count: 0 };
-  walk.archives.forEach((archive, index) => {
+  let skippedArchives = 0;
+  walk.archiveIds.forEach((archiveId, index) => {
+    const row = db.query("SELECT data FROM blobs WHERE id = ?").get(archiveId) as { data?: unknown } | null;
+    let archive: SummaryArchive | undefined;
+    // Cursor's own reader treats a missing archive blob as holding no messages
+    // and carries on, so one bad archive costs only its own messages here too.
+    try {
+      if (row?.data instanceof Uint8Array) archive = walkArchiveBlob(row.data);
+    } catch {}
+    if (!archive) {
+      skippedArchives++;
+      return;
+    }
     lines.push(JSON.stringify({
       type: "summary_archive",
       archiveIndex: index,
@@ -206,9 +220,10 @@ export const cursorChatSerializer: DbSerializer = (db, rawArgs): DbSerializeOutp
     if (line) lines.push(line);
   }
 
-  const warnings = skipped.count
-    ? [`Skipped ${skipped.count} message blob${skipped.count === 1 ? "" : "s"} that were missing or not single-line JSON.`]
-    : [];
+  const warnings = [
+    ...(skipped.count ? [`Skipped ${skipped.count} message blob${skipped.count === 1 ? "" : "s"} that were missing or not single-line JSON.`] : []),
+    ...(skippedArchives ? [`Skipped ${skippedArchives} summary archive${skippedArchives === 1 ? "" : "s"} that were missing or did not parse.`] : []),
+  ];
   return {
     files: [{ name: "cursor-chat.jsonl", role: "transcript", text: `${lines.join("\n")}\n` }],
     references: [],
