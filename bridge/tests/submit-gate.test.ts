@@ -429,7 +429,7 @@ test("a screen that stays clear through the window is reported clear once", asyn
   check.dispose();
 });
 
-test("a prompt that was answered reports the clear screen at once", async () => {
+test("a prompt that was answered reports the clear screen after the window", async () => {
   const reports: boolean[] = [];
   let rows = ["Trust this folder?"];
   const check = new StartupScreenCheck({
@@ -437,7 +437,7 @@ test("a prompt that was answered reports the clear screen at once", async () => 
     read: () => rows,
     report: (showing) => reports.push(showing),
     settleMs: 5,
-    clearMs: 60_000,
+    clearMs: 100,
   });
 
   check.noteOutput();
@@ -445,7 +445,36 @@ test("a prompt that was answered reports the clear screen at once", async () => 
   rows = ["> composer"];
   check.noteOutput();
   await wait(30);
+  expect(reports).toEqual([true]);
 
+  await wait(150);
   expect(reports).toEqual([true, false]);
+  check.dispose();
+});
+
+// Codex 0.164's order: the update prompt, the composer, then the trust dialog.
+// Ending the hold on the first answer would send a queued submit into the
+// dialog, where Enter trusts the repository.
+test("an answered prompt followed by another keeps the hold", async () => {
+  const reports: boolean[] = [];
+  let rows = ["› 1. Update now (runs `npm install -g @openai/codex`)", "  3. Skip until next version"];
+  const check = new StartupScreenCheck({
+    prompts: ["Update now (runs", "Skip until next version", "Trust this folder?"],
+    read: () => rows,
+    report: (showing) => reports.push(showing),
+    settleMs: 5,
+    clearMs: 200,
+  });
+
+  check.noteOutput();
+  await wait(30);
+  rows = ["› Ask Codex to do anything"];
+  check.noteOutput();
+  await wait(60);
+  rows = ["Trust this folder? Codex can read, edit, and run files here", "› 1. Trust and continue"];
+  check.noteOutput();
+  await wait(30);
+
+  expect(reports).toEqual([true, true]);
   check.dispose();
 });
