@@ -184,15 +184,10 @@ function readTodo(db: Database, sessionId: string, ctx: Context): unknown[] {
   }
 }
 
-function readSession(db: Database, sessionId: string, opts: OpencodeSerializeOptions, ctx: Context): OpencodeSessionDoc | undefined {
+function readSession(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc | undefined {
   const row = db.query("SELECT * FROM session WHERE id = ?").get(sessionId) as Record<string, unknown> | null;
   if (!row) return undefined;
-  const doc: OpencodeSessionDoc = { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
-  if (opts.includeKiloBoard) {
-    const board = readBoard(db, sessionId, ctx);
-    if (board) doc.board = board;
-  }
-  return doc;
+  return { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
 }
 
 /** Output has the `opencode export` shape so a target (or the user) can read or
@@ -201,8 +196,13 @@ function readSession(db: Database, sessionId: string, opts: OpencodeSerializeOpt
  * database holds account and credential tables that must never be selected. */
 export function serializeOpencodeSession(db: Database, sessionId: string, opts: OpencodeSerializeOptions): OpencodeSerialized | undefined {
   const ctx: Context = { redactions: new Set(), warnings: [], references: [] };
-  const doc = readSession(db, sessionId, opts, ctx);
+  const doc = readSession(db, sessionId, ctx);
   if (!doc) return undefined;
+  // The board hangs off the root session only, so a child never has one.
+  if (opts.includeKiloBoard) {
+    const board = readBoard(db, sessionId, ctx);
+    if (board) doc.board = board;
+  }
 
   const children: OpencodeSerialized["children"] = [];
   const seen = new Set([sessionId]);
@@ -221,7 +221,7 @@ export function serializeOpencodeSession(db: Database, sessionId: string, opts: 
           ctx.warnings.push(`Stopped after ${MAX_CHILDREN} child sessions.`);
           continue;
         }
-        const childDoc = readSession(db, id, opts, ctx);
+        const childDoc = readSession(db, id, ctx);
         if (!childDoc) continue;
         children.push({ id, doc: childDoc });
         next.push(id);

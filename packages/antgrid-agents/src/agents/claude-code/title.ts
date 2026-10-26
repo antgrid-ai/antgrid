@@ -1,6 +1,6 @@
 import type { ResolvedTitle } from "../types";
 import { firstMessage, manualTitle, readOrNull } from "../title-read";
-import { isLocalCommandNoise } from "./transcript-read";
+import { isLocalCommandNoise, isNonHumanOrigin } from "./transcript-read";
 
 /** Extract plain text from a Claude message `content` field (string or parts array).
  *  Returns the FIRST text part — not the same function as ./transcript.ts's
@@ -39,9 +39,7 @@ function titleField(value: unknown): string | null {
  *  same messages transcript-read.ts keeps for the visible history. */
 function isUnauthoredUserRecord(obj: any): boolean {
   return obj.isMeta === true || obj.isCompactSummary === true || obj.isSidechain === true ||
-    // Records without an origin predate the field and were typed by a person.
-    (typeof obj.origin === "object" && obj.origin !== null && obj.origin.kind !== "human") ||
-    isLocalCommandNoise(obj);
+    isNonHumanOrigin(obj) || isLocalCommandNoise(obj);
 }
 
 /**

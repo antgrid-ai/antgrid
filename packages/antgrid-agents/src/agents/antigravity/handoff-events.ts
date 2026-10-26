@@ -43,16 +43,19 @@ export const antigravityHandoffEvents: HandoffEventsFn = async (dir, manifest, s
   const pendingNames: string[] = [];
   // Results wait for the next record, which may be the planner that issued them.
   const held: Array<{ lineNo: number; value: Obj }> = [];
-  // Highest step emitted so far. A planner above it is new work, so results
-  // held with a higher step are its own; a user turn at or below it is a rewind.
+  // Highest step of the live pass so far. A planner above it is new work, so
+  // results held with a higher step are its own; a user turn at or below it is
+  // a rewind, which starts a new pass from that turn's step.
   let reached = -1;
 
   const emit = (lineNo: number, value: Obj) => {
     const at = `${manifest.primary}:${lineNo}`;
     const content = typeof value.content === "string" ? value.content : "";
     const step = stepOf(value);
-    const rewound = value.type === "USER_INPUT" && step !== undefined && step <= reached;
-    if (step !== undefined) reached = Math.max(reached, step);
+    const rewound = value.type === "USER_INPUT" && value.source === "USER_EXPLICIT" && step !== undefined && step <= reached;
+    // Keeping the retracted pass's high-water mark would read every later turn
+    // of the new pass as another rewind until it outgrew the old one.
+    if (step !== undefined) reached = rewound ? step : Math.max(reached, step);
 
     switch (value.type) {
       case "USER_INPUT": {
@@ -96,6 +99,7 @@ export const antigravityHandoffEvents: HandoffEventsFn = async (dir, manifest, s
   };
 
   const release = (keep: (value: Obj) => boolean = () => false) => {
+    if (held.length === 0) return;
     const kept = held.filter(({ value }) => keep(value));
     for (const result of held) if (!keep(result.value)) emit(result.lineNo, result.value);
     held.splice(0, held.length, ...kept);

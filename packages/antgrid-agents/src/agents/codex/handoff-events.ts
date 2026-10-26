@@ -7,11 +7,8 @@ import {
   type HandoffEvent,
   type HandoffEventsFn,
 } from "../handoff";
-import { isInjectedUserText, replacementUserTexts, retainedTurns } from "./rollout-read";
+import { isInjectedUserText, replacementUserTexts, retainedTurns, withoutRequestWrapper } from "./rollout-read";
 
-// Codex wraps typed input in a template for some entry points; everything before
-// this marker is scaffolding, not the user's words.
-const USER_MESSAGE_BEGIN = "## My request for Codex:";
 const MAX_RETAINED_USER_TEXTS = 3;
 
 type Sink = (event: HandoffEvent) => void;
@@ -31,11 +28,6 @@ function itemText(item: Json): string {
     if (record && typeof record.text === "string" && String(record.type).toLowerCase() === "text") out += record.text;
   }
   return out;
-}
-
-function stripRequestWrapper(message: string): string {
-  const index = message.indexOf(USER_MESSAGE_BEGIN);
-  return (index >= 0 ? message.slice(index + USER_MESSAGE_BEGIN.length) : message).trim();
 }
 
 function stringify(value: unknown): string {
@@ -76,7 +68,7 @@ function emitCompaction(record: Json, payload: Json, at: string, sink: Sink): vo
 function emitItem(item: Json, at: string, sink: Sink): void {
   switch (item.type) {
     case "UserMessage": {
-      const text = stripRequestWrapper(itemText(item));
+      const text = withoutRequestWrapper(itemText(item));
       if (!text) return;
       sink(userEvent(text, at));
       return;
@@ -149,7 +141,7 @@ function handleRecord(record: Json, at: string, sink: Sink): void {
     if (item) emitItem(item, at, sink);
   } else if (payload.type === "user_message" && typeof payload.message === "string") {
     // Rollouts written before paginated history keep messages in these two events.
-    const text = stripRequestWrapper(payload.message);
+    const text = withoutRequestWrapper(payload.message);
     if (text) sink(userEvent(text, at));
   } else if (payload.type === "agent_message" && typeof payload.message === "string") {
     const text = payload.message.trim();

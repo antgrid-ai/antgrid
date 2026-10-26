@@ -147,3 +147,29 @@ test("a rewound turn is marked as retracted before the prompt that replaces it",
   expect(kinds).toEqual(["user first", "user try A", "tool_call", "tool_result", "note", "user try B", "tool_call", "tool_result"]);
   expect(events.find((e) => e.kind === "note")).toMatchObject({ at: "antigravity-transcript.jsonl:6" });
 });
+
+test("turns after a rewind are not read as further rewinds", async () => {
+  const events = await parse([
+    step(0, input(wrap("first"))),
+    planner(1),
+    step(2, input(wrap("try A"))),
+    planner(3, "search_web"),
+    result(4, "found A"),
+    step(5, input(wrap("go on"))),
+    planner(6, "search_web"),
+    result(7, "more A"),
+    step(2, input(wrap("try B"))),
+    planner(3),
+    step(4, input(wrap("then C"))),
+    planner(5, "view_file"),
+    result(6, "b.ts"),
+    result(8, "c.ts"),
+    planner(7, "grep_search"),
+  ]);
+  expect(events.filter((e) => e.kind === "note")).toHaveLength(1);
+  // The new pass's steps sit below the retracted pass's, which must not stop a
+  // result written ahead of its planner from finding it.
+  const order = events.filter((e) => e.kind === "tool_call" || e.kind === "tool_result").slice(-4)
+    .map((e) => (e.kind === "tool_call" ? `call ${e.name}` : `result ${(e as { name?: string }).name}`));
+  expect(order).toEqual(["call view_file", "result view_file", "call grep_search", "result grep_search"]);
+});

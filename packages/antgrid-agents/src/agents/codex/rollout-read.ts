@@ -218,7 +218,7 @@ function compactedBase(payload: any): string[] {
   return replacementUserTexts(payload);
 }
 
-function withoutRequestWrapper(message: string): string {
+export function withoutRequestWrapper(message: string): string {
   const idx = message.indexOf(USER_MESSAGE_BEGIN);
   return (idx >= 0 ? message.slice(idx + USER_MESSAGE_BEGIN.length) : message).trim();
 }

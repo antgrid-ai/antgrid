@@ -77,11 +77,15 @@ export interface SummaryArchive {
 export interface RootWalk {
   messageIds: string[];
   archiveIds: string[];
+  /** Archive entries that are not a blob id, so name nothing to read. */
+  unreadableArchives: number;
 }
 
 export function walkRootBlob(root: Uint8Array): RootWalk {
   const fields = walkProto(root);
-  return { messageIds: blobIdsOf(fields, ROOT_MESSAGES_FIELD), archiveIds: blobIdsOf(fields, SUMMARY_ARCHIVES_FIELD) };
+  const archiveIds = blobIdsOf(fields, SUMMARY_ARCHIVES_FIELD);
+  const archiveEntries = fields.filter((f) => f.field === SUMMARY_ARCHIVES_FIELD).length;
+  return { messageIds: blobIdsOf(fields, ROOT_MESSAGES_FIELD), archiveIds, unreadableArchives: archiveEntries - archiveIds.length };
 }
 
 /** One ConversationSummaryArchive blob, as the root's field-13 id names it. */
@@ -139,6 +143,10 @@ function parseArgs(args: unknown): CursorSerializerArgs {
   };
 }
 
+function blobData(db: Database, id: string): unknown {
+  return (db.query("SELECT data FROM blobs WHERE id = ?").get(id) as { data?: unknown } | null)?.data;
+}
+
 function blobText(data: unknown): string | undefined {
   if (typeof data === "string") return data;
   return data instanceof Uint8Array ? Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8") : undefined;
@@ -147,8 +155,7 @@ function blobText(data: unknown): string | undefined {
 /** A message blob is spliced into the JSONL verbatim only when it is valid JSON
  * on one line; re-serializing would alter what the agent stored. */
 function messageLine(db: Database, blobId: string, archive: number | undefined, skipped: { count: number }): string | undefined {
-  const row = db.query("SELECT data FROM blobs WHERE id = ?").get(blobId) as { data?: unknown } | null;
-  const text = row ? blobText(row.data) : undefined;
+  const text = blobText(blobData(db, blobId));
   if (text === undefined || text.includes("\n")) {
     skipped.count++;
     return undefined;
@@ -166,11 +173,11 @@ export const cursorChatSerializer: DbSerializer = (db, rawArgs): DbSerializeOutp
   const meta = readStoreMeta(db);
   if (!meta || meta.agentId !== args.chatId) throw new HandoffSnapshotError("UNREADABLE", "The Cursor chat store does not belong to this chat.");
   if (!meta.latestRootBlobId) throw new HandoffSnapshotError("UNREADABLE", "The Cursor chat store has no root blob yet.");
-  const rootRow = db.query("SELECT data FROM blobs WHERE id = ?").get(meta.latestRootBlobId) as { data?: unknown } | null;
-  if (!rootRow || !(rootRow.data instanceof Uint8Array)) throw new HandoffSnapshotError("UNREADABLE", "The Cursor chat root blob is missing.");
+  const rootData = blobData(db, meta.latestRootBlobId);
+  if (!(rootData instanceof Uint8Array)) throw new HandoffSnapshotError("UNREADABLE", "The Cursor chat root blob is missing.");
   let walk: RootWalk;
   try {
-    walk = walkRootBlob(rootRow.data);
+    walk = walkRootBlob(rootData);
   } catch (error) {
     throw new HandoffSnapshotError("UNREADABLE", `The Cursor chat root blob did not parse: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -190,14 +197,14 @@ export const cursorChatSerializer: DbSerializer = (db, rawArgs): DbSerializeOutp
     }),
   ];
   const skipped = { count: 0 };
-  let skippedArchives = 0;
+  let skippedArchives = walk.unreadableArchives;
   walk.archiveIds.forEach((archiveId, index) => {
-    const row = db.query("SELECT data FROM blobs WHERE id = ?").get(archiveId) as { data?: unknown } | null;
+    const data = blobData(db, archiveId);
     let archive: SummaryArchive | undefined;
     // Cursor's own reader treats a missing archive blob as holding no messages
     // and carries on, so one bad archive costs only its own messages here too.
     try {
-      if (row?.data instanceof Uint8Array) archive = walkArchiveBlob(row.data);
+      if (data instanceof Uint8Array) archive = walkArchiveBlob(data);
     } catch {}
     if (!archive) {
       skippedArchives++;
