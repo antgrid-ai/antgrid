@@ -73,7 +73,6 @@ void main() {
     String? selectedFilePath,
     List<GitFileStatusEntry> gitFileEntries = const [],
     bool changesOnly = false,
-    Set<String> collapsedPaths = const {},
     void Function(String)? onToggleExpanded,
     void Function(String)? onFileSelected,
     void Function(String)? onStage,
@@ -89,7 +88,6 @@ void main() {
           selectedFilePath: selectedFilePath,
           gitStatus: _indexFor(gitFileEntries),
           changesOnly: changesOnly,
-          collapsedPaths: collapsedPaths,
           onToggleExpanded: onToggleExpanded ?? (_) {},
           onFileSelected: onFileSelected ?? (_) {},
           onStage: onStage,
@@ -490,13 +488,12 @@ void main() {
       expect(find.byType(AbStatusDot), findsNothing);
     });
 
-    testWidgets('changesOnly prunes unchanged files and directories', (
+    testWidgets('changesOnly lists just the changed files, flat', (
       tester,
     ) async {
-      final tree = makeTree();
       await tester.pumpWidget(
         buildTestWidget(
-          root: tree,
+          root: makeTree(),
           changesOnly: true,
           gitFileEntries: const [
             GitFileStatusEntry(
@@ -510,25 +507,25 @@ void main() {
         ),
       );
 
-      // main.dart changed and lib is its ancestor — both show.
-      expect(find.text('lib'), findsOneWidget);
-      expect(find.text('main.dart'), findsOneWidget);
-      // utils.dart (unchanged sibling) and README.md (unchanged, no
-      // ancestor relation to the change) are both hidden entirely.
-      expect(find.text('utils.dart'), findsNothing);
-      expect(find.text('README.md'), findsNothing);
+      // One row naming the file, its folder beside it — no folder rows.
+      expect(find.text('main.dart  project/lib'), findsOneWidget);
+      expect(find.text('lib'), findsNothing);
+      expect(find.text('project'), findsNothing);
+      // Unchanged files are not listed at all.
+      expect(find.textContaining('utils.dart'), findsNothing);
+      expect(find.textContaining('README.md'), findsNothing);
     });
 
     testWidgets(
-      'the changes tree orders names that differ only in case the way the file tree does',
+      'the changes list orders names that differ only in case the way the file tree does',
       (tester) async {
         const upper = GitFileStatusEntry(
-          path: 'project/README.md',
+          path: 'README.md',
           status: 'M',
           staged: false,
         );
         const lower = GitFileStatusEntry(
-          path: 'project/readme.md',
+          path: 'readme.md',
           status: 'M',
           staged: false,
         );
@@ -553,197 +550,35 @@ void main() {
       },
     );
 
-    testWidgets('a collapsed folder hides its files but keeps its own row', (
+    testWidgets('a folder\'s files stay together in the flat list', (
       tester,
     ) async {
       await tester.pumpWidget(
         buildTestWidget(
-          root: makeTree(),
+          root: null,
           changesOnly: true,
-          collapsedPaths: const {'project/lib'},
           gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 3,
-              deletions: 1,
-            ),
-            GitFileStatusEntry(
-              path: 'project/README.md',
-              status: 'M',
-              staged: false,
-              additions: 2,
-              deletions: 0,
-            ),
+            GitFileStatusEntry(path: 'b/x.dart', status: 'M', staged: false),
+            GitFileStatusEntry(path: 'a/z.dart', status: 'M', staged: false),
+            GitFileStatusEntry(path: 'b/a.dart', status: 'M', staged: false),
           ],
         ),
       );
 
-      expect(find.text('lib'), findsOneWidget);
-      expect(find.text('main.dart'), findsNothing);
-      // A sibling outside the folded folder is untouched by the fold.
-      expect(find.text('README.md'), findsOneWidget);
+      double top(String label) => tester.getRect(find.text(label)).top;
+      expect(top('z.dart  a'), lessThan(top('a.dart  b')));
+      expect(top('a.dart  b'), lessThan(top('x.dart  b')));
     });
 
-    testWidgets('a folded folder hides its files rather than relocating them', (
-      tester,
-    ) async {
-      // A fold must not push a file anywhere else in the list: reappearing
-      // at depth 0 under its full path is the fold undone, and the same file
-      // listed twice the moment the folder reopens.
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          collapsedPaths: const {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 3,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('project/lib/main.dart'), findsNothing);
-      expect(find.text('main.dart'), findsNothing);
-    });
-
-    testWidgets('a folded folder totals what it is hiding', (tester) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          collapsedPaths: const {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 3,
-              deletions: 1,
-            ),
-            // Twice, staged and unstaged, carrying the SAME combined counts —
-            // summing entries instead of paths would report +14.
-            GitFileStatusEntry(
-              path: 'project/lib/utils.dart',
-              status: 'M',
-              staged: false,
-              additions: 4,
-              deletions: 2,
-            ),
-            GitFileStatusEntry(
-              path: 'project/lib/utils.dart',
-              status: 'M',
-              staged: true,
-              additions: 4,
-              deletions: 2,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('+7'), findsOneWidget);
-      expect(find.text('-3'), findsOneWidget);
-    });
-
-    testWidgets('a fold over a conflict says so on the folder row', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          collapsedPaths: const {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: '!',
-              staged: false,
-            ),
-            GitFileStatusEntry(
-              path: 'project/lib/utils.dart',
-              status: 'M',
-              staged: false,
-              additions: 4,
-              deletions: 2,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('main.dart'), findsNothing);
-      expect(find.text('utils.dart'), findsNothing);
-      // The conflict outranks the line counts it is folded in with, and takes
-      // the same dot the file row would have.
-      expect(find.byType(AbStatusDot), findsOneWidget);
-      expect(find.text('+4'), findsNothing);
-    });
-
-    testWidgets('an open folder carries no rollup of its own', (tester) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 3,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      // The file's own +3/-1 and nothing else — no second copy on `lib`.
-      expect(find.text('main.dart'), findsOneWidget);
-      expect(find.text('+3'), findsOneWidget);
-      expect(find.text('-1'), findsOneWidget);
-    });
-
-    testWidgets('a changesOnly folder row toggles instead of doing nothing', (
-      tester,
-    ) async {
-      String? toggled;
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          onToggleExpanded: (p) => toggled = p,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 1,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      await tester.tap(find.text('lib'));
-      await tester.pump();
-      expect(toggled, 'project/lib');
-    });
-
-    testWidgets('changesOnly nests a change the file tree has no node for', (
+    testWidgets('changesOnly lists a change the file tree has no node for', (
       tester,
     ) async {
       // A DELETED file is the everyday case: it is gone from disk, so the
-      // tree — built from disk — can never carry a node for it. It gets the
-      // same nested row as everything else because this list is built from the
-      // change PATHS, not from that tree.
-      final tree = makeTree();
+      // tree — built from disk — can never carry a node for it. It gets an
+      // ordinary row because this list is built from the change PATHS.
       await tester.pumpWidget(
         buildTestWidget(
-          root: tree,
+          root: makeTree(),
           changesOnly: true,
           gitFileEntries: const [
             GitFileStatusEntry(
@@ -758,13 +593,11 @@ void main() {
         ),
       );
 
-      // Nested under the folders it was deleted out of, not a flat full path.
-      expect(find.text('project/lib/deleted.dart'), findsNothing);
-      expect(find.text('lib'), findsOneWidget);
-      expect(find.text('deleted.dart'), findsOneWidget);
+      final row = find.text('deleted.dart  project/lib');
+      expect(row, findsOneWidget);
       // Still actionable — a staged deletion has to be unstageable. On this
       // (touch) platform that means the swipe tray, the row's only affordance.
-      await tester.drag(find.text('deleted.dart'), const Offset(-120, 0));
+      await tester.drag(row, const Offset(-120, 0));
       await tester.pumpAndSettle();
       expect(find.text('Unstage'), findsOneWidget);
     });
@@ -802,65 +635,10 @@ void main() {
       expect(opened, 'assets/');
     });
 
-    testWidgets(
-      'changesOnly shows the changed file without expanding its directory',
-      (tester) async {
-        final tree = makeTree();
-        await tester.pumpWidget(
-          buildTestWidget(
-            root: tree,
-            changesOnly: true,
-            // expandedPaths deliberately empty — pruning must not depend on it.
-            gitFileEntries: const [
-              GitFileStatusEntry(
-                path: 'project/lib/main.dart',
-                status: 'M',
-                staged: false,
-              ),
-            ],
-          ),
-        );
-
-        expect(find.text('main.dart'), findsOneWidget);
-      },
-    );
-
     // `git:status` is a push while `root` waits on a lazy per-checkout tree
     // hydration, so the Git tab routinely builds with changes but no tree. The
-    // list it renders then has to be the SAME list — same rows, same nesting —
-    // or the whole tab visibly rearranges itself once the tree lands.
-    testWidgets('changesOnly nests changes before the tree has loaded', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: null,
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-            ),
-            GitFileStatusEntry(
-              path: 'project/README.md',
-              status: 'M',
-              staged: false,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('No files available'), findsNothing);
-      expect(find.text('project/lib/main.dart'), findsNothing);
-      expect(find.text('lib'), findsOneWidget);
-      expect(find.text('main.dart'), findsOneWidget);
-      expect(find.text('README.md'), findsOneWidget);
-    });
-
-    // The tree is what the file list is pruned FROM everywhere else, so the
-    // one thing that proves the Git tab no longer depends on it is the same
-    // change set rendering identically with and without it.
+    // list it renders then has to be the SAME list, or the whole tab visibly
+    // rearranges itself once the tree lands.
     testWidgets('changesOnly renders the same rows with or without the tree', (
       tester,
     ) async {
@@ -878,13 +656,15 @@ void main() {
       ];
       List<String> rowLabels() => tester
           .widgetList<Text>(find.byType(Text))
-          .map((t) => t.data ?? '')
+          .map((t) => t.textSpan?.toPlainText() ?? t.data ?? '')
           .toList();
 
       await tester.pumpWidget(
         buildTestWidget(root: null, changesOnly: true, gitFileEntries: entries),
       );
+      expect(find.text('No files available'), findsNothing);
       final withoutTree = rowLabels();
+      expect(withoutTree, contains('main.dart  project/lib'));
 
       await tester.pumpWidget(
         buildTestWidget(
@@ -1034,7 +814,7 @@ void main() {
       );
     });
 
-    testWidgets('a conflict sorts ahead of its siblings, still nested', (
+    testWidgets('a conflict sorts ahead of every other change', (
       tester,
     ) async {
       await withDesktop(
@@ -1043,87 +823,19 @@ void main() {
           root: makeTree(),
           changesOnly: true,
           gitFileEntries: const [
-            // main.dart comes first in the tree; the CONFLICT is what has to
-            // put utils.dart above it.
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 2,
-              deletions: 0,
-            ),
-            GitFileStatusEntry(
-              path: 'project/lib/utils.dart',
-              status: '!',
-              staged: false,
-            ),
-          ],
-        ),
-        () async {
-          // Still under `lib`, still a basename — only the order moved.
-          expect(find.text('lib'), findsOneWidget);
-          expect(
-            tester.getRect(find.text('utils.dart')).top,
-            lessThan(tester.getRect(find.text('main.dart')).top),
-          );
-          expect(
-            tester.getRect(find.text('lib')).top,
-            lessThan(tester.getRect(find.text('utils.dart')).top),
-          );
-        },
-      );
-    });
-
-    testWidgets(
-      'a folder holding a conflict sorts ahead of one that does not',
-      (tester) async {
-        await withDesktop(
-          tester,
-          buildTestWidget(
-            root: makeTree(),
-            changesOnly: true,
-            gitFileEntries: const [
-              // README.md is a depth-0 sibling of `lib` and comes after it in
-              // the tree; the conflict BELOW lib is what lifts the folder.
-              GitFileStatusEntry(
-                path: 'project/README.md',
-                status: '!',
-                staged: false,
-              ),
-              GitFileStatusEntry(
-                path: 'project/lib/main.dart',
-                status: 'M',
-                staged: false,
-                additions: 2,
-                deletions: 0,
-              ),
-            ],
-          ),
-          () async {
-            expect(
-              tester.getRect(find.text('README.md')).top,
-              lessThan(tester.getRect(find.text('lib')).top),
-            );
-          },
-        );
-      },
-    );
-
-    testWidgets('a conflict deep in a folder lifts every folder above it', (
-      tester,
-    ) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
+            // Both come first by path; only the CONFLICT puts utils.dart
+            // above them.
             GitFileStatusEntry(
               path: 'project/README.md',
               status: 'M',
               staged: false,
               additions: 1,
-              deletions: 0,
+            ),
+            GitFileStatusEntry(
+              path: 'project/lib/main.dart',
+              status: 'M',
+              staged: false,
+              additions: 2,
             ),
             GitFileStatusEntry(
               path: 'project/lib/utils.dart',
@@ -1133,12 +845,10 @@ void main() {
           ],
         ),
         () async {
-          // The conflict is two levels down; `lib` has to carry the priority
-          // up to depth 0 or the row it leads to is still below README.md.
-          expect(
-            tester.getRect(find.text('lib')).top,
-            lessThan(tester.getRect(find.text('README.md')).top),
-          );
+          double top(String label) => tester.getRect(find.text(label)).top;
+          final conflict = top('utils.dart  project/lib');
+          expect(conflict, lessThan(top('main.dart  project/lib')));
+          expect(conflict, lessThan(top('README.md  project')));
         },
       );
     });
@@ -1900,46 +1610,27 @@ void main() {
       ),
     ];
 
-    testWidgets(
-      'a fold or a file-tree update reuses the change tree and its rollups',
-      (tester) async {
-        final entries = mainEntries(3);
-        final folded = {'project/lib'};
-        Widget build({FileNode? root, Set<String> collapsed = const {}}) =>
-            buildTestWidget(
-              root: root,
-              changesOnly: true,
-              gitFileEntries: entries,
-              collapsedPaths: collapsed,
-            );
-        FileNode libRow() =>
-            (rowFor(tester, 'project/lib', FileNodeType.directory) as dynamic)
-                    .node
-                as FileNode;
+    testWidgets('a file-tree update reuses the changes rows', (tester) async {
+      final entries = mainEntries(3);
+      Widget build({FileNode? root}) => buildTestWidget(
+        root: root,
+        changesOnly: true,
+        gitFileEntries: entries,
+      );
+      FileNode mainRow() =>
+          (rowFor(tester, 'project/lib/main.dart', FileNodeType.file)
+                      as dynamic)
+                  .node
+              as FileNode;
 
-        await tester.pumpWidget(build());
-        final tree = libRow();
+      await tester.pumpWidget(build());
+      final node = mainRow();
 
-        await tester.pumpWidget(build(collapsed: folded));
-        expect(find.text('main.dart'), findsNothing);
-        expect(identical(libRow(), tree), isTrue);
-        final before = rowFor(tester, 'project/lib', FileNodeType.directory);
-
-        await tester.pumpWidget(build(root: makeTree(), collapsed: folded));
-        final after = rowFor(tester, 'project/lib', FileNodeType.directory);
-        // The row widget is rebuilt; what it carries is not re-derived.
-        expect(identical(before, after), isFalse);
-        expect(identical(libRow(), tree), isTrue);
-        expect(
-          identical(
-            (before as dynamic).rollupEntries,
-            (after as dynamic).rollupEntries,
-          ),
-          isTrue,
-        );
-        expect(find.text('+3'), findsOneWidget);
-      },
-    );
+      await tester.pumpWidget(build(root: makeTree()));
+      // The row widget is rebuilt; what it carries is not re-derived.
+      expect(identical(mainRow(), node), isTrue);
+      expect(find.text('+3'), findsOneWidget);
+    });
 
     testWidgets('a replaced change list is never served stale', (tester) async {
       final tree = makeTree();
@@ -1953,25 +1644,21 @@ void main() {
           additions: 7,
         ),
       ];
-      for (final mode in [
-        (changesOnly: true, collapsed: <String>{}),
-        (changesOnly: true, collapsed: lib),
-        (changesOnly: false, collapsed: <String>{}),
-      ]) {
+      for (final changesOnly in [true, false]) {
         for (final entries in [mainEntries(3), List.of(replacement)]) {
           await tester.pumpWidget(
             buildTestWidget(
               root: tree,
               expandedPaths: lib,
-              changesOnly: mode.changesOnly,
-              collapsedPaths: mode.collapsed,
+              changesOnly: changesOnly,
               gitFileEntries: entries,
             ),
           );
         }
-        expect(find.text('+3'), findsNothing, reason: '$mode');
-        expect(find.text('+5'), findsOneWidget, reason: '$mode');
-        expect(find.text('+7'), findsOneWidget, reason: '$mode');
+        final reason = 'changesOnly: $changesOnly';
+        expect(find.text('+3'), findsNothing, reason: reason);
+        expect(find.text('+5'), findsOneWidget, reason: reason);
+        expect(find.text('+7'), findsOneWidget, reason: reason);
       }
     });
 

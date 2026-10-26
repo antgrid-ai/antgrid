@@ -882,6 +882,9 @@ class GitCommitResultMessage {
   final String? sha;
   final String? error;
 
+  /// The `git:commit` this answers; absent from an older bridge.
+  final String? requestId;
+
   const GitCommitResultMessage({
     required this.id,
     required this.timestamp,
@@ -889,6 +892,7 @@ class GitCommitResultMessage {
     required this.success,
     this.sha,
     this.error,
+    this.requestId,
   });
 }
 
@@ -1616,6 +1620,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         size: json['size'] as int? ?? 0,
         error: json['error'] as String?,
         encoding: json['encoding'] as String? ?? 'utf8',
+        utf8Valid: json['utf8Valid'] as bool?,
         mimeType: json['mimeType'] as String?,
       );
 
@@ -1823,6 +1828,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         success: success,
         sha: json['sha'] as String?,
         error: json['error'] as String?,
+        requestId: json['requestId'] as String?,
       );
 
     case 'git:discard-result':

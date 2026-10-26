@@ -36,19 +36,16 @@ import 'copy_path.dart';
 /// buttons on desktop, a swipe tray on touch, never both. The SAME tree the
 /// Files tab renders, undecorated, when these are omitted.
 ///
-/// [changesOnly] switches the tree to the changed files alone, nested under
-/// the folders they live in and opened by default — no folder-by-folder
-/// clicking to find what changed. That tree is assembled from the change
-/// PATHS, not from [root] (see [_flattenChangesOnly]), so a deletion gets an
-/// ordinary nested row like everything else and the list looks the same
-/// whether or not the file tree has arrived yet. [collapsedPaths] is how the
-/// user folds a folder back up once the list is long enough to need it; a
-/// folded folder then carries the rollup of what it hides.
+/// [changesOnly] switches the tree to a flat list of the changed files alone,
+/// each named by its file with its folder beside it. That list is built from
+/// the change PATHS, not from [root] (see [_flattenChangesOnly]), so a
+/// deletion gets an ordinary row like everything else and the list looks the
+/// same whether or not the file tree has arrived yet.
 ///
-/// [root], [expandedPaths] and [collapsedPaths] are compared by identity
-/// between builds, and the rows derived from them are reused while they are
-/// unchanged, so a caller changes one by passing a new instance, never by
-/// editing it in place. [gitStatus] is immutable, so its identity is exact.
+/// [root] and [expandedPaths] are compared by identity between builds, and
+/// the rows derived from them are reused while they are unchanged, so a
+/// caller changes one by passing a new instance, never by editing it in
+/// place. [gitStatus] is immutable, so its identity is exact.
 class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
@@ -61,10 +58,12 @@ class FileTreeView extends StatefulWidget {
   final String? revealedDirectoryPath;
   final bool changesOnly;
 
-  /// Folders folded shut, in [changesOnly] mode only. Empty means the whole
-  /// change set is open, which is this tree's default — the inverse sense of
-  /// [expandedPaths], for the reason [GitPaneState.collapsedPaths] documents.
-  final Set<String> collapsedPaths;
+  /// Builds a sliver for a [CustomScrollView] the caller owns instead of a
+  /// list with its own scroll — how several lists share one scroll. The host
+  /// then owns closing an open swipe tray when it scrolls, and the highlighted
+  /// row is never scrolled to: sibling slivers can each hold a row for the same
+  /// path (a partially staged file), and two reveals on one viewport fight.
+  final bool sliver;
   final void Function(String path) onToggleExpanded;
   final void Function(String path) onFileSelected;
   final void Function(String path)? onStage;
@@ -86,7 +85,7 @@ class FileTreeView extends StatefulWidget {
     GitStatusIndex? gitStatus,
     this.revealedDirectoryPath,
     this.changesOnly = false,
-    this.collapsedPaths = const {},
+    this.sliver = false,
     required this.onToggleExpanded,
     required this.onFileSelected,
     this.onStage,
@@ -114,21 +113,12 @@ class _FileTreeViewState extends State<FileTreeView> {
   double? _rowExtent;
   List<_TreeRow> _lastFlatList = const [];
 
-  // The changed-files tree and the rollups walk it, both pure in the status
-  // index, so they live exactly as long as the index they came from.
-  GitStatusIndex? _indexSource;
-  FileNode? _changesRoot;
-
   // What [_lastFlatList] was built from. Changes-only rows come from the change
   // list and never from [FileTreeView.root], so a tree update must not rebuild
   // them. Null [_rowsChangesOnly] means nothing has been built yet.
   bool? _rowsChangesOnly;
   Object? _rowsTree;
   Set<String>? _rowsOpenSet;
-
-  // A folded folder's rollup depends only on the change list and the subtree it
-  // walks, so it lives exactly as long as the entries and rows it came from.
-  final Map<String, List<GitFileStatusEntry>> _rollups = {};
 
   /// A target still owed a scroll. It waits for its row rather than being
   /// tried once: the ancestors `FileService` expands to reveal it load their
@@ -144,7 +134,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     super.initState();
     // A link that switches to the Files tab can build this tree with its
     // target already set, so there is no change for didUpdateWidget to see.
-    _pendingReveal = _highlightPath;
+    if (!widget.sliver) _pendingReveal = _highlightPath;
   }
 
   @override
@@ -157,7 +147,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     final target = _highlightPath;
     final previous =
         oldWidget.revealedDirectoryPath ?? oldWidget.selectedFilePath;
-    if (target != previous) _pendingReveal = target;
+    if (target != previous && !widget.sliver) _pendingReveal = target;
   }
 
   @override
@@ -199,9 +189,7 @@ class _FileTreeViewState extends State<FileTreeView> {
     });
   }
 
-  bool _isOpen(FileNode node) => widget.changesOnly
-      ? !widget.collapsedPaths.contains(node.path)
-      : widget.expandedPaths.contains(node.path);
+  bool _isOpen(FileNode node) => widget.expandedPaths.contains(node.path);
 
   /// The APG treeview keys the rows' own [TreeArrowKeys] leave unhandled:
   /// ← on a closed folder or a file goes to its parent, → on an open folder
@@ -312,21 +300,12 @@ class _FileTreeViewState extends State<FileTreeView> {
     // Hot reload replaces the code the cached rows were derived with, not their
     // inputs.
     _rowsChangesOnly = null;
-    _changesRoot = null;
-    _rollups.clear();
-  }
-
-  void _syncIndex() {
-    if (identical(widget.gitStatus, _indexSource)) return;
-    _indexSource = widget.gitStatus;
-    _changesRoot = null;
-    _rollups.clear();
   }
 
   List<_TreeRow> _rows() {
     final changesOnly = widget.changesOnly;
     final Object? tree = changesOnly ? widget.gitStatus : widget.root;
-    final openSet = changesOnly ? widget.collapsedPaths : widget.expandedPaths;
+    final openSet = changesOnly ? null : widget.expandedPaths;
     if (_rowsChangesOnly == changesOnly &&
         identical(_rowsTree, tree) &&
         identical(_rowsOpenSet, openSet)) {
@@ -335,14 +314,8 @@ class _FileTreeViewState extends State<FileTreeView> {
     _rowsChangesOnly = changesOnly;
     _rowsTree = tree;
     _rowsOpenSet = openSet;
-    _rollups.clear();
     return _lastFlatList = changesOnly
-        ? _flattenChangesOnly(
-            _changesRoot ??= _changesTree(widget.gitStatus.byPath.keys),
-            widget.gitStatus.byPath,
-            widget.gitStatus.dirsWithConflicts,
-            widget.collapsedPaths,
-          )
+        ? _flattenChangesOnly(widget.gitStatus.byPath)
         : _flattenVisibleNodes(widget.root!, widget.expandedPaths);
   }
 
@@ -400,13 +373,13 @@ class _FileTreeViewState extends State<FileTreeView> {
     // while `root` waits on a lazy per-checkout tree hydration), and the Git
     // tab must render the same list either way.
     if (widget.root == null && !widget.changesOnly) {
-      return const AbEmptyState(
+      const empty = AbEmptyState(
         icon: AbIcons.folder,
         title: 'No files available',
       );
+      return widget.sliver ? const SliverToBoxAdapter(child: empty) : empty;
     }
 
-    _syncIndex();
     final entriesByPath = widget.gitStatus.byPath;
     final flatList = _rows();
     _pruneRowFocus(flatList);
@@ -423,9 +396,18 @@ class _FileTreeViewState extends State<FileTreeView> {
     }
 
     if (flatList.isEmpty) {
-      return AbEmptyState(
+      final empty = AbEmptyState(
         icon: widget.changesOnly ? AbIcons.check : AbIcons.folder,
         title: widget.changesOnly ? 'No changed files' : 'This folder is empty',
+      );
+      return widget.sliver ? SliverToBoxAdapter(child: empty) : empty;
+    }
+
+    if (widget.sliver) {
+      return SliverList.builder(
+        itemCount: flatList.length,
+        itemBuilder: (context, index) =>
+            _buildRow(flatList, entriesByPath, index),
       );
     }
 
@@ -443,63 +425,59 @@ class _FileTreeViewState extends State<FileTreeView> {
         child: ListView.builder(
           controller: _scrollController,
           itemCount: flatList.length,
-          itemBuilder: (context, index) {
-            final (:node, :depth, :truncationNotice, :loadingNotice) =
-                flatList[index];
-            if (truncationNotice) {
-              return _TruncationRow(
-                key: ValueKey(('truncated', node.path)),
-                depth: depth,
-              );
-            }
-            if (loadingNotice) {
-              return _LoadingRow(
-                key: ValueKey(('loading', node.path)),
-                depth: depth,
-              );
-            }
-            final isDirectory = node.type == FileNodeType.directory;
-            Widget row = _FileTreeRow(
-              // Typed, because one path can produce two rows: replacing a file
-              // with a directory of the same name leaves a deletion and an
-              // addition that share it, and a bare path key would be a duplicate.
-              key: ValueKey((node.path, node.type)),
-              node: node,
-              depth: depth,
-              focusNode: _rowNode(node),
-              isExpanded: _isOpen(node),
-              isSelected: node.path == _highlightPath,
-              changeEntries: entriesByPath[node.path] ?? const [],
-              // A folded folder answers for what it hides, so it carries the
-              // rollup its children can no longer show; an open one stays bare
-              // (its rows are right there, and a second stat over them is noise).
-              rollupEntries:
-                  isDirectory && widget.collapsedPaths.contains(node.path)
-                  ? _rollups.putIfAbsent(
-                      node.path,
-                      () => _descendantEntries(node, entriesByPath),
-                    )
-                  : const [],
-              onTap: isDirectory
-                  ? () => widget.onToggleExpanded(node.path)
-                  : () => widget.onFileSelected(node.path),
-              onStage: widget.onStage,
-              onUnstage: widget.onUnstage,
-              onDiscard: widget.onDiscard,
-              onResolveConflict: widget.onResolveConflict,
-            );
-            if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
-            // Matched on kind as well as path: a file replaced by a folder of
-            // the same name yields two rows here, and a GlobalKey takes one.
-            if (node.path == _highlightPath &&
-                isDirectory == (widget.revealedDirectoryPath != null)) {
-              row = KeyedSubtree(key: _selectedRowKey, child: row);
-            }
-            return row;
-          },
+          itemBuilder: (context, index) =>
+              _buildRow(flatList, entriesByPath, index),
         ),
       ),
     );
+  }
+
+  Widget _buildRow(
+    List<_TreeRow> flatList,
+    Map<String, List<GitFileStatusEntry>> entriesByPath,
+    int index,
+  ) {
+    final (:node, :depth, :truncationNotice, :loadingNotice, :folder) =
+        flatList[index];
+    if (truncationNotice) {
+      return _TruncationRow(
+        key: ValueKey(('truncated', node.path)),
+        depth: depth,
+      );
+    }
+    if (loadingNotice) {
+      return _LoadingRow(key: ValueKey(('loading', node.path)), depth: depth);
+    }
+    final isDirectory = node.type == FileNodeType.directory;
+    Widget row = _FileTreeRow(
+      // Typed, because one path can produce two rows: replacing a file
+      // with a directory of the same name leaves a deletion and an
+      // addition that share it, and a bare path key would be a duplicate.
+      key: ValueKey((node.path, node.type)),
+      node: node,
+      depth: depth,
+      focusNode: _rowNode(node),
+      isExpanded: _isOpen(node),
+      isSelected: node.path == _highlightPath,
+      changeEntries: entriesByPath[node.path] ?? const [],
+      folder: folder,
+      touchSized: widget.changesOnly,
+      onTap: isDirectory
+          ? () => widget.onToggleExpanded(node.path)
+          : () => widget.onFileSelected(node.path),
+      onStage: widget.onStage,
+      onUnstage: widget.onUnstage,
+      onDiscard: widget.onDiscard,
+      onResolveConflict: widget.onResolveConflict,
+    );
+    if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
+    // Matched on kind as well as path: a file replaced by a folder of
+    // the same name yields two rows here, and a GlobalKey takes one.
+    if (node.path == _highlightPath &&
+        isDirectory == (widget.revealedDirectoryPath != null)) {
+      row = KeyedSubtree(key: _selectedRowKey, child: row);
+    }
+    return row;
   }
 }
 
@@ -514,6 +492,7 @@ typedef _TreeRow = ({
   int depth,
   bool truncationNotice,
   bool loadingNotice,
+  String? folder,
 });
 
 /// Flatten the tree into a list of rows for rendering.
@@ -532,6 +511,7 @@ List<_TreeRow> _flattenVisibleNodes(FileNode root, Set<String> expandedPaths) {
       depth: 0,
       truncationNotice: true,
       loadingNotice: false,
+      folder: null,
     ));
   }
 
@@ -549,6 +529,7 @@ void _flattenNormal(
     depth: depth,
     truncationNotice: false,
     loadingNotice: false,
+    folder: null,
   ));
 
   if (node.type == FileNodeType.directory &&
@@ -565,6 +546,7 @@ void _flattenNormal(
         depth: depth + 1,
         truncationNotice: false,
         loadingNotice: true,
+        folder: null,
       ));
     }
     // After the children, where the missing ones would have been.
@@ -574,160 +556,60 @@ void _flattenNormal(
         depth: depth + 1,
         truncationNotice: true,
         loadingNotice: false,
+        folder: null,
       ));
     }
   }
 }
 
-/// The changed-files tree, assembled from the change PATHS alone — the file
-/// tree [FileTreeView.root] carries is deliberately not consulted.
+/// The changed files as a flat list, one row per path, built from the change
+/// PATHS alone — the file tree [FileTreeView.root] carries is deliberately not
+/// consulted. It is built from disk, so a deleted file has no node in it; it
+/// stops at the bridge's depth cap and ignore rules; and it arrives on its own
+/// schedule while `git:status` is pushed, so it is routinely absent.
 ///
-/// That tree cannot answer this question and never could. It is built from
-/// disk, so a deleted file has no node in it; it stops at the bridge's depth
-/// cap and at its ignore rules, so a deep path and a force-added ignored one
-/// have none either; and it arrives on its own schedule (a lazy per-checkout
-/// hydration) while `git:status` is pushed, so it is routinely absent
-/// altogether. Each of those used to fall through to a flat, full-path row at
-/// depth 0 — which made the ordinary first paint of the Git tab a flat list of
-/// every change that then re-nested itself under the user a moment later. A
-/// path already carries its own nesting, so deriving the tree from the changes
-/// makes the list identical before and after the file tree lands, and gives a
-/// deletion the same nested row as everything else.
+/// Conflicts sort to the FRONT, so a top-down read reaches every one first.
+/// The rest go case-insensitively by path, which keeps a folder's files
+/// together now that no folder row groups them.
 ///
-/// Conflicts sort to the FRONT at every level: whatever holds an unresolved
-/// merge — the conflicted file itself, or a directory with one anywhere below
-/// ([dirsWithConflicts]) — is listed before its siblings, so a top-down read
-/// reaches every conflict first without any of them losing the folder context
-/// that says which `main.dart` it is.
-///
-/// [collapsedPaths] hides a folder's descendants without dropping the folder
-/// itself, which then carries the rollup of what it hides.
-///
-/// [changesRoot] is [_changesTree] over [entriesByPath]'s keys; the caller
-/// builds it so it can be kept for as long as the change list is unchanged.
+/// Each row's path is the change path VERBATIM: a row looks its entries up by
+/// that string and every action hands it straight back to git, and git's own
+/// `dir/` for an untracked directory it did not walk into would not survive
+/// being rebuilt from segments.
 List<_TreeRow> _flattenChangesOnly(
-  FileNode changesRoot,
   Map<String, List<GitFileStatusEntry>> entriesByPath,
-  Set<String> dirsWithConflicts,
-  Set<String> collapsedPaths,
 ) {
-  final result = <_TreeRow>[];
-
-  bool holdsConflict(FileNode node) => node.type == FileNodeType.directory
-      ? dirsWithConflicts.contains(node.path)
-      : entriesByPath[node.path]?.any((e) => e.status == '!') ?? false;
-
-  void walk(FileNode node, int depth) {
-    // Stable partition, so everything that does NOT hold a conflict keeps the
-    // order it was built in (directories first, then name) and only the
-    // conflict-bearing rows move.
-    final children = [
-      ...node.children.where(holdsConflict),
-      ...node.children.where((c) => !holdsConflict(c)),
-    ];
-    for (final child in children) {
-      result.add((
-        node: child,
-        depth: depth,
-        truncationNotice: false,
-        loadingNotice: false,
-      ));
-      if (child.type == FileNodeType.directory &&
-          !collapsedPaths.contains(child.path)) {
-        walk(child, depth + 1);
-      }
-    }
-  }
-
-  walk(changesRoot, 0);
-  return result;
-}
-
-/// Assembles [paths] into a directory tree of their own, ordered by
-/// [sortFileNodes] (directories first, then case-insensitively by name), the
-/// order the real tree uses, so the two tabs agree.
-///
-/// Only the three fields a changed-file row reads are filled in — a real
-/// [FileNode]'s size and extension have no reader here, and inventing values
-/// for them would be inventing facts about a file that may not exist.
-FileNode _changesTree(Iterable<String> paths) {
-  final root = _ChangesDir('');
-  for (final path in paths) {
-    // Empty segments: a leading slash, and the trailing one git puts on an
-    // untracked directory it did not walk into.
-    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-    if (segments.isEmpty) continue;
-    var dir = root;
-    for (final segment in segments.sublist(0, segments.length - 1)) {
-      dir = dir.subdir(segment);
-    }
-    dir.filePaths.add(path);
-  }
-  return root.build('');
-}
-
-/// One directory while [_changesTree] is still filling it in.
-class _ChangesDir {
-  _ChangesDir(this.path);
-
-  final String path;
-  final Map<String, _ChangesDir> subdirs = {};
-
-  /// Leaf rows, keyed by the change path VERBATIM rather than rebuilt from its
-  /// segments: a row looks its entries up by that string and every action hands
-  /// it straight back to git, and git's own `dir/` for an untracked directory
-  /// it did not walk into would not survive the round trip.
-  final Set<String> filePaths = {};
-
-  String _childPath(String name) => path.isEmpty ? name : '$path/$name';
-
-  _ChangesDir subdir(String name) =>
-      subdirs.putIfAbsent(name, () => _ChangesDir(_childPath(name)));
-
-  FileNode build(String name) {
-    final children = sortFileNodes(<FileNode>[
-      for (final entry in subdirs.entries) entry.value.build(entry.key),
-      for (final filePath in filePaths)
-        FileNode(
-          name: filePath.split('/').where((s) => s.isNotEmpty).last,
-          path: filePath,
-          type: FileNodeType.file,
+  final conflicted = {
+    for (final MapEntry(:key, :value) in entriesByPath.entries)
+      if (value.any((e) => e.status == '!')) key,
+  };
+  final paths = entriesByPath.keys.toList()
+    ..sort((a, b) {
+      final byConflict =
+          (conflicted.contains(a) ? 0 : 1) - (conflicted.contains(b) ? 0 : 1);
+      if (byConflict != 0) return byConflict;
+      final byName = a.toLowerCase().compareTo(b.toLowerCase());
+      // Case-only twins: lowercase first, as the Files tab orders them, and
+      // never arrival order — the sort is not stable.
+      return byName != 0 ? byName : b.compareTo(a);
+    });
+  return [
+    for (final path in paths)
+      // Empty segments dropped: a leading slash, and the trailing one git puts
+      // on an untracked directory it did not walk into.
+      if (path.split('/').where((s) => s.isNotEmpty).toList() case [
+        ...final dirs,
+        final name,
+      ])
+        (
+          node: FileNode(name: name, path: path, type: FileNodeType.file),
+          depth: 0,
+          truncationNotice: false,
+          loadingNotice: false,
+          // Split here, once, rather than on every row build.
+          folder: dirs.isEmpty ? null : dirs.join('/'),
         ),
-    ]);
-    return FileNode(
-      name: name,
-      path: path,
-      type: FileNodeType.directory,
-      children: children,
-      // Built whole, right here — never a directory this app is still
-      // waiting on a listing for, unlike the real file tree.
-      childrenLoaded: true,
-    );
-  }
-}
-
-/// One entry per changed file anywhere under [dir] — what a folded folder
-/// summarizes. ONE per path, not one per git entry: a partially staged file
-/// arrives twice carrying the SAME combined-vs-HEAD counts on both, so keeping
-/// both would double it (the same dedup `GitStatusIndex` does for the header totals).
-List<GitFileStatusEntry> _descendantEntries(
-  FileNode dir,
-  Map<String, List<GitFileStatusEntry>> entriesByPath,
-) {
-  final out = <GitFileStatusEntry>[];
-  void walk(FileNode node) {
-    for (final child in node.children) {
-      if (child.type == FileNodeType.directory) {
-        walk(child);
-      } else {
-        final entries = entriesByPath[child.path];
-        if (entries != null && entries.isNotEmpty) out.add(entries.first);
-      }
-    }
-  }
-
-  walk(dir);
-  return out;
+  ];
 }
 
 /// Stands in for entries the bridge never sent. Its directory's listing stopped
@@ -838,9 +720,10 @@ class _FileTreeRow extends StatefulWidget {
   final bool isSelected;
   final List<GitFileStatusEntry> changeEntries;
 
-  /// For a FOLDED directory: one entry per changed file it hides, so the row
-  /// can stand in for the rows it is holding shut. Empty on every other row.
-  final List<GitFileStatusEntry> rollupEntries;
+  /// In the flat changes list, the folder the file lives in, shown muted after
+  /// its name: with no folder rows, it is the only thing telling two
+  /// `main.dart`s apart.
+  final String? folder;
   final VoidCallback? onTap;
 
   /// Owned by [FileTreeView], which moves the keyboard between rows itself.
@@ -850,6 +733,9 @@ class _FileTreeRow extends StatefulWidget {
   final void Function(String path)? onDiscard;
   final void Function(String path)? onResolveConflict;
 
+  /// Floors the row at a touch target's height on a touch platform.
+  final bool touchSized;
+
   const _FileTreeRow({
     super.key,
     required this.node,
@@ -857,7 +743,8 @@ class _FileTreeRow extends StatefulWidget {
     required this.isExpanded,
     required this.isSelected,
     this.changeEntries = const [],
-    this.rollupEntries = const [],
+    this.folder,
+    this.touchSized = false,
     this.onTap,
     this.focusNode,
     this.onStage,
@@ -918,6 +805,45 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     await copyPathWithToast(context, widget.node.path);
   }
 
+  /// One span rather than two widgets, so the ellipsis eats the folder before
+  /// it reaches the file name.
+  Widget _title(BuildContext context, bool isDirectory) {
+    final p = context.antgrid;
+    final folder = widget.folder;
+    return Text.rich(
+      TextSpan(
+        text: widget.node.name,
+        children: [
+          if (folder != null)
+            TextSpan(
+              text: '  $folder',
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                fontWeight: FontWeight.normal,
+                color: p.textMuted,
+              ),
+            ),
+        ],
+      ),
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontSm,
+        fontWeight: isDirectory ? FontWeight.w500 : FontWeight.normal,
+        color: widget.isSelected
+            ? p.accent
+            // Present only because includeIgnored asked for it — a
+            // still-selected ignored row keeps reading as selected above
+            // this, so the dim only applies once selection is ruled out.
+            : widget.node.ignored
+            ? p.textMuted
+            : isDirectory
+            ? p.textSecondary
+            : p.textPrimary,
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDirectory = widget.node.type == FileNodeType.directory;
@@ -975,13 +901,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             widget.onUnstage != null ||
             widget.onDiscard != null ||
             widget.onResolveConflict != null);
-    // An OPEN directory carries no decoration of its own — in changesOnly mode
-    // every directory left after pruning already implies a descendant changed,
-    // so a dot on top of that is redundant noise. A folded one is the
-    // exception: its rows are what the decoration would have been.
-    final hasDecoration =
-        (!isDirectory && widget.changeEntries.isNotEmpty) ||
-        widget.rollupEntries.isNotEmpty;
+    final hasDecoration = !isDirectory && widget.changeEntries.isNotEmpty;
     final showActions = hasActions && (_hovered || _focused);
 
     Widget row = MouseRegion(
@@ -1011,24 +931,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
               ? AbDisclosureChevron(expanded: widget.isExpanded)
               : const SizedBox(width: AbTokens.drawerLeadingSlot),
         ),
-        title: Text(
-          widget.node.name,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontSm,
-            fontWeight: isDirectory ? FontWeight.w500 : FontWeight.normal,
-            color: widget.isSelected
-                ? context.antgrid.accent
-                // Present only because includeIgnored asked for it — a
-                // still-selected ignored row keeps reading as selected above
-                // this, so the dim only applies once selection is ruled out.
-                : widget.node.ignored
-                ? context.antgrid.textMuted
-                : isDirectory
-                ? context.antgrid.textSecondary
-                : context.antgrid.textPrimary,
-          ),
-          overflow: TextOverflow.ellipsis,
-        ),
+        title: _title(context, isDirectory),
         // Actions outermost, badge inboard: at rest the change count is the
         // only tenant and sits flush at the gutter on every row, so the column
         // it forms is what the eye scans. Only a revealed row's badge steps
@@ -1038,9 +941,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (hasDecoration)
-                    widget.rollupEntries.isNotEmpty
-                        ? _FolderRollupBadge(entries: widget.rollupEntries)
-                        : _DiffStatBadge(entries: widget.changeEntries),
+                    _DiffStatBadge(entries: widget.changeEntries),
                   if (showActions && hasDecoration)
                     const SizedBox(width: AbTokens.space4),
                   if (showActions)
@@ -1078,6 +979,14 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             : null,
       ),
     );
+    // A change row is a finger's swipe target on touch, and the dense desktop
+    // height left little to land a swipe on without hitting its neighbour.
+    if (isMobilePlatform && widget.touchSized) {
+      row = ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: AbTokens.rowHeightLg),
+        child: row,
+      );
+    }
 
     // On touch this tray is the ONLY per-file affordance, which is why discard
     // rides in it beside stage/unstage rather than keeping a button of its own.
@@ -1145,44 +1054,6 @@ class _FileTreeRowState extends State<_FileTreeRow> {
         child: row,
       ),
     );
-  }
-}
-
-/// The trailing badge for a FOLDED directory, standing in for every changed
-/// file it is hiding.
-///
-/// A conflict below outranks the line counts, and takes the same danger dot a
-/// conflicted FILE row carries: folding a folder is the one way a conflict
-/// could leave the screen, and the fold has to say so in the row's own
-/// vocabulary rather than hide it in a total.
-class _FolderRollupBadge extends StatelessWidget {
-  const _FolderRollupBadge({required this.entries});
-
-  final List<GitFileStatusEntry> entries;
-
-  @override
-  Widget build(BuildContext context) {
-    if (entries.any((e) => e.status == '!')) {
-      return const AbStatusDot(tone: AbStatusTone.danger);
-    }
-    var additions = 0;
-    var deletions = 0;
-    for (final e in entries) {
-      additions += e.additions;
-      deletions += e.deletions;
-    }
-    if (additions == 0 && deletions == 0) {
-      // Renames and mode-only changes all the way down: there is nothing to
-      // count, but the folder is still holding rows shut, so it says how many.
-      return Text(
-        '${entries.length}',
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXs,
-          color: context.antgrid.textMuted,
-        ),
-      );
-    }
-    return AbDiffStat(additions: additions, deletions: deletions);
   }
 }
 

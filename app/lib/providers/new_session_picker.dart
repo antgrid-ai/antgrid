@@ -387,31 +387,52 @@ final detectedToolsForProvider =
       return {for (final t in tools) t.tool: t.label};
     });
 
+/// [sourceTool] labelled for the fork dialog to show before [handoffTargetsFor]
+/// answers.
+({String tool, String label}) handoffSourceFor(
+  ProviderContainer ref,
+  String sourceTool,
+) => (
+  tool: sourceTool,
+  label: newSessionAgentLabel(
+    KnownAgent(sourceTool),
+    null,
+    ref.read(agentCatalogProvider),
+  ),
+);
+
 /// The agents a session on [target]'s machine can be continued in, labelled for
 /// the fork dialog: every tool installed there, plus [sourceTool] itself so the
 /// same-agent choice survives the source agent having been uninstalled.
 ///
-/// Empty when detection does not answer within [timeout], which makes the fork
-/// dialog fall back to a same-agent fork rather than wait on a machine that may
-/// be offline. Takes a [ProviderContainer] because the caller is an activation
-/// handler that must not hold a `WidgetRef` across the await.
+/// Throws [TimeoutException] when the machine does not answer within [timeout],
+/// so the open dialog can say it could not list them instead of checking
+/// forever on a machine that may be offline, and [StateError] when a local
+/// lookup comes back with no agents at all. Takes a [ProviderContainer]
+/// because the caller is an activation handler that must not hold a `WidgetRef`
+/// across the await.
 Future<List<({String tool, String label})>> handoffTargetsFor(
   ProviderContainer ref,
   SessionTarget target, {
   required String sourceTool,
   Duration timeout = const Duration(seconds: 8),
 }) async {
-  final Map<String, String?> detected;
-  try {
-    detected = await ref
-        .read(detectedToolsForProvider(target).future)
-        .timeout(timeout);
-  } on TimeoutException {
-    return const [];
+  // [detectedToolsForProvider] answers a remote machine at once, with an empty
+  // map until its `agent:tools` advert lands: right for a picker that rebuilds,
+  // wrong for a one-shot read, which would take "not heard yet" as "nothing
+  // installed".
+  if (!target.isLocal) {
+    await _toolsAdvertised(ref, baseDeviceUuid(target.registrationId), timeout);
   }
-  // Nothing detected is "nobody said", and a lone source is nothing to choose
-  // between: either would show an agent row offering only the current agent.
-  if (!detected.keys.any((key) => key != sourceTool)) return const [];
+  final detected = await ref
+      .read(detectedToolsForProvider(target).future)
+      .timeout(timeout);
+  // [detectedToolsForProvider] turns every failed local lookup into an empty
+  // map, so locally nothing at all is a lookup that failed. A remote machine
+  // has already advertised by here, and its empty list is its answer.
+  if (detected.isEmpty && target.isLocal) {
+    throw StateError('No agents reported for $target');
+  }
   final catalog = ref.read(agentCatalogProvider);
   String labelOf(String key) =>
       newSessionAgentLabel(KnownAgent(key), detected, catalog);
@@ -420,6 +441,25 @@ Future<List<({String tool, String label})>> handoffTargetsFor(
     if (!detected.containsKey(sourceTool))
       (tool: sourceTool, label: labelOf(sourceTool)),
   ];
+}
+
+Future<void> _toolsAdvertised(
+  ProviderContainer ref,
+  String machineUuid,
+  Duration timeout,
+) {
+  final heard = Completer<void>();
+  final sub = ref.listen(controlPlaneStateProvider(machineUuid), (_, next) {
+    if (heard.isCompleted) return;
+    // No retry follows an error here, so waiting would only run the clock out.
+    // A rebuild under way still carries the previous error and is not one.
+    if (next.hasError && !next.isLoading) {
+      heard.completeError(next.error!, next.stackTrace);
+    } else if (next.value?.toolsReceived ?? false) {
+      heard.complete();
+    }
+  }, fireImmediately: true);
+  return heard.future.timeout(timeout).whenComplete(sub.close);
 }
 
 /// Wire-advertised chat-capable tool keys for the selected target's MACHINE, or

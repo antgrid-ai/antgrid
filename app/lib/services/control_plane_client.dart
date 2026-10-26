@@ -385,6 +385,11 @@ class ControlPlaneState {
   /// is on PATH there. Empty against a bridge predating the `agents` key, which
   /// means "this machine did not say", never "it has no agents".
   final List<AgentDescriptor> agents;
+
+  /// Whether an `agent:tools` advert has landed since the last reset. An empty
+  /// [tools] is otherwise both "not heard yet" and "nothing installed", and a
+  /// caller that must answer once cannot wait on the first by reading the second.
+  final bool toolsReceived;
   final ControlPlaneError? lastError;
 
   /// Machine-level remote-access switch off the last `agent:projects` advert.
@@ -397,6 +402,7 @@ class ControlPlaneState {
     this.projects = const [],
     this.tools = const [],
     this.agents = const [],
+    this.toolsReceived = false,
     this.lastError,
     this.remoteAccessEnabled,
   });
@@ -407,6 +413,7 @@ class ControlPlaneState {
     List<AdvertisedProject>? projects,
     List<AdvertisedTool>? tools,
     List<AgentDescriptor>? agents,
+    bool? toolsReceived,
     ControlPlaneError? lastError,
     bool clearError = false,
     bool? remoteAccessEnabled,
@@ -415,6 +422,7 @@ class ControlPlaneState {
     projects: projects ?? this.projects,
     tools: tools ?? this.tools,
     agents: agents ?? this.agents,
+    toolsReceived: toolsReceived ?? this.toolsReceived,
     lastError: clearError ? null : (lastError ?? this.lastError),
     remoteAccessEnabled: clearRemoteAccessEnabled
         ? null
@@ -582,6 +590,7 @@ class ControlPlaneClient {
       _state.copyWith(
         tools: tools,
         agents: parseAgentDescriptors(json['agents']),
+        toolsReceived: true,
         clearError: true,
       ),
     );

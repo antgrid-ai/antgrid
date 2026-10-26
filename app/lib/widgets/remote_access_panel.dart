@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -14,10 +16,13 @@ import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
+import '../models/device_stats.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
 import '../providers/remote_access.dart';
+import '../services/device_stats_reporter.dart';
 import '../services/devices_api.dart';
+import '../util/detached.dart';
 import '../util/relative_time.dart';
 
 /// The machine-wide remote-access switch, what it grants, and the roster of
@@ -299,11 +304,51 @@ String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
 // Device roster
 // ──────────────────────────────────────────────────────────────────────────────
 
-class _DevicesSection extends ConsumerWidget {
+class _DevicesSection extends ConsumerStatefulWidget {
   const _DevicesSection();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DevicesSection> createState() => _DevicesSectionState();
+}
+
+class _DevicesSectionState extends ConsumerState<_DevicesSection> {
+  /// Only while the roster is on screen: a device connecting or reporting its
+  /// stats reaches the bridge, and nothing tells this app it did. A loopback
+  /// read of an in-memory list, so it can afford to track devices' 15s reports.
+  static const _pollInterval = Duration(seconds: 5);
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    // The provider outlives the panel, so reopening would otherwise show the
+    // roster as it stood when the panel last closed until the first tick.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      detached(
+        'RemoteAccessPanel',
+        'roster refresh on open',
+        () => ref.read(remoteDevicesProvider.notifier).refreshQuietly(),
+      );
+    });
+    _poll = Timer.periodic(
+      _pollInterval,
+      (_) => detached(
+        'RemoteAccessPanel',
+        'roster poll',
+        () => ref.read(remoteDevicesProvider.notifier).refreshQuietly(),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final p = context.antgrid;
     final async = ref.watch(remoteDevicesProvider);
     // A mutation keeps the prior data (copyWithPrevious in the notifier), so a
@@ -467,14 +512,8 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
                 color: p.textPrimary,
               ),
       ),
-      subtitle: Text(
-        _lastSeen(),
-        overflow: TextOverflow.ellipsis,
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXxs,
-          color: p.textMuted,
-        ),
-      ),
+      subtitleMaxLines: 2,
+      subtitle: _subtitle(p),
       // Icon, not a labelled button: the row's job is to name a device, and a
       // word-wide action next to a name that can run long is the first thing to
       // squeeze it. What the glyph costs in explicitness the tooltip and the
@@ -514,13 +553,70 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     );
   }
 
+  /// `Pixel 9 · last seen 2 mins ago`, then what that device last said about
+  /// its RAM. The RAM line shows only while the device is live: the figure is
+  /// a snapshot, so once it stops reporting it describes a device nobody can
+  /// see, and the bridge keeps it until it next connects.
+  Widget _subtitle(AbColors p) {
+    final stats = phone.stats;
+    final style = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXxs,
+      color: p.textMuted,
+    );
+    final model = stats?.model;
+    final live = stats != null && isLiveReport(stats.reportedAt);
+    final usage = live
+        ? ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes)
+        : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          model == null ? _lastSeen() : '$model · ${_lastSeen()}',
+          key: ValueKey('device-seen-${phone.phonePubkey}'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        ),
+        if (usage != null)
+          Text(
+            usage,
+            key: ValueKey('device-usage-${phone.phonePubkey}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+      ],
+    );
+  }
+
   /// `last seen 2 mins ago`, or the raw stamp if the bridge sent something we
   /// can't parse — an unreadable timestamp is still more use than dropping the
   /// line, which is the only thing distinguishing two same-model devices.
+  ///
+  /// `lastSeenAt` moves only on admission, so a device that has stayed
+  /// connected would read as seen when it connected; its latest stats report,
+  /// re-sent while connected, is the fresher sighting.
   String _lastSeen() {
-    final at = DateTime.tryParse(phone.lastSeenAt);
+    final admitted = DateTime.tryParse(phone.lastSeenAt);
+    final reported = DateTime.tryParse(phone.stats?.reportedAt ?? '');
+    final at = admitted == null || reported == null
+        ? admitted ?? reported
+        : (reported.isAfter(admitted) ? reported : admitted);
     return 'last seen ${at == null ? phone.lastSeenAt : relativeTime(at.toLocal())}';
   }
+}
+
+/// A connected device re-reports every [DeviceStatsReporter.defaultInterval];
+/// three missed reports read as gone. `reportedAt` is stamped by the bridge
+/// this roster is read from, so there is no cross-device clock skew to absorb.
+@visibleForTesting
+bool isLiveReport(String? reportedAt, {DateTime? now}) {
+  final at = DateTime.tryParse(reportedAt ?? '');
+  if (at == null) return false;
+  return (now ?? DateTime.now()).difference(at) <
+      DeviceStatsReporter.defaultInterval * 3;
 }
 
 /// Platform strings come from the account record (`DeviceSummary.platform`),

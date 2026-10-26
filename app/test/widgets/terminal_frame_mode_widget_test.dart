@@ -381,7 +381,74 @@ Widget _wrap(
   ),
 );
 
+/// Enters selection the way the agent panel's session menu does — the only
+/// Select text the terminal offers.
+void selectText(WidgetTester tester) {
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(TerminalViewWrapper)),
+  );
+  container.read(terminalClipboardActionsProvider)!.selectText();
+}
+
 void main() {
+  // A click is how a desktop user focuses the terminal: it must not leave the
+  // output frozen behind selection chrome.
+  testWidgets('a mouse click selects nothing and stays live', (tester) async {
+    if (_skipWithoutNative()) return;
+    final h = await _makeService(addTearDown);
+    final tab = _tab(id: 'click-live');
+    TerminalFrameMessage frame(String text, int sequence) =>
+        TerminalFrameMessage(
+          id: '$sequence',
+          timestamp: 0,
+          terminalId: tab.terminalId,
+          runId: 'run',
+          attachmentId: 'attachment',
+          sequence: sequence,
+          version: 2,
+          revision: sequence,
+          cols: 80,
+          rows: 24,
+          ansi: '\x1b[2J\x1b[H$text',
+          syncTimedOut: false,
+          history: const TerminalHistoryBoundary(
+            epoch: 1,
+            firstRowId: 0,
+            nextRowId: 0,
+            status: 'recording',
+          ),
+        );
+    tab.latestFrame.value = frame('before click', 1);
+    await tester.pumpWidget(
+      _wrap(
+        TerminalViewWrapper(tab: tab, terminalService: h.service),
+        terminalState: Stream.value(_stateWith()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(GhosttyTerminalView)),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Copy'), findsNothing);
+    expect(find.text('Return to live'), findsNothing);
+    // Output written after the click reaches the screen: nothing froze it.
+    tab.latestFrame.value = frame('after click', 2);
+    await tester.pump();
+    expect(
+      tester
+          .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView))
+          .controller
+          .plainText,
+      contains('after click'),
+    );
+  });
+
   for (final kind in [PointerDeviceKind.mouse, PointerDeviceKind.touch]) {
     testWidgets(
       '${kind.name} selection retains its cells while complete frames arrive',
@@ -418,13 +485,17 @@ void main() {
         final copied = captureClipboard(tester);
         await tester.pumpWidget(
           _wrap(
-            TerminalViewWrapper(tab: tab, terminalService: h.service),
+            TerminalViewWrapper(
+              tab: tab,
+              terminalService: h.service,
+              isAgentSurface: true,
+            ),
             terminalState: Stream.value(_stateWith()),
           ),
         );
         await tester.pumpAndSettle();
         if (kind == PointerDeviceKind.touch) {
-          await tester.tap(find.bySemanticsLabel('Select text'));
+          selectText(tester);
           await tester.pump();
         }
         final finder = find.byType(GhosttyTerminalView);
@@ -487,7 +558,7 @@ void main() {
         ]);
         expect(view.controller.plainText, contains('other replacement'));
         expect(view.controller.cols, 100);
-        await tester.tap(find.bySemanticsLabel('Select text'));
+        selectText(tester);
         await tester.pump();
         tab.latestFrame.value = frame('new run', 1, run: 'replacement-run');
         tab.replaceEpoch.value++;
@@ -499,7 +570,7 @@ void main() {
         );
         expect(replaced.controller.plainText, contains('new run'));
         expect(find.text('Return to live'), findsNothing);
-        await tester.tap(find.bySemanticsLabel('Select text'));
+        selectText(tester);
         await tester.pump();
         final replacementEngine = GhosttyTerminalController();
         addTearDown(replacementEngine.dispose);
@@ -508,6 +579,7 @@ void main() {
             TerminalViewWrapper(
               tab: tab.copyWith(ghostty: replacementEngine),
               terminalService: h.service,
+              isAgentSurface: true,
             ),
             terminalState: Stream.value(_stateWith()),
           ),

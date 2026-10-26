@@ -557,6 +557,21 @@ describe("file-tree", () => {
       expect(r.content).toBe("hello");
     });
 
+    it.each(["a.txt", "notes.ico"])("reports UTF-8 validity from the original bytes in %s", (path) => {
+      const original = Buffer.from([0xf0, 0x90, 0x80]);
+      writeFileSync(join(tempDir, path), original);
+      const malformed = readFile(tempDir, path);
+      expect(malformed.content).toBe("\ufffd");
+      expect(Buffer.byteLength(malformed.content!)).toBe(original.length);
+      expect(malformed.utf8Valid).toBe(false);
+
+      writeFileSync(join(tempDir, path), "\ufffd");
+      const valid = readFile(tempDir, path);
+      expect(valid.content).toBe(malformed.content);
+      expect(valid.size).toBe(malformed.size);
+      expect(valid.utf8Valid).toBe(true);
+    });
+
     it("non-allowlisted binary still rejected", () => {
       writeFileSync(join(tempDir, "a.bin"), Buffer.from([0, 1, 2, 0, 3]));
       const r = readFile(tempDir, "a.bin");

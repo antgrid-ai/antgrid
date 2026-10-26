@@ -7,7 +7,7 @@
   app's overall data-collection posture.
 
   Source of truth for the data-type entries is the published privacy policy
-  (site/src/pages/privacy.md). Keep the two in lockstep — and confirm these
+  (src/pages/privacy.md in antgrid-ai/antgrid-site). Keep the two in lockstep — and confirm these
   match the App Store Connect "App Privacy" answers, which Apple cross-checks.
 -->
 <plist version="1.0">

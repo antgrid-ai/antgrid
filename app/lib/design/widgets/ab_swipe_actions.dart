@@ -377,21 +377,35 @@ class _AbSwipeActionsState extends State<AbSwipeActions>
                     ),
                   ),
                 ),
+              // The tray narrows the row rather than pushing it: a row's name
+              // leads it, so sliding the row by a tray that may take half its
+              // width pushed the name off screen and left the actions saying
+              // nothing about which file they act on. Narrowing keeps the name
+              // and ellipsizes what trails it. Only past the tray, where a full
+              // swipe is committing, does the row itself travel.
               Transform.translate(
-                offset: Offset(-_offset, 0),
-                child: Stack(
-                  children: [
-                    widget.child,
-                    // An open tray takes the row's own tap: the first tap
-                    // after a swipe means "never mind", not "open this file".
-                    if (_isOpen)
-                      Positioned.fill(
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: _close,
+                offset: Offset(
+                  -math.max(0.0, _offset - _trayExtent(rowWidth)),
+                  0,
+                ),
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    right: math.min(_offset, _trayExtent(rowWidth)),
+                  ),
+                  child: Stack(
+                    children: [
+                      widget.child,
+                      // An open tray takes the row's own tap: the first tap
+                      // after a swipe means "never mind", not "open this file".
+                      if (_isOpen)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: _close,
+                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],

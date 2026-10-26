@@ -364,6 +364,9 @@ const GitCommitMessage = BaseMessage.extend({
   type: z.literal("git:commit"),
   projectId: z.string(),
   message: z.string(),
+  /** Echoed on the result. The result is broadcast, so with two apps on one
+   *  checkout this is how each tells its own commit's outcome from the other's. */
+  requestId: z.string().optional(),
   ...CheckoutScoped,
 });
 
@@ -373,6 +376,7 @@ const GitCommitResultMessage = BaseMessage.extend({
   success: z.boolean(),
   sha: z.string().optional(),
   error: z.string().optional(),
+  requestId: z.string().optional(),
   ...CheckoutScoped,
 });
 
@@ -772,6 +776,8 @@ const FileContentMessage = BaseMessage.extend({
   content: z.string().nullable(),
   size: z.number(),
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
+  // Equal decoded/re-encoded lengths cannot prove that UTF-8 decoding was lossless.
+  utf8Valid: z.boolean().optional(),
   mimeType: z.string().optional(),
   error: z.string().optional(),
   ...CheckoutScoped,
@@ -977,6 +983,30 @@ const PushRegisterMessage = BaseMessage.extend({
   pushToken: z.string(),
   provider: z.enum(["fcm", "apns"]),
   pushPubkey: PushPubkeyB64,
+});
+
+// Each field is a byte count, optional because each platform reads a different
+// subset of them — an absent field means "this device can't say", not zero.
+const DeviceStatsBytes = z.number().int().nonnegative().optional();
+
+/** A connected device describing its own hardware, sent beside push:register on
+ *  each handshake. Shown in the desktop device roster; authorizes nothing. */
+const DeviceStatsMessage = BaseMessage.extend({
+  type: z.literal("device:stats"),
+  model: z.string().max(200).optional(),
+  ramTotalBytes: DeviceStatsBytes,
+  ramAvailableBytes: DeviceStatsBytes,
+  storageTotalBytes: DeviceStatsBytes,
+  storageFreeBytes: DeviceStatsBytes,
+});
+
+/** The machine describing its own RAM to attached apps, on each handshake and
+ *  then on a timer, so a remote view can show what the host has to spare.
+ *  Display only, like device:stats. */
+const MachineStatsMessage = BaseMessage.extend({
+  type: z.literal("machine:stats"),
+  ramTotalBytes: DeviceStatsBytes,
+  ramAvailableBytes: DeviceStatsBytes,
 });
 
 // Wire mirror of InstructionItem (handler/backlog.ts) — the live instruction
@@ -2700,6 +2730,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   CommandDoneMessage,
   NotificationPushMessage,
   PushRegisterMessage,
+  DeviceStatsMessage,
+  MachineStatsMessage,
   HandlerConfigureMessage,
   HandlerInstructMessage,
   HandlerStatusMessage,
@@ -2859,6 +2891,8 @@ export type CommandOutput = z.infer<typeof CommandOutputMessage>;
 export type CommandDone = z.infer<typeof CommandDoneMessage>;
 export type NotificationPush = z.infer<typeof NotificationPushMessage>;
 export type PushRegister = z.infer<typeof PushRegisterMessage>;
+export type DeviceStatsMsg = z.infer<typeof DeviceStatsMessage>;
+export type MachineStatsMsg = z.infer<typeof MachineStatsMessage>;
 export type HandlerInstructionItem = z.infer<typeof InstructionItemWire>;
 export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
 export type HandlerInstructMsg = z.infer<typeof HandlerInstructMessage>;
@@ -3168,7 +3202,7 @@ const KNOWN_TYPES = new Set<string>([
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
   "agent:projects", "agent:tools", "stream-ready", "control:result",
-  "command:run", "command:output", "command:done", "notification:push", "push:register",
+  "command:run", "command:output", "command:done", "notification:push", "push:register", "device:stats", "machine:stats",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:history:request", "handler:history:page",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",

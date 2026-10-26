@@ -1,4 +1,5 @@
 import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
+import { isUtf8 } from "node:buffer";
 import { join, resolve, relative, extname, basename } from "node:path";
 import ignore, { type Ignore } from "ignore";
 import { isInsideResolved, refusedUnderRoot } from "./terminal-links/containment";
@@ -487,6 +488,7 @@ type ReadFileResult = {
   size: number;
   error?: string;
   encoding?: "utf8" | "base64";
+  utf8Valid?: boolean;
   mimeType?: string;
 };
 
@@ -571,7 +573,7 @@ export function readFile(
       if (stat.size > MAX_FILE_SIZE) {
         return tooLarge(stat.size, MAX_FILE_SIZE);
       }
-      return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8" };
+      return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8", utf8Valid: isUtf8(buf) };
     }
 
     if (stat.size > MAX_FILE_SIZE) {
@@ -582,7 +584,7 @@ export function readFile(
     if (isBinaryBuffer(buf)) {
       return { content: null, size: stat.size, error: "Binary file" };
     }
-    return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8" };
+    return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8", utf8Valid: isUtf8(buf) };
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {

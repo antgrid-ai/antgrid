@@ -36,6 +36,11 @@ class MarkdownPreview extends StatefulWidget {
   final String? searchQuery;
   final ValueChanged<String>? onOpenFile;
 
+  /// Receives an absolute path (and, for one that began with `/`, its
+  /// project-root reading) when the reader follows a link outside the
+  /// project-relative form. The bridge decides whether it is inside the checkout.
+  final void Function(String path, String? repoFallback)? onOpenLocalPath;
+
   const MarkdownPreview({
     super.key,
     required this.content,
@@ -45,6 +50,7 @@ class MarkdownPreview extends StatefulWidget {
     this.searchLine,
     this.searchQuery,
     this.onOpenFile,
+    this.onOpenLocalPath,
   });
 
   @override
@@ -92,6 +98,8 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
         );
       case MarkdownLinkKind.repoFile:
         widget.onOpenFile?.call(target.value);
+      case MarkdownLinkKind.localPath:
+        widget.onOpenLocalPath?.call(target.value, target.repoFallback);
       case MarkdownLinkKind.anchor:
         _jumpToAnchor(target.value);
       case MarkdownLinkKind.unsupported:

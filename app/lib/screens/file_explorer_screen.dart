@@ -35,6 +35,7 @@ import '../design/widgets/ab_toolbar.dart';
 import '../keyboard/app_command_registry.dart';
 import '../keyboard/app_shortcuts.dart';
 import '../util/detached.dart';
+import '../util/external_url.dart';
 import '../widgets/file_search_bar.dart';
 import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
@@ -523,10 +524,10 @@ class _FileExplorerBody extends ConsumerWidget {
     fileService.clearViewingFile();
   }
 
-  Widget _buildContentArea() {
+  Widget _buildContentArea(BuildContext context) {
     final files = state.files;
     final hasContent = files.selectedFilePath != null;
-    final child = _buildContentAreaInner();
+    final child = _buildContentAreaInner(context);
 
     if (!hasContent) return child;
 
@@ -538,7 +539,7 @@ class _FileExplorerBody extends ConsumerWidget {
     );
   }
 
-  Widget _buildContentAreaInner() {
+  Widget _buildContentAreaInner(BuildContext context) {
     final files = state.files;
     if (files.selectedFilePath != null) {
       return FileViewerRouter(
@@ -552,6 +553,16 @@ class _FileExplorerBody extends ConsumerWidget {
             fileService.requestFileContent(files.selectedFilePath!),
         onClose: () => fileService.clearViewingFile(),
         onOpenFile: (path) => fileService.selectFile(path),
+        onOpenLocalPath: (path, repoFallback) => detached(
+          'FileExplorer',
+          'open markdown path link',
+          () => openMarkdownLocalPath(
+            context,
+            path,
+            fileService: () => fileService,
+            repoFallback: repoFallback,
+          ),
+        ),
       );
     }
 
@@ -563,7 +574,7 @@ class _FileExplorerBody extends ConsumerWidget {
       children: [
         SizedBox(width: 280, child: _buildTreePanel(context, ref)),
         const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
-        Expanded(child: _buildContentArea()),
+        Expanded(child: _buildContentArea(context)),
       ],
     );
   }
@@ -594,7 +605,7 @@ class _FileExplorerBody extends ConsumerWidget {
             ],
           ),
         ),
-        Expanded(child: _buildContentArea()),
+        Expanded(child: _buildContentArea(context)),
       ],
     );
   }

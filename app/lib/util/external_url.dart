@@ -319,6 +319,39 @@ Future<void> openContentLink(
   await openTerminalHyperlink(context, target, disclosed: disclosed);
 }
 
+/// Opens an absolute path a rendered markdown document linked to.
+///
+/// Inside the checkout it selects the file in the Files tab; outside it the
+/// bridge serves only markdown and images, which open in the read-only preview.
+/// [repoFallback] is tried when [path] names nothing, for a `/docs/a.md` link
+/// that meant the repo root rather than the filesystem root.
+///
+/// Never completes with an error, like [openContentLink].
+Future<void> openMarkdownLocalPath(
+  BuildContext context,
+  String path, {
+  required FileService? Function() fileService,
+  String? repoFallback,
+}) => _resolveAndShow(
+  context,
+  fileService,
+  (_) {},
+  null,
+  null,
+  'open markdown path link failed',
+  (service) async {
+    final result = await service.resolveTerminalPath(path);
+    final fallback = repoFallback;
+    if (fallback == null ||
+        result.relPath != null ||
+        result.externalImagePath != null) {
+      return result;
+    }
+    final alt = await service.resolveTerminalPath(fallback);
+    return alt.relPath != null ? alt : result;
+  },
+);
+
 /// Opens a path a bridge-detected terminal link named. The bridge resolves it
 /// against the one base it matched at detection, so the file opened is the one
 /// the link was minted for.

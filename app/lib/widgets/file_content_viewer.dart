@@ -22,6 +22,7 @@ import '../providers/providers.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'copy_path.dart';
+import 'file_download.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -481,7 +482,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildHeader(content.path),
+        _buildHeader(content),
         if (_showSearch) _buildSearchBar(),
         if (widget.fileWasModified)
           ViewerModifiedBanner(onRefresh: widget.onRefreshContent),
@@ -620,11 +621,11 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     );
   }
 
-  Widget _buildHeader(String path) {
+  Widget _buildHeader(FileContent content) {
     return AbToolbar.actions(
       center: Align(
         alignment: Alignment.centerLeft,
-        child: ViewerPathBreadcrumb(path: path),
+        child: ViewerPathBreadcrumb(path: content.path),
       ),
       trailing: [
         AbIconButton(
@@ -639,6 +640,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
             onTap: widget.onShowPreview,
             tooltip: 'Show preview',
           ),
+        FileDownloadButton(content: content),
         AbIconButton(
           icon: AbIcons.close,
           onTap: widget.onClose,

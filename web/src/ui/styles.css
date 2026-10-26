@@ -25,7 +25,7 @@
    does not have. The `fallback:` faces below are the metric-matched stand-ins
    that API generates, copied verbatim from the site's build output so both
    sides substitute identically. To refresh them after a font-package bump:
-   build the site and read the @font-face rules out of `site/dist/index.html`.
+   build antgrid-site and read the @font-face rules out of its `dist/index.html`.
 
    Vite fingerprints and emits the woff2 into public/build/ from these URLs. */
 @font-face {
@@ -139,7 +139,7 @@
 
 /* ---- Tokens ------------------------------------------------------------
    The Signal accent ramp is the marketing site's verbatim
-   (site/src/styles/global.css) — the two are one product and a user crosses
+   (antgrid-site's src/styles/global.css) — the two are one product and a user crosses
    between them mid sign-in, and tests/ui/accent-contrast.test.ts holds the two
    copies together. Surfaces are NOT shared: the site went warm so its zinc app
    windows read as objects on a bench; this service draws no windows, so its

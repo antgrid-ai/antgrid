@@ -9,19 +9,30 @@ enum MarkdownLinkKind {
   /// A heading in the document being read.
   anchor,
 
+  /// An absolute path on the machine the project lives on, which may be inside
+  /// the checkout or anywhere else. Only the bridge can tell which, so the
+  /// viewer asks it rather than guessing.
+  localPath,
+
   /// Nothing safe or meaningful to do.
   unsupported,
 }
 
 /// The resolved destination of a markdown link.
 class MarkdownLinkTarget {
-  const MarkdownLinkTarget(this.kind, this.value);
+  const MarkdownLinkTarget(this.kind, this.value, {this.repoFallback});
 
   final MarkdownLinkKind kind;
 
-  /// The URL, project-relative path, or heading fragment named by [kind];
-  /// empty for [MarkdownLinkKind.unsupported].
+  /// The URL, project-relative or absolute path, or heading fragment named by
+  /// [kind]; empty for [MarkdownLinkKind.unsupported].
   final String value;
+
+  /// For a [MarkdownLinkKind.localPath] that began with `/`: the project-root
+  /// reading of the same link. GitHub resolves `/docs/a.md` against the repo
+  /// root while a shell resolves it against the filesystem root, and nothing in
+  /// the href says which the author meant.
+  final String? repoFallback;
 
   static const unsupported = MarkdownLinkTarget(
     MarkdownLinkKind.unsupported,
@@ -30,10 +41,13 @@ class MarkdownLinkTarget {
 
   @override
   bool operator ==(Object other) =>
-      other is MarkdownLinkTarget && other.kind == kind && other.value == value;
+      other is MarkdownLinkTarget &&
+      other.kind == kind &&
+      other.value == value &&
+      other.repoFallback == repoFallback;
 
   @override
-  int get hashCode => Object.hash(kind, value);
+  int get hashCode => Object.hash(kind, value, repoFallback);
 
   @override
   String toString() => 'MarkdownLinkTarget(${kind.name}, $value)';
@@ -46,10 +60,13 @@ class MarkdownLinkTarget {
 /// them — is right for only the first: a relative path reaches the OS as a
 /// schemeless URI and a `#anchor` as an empty one.
 ///
-/// Only `http`/`https`/`mailto` open externally: a document is repository
-/// content, so `file:` would hand out local paths and a custom scheme could
+/// Only `http`/`https`/`mailto` open externally: a custom scheme could
 /// deep-link into another installed app. That is `openableTerminalHyperlink`'s
 /// set plus `mailto`, which a doc's contact line legitimately uses.
+///
+/// A `file:` URL or an absolute path is [MarkdownLinkKind.localPath]: it is not
+/// handed to the OS, only to the bridge, which opens it read-only and refuses
+/// anything outside the checkout that is not a markdown or image file.
 MarkdownLinkTarget resolveMarkdownLink(
   String href, {
   required String fromPath,
@@ -64,11 +81,13 @@ MarkdownLinkTarget resolveMarkdownLink(
         : MarkdownLinkTarget(MarkdownLinkKind.anchor, fragment);
   }
 
+  // Tested before `Uri` sees it: a backslash path does not parse as a URI, and
+  // `C:/notes.md` parses as scheme `c`.
+  if (_windowsDrivePath.hasMatch(trimmed)) return _drivePathTarget(trimmed);
+
   final parsed = Uri.tryParse(trimmed);
   if (parsed != null && parsed.hasScheme) {
-    // A single-letter scheme is a Windows drive, not a protocol — `Uri` reads
-    // `C:/notes.md` as scheme `c`. It is neither a URL to open nor a path
-    // inside the checkout, so it resolves to nothing.
+    if (parsed.scheme == 'file') return _fileUrlTarget(parsed);
     if (parsed.scheme.length == 1) return MarkdownLinkTarget.unsupported;
     if (parsed.scheme == 'http' || parsed.scheme == 'https') {
       // A hostless `http:///x` reaches the OS as a URL that opens nothing;
@@ -91,10 +110,40 @@ MarkdownLinkTarget resolveMarkdownLink(
   // A trailing slash names a directory, and the viewer opens files.
   if (path.isEmpty || path.endsWith('/')) return MarkdownLinkTarget.unsupported;
 
-  final resolved = _resolveProjectPath(fromPath, _decode(path));
+  final decoded = _decode(path);
+  final resolved = _resolveProjectPath(fromPath, decoded);
+  if (decoded.startsWith('/')) {
+    return MarkdownLinkTarget(
+      MarkdownLinkKind.localPath,
+      decoded,
+      repoFallback: resolved,
+    );
+  }
   return resolved == null
       ? MarkdownLinkTarget.unsupported
       : MarkdownLinkTarget(MarkdownLinkKind.repoFile, resolved);
+}
+
+final RegExp _windowsDrivePath = RegExp(r'^[A-Za-z]:[\\/]');
+final RegExp _fileUrlDrive = RegExp(r'^/[A-Za-z]:/');
+
+MarkdownLinkTarget _drivePathTarget(String href) {
+  final path = _decode(_stripSuffixes(href));
+  return path.endsWith('/') || path.endsWith(r'\')
+      ? MarkdownLinkTarget.unsupported
+      : MarkdownLinkTarget(MarkdownLinkKind.localPath, path);
+}
+
+MarkdownLinkTarget _fileUrlTarget(Uri url) {
+  // A host other than this machine names a network share, and opening one
+  // makes the bridge's machine authenticate to whoever wrote the link.
+  if (url.host.isNotEmpty && url.host.toLowerCase() != 'localhost') {
+    return MarkdownLinkTarget.unsupported;
+  }
+  var path = _decode(url.path);
+  if (_fileUrlDrive.hasMatch(path)) path = path.substring(1);
+  if (path.isEmpty || path.endsWith('/')) return MarkdownLinkTarget.unsupported;
+  return MarkdownLinkTarget(MarkdownLinkKind.localPath, path);
 }
 
 /// The GitHub-style anchor slug for [text].

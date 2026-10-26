@@ -126,8 +126,6 @@ void main() {
     final transport = await pumpRow(tester, handoff: true);
     await openFork(tester);
 
-    await tester.tap(find.byKey(const Key('fork-agent-selector')));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Claude Code'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Continue'));
@@ -149,20 +147,21 @@ void main() {
 
     // Away to another agent and back, so the own-agent pick is a real choice
     // and not the untouched default.
-    await tester.tap(find.byKey(const Key('fork-agent-selector')));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Claude Code'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('fork-agent-selector')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Codex').last);
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const Key('fork-agent-selector')),
+        matching: find.text('Codex'),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Fork'));
     await tester.pumpAndSettle();
 
     final fork = sentFork(transport);
     expect(fork.containsKey('targetTool'), isFalse);
-    expect(fork['workspace'], 'copy');
+    expect(fork['workspace'], 'current');
 
     await refuseFork(tester, transport);
     await tester.pumpWidget(const SizedBox());

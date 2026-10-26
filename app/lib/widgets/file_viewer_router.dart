@@ -24,6 +24,10 @@ class FileViewerRouter extends StatelessWidget {
   /// markdown document. Null where the viewer has no selection to move.
   final ValueChanged<String>? onOpenFile;
 
+  /// Opens an absolute path linked from a rendered markdown document; see
+  /// [MarkdownPreview.onOpenLocalPath].
+  final void Function(String path, String? repoFallback)? onOpenLocalPath;
+
   const FileViewerRouter({
     super.key,
     this.fileContent,
@@ -35,6 +39,7 @@ class FileViewerRouter extends StatelessWidget {
     this.searchLine,
     this.searchQuery,
     this.onOpenFile,
+    this.onOpenLocalPath,
   });
 
   Widget _source() => FileContentViewer(
@@ -64,6 +69,7 @@ class FileViewerRouter extends StatelessWidget {
           searchLine: searchLine,
           searchQuery: searchQuery,
           onOpenFile: onOpenFile,
+          onOpenLocalPath: onOpenLocalPath,
         );
       case FileViewerKind.svg:
         return SvgPreview(

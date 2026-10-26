@@ -9,6 +9,7 @@ import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
+import { createDeviceStatsStore, type DeviceStatsStore } from "./device-stats";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
@@ -418,6 +419,7 @@ export class HostServer {
   // authorization. Constructed once here; each core receives this exact instance
   // via startCore().
   private readonly pairedPhonesStore: PairedPhonesStore = loadPairedPhones(resolveAbDir());
+  private readonly deviceStatsStore: DeviceStatsStore = createDeviceStatsStore();
   // The one authorization gate for remote phones: is this machine reachable
   // from mobile at all. Every project verb from a phone is checked against it.
   private readonly remoteAccessPolicy: RemoteAccessPolicyStore = loadRemoteAccessPolicy(resolveAbDir());
@@ -974,6 +976,7 @@ export class HostServer {
       label: p.label,
       pairedAt: p.pairedAt,
       lastSeenAt: p.lastSeenAt,
+      stats: this.deviceStatsStore.get(p.phonePubkey),
     }));
   }
 
@@ -2644,6 +2647,7 @@ export class HostServer {
       identity: this.identityFor(mode),
       ...(relayUrl ? { relayUrl } : {}),
       pairedPhones: this.pairedPhonesStore,
+      deviceStats: this.deviceStatsStore,
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/models/device_stats.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
@@ -35,6 +36,54 @@ class _FakeNotifier extends RemoteDevicesNotifier {
   Future<void> unpair({required String phonePubkey}) async {
     unpaired.add(phonePubkey);
   }
+}
+
+/// A device that has reported its hardware since the host started, [ago].
+class _ReportingNotifier extends RemoteDevicesNotifier {
+  _ReportingNotifier([this.ago = Duration.zero]);
+  final Duration ago;
+
+  @override
+  Future<PhonesList> build() async => PhonesList(
+    phones: [
+      PairedPhoneSummary(
+        phonePubkey: 'pk-1',
+        phoneDeviceId: 'ph-1',
+        pairedAt: 'x',
+        lastSeenAt: 'y',
+        stats: DeviceStats(
+          model: 'iPhone 15 Pro',
+          ramTotalBytes: 8 * 1024 * 1024 * 1024,
+          ramAvailableBytes: 3 * 1024 * 1024 * 1024,
+          storageTotalBytes: 256000000000,
+          reportedAt: DateTime.now().subtract(ago).toIso8601String(),
+        ),
+      ),
+    ],
+    knownProjects: const [],
+  );
+}
+
+/// Admitted long ago and still connected: its latest report is just now.
+class _StillConnectedNotifier extends RemoteDevicesNotifier {
+  @override
+  Future<PhonesList> build() async => PhonesList(
+    phones: [
+      PairedPhoneSummary(
+        phonePubkey: 'pk-1',
+        phoneDeviceId: 'ph-1',
+        pairedAt: 'x',
+        lastSeenAt: DateTime.now()
+            .subtract(const Duration(days: 3))
+            .toIso8601String(),
+        stats: DeviceStats(
+          ramTotalBytes: 1,
+          reportedAt: DateTime.now().toIso8601String(),
+        ),
+      ),
+    ],
+    knownProjects: const [],
+  );
 }
 
 class _EmptyNotifier extends RemoteDevicesNotifier {
@@ -175,6 +224,59 @@ void main() {
     expect(fake.unpaired, ['pk-1']);
   });
 
+  testWidgets('a live device shows its model and RAM, not storage', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, devices: _ReportingNotifier.new);
+
+    expect(find.textContaining('iPhone 15 Pro · last seen'), findsOneWidget);
+    expect(find.text('RAM 5.0 / 8.0 GB'), findsOneWidget);
+    expect(find.textContaining('Storage'), findsNothing);
+  });
+
+  testWidgets('a device that stopped reporting shows no RAM or storage', (
+    tester,
+  ) async {
+    await _pumpPanel(
+      tester,
+      devices: () => _ReportingNotifier(const Duration(minutes: 2)),
+    );
+
+    // Still identified by model; only the stale figures go.
+    expect(find.textContaining('iPhone 15 Pro · last seen'), findsOneWidget);
+    expect(find.byKey(const ValueKey('device-usage-pk-1')), findsNothing);
+  });
+
+  test('a report is live for three missed intervals', () {
+    final now = DateTime.utc(2026, 1, 1, 12);
+    String ago(int s) => now.subtract(Duration(seconds: s)).toIso8601String();
+    expect(isLiveReport(ago(0), now: now), isTrue);
+    expect(isLiveReport(ago(44), now: now), isTrue);
+    expect(isLiveReport(ago(45), now: now), isFalse);
+    expect(isLiveReport(null, now: now), isFalse);
+    expect(isLiveReport('garbage', now: now), isFalse);
+  });
+
+  testWidgets('a connected device is last seen at its latest report', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, devices: _StillConnectedNotifier.new);
+
+    final seen = tester.widget<Text>(
+      find.byKey(const ValueKey('device-seen-pk-1')),
+    );
+    expect(seen.data, isNot(contains('day')));
+  });
+
+  testWidgets('a device that has not reported shows no usage line', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, devices: _FakeNotifier.new);
+
+    expect(find.text('last seen y'), findsOneWidget);
+    expect(find.byKey(const ValueKey('device-usage-pk-1')), findsNothing);
+  });
+
   testWidgets('turning OFF needs no confirm', (tester) async {
     final policy = _FakePolicyNotifier(true);
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
@@ -283,7 +385,10 @@ void main() {
       reach: () => _FakeReachNotifier(true),
     );
 
-    expect(find.textContaining('Nothing until remote access is on'), findsNothing);
+    expect(
+      find.textContaining('Nothing until remote access is on'),
+      findsNothing,
+    );
     expect(find.textContaining("Couldn't read remote access"), findsOne);
   });
 

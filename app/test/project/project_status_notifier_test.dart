@@ -176,5 +176,36 @@ void main() {
       notifier.dispose();
       await ctrl.close();
     });
+
+    test('machine:stats records the host RAM, and a repeat is silent', () async {
+      final ctrl = StreamController<InboundFrame>.broadcast();
+      final notifier = ProjectStatusNotifier(ctrl.stream);
+      var notifications = 0;
+      notifier.addListener(() => notifications++);
+      Map<String, dynamic> frame() => {
+        'id': '0',
+        'timestamp': 0,
+        'type': 'machine:stats',
+        'ramTotalBytes': 32000000000,
+        'ramAvailableBytes': 12000000000,
+      };
+
+      ctrl.add(InboundFrame(frame()));
+      await Future<void>.delayed(Duration.zero);
+      expect(notifier.value.machineStats?.ramTotalBytes, 32000000000);
+      expect(notifier.value.machineStats?.ramAvailableBytes, 12000000000);
+      expect(notifications, 1);
+
+      // The bridge re-sends on a timer; an unchanged figure must not rebuild
+      // every row watching this status.
+      ctrl.add(InboundFrame(frame()));
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 1);
+
+      // Never persisted: a cached figure would describe a machine long gone.
+      expect(notifier.value.toJson().containsKey('machineStats'), isFalse);
+      notifier.dispose();
+      await ctrl.close();
+    });
   });
 }

@@ -288,6 +288,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     }
   }
 
+  /// A mouse press freezes the screen so a drag can select over it; a click
+  /// that selected nothing returns to live rather than leaving output frozen
+  /// behind a click. Post-frame, so the view's selection report for this
+  /// gesture has landed first.
+  void _onSelectionPointerUp(PointerUpEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _historyOpen || _touchSelection) return;
+      if (_presentation.selecting && !_hasSelection) _returnToLive();
+    });
+  }
+
   TerminalService? _displayService;
   int _displayUpdate = 0;
 
@@ -960,6 +972,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(focusAgentInputProvider.notifier).set(_publishedFocusInput);
+      // The agent pane carries no buttons of its own for these; the session
+      // menu does, on every device. See [_buildQuickActions].
+      ref
+          .read(terminalClipboardActionsProvider.notifier)
+          .set(_publishedClipboardActions);
     });
   }
 
@@ -1066,6 +1083,25 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   /// mode mounts the transcript before this one is disposed.
   late final VoidCallback _publishedFocusInput = _focusScope.requestFocus;
 
+  /// The exact object published to [terminalClipboardActionsProvider], held so
+  /// dispose retracts only its own.
+  late final TerminalClipboardActions _publishedClipboardActions =
+      TerminalClipboardActions(
+        selectText: _selectText,
+        paste: () => detached('TerminalView', 'clipboard paste failed', _paste),
+        copyHostClipboard: () =>
+            _canCopyHostClipboard ? _copyHostClipboard : null,
+        attach: () => _canAttachFromMenu
+            ? () => detached('TerminalView', 'attach failed', _pickAndUpload)
+            : null,
+      );
+
+  // Desktop's only attach route. Mobile already has one in the quick-actions
+  // bar, and a LOCAL session needs none: the agent reads the user's own disk,
+  // so a path typed by hand or dropped by the OS already works.
+  bool get _canAttachFromMenu =>
+      widget.terminalService.session.mode == ProjectSessionMode.relay;
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -1091,6 +1127,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         _publishedFocusInput,
       )) {
         _container.read(focusAgentInputProvider.notifier).set(null);
+      }
+      if (identical(
+        _container.read(terminalClipboardActionsProvider),
+        _publishedClipboardActions,
+      )) {
+        _container.read(terminalClipboardActionsProvider.notifier).set(null);
       }
     } on Object {
       // Nothing to retract from — the container is gone.
@@ -1845,12 +1887,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     // straight back.
     final showPaneChrome = !_historyOpen;
     final showSendButton = _hasSelection && agentTab != null && showPaneChrome;
-    // Desktop's only attach route. Mobile already has one in the quick-actions
-    // bar, and a LOCAL session needs none: the agent reads the user's own disk,
-    // so a path typed by hand or dropped by the OS already works.
     final showAttachButton =
-        _hasPhysicalKeyboard &&
-        widget.terminalService.session.mode == ProjectSessionMode.relay;
+        !widget.isAgentSurface && _hasPhysicalKeyboard && _canAttachFromMenu;
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
@@ -2041,6 +2079,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _onSelectionPointerDown,
+      onPointerUp: _onSelectionPointerUp,
       onPointerSignal: (event) {
         if (!_historyOpen &&
             event is PointerScrollEvent &&
@@ -2179,45 +2218,27 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                       _onSendToAgent,
                     ),
                   ),
-                if (!_historyOpen)
+                // Only for the explicit Select text: a mouse selection copies
+                // with Ctrl+C and leaves on any key, and a click that selected
+                // nothing never stays frozen ([_onSelectionPointerUp]).
+                if (!_historyOpen && _presentation.selecting && _touchSelection)
                   Positioned(
                     top: AbTokens.space4,
                     right: AbTokens.space4,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (_presentation.selecting) ...[
-                          AbButton(
-                            label: 'Copy',
-                            compact: true,
-                            onTap: _hasSelection
-                                ? _copySelectionAndClear
-                                : null,
-                          ),
-                          AbButton(
-                            label: 'Return to live',
-                            compact: true,
-                            onTap: _returnToLive,
-                          ),
-                        ] else if (_hasPhysicalKeyboard)
-                          AbButton(
-                            label: 'Select text',
-                            compact: true,
-                            onTap: _selectText,
-                          ),
+                        AbButton(
+                          label: 'Copy',
+                          compact: true,
+                          onTap: _hasSelection ? _copySelectionAndClear : null,
+                        ),
+                        AbButton(
+                          label: 'Return to live',
+                          compact: true,
+                          onTap: _returnToLive,
+                        ),
                       ],
-                    ),
-                  ),
-                if (!_historyOpen &&
-                    _hasPhysicalKeyboard &&
-                    _canCopyHostClipboard)
-                  Positioned(
-                    bottom: AbTokens.space4,
-                    right: AbTokens.space4,
-                    child: AbButton(
-                      label: 'Copy host clipboard to this device',
-                      compact: true,
-                      onTap: _copyHostClipboard,
                     ),
                   ),
                 if (_historyOpen)
@@ -2667,9 +2688,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       composeOpen: _composeOpen,
       onToggleCompose: _toggleCompose,
       onDirectInput: _toggleDirectInput,
-      onSelectText: _selectText,
-      onPaste: () => detached('TerminalView', 'clipboard paste failed', _paste),
-      onCopyHostClipboard: _canCopyHostClipboard ? _copyHostClipboard : null,
     );
     return bar;
   }
