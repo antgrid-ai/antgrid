@@ -32,54 +32,95 @@ function requestText(content: string): string {
   return (wrapped ?? content.replace(INJECTED_BLOCK, "")).trim();
 }
 
-/** Reads the untruncated transcript in file order: `step_index` has gaps and
- * duplicates, so it is never used for ordering. */
+const stepOf = (value: Obj): number | undefined => (typeof value.step_index === "number" ? value.step_index : undefined);
+
+/** Reads the untruncated transcript in file order, because `step_index` has
+ * gaps and, after `/rewind`, repeats: agy keeps the retracted records and
+ * writes the new pass under the same indices. The index is consulted only
+ * where file order is known to lie, which is a tool result agy wrote before
+ * the planner step that issued it. */
 export const antigravityHandoffEvents: HandoffEventsFn = async (dir, manifest, sink, signal) => {
   const pendingNames: string[] = [];
+  // Results wait for the next record, which may be the planner that issued them.
+  const held: Array<{ lineNo: number; value: Obj }> = [];
+  // Highest step emitted so far. A planner above it is new work, so results
+  // held with a higher step are its own; a user turn at or below it is a rewind.
+  let reached = -1;
+
+  const emit = (lineNo: number, value: Obj) => {
+    const at = `${manifest.primary}:${lineNo}`;
+    const content = typeof value.content === "string" ? value.content : "";
+    const step = stepOf(value);
+    const rewound = value.type === "USER_INPUT" && step !== undefined && step <= reached;
+    if (step !== undefined) reached = Math.max(reached, step);
+
+    switch (value.type) {
+      case "USER_INPUT": {
+        if (value.source !== "USER_EXPLICIT") return;
+        pendingNames.length = 0;
+        if (rewound) {
+          sink({ kind: "note", text: "Antigravity rewound the conversation here; the turns just above, back to the one this prompt replaces, were retracted and are no longer part of its live context.", at });
+        }
+        const text = requestText(content);
+        if (!text) return;
+        sink(userEvent(text, at));
+        return;
+      }
+      case "PLANNER_RESPONSE": {
+        if (content.trim()) sink({ kind: "assistant", text: capEventText(content), at });
+        if (!Array.isArray(value.tool_calls)) return;
+        // Results follow their own planner step, so a call that never got one
+        // must not shift every later result onto the wrong name.
+        pendingNames.length = 0;
+        for (const call of value.tool_calls) {
+          if (!isObj(call) || typeof call.name !== "string") continue;
+          if (pendingNames.length < PENDING_NAMES_MAX) pendingNames.push(call.name);
+          sink({ kind: "tool_call", name: call.name, input: capEventText(stringify(call.args)), at });
+        }
+        return;
+      }
+      case "GENERIC": {
+        const name = pendingNames.shift();
+        const failed = value.status === "ERROR";
+        const body = content.replace(RESULT_HEADER, "");
+        const output = failed && typeof value.error === "string" ? [body, value.error].filter(Boolean).join("\n") : body;
+        sink({ kind: "tool_result", ...(name ? { name } : {}), output: capEventText(output), ...(failed ? { isError: true } : {}), at });
+        return;
+      }
+      case "CHECKPOINT": {
+        const summary = content.trim();
+        sink({ kind: "compaction", ...(summary ? { summary: capEventText(summary) } : {}), at });
+        return;
+      }
+    }
+  };
+
+  const release = (keep: (value: Obj) => boolean = () => false) => {
+    const kept = held.filter(({ value }) => keep(value));
+    for (const result of held) if (!keep(result.value)) emit(result.lineNo, result.value);
+    held.splice(0, held.length, ...kept);
+  };
+
   await forEachJsonlLine(
     join(dir, manifest.primary),
     (lineNo, value) => {
       if (!isObj(value)) return;
-      const at = `${manifest.primary}:${lineNo}`;
-      const content = typeof value.content === "string" ? value.content : "";
-
-      switch (value.type) {
-        case "USER_INPUT": {
-          if (value.source !== "USER_EXPLICIT") return;
-          pendingNames.length = 0;
-          const text = requestText(content);
-          if (!text) return;
-          sink(userEvent(text, at));
-          return;
-        }
-        case "PLANNER_RESPONSE": {
-          if (content.trim()) sink({ kind: "assistant", text: capEventText(content), at });
-          if (!Array.isArray(value.tool_calls)) return;
-          // Results follow their own planner step, so a call that never got one
-          // must not shift every later result onto the wrong name.
-          pendingNames.length = 0;
-          for (const call of value.tool_calls) {
-            if (!isObj(call) || typeof call.name !== "string") continue;
-            if (pendingNames.length < PENDING_NAMES_MAX) pendingNames.push(call.name);
-            sink({ kind: "tool_call", name: call.name, input: capEventText(stringify(call.args)), at });
-          }
-          return;
-        }
-        case "GENERIC": {
-          const name = pendingNames.shift();
-          const failed = value.status === "ERROR";
-          const body = content.replace(RESULT_HEADER, "");
-          const output = failed && typeof value.error === "string" ? [body, value.error].filter(Boolean).join("\n") : body;
-          sink({ kind: "tool_result", ...(name ? { name } : {}), output: capEventText(output), ...(failed ? { isError: true } : {}), at });
-          return;
-        }
-        case "CHECKPOINT": {
-          const summary = content.trim();
-          sink({ kind: "compaction", ...(summary ? { summary: capEventText(summary) } : {}), at });
-          return;
-        }
+      if (value.type === "GENERIC") {
+        held.push({ lineNo, value });
+        if (held.length > PENDING_NAMES_MAX) emit(held[0]!.lineNo, held.shift()!.value);
+        return;
       }
+      const step = stepOf(value);
+      if (value.type === "PLANNER_RESPONSE" && step !== undefined && step > reached) {
+        release((result) => (stepOf(result) ?? -1) > step);
+        emit(lineNo, value);
+        release();
+        return;
+      }
+      release();
+      emit(lineNo, value);
     },
     signal,
   );
+  release();
 };
