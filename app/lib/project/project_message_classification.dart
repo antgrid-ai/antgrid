@@ -57,6 +57,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
 
   'terminal:start',
   'terminal:stop',
+  'terminal:forget',
   'terminal:input',
   'terminal:resize',
   'terminal:output',

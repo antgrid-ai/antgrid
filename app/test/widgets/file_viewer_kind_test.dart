@@ -37,6 +37,12 @@ void main() {
         FileViewerKind.code,
       );
     });
+    test('base64 with no viewer is binary, download only', () {
+      expect(
+        fileViewerKindFor('app.exe', 'base64', 'application/octet-stream'),
+        FileViewerKind.binary,
+      );
+    });
     test('everything else is code', () {
       expect(fileViewerKindFor('main.dart', 'utf8'), FileViewerKind.code);
       expect(fileViewerKindFor('noext', null), FileViewerKind.code);

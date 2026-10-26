@@ -1,4 +1,4 @@
-import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, type Dirent } from "node:fs";
+import { readdirSync, lstatSync, readFileSync, existsSync, realpathSync, openSync, readSync, closeSync, type Dirent } from "node:fs";
 import { isUtf8 } from "node:buffer";
 import { join, resolve, relative, extname, basename } from "node:path";
 import ignore, { type Ignore } from "ignore";
@@ -32,9 +32,10 @@ export const MAX_BATCH_NODES = 10_000;
 
 const MAX_FILE_SIZE = 1_048_576; // 1MB
 const MAX_BINARY_FILE_SIZE = 10_485_760; // 10MB
+const OCTET_STREAM_MIME = "application/octet-stream";
 
-// Binary types we transport as base64 for rendering. Anything else binary is
-// still rejected (the app has no viewer for it).
+// Binary types the app has a viewer for. Any other binary is still transported
+// as base64, labelled OCTET_STREAM_MIME, so the app can offer it for download.
 const RENDERABLE_BINARY_MIME: Record<string, string> = {
   ".png": "image/png",
   ".apng": "image/apng",
@@ -483,6 +484,16 @@ function isBinaryBuffer(buf: Buffer): boolean {
   return false;
 }
 
+function readHead(absPath: string): Buffer {
+  const fd = openSync(absPath, "r");
+  try {
+    const head = Buffer.alloc(BINARY_CHECK_BYTES);
+    return head.subarray(0, readSync(fd, head, 0, BINARY_CHECK_BYTES, 0));
+  } finally {
+    closeSync(fd);
+  }
+}
+
 type ReadFileResult = {
   content: string | null;
   size: number;
@@ -576,13 +587,16 @@ export function readFile(
       return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8", utf8Valid: isUtf8(buf) };
     }
 
-    if (stat.size > MAX_FILE_SIZE) {
-      return tooLarge(stat.size, MAX_FILE_SIZE);
+    // Past the binary cap only the head is read: it decides which cap applies
+    // without pulling a huge file into memory.
+    const buf = stat.size > MAX_BINARY_FILE_SIZE ? readHead(absPath) : readFileSync(absPath);
+    const binary = isBinaryBuffer(buf);
+    const cap = binary ? MAX_BINARY_FILE_SIZE : MAX_FILE_SIZE;
+    if (stat.size > cap) {
+      return tooLarge(stat.size, cap);
     }
-
-    const buf = readFileSync(absPath);
-    if (isBinaryBuffer(buf)) {
-      return { content: null, size: stat.size, error: "Binary file" };
+    if (binary) {
+      return { content: buf.toString("base64"), size: stat.size, encoding: "base64", mimeType: OCTET_STREAM_MIME };
     }
     return { content: buf.toString("utf8"), size: stat.size, encoding: "utf8", utf8Valid: isUtf8(buf) };
   } catch (err: unknown) {

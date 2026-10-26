@@ -2161,6 +2161,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sendStatus();
         break;
       }
+      case "terminal:forget": {
+        // Closing a user terminal's tab. A stop alone leaves the stopped row and
+        // its saved screen behind, so the tab returns on the next connection
+        // (a restart, another device). Services and sessions are never closed
+        // this way: their rows belong to the config and the session list.
+        if (sessions?.get(msg.terminalId)
+          || (runtime.config.services ?? []).some((s) => s.name === msg.terminalId)) break;
+        const forgetId = internalTerminalId(runtime, msg.terminalId);
+        manager.kill(forgetId, AGENT_GRACE_MS);
+        manager.forget(forgetId);
+        sendStatus();
+        break;
+      }
       case "terminal:resize":
         manager.resize(
           internalTerminalId(runtime, msg.terminalId),
@@ -3859,8 +3872,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       const owner = terminalOwner(terminal.terminalId);
       const session = sessions?.get(terminal.terminalId);
+      // A shell left over from an earlier host lifetime has no process, no
+      // Restart and nobody who asked for it: listed, it is only a dead tab that
+      // the app cannot get rid of. Sessions and services are named by other
+      // means, so only an untyped, unowned row is dropped.
+      const { archived, ...status } = terminal;
+      if (archived && !status.type && !session
+        && !(runtime.config.services ?? []).some((s) => s.name === owner.externalId)) return [];
       return owner.runtime === runtime
-        ? [{ ...terminal, terminalId: owner.externalId, name: session?.name ?? terminal.name,
+        ? [{ ...status, terminalId: owner.externalId, name: session?.name ?? terminal.name,
           type: terminal.type ?? (session ? "agent" as const : undefined) }]
         : [];
     });

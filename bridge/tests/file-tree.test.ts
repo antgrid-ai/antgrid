@@ -507,8 +507,10 @@ describe("file-tree", () => {
       writeFileSync(join(tempDir, "binary.dat"), binary);
 
       const result = readFile(tempDir, "binary.dat");
-      expect(result.content).toBeNull();
-      expect(result.error).toBe("Binary file");
+      expect(result.error).toBeUndefined();
+      expect(result.encoding).toBe("base64");
+      expect(result.mimeType).toBe("application/octet-stream");
+      expect(Buffer.from(result.content!, "base64").equals(binary)).toBe(true);
     });
 
     it("rejects files over the size limit", () => {
@@ -572,11 +574,35 @@ describe("file-tree", () => {
       expect(valid.utf8Valid).toBe(true);
     });
 
-    it("non-allowlisted binary still rejected", () => {
-      writeFileSync(join(tempDir, "a.bin"), Buffer.from([0, 1, 2, 0, 3]));
+    it("serves a binary with no viewer as base64 so it can be downloaded", () => {
+      const bytes = Buffer.from([0, 1, 2, 0, 3]);
+      writeFileSync(join(tempDir, "a.bin"), bytes);
       const r = readFile(tempDir, "a.bin");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+      expect(r.mimeType).toBe("application/octet-stream");
+      expect(Buffer.from(r.content!, "base64").equals(bytes)).toBe(true);
+    });
+
+    it("serves a binary between the text and binary caps", () => {
+      writeFileSync(join(tempDir, "mid.bin"), Buffer.alloc(2_000_000, 0));
+      const r = readFile(tempDir, "mid.bin");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+    });
+
+    it("oversized binary with no viewer rejected", () => {
+      writeFileSync(join(tempDir, "big.bin"), Buffer.alloc(10_485_761, 0));
+      const r = readFile(tempDir, "big.bin");
       expect(r.content).toBeNull();
-      expect(r.error).toBe("Binary file");
+      expect(r.error).toContain("File too large");
+      expect(r.error).toContain("10485760");
+    });
+
+    it("oversized text still reports the text cap", () => {
+      writeFileSync(join(tempDir, "huge.txt"), "x".repeat(10_485_761));
+      const r = readFile(tempDir, "huge.txt");
+      expect(r.error).toContain("max 1048576");
     });
 
     it("oversized binary rejected", () => {
