@@ -2,7 +2,7 @@ import { afterAll, test, expect } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readTailUntil, readTranscriptTail, TAIL_BYTES, TAIL_WINDOW_BYTES } from "../src/transcript-tail";
+import { OVERSIZED_LINE_BYTES, readTailUntil, readTranscriptTail, TAIL_BYTES, TAIL_WINDOW_BYTES } from "../src/transcript-tail";
 import {
   lastAssistantText,
   readLastClaudeMessages,
@@ -264,4 +264,52 @@ test("never reads past the widest window", async () => {
   expect(out).toEqual([]);
   expect(seen.length).toBe(TAIL_WINDOW_BYTES.length);
   expect(Math.max(...seen)).toBeLessThanOrEqual(TAIL_WINDOW_BYTES[TAIL_WINDOW_BYTES.length - 1]!);
+});
+
+// An image read or a large file dump is one tool_result line. Counted against
+// the windows, ten of them fill the widest and leave the judge a handful of
+// the twenty messages it asked for.
+test("tool results larger than OVERSIZED_LINE_BYTES do not count against the windows", async () => {
+  const lines: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    lines.push(assistant(`msg-${i}`));
+    if (i >= 10) lines.push(toolResult(OVERSIZED_LINE_BYTES + 300_000));
+  }
+  const path = fixture(lines);
+  const msgs = await readLastClaudeMessages(path, 20);
+  expect(msgs).toHaveLength(20);
+  expect(msgs[0]).toBe("msg-0");
+});
+
+// Skipping a line still means scanning it for its start, so the scan has a
+// ceiling of its own.
+test("does not look further back than the scan ceiling", async () => {
+  const lines = [assistant("before"), ...Array.from({ length: 3 }, () => toolResult(OVERSIZED_LINE_BYTES + 100_000)), assistant("after")];
+  const path = fixture(lines);
+  const texts = (raw: string) => raw.split("\n").filter((l) => l.includes('"text"'));
+  expect(await readTailUntil(path, 20, texts)).toHaveLength(2);
+  expect(await readTailUntil(path, 20, texts, { scanBytes: 1024 * 1024 })).toEqual([assistant("after")]);
+});
+
+// A claimed line no window can hold is never passed over, since older lines
+// without it would give the parser the wrong state.
+test("a claimed line too large for every window ends the read", async () => {
+  const marker = JSON.stringify({ type: "marker", pad: "z".repeat(TAIL_WINDOW_BYTES[TAIL_WINDOW_BYTES.length - 1]!) });
+  const path = fixture([assistant("before"), marker, assistant("after")]);
+  const texts = (raw: string) => raw.split("\n").filter((l) => l.includes('"text"'));
+  expect(await readTailUntil(path, 20, texts, { keepOversized: (head) => head.includes('"marker"') }))
+    .toEqual([assistant("after")]);
+  expect(await readTailUntil(path, 20, texts)).toHaveLength(2);
+});
+
+// Typed text is kept at any size; only tool results are skipped as payloads.
+test("an oversized typed prompt is still read", async () => {
+  const big = "y".repeat(OVERSIZED_LINE_BYTES + 100_000);
+  const path = fixture([
+    assistant("before"),
+    JSON.stringify({ type: "user", message: { role: "user", content: big } }),
+    toolResult(OVERSIZED_LINE_BYTES + 100_000),
+    assistant("after"),
+  ]);
+  expect(await readLastClaudeMessages(path, 20)).toEqual(["before", big, "after"]);
 });

@@ -110,6 +110,11 @@ function emitItem(item: Json, at: string, sink: Sink): void {
       }
       return;
     }
+    case "ImageView": {
+      // The pixels stay in the rollout; the path keeps the turn's shape.
+      sink({ kind: "tool_call", name: "view image", input: capEventText(stringify(item.path)), at });
+      return;
+    }
     default:
       return;
   }
