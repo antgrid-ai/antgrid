@@ -35,8 +35,10 @@ export const TAIL_SCAN_BYTES = 64 * 1024 * 1024;
 
 const SCAN_CHUNK_BYTES = 64 * 1024;
 
-// Holds a Codex rollout line's top-level type, which follows its timestamp.
-const LINE_HEAD_BYTES = 256;
+// Holds what a reader classifies a line by: a Codex rollout line's type and
+// item type, or the start of a Claude line's message content, measured at up
+// to 800 bytes in.
+const LINE_HEAD_BYTES = 1024;
 
 export interface TailReadOptions {
   /** Keeps an oversized line whose first bytes show the parser needs it, such
@@ -113,7 +115,9 @@ export async function readTailUntil<T>(
     const info = await stat(path);
     if (!info.isFile()) return [];
     const file = (fh = await open(path, "r"));
-    const floor = Math.max(0, info.size - (opts.scanBytes ?? TAIL_SCAN_BYTES));
+    // One byte past the ceiling, so a line starting exactly on it has the
+    // newline before it in view and is not taken for a partial one.
+    const floor = Math.max(0, info.size - (opts.scanBytes ?? TAIL_SCAN_BYTES) - 1);
     const lines = linesFromEnd(file, info.size, floor);
     const kept: string[] = []; // newest first
     let keptBytes = 0;
@@ -173,7 +177,7 @@ async function* linesFromEnd(fh: FileHandle, size: number, floor: number): Async
   let cursor = size;
   while (cursor > floor) {
     const from = Math.max(floor, cursor - SCAN_CHUNK_BYTES);
-    const chunk = Buffer.alloc(cursor - from);
+    const chunk = Buffer.allocUnsafe(cursor - from);
     const { bytesRead } = await fh.read(chunk, 0, chunk.length, from);
     // The file shrank under the read, so the offsets no longer hold.
     if (bytesRead < chunk.length) return;

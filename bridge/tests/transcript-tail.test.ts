@@ -301,3 +301,15 @@ test("a claimed line too large for every window ends the read", async () => {
     .toEqual([assistant("after")]);
   expect(await readTailUntil(path, 20, texts)).toHaveLength(2);
 });
+
+// Typed text is kept at any size; only tool results are skipped as payloads.
+test("an oversized typed prompt is still read", async () => {
+  const big = "y".repeat(OVERSIZED_LINE_BYTES + 100_000);
+  const path = fixture([
+    assistant("before"),
+    JSON.stringify({ type: "user", message: { role: "user", content: big } }),
+    toolResult(OVERSIZED_LINE_BYTES + 100_000),
+    assistant("after"),
+  ]);
+  expect(await readLastClaudeMessages(path, 20)).toEqual(["before", big, "after"]);
+});

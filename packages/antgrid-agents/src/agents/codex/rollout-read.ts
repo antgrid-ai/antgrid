@@ -137,11 +137,23 @@ export async function readLastCodexMessages(path: string, n: number): Promise<st
 
 // The first "type" in a rollout line is its own; only timestamp and ordinal
 // come before it. A compaction checkpoint carries the history it replaces, so
-// it can be oversized and must still be read to reset the list.
+// it can be oversized and must still be read to reset the list. An event_msg is
+// claimed only when it can be a message: paginated rollouts also carry tool
+// output (MCP screenshots, command output) as item_completed events, and
+// claiming those would let them fill the windows again. A head too short to
+// name the payload or item is claimed rather than risk dropping a message.
 const LINE_TYPE = /"type":"([a-z_]+)"/;
+const PAYLOAD_TYPE = /"payload":\{"type":"([a-z_]+)"/;
+const ITEM_TYPE = /"item":\{"type":"([A-Za-z]+)"/;
 const readsLine = (head: string) => {
   const type = LINE_TYPE.exec(head)?.[1];
-  return type === "compacted" || type === "event_msg";
+  if (type === "compacted") return true;
+  if (type !== "event_msg") return false;
+  const payload = PAYLOAD_TYPE.exec(head)?.[1];
+  if (payload === undefined || payload === "user_message" || payload === "agent_message") return true;
+  if (payload !== "item_completed") return false;
+  const item = ITEM_TYPE.exec(head)?.[1];
+  return item === undefined || item === "UserMessage" || item === "AgentMessage";
 };
 
 function codexMessagesIn(raw: string): string[] {

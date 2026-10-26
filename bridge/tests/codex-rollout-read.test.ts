@@ -135,6 +135,28 @@ test("readLastCodexMessages reads paginated UserMessage/AgentMessage items", asy
   expect(await readLastCodexMessages(path, 10)).toEqual(["fix the bug", "looking", "done"]);
 });
 
+// A paginated rollout carries tool output in item_completed events too: an MCP
+// screenshot or a command's aggregated output is an event_msg line.
+test("oversized paginated tool items do not push recent messages out", async () => {
+  const lines: object[] = [];
+  for (let i = 0; i < 20; i++) {
+    lines.push(i % 2 ? pagedAgent(`msg-${i}`) : pagedUser(`msg-${i}`));
+    if (i >= 10) {
+      lines.push(completed({ type: "McpToolCall", id: "m", server: "browser", tool: "screenshot", result: { content: [{ type: "image", data: "A".repeat(600_000) }] } }));
+    }
+  }
+  const { path } = makeHome(lines);
+  const msgs = await readLastCodexMessages(path, 20);
+  expect(msgs).toHaveLength(20);
+  expect(msgs[0]).toBe("msg-0");
+});
+
+test("an oversized paginated user message is still read", async () => {
+  const big = "y".repeat(400_000);
+  const { path } = makeHome([pagedUser("old"), pagedUser(big), pagedAgent("new")]);
+  expect(await readLastCodexMessages(path, 10)).toEqual(["old", big, "new"]);
+});
+
 test("a paginated user message split across text parts is joined as written", async () => {
   const { path } = makeHome([
     pagedUser("first line\n", "> quoted\n", "last line"),

@@ -73,8 +73,18 @@ export async function readLastClaudeMessages(transcriptPath: string, n: number):
   // messageText keeps only `text` parts, so the entries that fill the window are
   // mostly the ones this drops. See TAIL_WINDOW_BYTES for what that cost the
   // handler's judge before it was measured.
-  return (await readTailUntil(transcriptPath, n, claudeMessagesIn)).slice(-n);
+  return (await readTailUntil(transcriptPath, n, claudeMessagesIn, { keepOversized: hasTextContent })).slice(-n);
 }
+
+// An oversized line is kept when its content is typed text: a string or a text
+// part. Claude writes one content block per line, and a tool result opens with
+// tool_use_id or tool_result instead. Only the FIRST "content" counts, since a
+// tool result nests a string content of its own. An assistant line names its
+// own type after the message, past the head, so the content is what tells.
+const hasTextContent = (head: string) => {
+  const at = head.indexOf('"content":');
+  return at >= 0 && /^(?:"|\[\{"type":"text")/.test(head.slice(at + '"content":'.length));
+};
 
 // Walks a Claude `message.content` value looking for a text leaf starting
 // with [prefix] — either a plain "text" part, or one nested inside a
