@@ -386,7 +386,13 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
     fork: copilotFork,
-    // Measured against 1.0.95 in an untrusted folder: "Yes" is highlighted.
+    // Measured against 1.0.103 on Windows: one Ctrl-C only arms the quit
+    // ("ctrl+c again to exit") and the session never leaves; two, 300ms apart,
+    // exit an idle session in 1.5-2.1s with code 0. A single-press ask spent
+    // the whole grace and force-killed, which also skipped Copilot's shutdown
+    // flush of its last turn.
+    gracefulExit: { keystrokes: [ETX, ETX] },
+    // Measured against 1.0.95 and 1.0.103 in an untrusted folder: "Yes" is highlighted.
     startupPrompts: ["Confirm folder trust", "Do you trust the files in this folder?"],
     hooks: copilotHooks,
     mcp: copilotMcp,
