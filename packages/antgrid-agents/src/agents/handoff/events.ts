@@ -106,6 +106,14 @@ export function classifyUserText(text: string): { text: string; genuine: boolean
   return extra ? { text: extra, genuine: true, handoffPrompt: true } : { text, genuine: false, handoffPrompt: true };
 }
 
+/** The part of a message that can name a session: the person's own words, or
+ * undefined when it is only Antgrid's handoff prompt, whose template says
+ * nothing about the task. */
+export function authoredText(text: string): string | undefined {
+  const classified = classifyUserText(text);
+  return classified.genuine ? classified.text : undefined;
+}
+
 /** The user event every parser emits; classifies before capping so a long
  * prompt cannot lose its marker. */
 export function userEvent(raw: string, at: string): Extract<HandoffEvent, { kind: "user" }> {

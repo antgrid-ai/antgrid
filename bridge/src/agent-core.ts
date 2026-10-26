@@ -32,6 +32,7 @@ import {
   submittedLine,
 } from "./keystrokes";
 import { transcriptInterruptFor } from "antgrid-agents/builtins";
+import { authoredText } from "antgrid-agents/handoff";
 import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
@@ -5148,7 +5149,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // A post carrying `prompt` needs no read at all: the hook handed us the
     // message the user just submitted, which is both the context and the reason
     // this fires before the transcript has been written.
-    const submitted = target.prompt?.trim();
+    //
+    // Unless it is Antgrid's handoff prompt, which names no task: the read below
+    // drops it too, and the row keeps its fork name until the agent has worked.
+    const submitted = target.prompt ? authoredText(target.prompt)?.trim() : undefined;
     const context = submitted || await buildTitleContext({
       tool,
       transcriptPath: target.transcriptPath,

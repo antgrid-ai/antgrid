@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildTitleContext, generateTitleFromContext, parseTitleFromOutput,
 } from "../src/agents/title-generate";
+import { handoffPrompt } from "../src/handoff/handoff-prompt";
 
 function tmp() { return mkdtempSync(join(tmpdir(), "ab-tg-")); }
 
@@ -136,6 +137,36 @@ describe("generateSessionTitle", () => {
     const { spawn, calls } = fakeSpawn("Something\n");
     expect(await generateSessionTitle({ tool: "claude-code", cwd: tmp(), spawn })).toBeNull();
     expect(calls).toHaveLength(0);
+  });
+
+  describe("a handoff target's transcript", () => {
+    function transcript(dir: string, ...lines: object[]): string {
+      const p = join(dir, "t.jsonl");
+      writeFileSync(p, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+      return p;
+    }
+    const opening = (dir: string) => ({
+      type: "user",
+      message: { content: handoffPrompt({ sourceLabel: "Codex", excerptPath: join(dir, "excerpt.md"), rawPath: join(dir, "rollout.jsonl") }) },
+    });
+
+    test("is named from the work, never from Antgrid's handoff prompt", async () => {
+      const d = tmp();
+      const p = transcript(d, opening(d),
+        { type: "assistant", message: { content: [{ type: "text", text: "Picking the uploader retry back up." }] } });
+      const { spawn, calls } = fakeSpawn("Add upload retry\n");
+      expect(await generateSessionTitle({ tool: "claude-code", cwd: d, transcriptPath: p, spawn })).toBe("Add upload retry");
+      const sent = calls[0]!.join(" ");
+      expect(sent).toContain("Picking the uploader retry back up.");
+      expect(sent).not.toContain("handed off");
+    });
+
+    test("holding only the handoff prompt, has nothing to name yet", async () => {
+      const d = tmp();
+      const { spawn, calls } = fakeSpawn("Something\n");
+      expect(await generateSessionTitle({ tool: "claude-code", cwd: d, transcriptPath: transcript(d, opening(d)), spawn })).toBeNull();
+      expect(calls).toHaveLength(0);
+    });
   });
 
   // kimi carries no headless entry — nobody has run its headless argv —
