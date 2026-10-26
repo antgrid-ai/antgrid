@@ -86,6 +86,38 @@ test("an empty compacted summary is not emitted as a message", async () => {
   expect(await readLastCodexMessages(path, 10)).toEqual(["new"]);
 });
 
+// view_image writes each image into the rollout as one base64 tool output;
+// codex 0.164 wrote ten totalling 5MB into a single thread.
+const imageOutput = (bytes: number) => ({
+  timestamp: "t",
+  type: "response_item",
+  payload: { type: "custom_tool_call_output", call_id: "call", output: [{ type: "input_image", image_url: `data:image/png;base64,${"A".repeat(bytes)}` }] },
+});
+
+test("image outputs larger than the widest window do not push recent messages out", async () => {
+  const lines: object[] = [];
+  for (let i = 0; i < 20; i++) {
+    lines.push(i % 2 ? agentMsg(`msg-${i}`) : userMsg(`msg-${i}`));
+    if (i >= 10) lines.push(imageOutput(600_000));
+  }
+  const { path } = makeHome(lines);
+  const msgs = await readLastCodexMessages(path, 20);
+  expect(msgs).toHaveLength(20);
+  expect(msgs[0]).toBe("msg-0");
+  expect(msgs[19]).toBe("msg-19");
+});
+
+test("an oversized compaction line is still read and resets the list", async () => {
+  const filler = { type: "message", role: "developer", content: [{ type: "input_text", text: "x".repeat(400_000) }] };
+  const { path } = makeHome([
+    userMsg("old"),
+    { timestamp: "t", type: "compacted", payload: { message: "summary of old", replacement_history: [filler] } },
+    imageOutput(600_000),
+    agentMsg("new"),
+  ]);
+  expect(await readLastCodexMessages(path, 10)).toEqual(["summary of old", "new"]);
+});
+
 // Paginated rollouts (codex 0.16x) persist only item_completed for messages.
 const completed = (item: object) => ({ timestamp: "t", type: "event_msg", payload: { type: "item_completed", thread_id: THREAD, turn_id: "turn", item } });
 const pagedUser = (...parts: string[]) => completed({ type: "UserMessage", id: "u", content: parts.map((text) => ({ type: "text", text, text_elements: [] })) });

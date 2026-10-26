@@ -132,8 +132,17 @@ export async function readLastCodexMessages(path: string, n: number): Promise<st
   // rollout interleaves its conversation with response_item twins and tool
   // traffic this drops, so the share of a byte window that survives to here is
   // small and varies by session.
-  return (await readTailUntil(path, n, codexMessagesIn)).slice(-n);
+  return (await readTailUntil(path, n, codexMessagesIn, { keepOversized: readsLine })).slice(-n);
 }
+
+// The first "type" in a rollout line is its own; only timestamp and ordinal
+// come before it. A compaction checkpoint carries the history it replaces, so
+// it can be oversized and must still be read to reset the list.
+const LINE_TYPE = /"type":"([a-z_]+)"/;
+const readsLine = (head: string) => {
+  const type = LINE_TYPE.exec(head)?.[1];
+  return type === "compacted" || type === "event_msg";
+};
 
 function codexMessagesIn(raw: string): string[] {
   let out: string[] = [];

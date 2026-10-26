@@ -154,6 +154,14 @@ test("tail items become assistant, tool call and tool result events", async () =
   expect(events[6]).toMatchObject({ text: "Plan:\n1. do it" });
 });
 
+test("an image view keeps its place in the turn as a tool call naming the file", async () => {
+  const events = await run({
+    "codex-rollout-01.jsonl": [user("check the layout"), item({ type: "ImageView", id: "exec-1", path: "shots/home.png" }), agent("looks right")],
+  });
+  expect(events.map((e) => e.kind)).toEqual(["user", "tool_call", "assistant"]);
+  expect(events[1]).toMatchObject({ name: "view image", input: "shots/home.png" });
+});
+
 test("a usage-limit turn error becomes an assistant note", async () => {
   const events = await run({
     "codex-rollout-01.jsonl": [
