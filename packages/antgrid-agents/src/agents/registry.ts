@@ -199,8 +199,17 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // but that is a different case from a turn to confirm closed.
     transcriptInterrupt: isCodexInterruptRecord,
     // Measured against 0.163.0 in an untrusted folder: "Trust and continue" is
-    // highlighted, and the decision is saved for the whole repository.
-    startupPrompts: ["Trust this folder?", "Trust and continue"],
+    // highlighted, and the decision is saved for the whole repository. The
+    // update and hooks-review screens (0.164.0 source and binary) open before
+    // the session too: the update screen ignores pastes and Enter runs the
+    // highlighted "Update now", which replaces the CLI and exits it. The
+    // update rows are the options, not the heading, because the in-session
+    // "Update available!" notice is not a choice.
+    startupPrompts: [
+      "Trust this folder?", "Trust and continue",
+      "Update now (runs", "Skip until next version",
+      "Hooks need review",
+    ],
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
     //
