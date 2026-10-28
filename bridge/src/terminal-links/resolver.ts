@@ -203,7 +203,7 @@ export interface ClassifyHints {
 /** The kind of link a found path earns, or undefined for none. Containment is
  *  lexical unless both real paths are known: a path inside the checkout that
  *  reaches outside it through a link is outside, and then earns a link only as
- *  an image the preview can show. */
+ *  a file the preview can show. */
 export function classifyPath(
   abs: string,
   status: "file" | "dir",

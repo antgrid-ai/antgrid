@@ -33,6 +33,22 @@ Future<void> initDesktopWindowChrome() async {
   await windowManager.setMinimumSize(const Size(640, 400));
 }
 
+/// Raises the app window for an OS notification tap. A toast click only invokes
+/// the plugin callback in-process; it does not restore a minimized or hidden
+/// window, so without this the route is applied to a window nobody can see.
+/// No-op off desktop.
+Future<void> bringWindowToFront() async {
+  if (kIsWeb) return;
+  if (defaultTargetPlatform != TargetPlatform.windows &&
+      defaultTargetPlatform != TargetPlatform.macOS &&
+      defaultTargetPlatform != TargetPlatform.linux) {
+    return;
+  }
+  if (await windowManager.isMinimized()) await windowManager.restore();
+  if (!await windowManager.isVisible()) await windowManager.show();
+  await windowManager.focus();
+}
+
 /// Window actions, behind an interface so widget tests never touch `dart:io`.
 abstract class WindowChrome {
   Future<void> startDragging();

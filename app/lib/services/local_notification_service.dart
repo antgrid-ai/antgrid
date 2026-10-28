@@ -76,11 +76,18 @@ class LocalNotificationService {
         iOS: DarwinInitializationSettings(),
         macOS: DarwinInitializationSettings(),
         windows: WindowsInitializationSettings(
-          appName: 'Antgrid',
-          appUserModelId: 'com.antgrid.app',
-          // Also the MSIX `toast_activator.clsid` in pubspec.yaml; if they
-          // drift, a Store toast click opens a second instance.
-          guid: 'd49b0314-ee7a-4626-bf79-97cdb8a991ab',
+          appName: kDebugMode ? 'Antgrid (dev)' : 'Antgrid',
+          // A debug build must not share the installed app's identity: Windows
+          // routes a toast click by AUMID/CLSID, and the packaged manifest
+          // wins, so a dev toast click would activate the installed app and
+          // never reach this process.
+          appUserModelId: kDebugMode ? 'com.antgrid.app.dev' : 'com.antgrid.app',
+          // Release value is also the MSIX `toast_activator.clsid` in
+          // pubspec.yaml; if they drift, a Store toast click opens a second
+          // instance.
+          guid: kDebugMode
+              ? '5b0e8f6a-3c1d-4a52-9d7e-2f4c8a1b6e93'
+              : 'd49b0314-ee7a-4626-bf79-97cdb8a991ab',
         ),
         linux: LinuxInitializationSettings(defaultActionName: 'Open'),
       );

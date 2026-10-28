@@ -818,9 +818,10 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   relPath: z.string().nullable(),
   isDirectory: z.boolean(),
   // Absolute path, set only when relPath is null AND the path is a
-  // recognized image or markdown file outside the checkout (see file-tree.ts's
-  // externalSafePreview) — an image-generation tool's output or an agent's
-  // plan, typically. Named for its first use; kept for wire compatibility. Lets the app preview it read-only via `file:read`
+  // file the viewer can show outside the checkout (see file-tree.ts's
+  // externalSafePreview: images, PDF, markdown, text/code, never a credential
+  // file). Named for its first use, an image tool's output; kept for wire
+  // compatibility. Lets the app preview it read-only via `file:read`
   // (which applies the same extension gate again) instead of refusing the
   // link outright.
   externalImagePath: z.string().nullable(),

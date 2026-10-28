@@ -47,6 +47,9 @@ class AdHocTerminalsNotifier extends Notifier<List<TerminalTab>> {
         if (t.terminalId != 'agent' &&
             t.type != 'agent' &&
             t.type != 'service' &&
+            // An exited shell is not resumable; listing it only offers a
+            // "Start" screen after an app restart. New Terminal replaces it.
+            t.sessionState != TerminalSessionState.exited &&
             !setupIds.contains(t.terminalId))
           t,
     ];

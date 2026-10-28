@@ -58,20 +58,17 @@ export function renderableBinaryMime(path: string): string | undefined {
   return RENDERABLE_BINARY_MIME[extname(path).toLowerCase()];
 }
 
-/// Raster image types `readFile` will serve from OUTSIDE the checkout root —
-/// deliberately a narrower subset of [RENDERABLE_BINARY_MIME], for a path a
-/// terminal program printed (an OSC 8 `file://` hyperlink target, e.g. an
-/// image-generation tool's own output directory) rather than one the app
-/// found by walking this checkout's tree. That distinction is exactly the
-/// trust boundary: everything ELSE in this file assumes a path came from the
-/// tree or from inside the checkout, and readFile's traversal guard exists
-/// because a hyperlink's target is untrusted (whatever program is running in
-/// the terminal chose it, not the user). Two are withheld even though
-/// RENDERABLE_BINARY_MIME carries them: `.pdf` for its larger parser attack
-/// surface, and `.ico` for having no real "generated output" use case here —
-/// neither is worth the exposure for a path this app never chose to trust
-/// with a checkout. `.svg` was never in RENDERABLE_BINARY_MIME to begin with
-/// (it can embed a script), so it needs no separate exclusion here.
+/// What `readFile` will serve from OUTSIDE the checkout root — a path a terminal
+/// program printed (an OSC 8 `file://` hyperlink, or a path in its output)
+/// rather than one the app found by walking this checkout's tree. That is the
+/// trust boundary: whatever program is running in the terminal chose the path,
+/// not the user, and readFile's traversal guard exists for exactly that reason.
+///
+/// The gate is the file's NAME alone, checked before any stat, so it cannot be
+/// used to probe the disk for anything it would not serve: a type the app has a
+/// viewer for, minus anything that is likely to hold a credential
+/// ([isSecretBearingPath]). `.svg` is excluded because it can embed a script.
+/// Every other binary stays out; the app would only offer it for download.
 const EXTERNAL_SAFE_IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
   ".apng": "image/apng",
@@ -81,21 +78,49 @@ const EXTERNAL_SAFE_IMAGE_MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
   ".avif": "image/avif",
 };
 
-/// Markdown is the one text type served from outside the checkout: agents
-/// write plans and reports to their own directories, and the app renders it
-/// as inert text. Keep in lockstep with `_markdownExts` in
+/// Markdown renders as inert text. Keep in lockstep with `_markdownExts` in
 /// `app/lib/widgets/file_viewer_kind.dart`, or the preview shows source.
 const EXTERNAL_SAFE_MARKDOWN_EXTS = new Set([".md", ".markdown", ".mdx"]);
 
-/// Whether [path]'s extension is one `readFile` will serve from outside the
-/// checkout root — see [EXTERNAL_SAFE_IMAGE_MIME] and
-/// [EXTERNAL_SAFE_MARKDOWN_EXTS].
+/// Text the app shows in its code view. An allowlist rather than "anything
+/// text": an unknown extension says nothing about what is inside.
+const EXTERNAL_SAFE_TEXT_EXTS = new Set([
+  ".txt", ".log", ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+  ".csv", ".tsv", ".xml", ".html", ".htm", ".css", ".scss", ".less", ".diff", ".patch",
+  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".dart", ".py", ".rb", ".go", ".rs", ".java",
+  ".kt", ".swift", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".lua", ".r", ".sql",
+  ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd", ".gradle", ".properties", ".tex",
+]);
+
+/// Names and directories that hold credentials. Matched on the path as
+/// printed, either separator, because the bridge machine's OS is not the app's.
+const SECRET_FILE_NAME =
+  /^(\.env(\..*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.htpasswd|id_(rsa|dsa|ecdsa|ed25519)(\..*)?|credentials(\..*)?|secrets?(\..*)?|.*\.(pem|key|p12|pfx|jks|keystore|ppk|kdbx|gpg|asc))$/i;
+const SECRET_DIRS = new Set([".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".gcloud"]);
+
+/// Whether [path] names a file likely to hold a credential. Applied to the
+/// printed path, so a link cannot launder one through a harmless name.
+export function isSecretBearingPath(path: string): boolean {
+  const parts = path.split(/[/\\]/).filter((p) => p.length > 0);
+  const name = parts[parts.length - 1] ?? "";
+  if (SECRET_FILE_NAME.test(name)) return true;
+  return parts.slice(0, -1).some((p) => SECRET_DIRS.has(p.toLowerCase()));
+}
+
+/// Whether [path] is one `readFile` will serve from outside the checkout root.
 export function externalSafePreview(path: string): boolean {
+  if (isSecretBearingPath(path)) return false;
   const ext = extname(path).toLowerCase();
-  return ext in EXTERNAL_SAFE_IMAGE_MIME || EXTERNAL_SAFE_MARKDOWN_EXTS.has(ext);
+  return (
+    ext in EXTERNAL_SAFE_IMAGE_MIME ||
+    ext === ".pdf" ||
+    EXTERNAL_SAFE_MARKDOWN_EXTS.has(ext) ||
+    EXTERNAL_SAFE_TEXT_EXTS.has(ext)
+  );
 }
 
 const DEFAULT_IGNORES = [

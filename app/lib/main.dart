@@ -413,7 +413,10 @@ Future<void> main() async {
   LocalNotificationService().onTap = (response) => detached(
     'Main',
     'notification tap failed',
-    () => handleNotificationRoute(routeOfTapResponse(response)),
+    () async {
+      await bringWindowToFront();
+      await handleNotificationRoute(routeOfTapResponse(response));
+    },
   );
 
   // iOS ONLY — see [pushTapRegistrationSupported] for why the narrowing is the

@@ -557,11 +557,14 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   }
 
   Widget _buildHeader(FileContent content) {
+    final embedded = ViewerChrome.embeddedIn(context);
     return AbToolbar.actions(
-      center: Align(
-        alignment: Alignment.centerLeft,
-        child: ViewerPathBreadcrumb(path: content.path),
-      ),
+      center: embedded
+          ? const SizedBox.shrink()
+          : Align(
+              alignment: Alignment.centerLeft,
+              child: ViewerPathBreadcrumb(path: content.path),
+            ),
       trailing: [
         AbIconButton(
           icon: AbIcons.search,
@@ -575,12 +578,13 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
             onTap: widget.onShowPreview,
             tooltip: 'Show preview',
           ),
-        FileDownloadButton(content: content),
-        AbIconButton(
-          icon: AbIcons.close,
-          onTap: widget.onClose,
-          tooltip: 'Close file',
-        ),
+        if (!embedded) FileDownloadButton(content: content),
+        if (!embedded)
+          AbIconButton(
+            icon: AbIcons.close,
+            onTap: widget.onClose,
+            tooltip: 'Close file',
+          ),
       ],
     );
   }

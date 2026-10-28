@@ -14,6 +14,20 @@ import '../providers/providers.dart';
 import 'copy_path.dart';
 import 'file_download.dart';
 
+/// Marks a subtree whose host already draws the file's title bar (name, path,
+/// download, close), so the viewers inside keep only their own tools. The
+/// preview popup is the one host.
+class ViewerChrome extends InheritedWidget {
+  const ViewerChrome({super.key, required super.child});
+
+  /// Whether the nearest host owns the title bar.
+  static bool embeddedIn(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<ViewerChrome>() != null;
+
+  @override
+  bool updateShouldNotify(ViewerChrome oldWidget) => false;
+}
+
 /// Shared header for media/preview viewers. [trailing] holds optional actions
 /// (e.g. a preview/source toggle) placed left of Download and close.
 Widget buildViewerHeader({
@@ -21,18 +35,29 @@ Widget buildViewerHeader({
   VoidCallback? onClose,
   List<Widget> trailing = const [],
 }) {
-  return AbToolbar.custom(
-    children: [
-      Expanded(
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: ViewerPathBreadcrumb(path: content.path),
-        ),
-      ),
-      ...trailing,
-      FileDownloadButton(content: content),
-      if (onClose != null) AbIconButton(icon: AbIcons.close, onTap: onClose),
-    ],
+  return Builder(
+    builder: (context) {
+      if (ViewerChrome.embeddedIn(context)) {
+        if (trailing.isEmpty) return const SizedBox.shrink();
+        return AbToolbar.custom(
+          children: [const Spacer(), ...trailing],
+        );
+      }
+      return AbToolbar.custom(
+        children: [
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ViewerPathBreadcrumb(path: content.path),
+            ),
+          ),
+          ...trailing,
+          FileDownloadButton(content: content),
+          if (onClose != null)
+            AbIconButton(icon: AbIcons.close, onTap: onClose),
+        ],
+      );
+    },
   );
 }
 
