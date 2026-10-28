@@ -67,8 +67,8 @@ void main() {
         projects: <PickerProject>[],
       ),
     ]),
-    newSessionDetectedToolsProvider.overrideWith(
-      (ref) async => const <String, String?>{},
+    detectedToolsForProvider.overrideWith(
+      (ref, target) async => const <String, String?>{},
     ),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
     if (surface != null)

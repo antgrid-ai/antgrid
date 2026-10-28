@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 const _target = LocalProject('p');
 const _remote = RemoteProject(machineUuid: 'm', projectId: 'p');
 
-ProviderContainer _container(Future<Map<String, String?>> Function() detect) {
+ProviderContainer _container(Future<Map<String, String?>?> Function() detect) {
   final container = ProviderContainer(
     overrides: [
       detectedToolsForProvider.overrideWith((ref, target) => detect()),
@@ -21,7 +21,7 @@ ProviderContainer _container(Future<Map<String, String?>> Function() detect) {
 }
 
 /// A remote machine whose control plane is fed by hand, with the real
-/// [detectedToolsForProvider] reading it: that provider's empty answer before
+/// [detectedToolsForProvider] reading it: that provider's null answer before
 /// the `agent:tools` advert is the thing under test.
 ProviderContainer _remoteContainer(StreamController<ControlPlaneState> plane) {
   final container = ProviderContainer(
@@ -38,7 +38,9 @@ ProviderContainer _remoteContainer(StreamController<ControlPlaneState> plane) {
 
 void main() {
   test('detection that never answers throws', () async {
-    final container = _container(() => Completer<Map<String, String?>>().future);
+    final container = _container(
+      () => Completer<Map<String, String?>?>().future,
+    );
     await expectLater(
       handoffTargetsFor(
         container,
@@ -50,10 +52,10 @@ void main() {
     );
   });
 
-  // A failed local lookup arrives as an empty map; reading it as "no other
-  // agent installed" would tell the user something false.
-  test('nothing detected reads as a failed lookup', () async {
-    final container = _container(() async => const <String, String?>{});
+  // Reading a failed lookup as "no other agent installed" would tell the user
+  // something false.
+  test('a lookup that could not ask the machine throws', () async {
+    final container = _container(() async => throw StateError('no host'));
     await expectLater(
       handoffTargetsFor(container, _target, sourceTool: 'codex'),
       throwsA(isA<StateError>()),
@@ -105,9 +107,9 @@ void main() {
     expect(targets.map((t) => t.tool), ['codex', 'claude-code']);
   });
 
-  // The New Session picker reads the same provider and caches its empty
+  // The New Session picker reads the same provider and caches its null
   // pre-advert answer; the fork's lookup must not inherit it.
-  test('an empty answer cached before the advert is not reused', () async {
+  test('a null answer cached before the advert is not reused', () async {
     final plane = StreamController<ControlPlaneState>();
     final container = _remoteContainer(plane);
     container.listen(detectedToolsForProvider(_remote), (_, _) {});
@@ -115,7 +117,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(
       await container.read(detectedToolsForProvider(_remote).future),
-      isEmpty,
+      isNull,
     );
 
     final pending = handoffTargetsFor(container, _remote, sourceTool: 'codex');

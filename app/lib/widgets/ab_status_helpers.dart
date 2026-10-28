@@ -222,6 +222,11 @@ String emptyAdvertHint(bool? remoteAccessEnabled) =>
       null => 'Machine offline',
     };
 
+/// A machine's installed-agents lookup, still running and failed. Shared by the
+/// fork dialog and the New Session agent menu, which ask the same question.
+const agentsCheckingCopy = 'Checking installed agents…';
+const agentsUnlistedCopy = "Couldn't list installed agents.";
+
 /// Maps [TerminalSessionState] to a status tone for the leading dot.
 ///
 /// Green/red/grey and NOT the agent tones an agent session row uses for what
