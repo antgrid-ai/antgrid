@@ -15,6 +15,7 @@ import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_touch_sizing.dart';
+import 'ab_status_helpers.dart' show agentsCheckingCopy, agentsUnlistedCopy;
 
 /// The two workspaces a fork can run in, spelled the way `session:fork` spells
 /// them, so nothing has to translate between the control the user touched and
@@ -140,8 +141,8 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   /// says "this machine": on a phone, the machine in hand is not the one asked.
   String? get _agentNote {
     final answer = _answer;
-    if (answer == null) return 'Checking installed agents…';
-    if (answer.failed) return "Couldn't list installed agents.";
+    if (answer == null) return agentsCheckingCopy;
+    if (answer.failed) return agentsUnlistedCopy;
     if (answer.targets.any((t) => t.tool != widget.source?.tool)) return null;
     return 'No other agent installed.';
   }

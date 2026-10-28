@@ -30,7 +30,6 @@ import '../../launcher/host_control_client.dart' show HostControlException;
 // composer); re-exported so existing importers keep resolving it from here.
 export '../../design/widgets/ab_composer_send_button.dart'
     show ComposerSendButton;
-import '../../models/agent_descriptor.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
@@ -39,10 +38,12 @@ import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
 import '../../util/ab_log.dart';
 import '../../util/detached.dart';
-import '../ab_status_helpers.dart' show sessionRefusalCopy;
+import '../ab_status_helpers.dart'
+    show agentsCheckingCopy, agentsUnlistedCopy, sessionRefusalCopy;
 import 'branch_menu.dart';
 import 'branch_remote_advisory.dart';
 import 'environment_menu.dart';
+import 'picker_sources.dart';
 import 'project_menu.dart';
 
 typedef StartNewSessionCallback =
@@ -1209,11 +1210,8 @@ class _AgentSelector extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final agent = ref.watch(newSessionAgentProvider);
-    final detected =
-        ref.watch(newSessionDetectedToolsProvider).value ??
-        const <String, String?>{};
+    final detected = ref.watch(newSessionDetectedToolsProvider).value;
     final catalog = ref.watch(agentCatalogProvider);
-    final options = _buildAgentOptions(detected, catalog, agent);
 
     return ComposerChip(
       key: const Key('new-session-agent-selector'),
@@ -1223,19 +1221,15 @@ class _AgentSelector extends ConsumerWidget {
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
-        final picked = await showAbMenu<NewSessionAgent>(
+        // A panel rather than a static menu: detection can still be under way
+        // when the menu opens, and its rows have to arrive while it is up.
+        final picked = await showAbPanel<NewSessionAgent>(
           context: ctx,
           preferred: AbMenuPlacement.above,
           anchorRect: anchor,
           bounds: MenuBoundsScope.maybeOf(ctx),
-          entries: [
-            for (final a in options)
-              AbMenuItem(
-                label: newSessionAgentLabel(a, detected, catalog),
-                value: a,
-                icon: a == agent ? AbIcons.check : null,
-              ),
-          ],
+          width: 240,
+          builder: (_) => const _AgentPanel(),
         );
         if (picked != null) {
           ref.read(newSessionAgentProvider.notifier).set(picked);
@@ -1246,25 +1240,68 @@ class _AgentSelector extends ConsumerWidget {
   }
 }
 
+/// Live content of the agent menu: a line saying why the list is short while
+/// the target has not answered or could not be asked, then the options.
+class _AgentPanel extends ConsumerWidget {
+  const _AgentPanel();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final agent = ref.watch(newSessionAgentProvider);
+    final tools = ref.watch(newSessionDetectedToolsProvider);
+    final detected = tools.value;
+    final catalog = ref.watch(agentCatalogProvider);
+    final status = _agentListStatus(
+      tools,
+      ref.watch(selectedTargetProjectProvider),
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (status != null) PanelHint(status),
+        for (final a in _buildAgentOptions(detected, agent))
+          PanelRow(
+            icon: a is CustomAgent ? AbIcons.code : AbIcons.terminal,
+            label: newSessionAgentLabel(a, detected, catalog),
+            selected: a == agent,
+            mono: false,
+            onTap: () => Navigator.of(context).pop<NewSessionAgent>(a),
+          ),
+      ],
+    );
+  }
+}
+
+/// Why the agent menu offers nothing beyond the current pick, or null when the
+/// target has answered (or there is no target to ask).
+String? _agentListStatus(
+  AsyncValue<Map<String, String?>?> tools,
+  PickerProject? target,
+) {
+  if (target == null) return null;
+  if (tools.hasError) {
+    return target.isLocal ? agentsUnlistedCopy : 'Machine offline';
+  }
+  if (tools.value == null) return agentsCheckingCopy;
+  return null;
+}
+
 /// Build the agent menu's options from the tools detected on the target.
 ///
 /// The options ARE the advertised tools, in the bridge's order — an agent this
 /// app predates still appears, which the app-side enum this replaced could not
-/// do. When [detected] is empty (detection still in flight, target not focused,
-/// or an older agent without the handler) the persisted [catalog] stands in, so
-/// the menu still lists the agents some bridge has described rather than a set
-/// this app shipped guessing at. `Custom` is always last, and the current
-/// [selected] agent is always included so the trigger never renders a hidden
-/// option — which is also what keeps the menu non-empty on a cold install with
-/// no catalog yet.
+/// do. Until the target has answered ([detected] null) no agent is offered
+/// beyond the current pick: the persisted catalog would stand in with every
+/// agent any bridge has described, installed on this machine or not. `Custom`
+/// is always last, and the current [selected] agent is always included so the
+/// trigger never renders a hidden option.
 List<NewSessionAgent> _buildAgentOptions(
-  Map<String, String?> detected,
-  Map<String, AgentDescriptor> catalog,
+  Map<String, String?>? detected,
   NewSessionAgent selected,
 ) {
-  final keys = detected.isNotEmpty ? detected.keys : catalog.keys;
   final options = <NewSessionAgent>[
-    for (final key in keys) KnownAgent(key),
+    for (final key in detected?.keys ?? const <String>[]) KnownAgent(key),
     const CustomAgent(),
   ];
   if (!options.contains(selected)) return [selected, ...options];

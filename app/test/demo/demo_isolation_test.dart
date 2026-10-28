@@ -516,7 +516,9 @@ void main() {
     );
 
     await container.read(focusedMachineToolsProvider.future);
-    await container.read(newSessionDetectedToolsProvider.future);
+    await container.read(
+      detectedToolsForProvider(sessionTargetOf(project)).future,
+    );
     await container.read(newSessionChatCapableToolsProvider.future);
     await container.read(newSessionBranchCatalogProvider.future);
     await container.read(
