@@ -55,7 +55,7 @@ dependencies:
   # Ghostty's VT engine in Flutter — production terminal renderer.
   # Wins decisively on TUI block-element rendering (▀ ▄ █ etc) over the
   # previous kterm-based path which required a custom geometric painter.
-  ghostty_vte_flutter: ^0.1.3
+  ghostty_vte_flutter: ^0.2.0-beta.2
   # Preview webview: both the app-facing API (WebViewController/WebViewWidget)
   # and every platform impl — WebView2 (Windows), WKWebView (macOS/iOS),
   # WebKitGTK 4.1 (Linux), Android. Since 1.3.0 it vendors its own
@@ -205,17 +205,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

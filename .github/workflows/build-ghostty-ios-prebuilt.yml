@@ -17,7 +17,7 @@ on:
       vte_release_tag:
         description: ghostty_vte release to take the device asset from (must match the vendored bindings' ABI — the script verifies this)
         required: false
-        default: ghostty_vte-v0.1.4
+        default: ghostty_vte-v0.2.0-beta.2
       expected_payload_sha256:
         description: sha256 the fork's native_prebuilt.lock.yaml records for ios-arm64 (leave blank to use the script default)
         required: false

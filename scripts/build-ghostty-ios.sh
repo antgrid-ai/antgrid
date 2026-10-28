@@ -40,11 +40,11 @@ set -euo pipefail
 # ArgumentError at the first call of each absent function — on device, never on
 # simulator. The symbol check at the end of this script is what catches it.
 VTE_RELEASE_REPO="${VTE_RELEASE_REPO:-kingwill101/dart_terminal}"
-VTE_RELEASE_TAG="${VTE_RELEASE_TAG:-ghostty_vte-v0.1.4}"
+VTE_RELEASE_TAG="${VTE_RELEASE_TAG:-ghostty_vte-v0.2.0-beta.2}"
 # The payload hash the fork's native_prebuilt.lock.yaml records for ios-arm64.
 # Pinning it here ties the committed override to the same bytes the hook would
 # have downloaded, so a silently re-cut upstream asset fails loudly.
-EXPECTED_PAYLOAD_SHA256="${EXPECTED_PAYLOAD_SHA256:-71d259c95a320e914657dddd1f95ff2ad25057c8dc9f92f577073d495777ad3a}"
+EXPECTED_PAYLOAD_SHA256="${EXPECTED_PAYLOAD_SHA256:-a6c2dcd8050ca6e13ed99195dbd255f92e9883ebec6d64b4414ea724b5e06ca1}"
 # Must equal Flutter's native-asset framework MinimumOSVersion (see the ITMS-90208
 # note above). A framework may declare a lower floor than the app; the app's own
 # deployment target is what actually bounds the install base.

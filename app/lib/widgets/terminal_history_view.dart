@@ -50,6 +50,10 @@ final RegExp _uriControlChars = RegExp(r'[\x00-\x1f\x7f-\x9f]');
 const int _historyEngineMaxLines = 8000;
 const int _historyRenderMaxLines = 6000;
 
+// Effectively unbounded: the engine treats this as a limit, not a reservation,
+// and it stays within a 32-bit size_t for the web runtime.
+const int _scratchEngineMaxLines = 1 << 30;
+
 /// Encodes archived rows as terminal output a VT engine can ingest.
 ///
 /// Rows are re-joined into LOGICAL lines: `wrapped` means "this row continues
@@ -107,7 +111,15 @@ VtTerminal _openScratchEngine(int cols) {
     debugTerminalHistoryScratchEngines++;
     return true;
   }());
-  return GhosttyVt.newTerminal(cols: cols, rows: 1, maxScrollback: 64 << 20);
+  // A counter, not a mirror of the reader: it must never drop a row, or
+  // `totalRows` plateaus and the starts and line counts measured past the
+  // limit come out short. Re-measuring the old window at a narrower width
+  // after a resize can run far past the reader's own depth.
+  return GhosttyVt.newTerminal(
+    cols: cols,
+    rows: 1,
+    maxScrollback: _scratchEngineMaxLines,
+  );
 }
 
 /// First index whose rowId is >= [rowId], or `rows.length`. [rows] must be
@@ -498,8 +510,6 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
     super.initState();
     _controller = GhosttyTerminalController(
       maxLines: _historyEngineMaxLines,
-      maxScrollbackLines: _historyEngineMaxLines,
-      maxScrollback: 64 << 20,
       // The view resizes its controller to the pane on its first layout, so
       // these are only what the rows are ingested against for the one frame
       // before that lands.

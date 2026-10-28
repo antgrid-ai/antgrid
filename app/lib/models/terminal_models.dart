@@ -56,7 +56,7 @@ class TerminalTab {
   /// The scrollback this terminal's engine no longer holds.
   ///
   /// Frame mode replaces the whole screen on every frame and keeps nothing
-  /// above it, so [ghostty]'s own `maxScrollbackLines` budget goes unused and
+  /// above it, so [ghostty]'s own `maxScrollback` budget goes unused and
   /// the rows that scrolled off live only in the agent's archive. This is the
   /// app's window onto that archive, paged on demand.
   ///
@@ -113,14 +113,11 @@ class TerminalTab {
              initialCols: cols,
              initialRows: rows,
              mouseMotionReportInterval: const Duration(milliseconds: 50),
+             // Also the engine's scrollback in rows: `maxScrollback` defaults
+             // to `maxLines`, so the depth no longer depends on width. The
+             // engine prunes whole pages, so it holds at most this many rows
+             // and can hold up to a page fewer.
              maxLines: 10000,
-             // Rows, not bytes: at an agent-sized 202 columns a 10k-row
-             // history is roughly 17 MB, so the ceiling is generous enough
-             // that the row budget is what actually binds. Sizing this in
-             // bytes instead would retain ~2.5x fewer rows on a wide terminal
-             // than a narrow one.
-             maxScrollback: 64 << 20,
-             maxScrollbackLines: 10000,
            ),
        replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0),
        latestFrame = latestFrame ?? ValueNotifier<TerminalFrameMessage?>(null);

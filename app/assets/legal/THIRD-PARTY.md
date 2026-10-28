@@ -142,7 +142,7 @@ ghostty_vte:
   git:
     url: https://github.com/antgrid-ai/dart_terminal.git
     path: pkgs/vte/ghostty_vte
-    ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+    ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
 ```
 
 `ghostty_vte_flutter` and `portable_pty` are pinned to the same repository and
@@ -154,9 +154,9 @@ that was never distributed and no one finds out until it matters.
 
 | Package | Version | Licence | Copyright holder | Upstream |
 |---|---|---|---|---|
-| `ghostty_vte` | 0.1.4+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/vte/ghostty_vte` |
-| `ghostty_vte_flutter` | 0.1.4+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/vte/ghostty_vte_flutter` |
-| `portable_pty` | 0.0.6+antgrid.2 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/pty/portable_pty` |
+| `ghostty_vte` | 0.2.0-beta.2+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/vte/ghostty_vte` |
+| `ghostty_vte_flutter` | 0.2.0-beta.2+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/vte/ghostty_vte_flutter` |
+| `portable_pty` | 0.0.7-beta.2+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 | `https://github.com/kingwill101/dart_terminal/tree/master/pkgs/pty/portable_pty` |
 
 The MIT texts are not redistributed in this repository — each package carries its
 upstream `LICENSE` in the fork, and pub resolves it into the pub cache alongside
@@ -255,8 +255,8 @@ be satisfied.
 | Project | Ghostty, `https://github.com/ghostty-org/ghostty` |
 | Licence | MIT |
 | Copyright holder | Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors |
-| Pinned commit for the released libraries | `4d605bf0d819df901a0332bbb320dc849fdd82e4` (`native_prebuilt.yaml` in the fork) |
-| Pinned commit for the iOS prebuilt | the same — `app/.prebuilt/ios-arm64/libghostty-vt.dylib` is the upstream `ghostty_vte-v0.1.4` device asset with its `minos` restamped (`scripts/build-ghostty-ios.sh`) |
+| Pinned commit for the released libraries | `f2d5758f6305867dc36b36293c6165d8152b853e` (`native_prebuilt.yaml` in the fork) |
+| Pinned commit for the iOS prebuilt | the same — `app/.prebuilt/ios-arm64/libghostty-vt.dylib` is the upstream `ghostty_vte-v0.2.0-beta.2` device asset with its `minos` restamped (`scripts/build-ghostty-ios.sh`) |
 
 **The shipped library is a modified work.** On Android, `ghostty_vte`'s build
 recipe applies `ghostty-libvt-link-libc.patch` to Ghostty source before
@@ -393,7 +393,7 @@ copyright holder read from each package's own licence file.
 | `flutter_riverpod` | 3.3.2 | MIT | Copyright (c) 2020 Remi Rousselet |
 | `flutter_secure_storage` | 10.3.1 | BSD-3-Clause | Copyright 2017 German Saprykin |
 | `flutter_svg` | 2.2.4 | MIT | Copyright (c) 2018 Dan Field |
-| `ghostty_vte_flutter` | 0.1.4+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 — fork resolved from git, see above |
+| `ghostty_vte_flutter` | 0.2.0-beta.2+antgrid.1 | MIT | Copyright (c) 2026 kingwill101 — fork resolved from git, see above |
 | `http` | 1.6.0 | BSD-3-Clause | Copyright 2014, the Dart project authors |
 | `iconify_flutter` | 0.0.7 | MIT | Copyright (c) 2022 Andrew Nasef — icon artwork is separately licensed, see above |
 | `in_app_update` | 4.2.5 | MIT | Copyright (c) 2020 Victor Choueiri |
