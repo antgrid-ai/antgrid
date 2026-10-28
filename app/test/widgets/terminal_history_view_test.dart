@@ -2073,11 +2073,7 @@ void main() {
       ];
       int fresh(List<TerminalHistoryRow> list) {
         if (list.isEmpty) return 0;
-        final t = GhosttyVt.newTerminal(
-          cols: 10,
-          rows: 1,
-          maxScrollback: 64 << 20,
-        );
+        final t = GhosttyVt.newTerminal(cols: 10, rows: 1);
         try {
           t.writeBytes(encodeTerminalHistoryRows(list));
           return t.totalRows;

@@ -15,7 +15,7 @@ class TerminalPresentationController {
   }) : engine = GhosttyTerminalController(
          initialCols: tab.cols,
          initialRows: tab.rows,
-         maxScrollbackLines: 0,
+         maxScrollback: 0,
          mouseMotionReportInterval: const Duration(milliseconds: 50),
        ) {
     engine.attachExternalTransport(
