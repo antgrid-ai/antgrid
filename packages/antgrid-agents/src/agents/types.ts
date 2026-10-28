@@ -4,7 +4,7 @@
 // the spec table below reading a constant still in its temporal dead zone.
 
 import type { BridgeCommand, HookCommand } from "../hook-command";
-import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
+import type { HookInvocation, HookPath, HookPost, HookStdoutProfile } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { HandoffEventsFn } from "./handoff/events";
 import type { HandoffSnapshotFn } from "./handoff/types";
@@ -144,6 +144,7 @@ export interface HookInjectCtx {
 export interface McpInjectCtx {
   abDir: string;
   mcpCommand: BridgeCommand;
+  memoryMcpCommand?: BridgeCommand;
 }
 
 export interface McpProfile {
@@ -526,6 +527,9 @@ export interface HookProfile {
   /** Turns one allowlisted invocation into the loopback posts it implies. Called
    *  only after the event passed `events`, so it never re-checks. */
   toPosts: (invocation: HookInvocation, ctx: HookPostCtx) => Promise<HookPost[]>;
+  /** Opt-in model-visible output. Requires injected live caller identity;
+   * notification-only hooks never echo loopback response bodies. */
+  stdout?: HookStdoutProfile;
   /**
    * Every loopback path this agent's INSTALLED INTEGRATION can POST — whether
    * through `bridge hook` (this profile's `toPosts`) or from inside the agent's

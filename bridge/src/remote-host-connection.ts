@@ -14,4 +14,6 @@ export interface RemoteHostConnection extends Pick<PeerSessionOwner,
   noteResume(): Promise<boolean>;
   recheckAuthorization(): void;
   authorizeDevice?(deviceId: string): Promise<boolean>;
+  /** Current native lease and session authority, without refreshing or yielding. */
+  isPeerAuthorized?(peerId: string): boolean;
 }

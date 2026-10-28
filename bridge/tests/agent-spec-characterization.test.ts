@@ -369,6 +369,12 @@ const CODEX_MCP_INJECTION: string[] = [
   `mcp_servers.antgrid.args=["mcp"]`,
   "-c",
   `mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.command="${BIN}"`,
+  "-c",
+  `mcp_servers.antgrid-memory.args=["memory-mcp"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
 ];
 
 describe("codex hook trust", () => {
@@ -399,6 +405,7 @@ describe("launch augmentation", () => {
   }
 
   const MCP_ENTRY = { type: "local", command: [BIN, "mcp"] };
+  const MEMORY_MCP_ENTRY = { type: "local", command: [BIN, "memory-mcp"] };
 
   test("claude-code", () => {
     const abDir = tmp("ab-spec-");
@@ -432,7 +439,7 @@ describe("launch augmentation", () => {
     expect(a.args).toEqual([]);
     expect(Object.keys(a.env).sort()).toEqual(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
     expect(a.env.OPENCODE_CONFIG).toBe(join(abDir, "agents", "opencode-session-namer.json"));
-    expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
+    expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
     expect(a.notificationsInjected).toBeUndefined();
   });
 
@@ -474,7 +481,7 @@ describe("launch augmentation", () => {
     const a = augment("kilo", tmp("ab-spec-"), tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
     expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT"]);
-    expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
+    expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
   });
 
   for (const key of ["mistral-vibe"] as const) {

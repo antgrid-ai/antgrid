@@ -14,6 +14,7 @@ export interface AugmentOptions {
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;
+  memoryMcpCommand?: BridgeCommand;
   /** `false` skips the MCP profile. Chat spawns pass it: no chat driver
    *  forwards an MCP channel, and the session directory lists chat sessions
    *  as receive-only on that basis. */
@@ -44,7 +45,9 @@ export function augmentAgentLaunch(
   if (spec.mcp && options.mcp !== false) {
     try {
       const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
-      if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand });
+      const memoryMcpCommand = options.memoryMcpCommand
+        ?? (options.mcpCommand ? undefined : agentHost().memoryMcpCommand?.());
+      if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand, memoryMcpCommand });
     } catch (err) {
       log.warn("agent MCP augmentation failed for %s: %s", tool, err);
     }

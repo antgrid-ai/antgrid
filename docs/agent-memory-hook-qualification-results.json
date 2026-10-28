@@ -1,0 +1,1432 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-28",
+  "date_timezone": "UTC",
+  "platform": "Windows x64",
+  "release_qualified": false,
+  "previous_report": "agent-memory-qualification-results.json",
+  "environment": {
+    "project": "isolated non-Git fixture; correction evidence withheld until the correction scenario",
+    "profile": "isolated Antgrid profile and provider native homes",
+    "approval_policy": "bypass",
+    "agent_launch": "real Antgrid host, durable sessions, managed MCP profiles and PTYs; installed default models",
+    "prompts": "ordinary fixture tasks; static workflow guidance supplied through the provider-native hook, with no saved-memory content injection",
+    "app_controls": "authenticated desktop owner payload transport; Flutter UI not driven"
+  },
+  "policy_revisions": {
+    "hook-v1": "Fixed SessionStart guidance makes memory tool discovery and automatic saving visible to Codex. It prohibits repetitions of recalled memory but does not require searching before a new save.",
+    "hook-v2": "Adds an explicit search-before-save rule: inspect relevant results, reuse an unchanged finding even if independently verified or differently worded, and do not assume exact-duplicate suppression merges paraphrases. Recorded only in observations explicitly labeled hook-v2.",
+    "hook-v3": "Additionally names the four memory tools, explains that MCP resources are not the tool catalog, and directs reusable project findings to project scope while reserving task scope for temporary or unfinished implementation state. Search-first and scope guidance also appears in MCP instructions and the save description. Recorded only in observations explicitly labeled hook-v3."
+  },
+  "hook_v3_guidance": {
+    "sha256": "53098d1698cb973742b68a103068f487c0732fee4d4794e67453fe0d4eaa3ee6",
+    "utf8_bytes": 1575,
+    "compiled_hook_json_utf8_bytes": 1653,
+    "compiled_smoke_platform": "win32",
+    "compiled_smoke_runtime": "1.3.14",
+    "note": "Fingerprint covers the fixed shared hook guidance text; MCP instruction text is additional static guidance."
+  },
+  "methodology": {
+    "usage_source": "Native provider JSONL transcripts filtered to each scenario's start/end timestamps. Claude message IDs are deduplicated before summing usage; Codex final total_token_usage is used for each fresh session. Resumed Codex usage subtracts the last cumulative usage before the scenario window.",
+    "token_semantics": "Codex input_reported includes cached_input_tokens; uncached_input subtracts cache_read. Claude input_reported is uncached and excludes cache read and cache creation. Reasoning is a subset of output, not an additional token charge.",
+    "latency": "Wall time includes CLI startup, model, tool calls and terminal completion. Codex memory call latency is the native MCP duration; Claude latency is elapsed time between native tool-use and tool-result timestamps.",
+    "tool_counts": "Claude tool_use IDs are deduplicated; Codex completed native command/file/MCP events are counted. Codex catalog-discovery wrappers are reported separately, not added to nested tool counts. No matched baseline exists to attribute extra calls, tokens or latency to memory.",
+    "quality": "Counts assess only directly observed eligible cases. Incorrect saves include unnecessary paraphrased duplicates and wrong scope for reusable findings, also separately classified; no factual inaccuracy was observed in those findings. Retrieval misses require an eligible record and include failure to invoke retrieval. Null means not evaluated, not zero. Record counts distinguish active, superseded and expired history, and separately record intended scopes.",
+    "scope": "One observed sequence per policy/mode is evidence for these fixtures, not a reliability estimate. Unit and integration tests cover deterministic storage invariants separately. OpenCode and macOS/Linux live-agent behavior are not qualified by this report.",
+    "cost": "No actual charge supplied; subscription and marginal memory cost remain unknown.",
+    "raw_evidence": "Native transcripts and authenticated inspection snapshots remain in ignored temporary artifacts. This report contains no raw transcript, absolute path, run identifier or authentication material."
+  },
+  "observations": [
+    {
+      "sequence": "hook_v1_exec",
+      "policy_revision": "hook-v1",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "automatic_save",
+      "result": "pass",
+      "note": "After reading the fixture, Codex discovered memory tools, searched, and automatically saved one source-backed project finding without a remember request. The finding preserved the Windows locale and incompatible macOS version conditions, and distinguished source inspection from executable reproduction.",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 40434,
+      "tokens": {
+        "input_reported": 82757,
+        "input_includes_cache": true,
+        "uncached_input": 5317,
+        "cache_read": 77440,
+        "cache_write": 0,
+        "output": 662,
+        "reasoning": 11
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 3,
+        "memory_search": 1,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 1,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 11.1096,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 14.9364,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v1_exec",
+      "policy_revision": "hook-v1",
+      "agent": "claude",
+      "cli_version": "2.1.312",
+      "model": "claude-opus-5-5",
+      "mode": "terminal PTY, print stream-json",
+      "scenario": "cross_agent_recall",
+      "result": "pass",
+      "note": "Claude searched and received the actual Codex-created record with full content, applicability, and Codex provenance. It did not save a repeated finding. Claude's existing MCP integration was unchanged.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 23402,
+      "tokens": {
+        "input_reported": 8,
+        "input_includes_cache": false,
+        "uncached_input": 8,
+        "cache_read": 74133,
+        "cache_write": 13072,
+        "output": 1261,
+        "reasoning": null
+      },
+      "token_usage_scope": "scenario_unique_assistant_messages",
+      "static_guidance": {
+        "mechanism": "existing MCP server instructions and tool descriptions",
+        "developer_context_count": null,
+        "before_first_action": null
+      },
+      "tool_calls": {
+        "ToolSearch": 1,
+        "Bash": 2,
+        "memory_search": 1,
+        "mcp__antgrid__antgrid_inbox": 1
+      },
+      "codex_catalog_discovery_calls": null,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 24,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v1_exec",
+      "policy_revision": "hook-v1",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "independent_repeat",
+      "result": "fail",
+      "note": "A fresh Codex session read the same sources and saved a differently worded version of the existing finding without searching. The resulting second active record is an unnecessary paraphrase, not a failure of exact-byte duplicate suppression. This observed failure prompted the separate hook-v2 guidance revision.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 2,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "wall_time_ms": 32849,
+      "tokens": {
+        "input_reported": 91256,
+        "input_includes_cache": true,
+        "uncached_input": 13944,
+        "cache_read": 77312,
+        "cache_write": 0,
+        "output": 580,
+        "reasoning": 28
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 2,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_save",
+          "duration_ms": 12.2196,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": 1,
+        "redundant_saves": 1,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v1_exec",
+      "policy_revision": "hook-v1",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "correction",
+      "result": "pass",
+      "note": "Codex searched, read both existing records, and issued a correction with supersedes for each duplicate chain. Both earlier revisions became superseded and both current revisions preserved Windows 3.3-only applicability and uncertainty about other conditions. This verifies actual memory correction rather than only a source-file edit.",
+      "records_before": {
+        "active": 2,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 2,
+        "superseded": 2,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 4,
+        "task": 0
+      },
+      "wall_time_ms": 48764,
+      "tokens": {
+        "input_reported": 128144,
+        "input_includes_cache": true,
+        "uncached_input": 13456,
+        "cache_read": 114688,
+        "cache_write": 0,
+        "output": 693,
+        "reasoning": 47
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 1,
+        "memory_search": 1,
+        "memory_get": 2,
+        "memory_save": 2
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 6.9956,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 4.5455,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 5.0811,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 10.0285,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 9.0658,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "redundant_saves": null,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v1_exec",
+      "policy_revision": "hook-v1",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "forget",
+      "result": "pass",
+      "note": "Codex found both current records, read both with history access enabled, and forgot both correction chains with cleanup complete. A final search and authenticated app inspection returned no records. Its first search was rejected because the requested limit exceeded 10; it corrected the argument and continued.",
+      "records_before": {
+        "active": 2,
+        "superseded": 2,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 4,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 44377,
+      "tokens": {
+        "input_reported": 151831,
+        "input_includes_cache": true,
+        "uncached_input": 16151,
+        "cache_read": 135680,
+        "cache_write": 0,
+        "output": 416,
+        "reasoning": 0
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "memory_search": 3,
+        "memory_get": 2,
+        "memory_forget": 2
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 9.8079,
+          "error": true
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 6.9933,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 3.7314,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 6.2068,
+          "error": false
+        },
+        {
+          "tool": "memory_forget",
+          "duration_ms": 9.1126,
+          "error": false
+        },
+        {
+          "tool": "memory_forget",
+          "duration_ms": 6.561,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 5.408,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 1,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v2_tui_then_exec",
+      "policy_revision": "hook-v2",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, default interactive",
+      "scenario": "automatic_save",
+      "result": "partial",
+      "note": "The default interactive Codex terminal discovered tools, searched, and automatically saved a factually source-backed finding. It selected task scope for the reusable finding, making it inaccessible to later sessions. Automatic saving was observed, but reusable cross-agent retention failed scope selection; the visible assistant messages did not explain that choice.",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 1
+      },
+      "wall_time_ms": 40247,
+      "tokens": {
+        "input_reported": 99449,
+        "input_includes_cache": true,
+        "uncached_input": 22777,
+        "cache_read": 76672,
+        "cache_write": 0,
+        "output": 658,
+        "reasoning": 14
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 2,
+        "memory_search": 1,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 9.7918,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 22.2415,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 1,
+        "scope_selection_misses": 1,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v2_tui_then_exec",
+      "policy_revision": "hook-v2",
+      "agent": "claude",
+      "cli_version": "2.1.312",
+      "model": "claude-opus-5-5",
+      "mode": "terminal PTY, print stream-json",
+      "scenario": "cross_agent_recall",
+      "result": "not_evaluable",
+      "note": "Claude made three memory searches and received no result. The initial finding belonged to another durable session's task scope, so no authorized record existed. This verifies the task isolation boundary rather than a search or ranking miss; the cross-agent recall prerequisite failed.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 1
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 1
+      },
+      "wall_time_ms": 25454,
+      "tokens": {
+        "input_reported": 10,
+        "input_includes_cache": false,
+        "uncached_input": 10,
+        "cache_read": 110248,
+        "cache_write": 14987,
+        "output": 1379,
+        "reasoning": null
+      },
+      "token_usage_scope": "scenario_unique_assistant_messages",
+      "static_guidance": {
+        "mechanism": "existing MCP server instructions and tool descriptions",
+        "developer_context_count": null,
+        "before_first_action": null
+      },
+      "tool_calls": {
+        "ToolSearch": 1,
+        "Bash": 2,
+        "memory_search": 3,
+        "mcp__antgrid__antgrid_inbox": 1
+      },
+      "codex_catalog_discovery_calls": null,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 24,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 18,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 26,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v2_tui_then_exec",
+      "policy_revision": "hook-v2",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "independent_repeat",
+      "result": "not_evaluable",
+      "note": "Codex followed search-before-save: two searches returned empty because the prior finding was task-scoped to another session. It then saved the source finding in its own task scope with a checkout restriction. No new behavior was established beyond rereading the sources. Duplicate avoidance across accessible records cannot be evaluated here; this is a second scope-selection miss, not a failure of authorization or exact-duplicate suppression.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 2,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 1
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 2
+      },
+      "wall_time_ms": 43031,
+      "tokens": {
+        "input_reported": 128746,
+        "input_includes_cache": true,
+        "uncached_input": 25450,
+        "cache_read": 103296,
+        "cache_write": 0,
+        "output": 712,
+        "reasoning": 32
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 3,
+        "memory_search": 2,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 9.2477,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 4.1924,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 9.4467,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": 1,
+        "scope_selection_misses": 1,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v2_tui_then_exec",
+      "policy_revision": "hook-v2",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "correction",
+      "result": "not_evaluable",
+      "note": "Codex searched repeatedly but could not access either earlier task record. It saved the new Windows 3.3 evidence as a project finding without supersedes; the two prior task records remained active. This does not qualify correction history. One search exceeded the maximum limit and was rejected before a valid retry.",
+      "records_before": {
+        "active": 2,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 3,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 2
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 2
+      },
+      "wall_time_ms": 55136,
+      "tokens": {
+        "input_reported": 221530,
+        "input_includes_cache": true,
+        "uncached_input": 15706,
+        "cache_read": 205824,
+        "cache_write": 0,
+        "output": 694,
+        "reasoning": 55
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 3,
+        "memory_search": 5,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 7.972,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 6.2595,
+          "error": true
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 5.174,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 4.8792,
+          "error": false
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 4.6736,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 11.2703,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 1,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v2_tui_then_exec",
+      "policy_revision": "hook-v2",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "forget",
+      "result": "fail",
+      "note": "Static SessionStart guidance was present before the first action. Codex called MCP resource-listing APIs instead of discovering the memory tools, then claimed search/deletion tools were unavailable. It made no memory calls and left all records unchanged, including the eligible project finding. The task-scope issue does not explain this separate tool-discovery failure.",
+      "records_before": {
+        "active": 3,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 3,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 2
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 2
+      },
+      "wall_time_ms": 18656,
+      "tokens": {
+        "input_reported": 71523,
+        "input_includes_cache": true,
+        "uncached_input": 22115,
+        "cache_read": 49408,
+        "cache_write": 0,
+        "output": 137,
+        "reasoning": 13
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "codex.list_mcp_resources": 1,
+        "codex.list_mcp_resource_templates": 1
+      },
+      "codex_catalog_discovery_calls": 1,
+      "memory_call_latency_ms": [],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": 1,
+        "forget_misses": 1
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v1_original_session_replay",
+      "policy_revision": "hook-v2",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "replay",
+      "result": "pass",
+      "note": "The original hook-v1 durable Codex session resumed with hook-v2 static guidance and ran a local verification script using inherited live caller identity. Replaying its original forgotten operation returned HTTP 400 FORGOTTEN, and no record reappeared. This is explicit bridge replay verification, not automatic MCP tool selection. Token usage is the increment since that session's preceding turn.",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 21277,
+      "tokens": {
+        "input_reported": 53902,
+        "input_includes_cache": true,
+        "uncached_input": 910,
+        "cache_read": 52992,
+        "cache_write": 0,
+        "output": 152,
+        "reasoning": 0
+      },
+      "token_usage_scope": "scenario_cumulative_delta",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 2
+      },
+      "codex_catalog_discovery_calls": 0,
+      "memory_call_latency_ms": [],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_tui_then_exec",
+      "policy_revision": "hook-v3",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, default interactive",
+      "scenario": "automatic_save",
+      "result": "pass",
+      "note": "The default interactive Codex terminal discovered tools, searched, and automatically saved a source-backed project finding without a remember request. It preserved Windows locale and unspecified Windows version, the incompatible macOS 3.2 condition, and documentary rather than executable verification.",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 38863,
+      "tokens": {
+        "input_reported": 80137,
+        "input_includes_cache": true,
+        "uncached_input": 5257,
+        "cache_read": 74880,
+        "cache_write": 0,
+        "output": 620,
+        "reasoning": 15
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 2,
+        "memory_search": 1,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 12.1167,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 14.8674,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_tui_then_exec",
+      "policy_revision": "hook-v3",
+      "agent": "claude",
+      "cli_version": "2.1.312",
+      "model": "claude-opus-5-5",
+      "mode": "terminal PTY, print stream-json",
+      "scenario": "cross_agent_recall",
+      "result": "pass",
+      "note": "Claude searched and received the exact Codex-created project record with full content, applicability, and Codex provenance. It made no save.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 24630,
+      "tokens": {
+        "input_reported": 8,
+        "input_includes_cache": false,
+        "uncached_input": 8,
+        "cache_read": 78651,
+        "cache_write": 15273,
+        "output": 1265,
+        "reasoning": null
+      },
+      "token_usage_scope": "scenario_unique_assistant_messages",
+      "static_guidance": {
+        "mechanism": "existing MCP server instructions and tool descriptions",
+        "developer_context_count": null,
+        "before_first_action": null
+      },
+      "tool_calls": {
+        "ToolSearch": 1,
+        "Bash": 2,
+        "memory_search": 1,
+        "mcp__antgrid__antgrid_inbox": 1
+      },
+      "codex_catalog_discovery_calls": null,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 21,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_tui_then_exec",
+      "policy_revision": "hook-v3",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "independent_repeat",
+      "result": "pass",
+      "note": "A fresh Codex session read the source, searched for the finding, received the existing project record, and inspected it with memory_get. It made no save and the single active record remained unchanged. This verifies behaviorally avoiding a repeated paraphrase, separately from storage's exact-duplicate suppression.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 33965,
+      "tokens": {
+        "input_reported": 126977,
+        "input_includes_cache": true,
+        "uncached_input": 18689,
+        "cache_read": 108288,
+        "cache_write": 0,
+        "output": 527,
+        "reasoning": 0
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 3,
+        "memory_search": 1,
+        "memory_get": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 8.5124,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 4.9365,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_tui_then_exec",
+      "policy_revision": "hook-v3",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "correction",
+      "result": "pass",
+      "note": "Codex searched, read the original record, and saved a correction using supersedes. The previous record became superseded and one current record remained. The correction is limited to Windows 3.3, leaves older Windows versions unverified, and does not claim new macOS verification. This verifies an actual memory correction with retained prior history.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 1,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "wall_time_ms": 35020,
+      "tokens": {
+        "input_reported": 99926,
+        "input_includes_cache": true,
+        "uncached_input": 10326,
+        "cache_read": 89600,
+        "cache_write": 0,
+        "output": 539,
+        "reasoning": 0
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "shell": 1,
+        "memory_search": 1,
+        "memory_get": 1,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 7.0527,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 4.9115,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 7.7161,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_tui_then_exec",
+      "policy_revision": "hook-v3",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "forget",
+      "result": "pass",
+      "note": "Codex searched, read the corrected record with history access enabled, and forgot its correction chain with cleanup complete. Authenticated app inspection then returned no records. Its first search used limit 30 and was rejected; the corrected limit 10 search succeeded.",
+      "records_before": {
+        "active": 1,
+        "superseded": 1,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 27939,
+      "tokens": {
+        "input_reported": 116289,
+        "input_includes_cache": true,
+        "uncached_input": 6209,
+        "cache_read": 110080,
+        "cache_write": 0,
+        "output": 303,
+        "reasoning": 0
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "memory_search": 2,
+        "memory_get": 1,
+        "memory_forget": 1
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 9.7568,
+          "error": true
+        },
+        {
+          "tool": "memory_search",
+          "duration_ms": 5.4737,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 3.7921,
+          "error": false
+        },
+        {
+          "tool": "memory_forget",
+          "duration_ms": 7.1056,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 1,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": 0,
+        "forget_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_reverse",
+      "policy_revision": "hook-v3",
+      "agent": "claude",
+      "cli_version": "2.1.312",
+      "model": "claude-opus-5-5",
+      "mode": "terminal PTY, print stream-json",
+      "scenario": "automatic_save",
+      "result": "pass",
+      "note": "Claude searched and automatically saved a source-backed project finding without a remember request. It retained the Windows date-locale condition, incompatible macOS 3.2 behavior, unspecified Windows version, and documentary rather than executable verification. This used the existing Claude MCP integration with revised static MCP guidance.",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 32993,
+      "tokens": {
+        "input_reported": 14,
+        "input_includes_cache": false,
+        "uncached_input": 14,
+        "cache_read": 174750,
+        "cache_write": 16356,
+        "output": 2208,
+        "reasoning": null
+      },
+      "token_usage_scope": "scenario_unique_assistant_messages",
+      "static_guidance": {
+        "mechanism": "existing MCP server instructions and tool descriptions",
+        "developer_context_count": null,
+        "before_first_action": null
+      },
+      "tool_calls": {
+        "Bash": 2,
+        "ToolSearch": 1,
+        "memory_search": 1,
+        "mcp__antgrid__antgrid_inbox": 1,
+        "memory_save": 1
+      },
+      "codex_catalog_discovery_calls": null,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 30,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 23,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    },
+    {
+      "sequence": "hook_v3_reverse",
+      "policy_revision": "hook-v3",
+      "agent": "codex",
+      "cli_version": "0.164.0",
+      "model": "gpt-6.1-sol",
+      "mode": "terminal PTY, exec json",
+      "scenario": "cross_agent_recall",
+      "result": "pass",
+      "note": "Codex searched and received the exact Claude-created project record with full content, applicability, and Claude provenance, then inspected it with memory_get. It made no save, completing the reverse cross-agent direction.",
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 36329,
+      "tokens": {
+        "input_reported": 126212,
+        "input_includes_cache": true,
+        "uncached_input": 12932,
+        "cache_read": 113280,
+        "cache_write": 0,
+        "output": 489,
+        "reasoning": 0
+      },
+      "token_usage_scope": "fresh_session_total",
+      "static_guidance": {
+        "mechanism": "SessionStart additionalContext",
+        "developer_context_count": 1,
+        "before_first_action": true
+      },
+      "tool_calls": {
+        "memory_search": 1,
+        "memory_get": 1,
+        "shell": 2
+      },
+      "codex_catalog_discovery_calls": 2,
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 7.7681,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 3.7776,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "extra_tool_calls_vs_baseline": null,
+      "actual_cost_usd": null
+    }
+  ]
+}

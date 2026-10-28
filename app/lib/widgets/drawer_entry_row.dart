@@ -22,6 +22,9 @@ import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
+import '../models/memory.dart';
+import '../screens/memory_screen.dart';
+import '../util/detached.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -135,6 +138,21 @@ class _MachineDrawerHeaderRowState
           // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
           // same reason — two owners of one cell is a fight.
           trailing: AbRowTrailingCell.kit([
+            AbIconButton(
+              icon: AbIcons.list,
+              tooltip: 'Machine memory',
+              onTap: () => detached(
+                'Memory',
+                'open failed',
+                () => openMemoryScreen(
+                  context,
+                  MemoryTarget.machine(
+                    machineId: machineUuid,
+                    label: entry.displayName,
+                  ),
+                ),
+              ),
+            ),
             _DrawerEntryTrailing(
               entry: entry,
               revealed: revealed,
@@ -199,11 +217,24 @@ class LocalMachineBand extends ConsumerWidget {
             // a desktop that opened a project earlier in the session that is a
             // live green dot pinned to a project it has nothing to do with. Every
             // other real-source surface in this drawer is gated the same way.
-            // The empty cell stays, so the demo band's title ellipsizes where
-            // the real one's does instead of running a cell further right.
-            trailing: AbRowTrailingCell(
-              child: ref.watch(demoModeProvider) ? null : const _LocalHostDot(),
-            ),
+            // Memory also has no store behind the sample project.
+            trailing: ref.watch(demoModeProvider)
+                ? const AbRowTrailingCell()
+                : AbRowTrailingCell.kit([
+                    AbIconButton(
+                      icon: AbIcons.list,
+                      tooltip: 'Machine memory',
+                      onTap: () => detached(
+                        'Memory',
+                        'open failed',
+                        () => openMemoryScreen(
+                          context,
+                          const MemoryTarget.machine(),
+                        ),
+                      ),
+                    ),
+                    const AbRowTrailingCell(child: _LocalHostDot()),
+                  ]),
           ),
         ],
       ),

@@ -2,6 +2,7 @@ import { clipboardMessages, CLIPBOARD_MESSAGE_TYPES, TerminalClipboardMessageSch
 export * from "./terminal-clipboard/protocol";
 import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
+import { MemoryRequestSchema, MemoryResultSchema } from "antgrid-memory";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
 import {
@@ -2697,7 +2698,26 @@ const NetwatchEventsMessage = BaseMessage.extend({
   sentAt: z.number().optional(),
 });
 
+export const MemoryRequestMessage = BaseMessage.extend({
+  type: z.literal("memory:request"),
+  requestId: z.string().min(1),
+  request: z.record(z.string(), z.unknown()).superRefine((value, context) => {
+    const parsed = MemoryRequestSchema.safeParse(value);
+    if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+  }),
+});
+
+const MemoryResultMessage = BaseMessage.extend({
+  type: z.literal("memory:result"),
+  requestId: z.string().min(1),
+  ok: z.boolean(),
+  result: z.record(z.string(), z.unknown()).refine((value) => MemoryResultSchema.safeParse(value).success, "Invalid memory result").optional(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
+  MemoryRequestMessage,
+  MemoryResultMessage,
   ...clipboardMessages,
   AgentHelloMessage,
   PortDetectedMessage,
@@ -3007,6 +3027,8 @@ export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessag
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
 export type RpcRequest = z.infer<typeof RequestMessage>;
+export type MemoryRequest = z.infer<typeof MemoryRequestMessage>;
+export type MemoryResult = z.infer<typeof MemoryResultMessage>;
 export type RpcResponse = z.infer<typeof ResponseMessage>;
 export type AgentItem = z.infer<typeof AgentItemSchema>;
 export type AgentError = z.infer<typeof AgentErrorSchema>;
@@ -3069,6 +3091,7 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * Add a type here in the same commit that gives it a secret-bearing field.
  */
 export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "agent:question-resolve",
   "terminal:input",
@@ -3203,6 +3226,7 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:forget", "terminal:resize", "terminal:size", "agent:status",

@@ -1,4 +1,5 @@
 import { toPosixPath } from "../launch-inject";
+import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
 // Codex does NOT pass its own environment down to an MCP server — a probe
@@ -16,15 +17,13 @@ const MCP_ENV_VARS = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID
  * already rendered as a shell line.) None of these keys feeds a `hooks.*`
  * fingerprint, so every `trusted_hash` stays valid.
  */
-export function inject({ mcpCommand }: McpInjectCtx): LaunchAugmentation {
-  const command = JSON.stringify(toPosixPath(mcpCommand.binary));
-  const args = JSON.stringify(mcpCommand.preargs.map(toPosixPath));
+export function inject(ctx: McpInjectCtx): LaunchAugmentation {
   return {
-    args: [
-      "-c", `mcp_servers.antgrid.command=${command}`,
-      "-c", `mcp_servers.antgrid.args=${args}`,
-      "-c", `mcp_servers.antgrid.env_vars=${JSON.stringify(MCP_ENV_VARS)}`,
-    ],
+    args: mcpCommands(ctx).flatMap(([name, command]) => [
+      "-c", `mcp_servers.${name}.command=${JSON.stringify(toPosixPath(command.binary))}`,
+      "-c", `mcp_servers.${name}.args=${JSON.stringify(command.preargs.map(toPosixPath))}`,
+      "-c", `mcp_servers.${name}.env_vars=${JSON.stringify(MCP_ENV_VARS)}`,
+    ]),
     env: {},
   };
 }

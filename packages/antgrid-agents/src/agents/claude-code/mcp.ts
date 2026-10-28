@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { BridgeCommand } from "../../hook-command";
 import { materializeJson, NO_INJECTION } from "../launch-inject";
+import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
 // Claude expands `${VAR}` in an MCP entry's `env` against its OWN environment
@@ -16,22 +16,16 @@ const MCP_ENV = {
 // Deliberately NOT under `<abDir>/plugin/claude`: `--plugin-dir` also loads a
 // `.mcp.json` sitting in the plugin tree, and the server would then register
 // twice — once as `antgrid`, once as `plugin:antgrid-session-namer:antgrid`.
-function materializeClaudeMcpConfig(
-  abDir: string,
-  command: BridgeCommand,
-): string | null {
+function materializeClaudeMcpConfig(ctx: McpInjectCtx): string | null {
+  const { abDir } = ctx;
   const configPath = join(abDir, "mcp", "claude.json");
   const config = {
-    mcpServers: {
-      // The same server key `project-integrations.ts` writes, so the two entries a user
-      // with both can end up holding are argv-identical rather than rival.
-      antgrid: {
+    mcpServers: Object.fromEntries(mcpCommands(ctx).map(([name, command]) => [name, {
         type: "stdio",
         command: command.binary,
         args: [...command.preargs],
         env: MCP_ENV,
-      },
-    },
+      }])),
   };
   return materializeJson("Claude MCP config", { [configPath]: config }) ? configPath : null;
 }
@@ -45,7 +39,7 @@ function materializeClaudeMcpConfig(
 // list` loads the file and leaves the rest alone. A session's own args are
 // folded in right after this pair (session-manager's shell line), so the
 // separated form would hand the user's first word to us as a config path.
-export function inject({ abDir, mcpCommand }: McpInjectCtx): LaunchAugmentation {
-  const configPath = materializeClaudeMcpConfig(abDir, mcpCommand);
+export function inject(ctx: McpInjectCtx): LaunchAugmentation {
+  const configPath = materializeClaudeMcpConfig(ctx);
   return configPath ? { args: [`--mcp-config=${configPath}`], env: {} } : NO_INJECTION;
 }

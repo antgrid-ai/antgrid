@@ -1,0 +1,899 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-28",
+  "date_timezone": "UTC",
+  "platform": "Windows x64",
+  "release_qualified": false,
+  "related_report": "agent-memory-hook-qualification-results.json",
+  "environment": {
+    "project": "isolated non-Git fixture; correction evidence withheld until the correction scenario",
+    "profile": "isolated Antgrid profile and provider native homes",
+    "agent_launch": "real Antgrid host, durable sessions, managed MCP profiles, native integration plugin and PTYs",
+    "opencode_sdk_version": "1.15.10",
+    "model_selection": "OpenCode explicitly configured to openai/gpt-6.1-sol; other agents use their installed model defaults",
+    "prompts": "ordinary fixture tasks with static integration guidance; no remembered content injected into prompts",
+    "app_controls": "authenticated desktop owner payload transport; Flutter UI not driven"
+  },
+  "configured_guidance": {
+    "revision": "hook-v3",
+    "mechanism": "OpenCode experimental.chat.system.transform",
+    "sha256": "53098d1698cb973742b68a103068f487c0732fee4d4794e67453fe0d4eaa3ee6",
+    "utf8_bytes": 1575,
+    "delivery_verified": null,
+    "note": "The configured source and plugin behavior are known. Native message storage does not include the transformed provider system context, and the harness did not capture provider requests or audit bootstrap requests. Successful tool use does not prove this hook supplied the guidance."
+  },
+  "methodology": {
+    "opencode_usage": "Read-only SQLite queries select only the target session's message and part rows within each scenario window, plus session.version. Assistant message usage is summed once per unique row; step-finish totals are a separate cross-check, never added a second time. Auxiliary title/model calls may not appear in native message usage.",
+    "other_usage": "Claude native assistant message IDs are deduplicated before summing usage; Codex uses the final fresh-session usage or a resumed-session cumulative delta.",
+    "token_semantics": "OpenCode native input excludes cache fields and its normalized output excludes reasoning: observed total equals input + cache_read + cache_write + output + reasoning. Claude input excludes cache and output includes reasoning. Codex input includes cache and output includes reasoning. Fields are kept separate to prevent double counting.",
+    "latency": "Wall time includes startup, model/tool execution and terminal completion. OpenCode call latency is native tool state end minus start; Claude latency is tool-use to tool-result elapsed time. The reverse cross-agent sequence and original blocked replay probe ran concurrently. These observations are not a comparative performance benchmark.",
+    "tool_counts": "OpenCode tool-part rows are counted once; Claude tool-use IDs are deduplicated. Non-memory payload bodies are excluded from the metrics helper. No matched baseline exists to attribute extra calls, tokens or latency to memory.",
+    "quality": "Counts assess only directly observed eligible cases. Null means not evaluated, not zero. Record counts distinguish lifecycle and scope. One sequence is fixture evidence, not a reliability estimate.",
+    "cost": "OpenCode's native reported cost can be zero under subscription-backed access despite nonzero usage; zero is not interpreted as free usage. Positive native estimates remain separate from actual charges, which are unknown.",
+    "limitations": "Windows behavior only; no macOS/Linux live-agent qualification. Hook context delivery is not directly observed in the native store. The first resumed TUI replay never received its launch prompt; a separate retry used ordinary terminal input and preserves the blocked attempt. Release qualification remains false pending the full release gates.",
+    "raw_evidence": "Native transcripts, database files and authenticated inspection snapshots remain in isolated temporary artifacts. This report contains no raw transcript, absolute path, native identifier or authentication material."
+  },
+  "observations": [
+    {
+      "sequence": "opencode_interactive",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "automatic_save",
+      "result": "pass",
+      "note": "The interactive OpenCode terminal searched and automatically saved a source-backed project finding without a remember request. The record preserved Windows locale/version uncertainty, the incompatible macOS 3.2 condition, and documentary rather than executable verification. Working-to-done hook completion preceded requested terminal teardown; the subsequent exit code -1 does not indicate a failed model turn.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": -1,
+      "stopped_after_completion": true,
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 58894,
+      "tokens": {
+        "input_reported": 29856,
+        "input_includes_cache": false,
+        "uncached_input": 29856,
+        "cache_read": 72704,
+        "cache_write": 0,
+        "output": 754,
+        "reasoning": 24,
+        "reported_total": 103338,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 29856,
+          "output": 754,
+          "reasoning": 24,
+          "cache_read": 72704,
+          "cache_write": 0,
+          "total": 103338
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 8,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "glob": 1,
+        "read": 3,
+        "memory_search": 1,
+        "memory_save": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 23,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 25,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "opencode_interactive",
+      "policy_revision": "hook-v3",
+      "agent": "claude",
+      "cli_version": "2.1.312 (Claude Code)",
+      "native_session_version": null,
+      "model": "claude-opus-5-5",
+      "configured_model": null,
+      "mode": "terminal print/exec",
+      "approval_policy": "bypass",
+      "scenario": "cross_agent_recall",
+      "result": "pass",
+      "note": "Claude searched and received the exact OpenCode-created project record with full content, applicability, and OpenCode provenance. It made no save.",
+      "completion": "provider process exit",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": false,
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 22358,
+      "tokens": {
+        "input_reported": 8,
+        "input_includes_cache": false,
+        "uncached_input": 8,
+        "cache_read": 78706,
+        "cache_write": 15423,
+        "output": 1174,
+        "reasoning": null,
+        "reported_total": null,
+        "reasoning_is_included_in_output": true
+      },
+      "usage_cross_check": null,
+      "native_message_count": null,
+      "static_guidance": {
+        "mechanism": "MCP server instructions and tool descriptions",
+        "provider_request_context_verified": null
+      },
+      "tool_calls": {
+        "ToolSearch": 1,
+        "Bash": 2,
+        "memory_search": 1,
+        "mcp__antgrid__antgrid_inbox": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 22,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "native_reported_cost_usd": null,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "opencode_interactive",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "independent_repeat",
+      "result": "pass",
+      "note": "A fresh OpenCode session read the source, searched and received the existing project finding, then inspected it with memory_get. It made no save and the single active record remained unchanged. This verifies avoiding a repeated paraphrase, separately from exact-duplicate storage suppression.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": true,
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 37976,
+      "tokens": {
+        "input_reported": 31620,
+        "input_includes_cache": false,
+        "uncached_input": 31620,
+        "cache_read": 100864,
+        "cache_write": 0,
+        "output": 480,
+        "reasoning": 26,
+        "reported_total": 132990,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 31620,
+          "output": 480,
+          "reasoning": 26,
+          "cache_read": 100864,
+          "cache_write": 0,
+          "total": 132990
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 10,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "glob": 1,
+        "read": 3,
+        "memory_search": 1,
+        "memory_get": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 12,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 7,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "opencode_interactive",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "correction",
+      "result": "pass",
+      "note": "OpenCode searched, read the original, and used memory_save with supersedes. One current record and one superseded revision remained. The correction restricted the changed advice to Windows 3.3, explicitly left other Windows versions unverified, and preserved unchanged UTC and macOS 3.2 context. This verifies actual memory correction rather than only a source edit.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": true,
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 1,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "wall_time_ms": 35919,
+      "tokens": {
+        "input_reported": 15900,
+        "input_includes_cache": false,
+        "uncached_input": 15900,
+        "cache_read": 73472,
+        "cache_write": 0,
+        "output": 728,
+        "reasoning": 0,
+        "reported_total": 90100,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 15900,
+          "output": 728,
+          "reasoning": 0,
+          "cache_read": 73472,
+          "cache_write": 0,
+          "total": 90100
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 7,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "glob": 1,
+        "memory_search": 1,
+        "read": 1,
+        "memory_get": 1,
+        "memory_save": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 19,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 7,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 16,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "opencode_interactive",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "forget",
+      "result": "pass",
+      "note": "OpenCode searched for the saved finding and forgot the corrected record's chain through memory_forget. The tool reported cleanup complete and authenticated app inspection returned no current or historical records.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": true,
+      "records_before": {
+        "active": 1,
+        "superseded": 1,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 2,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 24587,
+      "tokens": {
+        "input_reported": 15109,
+        "input_includes_cache": false,
+        "uncached_input": 15109,
+        "cache_read": 56960,
+        "cache_write": 0,
+        "output": 135,
+        "reasoning": 0,
+        "reported_total": 72204,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 15109,
+          "output": 135,
+          "reasoning": 0,
+          "cache_read": 56960,
+          "cache_write": 0,
+          "total": 72204
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 6,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "memory_search": 1,
+        "memory_forget": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 11,
+          "error": false
+        },
+        {
+          "tool": "memory_forget",
+          "duration_ms": 13,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": 0,
+        "forget_misses": 0
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "claude_to_opencode",
+      "policy_revision": "hook-v3",
+      "agent": "claude",
+      "cli_version": "2.1.312 (Claude Code)",
+      "native_session_version": null,
+      "model": "claude-opus-5-5",
+      "configured_model": null,
+      "mode": "terminal print/exec",
+      "approval_policy": "bypass",
+      "scenario": "automatic_save",
+      "result": "pass",
+      "note": "Claude searched and automatically saved a source-backed project finding without a remember request. It retained the Windows locale condition, unspecified Windows version, incompatible macOS 3.2 behavior, and documentary verification limit.",
+      "completion": "provider process exit",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": false,
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 30979,
+      "tokens": {
+        "input_reported": 10,
+        "input_includes_cache": false,
+        "uncached_input": 10,
+        "cache_read": 112189,
+        "cache_write": 16298,
+        "output": 2107,
+        "reasoning": null,
+        "reported_total": null,
+        "reasoning_is_included_in_output": true
+      },
+      "usage_cross_check": null,
+      "native_message_count": null,
+      "static_guidance": {
+        "mechanism": "MCP server instructions and tool descriptions",
+        "provider_request_context_verified": null
+      },
+      "tool_calls": {
+        "Bash": 2,
+        "ToolSearch": 1,
+        "mcp__antgrid__antgrid_inbox": 1,
+        "memory_search": 1,
+        "memory_save": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 25,
+          "error": false
+        },
+        {
+          "tool": "memory_save",
+          "duration_ms": 26,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": 0,
+        "incorrect_saves": 0,
+        "scope_selection_misses": 0,
+        "redundant_saves": 0,
+        "retrieval_misses": null
+      },
+      "native_reported_cost_usd": null,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "claude_to_opencode",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "cross_agent_recall",
+      "result": "pass",
+      "note": "OpenCode searched and received the exact Claude-created project record with full content, applicability, and Claude provenance, then inspected it with memory_get. It made no save, completing the reverse cross-agent direction.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": true,
+      "records_before": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 1,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 1,
+        "task": 0
+      },
+      "wall_time_ms": 47835,
+      "tokens": {
+        "input_reported": 16032,
+        "input_includes_cache": false,
+        "uncached_input": 16032,
+        "cache_read": 87040,
+        "cache_write": 0,
+        "output": 436,
+        "reasoning": 0,
+        "reported_total": 103508,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 16032,
+          "output": 436,
+          "reasoning": 0,
+          "cache_read": 87040,
+          "cache_write": 0,
+          "total": 103508
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 8,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "memory_search": 1,
+        "memory_get": 1,
+        "glob": 1,
+        "read": 1
+      },
+      "memory_call_latency_ms": [
+        {
+          "tool": "memory_search",
+          "duration_ms": 16,
+          "error": false
+        },
+        {
+          "tool": "memory_get",
+          "duration_ms": 7,
+          "error": false
+        }
+      ],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": 0,
+        "retrieval_misses": 0
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": []
+    },
+    {
+      "sequence": "original_session_replay_prompt_not_delivered",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": null,
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "replay",
+      "result": "blocked",
+      "note": "The resumed interactive session received no new user or assistant message and ran no tools during the entire timeout window. The launch did not deliver its replay prompt; the original answer remained displayed. This is a qualification-harness prompt-delivery block, not a memory replay failure. No original-session usage is attributed to this attempt, and no replay-storage verdict can be assigned.",
+      "completion": "harness timeout without a native user message",
+      "terminal_exit_code": null,
+      "stopped_after_completion": false,
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 300506,
+      "tokens": {
+        "input_reported": null,
+        "input_includes_cache": false,
+        "uncached_input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "reasoning": null,
+        "reported_total": null,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": null,
+          "output": null,
+          "reasoning": null,
+          "cache_read": null,
+          "cache_write": null,
+          "total": null
+        },
+        "matching_available_fields": null,
+        "mismatches": []
+      },
+      "native_message_count": 0,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {},
+      "memory_call_latency_ms": [],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "native_reported_cost_usd": null,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": [
+        "No native message was received in this scenario window; usage is unknown and the task was not evaluated."
+      ]
+    },
+    {
+      "sequence": "original_session_replay_terminal_input",
+      "policy_revision": "hook-v3",
+      "agent": "opencode",
+      "cli_version": "1.19.0",
+      "native_session_version": "1.19.0",
+      "model": "openai/gpt-6.1-sol",
+      "configured_model": "openai/gpt-6.1-sol",
+      "mode": "interactive terminal",
+      "approval_policy": "default",
+      "scenario": "replay",
+      "result": "pass",
+      "note": "The original durable OpenCode session resumed and received the unchanged replay prompt once through ordinary terminal input after readiness. It ran the local verification script using inherited live caller identity. Actual native bash tool output reported HTTP 400 FORGOTTEN for the original forgotten operation, and no record reappeared. This is explicit bridge replay verification rather than automatic MCP tool selection. Only new message rows from the retry window contribute usage.",
+      "completion": "hook work-status working to done",
+      "terminal_exit_code": 0,
+      "stopped_after_completion": true,
+      "prompt_delivery": "terminal input after native resume readiness",
+      "records_before": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "records_after": {
+        "active": 0,
+        "superseded": 0,
+        "expired": 0
+      },
+      "record_scopes_before": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "record_scopes_after": {
+        "user": 0,
+        "project": 0,
+        "task": 0
+      },
+      "wall_time_ms": 21997,
+      "tokens": {
+        "input_reported": 7924,
+        "input_includes_cache": false,
+        "uncached_input": 7924,
+        "cache_read": 70400,
+        "cache_write": 0,
+        "output": 139,
+        "reasoning": 0,
+        "reported_total": 78463,
+        "reasoning_is_included_in_output": false
+      },
+      "usage_cross_check": {
+        "step_finish": {
+          "input": 7924,
+          "output": 139,
+          "reasoning": 0,
+          "cache_read": 70400,
+          "cache_write": 0,
+          "total": 78463
+        },
+        "matching_available_fields": true,
+        "mismatches": []
+      },
+      "native_message_count": 6,
+      "static_guidance": {
+        "mechanism": "experimental.chat.system.transform",
+        "stored_user_system_count": 0,
+        "stored_exact_guidance_count": 0,
+        "stored_before_first_assistant": null,
+        "provider_request_context_verified": null,
+        "note": "The native schema does not promise to retain transformed provider system messages. Stored user.system is not proof of the final provider request; tool success alone does not verify hook delivery."
+      },
+      "tool_calls": {
+        "antgrid_antgrid_inbox": 2,
+        "glob": 1,
+        "bash": 1
+      },
+      "memory_call_latency_ms": [],
+      "memory_tool_errors": 0,
+      "quality": {
+        "save_misses": null,
+        "incorrect_saves": null,
+        "redundant_saves": null,
+        "retrieval_misses": null
+      },
+      "native_reported_cost_usd": 0,
+      "list_price_estimate_usd": null,
+      "actual_cost_usd": null,
+      "extra_tool_calls_vs_baseline": null,
+      "warnings": [],
+      "verification_receipts": [
+        {
+          "code": "FORGOTTEN",
+          "status": 400
+        }
+      ]
+    }
+  ]
+}

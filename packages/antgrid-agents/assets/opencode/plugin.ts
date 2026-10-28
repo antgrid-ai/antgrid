@@ -7,6 +7,7 @@
 // opencode's own Bun runtime, so we use fetch (no node). Correlation via the
 // ANTGRID_TERMINAL_ID env.
 import type { Plugin } from "@opencode-ai/plugin";
+import { MEMORY_AGENT_GUIDANCE } from "../memory-guidance";
 
 // Posts go out one at a time (see `send`), so a bridge that accepts the
 // connection and then hangs would hold up every post queued behind it; a dead
@@ -21,8 +22,61 @@ const ACTIVITY_INTERVAL_MS = 60_000;
 // Bounds the loopback POST, not the display — the same ceiling the Claude hook
 // clips a question to.
 const MAX_DETAIL_CHARS = 400;
+const MEMORY_BOOTSTRAP_TIMEOUT_MS = 1500;
+const MEMORY_BOOTSTRAP_MAX_BYTES = 1024;
 
 type Post = { path: string; body: Record<string, unknown> };
+
+async function memoryGuidanceEnabled(): Promise<boolean> {
+  const portText = process.env.ANTGRID_API_PORT;
+  const terminalId = process.env.ANTGRID_TERMINAL_ID?.trim();
+  const runId = process.env.ANTGRID_RUN_ID?.trim();
+  const port = Number(portText);
+  if (!portText || !/^\d+$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535
+    || !terminalId || terminalId.startsWith("${") || !runId || runId.startsWith("${")) return false;
+  try {
+    const url = new URL(`http://127.0.0.1:${port}/memory/bootstrap`);
+    url.searchParams.set("terminalId", terminalId);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId }),
+      redirect: "error",
+      signal: AbortSignal.timeout(MEMORY_BOOTSTRAP_TIMEOUT_MS),
+    });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      return false;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let text = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > MEMORY_BOOTSTRAP_MAX_BYTES) return false;
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    const status: unknown = JSON.parse(text);
+    // This installed asset has no runtime dependencies. Mirror the narrow
+    // bridge schema and refuse extra fields so memory content cannot enter it.
+    if (!status || typeof status !== "object" || Array.isArray(status)) return false;
+    const result = status as Record<string, unknown>;
+    return Object.keys(result).length === 4
+      && result.available === true && result.enabled === true
+      && result.paused === false && result.project_paused === false;
+  } catch {
+    return false;
+  }
+}
 
 function clip(text: unknown): string | undefined {
   if (typeof text !== "string") return undefined;
@@ -279,6 +333,13 @@ export const AntgridSessionNamer: Plugin = async () => {
   }
 
   return {
+    "experimental.chat.system.transform": async (input, output) => {
+      for (let index = output.system.length - 1; index >= 0; index--) {
+        if (output.system[index] === MEMORY_AGENT_GUIDANCE) output.system.splice(index, 1);
+      }
+      if (!input.sessionID || children.has(input.sessionID)) return;
+      if (await memoryGuidanceEnabled()) output.system.push(MEMORY_AGENT_GUIDANCE);
+    },
     event: async ({ event }: { event: any }) => {
       const port = process.env.ANTGRID_API_PORT;
       if (!port) return;

@@ -70,6 +70,7 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
     vibeHome: typeof request.adapterOptions?.vibeHome === "string" ? request.adapterOptions.vibeHome : undefined,
     hookCommand: runtime?.host.hookCommand(),
     mcpCommand: runtime?.host.mcpCommand?.(),
+    memoryMcpCommand: runtime?.host.memoryMcpCommand?.(),
   }, runtime?.get);
   let command: string;
   let args: string[] = [];

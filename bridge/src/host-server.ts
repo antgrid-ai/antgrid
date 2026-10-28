@@ -80,6 +80,8 @@ import { agentSpec, schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
 import { SchedulerInvalidCronError, nextOccurrences, resolveRunAt, schedulerErrorCode } from "./scheduler/cron";
+import { MemoryError } from "antgrid-memory";
+import { HostMemory, memoryFailure } from "./memory";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -681,6 +683,7 @@ export class HostServer {
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
+  private readonly memory = new HostMemory(resolveAbDir);
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
@@ -1389,6 +1392,24 @@ export class HostServer {
     }
   }
 
+  async handleMemoryRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
+    try {
+      const validate = () => {
+        if (!peerId || !this.controlPlaneRelay?.isPeerAuthorized?.(peerId) || !this.remoteAccessPolicy.isEnabled()) {
+          throw new MemoryError("FORBIDDEN", "An authorized native machine connection with remote access enabled is required.");
+        }
+      };
+      validate();
+      if (!await this.controlPlaneRelay!.authorizeDevice?.(baseSlotDeviceId(peerId!))) {
+        throw new MemoryError("FORBIDDEN", "Device account authorization is unavailable.");
+      }
+      const result = await this.memory.execute(() => { validate(); return { actor: "app" }; }, req.params);
+      return createMessage("response", { requestId: req.requestId, ok: true, result });
+    } catch (error) {
+      return createMessage("response", { requestId: req.requestId, ok: false, error: memoryFailure(error) });
+    }
+  }
+
   /** Answer one control-plane RPC to the app session that ASKED, rather than to
    *  every established session on this machine.
    *
@@ -1435,6 +1456,11 @@ export class HostServer {
     // tools/projects until an unrelated re-advertise. It exposes no authority
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
+      if (msg.method === "memory.request") {
+        void this.handleMemoryRpc(msg, peerId)
+          .then((res) => this.answerAsker(res, channel, bus, peerId));
+        return;
+      }
       if (msg.method.startsWith("scheduler.")) {
         void this.handleSchedulerRpc(msg, peerId)
           .then((res) => this.answerAsker(res, channel, bus, peerId));
@@ -2144,6 +2170,13 @@ export class HostServer {
 
   private async handleControl(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
+      case "memory:request": {
+        try {
+          return { id: req.id, ok: true, type: req.type, result: await this.memory.execute(() => ({ actor: "app" }), req.request) };
+        } catch (error) {
+          return { id: req.id, ok: false, error: memoryFailure(error) };
+        }
+      }
       case "scheduler:request": {
         try {
           return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
@@ -2701,6 +2734,16 @@ export class HostServer {
       startSession: (sessionId) => this.startLocalSession(sessionId),
       // Binds the catalog key rather than the core's computed id: schedules are stored under the key.
       schedulerForAgent: (identity, method, params) => this.schedulerRequestForAgent({ ...identity, projectId }, method, params),
+      memoryForAgent: (caller, request) => this.memory.execute(() => {
+        if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+        return { ...caller(), actor: "agent", project_id: projectId };
+      }, request, 1),
+      memoryForApp: (request, validate, peerId) => this.memory.execute(() => {
+        validate();
+        if (peerId && !this.controlPlaneRelay?.isPeerAuthorized?.(peerId)) throw new MemoryError("FORBIDDEN", "Native memory authorization has expired.");
+        if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+        return { actor: "app", project_id: projectId };
+      }, request),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
@@ -3035,6 +3078,7 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
+    this.memory.close();
     // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.
     closeTerminalHistoryStore();

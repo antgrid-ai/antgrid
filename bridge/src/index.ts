@@ -108,6 +108,14 @@ program
     await runMcpCli();
   });
 
+program
+  .command("memory-mcp", { hidden: true })
+  .description("Run the Antgrid Memory MCP server over stdio")
+  .action(async () => {
+    const { runMemoryMcpCli } = await import("./cli/memory-mcp");
+    await runMemoryMcpCli();
+  });
+
 // Single default action — reads bootstrap payload from stdin, branches on mode.
 program
   .option("--verbose", "Alias for --log-level debug")

@@ -343,6 +343,16 @@ describe("augmentAgentLaunch MCP injection", () => {
             ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
           },
         },
+        "antgrid-memory": {
+          type: "stdio",
+          command: HOOK_COMMAND.binary,
+          args: ["memory-mcp"],
+          env: {
+            ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
+            ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+            ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
+          },
+        },
       },
     });
   });
@@ -476,6 +486,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
   afterEach(() => overrideCursorHelp(CURSOR_HELP));
 
   const ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "mcp"] };
+  const MEMORY_ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "memory-mcp"] };
   const FAMILY = [
     { tool: "opencode", envVar: "OPENCODE_CONFIG_CONTENT" },
     { tool: "kilo", envVar: "KILO_CONFIG_CONTENT" },
@@ -488,7 +499,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       );
 
     test(`${tool} adds mcp.antgrid as separate command fields`, () => {
-      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
+      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY } });
     });
 
     test(`${tool} keeps a user's ${envVar} keys and their own mcp servers`, () => {
@@ -498,7 +509,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       }));
       expect(JSON.parse(a.env[envVar])).toEqual({
         model: "x/y",
-        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
+        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY },
       });
     });
 
@@ -509,7 +520,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     });
 
     test(`${tool} treats a blank ${envVar} as unset`, () => {
-      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
+      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY } });
     });
   }
 
@@ -522,7 +533,10 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     // there would register the server twice.
     expect(a.args).toContain(join(abDir, "plugin", "copilot"));
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
-      mcpServers: { antgrid: { type: "local", command: HOOK_COMMAND.binary, args: ["mcp"], tools: ["*"] } },
+      mcpServers: {
+        antgrid: { type: "local", command: HOOK_COMMAND.binary, args: ["mcp"], tools: ["*"] },
+        "antgrid-memory": { type: "local", command: HOOK_COMMAND.binary, args: ["memory-mcp"], tools: ["*"] },
+      },
     });
   });
 
@@ -547,6 +561,15 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
         antgrid: {
           command: HOOK_COMMAND.binary,
           args: ["mcp"],
+          env: {
+            ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
+            ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
+            ANTGRID_RUN_ID: "${env:ANTGRID_RUN_ID}",
+          },
+        },
+        "antgrid-memory": {
+          command: HOOK_COMMAND.binary,
+          args: ["memory-mcp"],
           env: {
             ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
             ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",

@@ -11,10 +11,14 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../models/ab_config.dart';
+import '../models/memory.dart';
+import '../providers/agent_transport.dart' show selectedRegistrationIdProvider;
 import '../providers/providers.dart';
 import '../services/app_settings_service.dart';
 import '../services/config_service.dart';
 import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
+import '../util/detached.dart';
+import 'memory_screen.dart';
 
 class ProjectSettingsScreen extends ConsumerStatefulWidget {
   const ProjectSettingsScreen({super.key});
@@ -30,10 +34,12 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
   String? _saveError;
   bool _saving = false;
   bool _loadFailed = false;
+  String? _memoryProjectId;
 
   @override
   void initState() {
     super.initState();
+    _memoryProjectId = ref.read(selectedRegistrationIdProvider);
     // Fire-and-forget: errors are routed into _saveError (and an empty draft is
     // shown) so a read/detect failure surfaces instead of stranding the loading
     // spinner forever.
@@ -139,6 +145,28 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
             child: ListView(
               padding: const EdgeInsets.all(AbTokens.space12),
               children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: AbButton(
+                    label: 'Project memory',
+                    onTap: _memoryProjectId == null
+                        ? null
+                        : () {
+                            final id = _memoryProjectId;
+                            if (id != null) {
+                              detached(
+                                'Memory',
+                                'open failed',
+                                () => openMemoryScreen(
+                                  context,
+                                  MemoryTarget.project(id),
+                                ),
+                              );
+                            }
+                          },
+                  ),
+                ),
+                const SizedBox(height: AbTokens.space12),
                 _AgentSection(
                   draft: draft,
                   detected: _detected,

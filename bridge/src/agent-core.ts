@@ -66,6 +66,9 @@ import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HAND
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { resolveSchedulerCaller } from "./scheduler-caller";
 import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
+import { MemoryError } from "antgrid-memory";
+import { MemoryRequestMessage } from "./protocol";
+import { memoryFailure, resolveMemoryCaller, type MemoryForAgent, type MemoryForApp } from "./memory";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -612,6 +615,8 @@ export interface BuildAgentCoreOptions {
    *  decides what that session may do. Absent means a bare core, and every
    *  scheduler route answers SCHEDULER_UNAVAILABLE. */
   schedulerForAgent?: SchedulerForAgent;
+  memoryForAgent?: MemoryForAgent;
+  memoryForApp?: MemoryForApp;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -1611,6 +1616,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     switch (msg.type) {
+      case "memory:request": {
+        const validate = () => {
+          if ((clientGenerations.get(client) ?? 0) !== clientGeneration
+            || (client !== "loopback" && (!remoteFrameAllowed("relay") || !peerId || !peerSessionProvider?.(peerId)))) {
+            throw new MemoryError("FORBIDDEN", "The authenticated project connection is no longer available.");
+          }
+        };
+        try { validate(); } catch { break; }
+        const request = MemoryRequestMessage.safeParse(msg);
+        if (!request.success) {
+          sendAbTo(createMessage("memory:result", { requestId: msg.requestId, ok: false, error: memoryFailure(request.error) }), client);
+          break;
+        }
+        const respond = (fields: { ok: boolean; result?: Record<string, unknown>; error?: { code: string; message: string } }) => {
+          try { validate(); } catch { return; }
+          sendAbTo(createMessage("memory:result", { requestId: request.data.requestId, ...fields }), client);
+        };
+        if (!opts.memoryForApp) {
+          respond({ ok: false, error: { code: "UNAVAILABLE", message: "Memory is unavailable in this process." } });
+          break;
+        }
+        void opts.memoryForApp(request.data.request, validate, peerId)
+          .then((result) => respond({ ok: true, result }))
+          .catch((error) => respond({ ok: false, error: memoryFailure(error) }));
+        break;
+      }
+      case "memory:result": break;
       // A remote bus frame is relayed by an app session between two bridges that
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
       // coordinator applies only frames addressed to a session it holds, and a
@@ -5263,6 +5295,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
+    memory: async ({ terminalId, runId, request }) => {
+      const caller = () => resolveMemoryCaller({
+        session: (id) => sessions?.get(id),
+        isLiveRun: (id, liveRun) => sessions?.isLiveRun(id, liveRun) ?? false,
+        runAgent: (id, liveRun) => sessions?.liveRunAgent(id, liveRun),
+        checkoutExists: (id) => {
+          const runtime = checkoutRuntimes.runtime(id);
+          return runtime !== undefined && !runtime.disposed && sessions?.isCheckoutDeleting(id) !== true;
+        },
+      }, terminalId, runId);
+      caller();
+      if (!opts.memoryForAgent) throw new MemoryError("UNAVAILABLE", "Memory is unavailable in this process.");
+      return opts.memoryForAgent(caller, request);
+    },
     scheduler: async ({ terminalId, runId, method, params }) => {
       if (!opts.schedulerForAgent) {
         throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");

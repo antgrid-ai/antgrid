@@ -13,10 +13,20 @@ integration files. Package code must never import bridge internals.
 The host creates `createAgentRuntime({ registry, host })` from
 `antgrid-agents/runtime`. Each runtime snapshots its definitions and binds logging,
 state storage, hook resolution, and process services to its own operations.
-Hosts exposing session tools also provide `mcpCommand()`. The optional adapter
-`mcp.inject` operation receives that command and supplies its own configuration
+Hosts exposing session tools also provide `mcpCommand()`, and may provide
+`memoryMcpCommand()` for the independent `antgrid-memory` server. The optional adapter
+`mcp.inject` operation receives those commands and supplies its own configuration
 or arguments. Hook and MCP injection fail independently, so losing one does not
 remove the other integration.
+
+Adapters may opt into validated model-visible hook output through
+`HookProfile.stdout`. The bridge requests settings with inherited live caller
+identity, while the adapter validates the reply and emits its fixed provider
+format. Codex uses this for static memory guidance at `SessionStart`; OpenCode
+uses its terminal plugin's system transform and the same guidance asset.
+Neither path injects memory records. Disabled, paused or unavailable memory
+produces no guidance; saves still recheck settings in the memory service.
+
 Terminal adapters
 receive semantic conversation intent and a host-selected working directory;
 their launch preparation may be asynchronous. Raw shell input remains distinct
