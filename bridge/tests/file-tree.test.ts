@@ -507,8 +507,10 @@ describe("file-tree", () => {
       writeFileSync(join(tempDir, "binary.dat"), binary);
 
       const result = readFile(tempDir, "binary.dat");
-      expect(result.content).toBeNull();
-      expect(result.error).toBe("Binary file");
+      expect(result.error).toBeUndefined();
+      expect(result.encoding).toBe("base64");
+      expect(result.mimeType).toBe("application/octet-stream");
+      expect(Buffer.from(result.content!, "base64").equals(binary)).toBe(true);
     });
 
     it("rejects files over the size limit", () => {
@@ -572,11 +574,35 @@ describe("file-tree", () => {
       expect(valid.utf8Valid).toBe(true);
     });
 
-    it("non-allowlisted binary still rejected", () => {
-      writeFileSync(join(tempDir, "a.bin"), Buffer.from([0, 1, 2, 0, 3]));
+    it("serves a binary with no viewer as base64 so it can be downloaded", () => {
+      const bytes = Buffer.from([0, 1, 2, 0, 3]);
+      writeFileSync(join(tempDir, "a.bin"), bytes);
       const r = readFile(tempDir, "a.bin");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+      expect(r.mimeType).toBe("application/octet-stream");
+      expect(Buffer.from(r.content!, "base64").equals(bytes)).toBe(true);
+    });
+
+    it("serves a binary between the text and binary caps", () => {
+      writeFileSync(join(tempDir, "mid.bin"), Buffer.alloc(2_000_000, 0));
+      const r = readFile(tempDir, "mid.bin");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+    });
+
+    it("oversized binary with no viewer rejected", () => {
+      writeFileSync(join(tempDir, "big.bin"), Buffer.alloc(10_485_761, 0));
+      const r = readFile(tempDir, "big.bin");
       expect(r.content).toBeNull();
-      expect(r.error).toBe("Binary file");
+      expect(r.error).toContain("File too large");
+      expect(r.error).toContain("10485760");
+    });
+
+    it("oversized text still reports the text cap", () => {
+      writeFileSync(join(tempDir, "huge.txt"), "x".repeat(10_485_761));
+      const r = readFile(tempDir, "huge.txt");
+      expect(r.error).toContain("max 1048576");
     });
 
     it("oversized binary rejected", () => {
@@ -634,8 +660,17 @@ describe("file-tree", () => {
       expect(r.content).toBe("# Plan\n");
     });
 
-    it("still denies a non-image path outside the checkout root", () => {
+    it("serves a text file from outside the checkout root", () => {
       const outsidePath = join(externalDir, "notes.txt");
+      writeFileSync(outsidePath, "hello");
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.error).toBeUndefined();
+      expect(r.content).toBe("hello");
+    });
+
+    it("still denies a type with no viewer outside the checkout root", () => {
+      const outsidePath = join(externalDir, "notes.bin");
       writeFileSync(outsidePath, "hello");
 
       const r = readFile(tempDir, outsidePath);
@@ -652,11 +687,11 @@ describe("file-tree", () => {
       "base64",
     );
 
-    it("denies a text file reached through a link that leaves the checkout", () => {
-      writeFileSync(join(externalDir, "secret.txt"), "shh");
+    it("denies an unviewable file reached through a link that leaves the checkout", () => {
+      writeFileSync(join(externalDir, "secret.bin"), "shh");
       dirLink(externalDir, join(tempDir, "out"));
 
-      const r = readFile(tempDir, "out/secret.txt");
+      const r = readFile(tempDir, "out/secret.bin");
       expect(r.content).toBeNull();
       expect(r.error).toBe("Path traversal denied");
     });
@@ -671,10 +706,10 @@ describe("file-tree", () => {
     });
 
     it("denies a png-named link whose real path is not an image", () => {
-      writeFileSync(join(externalDir, "secret.txt"), "shh");
+      writeFileSync(join(externalDir, "secret.bin"), "shh");
       dirLink(externalDir, join(tempDir, "out.png"));
 
-      const r = readFile(tempDir, "out.png/secret.txt");
+      const r = readFile(tempDir, "out.png/secret.bin");
       expect(r.content).toBeNull();
       expect(r.error).toBe("Path traversal denied");
     });
@@ -697,9 +732,18 @@ describe("file-tree", () => {
       expect(r.content).toBe("ok");
     });
 
-    it("still denies a PDF outside the checkout root (excluded on purpose)", () => {
+    it("serves a PDF from outside the checkout root", () => {
       const outsidePath = join(externalDir, "generated.pdf");
-      writeFileSync(outsidePath, "not a real pdf — the extension is what's under test");
+      writeFileSync(outsidePath, Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]));
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.error).toBeUndefined();
+      expect(r.mimeType).toBe("application/pdf");
+    });
+
+    it("denies a credential file outside the checkout root even with a viewable extension", () => {
+      const outsidePath = join(externalDir, "server.pem");
+      writeFileSync(outsidePath, "-----BEGIN PRIVATE KEY-----");
 
       const r = readFile(tempDir, outsidePath);
       expect(r.content).toBeNull();
@@ -721,19 +765,29 @@ describe("file-tree", () => {
       expect(externalSafePreview("a.mdx")).toBe(true);
     });
 
-    it("excludes svg, pdf, and ico even though other surfaces can render them", () => {
-      // .svg can embed a script, .pdf is a heavier parser, .ico has no real
-      // "generated output" use case here — none is worth the exposure for a
-      // path this app never chose to trust with a checkout.
-      expect(externalSafePreview("a.svg")).toBe(false);
-      expect(externalSafePreview("a.pdf")).toBe(false);
-      expect(externalSafePreview("a.ico")).toBe(false);
+    it("recognizes pdf and common text and code files", () => {
+      expect(externalSafePreview("a.pdf")).toBe(true);
+      expect(externalSafePreview("a.txt")).toBe(true);
+      expect(externalSafePreview("a.json")).toBe(true);
+      expect(externalSafePreview("a.md.txt")).toBe(true);
+      expect(externalSafePreview(["C:", "Users", "me", "src", "main.dart"].join("\\"))).toBe(true);
     });
 
-    it("excludes other text files", () => {
-      expect(externalSafePreview("a.txt")).toBe(false);
+    it("excludes svg, which can embed a script, and types with no viewer", () => {
+      expect(externalSafePreview("a.svg")).toBe(false);
+      expect(externalSafePreview("a.exe")).toBe(false);
+      expect(externalSafePreview("a.zip")).toBe(false);
+      expect(externalSafePreview("Makefile")).toBe(false);
+    });
+
+    it("excludes files and directories that hold credentials", () => {
       expect(externalSafePreview(".env")).toBe(false);
-      expect(externalSafePreview("a.md.txt")).toBe(false);
+      expect(externalSafePreview("/app/.env.local")).toBe(false);
+      expect(externalSafePreview("server.pem")).toBe(false);
+      expect(externalSafePreview("id_rsa")).toBe(false);
+      expect(externalSafePreview("credentials.json")).toBe(false);
+      expect(externalSafePreview("/home/me/.ssh/config.txt")).toBe(false);
+      expect(externalSafePreview(["C:", "Users", "me", ".aws", "notes.txt"].join("\\"))).toBe(false);
     });
   });
 });

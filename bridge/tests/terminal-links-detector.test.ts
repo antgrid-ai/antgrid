@@ -555,7 +555,7 @@ describe("quoted alternatives", () => {
     e.fs.add("/r/src/a.ts");
     const { result } = await detectSettled(e, mkRows(['"run src/a.ts now"'], 30));
     expect(result.spans).toHaveLength(1);
-    expect([result.spans[0]!.startCol, result.spans[0]!.endCol]).toEqual([1, 17]);
+    expect([result.spans[0]!.startCol, result.spans[0]!.endCol]).toEqual([0, 18]);
     expect(pathParams(result.spans[0]!.uri).p).toBe("run src/a.ts now");
   });
 
@@ -596,11 +596,11 @@ describe("outside the checkout", () => {
   it("links an outside image and nothing else outside", async () => {
     const e = env();
     e.fs.add("/o/shot.png");
-    e.fs.add("/o/notes.ts");
-    const { result } = await detectSettled(e, mkRows(["see /o/shot.png and /o/notes.ts"], 40));
+    e.fs.add("/o/notes.bin");
+    const { result } = await detectSettled(e, mkRows(["see /o/shot.png and /o/notes.bin"], 40));
     expect(result.spans).toHaveLength(1);
     expect(pathParams(result.spans[0]!.uri)).toEqual({ p: "/o/shot.png", b: "a", k: "i" });
-    expect(e.fs.lstats.some((p) => p.includes("notes.ts"))).toBe(false);
+    expect(e.fs.lstats.some((p) => p.includes("notes.bin"))).toBe(false);
   });
 
   it("does not link an outside directory named like an image", async () => {
@@ -982,5 +982,28 @@ describe("a link out of the checkout through the checkout", () => {
 
     expect(result.spans).toHaveLength(1);
     expect(result.refining.size).toBe(0);
+  });
+});
+
+describe("quoted paths", () => {
+  it("cover their quote marks, so a tap on a mark opens the file", async () => {
+    const e = env();
+    e.fs.add("/r/a.ts");
+    const { result } = await detectSettled(e, mkRows(['see "/r/a.ts" now'], 40));
+    expect(result.spans.map((s) => [s.row, s.startCol, s.endCol])).toEqual([[0, 4, 13]]);
+  });
+
+  it("leave an unquoted path's span as it was", async () => {
+    const e = env();
+    e.fs.add("/r/a.ts");
+    const { result } = await detectSettled(e, mkRows(["see /r/a.ts now"], 40));
+    expect(result.spans.map((s) => [s.row, s.startCol, s.endCol])).toEqual([[0, 4, 11]]);
+  });
+
+  it("keep a mark that wrapped onto another row out of the span", async () => {
+    const e = env();
+    e.fs.add("/r/a.ts");
+    const { result } = await detectSettled(e, mkRows(['"/r/a.ts', '"'], 8, { wrapped: [1] }));
+    expect(result.spans.map((s) => [s.row, s.startCol, s.endCol])).toEqual([[0, 0, 8]]);
   });
 });

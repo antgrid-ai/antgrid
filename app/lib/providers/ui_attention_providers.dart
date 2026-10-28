@@ -22,6 +22,11 @@ final appLifecycleStateProvider =
 final agentSurfaceVisibleProvider =
     NotifierProvider<ValueController<bool>, bool>(() => ValueController(true));
 
+/// A surface on the mobile workspace page needs horizontal drags for itself
+/// (a zoomed PDF panning), so the page-switching PageView must not claim them.
+final pagerSwipeLockedProvider =
+    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+
 enum WorkbenchSurface {
   workspace,
   newSession,

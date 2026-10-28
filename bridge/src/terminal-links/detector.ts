@@ -689,8 +689,38 @@ function run(
         }
       }
     }
-    return out.length > 0 ? out : undefined;
+    if (out.length === 0) return undefined;
+    if (claim.quoted && claim.segs.length === 1) widenToQuotes(claim.segs[0]!, out);
+    return out;
   }
+
+  /** A finger lands on the quote marks around a quoted path as readily as on
+   *  the path, and a tap that misses the span opens nothing. The marks join
+   *  the span when they sit on the same row as the path's own ends; a mark that
+   *  wrapped onto another row stays out, since one span cannot cover two. */
+  function widenToQuotes(seg: Segment, spans: DetectedSpan[]): void {
+    const first = spans[0]!;
+    const last = spans[spans.length - 1]!;
+    const before = seg.start - 1;
+    if (before >= 0 && isQuoteMark(seg.line.text.charCodeAt(before)) && seg.line.rowAt[before] === first.row) {
+      const col = seg.line.colAt[before]!;
+      if (col >= 0 && col < first.startCol) first.startCol = col;
+    }
+    const after = seg.end;
+    if (after < seg.line.text.length && isQuoteMark(seg.line.text.charCodeAt(after)) && seg.line.rowAt[after] === last.row) {
+      const col = seg.line.colAt[after]!;
+      if (col >= 0) {
+        const r = rows[last.row]!;
+        last.endCol = Math.max(last.endCol, Math.min(r.cols, col + Math.max(1, r.widthAt[col] ?? 1)));
+      }
+    }
+  }
+}
+
+function isQuoteMark(code: number): boolean {
+  return (
+    code === 0x22 || code === 0x27 || code === 0x60 || code === 0x2018 || code === 0x2019 || code === 0x201c || code === 0x201d
+  );
 }
 
 function firstStartingAt(entries: ReadonlyArray<{ scanned: { start: number } }>, at: number): number {

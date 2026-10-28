@@ -2286,6 +2286,10 @@ class TerminalService {
     _discardFrameArchive(terminalId);
     _historyRunId.remove(terminalId);
     requestStop(terminalId);
+    // The stop alone leaves the bridge's stopped row and saved screen, which
+    // list the tab again on the next connection. A bridge that predates the
+    // verb drops it and keeps the old behaviour.
+    _send(createAbMessage('terminal:forget', {'terminalId': terminalId}));
     _deletedTerminalIds.add(terminalId);
     if (_pendingTerminalIds.contains(terminalId)) {
       _canceledPendingTerminalIds.add(terminalId);

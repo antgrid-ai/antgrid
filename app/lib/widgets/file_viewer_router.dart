@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import '../models/file_tree_models.dart';
+import 'binary_file_viewer.dart';
 import 'file_content_viewer.dart';
 import 'file_viewer_kind.dart';
 import 'image_viewer.dart';
@@ -89,6 +90,12 @@ class FileViewerRouter extends StatelessWidget {
         );
       case FileViewerKind.pdf:
         return FilePdfViewer(
+          key: ValueKey(fc.path),
+          content: fc,
+          onClose: onClose,
+        );
+      case FileViewerKind.binary:
+        return BinaryFileViewer(
           key: ValueKey(fc.path),
           content: fc,
           onClose: onClose,

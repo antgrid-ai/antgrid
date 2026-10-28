@@ -96,4 +96,119 @@ void main() {
     expect(focused.currentState.preview.isOpen, isTrue);
     await tester.pumpWidget(const SizedBox());
   });
+
+  group('title bar', () {
+    Future<_PreviewService> open(
+      WidgetTester tester, {
+      required Size screen,
+      required FileContent content,
+      String? displayName,
+    }) async {
+      tester.view.physicalSize = screen;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final service = _PreviewService();
+      addTearDown(service.changes.close);
+      late BuildContext launchContext;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: Builder(
+              builder: (context) {
+                launchContext = context;
+                return const SizedBox();
+              },
+            ),
+          ),
+        ),
+      );
+      unawaited(
+        showFilePreviewDialog(
+          launchContext,
+          service,
+          path: content.path,
+          displayName: displayName ?? 'notes.json',
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      service.emit(
+        PreviewPaneState(
+          path: content.path,
+          displayName: displayName ?? 'notes.json',
+          content: content,
+        ),
+      );
+      await tester.pump();
+      return service;
+    }
+
+    const content = FileContent(
+      path: r'C:\Users\me\Docs\notes.json',
+      content: '{}',
+      size: 2048,
+    );
+
+    testWidgets('names the file, its type and size, and where it lives', (
+      tester,
+    ) async {
+      await open(tester, screen: const Size(1400, 900), content: content);
+      expect(find.text('notes.json'), findsOneWidget);
+      expect(
+        find.text(r'JSON · 2.0 KB · C:\Users\me\Docs'),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Copy path'), findsOneWidget);
+      expect(find.byTooltip('Close'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('leaves the viewer one header, not two', (tester) async {
+      await open(tester, screen: const Size(1400, 900), content: content);
+      expect(find.byTooltip('Close file'), findsNothing);
+      expect(find.byTooltip('Download'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('fills a phone and caps a large window', (tester) async {
+      await open(tester, screen: const Size(400, 800), content: content);
+      Size dialog() => tester.getSize(
+        find
+            .descendant(
+              of: find.byType(Dialog),
+              matching: find.byType(SizedBox),
+            )
+            .first,
+      );
+      expect(dialog().width, 400 - 16);
+      await tester.pumpWidget(const SizedBox());
+
+      await open(tester, screen: const Size(2400, 1400), content: content);
+      expect(dialog().width, 1120);
+      expect(dialog().height, 900);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  test('previewFolder keeps the separator style the path was written in', () {
+    expect(previewFolder(r'C:\a\b.txt'), r'C:\a');
+    expect(previewFolder('/a/b/c.txt'), '/a/b');
+    expect(previewFolder(r'C:\b.txt'), r'C:\');
+    expect(previewFolder('b.txt'), '');
+    expect(previewFileName(r'C:\a\b.txt'), 'b.txt');
+  });
+
+  test('previewKindLabel names what the viewer will show', () {
+    String label(String path, {String enc = 'utf8', String? mime}) =>
+        previewKindLabel(
+          FileContent(path: path, size: 1, encoding: enc, mimeType: mime),
+        );
+    expect(label('/a/plan.md'), 'Markdown');
+    expect(label('/a/x.dart'), 'DART');
+    expect(label('/a/Makefile'), 'Text');
+    expect(label('/a/x.pdf', enc: 'base64', mime: 'application/pdf'), 'PDF');
+    expect(label('/a/x.png', enc: 'base64', mime: 'image/png'), 'Image');
+  });
 }

@@ -86,7 +86,11 @@ dependencies:
   http: ^1.2.2
   flutter_local_notifications: ^22.0.1
   markdown_widget: ^2.3.2+8
-  pdfrx: ^2.4.4
+  # 2.4.x leaves pages blank after a fast scroll (canceled previews never
+  # re-render) and can wedge PDFium's worker on a Windows read race (#595), which
+  # also hangs hot reload. Fixed in 2.5.0-2.6.6. 2.7.0+ compiles a native C
+  # gate, which CI's toolchains are not yet qualified for.
+  pdfrx: ">=2.6.6 <2.7.0"
   sentry_flutter: ^9.22.0
   # Fork of uxduck/push. Stock push runs the host app's main() headlessly on a
   # terminated-state push (BackgroundFlutterAppLauncher); the fork adds an

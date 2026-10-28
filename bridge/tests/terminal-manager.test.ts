@@ -278,6 +278,24 @@ describe("TerminalManager", () => {
     expect(outputs.join("")).toContain("54321");
   });
 
+  test("a forgotten terminal is no longer reported, live or stopped", async () => {
+    manager.spawn({ terminalId: "t1" });
+    await new Promise((r) => setTimeout(r, 100));
+    manager.kill("t1");
+    await waitFor(() => !manager.has("t1"));
+    expect(manager.getStatus().some((s) => s.terminalId === "t1")).toBe(true);
+
+    manager.forget("t1");
+    expect(manager.getStatus().some((s) => s.terminalId === "t1")).toBe(false);
+
+    // A live one is dropped once its process is reaped, not before.
+    manager.spawn({ terminalId: "t2" });
+    manager.kill("t2");
+    manager.forget("t2");
+    await waitFor(() => !manager.has("t2"));
+    expect(manager.getStatus().some((s) => s.terminalId === "t2")).toBe(false);
+  });
+
   test("resize updates terminal dimensions", async () => {
     manager.spawn({ terminalId: "t1" });
     await new Promise((r) => setTimeout(r, 100));

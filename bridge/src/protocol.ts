@@ -182,6 +182,12 @@ const TerminalStartCommand = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const TerminalForgetCommand = BaseMessage.extend({
+  type: z.literal("terminal:forget"),
+  terminalId: z.string(),
+  ...CheckoutScoped,
+});
+
 const TerminalStopCommand = BaseMessage.extend({
   type: z.literal("terminal:stop"),
   terminalId: z.string(),
@@ -812,9 +818,10 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   relPath: z.string().nullable(),
   isDirectory: z.boolean(),
   // Absolute path, set only when relPath is null AND the path is a
-  // recognized image or markdown file outside the checkout (see file-tree.ts's
-  // externalSafePreview) — an image-generation tool's output or an agent's
-  // plan, typically. Named for its first use; kept for wire compatibility. Lets the app preview it read-only via `file:read`
+  // file the viewer can show outside the checkout (see file-tree.ts's
+  // externalSafePreview: images, PDF, markdown, text/code, never a credential
+  // file). Named for its first use, an image tool's output; kept for wire
+  // compatibility. Lets the app preview it read-only via `file:read`
   // (which applies the same extension gate again) instead of refusing the
   // link outright.
   externalImagePath: z.string().nullable(),
@@ -2702,6 +2709,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalBellMessage,
   TerminalStartCommand,
   TerminalStopCommand,
+  TerminalForgetCommand,
   TerminalResizeCommand,
   TerminalSizeMessage,
   AgentStatusMessage,
@@ -2869,6 +2877,7 @@ export type SessionHello = z.infer<typeof SessionHelloFrame>;
 export type SessionEstablished = z.infer<typeof SessionEstablishedFrame>;
 export type TerminalStart = z.infer<typeof TerminalStartCommand>;
 export type TerminalStop = z.infer<typeof TerminalStopCommand>;
+export type TerminalForget = z.infer<typeof TerminalForgetCommand>;
 export type TerminalResize = z.infer<typeof TerminalResizeCommand>;
 export type TerminalSize = z.infer<typeof TerminalSizeMessage>;
 export type AgentStatus = z.infer<typeof AgentStatusMessage>;
@@ -3075,7 +3084,7 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   ...CLIPBOARD_MESSAGE_TYPES,
-  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
+  "terminal:start", "terminal:stop", "terminal:forget", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "agent:status",
@@ -3196,7 +3205,7 @@ export function parseMessage(raw: string): AbMessage | null {
 const KNOWN_TYPES = new Set<string>([
   ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
-  "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
+  "terminal:start", "terminal:stop", "terminal:forget", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",

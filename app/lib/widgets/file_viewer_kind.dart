@@ -1,7 +1,7 @@
 // app/lib/widgets/file_viewer_kind.dart
 
 /// Which specialized viewer should render a file.
-enum FileViewerKind { code, markdown, svg, image, pdf }
+enum FileViewerKind { code, markdown, svg, image, pdf, binary }
 
 const _markdownExts = {'md', 'markdown', 'mdx'};
 
@@ -19,7 +19,8 @@ String? _ext(String path) {
 /// require base64 bytes ([encoding] == 'base64') and are classified by the
 /// bridge-supplied [mimeType] — the single source of truth for which binaries
 /// are renderable (`RENDERABLE_BINARY_MIME` in bridge/src/file-tree.ts) — so the
-/// allowlist isn't duplicated app-side. Anything else falls back to the code view.
+/// allowlist isn't duplicated app-side. Other base64 content is [binary]
+/// (download only); anything else falls back to the code view.
 FileViewerKind fileViewerKindFor(
   String path,
   String? encoding, [
@@ -34,6 +35,8 @@ FileViewerKind fileViewerKindFor(
   if (encoding == 'base64' && mimeType != null) {
     if (mimeType.startsWith('image/')) return FileViewerKind.image;
     if (mimeType == 'application/pdf') return FileViewerKind.pdf;
+    // Bytes the bridge sent that no viewer above takes: held for download only.
+    return FileViewerKind.binary;
   }
   return FileViewerKind.code;
 }

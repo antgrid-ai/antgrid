@@ -1110,6 +1110,8 @@ export class TerminalManager {
     rows: number;
     type?: "agent" | "service";
     driverClientId?: string;
+    /** Known only from the history store: a previous host lifetime's terminal. */
+    archived?: true;
   }> {
     const live = Array.from(this.sessions.entries()).map(([id, session]) => ({
       terminalId: id,
@@ -1138,6 +1140,7 @@ export class TerminalManager {
     const archived = this.archivedTerminalIds().filter((id) => !known.has(id)).map((terminalId) => ({
       terminalId, name: terminalId, running: false, shell: "", cols: 80, rows: 24,
       type: this.terminalTypes.get(terminalId),
+      archived: true as const,
     }));
     return [...live, ...stopped, ...archived];
   }
