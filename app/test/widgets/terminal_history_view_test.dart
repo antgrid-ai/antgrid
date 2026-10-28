@@ -2073,7 +2073,13 @@ void main() {
       ];
       int fresh(List<TerminalHistoryRow> list) {
         if (list.isEmpty) return 0;
-        final t = GhosttyVt.newTerminal(cols: 10, rows: 1);
+        // As unbounded as the scratch engine it checks, so the reference
+        // never drops a row the measurement keeps.
+        final t = GhosttyVt.newTerminal(
+          cols: 10,
+          rows: 1,
+          maxScrollback: 1 << 30,
+        );
         try {
           t.writeBytes(encodeTerminalHistoryRows(list));
           return t.totalRows;

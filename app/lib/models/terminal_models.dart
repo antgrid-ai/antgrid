@@ -114,8 +114,9 @@ class TerminalTab {
              initialRows: rows,
              mouseMotionReportInterval: const Duration(milliseconds: 50),
              // Also the engine's scrollback in rows: `maxScrollback` defaults
-             // to `maxLines`, so the transcript and the engine keep the same
-             // history at any width.
+             // to `maxLines`, so the depth no longer depends on width. The
+             // engine prunes whole pages, so it holds at most this many rows
+             // and can hold up to a page fewer.
              maxLines: 10000,
            ),
        replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0),
