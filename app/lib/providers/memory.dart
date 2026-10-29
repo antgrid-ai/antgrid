@@ -2,30 +2,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../models/memory.dart';
-import '../project/project_session_registry.dart';
 import '../services/memory_service.dart';
 import '../utils/platform_utils.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
-import 'host_status.dart';
 import 'providers.dart' show warmServiceFor;
-import 'supervisor_status.dart';
 
 typedef MemoryRequest =
     Future<Map<String, dynamic>> Function(Map<String, dynamic> request);
 
-final memoryRequestProvider = Provider.family<MemoryRequest, MemoryTarget>((
-  ref,
-  target,
-) {
+/// Resolves the transport at call time and watches nothing: a dependency
+/// rebuild here would dispose every consumer's state (an open correction
+/// editor, a second `get`), and reading it must not build the project session.
+final memoryRequestProvider = Provider.autoDispose
+    .family<MemoryRequest, MemoryTarget>((ref, target) {
   final container = ref.container;
-  if (target.projectEntryId case final entryId?) {
-    ref.watch(projectSessionProvider(entryId));
-  } else if (target.machineId case final machineId?) {
-    ref.watch(supervisorStatusProvider(machineId));
-  } else {
-    ref.watch(hostStatusProvider);
-  }
   return (request) async {
     if (container.read(demoModeProvider)) {
       throw const MemoryException(
@@ -73,7 +64,7 @@ final memoryRequestProvider = Provider.family<MemoryRequest, MemoryTarget>((
       client.close();
     }
   };
-});
+    });
 
 typedef MemoryQuery = ({
   MemoryTarget target,
@@ -101,7 +92,13 @@ final memorySnapshotProvider = FutureProvider.autoDispose
       final status = MemoryStatus.fromJson(await request({'op': 'status'}));
       if (!status.available) return MemorySnapshot(status: status);
       if (query.query.isNotEmpty && status.searchStatus != 'ready') {
-        return MemorySnapshot(status: status);
+        return MemorySnapshot(
+          status: status,
+          resultError: const MemoryException(
+            'SEARCH_UNAVAILABLE',
+            'Search is unavailable. Clear the search to browse saved records.',
+          ),
+        );
       }
       try {
         final result = await request(

@@ -21,6 +21,15 @@ import '../../providers/memory.dart';
 import 'memory_error.dart';
 import '../../util/detached.dart';
 
+const kMaxEvidenceReferences = 8;
+
+/// One reference per line; CRLF and whitespace-only lines are not references.
+List<String> parseEvidenceLines(String text) => const LineSplitter()
+    .convert(text)
+    .map((line) => line.trim())
+    .where((line) => line.isNotEmpty)
+    .toList(growable: false);
+
 class MemoryRecordDetails extends ConsumerWidget {
   const MemoryRecordDetails({
     super.key,
@@ -56,7 +65,9 @@ class MemoryRecordDetails extends ConsumerWidget {
             ),
             Expanded(
               child: record.when(
-                skipLoadingOnRefresh: false,
+                // A dependency rebuild or refresh must not swap the body for a
+                // spinner: that would dispose an open correction editor.
+                skipLoadingOnReload: true,
                 data: (record) => _RecordBody(
                   key: ValueKey(record.id),
                   target: target,
@@ -115,13 +126,17 @@ class _RecordBodyState extends ConsumerState<_RecordBody> {
   Future<void> _save() async {
     if (_busy) return;
     final request = ref.read(memoryRequestProvider(widget.target));
+    final evidence = parseEvidenceLines(_evidence.text);
+    if (evidence.length > kMaxEvidenceReferences) {
+      setState(
+        () => _error = 'Up to $kMaxEvidenceReferences evidence references',
+      );
+      return;
+    }
     final save = widget.record.correction(
       content: _content.text,
       applicability: _applicability.text,
-      evidence: _evidence.text
-          .split('\n')
-          .where((line) => line.isNotEmpty)
-          .toList(),
+      evidence: evidence,
     );
     final payload = jsonEncode(save);
     if (payload != _pendingPayload) {

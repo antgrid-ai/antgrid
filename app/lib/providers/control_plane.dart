@@ -249,40 +249,43 @@ Future<void> refreshMachineInventoryAndControlPlanes(
   if (!ref.mounted) return;
 
   final targets = uuids.whereType<String>().toSet();
-  final relayManager = ref.read(relayConnectionManagerProvider);
-  await Future.wait(
-    targets.map((uuid) async {
-      try {
-        // A mid-climb machine leaves this read pending until its dial settles;
-        // the timeout throws into the catch below, forcing the fresh attempt.
-        final client = await ref
-            .read(controlPlaneClientForProvider(uuid).future)
-            .timeout(_kRefreshDialWait);
-        if (client != null) {
-          await _probeAndReconcile(client);
-          return;
-        }
-      } catch (_) {
-        // Fall through to a fresh connection attempt below.
-      }
-      if (!ref.mounted) return;
+  await Future.wait(targets.map((uuid) => retryMachineControlPlane(ref, uuid)));
+}
 
-      // A machine can sit Connected UNDER a stale cached rejection (a failed
-      // eager launch dial that later self-recovered via peer presence).
-      // Restarting it would kill the live peer session and every project stream
-      // riding the socket — and the invalidate + re-read below succeeds on the
-      // live connection anyway, so only a not-connected machine is torn down
-      // for its fresh attempt. Restarted, never released: the machine is still
-      // wanted, and a release would strand every open project bound to it.
-      if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
-        await relayManager.restart(uuid);
-      }
-      invalidateControlPlaneProviders(ref, uuid);
-      await refreshControlPlanes(ref, [
-        uuid,
-      ]).timeout(_kRefreshDialWait, onTimeout: () {});
-    }),
-  );
+/// One machine's share of a manual refresh: probe a live client, otherwise
+/// force a fresh dial. Also the retry path for a screen that holds a settled
+/// dial failure, which re-reading the cached provider would only replay.
+Future<void> retryMachineControlPlane(RefreshRef ref, String uuid) async {
+  final relayManager = ref.read(relayConnectionManagerProvider);
+  try {
+    // A mid-climb machine leaves this read pending until its dial settles;
+    // the timeout throws into the catch below, forcing the fresh attempt.
+    final client = await ref
+        .read(controlPlaneClientForProvider(uuid).future)
+        .timeout(_kRefreshDialWait);
+    if (client != null) {
+      await _probeAndReconcile(client);
+      return;
+    }
+  } catch (_) {
+    // Fall through to a fresh connection attempt below.
+  }
+  if (!ref.mounted) return;
+
+  // A machine can sit Connected UNDER a stale cached rejection (a failed
+  // eager launch dial that later self-recovered via peer presence).
+  // Restarting it would kill the live peer session and every project stream
+  // riding the socket — and the invalidate + re-read below succeeds on the
+  // live connection anyway, so only a not-connected machine is torn down
+  // for its fresh attempt. Restarted, never released: the machine is still
+  // wanted, and a release would strand every open project bound to it.
+  if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
+    await relayManager.restart(uuid);
+  }
+  invalidateControlPlaneProviders(ref, uuid);
+  await refreshControlPlanes(ref, [
+    uuid,
+  ]).timeout(_kRefreshDialWait, onTimeout: () {});
 }
 
 /// Dial every eager target (see [eagerControlPlaneTargetsProvider]) so opening

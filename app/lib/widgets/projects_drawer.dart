@@ -19,7 +19,9 @@ import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
 import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
+import '../models/memory.dart';
 import '../models/session_entry.dart';
+import '../screens/memory_screen.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
@@ -757,6 +759,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
     // would cancel and resume the work-status subscription on each frame.
     final needsUser =
         !expanded && DrawerProjectAggregateDot.needsUser(ref, regId);
+    final demo = ref.watch(demoModeProvider);
     final label = widget.project.label;
     final name = (label != null && label.isNotEmpty)
         ? label
@@ -790,6 +793,20 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // The rail cell goes to whichever element is outermost, so the dot
             // inherits it at rest instead of sitting a full cell inboard of
             // every other row's trailing glyph.
+            final memory = revealed && !demo
+                ? AbIconButton(
+                    icon: AbIcons.list,
+                    tooltip: 'Project memory',
+                    onTap: () => detached(
+                      'Memory',
+                      'open failed',
+                      () => openMemoryScreen(
+                        context,
+                        MemoryTarget.project(regId, label: name),
+                      ),
+                    ),
+                  )
+                : null;
             final cells = <Widget?>[];
             if (newSession == null) {
               if (aggregate != null) {
@@ -797,6 +814,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
               }
             } else {
               cells.add(aggregate);
+              cells.add(memory);
               cells.add(AbRowTrailingCell(child: newSession));
             }
             return AbListRow(

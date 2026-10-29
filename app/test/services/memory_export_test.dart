@@ -37,16 +37,33 @@ void main() {
         {'op': 'export', 'cursor': 'page-3'},
       ]);
       last.complete(memoryExportPage(records: [records[2]]));
-      final data = (await export)!.toJson();
-      expect(jsonDecode(jsonEncode(data)), {
+      final bytes = (await export)!;
+      final data = {
         'version': 1,
         'owner_id': 'owner',
         'exported_at': 1000,
         'records': records,
-      });
-      expect(data.containsKey('next_cursor'), isFalse);
+      };
+      expect(jsonDecode(utf8.decode(bytes)), data);
+      expect(
+        utf8.decode(bytes),
+        const JsonEncoder.withIndent('  ').convert(data),
+      );
     },
   );
+
+  test('an empty export is the same file the whole-document encoder writes', () async {
+    final bytes = await collectMemoryExport((_) async => memoryExportPage());
+    expect(
+      utf8.decode(bytes!),
+      const JsonEncoder.withIndent('  ').convert({
+        'version': 1,
+        'owner_id': 'owner',
+        'exported_at': 1000,
+        'records': <Object>[],
+      }),
+    );
+  });
 
   test('a later-page failure returns no partial export', () async {
     final calls = <Map<String, dynamic>>[];

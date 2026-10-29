@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/widgets.dart';
@@ -17,9 +16,13 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_text_field.dart';
-import '../models/file_tree_models.dart';
 import '../models/memory.dart';
+import '../project/project_session_registry.dart' show projectSessionProvider;
+import '../providers/agent_transport.dart' show agentTransportForProvider;
+import '../providers/control_plane.dart'
+    show RefreshRef, retryMachineControlPlane;
 import '../providers/memory.dart';
+import '../providers/relay_connection.dart' show relayConnectionManagerProvider;
 import '../providers/memory_route_targets.dart';
 import '../services/memory_service.dart';
 import '../util/detached.dart';
@@ -77,6 +80,24 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
 
   void _reload() => ref.invalidate(memorySnapshotProvider(_view));
 
+  /// A settled dial failure is cached by the provider chain, so reloading alone
+  /// would replay it; the connection has to be redialled first.
+  Future<void> _retry() async {
+    final machineId = widget.target.machineId;
+    final entryId = widget.target.projectEntryId;
+    if (machineId != null) {
+      await retryMachineControlPlane(RefreshRef.of(ref), machineId);
+    } else if (entryId != null) {
+      ref.read(relayConnectionManagerProvider).peek(entryId)?.retry();
+      ref.invalidate(agentTransportForProvider(entryId));
+      if (ref.read(projectSessionProvider(entryId)).hasError) {
+        ref.invalidate(projectSessionProvider(entryId));
+      }
+    }
+    if (!mounted) return;
+    _reload();
+  }
+
   Future<void> _act(Map<String, dynamic> operation) async {
     if (_busy) return;
     final request = ref.read(memoryRequestProvider(widget.target));
@@ -106,20 +127,13 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
       _actionError = null;
     });
     try {
-      final exported = await collectMemoryExport(request, isActive: isActive);
-      if (!mounted || route?.isActive == false || exported == null) return;
-      final text = const JsonEncoder.withIndent(
-        '  ',
-      ).convert(exported.toJson());
-      await downloadFileContent(
+      final bytes = await collectMemoryExport(request, isActive: isActive);
+      if (!mounted || route?.isActive == false || bytes == null) return;
+      await downloadFileBytes(
         context,
-        FileContent(
-          path: 'antgrid-memory.json',
-          content: text,
-          size: utf8.encode(text).length,
-          utf8Valid: true,
-          mimeType: 'application/json',
-        ),
+        name: 'antgrid-memory.json',
+        mimeType: 'application/json',
+        bytes: bytes,
       );
     } catch (error) {
       if (!mounted || route?.isActive == false) return;
@@ -140,8 +154,17 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
   }
 
   void _searchNow() {
+    final text = _search.text.trim();
+    // Enter bypasses the disabled Search button; without this the query would
+    // replace the list with an error while the index is down.
+    final searchStatus = ref
+        .read(memorySnapshotProvider(_view))
+        .value
+        ?.status
+        .searchStatus;
+    if (text.isNotEmpty && searchStatus != 'ready') return;
     setState(() {
-      _query = _search.text.trim();
+      _query = text;
       _offset = 0;
     });
   }
@@ -181,7 +204,8 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
                   subtitle: memoryErrorCopy(error),
                   action: AbButton(
                     label: 'Reconnect and retry',
-                    onTap: _reload,
+                    onTap: () =>
+                        detached('Memory', 'reconnect failed', _retry),
                   ),
                 ),
               ),

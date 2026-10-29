@@ -653,6 +653,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // so a session must name a project. The + lives on each advertised project
     // row instead (see `_AdvertisedProjectRow`).
     final offersNewSession = actions && entry.machineUuid == null;
+    // Read ahead of `actions` for the same subscription-lifetime reason as
+    // above. The sample project has no memory store behind it.
+    final demo = ref.watch(demoModeProvider);
+    final offersMemory = offersNewSession && !demo;
 
     final cells = <Widget>[
       if (status.configError)
@@ -680,6 +684,22 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // Actions outermost, and whatever ends up last carries the cell: the rail
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
+      if (offersMemory) {
+        cells.add(
+          AbIconButton(
+            icon: AbIcons.list,
+            tooltip: 'Project memory',
+            onTap: () => detached(
+              'Memory',
+              'open failed',
+              () => openMemoryScreen(
+                context,
+                MemoryTarget.project(entry.id, label: entry.displayName),
+              ),
+            ),
+          ),
+        );
+      }
       if (offersNewSession) {
         final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
         cells.add(offersRemove ? plus : AbRowTrailingCell(child: plus));

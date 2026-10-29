@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 
@@ -6,11 +8,19 @@ import '../models/ab_message.dart';
 import '../models/memory.dart';
 import '../project/project_session.dart';
 
-Future<MemoryExport?> collectMemoryExport(
+const _indent = JsonEncoder.withIndent('  ');
+
+/// The version-1 export file as UTF-8, laid out as
+/// `JsonEncoder.withIndent('  ')` would lay out the whole document.
+///
+/// Each page is encoded as it arrives and dropped, so the record maps, the
+/// full text and a second byte copy never coexist.
+Future<Uint8List?> collectMemoryExport(
   Future<Map<String, dynamic>> Function(Map<String, dynamic>) request, {
   bool Function()? isActive,
 }) async {
-  final records = <Map<String, dynamic>>[];
+  final out = BytesBuilder(copy: false);
+  var written = 0;
   final seenCursors = <String>{};
   final seenRecords = <String>{};
   MemoryExportPage? first;
@@ -23,6 +33,14 @@ Future<MemoryExport?> collectMemoryExport(
     });
     if (isActive?.call() == false) return null;
     final page = MemoryExportPage.fromJson(response);
+    if (first == null) {
+      out.add(
+        utf8.encode(
+          '{\n  "version": 1,\n  "owner_id": ${jsonEncode(page.ownerId)},\n'
+          '  "exported_at": ${page.exportedAt},\n  "records": [',
+        ),
+      );
+    }
     first ??= page;
     if (page.ownerId != first.ownerId || page.exportedAt != first.exportedAt) {
       throw const MemoryException(
@@ -37,15 +55,17 @@ Future<MemoryExport?> collectMemoryExport(
           'Memory export repeated a record. Start the export again.',
         );
       }
-      records.add(record);
+      out.add(
+        utf8.encode(
+          '${written++ == 0 ? '\n' : ',\n'}    '
+          '${_indent.convert(record).replaceAll('\n', '\n    ')}',
+        ),
+      );
     }
     cursor = page.nextCursor;
     if (cursor == null) {
-      return MemoryExport(
-        ownerId: first.ownerId,
-        exportedAt: first.exportedAt,
-        records: List.unmodifiable(records),
-      );
+      out.add(utf8.encode(written == 0 ? ']\n}' : '\n  ]\n}'));
+      return out.takeBytes();
     }
     if (!seenCursors.add(cursor)) {
       throw const MemoryException(

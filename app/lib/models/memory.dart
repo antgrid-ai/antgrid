@@ -71,25 +71,6 @@ class MemoryResponse {
   }
 }
 
-class MemoryExport {
-  const MemoryExport({
-    required this.ownerId,
-    required this.exportedAt,
-    required this.records,
-  });
-
-  final String ownerId;
-  final int exportedAt;
-  final List<Map<String, dynamic>> records;
-
-  Map<String, dynamic> toJson() => {
-    'version': 1,
-    'owner_id': ownerId,
-    'exported_at': exportedAt,
-    'records': records,
-  };
-}
-
 class MemoryExportPage {
   const MemoryExportPage._({
     required this.ownerId,
