@@ -48,6 +48,11 @@ and refusal after concurrent record changes. The route tests cover overlapping
 Memory screens, dismissal animations and navigator disposal; export tests
 verify that Back cancels both continuation requests and the final save dialog.
 
+The macOS run on 2026-10-29 (macOS 27.0.1 arm64, Bun 1.3.14) passed the
+compiled packaging smoke, 38 storage tests, the full bridge suite, three
+consecutive runs of both native memory gates, and 41 focused Flutter tests.
+Memory, bridge and eval typechecks and `flutter analyze --no-pub` were clean.
+
 ## Agent preparation and execution
 
 ```sh

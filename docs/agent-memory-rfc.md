@@ -393,7 +393,8 @@ downloaded file.
 | Flutter inspection controls | Focused Memory widget/service tests and `flutter analyze --no-pub` | Passed 15 tests and clean analysis; compact and desktop preview inspected with mock records, without a real account or host |
 | Terminal profiles and MCP retries | `antgrid-agents` suites and bridge memory MCP tests | Passed 326 adapter tests, 15 MCP tests, and adapter typecheck; separate server registered without changing chat or native memory |
 | Windows compiled MCP + SQLite/FTS5 | `bridge/scripts/memory-mcp-smoke.ts`, compiled with Bun 1.3.14, executed on Windows | Passed tool table, full-text search, persistence/restart, correction, forgetting, and old-operation replay |
-| macOS/Linux compiled packaging | Same smoke harness is portable but has not run here | Unqualified |
+| macOS compiled MCP + SQLite/FTS5 | Same smoke harness, compiled with Bun 1.3.14, executed on macOS 27.0.1 arm64 on 2026-10-29 | Passed tool table, full-text search, persistence/restart, correction, forgetting, and old-operation replay |
+| Linux compiled packaging | Same smoke harness is portable but has not run here | Unqualified |
 | Claude Code 2.1.312 automatic saving | Authenticated real Antgrid terminal sessions, print mode, default `claude-opus-5-5`, isolated non-Git fixtures and native homes | Two ordinary-work runs saved source-backed findings without a remember request; full cross-agent sequence remains incomplete |
 | Codex CLI 0.164.0 automatic saving | Authenticated real Antgrid terminal sessions, default `gpt-6.1-sol`; fresh exec and normal interactive runs | Both fresh-store ordinary-work runs completed without saving; automatic-save gate failed |
 | Live duplicate, forget, and restart replay | Claude MCP forgetting plus explicit local verification scripts in the original durable session using inherited live caller identity | Exact duplicate returned `already_present`; original and duplicate operation replays returned `FORGOTTEN` after deletion; history remained empty |
@@ -494,7 +495,7 @@ without creating another (36.329 s).
 
 These observations do not establish a general save reliability rate. Actual
 charges and marginal token/tool overhead remain unmeasured without a matched
-baseline. macOS/Linux packaging results, live pause/fork/checkout combinations,
+baseline. Linux packaging results, live pause/fork/checkout combinations,
 and the app-connected provider walkthrough still require release qualification.
 
 ## OpenCode live follow-up recorded on 2026-10-29
