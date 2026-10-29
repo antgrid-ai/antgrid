@@ -2,12 +2,11 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_confirm_dialog.dart';
-import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_inline_banner.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_loading.dart';
@@ -18,7 +17,8 @@ import '../../models/memory.dart';
 import '../../providers/memory.dart';
 import '../../util/detached.dart';
 import '../../utils/platform_utils.dart';
-import 'memory_error.dart';
+import 'memory_mutation.dart';
+import 'memory_section_label.dart';
 
 Future<void> showMemorySettings(
   BuildContext context, {
@@ -45,35 +45,17 @@ class MemorySettingsDialog extends ConsumerStatefulWidget {
       _MemorySettingsDialogState();
 }
 
-class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
+class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
+    with MemoryMutation<MemorySettingsDialog> {
   final _scroll = ScrollController();
-  bool _busy = false;
-  String? _error;
+
+  @override
+  MemoryTarget get mutationTarget => widget.target;
 
   @override
   void dispose() {
     _scroll.dispose();
     super.dispose();
-  }
-
-  Future<bool> _send(Map<String, dynamic> request) async {
-    if (_busy) return false;
-    final send = ref.read(memoryRequestProvider(widget.target));
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await send(request);
-      if (!mounted) return false;
-      invalidateMemoryViews(ref, widget.target);
-      return true;
-    } catch (error) {
-      if (mounted) setState(() => _error = memoryErrorCopy(error, mutation: true));
-      return false;
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 
   Future<void> _turnOff() async {
@@ -86,7 +68,7 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
       destructive: true,
     );
     if (!confirmed || !mounted) return;
-    if (await _send({'op': 'settings', 'enabled': false}) && mounted) {
+    if (await sendMutation({'op': 'settings', 'enabled': false}) && mounted) {
       Navigator.of(context).pop();
     }
   }
@@ -164,7 +146,7 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (_error case final error?) ...[
+        if (mutationError case final error?) ...[
           AbInlineBanner(text: error, color: colors.error),
           const SizedBox(height: AbTokens.space16),
         ],
@@ -178,24 +160,16 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
             value: !status.paused,
             semanticLabel: 'Let agents save memories',
             large: true,
-            onChanged: _busy
+            onChanged: busy
                 ? null
                 : (v) => detached(
                     'Memory',
                     'pause toggle failed',
-                    () => _send({'op': 'settings', 'paused': !v}),
+                    () => sendMutation({'op': 'settings', 'paused': !v}),
                   ),
           ),
         const SizedBox(height: AbTokens.space16),
-        Text(
-          'Saving by project',
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontSm,
-            fontWeight: FontWeight.w600,
-            color: colors.textMuted,
-          ),
-        ),
-        const SizedBox(height: AbTokens.space8),
+        const MemorySectionLabel('Saving by project', bottom: AbTokens.space8),
         if (machinePaused) ...[
           Text(
             'Saving is paused for every project.',
@@ -236,12 +210,12 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
                         state: machinePaused || p.paused ? 'Paused' : 'Saving',
                         value: !machinePaused && !p.paused,
                         semanticLabel: 'Saving for ${p.displayName}',
-                        onChanged: _busy || machinePaused
+                        onChanged: busy || machinePaused
                             ? null
                             : (v) => detached(
                                 'Memory',
                                 'project pause toggle failed',
-                                () => _send({
+                                () => sendMutation({
                                   'op': 'settings',
                                   'project_id': p.projectId,
                                   'project_paused': !v,
@@ -272,29 +246,11 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Container(
-          height: 48,
-          padding: const EdgeInsets.only(
-            left: AbTokens.space16 + AbTokens.space4,
-            right: AbTokens.space8,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Memory settings',
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontMd,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-              AbIconButton(
-                icon: AbIcons.close,
-                tooltip: 'Close',
-                onTap: () => Navigator.of(context).pop(),
-              ),
-            ],
+        Padding(
+          padding: abDialogTitlePadding.copyWith(bottom: AbTokens.space8),
+          child: abDialogTitle(
+            'Memory settings',
+            onClose: () => Navigator.of(context).pop(),
           ),
         ),
         const AbSeparator.horizontal(),
@@ -327,7 +283,7 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog> {
               AbButton(
                 label: 'Turn off Memory',
                 color: context.antgrid.error,
-                onTap: _busy
+                onTap: busy
                     ? null
                     : () => detached('Memory', 'turn off failed', _turnOff),
               ),

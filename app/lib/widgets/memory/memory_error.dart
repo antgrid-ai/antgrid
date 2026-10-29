@@ -5,7 +5,6 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart'
 
 import '../../launcher/host_control_client.dart';
 import '../../models/memory.dart';
-import '../../services/pending_reply.dart';
 import '../ab_status_helpers.dart';
 
 String memoryErrorCode(Object error) => switch (error) {
@@ -23,7 +22,6 @@ String memoryErrorCopy(Object error, {bool mutation = false}) {
   if (code == 'UNKNOWN_OUTCOME' ||
       (mutation &&
           (error is TimeoutException ||
-              error is SessionDownException ||
               code == 'TIMEOUT' ||
               code == 'TRANSPORT' ||
               code == 'TRANSPORT_ERROR'))) {

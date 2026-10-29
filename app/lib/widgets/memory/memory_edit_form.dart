@@ -18,14 +18,31 @@ import '../../models/memory.dart';
 import '../../providers/memory.dart';
 import '../../util/detached.dart';
 import 'memory_error.dart';
+import 'memory_section_label.dart';
 
 const kMaxEvidenceReferences = 8;
 
+/// Lays out a row of buttons: inline on wide layouts, one full-width tap
+/// target per button on compact ones. Each button carries its own `expand`.
+Widget memoryButtonRow(List<Widget> buttons, {required bool expand}) => Row(
+  children: [
+    for (final (i, button) in buttons.indexed) ...[
+      if (i > 0) const SizedBox(width: AbTokens.space8),
+      if (expand)
+        Expanded(
+          child: SizedBox(height: AbTokens.tapTargetMin, child: button),
+        )
+      else
+        button,
+    ],
+  ],
+);
+
 /// Edits one memory by saving a correction that supersedes it.
 ///
-/// In compact layouts the pane owns Save and Cancel (a bar that must stay put
-/// above the keyboard), so it reads [MemoryEditFormState.canSave] through a
-/// `GlobalKey` and learns of changes through [onChanged].
+/// In compact layouts the pane hosts [MemoryEditFormState.actions] in a bar that
+/// must stay put above the keyboard, reading the form through a `GlobalKey` and
+/// learning of changes through [onChanged].
 class MemoryEditForm extends ConsumerStatefulWidget {
   const MemoryEditForm({
     super.key,
@@ -60,9 +77,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   String? _pendingPayload;
   String? _operationKey;
 
-  bool get busy => _busy;
-
-  bool get canSave {
+  bool get _canSave {
     if (_busy || _content.text.trim().isEmpty) return false;
     final record = widget.record;
     return _content.text.trim() != record.content ||
@@ -109,7 +124,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   }
 
   Future<void> save() async {
-    if (!canSave) return;
+    if (!_canSave) return;
     final request = ref.read(memoryRequestProvider(widget.target));
     final save = widget.record.correction(
       content: _content.text.trim(),
@@ -152,17 +167,21 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
     }
   }
 
-  Widget _label(String text) => Padding(
-    padding: const EdgeInsets.only(bottom: AbTokens.space6),
-    child: Text(
-      text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontSm,
-        fontWeight: FontWeight.w600,
-        color: context.antgrid.textMuted,
-      ),
+  /// Save and Cancel, shared by this form's own footer and the compact pane's
+  /// fixed bar so the enabled rules live in one place.
+  Widget actions({required bool expand}) => memoryButtonRow([
+    AbButton(
+      label: 'Save changes',
+      variant: AbButtonVariant.primary,
+      expand: expand,
+      onTap: _canSave ? () => detached('Memory', 'save failed', save) : null,
     ),
-  );
+    AbButton(
+      label: 'Cancel',
+      expand: expand,
+      onTap: _busy ? null : widget.onCancel,
+    ),
+  ], expand: expand);
 
   Widget _chip(String source) {
     final p = context.antgrid;
@@ -218,7 +237,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
             AbInlineBanner(text: error, color: p.error),
             const SizedBox(height: AbTokens.space12),
           ],
-          _label('Memory'),
+          const MemorySectionLabel('Memory'),
           AbTextField(
             controller: _content,
             minLines: 4,
@@ -227,14 +246,14 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
             enabled: !_busy,
           ),
           const SizedBox(height: AbTokens.space16),
-          _label('Applies when'),
+          const MemorySectionLabel('Applies when'),
           AbTextField(
             controller: _applicability,
             hintText: 'For example: Windows builds only',
             enabled: !_busy,
           ),
           const SizedBox(height: AbTokens.space16),
-          _label('Sources'),
+          const MemorySectionLabel('Sources'),
           if (_sources.isNotEmpty) ...[
             Wrap(
               spacing: AbTokens.space6,
@@ -276,22 +295,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
           Text('Saving keeps the current text as an earlier version.', style: muted),
           if (!widget.compact) ...[
             const SizedBox(height: AbTokens.space16),
-            Row(
-              children: [
-                AbButton(
-                  label: 'Save changes',
-                  variant: AbButtonVariant.primary,
-                  onTap: canSave
-                      ? () => detached('Memory', 'save failed', save)
-                      : null,
-                ),
-                const SizedBox(width: AbTokens.space8),
-                AbButton(
-                  label: 'Cancel',
-                  onTap: _busy ? null : widget.onCancel,
-                ),
-              ],
-            ),
+            actions(expand: false),
           ],
         ],
       ),

@@ -14,7 +14,7 @@ import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
-import 'package:antgrid/widgets/memory/memory_icon_button.dart';
+import 'package:antgrid/widgets/memory/memory_project_button.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/demo_mode.dart';

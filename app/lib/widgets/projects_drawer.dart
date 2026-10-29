@@ -22,7 +22,7 @@ import '../project/project_session_registry.dart'
 import '../models/memory.dart';
 import '../screens/memory_screen.dart' show openMemoryScreen;
 import '../models/session_entry.dart';
-import 'memory/memory_icon_button.dart';
+import 'memory/memory_project_button.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
@@ -268,7 +268,9 @@ class _NavActions extends ConsumerWidget {
 
     final offersMemory = !isMobilePlatform && !ref.watch(demoModeProvider);
     final memoryCount = offersMemory
-        ? ref.watch(memoryDrawerSummaryProvider).value?.memories
+        ? ref.watch(
+            memoryDrawerSummaryProvider.select((s) => s.value?.memories),
+          )
         : null;
 
     Widget navigationRow({
@@ -363,11 +365,8 @@ class _NavActions extends ConsumerWidget {
 /// actually holds are unknown until the row is expanded, and asking would open
 /// a control-plane socket per machine at drawer build. Nothing in the drawer
 /// counts its own contents any more: the panel is scanned for the one row that
-/// needs the user, which is what the attention dots are for. Memory is the one
-/// exception: the local host answers without a socket or spawn
-/// ([memoryDrawerSummaryProvider] waits for the host to be up), the number is
-/// the item's size rather than an attention signal, and remote rows
-/// deliberately carry no count.
+/// needs the user, which is what the attention dots are for. (Memory is the one
+/// exception; see `_DrawerEntryTrailing`.)
 class _GroupLabel extends ConsumerWidget {
   const _GroupLabel({required this.label, required this.onRefresh});
 

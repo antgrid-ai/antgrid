@@ -232,6 +232,13 @@ export class MemoryService {
     });
   }
 
+  /** Single definition of current versus earlier, so list totals and per-project counts cannot disagree. */
+  private versionCondition(versions: "current" | "earlier"): { sql: string; args: number[] } {
+    const cutoff = this.now() - TASK_EXPIRY_MS;
+    return versions === "current"
+      ? { sql: "(r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?))", args: [cutoff] }
+      : { sql: "(r.superseded_by IS NOT NULL OR (r.memory_type='task_state' AND r.updated_at<=?))", args: [cutoff] };
+  }
   private filter(ctx: MemoryContext, versions: Versions, memoryType?: string): { sql: string; args: (string | number)[] } {
     let sql = "r.owner_id=?";
     const args: (string | number)[] = [ctx.owner_id];
@@ -241,9 +248,11 @@ export class MemoryService {
       sql += " AND r.project_id=? AND (r.scope!='task' OR r.task_id=?) AND (r.checkout_id IS NULL OR r.checkout_id=?)";
       args.push(ctx.project_id!, ctx.session_id!, ctx.checkout_id!);
     }
-    const cutoff = this.now() - TASK_EXPIRY_MS;
-    if (versions === "current") { sql += " AND r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?)"; args.push(cutoff); }
-    else if (versions === "earlier") { sql += " AND (r.superseded_by IS NOT NULL OR (r.memory_type='task_state' AND r.updated_at<=?))"; args.push(cutoff); }
+    if (versions !== "all") {
+      const version = this.versionCondition(versions);
+      sql += ` AND ${version.sql}`;
+      args.push(...version.args);
+    }
     if (memoryType !== undefined) { sql += " AND r.memory_type=?"; args.push(memoryType); }
     return { sql, args };
   }
@@ -292,40 +301,40 @@ export class MemoryService {
   }
   private search(ctx: MemoryContext, request: Extract<MemoryRequest, { op: "search" }>): Record<string, unknown> {
     if (ctx.actor === "app") return this.appSearch(ctx, request);
-    const { query, limit } = request;
-    const match = ftsQuery(query);
-    if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
-    const { sql, args } = this.filter(ctx, "current");
-    try {
+    return this.guardedSearch(() => {
+      const { query, limit } = request;
+      const match = ftsQuery(query);
+      const { sql, args } = this.filter(ctx, "current");
       const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(match, ...args, limit + 1) as Row[];
       return searchResponse(rows.map(r => this.record(r)), limit);
-    } catch (error) {
-      if (isBusy(error)) throw error;
-      this.store.searchReady = false;
-      throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search failed; rebuild the index without replacing the database");
-    }
+    });
   }
   // The app is not inside an MCP envelope, so it gets complete records with timestamps.
   private appSearch(ctx: MemoryContext, request: Extract<MemoryRequest, { op: "search" }>): Record<string, unknown> {
-    if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
-    let match: string;
-    try { match = ftsQuery(request.query); }
-    catch (error) {
-      // A query of punctuation matches nothing by definition: a true empty result,
-      // not a hidden failure. search() deliberately lets ftsQuery's INVALID_ARGUMENT
-      // reach agents, so a model learns its query had no searchable terms instead of
-      // reading an empty result as "nothing remembered".
-      if (error instanceof MemoryError && error.code === "INVALID_ARGUMENT") return { results: [], has_more: false, total: 0 };
-      throw error;
-    }
-    const { sql, args } = this.filter(ctx, request.versions, request.memory_type);
-    try {
+    return this.guardedSearch(() => {
+      let match: string;
+      try { match = ftsQuery(request.query); }
+      catch (error) {
+        // A query of punctuation matches nothing by definition: a true empty result,
+        // not a hidden failure. search() deliberately lets ftsQuery's INVALID_ARGUMENT
+        // reach agents, so a model learns its query had no searchable terms instead of
+        // reading an empty result as "nothing remembered".
+        if (error instanceof MemoryError && error.code === "INVALID_ARGUMENT") return { results: [], has_more: false, total: 0 };
+        throw error;
+      }
+      const { sql, args } = this.filter(ctx, request.versions, request.memory_type);
       const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ? OFFSET ?`)
         .all(match, ...args, request.limit + 1, request.offset) as Row[];
       const total = (this.store.query(`SELECT count(*) AS total FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql}`).get(match, ...args) as { total: number }).total;
       return { results: rows.slice(0, request.limit).map(r => this.record(r)), has_more: rows.length > request.limit, total };
-    } catch (error) {
-      if (isBusy(error)) throw error;
+    });
+  }
+  /** Readiness check and failure policy shared by every FTS query: an unexpected failure marks the index unready so the next call reports repair instead of retrying a broken index. */
+  private guardedSearch<T>(run: () => T): T {
+    if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
+    try { return run(); }
+    catch (error) {
+      if (error instanceof MemoryError || isBusy(error)) throw error;
       this.store.searchReady = false;
       throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search failed; rebuild the index without replacing the database");
     }
@@ -346,14 +355,21 @@ export class MemoryService {
   }
 
   private projects(ctx: MemoryContext): Record<string, unknown> {
-    const rows = this.store.query(`WITH ids(project_id) AS (SELECT project_id FROM records WHERE owner_id=? UNION SELECT project_id FROM project_settings),
-      agg AS (SELECT project_id,
-        sum(CASE WHEN superseded_by IS NULL AND (memory_type!='task_state' OR updated_at>?) THEN 1 ELSE 0 END) AS memories,
-        count(*) AS total FROM records WHERE owner_id=? GROUP BY project_id)
-      SELECT ids.project_id, coalesce(agg.memories,0) AS memories, coalesce(agg.total,0)-coalesce(agg.memories,0) AS earlier_versions,
-        coalesce(s.paused,0) AS paused
-      FROM ids LEFT JOIN agg USING(project_id) LEFT JOIN project_settings s USING(project_id)${ctx.project_id ? " WHERE ids.project_id=?" : ""} ORDER BY ids.project_id`)
-      .all(ctx.owner_id, this.now() - TASK_EXPIRY_MS, ctx.owner_id, ...(ctx.project_id ? [ctx.project_id] : [])) as { project_id: string; memories: number; earlier_versions: number; paused: number }[];
+    const scope = this.filter(ctx, "all");
+    const current = this.versionCondition("current");
+    const earlier = this.versionCondition("earlier");
+    // Settings rows outlive their records, so projects with only a setting are appended after the single aggregation.
+    const rows = this.store.query(`WITH agg AS (SELECT r.project_id,
+        sum(CASE WHEN ${current.sql} THEN 1 ELSE 0 END) AS memories,
+        sum(CASE WHEN ${earlier.sql} THEN 1 ELSE 0 END) AS earlier_versions
+        FROM records r WHERE ${scope.sql} GROUP BY r.project_id)
+      SELECT agg.project_id, agg.memories, agg.earlier_versions, coalesce(s.paused,0) AS paused
+      FROM agg LEFT JOIN project_settings s ON s.project_id=agg.project_id
+      UNION ALL
+      SELECT s.project_id, 0, 0, s.paused FROM project_settings s
+      WHERE NOT EXISTS (SELECT 1 FROM agg WHERE agg.project_id=s.project_id)${ctx.project_id ? " AND s.project_id=?" : ""}
+      ORDER BY project_id`)
+      .all(...current.args, ...earlier.args, ...scope.args, ...(ctx.project_id ? [ctx.project_id] : [])) as { project_id: string; memories: number; earlier_versions: number; paused: number }[];
     const projects = rows.map(r => ({ project_id: r.project_id, memories: r.memories, earlier_versions: r.earlier_versions, paused: !!r.paused }));
     return { projects, memories: projects.reduce((n, p) => n + p.memories, 0), earlier_versions: projects.reduce((n, p) => n + p.earlier_versions, 0) };
   }

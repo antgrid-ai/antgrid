@@ -31,7 +31,7 @@ class MemoryToolbar extends StatelessWidget {
   });
 
   final MemoryFilter filter;
-  final MemoryProjects? projects;
+  final MemoryProjects projects;
   final bool searchReady;
   final TextEditingController searchController;
   final ValueChanged<MemoryFilter> onChanged;
@@ -39,27 +39,10 @@ class MemoryToolbar extends StatelessWidget {
   final bool compact;
   final String? countLine;
 
-  MemoryFilter _with({
-    String? query,
-    MemoryVersions? versions,
-    Object? projectId = _keep,
-    Object? memoryType = _keep,
-  }) => MemoryFilter(
-    query: query ?? filter.query,
-    versions: versions ?? filter.versions,
-    projectId: identical(projectId, _keep)
-        ? filter.projectId
-        : projectId as String?,
-    memoryType: identical(memoryType, _keep)
-        ? filter.memoryType
-        : memoryType as String?,
-  );
-
   String get _projectLabel {
     final id = filter.projectId;
     if (id == null) return 'All projects';
-    final name = projects?.labelFor(id) ?? id;
-    return projects?.isRemoved(id) ?? false ? '$name (removed)' : name;
+    return projects.stateLabelFor(id);
   }
 
   String get _kindLabel => filter.memoryType == null
@@ -69,9 +52,6 @@ class MemoryToolbar extends StatelessWidget {
   Future<void> _pickProject(BuildContext anchor) async {
     final rect = abMenuAnchorRect(anchor);
     if (rect == null) return;
-    final all = projects?.projects ?? const <MemoryProjectSummary>[];
-    final live = all.where((p) => !p.removed);
-    final removed = all.where((p) => p.removed);
     final current = filter.projectId;
     final picked = await showAbMenu<String>(
       context: anchor,
@@ -82,22 +62,20 @@ class MemoryToolbar extends StatelessWidget {
           value: _kAll,
           icon: current == null ? AbIcons.check : null,
         ),
-        for (final p in live)
+        for (final p in projects.projects)
           AbMenuItem(
-            label: p.displayName,
-            value: p.projectId,
-            icon: current == p.projectId ? AbIcons.check : null,
-          ),
-        for (final p in removed)
-          AbMenuItem(
-            label: '${p.displayName} (removed)',
+            label: p.stateLabel,
             value: p.projectId,
             icon: current == p.projectId ? AbIcons.check : null,
           ),
       ],
     );
     if (picked == null) return;
-    onChanged(_with(projectId: picked == _kAll ? null : picked));
+    onChanged(
+      picked == _kAll
+          ? filter.copyWith(clearProjectId: true)
+          : filter.copyWith(projectId: picked),
+    );
   }
 
   Future<void> _pickKind(BuildContext anchor) async {
@@ -122,7 +100,11 @@ class MemoryToolbar extends StatelessWidget {
       ],
     );
     if (picked == null) return;
-    onChanged(_with(memoryType: picked == _kAll ? null : picked));
+    onChanged(
+      picked == _kAll
+          ? filter.copyWith(clearMemoryType: true)
+          : filter.copyWith(memoryType: picked),
+    );
   }
 
   Widget _picker(
@@ -175,7 +157,7 @@ class MemoryToolbar extends StatelessWidget {
         // A programmatic clear leaves the debounce pending; never apply text
         // the field no longer shows.
         if (text != searchController.text) return;
-        onChanged(_with(query: text));
+        onChanged(filter.copyWith(query: text));
       },
     );
   }
@@ -231,7 +213,7 @@ class MemoryToolbar extends StatelessWidget {
                   ),
                 ],
                 selected: filter.versions,
-                onSelect: (v) => onChanged(_with(versions: v)),
+                onSelect: (v) => onChanged(filter.copyWith(versions: v)),
               ),
             ),
             _label(context, 'Project'),
@@ -269,7 +251,7 @@ class MemoryToolbar extends StatelessWidget {
                   label: 'Earlier versions',
                   selected: filter.versions == MemoryVersions.earlier,
                   onTap: () => onChanged(
-                    _with(
+                    filter.copyWith(
                       versions: filter.versions == MemoryVersions.earlier
                           ? MemoryVersions.current
                           : MemoryVersions.earlier,
@@ -294,5 +276,3 @@ class MemoryToolbar extends StatelessWidget {
     );
   }
 }
-
-const Object _keep = Object();

@@ -30,6 +30,7 @@ import '../widgets/memory/memory_error.dart';
 import '../widgets/memory/memory_format.dart';
 import '../widgets/memory/memory_header.dart';
 import '../widgets/memory/memory_list.dart';
+import '../widgets/memory/memory_mutation.dart';
 import '../widgets/memory/memory_off_state.dart';
 import '../widgets/memory/memory_problems.dart';
 import '../widgets/memory/memory_record_details.dart';
@@ -72,7 +73,8 @@ class MemoryScreen extends ConsumerStatefulWidget {
   ConsumerState<MemoryScreen> createState() => _MemoryScreenState();
 }
 
-class _MemoryScreenState extends ConsumerState<MemoryScreen> {
+class _MemoryScreenState extends ConsumerState<MemoryScreen>
+    with MemoryMutation<MemoryScreen> {
   late MemoryFilter _filter = MemoryFilter(projectId: widget.initialProjectId);
   int _pages = 1;
   String? _selectedId;
@@ -85,8 +87,6 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
   /// Keys the detail pane so an open edit or confirm never survives a filter
   /// change.
   int _epoch = 0;
-  bool _busy = false;
-  String? _actionError;
   String? _offError;
 
   // The only owner of the search text, shared by the wide and compact toolbars
@@ -119,6 +119,9 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
 
   MemoryTarget get _target => widget.target;
 
+  @override
+  MemoryTarget get mutationTarget => _target;
+
   /// Every filter change goes through here so paging, pinning and the detail
   /// pane's identity reset together.
   void _setFilter(MemoryFilter next) => setState(() {
@@ -126,7 +129,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     _pages = 1;
     _pinned = false;
     _epoch++;
-    _actionError = null;
+    mutationError = null;
   });
 
   /// With search broken the backend throws SEARCH_UNAVAILABLE for every search
@@ -172,56 +175,27 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     ref.invalidate(memoryStatusProvider(_target));
   }
 
-  Future<bool> _send(
-    Map<String, dynamic> request, {
-    void Function(Object error)? onError,
-  }) async {
-    if (_busy) return false;
-    final send = ref.read(memoryRequestProvider(_target));
-    setState(() {
-      _busy = true;
-      _actionError = null;
-    });
-    try {
-      await send(request);
-      if (!mounted) return false;
-      invalidateMemoryViews(ref, _target);
-      return true;
-    } catch (error) {
-      if (mounted) {
-        if (onError != null) {
-          onError(error);
-        } else {
-          setState(() => _actionError = memoryErrorCopy(error, mutation: true));
-        }
-      }
-      return false;
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   Future<void> _repair({required bool announce}) async {
-    final ok = await _send({'op': 'repair'});
+    final ok = await sendMutation({'op': 'repair'});
     if (ok && announce && mounted) showAbToast(context, 'Search rebuilt');
   }
 
   Future<void> _turnOn() async {
     setState(() => _offError = null);
-    await _send({
+    await sendMutation({
       'op': 'settings',
       'enabled': true,
     }, onError: (e) => setState(() => _offError = memoryErrorCopy(e, mutation: true)));
   }
 
   Future<void> _export({String? projectId}) async {
-    if (_busy) return;
+    if (busy) return;
     final route = ModalRoute.of(context);
     bool isActive() => mounted && (route?.isActive ?? true);
     final request = ref.read(memoryRequestProvider(_target));
     setState(() {
-      _busy = true;
-      _actionError = null;
+      busy = true;
+      mutationError = null;
     });
     try {
       final bytes = await collectMemoryExport(
@@ -241,9 +215,9 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
       if (mounted) showAbToast(context, 'Memories exported');
     } catch (error) {
       if (!mounted || route?.isActive == false) return;
-      setState(() => _actionError = memoryErrorCopy(error));
+      setState(() => mutationError = memoryErrorCopy(error));
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -370,7 +344,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     children: [
       header,
       ...above,
-      if (_actionError case final error?)
+      if (mutationError case final error?)
         AbInlineBanner(text: error, color: context.antgrid.error),
       Expanded(child: body),
     ],
@@ -390,59 +364,47 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
             Widget bareHeader() => wide
                 ? MemoryHeader(target: _target, onClose: close)
                 : MemoryHeader.compact(onBack: close);
+            final Widget body;
             if (status == null) {
-              if (statusAsync.isLoading) {
-                return _frame(
-                  header: bareHeader(),
-                  body: const Center(child: AbLoading()),
-                );
-              }
-              return _frame(
-                header: bareHeader(),
-                body: AbEmptyState.error(
-                  title: 'Memory unavailable',
-                  subtitle: memoryErrorCopy(statusAsync.error!),
-                  action: AbButton(
-                    label: _target.machineId != null
-                        ? 'Reconnect and retry'
-                        : 'Retry',
-                    onTap: () =>
-                        detached('Memory', 'reconnect failed', _retry),
-                  ),
+              body = statusAsync.isLoading
+                  ? const Center(child: AbLoading())
+                  : AbEmptyState.error(
+                      title: 'Memory unavailable',
+                      subtitle: memoryErrorCopy(statusAsync.error!),
+                      action: AbButton(
+                        label: _target.machineId != null
+                            ? 'Reconnect and retry'
+                            : 'Retry',
+                        onTap: () =>
+                            detached('Memory', 'reconnect failed', _retry),
+                      ),
+                    );
+            } else if (!status.available) {
+              body = AbEmptyState.error(
+                title: 'Memory unavailable',
+                subtitle:
+                    "Memory storage couldn't be opened. Saved memories stay on disk.",
+                action: AbButton(
+                  label: 'Retry store recovery',
+                  onTap: busy
+                      ? null
+                      : () => detached(
+                          'Memory',
+                          'recovery failed',
+                          () => _repair(announce: false),
+                        ),
                 ),
               );
-            }
-            if (!status.available) {
-              return _frame(
-                header: bareHeader(),
-                body: AbEmptyState.error(
-                  title: 'Memory unavailable',
-                  subtitle:
-                      "Memory storage couldn't be opened. Saved memories stay on disk.",
-                  action: AbButton(
-                    label: 'Retry store recovery',
-                    onTap: _busy
-                        ? null
-                        : () => detached(
-                            'Memory',
-                            'recovery failed',
-                            () => _repair(announce: false),
-                          ),
-                  ),
-                ),
+            } else if (!status.enabled) {
+              body = MemoryOffState(
+                busy: busy,
+                error: _offError,
+                onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
               );
+            } else {
+              return _full(status, wide: wide, close: close);
             }
-            if (!status.enabled) {
-              return _frame(
-                header: bareHeader(),
-                body: MemoryOffState(
-                  busy: _busy,
-                  error: _offError,
-                  onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
-                ),
-              );
-            }
-            return _full(status, wide: wide, close: close);
+            return _frame(header: bareHeader(), body: body);
           },
         ),
       ),
@@ -455,7 +417,8 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     required VoidCallback close,
   }) {
     final colors = context.antgrid;
-    final projects = ref.watch(memoryProjectsProvider(_target)).value;
+    final projects =
+        ref.watch(memoryProjectsProvider(_target)).value ?? MemoryProjects.empty;
     final applied = _applied(status);
     final pages = [
       for (var i = 0; i < _pages; i++)
@@ -479,25 +442,17 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     if (_lastWide != null && _lastWide != wide) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || _search.text == _filter.query) return;
-        _setFilter(
-          MemoryFilter(
-            versions: _filter.versions,
-            projectId: _filter.projectId,
-            memoryType: _filter.memoryType,
-            query: _search.text,
-          ),
-        );
+        _setFilter(_filter.copyWith(query: _search.text));
       });
     }
     _lastWide = wide;
 
     final projectId = _filter.projectId;
     final projectPaused =
-        projectId != null && (projects?[projectId]?.paused ?? false);
-    final word = memoryStatusWord(status, projectPaused: projectPaused).word;
+        projectId != null && (projects[projectId]?.paused ?? false);
     final problems = MemoryProblems(
       status: status,
-      busy: _busy,
+      busy: busy,
       onRepair: () => detached(
         'Memory',
         'repair failed',
@@ -524,6 +479,19 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
       onRetry: () => _invalidatePages(status),
     );
 
+    final toolbar = MemoryToolbar(
+      compact: !wide,
+      filter: _filter,
+      projects: projects,
+      searchReady: status.searchReady,
+      searchController: _search,
+      searchFocus: _searchFocus,
+      onChanged: _setFilter,
+      countLine: wide || total == null
+          ? null
+          : '${memoryCountLabel(total)}  ·  ${memoryStatusWord(status, projectPaused: projectPaused).word.toLowerCase()}',
+    );
+
     if (!wide) {
       return _frame(
         header: MemoryHeader.compact(
@@ -531,21 +499,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
           onSettings: () =>
               detached('Memory', 'settings failed', _openSettings),
         ),
-        above: [
-          problems,
-          MemoryToolbar(
-            compact: true,
-            filter: _filter,
-            projects: projects,
-            searchReady: status.searchReady,
-            searchController: _search,
-            searchFocus: _searchFocus,
-            onChanged: _setFilter,
-            countLine: total == null
-                ? null
-                : '${memoryCountLabel(total)}  ·  ${word.toLowerCase()}',
-          ),
-        ],
+        above: [problems, toolbar],
         body: listPane,
       );
     }
@@ -625,17 +579,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
             onMore: (anchor) =>
                 detached('Memory', 'menu failed', () => _openMore(anchor)),
           ),
-          above: [
-            problems,
-            MemoryToolbar(
-              filter: _filter,
-              projects: projects,
-              searchReady: status.searchReady,
-              searchController: _search,
-              searchFocus: _searchFocus,
-              onChanged: _setFilter,
-            ),
-          ],
+          above: [problems, toolbar],
           body: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [

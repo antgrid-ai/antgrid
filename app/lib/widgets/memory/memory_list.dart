@@ -109,7 +109,7 @@ class MemoryListPane extends ConsumerStatefulWidget {
   /// serves the project-only empty state, where that is "Show all projects".
   final VoidCallback onClearFilters;
   final VoidCallback onRetry;
-  final MemoryProjects? projects;
+  final MemoryProjects projects;
   final bool compact;
 
   @override
@@ -137,7 +137,6 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     if (widget.visible.isEmpty && total == 0) return _empty();
 
     final catalog = ref.watch(agentCatalogProvider);
-    final projects = widget.projects;
     final list = ListView.builder(
       controller: _scroll,
       itemCount: widget.visible.length + 1,
@@ -146,8 +145,8 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
         final record = widget.visible[index];
         return MemoryListRow(
           record: record,
-          projectLabel: projects?.labelFor(record.projectId) ?? record.projectId,
-          projectRemoved: projects?.isRemoved(record.projectId) ?? false,
+          projectLabel: widget.projects.labelFor(record.projectId),
+          projectRemoved: widget.projects.isRemoved(record.projectId),
           agentLabel: memoryAgentName(record, catalog),
           selected: record.id == widget.selectedId,
           onTap: () => widget.onSelect(record.id),
@@ -231,7 +230,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     }
     final projectId = filter.projectId;
     if (projectId != null) {
-      final label = widget.projects?.labelFor(projectId) ?? projectId;
+      final label = widget.projects.labelFor(projectId);
       return AbEmptyState(
         title: earlier
             ? 'No earlier versions for $label'

@@ -91,7 +91,6 @@ void main() {
     test('orders cataloged by lowercased name, removed last', () {
       expect(projects.projects.map((p) => p.projectId), ['a', 'z', 'gone']);
       expect(projects.memories, 5);
-      expect(projects.earlierVersions, 2);
     });
 
     test('labels, removed and operator []', () {
@@ -191,17 +190,6 @@ void main() {
         ),
       );
       expect(f.browse().hashCode, f.browse().hashCode);
-    });
-
-    test('narrowed', () {
-      expect(const MemoryFilter().narrowed, isFalse);
-      expect(const MemoryFilter(query: 'a').narrowed, isTrue);
-      expect(const MemoryFilter(projectId: 'p').narrowed, isTrue);
-      expect(const MemoryFilter(memoryType: 'note').narrowed, isTrue);
-      expect(
-        const MemoryFilter(versions: MemoryVersions.earlier).narrowed,
-        isFalse,
-      );
     });
   });
 

@@ -684,7 +684,11 @@ export class HostServer {
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
-  private readonly memory = new HostMemory(resolveAbDir, () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: seen.label ?? basename(seen.path) })));
+  private readonly memory = new HostMemory(
+    resolveAbDir,
+    () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: projectLabel(seen) })),
+    (projectId) => this.seenProjects.has(projectId),
+  );
   private releaseMemoryGate: (() => void) | undefined;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
@@ -1091,7 +1095,7 @@ export class HostServer {
     for (const [projectId, seen] of this.seenProjects) {
       if (!isSafeProjectId(projectId) || !existsSync(seen.path)) continue;
       const resolved = await resolveProject(seen.path);
-      projects.push({ projectId, label: seen.label ?? basename(seen.path), isGitRepository: resolved.isGitRepository });
+      projects.push({ projectId, label: projectLabel(seen), isGitRepository: resolved.isGitRepository });
     }
     return projects;
   }
@@ -3355,6 +3359,8 @@ interface SeenProjectsFileShape {
   version: 1;
   projects: Record<string, SeenProject>;
 }
+
+function projectLabel(seen: SeenProject): string { return seen.label ?? basename(seen.path); }
 
 function seenProjectsPath(): string {
   return join(resolveAbDir(), "agents", "projects.json");

@@ -23,7 +23,7 @@ import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../models/memory.dart';
-import 'memory/memory_icon_button.dart';
+import 'memory/memory_project_button.dart';
 import '../providers/memory.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
@@ -626,8 +626,17 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // Read ahead of `actions` for the same subscription-lifetime reason as
     // above. The sample project has no memory store behind it.
     final demo = ref.watch(demoModeProvider);
-    final memorySummary = ref.watch(memoryDrawerSummaryProvider).value;
     final offersMemory = offersNewSession && !demo;
+    // Selected down to this row's count, and only for rows that can ever show
+    // one (stable per row, unlike [offersMemory], which follows hover): a
+    // summary reload must not rebuild every demo and remote row.
+    final memoryCount = !demo && entry.machineUuid == null && entry is! RemoteAgentEntry
+        ? ref.watch(
+            memoryDrawerSummaryProvider.select(
+              (s) => s.value == null ? null : (s.value![entry.id]?.memories ?? 0),
+            ),
+          )
+        : null;
 
     final cells = <Widget>[
       if (status.configError)
@@ -660,7 +669,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
       if (offersMemory) {
-        cells.add(_memoryButton(entry, memorySummary));
+        cells.add(_memoryButton(entry, memoryCount));
       }
       if (offersNewSession) {
         final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
@@ -684,16 +693,16 @@ class _DrawerEntryTrailing extends ConsumerWidget {
         const SizedBox.shrink();
   }
 
-  static Widget _memoryButton(DrawerEntry entry, MemoryProjects? summary) {
-    // A legacy compound id is `<machineUuid>.<projectId>`.
-    final dot = entry.id.indexOf('.');
-    if (entry is RemoteAgentEntry && dot > 0) {
+  static Widget _memoryButton(DrawerEntry entry, int? count) {
+    // A legacy compound id is `<machineUuid>.<projectId>`; a leading dot has no
+    // machine part, so it is not one.
+    if (entry is RemoteAgentEntry && entry.id.indexOf('.') > 0) {
       return MemoryProjectButton(
         target: MemoryTarget.machine(
-          machineId: entry.id.substring(0, dot),
+          machineId: baseDeviceUuid(entry.id),
           label: entry.subtitle,
         ),
-        projectId: entry.id.substring(dot + 1),
+        projectId: baseProjectId(entry.id),
         projectName: entry.displayName,
       );
     }
@@ -701,7 +710,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
       target: const MemoryTarget.machine(),
       projectId: entry.id,
       projectName: entry.displayName,
-      count: summary == null ? null : (summary[entry.id]?.memories ?? 0),
+      count: count,
     );
   }
 }

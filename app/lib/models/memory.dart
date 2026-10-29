@@ -47,13 +47,22 @@ class MemoryFilter {
   final String? memoryType;
 
   bool get isSearch => query.trim().isNotEmpty;
-  bool get narrowed => isSearch || projectId != null || memoryType != null;
 
-  MemoryFilter browse() => MemoryFilter(
-    versions: versions,
-    projectId: projectId,
-    memoryType: memoryType,
+  MemoryFilter copyWith({
+    String? query,
+    MemoryVersions? versions,
+    String? projectId,
+    bool clearProjectId = false,
+    String? memoryType,
+    bool clearMemoryType = false,
+  }) => MemoryFilter(
+    query: query ?? this.query,
+    versions: versions ?? this.versions,
+    projectId: clearProjectId ? null : projectId ?? this.projectId,
+    memoryType: clearMemoryType ? null : memoryType ?? this.memoryType,
   );
+
+  MemoryFilter browse() => copyWith(query: '');
 
   Map<String, dynamic> request(int offset) => isSearch
       ? {
@@ -407,24 +416,26 @@ class MemoryProjectSummary {
   MemoryProjectSummary.fromJson(Map<String, dynamic> json)
     : projectId = json['project_id'] as String,
       memories = json['memories'] as int? ?? 0,
-      earlierVersions = json['earlier_versions'] as int? ?? 0,
       paused = json['paused'] == true,
       label = json['label'] as String?,
       cataloged = json['cataloged'] != false;
 
   final String projectId;
   final int memories;
-  final int earlierVersions;
   final bool paused;
   final String? label;
   final bool cataloged;
 
   String get displayName => (label?.isNotEmpty ?? false) ? label! : projectId;
   bool get removed => !cataloged;
+
+  /// A removed project's name is unknowable, so the suffix is the only hint
+  /// that its rows are orphaned.
+  String get stateLabel => removed ? '$displayName (removed)' : displayName;
 }
 
 class MemoryProjects {
-  const MemoryProjects._(this.projects, this.memories, this.earlierVersions);
+  const MemoryProjects._(this.projects, this.memories);
 
   factory MemoryProjects.fromJson(Map<String, dynamic> json) {
     final rows = [
@@ -442,15 +453,13 @@ class MemoryProjects {
     return MemoryProjects._(
       List.unmodifiable(rows),
       json['memories'] as int? ?? 0,
-      json['earlier_versions'] as int? ?? 0,
     );
   }
 
-  static const empty = MemoryProjects._([], 0, 0);
+  static const empty = MemoryProjects._([], 0);
 
   final List<MemoryProjectSummary> projects;
   final int memories;
-  final int earlierVersions;
 
   MemoryProjectSummary? operator [](String projectId) {
     for (final project in projects) {
@@ -462,4 +471,6 @@ class MemoryProjects {
   String labelFor(String projectId) =>
       this[projectId]?.displayName ?? projectId;
   bool isRemoved(String projectId) => this[projectId]?.removed ?? false;
+  String stateLabelFor(String projectId) =>
+      this[projectId]?.stateLabel ?? projectId;
 }

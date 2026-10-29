@@ -23,6 +23,7 @@ import '../../util/detached.dart';
 import 'memory_edit_form.dart';
 import 'memory_error.dart';
 import 'memory_format.dart';
+import 'memory_section_label.dart';
 import 'memory_tag.dart';
 
 /// One memory's detail: view, edit, forget, earlier versions.
@@ -51,6 +52,8 @@ class MemoryDetailPane extends ConsumerStatefulWidget {
   @override
   ConsumerState<MemoryDetailPane> createState() => _MemoryDetailPaneState();
 }
+
+const _sectionTop = AbTokens.space24 + AbTokens.space4;
 
 class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
   bool _editing = false;
@@ -83,20 +86,6 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
   );
 
   @override
-  void didUpdateWidget(MemoryDetailPane oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.id != widget.id) {
-      _editing = false;
-      _confirming = false;
-      _earlierOpen = false;
-      _techOpen = false;
-      _forgetting = false;
-      _forgetError = null;
-      _goneNotified = false;
-    }
-  }
-
-  @override
   void dispose() {
     _scroll.dispose();
     _editNode.dispose();
@@ -115,7 +104,16 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     });
   }
 
-  void _startEdit() => setState(() => _editing = true);
+  void _startEdit() {
+    setState(() => _editing = true);
+    // The compact bar reads the form through its key, which resolves only after
+    // this frame has built it.
+    if (widget.compact) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
 
   void _cancelEdit() {
     setState(() => _editing = false);
@@ -260,19 +258,6 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     final lifecycle = memoryLifecycleLabel(record);
     final agent = memoryAgentName(record, catalog);
 
-    Widget heading(String text, {double top = AbTokens.space24 + AbTokens.space4}) =>
-        Padding(
-          padding: EdgeInsets.only(top: top, bottom: AbTokens.space6),
-          child: Text(
-            text,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontSm,
-              fontWeight: FontWeight.w600,
-              color: p.textMuted,
-            ),
-          ),
-        );
-
     final tags = Padding(
       padding: const EdgeInsets.only(bottom: AbTokens.space16),
       child: Wrap(
@@ -315,12 +300,12 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
           record.content,
           style: AbTokens.sansStyle(fontSize: AbTokens.fontLg, height: 1.6),
         ),
-        heading('Applies when'),
+        const MemorySectionLabel('Applies when', top: _sectionTop),
         Text(
           memoryAppliesText(record, project: project),
           style: AbTokens.sansStyle(fontSize: AbTokens.fontBody, height: 1.5),
         ),
-        heading('Sources'),
+        const MemorySectionLabel('Sources', top: _sectionTop),
         if (record.evidence.isEmpty)
           Text(
             "The agent didn't cite any files.",
@@ -447,15 +432,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
             ),
             child: _confirming
                 ? _confirmBox(context, record)
-                : Row(
-                    children: [
-                      if (record.isCurrent) ...[
-                        _editButton(canSave, expand: false),
-                        const SizedBox(width: AbTokens.space8),
-                      ],
-                      _forgetButton(context, expand: false),
-                    ],
-                  ),
+                : _actionRow(context, record, canSave, expand: false),
           ),
       ],
     );
@@ -485,6 +462,16 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       ],
     ),
   );
+
+  Widget _actionRow(
+    BuildContext context,
+    MemoryRecord record,
+    bool canSave, {
+    required bool expand,
+  }) => memoryButtonRow([
+    if (record.isCurrent) _editButton(canSave, expand: expand),
+    _forgetButton(context, expand: expand),
+  ], expand: expand);
 
   Widget _editButton(bool canSave, {required bool expand}) {
     final button = AbButton(
@@ -578,22 +565,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
                 AbInlineBanner(text: error, color: p.error),
               ],
               const SizedBox(height: AbTokens.space12),
-              if (compact)
-                Row(
-                  children: [
-                    Expanded(child: _tall(forget)),
-                    const SizedBox(width: AbTokens.space8),
-                    Expanded(child: _tall(keep)),
-                  ],
-                )
-              else
-                Row(
-                  children: [
-                    forget,
-                    const SizedBox(width: AbTokens.space8),
-                    keep,
-                  ],
-                ),
+              memoryButtonRow([forget, keep], expand: compact),
             ],
           ),
         ),
@@ -601,52 +573,17 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     );
   }
 
-  Widget _tall(Widget child) =>
-      SizedBox(height: AbTokens.tapTargetMin, child: child);
-
   Widget _bar(BuildContext context, MemoryRecord record, {required bool canSave}) {
     final p = context.antgrid;
     final Widget content;
     if (_confirming) {
       content = _confirmBox(context, record);
     } else if (_editing) {
-      final form = _formKey.currentState;
-      content = Row(
-        children: [
-          Expanded(
-            child: _tall(
-              AbButton(
-                label: 'Save changes',
-                variant: AbButtonVariant.primary,
-                expand: true,
-                onTap: form != null && form.canSave
-                    ? () => detached('Memory', 'save failed', form.save)
-                    : null,
-              ),
-            ),
-          ),
-          const SizedBox(width: AbTokens.space8),
-          Expanded(
-            child: _tall(
-              AbButton(
-                label: 'Cancel',
-                expand: true,
-                onTap: form != null && form.busy ? null : _cancelEdit,
-              ),
-            ),
-          ),
-        ],
-      );
+      content =
+          _formKey.currentState?.actions(expand: true) ??
+          const SizedBox(height: AbTokens.tapTargetMin);
     } else {
-      content = Row(
-        children: [
-          if (record.isCurrent) ...[
-            Expanded(child: _tall(_editButton(canSave, expand: true))),
-            const SizedBox(width: AbTokens.space8),
-          ],
-          Expanded(child: _tall(_forgetButton(context, expand: true))),
-        ],
-      );
+      content = _actionRow(context, record, canSave, expand: true);
     }
     return Container(
       padding: EdgeInsets.fromLTRB(

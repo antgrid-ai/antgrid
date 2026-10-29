@@ -55,6 +55,11 @@ export class HostMemory {
   constructor(
     private readonly profileDirectory: () => string,
     private readonly catalog: () => Iterable<{ project_id: string; label?: string }> = () => [],
+    // The host passes a direct lookup so a settings write does not build labels for the whole catalog.
+    private readonly isCataloged: (projectId: string) => boolean = (projectId) => {
+      for (const entry of this.catalog()) if (entry.project_id === projectId) return true;
+      return false;
+    },
   ) {}
 
   private directory(): string { return join(this.profileDirectory(), "memory"); }
@@ -146,7 +151,7 @@ export class HostMemory {
     const enrich = caller.actor === "app" && op === "projects";
     if (caller.actor === "app" && !caller.project_id && op === "settings") {
       const target = (request as { project_id?: unknown }).project_id;
-      if (typeof target === "string" && ![...this.catalog()].some((entry) => entry.project_id === target)) {
+      if (typeof target === "string" && !this.isCataloged(target)) {
         throw new MemoryError("NOT_FOUND", "This project is not in this machine's catalog");
       }
     }
