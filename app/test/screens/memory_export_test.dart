@@ -11,19 +11,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/memory_export_fixtures.dart';
+import '../helpers/toast_host.dart';
 
-const _target = MemoryTarget.project('project');
+const _target = MemoryTarget.machine();
 const _saveChannel = MethodChannel('ai.radhaai.antgrid/save_file');
 
 Future<void> _mountExport(
   WidgetTester tester,
   MemoryRequest exportRequest, {
   GlobalKey<NavigatorState>? navigatorKey,
+  String? projectId,
+  List<Map<String, dynamic>>? seen,
 }) async {
+  tester.view.physicalSize = const Size(1280, 820);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         memoryRequestProvider(_target).overrideWithValue((request) async {
+          seen?.add(request);
           if (request['op'] == 'export') return exportRequest(request);
           if (request['op'] == 'status') {
             return {
@@ -32,11 +40,15 @@ Future<void> _mountExport(
               'search_status': 'ready',
             };
           }
-          return {'results': [], 'has_more': false};
+          if (request['op'] == 'projects') {
+            return {'projects': <Object>[], 'memories': 0};
+          }
+          return {'results': [], 'has_more': false, 'total': 0};
         }),
       ],
       child: MaterialApp(
         theme: buildAbTheme(),
+        builder: abToastHostBuilder,
         navigatorKey: navigatorKey,
         onGenerateInitialRoutes: navigatorKey == null
             ? null
@@ -45,11 +57,14 @@ Future<void> _mountExport(
                   builder: (_) => const SizedBox.shrink(),
                 ),
                 PageRouteBuilder<void>(
-                  pageBuilder: (_, _, _) => const MemoryScreen(target: _target),
+                  pageBuilder: (_, _, _) =>
+                      MemoryScreen(target: _target, initialProjectId: projectId),
                   reverseTransitionDuration: const Duration(seconds: 1),
                 ),
               ],
-        home: navigatorKey == null ? const MemoryScreen(target: _target) : null,
+        home: navigatorKey == null
+            ? MemoryScreen(target: _target, initialProjectId: projectId)
+            : null,
         routes: navigatorKey == null
             ? const {}
             : {'/': (_) => const SizedBox.shrink()},
@@ -57,8 +72,9 @@ Future<void> _mountExport(
     ),
   );
   await tester.pumpAndSettle();
-  await tester.ensureVisible(find.text('Export JSON'));
-  await tester.tap(find.text('Export JSON'));
+  await tester.tap(find.byTooltip('More actions'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Export memories'));
   await tester.pump();
 }
 
@@ -103,6 +119,28 @@ void main() {
     });
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+  testWidgets('a project-filtered export is scoped and named for the project', (
+    tester,
+  ) async {
+    final seen = <Map<String, dynamic>>[];
+    await _mountExport(
+      tester,
+      (request) async => memoryExportPage(records: [memoryExportRecord('a')]),
+      projectId: 'p1',
+      seen: seen,
+    );
+    await tester.pumpAndSettle();
+    expect(savedFiles, hasLength(1));
+    expect(savedFiles.single['name'], 'antgrid-memory-p1.json');
+    expect(seen.where((r) => r['op'] == 'export'), isNotEmpty);
+    expect(
+      seen.where((r) => r['op'] == 'export').every((r) => r['project_id'] == 'p1'),
+      isTrue,
+    );
+    expect(find.text('Memories exported'), findsOneWidget);
+    await tester.pumpAndSettle(const Duration(seconds: 5));
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
   testWidgets('a second-page refusal discards data and explains retry', (
     tester,
   ) async {
@@ -121,7 +159,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(savedFiles, isEmpty);
     expect(find.textContaining('Start the export again'), findsOneWidget);
-    expect(find.textContaining('Correction conflict'), findsNothing);
+    expect(find.textContaining('Someone edited'), findsNothing);
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   testWidgets('closing during pagination stops later requests and download', (

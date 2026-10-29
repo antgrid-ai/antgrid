@@ -24,6 +24,7 @@ import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../models/memory.dart';
 import 'memory/memory_icon_button.dart';
+import '../providers/memory.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -137,12 +138,6 @@ class _MachineDrawerHeaderRowState
           // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
           // same reason — two owners of one cell is a fight.
           trailing: AbRowTrailingCell.kit([
-            MemoryIconButton(
-              target: MemoryTarget.machine(
-                machineId: machineUuid,
-                label: entry.displayName,
-              ),
-            ),
             _DrawerEntryTrailing(
               entry: entry,
               revealed: revealed,
@@ -207,13 +202,9 @@ class LocalMachineBand extends ConsumerWidget {
             // a desktop that opened a project earlier in the session that is a
             // live green dot pinned to a project it has nothing to do with. Every
             // other real-source surface in this drawer is gated the same way.
-            // Memory also has no store behind the sample project.
             trailing: ref.watch(demoModeProvider)
                 ? const AbRowTrailingCell()
-                : AbRowTrailingCell.kit([
-                    const MemoryIconButton(target: MemoryTarget.machine()),
-                    const AbRowTrailingCell(child: _LocalHostDot()),
-                  ]),
+                : const AbRowTrailingCell(child: _LocalHostDot()),
           ),
         ],
       ),
@@ -635,6 +626,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // Read ahead of `actions` for the same subscription-lifetime reason as
     // above. The sample project has no memory store behind it.
     final demo = ref.watch(demoModeProvider);
+    final memorySummary = ref.watch(memoryDrawerSummaryProvider).value;
     final offersMemory = offersNewSession && !demo;
 
     final cells = <Widget>[
@@ -652,7 +644,11 @@ class _DrawerEntryTrailing extends ConsumerWidget {
       // user — that is a call to action, and the sessions that would carry it
       // are off screen. It does NOT say how many sessions it holds: a count is
       // a number to read rather than a state to notice, and the drawer is
-      // scanned.
+      // scanned. Memory is the one exception, and only on local rows: the local
+      // host answers without a socket or spawn
+      // ([memoryDrawerSummaryProvider] waits for the host to be up), the number
+      // is the item's size rather than an attention signal, and remote rows
+      // deliberately carry none.
       if (expanded == false &&
           DrawerProjectAggregateDot.needsUser(ref, entry.id))
         DrawerProjectAggregateDot(entryId: entry.id),
@@ -664,11 +660,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
       if (offersMemory) {
-        cells.add(
-          MemoryIconButton(
-            target: MemoryTarget.project(entry.id, label: entry.displayName),
-          ),
-        );
+        cells.add(_memoryButton(entry, memorySummary));
       }
       if (offersNewSession) {
         final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
@@ -690,6 +682,27 @@ class _DrawerEntryTrailing extends ConsumerWidget {
 
     return AbRowTrailingCell.kit(cells, ownsColumn: hostsActions) ??
         const SizedBox.shrink();
+  }
+
+  static Widget _memoryButton(DrawerEntry entry, MemoryProjects? summary) {
+    // A legacy compound id is `<machineUuid>.<projectId>`.
+    final dot = entry.id.indexOf('.');
+    if (entry is RemoteAgentEntry && dot > 0) {
+      return MemoryProjectButton(
+        target: MemoryTarget.machine(
+          machineId: entry.id.substring(0, dot),
+          label: entry.subtitle,
+        ),
+        projectId: entry.id.substring(dot + 1),
+        projectName: entry.displayName,
+      );
+    }
+    return MemoryProjectButton(
+      target: const MemoryTarget.machine(),
+      projectId: entry.id,
+      projectName: entry.displayName,
+      count: summary == null ? null : (summary[entry.id]?.memories ?? 0),
+    );
   }
 }
 

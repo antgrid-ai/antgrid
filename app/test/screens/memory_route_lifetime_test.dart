@@ -16,7 +16,6 @@ import 'package:flutter_test/flutter_test.dart';
 const remote = MemoryTarget.machine(machineId: 'remote', label: 'Remote');
 const otherRemote = MemoryTarget.machine(machineId: 'other', label: 'Other');
 const local = MemoryTarget.machine();
-const project = MemoryTarget.project('active-project');
 
 final _record = <String, dynamic>{
   'id': 'memory-1',
@@ -43,15 +42,36 @@ Future<Map<String, dynamic>> _request(Map<String, dynamic> request) async =>
         'pending_operations': 0,
       },
       'get' => {'record': _record},
+      'projects' => {
+        'projects': [
+          {'project_id': 'antgrid', 'label': 'antgrid', 'memories': 1},
+        ],
+        'memories': 1,
+      },
       _ => {
         'results': [_record],
         'has_more': false,
+        'total': 1,
       },
     };
 
 Future<({ProviderContainer container, BuildContext context})> _mount(
   WidgetTester tester,
 ) async {
+  // Below the wide breakpoint, so a row tap pushes the detail page.
+  tester.view.physicalSize = const Size(390, 844);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  // The substituted test font makes the compact picker labels wider than their
+  // box, and AbButton only ellipsizes with wrapLabel. This file pins route
+  // lifetime, not geometry.
+  final onError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    if (details.exception.toString().contains('overflowed')) return;
+    onError?.call(details);
+  };
+  addTearDown(() => FlutterError.onError = onError);
   final registry = ProjectSessionRegistry(
     localCap: 10,
     relayCap: 30,
@@ -67,7 +87,7 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
         () => ValueController(WorkbenchSurface.workspace),
       ),
       eagerControlPlanesEnabledProvider.overrideWithValue(false),
-      for (final target in [remote, otherRemote, local, project])
+      for (final target in [remote, otherRemote, local])
         memoryRequestProvider(target).overrideWithValue(_request),
     ],
   );
@@ -103,6 +123,7 @@ void main() {
     await tester.tap(find.text('A retained finding'));
     await tester.pumpAndSettle();
     expect(find.byType(MemoryRecordDetails), findsOneWidget);
+    expect(find.text('Applies when'), findsOneWidget);
     expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
     Navigator.of(h.context).pop();
     await tester.pumpAndSettle();
@@ -148,11 +169,23 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('local and project Memory do not add machine demand', (
+  testWidgets('a remote project entry adds machine demand like the machine', (
     tester,
   ) async {
     final h = await _mount(tester);
-    for (final target in [local, project]) {
+    final done = openMemoryScreen(h.context, remote, projectId: 'antgrid');
+    expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
+    await tester.pumpAndSettle();
+    Navigator.of(h.context).pop();
+    await tester.pumpAndSettle();
+    await done;
+    expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('local Memory does not add machine demand', (tester) async {
+    final h = await _mount(tester);
+    for (final target in [local]) {
       final done = openMemoryScreen(h.context, target);
       await tester.pumpAndSettle();
       expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);

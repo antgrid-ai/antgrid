@@ -299,8 +299,8 @@ open-time index check compares counts and joins on it instead of scanning
 content; the FTS `integrity-check` runs only during repair. A store written by a
 newer schema version is refused rather than opened.
 
-Memory starts disabled. One app enablement applies to the local profile; a
-project screen may perform that one-time enablement too. While memory is
+Memory starts disabled. One app enablement, from the machine Memory screen,
+applies to the local profile. While memory is
 disabled, new agent launches register no `antgrid-memory` server and receive no
 guidance, and every agent operation except `status` is refused with `DISABLED`,
 reads included. The app keeps full inspection, export and forgetting. Turning
@@ -308,8 +308,8 @@ memory on or off applies to sessions launched afterwards: a running session keep
 the server it started with, and the service refusal is what stops its tools.
 Profile pause blocks every agent save. Project pause blocks every save
 originating in that project, including explicit remember requests. Reads,
-forgetting, and app corrections remain available while paused. Profile controls
-live in machine Memory; project controls live in project Memory.
+forgetting, and app corrections remain available while paused. Profile and
+per-project pause controls both live in the machine Memory settings dialog.
 
 V1 stores only `project` and `task` records.
 
@@ -382,11 +382,13 @@ machine Memory can retry cleanup. This is local storage cleanup, not a promise
 to erase filesystem backups, external source files, native agent memory, or
 previously delivered conversation content.
 
-The app's project Memory uses admitted project payload streams; machine Memory
-uses authenticated native machine RPC or the local owner's token-protected
-control listener. Neither path carries memory over the control relay. Project
-inspection sees its project/task records; machine inspection also sees
-histories whose projects or sessions were removed. Corrections
+The app has one Memory screen per machine. Opening it from a project entry
+presets the Project filter to that project. Requests use authenticated native
+machine RPC (`memory.request`) or the local owner's token-protected control
+listener, and neither path carries memory over the control relay. The bridge
+still answers `memory:request` on admitted project streams; the app does not
+use it, and the memory gate evals drive both paths. Inspection
+also sees histories whose projects or sessions were removed. Corrections
 retain scope and checkout restrictions. Export is JSON version 1 with IDs,
 records, provenance, applicability, links, and derived lifecycle state; it
 excludes operational retry payloads and credentials. Import remains deferred.

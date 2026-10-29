@@ -20,6 +20,7 @@ import '../models/drawer_entry.dart';
 import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
 import '../models/memory.dart';
+import '../screens/memory_screen.dart' show openMemoryScreen;
 import '../models/session_entry.dart';
 import 'memory/memory_icon_button.dart';
 import '../models/session_target.dart';
@@ -29,6 +30,7 @@ import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
+import '../providers/memory.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/drawer_expansion.dart';
 import '../providers/drawer_order.dart';
@@ -252,12 +254,30 @@ class _NavActions extends ConsumerWidget {
       closeDrawerIfOverlay(context);
     }
 
+    // Close first: [openMemoryScreen] pushes synchronously, and closing pops the
+    // topmost route, so closing second would pop the Memory screen just pushed
+    // whenever the drawer is a real [Scaffold.drawer].
+    void openMemory() {
+      closeDrawerIfOverlay(context);
+      detached(
+        'Memory',
+        'open failed',
+        () => openMemoryScreen(context, const MemoryTarget.machine()),
+      );
+    }
+
+    final offersMemory = !isMobilePlatform && !ref.watch(demoModeProvider);
+    final memoryCount = offersMemory
+        ? ref.watch(memoryDrawerSummaryProvider).value?.memories
+        : null;
+
     Widget navigationRow({
       required String label,
       required String icon,
       required bool selected,
       required VoidCallback onTap,
       bool enabled = true,
+      Widget? trailing,
     }) {
       Widget row = AbListRow(
         title: Text(label, style: AbTokens.sansStyle()),
@@ -272,6 +292,7 @@ class _NavActions extends ConsumerWidget {
         selectionStyle: AbRowSelection.surface,
         hoverable: true,
         enabled: enabled,
+        trailing: trailing,
         onTap: enabled ? onTap : null,
       );
       if (isMobilePlatform) {
@@ -310,6 +331,24 @@ class _NavActions extends ConsumerWidget {
               selected: surface == WorkbenchSurface.scheduler,
               onTap: openScheduler,
             ),
+            if (offersMemory) ...[
+              const SizedBox(height: AbTokens.space4),
+              navigationRow(
+                label: 'Memory',
+                icon: AbIcons.lightbulb,
+                selected: false,
+                onTap: openMemory,
+                trailing: memoryCount != null && memoryCount > 0
+                    ? Text(
+                        '$memoryCount',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontSm,
+                          color: context.antgrid.textMuted,
+                        ),
+                      )
+                    : null,
+              ),
+            ],
           ],
         ),
       ),
@@ -324,7 +363,11 @@ class _NavActions extends ConsumerWidget {
 /// actually holds are unknown until the row is expanded, and asking would open
 /// a control-plane socket per machine at drawer build. Nothing in the drawer
 /// counts its own contents any more: the panel is scanned for the one row that
-/// needs the user, which is what the attention dots are for.
+/// needs the user, which is what the attention dots are for. Memory is the one
+/// exception: the local host answers without a socket or spawn
+/// ([memoryDrawerSummaryProvider] waits for the host to be up), the number is
+/// the item's size rather than an attention signal, and remote rows
+/// deliberately carry no count.
 class _GroupLabel extends ConsumerWidget {
   const _GroupLabel({required this.label, required this.onRefresh});
 
@@ -620,7 +663,12 @@ class _EntryWithSessions extends ConsumerWidget {
         entryRowWrapped,
         if (expanded)
           machineUuid != null
-              ? _MachineProjects(machineUuid: machineUuid)
+              ? _MachineProjects(
+                  machineUuid: machineUuid,
+                  machineLabel: entry.displayName.trim().isEmpty
+                      ? 'Remote machine'
+                      : entry.displayName,
+                )
               : SessionsList(projectId: entry.id),
       ],
     );
@@ -668,7 +716,11 @@ Widget _machineHint(
 /// empty (switch off vs genuinely no projects) and is rendered as such.
 class _MachineProjects extends ConsumerWidget {
   final String machineUuid;
-  const _MachineProjects({required this.machineUuid});
+  final String machineLabel;
+  const _MachineProjects({
+    required this.machineUuid,
+    required this.machineLabel,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -709,6 +761,7 @@ class _MachineProjects extends ConsumerWidget {
               _AdvertisedProjectRow(
                 key: ValueKey(p.projectId),
                 machineUuid: machineUuid,
+                machineLabel: machineLabel,
                 project: p,
               ),
           ],
@@ -725,10 +778,12 @@ class _MachineProjects extends ConsumerWidget {
 /// bare-uuid ids).
 class _AdvertisedProjectRow extends ConsumerStatefulWidget {
   final String machineUuid;
+  final String machineLabel;
   final AdvertisedProject project;
   const _AdvertisedProjectRow({
     super.key,
     required this.machineUuid,
+    required this.machineLabel,
     required this.project,
   });
 
@@ -794,8 +849,13 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // inherits it at rest instead of sitting a full cell inboard of
             // every other row's trailing glyph.
             final memory = revealed && !demo
-                ? MemoryIconButton(
-                    target: MemoryTarget.project(regId, label: name),
+                ? MemoryProjectButton(
+                    target: MemoryTarget.machine(
+                      machineId: widget.machineUuid,
+                      label: widget.machineLabel,
+                    ),
+                    projectId: widget.project.projectId,
+                    projectName: name,
                   )
                 : null;
             final cells = <Widget?>[];

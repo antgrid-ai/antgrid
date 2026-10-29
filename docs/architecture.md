@@ -276,7 +276,8 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
   the package never imports bridge. Its database lives under the local profile's
   `memory/`, outside projects and disposable checkouts. The separate
   `memory-mcp` entry point forwards tools to the host service; app inspection
-  uses authenticated project or machine payload transport. See
+  uses the authenticated machine payload transport (native `memory.request` RPC
+  or the local control listener). See
   [agent-memory-rfc.md](agent-memory-rfc.md) for the contract and release gates.
 
 - **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,

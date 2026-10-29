@@ -6,20 +6,45 @@ import '../../models/memory.dart';
 import '../../screens/memory_screen.dart';
 import '../../util/detached.dart';
 
-/// Opens the memory screen for [target] from a drawer row.
-class MemoryIconButton extends StatelessWidget {
-  const MemoryIconButton({super.key, required this.target});
+/// Opens the memory screen for one project from a drawer row.
+class MemoryProjectButton extends StatelessWidget {
+  const MemoryProjectButton({
+    super.key,
+    required this.target,
+    required this.projectId,
+    required this.projectName,
+    this.count,
+  });
 
   final MemoryTarget target;
+  final String projectId;
+  final String projectName;
+
+  /// Null when the row cannot know it without a request (remote machines).
+  final int? count;
 
   @override
-  Widget build(BuildContext context) => AbIconButton(
-    icon: AbIcons.list,
-    tooltip: target.isProject ? 'Project memory' : 'Machine memory',
-    onTap: () => detached(
+  Widget build(BuildContext context) {
+    void open() => detached(
       'Memory',
       'open failed',
-      () => openMemoryScreen(context, target),
-    ),
-  );
+      () => openMemoryScreen(context, target, projectId: projectId),
+    );
+    // AbIconButton has no semantic-label parameter and its Tooltip message
+    // would otherwise be announced as well, so the accessible name is the
+    // count-free label and is announced once.
+    return Semantics(
+      label: '$projectName memories',
+      button: true,
+      excludeSemantics: true,
+      onTap: open,
+      child: AbIconButton(
+        icon: AbIcons.lightbulb,
+        tooltip: count == null
+            ? '$projectName memories'
+            : '$projectName memories ($count)',
+        onTap: open,
+      ),
+    );
+  }
 }

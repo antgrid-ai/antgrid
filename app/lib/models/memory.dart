@@ -4,25 +4,84 @@ import 'package:flutter/foundation.dart';
 
 @immutable
 class MemoryTarget {
-  const MemoryTarget.machine({this.machineId, this.label = 'This machine'})
-    : projectEntryId = null;
-  const MemoryTarget.project(String entryId, {this.label = 'This project'})
-    : projectEntryId = entryId,
-      machineId = null;
+  const MemoryTarget.machine({this.machineId, this.label = 'This machine'});
 
+  /// Null is this desktop's local host.
   final String? machineId;
-  final String? projectEntryId;
   final String label;
-  bool get isProject => projectEntryId != null;
 
   @override
   bool operator ==(Object other) =>
       other is MemoryTarget &&
       other.machineId == machineId &&
-      other.projectEntryId == projectEntryId &&
       other.label == label;
   @override
-  int get hashCode => Object.hash(machineId, projectEntryId, label);
+  int get hashCode => Object.hash(machineId, label);
+}
+
+enum MemoryVersions { current, earlier }
+
+const kMemoryPageSize = 50;
+const kMemoryKindOrder = ['preference', 'note', 'observation', 'task_state'];
+
+String memoryKindLabel(String memoryType) => switch (memoryType) {
+  'preference' => 'Preference',
+  'note' => 'Note',
+  'observation' => 'Observation',
+  'task_state' => 'Session progress',
+  _ => memoryType,
+};
+
+@immutable
+class MemoryFilter {
+  const MemoryFilter({
+    this.query = '',
+    this.versions = MemoryVersions.current,
+    this.projectId,
+    this.memoryType,
+  });
+
+  final String query;
+  final MemoryVersions versions;
+  final String? projectId;
+  final String? memoryType;
+
+  bool get isSearch => query.trim().isNotEmpty;
+  bool get narrowed => isSearch || projectId != null || memoryType != null;
+
+  MemoryFilter browse() => MemoryFilter(
+    versions: versions,
+    projectId: projectId,
+    memoryType: memoryType,
+  );
+
+  Map<String, dynamic> request(int offset) => isSearch
+      ? {
+          'op': 'search',
+          'query': query.trim(),
+          'limit': kMemoryPageSize,
+          'offset': offset,
+          'versions': versions.name,
+          'project_id': ?projectId,
+          'memory_type': ?memoryType,
+        }
+      : {
+          'op': 'list',
+          'versions': versions.name,
+          'offset': offset,
+          'project_id': ?projectId,
+          'memory_type': ?memoryType,
+        };
+
+  @override
+  bool operator ==(Object other) =>
+      other is MemoryFilter &&
+      other.query == query &&
+      other.versions == versions &&
+      other.projectId == projectId &&
+      other.memoryType == memoryType;
+  @override
+  int get hashCode => Object.hash(query, versions, projectId, memoryType);
 }
 
 class MemoryException implements Exception {
@@ -210,6 +269,23 @@ bool _exportRecord(Map<String, dynamic> record, Object? owner) {
       );
 }
 
+class MemoryFailure {
+  MemoryFailure.fromJson(Map<String, dynamic> json)
+    : code = json['code'] as String? ?? '',
+      targetId = json['target_id'] as String? ?? '',
+      latestId = json['latest_id'] as String?,
+      projectId = json['project_id'] as String?;
+
+  final String code;
+  final String targetId;
+  final String? latestId;
+  final String? projectId;
+
+  /// The latest version is what the user can act on; the target is only the
+  /// stale one the failed save named.
+  String get showId => latestId ?? targetId;
+}
+
 class MemoryStatus {
   MemoryStatus.fromJson(Map<String, dynamic> json)
     : available = json['available'] == true,
@@ -220,6 +296,11 @@ class MemoryStatus {
       recoveryStatus = json['recovery_status'] as String? ?? 'ready',
       pendingOperations = json['pending_operations'] as int? ?? 0,
       failedOperations = json['failed_operations'] as int? ?? 0,
+      failures = [
+        for (final failure in json['failures'] as List? ?? const [])
+          if (failure is Map)
+            MemoryFailure.fromJson(failure.cast<String, dynamic>()),
+      ],
       error = (json['error'] as Map?)?['message'] as String?;
   final bool available;
   final bool enabled;
@@ -229,7 +310,13 @@ class MemoryStatus {
   final String recoveryStatus;
   final int pendingOperations;
   final int failedOperations;
+  final List<MemoryFailure> failures;
   final String? error;
+
+  bool get searchReady => searchStatus == 'ready';
+  bool get cleanupFailed => recoveryStatus == 'cleanup_failed';
+  bool get needsAttention =>
+      !available || !searchReady || failedOperations > 0 || cleanupFailed;
 }
 
 class MemoryRecord {
@@ -268,6 +355,17 @@ class MemoryRecord {
   final DateTime? updatedAt;
   final bool excerpted;
 
+  bool get isCurrent => lifecycle == 'active';
+  bool get isTaskScope => scope == 'task';
+  bool get byApp => source['actor'] == 'app';
+  String? get agentId => source['agent_id'] as String?;
+  String get kindLabel => memoryKindLabel(memoryType);
+  String? get shortSessionId {
+    final id = taskId;
+    if (id == null) return null;
+    return id.length <= 8 ? id : id.substring(0, 8);
+  }
+
   static DateTime? _date(Object? value) => switch (value) {
     int value => DateTime.fromMillisecondsSinceEpoch(value),
     String value => DateTime.tryParse(value),
@@ -287,4 +385,81 @@ class MemoryRecord {
     'restrict_to_checkout': checkoutId != null,
     'supersedes': id,
   };
+}
+
+class MemoryDetail {
+  MemoryDetail.fromJson(Map<String, dynamic> json)
+    : record = MemoryRecord.fromJson(
+        (json['record'] as Map).cast<String, dynamic>(),
+      ),
+      earlier = [
+        for (final record in json['earlier'] as List? ?? const [])
+          MemoryRecord.fromJson((record as Map).cast<String, dynamic>()),
+      ],
+      earlierHasMore = json['earlier_has_more'] == true;
+
+  final MemoryRecord record;
+  final List<MemoryRecord> earlier;
+  final bool earlierHasMore;
+}
+
+class MemoryProjectSummary {
+  MemoryProjectSummary.fromJson(Map<String, dynamic> json)
+    : projectId = json['project_id'] as String,
+      memories = json['memories'] as int? ?? 0,
+      earlierVersions = json['earlier_versions'] as int? ?? 0,
+      paused = json['paused'] == true,
+      label = json['label'] as String?,
+      cataloged = json['cataloged'] != false;
+
+  final String projectId;
+  final int memories;
+  final int earlierVersions;
+  final bool paused;
+  final String? label;
+  final bool cataloged;
+
+  String get displayName => (label?.isNotEmpty ?? false) ? label! : projectId;
+  bool get removed => !cataloged;
+}
+
+class MemoryProjects {
+  const MemoryProjects._(this.projects, this.memories, this.earlierVersions);
+
+  factory MemoryProjects.fromJson(Map<String, dynamic> json) {
+    final rows = [
+      for (final row in json['projects'] as List? ?? const [])
+        if (row is Map)
+          MemoryProjectSummary.fromJson(row.cast<String, dynamic>()),
+    ];
+    // Removed projects sink: their name is unknowable, so they read as ids.
+    rows.sort((a, b) {
+      final byRemoved = (a.removed ? 1 : 0).compareTo(b.removed ? 1 : 0);
+      return byRemoved != 0
+          ? byRemoved
+          : a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+    });
+    return MemoryProjects._(
+      List.unmodifiable(rows),
+      json['memories'] as int? ?? 0,
+      json['earlier_versions'] as int? ?? 0,
+    );
+  }
+
+  static const empty = MemoryProjects._([], 0, 0);
+
+  final List<MemoryProjectSummary> projects;
+  final int memories;
+  final int earlierVersions;
+
+  MemoryProjectSummary? operator [](String projectId) {
+    for (final project in projects) {
+      if (project.projectId == projectId) return project;
+    }
+    return null;
+  }
+
+  String labelFor(String projectId) =>
+      this[projectId]?.displayName ?? projectId;
+  bool isRemoved(String projectId) => this[projectId]?.removed ?? false;
 }

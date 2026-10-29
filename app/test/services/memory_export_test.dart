@@ -52,6 +52,20 @@ void main() {
     },
   );
 
+  test('a project filter rides on every page request', () async {
+    final calls = <Map<String, dynamic>>[];
+    await collectMemoryExport((request) async {
+      calls.add(request);
+      return request['cursor'] == null
+          ? memoryExportPage(records: [memoryExportRecord('a')], cursor: 'c2')
+          : memoryExportPage(records: [memoryExportRecord('b')]);
+    }, projectId: 'p');
+    expect(calls, [
+      {'op': 'export', 'project_id': 'p'},
+      {'op': 'export', 'cursor': 'c2', 'project_id': 'p'},
+    ]);
+  });
+
   test('an empty export is the same file the whole-document encoder writes', () async {
     final bytes = await collectMemoryExport((_) async => memoryExportPage());
     expect(
