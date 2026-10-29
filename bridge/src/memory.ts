@@ -52,7 +52,10 @@ export class HostMemory {
   private enabledCache?: boolean;
   private warmTimer?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly profileDirectory: () => string) {}
+  constructor(
+    private readonly profileDirectory: () => string,
+    private readonly catalog: () => Iterable<{ project_id: string; label?: string }> = () => [],
+  ) {}
 
   private directory(): string { return join(this.profileDirectory(), "memory"); }
   private storePresent(): boolean { return existsSync(join(this.directory(), MEMORY_DATABASE)); }
@@ -96,13 +99,39 @@ export class HostMemory {
     if (actor === "app" && (op.op === "repair" || (op.op === "settings" && op.enabled === true))) return "create";
     if (actor === "agent" && op.op !== "status") throw new MemoryError("DISABLED", MEMORY_OFF);
     switch (op.op) {
-      case "status": case "settings": return { ...NEVER_ENABLED_STATUS };
+      // An agent's absent-store status reaches /memory/status raw, and agents never get a `failures` key.
+      case "status": case "settings": return actor === "app" ? { ...NEVER_ENABLED_STATUS, failures: [] } : { ...NEVER_ENABLED_STATUS };
+      case "dismiss": return { ...NEVER_ENABLED_STATUS, failures: [] };
+      case "projects": return { projects: [], memories: 0, earlier_versions: 0 };
       case "recover": return { recovered: [], pending_operations: 0, errors: [] };
-      case "search": case "list": return { results: [], has_more: false };
+      case "search": case "list": return { results: [], has_more: false, total: 0 };
       case "export": throw new MemoryError("NOT_FOUND", "Memory has never been turned on, so there is nothing to export");
       case "get": case "forget": throw new MemoryError("NOT_FOUND", "Memory is not available in this context");
       default: throw new MemoryError("DISABLED", MEMORY_OFF);
     }
+  }
+
+  private enrichProjects(result: Record<string, unknown>, scoped: boolean): Record<string, unknown> {
+    const labels = new Map<string, string | undefined>();
+    for (const entry of this.catalog()) labels.set(entry.project_id, entry.label);
+    type Row = { project_id: string; memories: number; earlier_versions: number; paused: boolean; label?: string; cataloged?: boolean };
+    const rows: Row[] = [];
+    for (const row of (result.projects as Row[] | undefined) ?? []) {
+      const cataloged = labels.has(row.project_id);
+      // project_settings rows are never deleted (an unpause upserts paused=0), so a removed project that only
+      // ever had a setting would otherwise sit in the Project dropdown forever as an empty entry nobody can clear.
+      if (!cataloged && row.memories === 0 && row.earlier_versions === 0) continue;
+      const label = labels.get(row.project_id);
+      rows.push({ ...row, ...(label !== undefined ? { label } : {}), cataloged });
+    }
+    if (!scoped) {
+      const present = new Set(rows.map((row) => row.project_id));
+      for (const [id, label] of labels) {
+        if (present.has(id)) continue;
+        rows.push({ project_id: id, memories: 0, earlier_versions: 0, paused: false, ...(label !== undefined ? { label } : {}), cataloged: true });
+      }
+    }
+    return { ...result, projects: rows };
   }
 
   async execute(
@@ -114,9 +143,16 @@ export class HostMemory {
     const caller = context();
     const op = typeof request === "object" && request !== null && "op" in request ? request.op : undefined;
     if (caller.actor === "app" && this.error && op === "repair") this.error = undefined;
+    const enrich = caller.actor === "app" && op === "projects";
+    if (caller.actor === "app" && !caller.project_id && op === "settings") {
+      const target = (request as { project_id?: unknown }).project_id;
+      if (typeof target === "string" && ![...this.catalog()].some((entry) => entry.project_id === target)) {
+        throw new MemoryError("NOT_FOUND", "This project is not in this machine's catalog");
+      }
+    }
     if (!this.service && !this.error && !this.storePresent()) {
       const answer = this.absentAnswer(request, caller.actor);
-      if (answer !== "create") return answer;
+      if (answer !== "create") return enrich ? this.enrichProjects(answer, !!caller.project_id) : answer;
     }
     const service = this.open();
     if (!service) {
@@ -127,8 +163,8 @@ export class HostMemory {
       if (this.closed) throw new MemoryError("UNAVAILABLE", "The memory host has stopped.");
       return { ...context(), owner_id: service.ownerId };
     }, request, { maxAttempts });
-    if ((op === "status" || op === "settings" || op === "repair") && typeof result.enabled === "boolean") this.enabledCache = result.enabled;
-    return result;
+    if ((op === "status" || op === "settings" || op === "repair" || op === "dismiss") && typeof result.enabled === "boolean") this.enabledCache = result.enabled;
+    return enrich ? this.enrichProjects(result, !!caller.project_id) : result;
   }
 
   close(): void {

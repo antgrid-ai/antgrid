@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const LIMITS = { content: 4096, applicability: 1024, record: 16384, query: 1024, response: 8192, excerpt: 512, exportPage: 256 * 1024, exportRecords: 64, exportCursor: 2048 } as const;
+export const LIMITS = { content: 4096, applicability: 1024, record: 16384, query: 1024, response: 8192, excerpt: 512, exportPage: 256 * 1024, exportRecords: 64, exportCursor: 2048, page: 50 } as const;
 export const TASK_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 export const bytes = (value: unknown): number => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
 
@@ -15,6 +15,7 @@ function boundedText(field: string, limit: number, nonempty = false) {
 const id = z.string().min(1).max(256);
 const exportCursor = boundedText("export cursor", LIMITS.exportCursor, true);
 export const MemoryTypeSchema = z.enum(["preference", "task_state", "observation", "note"]);
+export const MemoryVersionsSchema = z.enum(["current", "earlier", "all"]);
 export const MemoryScopeSchema = z.enum(["project", "task"]);
 export const MemorySaveSchema = z.object({
   content: boundedText("content", LIMITS.content, true),
@@ -36,16 +37,25 @@ export type MemorySave = z.infer<typeof MemorySaveSchema>;
 
 export const MemoryRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("status") }).strict(),
-  z.object({ op: z.literal("settings"), enabled: z.boolean().optional(), paused: z.boolean().optional(), project_paused: z.boolean().optional() }).strict(),
-  z.object({ op: z.literal("search"), query: boundedText("query", LIMITS.query, true), limit: z.number().int().min(1).max(10).default(5) }).strict(),
-  z.object({ op: z.literal("list"), history: z.boolean().default(false), offset: z.number().int().min(0).max(1_000_000).default(0) }).strict(),
-  z.object({ op: z.literal("get"), id, history: z.boolean().default(false) }).strict(),
+  z.object({ op: z.literal("settings"), enabled: z.boolean().optional(), paused: z.boolean().optional(), project_paused: z.boolean().optional(), project_id: id.optional() }).strict(),
+  z.object({
+    op: z.literal("search"), query: boundedText("query", LIMITS.query, true), limit: z.number().int().min(1).max(LIMITS.page).default(5),
+    offset: z.number().int().min(0).max(1_000_000).default(0), versions: z.enum(["current", "earlier"]).default("current"),
+    project_id: id.optional(), memory_type: MemoryTypeSchema.optional(),
+  }).strict(),
+  z.object({
+    op: z.literal("list"), versions: MemoryVersionsSchema.default("current"), offset: z.number().int().min(0).max(1_000_000).default(0),
+    project_id: id.optional(), memory_type: MemoryTypeSchema.optional(),
+  }).strict(),
+  z.object({ op: z.literal("get"), id, history: z.boolean().default(false), earlier: z.boolean().default(false) }).strict(),
   z.object({ op: z.literal("prepare"), operation_key: id, save: MemorySaveSchema }).strict(),
   z.object({ op: z.literal("save"), operation_key: id, save: MemorySaveSchema }).strict(),
   z.object({ op: z.literal("recover") }).strict(),
   z.object({ op: z.literal("forget"), id }).strict(),
-  z.object({ op: z.literal("export"), cursor: exportCursor.optional() }).strict(),
+  z.object({ op: z.literal("export"), cursor: exportCursor.optional(), project_id: id.optional() }).strict(),
   z.object({ op: z.literal("repair") }).strict(),
+  z.object({ op: z.literal("projects") }).strict(),
+  z.object({ op: z.literal("dismiss"), target_id: id }).strict(),
 ]);
 export type MemoryRequest = z.infer<typeof MemoryRequestSchema>;
 // Wire messages carry the request as a plain record so their own schema stays
@@ -81,12 +91,18 @@ export const MemorySearchHitSchema = MemoryRecordSchema.pick({
   checkout_id: true, applicability: true, source: true, lifecycle: true,
 }).extend({ excerpted: z.boolean() });
 export type MemorySearchHit = z.infer<typeof MemorySearchHitSchema>;
+export const MemoryFailureSchema = z.object({ code: z.string(), target_id: id, latest_id: id.optional(), project_id: id.nullable() });
+export const MemoryProjectSchema = z.object({
+  project_id: id, memories: z.number().int().nonnegative(), earlier_versions: z.number().int().nonnegative(), paused: z.boolean(),
+  label: z.string().max(256).optional(), cataloged: z.boolean().optional(),
+});
 const SaveResultSchema = z.object({ operation_key: id, id, outcome: z.enum(["saved", "already_present"]), lifecycle: z.enum(["active", "expired", "superseded"]) });
 export const MemoryResultSchema = z.union([
   z.object({ available: z.literal(false), error: z.object({ code: z.string(), message: z.string() }) }),
-  z.object({ available: z.boolean(), search_status: z.enum(["ready", "search_unavailable"]), enabled: z.boolean(), paused: z.boolean(), project_paused: z.boolean(), pending_operations: z.number(), failed_operations: z.number().optional(), recovery_status: z.enum(["ready", "cleanup_failed"]), error: z.object({ code: z.string(), message: z.string() }).optional() }),
-  z.object({ results: z.array(z.union([MemoryRecordSchema, MemorySearchHitSchema])), has_more: z.boolean() }),
-  z.object({ record: MemoryRecordSchema }),
+  z.object({ available: z.boolean(), search_status: z.enum(["ready", "search_unavailable"]), enabled: z.boolean(), paused: z.boolean(), project_paused: z.boolean(), pending_operations: z.number(), failed_operations: z.number().optional(), failures: z.array(MemoryFailureSchema).max(20).optional(), recovery_status: z.enum(["ready", "cleanup_failed"]), error: z.object({ code: z.string(), message: z.string() }).optional() }),
+  z.object({ results: z.array(z.union([MemoryRecordSchema, MemorySearchHitSchema])), has_more: z.boolean(), total: z.number().int().nonnegative().optional() }),
+  z.object({ record: MemoryRecordSchema, earlier: z.array(MemoryRecordSchema).max(20).optional(), earlier_has_more: z.boolean().optional() }),
+  z.object({ projects: z.array(MemoryProjectSchema), memories: z.number().int().nonnegative(), earlier_versions: z.number().int().nonnegative() }),
   SaveResultSchema,
   z.object({ operation_key: id, state: z.enum(["pending", "resolved", "suppressed"]) }),
   z.object({ recovered: z.array(SaveResultSchema), pending_operations: z.number(), errors: z.array(z.object({ operation_key: id, code: z.string(), message: z.string() })).optional() }),

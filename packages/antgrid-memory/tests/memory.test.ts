@@ -80,7 +80,7 @@ describe("local ownership and controls", () => {
     expect((await call(app, { op: "export" })).records).toMatchObject([{ id: kept.id }]);
     expect((await record(kept.id, app)).id).toBe(kept.id);
     await call(app, { op: "forget", id: kept.id });
-    expect((await call(app, { op: "list", history: true })).results).toEqual([]);
+    expect((await call(app, { op: "list", versions: "all" })).results).toEqual([]);
     await call(app, { op: "settings", enabled: true });
     expect((await call(agent, { op: "recover" })).recovered).toHaveLength(1);
   });
@@ -92,7 +92,11 @@ describe("local ownership and controls", () => {
     expect(sql().query("SELECT count(*) AS n FROM operations").get()).toEqual({ n: 1 });
   });
   test("agents cannot use app-only operations or provide source identities", async () => {
-    for (const op of ["export", "list", "repair", "settings"]) await rejects(call(agent, { op }), "FORBIDDEN");
+    for (const request of [{ op: "export" }, { op: "list" }, { op: "repair" }, { op: "settings" }, { op: "projects" }, { op: "dismiss", target_id: "x" }]) {
+      await rejects(call(agent, request), "FORBIDDEN");
+    }
+    await rejects(call(agent, { op: "search", query: "JDK", limit: 11 }), "FORBIDDEN");
+    await rejects(call(agent, { op: "search", query: "JDK", memory_type: "note" }), "FORBIDDEN");
     await rejects(call(agent, { op: "save", operation_key: "spoof", save: finding({ project_id: "other" }) }), "INVALID_ARGUMENT");
     for (const key of ["session_id", "project_id", "checkout_id", "run_id"] as const) {
       await rejects(call({ ...agent, [key]: undefined }, { op: "search", query: "JDK" }), "FORBIDDEN");

@@ -78,7 +78,7 @@ test("project memory stays bound to its admitted core while machine inspection i
   const own = await seed(first.id, "project", "first finding");
   await seed(first.id, "task", "task finding");
   const other = await seed(second.id, "project", "second finding");
-  const rows = await ask(first.bus, { op: "list", history: true });
+  const rows = await ask(first.bus, { op: "list", versions: "all" });
   expect(rows.ok).toBe(true);
   expect(rows.result.results.map((r: any) => r.content).sort()).toEqual(["first finding", "task finding"]);
   expect((await ask(first.bus, { op: "get", id: other.id })).error.code).toBe("NOT_FOUND");
@@ -86,7 +86,7 @@ test("project memory stays bound to its admitted core while machine inspection i
   expect((await ask(first.bus, { op: "settings", paused: true })).error.code).toBe("FORBIDDEN");
   expect((await ask(first.bus, { op: "settings", project_paused: true })).result.project_paused).toBe(true);
   (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(second.id);
-  const all = await memory().execute(app, { op: "list", history: true }) as any;
+  const all = await memory().execute(app, { op: "list", versions: "all" }) as any;
   expect(all.results.map((r: any) => r.content)).toContain("second finding");
   expect((await ask(second.bus, { op: "status" })).error.code).toBe("FORBIDDEN");
 });
@@ -171,10 +171,13 @@ test("a profile that never enabled memory is answered without creating a store",
   try {
     expect(await profile.execute(app, { op: "status" })).toEqual({
       available: true, search_status: "ready", enabled: false, paused: false, failed_operations: 0,
+      project_paused: false, pending_operations: 0, recovery_status: "ready", failures: [],
+    });
+    expect(await profile.execute(agentCaller, { op: "status" })).toEqual({
+      available: true, search_status: "ready", enabled: false, paused: false, failed_operations: 0,
       project_paused: false, pending_operations: 0, recovery_status: "ready",
     });
-    expect(await profile.execute(agentCaller, { op: "status" })).toMatchObject({ available: true, enabled: false, paused: false, project_paused: false });
-    expect(await profile.execute(app, { op: "search", query: "anything" })).toEqual({ results: [], has_more: false });
+    expect(await profile.execute(app, { op: "search", query: "anything" })).toEqual({ results: [], has_more: false, total: 0 });
     await expect(profile.execute(app, { op: "get", id: "m1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(profile.execute(app, { op: "export" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(profile.execute(app, { op: "bogus" })).rejects.toMatchObject({ name: "ZodError" });
@@ -189,6 +192,62 @@ test("a profile that never enabled memory is answered without creating a store",
     expect(profile.launchEnabled()).toBe(false);
     expect(existsSync(join(profileDirectory(), "memory"))).toBe(false);
   } finally { profile.close(); }
+});
+
+test("an absent store answers projects from the catalog without creating a store", async () => {
+  const profile = new HostMemory(profileDirectory, () => [{ project_id: "alpha", label: "Alpha" }, { project_id: "beta" }]);
+  try {
+    expect(await profile.execute(app, { op: "projects" })).toEqual({
+      projects: [
+        { project_id: "alpha", memories: 0, earlier_versions: 0, paused: false, label: "Alpha", cataloged: true },
+        { project_id: "beta", memories: 0, earlier_versions: 0, paused: false, cataloged: true },
+      ],
+      memories: 0, earlier_versions: 0,
+    });
+    expect(existsSync(join(profileDirectory(), "memory"))).toBe(false);
+  } finally { profile.close(); }
+});
+
+test("removed projects keep their records in the project list but lose an empty settings row", async () => {
+  let catalog = [{ project_id: "alpha", label: "Alpha" }, { project_id: "gone-with-records" }, { project_id: "gone-settings-only" }];
+  const profile = new HostMemory(profileDirectory, () => catalog);
+  const agent = (project_id: string) => () => ({ actor: "agent" as const, project_id, session_id: "s", checkout_id: "main", agent_id: "codex", run_id: "r" });
+  try {
+    await profile.execute(app, { op: "settings", enabled: true });
+    for (const id of ["alpha", "gone-with-records"]) {
+      await profile.execute(agent(id), { op: "save", operation_key: crypto.randomUUID(), save: { content: `memory for ${id}`, memory_type: "note", scope: "project" } });
+    }
+    await profile.execute(app, { op: "settings", project_id: "gone-settings-only", project_paused: true });
+    await profile.execute(app, { op: "settings", project_id: "gone-settings-only", project_paused: false });
+    catalog = [{ project_id: "alpha", label: "Alpha" }];
+    const result = await profile.execute(app, { op: "projects" }) as any;
+    expect(result.projects.map((row: any) => row.project_id)).toEqual(["alpha", "gone-with-records"]);
+    expect(result.projects[0]).toMatchObject({ label: "Alpha", cataloged: true, memories: 1 });
+    expect(result.projects[1]).toMatchObject({ cataloged: false, memories: 1 });
+    expect(result.projects[1]).not.toHaveProperty("label");
+    expect(result.memories).toBe(2);
+  } finally { profile.close(); }
+});
+
+test("machine settings for an uncataloged project are refused before a store exists", async () => {
+  const profile = new HostMemory(profileDirectory, () => [{ project_id: "alpha" }]);
+  try {
+    await expect(profile.execute(app, { op: "settings", project_id: "unknown", project_paused: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(existsSync(join(profileDirectory(), "memory"))).toBe(false);
+  } finally { profile.close(); }
+});
+
+test("the phone memory RPC accepts a project-narrowed list", async () => {
+  await host.startControlPlane();
+  (host as unknown as { controlPlaneRelay: RemoteHostConnection }).controlPlaneRelay = {
+    peerSession: () => ({}), isPeerAuthorized: () => true, authorizeDevice: async () => true,
+    close: async () => {}, recheckAuthorization: () => {},
+  } as unknown as RemoteHostConnection;
+  await host.handleRemoteAccessVerb({ id: "enable", type: "mobile-access:set", enabled: true });
+  const request = createMessage("request", { requestId: "narrow", method: "memory.request", params: { op: "list", project_id: "some-project" } });
+  const response = await host.handleMemoryRpc(request, "phone#machine") as any;
+  expect(response.error).toBeUndefined();
+  expect(response.result).toEqual({ results: [], has_more: false, total: 0 });
 });
 
 test("only an app request to enable or repair creates the store, and launches follow the setting", async () => {

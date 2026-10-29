@@ -16,11 +16,25 @@ service.close();
 The owner ID comes from `service.ownerId`, which is retained in the database.
 Agents require a project, durable session, checkout, and verified live run.
 The run secret is checked by the host and never persisted. App contexts without
-a project may inspect all local records; project app contexts see that project's
-records only. Scopes are `project` and `task`. App saves are corrections of
+a project see every local record; project app contexts see that project's
+records only. A `project_id` on an app request can only narrow: a machine app
+context may narrow to one project, a project context can never widen or switch
+(a different project is `FORBIDDEN`), and agents can never pass it.
+Scopes are `project` and `task`. App saves are corrections of
 existing records and cannot widen their scope. While memory is disabled every
 agent operation except `status` is refused with `DISABLED`; app inspection,
 export and forgetting remain available.
+
+App inspection adds a few operations and options. `projects` lists every project
+with its memory and earlier-version counts and its pause state. `list` and
+`search` take `versions` (`current`, `earlier`, and `all` on `list`), `offset`
+and `memory_type`, and return `total`; app search results are complete records,
+and a query with no searchable tokens is an empty result for the app, while an
+unavailable index is still `SEARCH_UNAVAILABLE`. `get` with `earlier` returns
+the correction chain behind a memory, newest first. App `status` carries
+`failures` (conflicted corrections with the latest version to retry against), and
+`dismiss` acknowledges one without making its operation key replayable. Agents
+are refused every one of these options.
 
 The service owns write serialization, immediate SQLite transactions, default
 opt-out and pause controls, correction conflicts, task-state inactivity expiry,

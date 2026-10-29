@@ -215,7 +215,7 @@ try {
     const created = resumeSession ? { ok: true, session: { id: resumeSession } } : await request("session:create", { name, tool: agent === "claude" ? "claude-code" : agent, args: rawArgs, mode: "terminal", approvalPolicy, isolation: "shared" });
     if (!created.ok) throw new Error(created.error);
     const sessionId = created.session.id;
-    const before = await memory({ op: "list", history: true });
+    const before = await memory({ op: "list", versions: "all" });
     const start = Date.now();
     const row: any = { agent, mode: interactive ? "interactive terminal" : opencodeRun ? "terminal run" : "terminal print/exec", approval_policy: approvalPolicy, provider_version: report.capabilities[agent].version, configured_model: agent === "opencode" ? opencodeModel : undefined, native_database: agent === "opencode" ? join(nativeHomes.opencode, "data", "opencode", "opencode.db") : undefined, scenario: stage, session_id: sessionId, prompt: scenario.prompt, replayed_operations: replayCount, started_at: new Date(start).toISOString(), before };
     observations.push(row); saveReport();
@@ -277,7 +277,7 @@ try {
     row.finished_at = new Date().toISOString();
     row.session = sessions.get(sessionId);
     row.native_session_id = row.session?.agentSessionId;
-    row.after = await memory({ op: "list", history: true });
+    row.after = await memory({ op: "list", versions: "all" });
     let text = output.get(sessionId) ?? "";
     if (!text && apiPort) {
       const response = await fetch(`http://127.0.0.1:${apiPort}/terminals/${sessionId}/scrollback?terminalId=${sessionId}`);

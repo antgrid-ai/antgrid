@@ -17,7 +17,7 @@ type Row = {
 type Operation = {
   binding: string; operation_key: string; payload_hash: string | null; match_hash: string | null;
   target_id: string | null; payload: string | null; record_id: string | null;
-  outcome: "saved" | "already_present" | null; state: "pending" | "resolved" | "suppressed";
+  outcome: "saved" | "already_present" | "dismissed" | null; state: "pending" | "resolved" | "suppressed";
   origin_project_id: string | null;
   failure_code: string | null;
 };
@@ -26,6 +26,8 @@ type SaveResult = { operation_key: string; id: string; outcome: "saved" | "alrea
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const isBusy = (error: unknown): boolean => !!error && typeof error === "object" && "code" in error && /SQLITE_(BUSY|LOCKED)/.test(String(error.code));
 const EXPORT_CURSOR_VERSION = 1;
+const FAILED = "failure_code IS NOT NULL AND outcome IS NOT 'dismissed'";
+type Versions = "current" | "earlier" | "all";
 const ExportCursorSchema = z.object({
   version: z.literal(EXPORT_CURSOR_VERSION), binding: z.string().regex(/^[a-f0-9]{64}$/), revision: z.number().int().nonnegative(),
   high_seq: z.number().int().nonnegative(), last_id: z.string().min(1).max(256), exported_at: z.number().int().nonnegative(),
@@ -72,7 +74,7 @@ export class MemoryService {
     const task = this.queue.then(async () => {
       try {
         return await this.retryBusy(options.maxAttempts ?? 3, deadline, async () => {
-          const ctx = this.context(context);
+          const ctx = this.narrow(this.context(context), request);
           if (performance.now() >= deadline) throw new MemoryError("BUSY", "Memory request exceeded its queue deadline; retry the same operation key");
           return request.op === "recover" ? await this.recover(context, deadline) : this.dispatch(ctx, request);
         });
@@ -112,15 +114,33 @@ export class MemoryService {
     return ctx;
   }
 
+  // A caller-supplied project can only narrow an app's machine view; it can never
+  // widen a project context or let an agent leave the project it was verified for.
+  private narrow(ctx: MemoryContext, request: MemoryRequest): MemoryContext {
+    const requested = "project_id" in request ? request.project_id : undefined;
+    if (requested === undefined) return ctx;
+    if (ctx.actor === "agent") throw new MemoryError("FORBIDDEN", "Agents cannot choose a project");
+    if (ctx.project_id && ctx.project_id !== requested) throw new MemoryError("FORBIDDEN", "This connection is limited to its own project");
+    return { ...ctx, project_id: requested };
+  }
+
   private dispatch(ctx: MemoryContext, request: MemoryRequest): Record<string, unknown> {
-    if (ctx.actor === "agent" && ["settings", "list", "export", "repair"].includes(request.op)) throw new MemoryError("FORBIDDEN", "This operation requires app inspection");
+    if (ctx.actor === "agent" && ["settings", "list", "export", "repair", "projects", "dismiss"].includes(request.op)) throw new MemoryError("FORBIDDEN", "This operation requires app inspection");
+    const inspectionOnly = request.op === "search" ? request.limit > 10 || request.offset > 0 || request.versions !== "current" || request.memory_type !== undefined
+      : request.op === "get" && request.earlier;
+    if (ctx.actor === "agent" && inspectionOnly) throw new MemoryError("FORBIDDEN", "This option requires app inspection");
     if (request.op !== "status") this.enabled(ctx);
     switch (request.op) {
       case "status": return this.status(ctx);
       case "settings": return this.settings(ctx, request);
-      case "search": return this.search(ctx, request.query, request.limit);
-      case "list": return this.list(ctx, request.history, request.offset);
-      case "get": return { record: this.record(this.requireRecord(ctx, request.id, request.history)) };
+      case "search": return this.search(ctx, request);
+      case "list": return this.list(ctx, request.versions, request.offset, request.memory_type);
+      case "get": {
+        const row = this.requireRecord(ctx, request.id, request.history);
+        return request.earlier ? { record: this.record(row), ...this.earlier(ctx, row) } : { record: this.record(row) };
+      }
+      case "projects": return this.projects(ctx);
+      case "dismiss": return this.dismiss(ctx, request.target_id);
       case "prepare": return this.prepare(ctx, request.operation_key, redactSave(request.save));
       case "save": return this.save(ctx, request.operation_key, redactSave(request.save));
       case "forget": return this.forget(ctx, request.id);
@@ -133,9 +153,33 @@ export class MemoryService {
   private status(ctx: MemoryContext): Record<string, unknown> {
     const profile = this.store.query("SELECT * FROM profile WHERE singleton=1").get() as { enabled: number; paused: number; cleanup_pending: number };
     const project = ctx.project_id ? this.store.query("SELECT paused FROM project_settings WHERE project_id=?").get(ctx.project_id) as { paused: number } | null : null;
-    const failedOperations = this.operationCount(ctx, "failure_code IS NOT NULL");
+    const failedOperations = this.operationCount(ctx, FAILED);
     return { available: true, search_status: this.store.searchReady ? "ready" : "search_unavailable", enabled: !!profile.enabled, paused: !!profile.paused, failed_operations: failedOperations,
-      project_paused: !!project?.paused, pending_operations: this.operationCount(ctx, "state='pending'"), recovery_status: profile.cleanup_pending ? "cleanup_failed" : "ready" };
+      project_paused: !!project?.paused, pending_operations: this.operationCount(ctx, "state='pending'"), recovery_status: profile.cleanup_pending ? "cleanup_failed" : "ready",
+      ...(ctx.actor === "app" ? { failures: this.failures(ctx) } : {}) };
+  }
+
+  private failures(ctx: MemoryContext): Record<string, unknown>[] {
+    const scoped = ctx.project_id ? " AND origin_project_id=?" : "";
+    const rows = this.store.query(`SELECT failure_code, target_id, origin_project_id FROM operations WHERE ${FAILED} AND target_id IS NOT NULL${scoped} ORDER BY rowid DESC LIMIT 20`)
+      .all(...(ctx.project_id ? [ctx.project_id] : [])) as { failure_code: string; target_id: string; origin_project_id: string | null }[];
+    const lookup = (id: string) => this.store.query("SELECT id, superseded_by FROM records WHERE id=?").get(id) as { id: string; superseded_by: string | null } | null;
+    return rows.map(row => {
+      // Bounded walk: a corrupt chain must not spin the status read.
+      let latest = lookup(row.target_id);
+      for (let hops = 0; latest?.superseded_by && hops < 64; hops++) latest = lookup(latest.superseded_by);
+      return { code: row.failure_code, target_id: row.target_id, ...(latest ? { latest_id: latest.id } : {}), project_id: row.origin_project_id };
+    });
+  }
+
+  // Conflict rows never carry an outcome (the conflict insert writes none, and only
+  // a pending operation, whose outcome is NULL, can reach its ON CONFLICT path), so
+  // outcome is free to record the acknowledgement without a schema change. The
+  // failure code stays, so a replayed key still reports CONFLICT before outcome is read.
+  private dismiss(ctx: MemoryContext, targetId: string): Record<string, unknown> {
+    const scoped = ctx.project_id ? " AND origin_project_id=?" : "";
+    this.store.query(`UPDATE operations SET outcome='dismissed' WHERE failure_code IS NOT NULL AND target_id=?${scoped}`).run(targetId, ...(ctx.project_id ? [ctx.project_id] : []));
+    return this.status(ctx);
   }
 
   private settings(ctx: MemoryContext, request: Extract<MemoryRequest, { op: "settings" }>): Record<string, unknown> {
@@ -188,7 +232,7 @@ export class MemoryService {
     });
   }
 
-  private filter(ctx: MemoryContext, history: boolean): { sql: string; args: (string | number)[] } {
+  private filter(ctx: MemoryContext, versions: Versions, memoryType?: string): { sql: string; args: (string | number)[] } {
     let sql = "r.owner_id=?";
     const args: (string | number)[] = [ctx.owner_id];
     if (ctx.actor === "app") {
@@ -197,7 +241,10 @@ export class MemoryService {
       sql += " AND r.project_id=? AND (r.scope!='task' OR r.task_id=?) AND (r.checkout_id IS NULL OR r.checkout_id=?)";
       args.push(ctx.project_id!, ctx.session_id!, ctx.checkout_id!);
     }
-    if (!history) { sql += " AND r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?)"; args.push(this.now() - TASK_EXPIRY_MS); }
+    const cutoff = this.now() - TASK_EXPIRY_MS;
+    if (versions === "current") { sql += " AND r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?)"; args.push(cutoff); }
+    else if (versions === "earlier") { sql += " AND (r.superseded_by IS NOT NULL OR (r.memory_type='task_state' AND r.updated_at<=?))"; args.push(cutoff); }
+    if (memoryType !== undefined) { sql += " AND r.memory_type=?"; args.push(memoryType); }
     return { sql, args };
   }
   private exportPage(ctx: MemoryContext, cursor?: string): Record<string, unknown> {
@@ -214,7 +261,7 @@ export class MemoryService {
       if (previous && previous.revision !== revision) throw new MemoryError("EXPORT_CHANGED", "Memories changed during export; discard these pages and start a new export");
       const highSeq = previous?.high_seq ?? (this.store.query("SELECT coalesce(max(seq),0) AS seq FROM records").get() as { seq: number }).seq;
       const exportedAt = previous?.exported_at ?? this.now();
-      const { sql, args } = this.filter(ctx, true);
+      const { sql, args } = this.filter(ctx, "all");
       const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} AND r.seq<=? AND r.id>? ORDER BY r.id ASC LIMIT ?`)
         .all(...args, highSeq, previous?.last_id ?? "", LIMITS.exportRecords + 1) as Row[];
       const result = { version: 1, owner_id: this.ownerId, exported_at: exportedAt, records: [] as MemoryRecord[], next_cursor: null as string | null };
@@ -237,15 +284,18 @@ export class MemoryService {
       return result;
     }).deferred();
   }
-  private list(ctx: MemoryContext, history: boolean, offset: number): Record<string, unknown> {
-    const { sql, args } = this.filter(ctx, history);
-    const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} ORDER BY r.created_at DESC,r.id LIMIT 51 OFFSET ?`).all(...args, offset) as Row[];
-    return { results: rows.slice(0, 50).map(r => this.record(r)), has_more: rows.length > 50 };
+  private list(ctx: MemoryContext, versions: Versions, offset: number, memoryType?: string): Record<string, unknown> {
+    const { sql, args } = this.filter(ctx, versions, memoryType);
+    const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} ORDER BY r.created_at DESC,r.id LIMIT ${LIMITS.page + 1} OFFSET ?`).all(...args, offset) as Row[];
+    const total = (this.store.query(`SELECT count(*) AS total FROM records r WHERE ${sql}`).get(...args) as { total: number }).total;
+    return { results: rows.slice(0, LIMITS.page).map(r => this.record(r)), has_more: rows.length > LIMITS.page, total };
   }
-  private search(ctx: MemoryContext, query: string, limit: number): Record<string, unknown> {
+  private search(ctx: MemoryContext, request: Extract<MemoryRequest, { op: "search" }>): Record<string, unknown> {
+    if (ctx.actor === "app") return this.appSearch(ctx, request);
+    const { query, limit } = request;
     const match = ftsQuery(query);
     if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
-    const { sql, args } = this.filter(ctx, false);
+    const { sql, args } = this.filter(ctx, "current");
     try {
       const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(match, ...args, limit + 1) as Row[];
       return searchResponse(rows.map(r => this.record(r)), limit);
@@ -254,6 +304,58 @@ export class MemoryService {
       this.store.searchReady = false;
       throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search failed; rebuild the index without replacing the database");
     }
+  }
+  // The app is not inside an MCP envelope, so it gets complete records with timestamps.
+  private appSearch(ctx: MemoryContext, request: Extract<MemoryRequest, { op: "search" }>): Record<string, unknown> {
+    if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
+    let match: string;
+    try { match = ftsQuery(request.query); }
+    catch (error) {
+      // A query of punctuation matches nothing by definition: a true empty result,
+      // not a hidden failure. search() deliberately lets ftsQuery's INVALID_ARGUMENT
+      // reach agents, so a model learns its query had no searchable terms instead of
+      // reading an empty result as "nothing remembered".
+      if (error instanceof MemoryError && error.code === "INVALID_ARGUMENT") return { results: [], has_more: false, total: 0 };
+      throw error;
+    }
+    const { sql, args } = this.filter(ctx, request.versions, request.memory_type);
+    try {
+      const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ? OFFSET ?`)
+        .all(match, ...args, request.limit + 1, request.offset) as Row[];
+      const total = (this.store.query(`SELECT count(*) AS total FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql}`).get(match, ...args) as { total: number }).total;
+      return { results: rows.slice(0, request.limit).map(r => this.record(r)), has_more: rows.length > request.limit, total };
+    } catch (error) {
+      if (isBusy(error)) throw error;
+      this.store.searchReady = false;
+      throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search failed; rebuild the index without replacing the database");
+    }
+  }
+
+  private earlier(ctx: MemoryContext, row: Row): { earlier: MemoryRecord[]; earlier_has_more: boolean } {
+    const chain: MemoryRecord[] = [];
+    let next = row.supersedes;
+    // Stops at the first missing or disallowed row, so a chain broken by forgetting
+    // or crossing a context never exposes what lies beyond it.
+    while (next && chain.length <= 20) {
+      const previous = this.store.query("SELECT * FROM records WHERE id=?").get(next) as Row | null;
+      if (!previous || !this.allowed(ctx, previous)) break;
+      chain.push(this.record(previous));
+      next = previous.supersedes;
+    }
+    return { earlier: chain.slice(0, 20), earlier_has_more: chain.length > 20 };
+  }
+
+  private projects(ctx: MemoryContext): Record<string, unknown> {
+    const rows = this.store.query(`WITH ids(project_id) AS (SELECT project_id FROM records WHERE owner_id=? UNION SELECT project_id FROM project_settings),
+      agg AS (SELECT project_id,
+        sum(CASE WHEN superseded_by IS NULL AND (memory_type!='task_state' OR updated_at>?) THEN 1 ELSE 0 END) AS memories,
+        count(*) AS total FROM records WHERE owner_id=? GROUP BY project_id)
+      SELECT ids.project_id, coalesce(agg.memories,0) AS memories, coalesce(agg.total,0)-coalesce(agg.memories,0) AS earlier_versions,
+        coalesce(s.paused,0) AS paused
+      FROM ids LEFT JOIN agg USING(project_id) LEFT JOIN project_settings s USING(project_id)${ctx.project_id ? " WHERE ids.project_id=?" : ""} ORDER BY ids.project_id`)
+      .all(ctx.owner_id, this.now() - TASK_EXPIRY_MS, ctx.owner_id, ...(ctx.project_id ? [ctx.project_id] : [])) as { project_id: string; memories: number; earlier_versions: number; paused: number }[];
+    const projects = rows.map(r => ({ project_id: r.project_id, memories: r.memories, earlier_versions: r.earlier_versions, paused: !!r.paused }));
+    return { projects, memories: projects.reduce((n, p) => n + p.memories, 0), earlier_versions: projects.reduce((n, p) => n + p.earlier_versions, 0) };
   }
 
   private binding(ctx: MemoryContext): string { return hash([ctx.owner_id, ctx.actor, ctx.project_id ?? null, ctx.actor === "agent" ? ctx.session_id : null]); }
@@ -278,7 +380,7 @@ export class MemoryService {
     if (operation.state === "resolved") {
       if (operation.failure_code) throw new MemoryError(operation.failure_code, "This correction conflicted with a newer revision; inspect it before creating another operation");
       const row = this.requireRecord(ctx, operation.record_id!);
-      return { operation_key: operation.operation_key, id: row.id, outcome: operation.outcome!, lifecycle: this.record(row).lifecycle };
+      return { operation_key: operation.operation_key, id: row.id, outcome: operation.outcome as SaveResult["outcome"], lifecycle: this.record(row).lifecycle };
     }
   }
   private preflightOperation(ctx: MemoryContext, key: string): Operation | null {
@@ -327,8 +429,9 @@ export class MemoryService {
       if (replay) return replay;
       if (target?.superseded_by) {
         this.store.query(`INSERT INTO operations(binding,operation_key,payload_hash,target_id,origin_project_id,state,failure_code) VALUES(?,?,?,?,?,'resolved','CONFLICT')
-          ON CONFLICT(binding,operation_key) DO UPDATE SET state='resolved',payload=NULL,failure_code='CONFLICT'`)
-          .run(this.binding(ctx), key, payloadHash, save.supersedes, ctx.project_id ?? null);
+          ON CONFLICT(binding,operation_key) DO UPDATE SET state='resolved',payload=NULL,failure_code='CONFLICT',origin_project_id=excluded.origin_project_id`)
+          // The target's project, so a correction made from the machine view still counts against it.
+          .run(this.binding(ctx), key, payloadHash, save.supersedes, target.project_id);
         return new MemoryError("CONFLICT", "Memory has already been corrected; inspect the latest revision");
       }
       let row: Row | undefined;

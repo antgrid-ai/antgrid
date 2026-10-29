@@ -64,6 +64,12 @@ test("native memory inspection, correction, forgetting and restart preserve prof
     expect((await projectRequest(env, streamId, { op: "get", id: own.id })).error.code).toBe("NOT_FOUND");
     expect((await projectRequest(env, streamId, { op: "get", id: own.id, history: true })).result.record.lifecycle).toBe("superseded");
 
+    const streamList = await projectRequest(env, streamId, { op: "list", versions: "all" });
+    const machineList = await machineRequest(env, { op: "list", project_id: env.projectId, versions: "all" });
+    expect(machineList.result.results.map((r: any) => r.id).sort()).toEqual(streamList.result.results.map((r: any) => r.id).sort());
+    const projects = await machineRequest(env, { op: "projects" });
+    expect(projects.result.projects).toContainEqual(expect.objectContaining({ project_id: env.projectId, cataloged: true }));
+
     env.app.dropSocket();
     expect(await env.app.waitForClose(2000)).toBe(true);
     const detail = await projectRequest(env, streamId, { op: "get", id: correction.result.id });

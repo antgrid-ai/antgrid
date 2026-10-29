@@ -684,7 +684,7 @@ export class HostServer {
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
-  private readonly memory = new HostMemory(resolveAbDir);
+  private readonly memory = new HostMemory(resolveAbDir, () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: seen.label ?? basename(seen.path) })));
   private releaseMemoryGate: (() => void) | undefined;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
