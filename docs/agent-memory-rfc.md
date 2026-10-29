@@ -1,6 +1,6 @@
 # Antgrid Memory architecture proposal
 
-**Status:** Implemented locally; release qualification incomplete. Updated 2026-10-29. Storage, bridge authorization, the separate memory MCP server, and app inspection controls are implemented. The final hook trial passed automatic saving, cross-agent recall in both directions, reuse without duplication, correction/history, and forgetting with Claude Code and Codex. OpenCode 1.19.0 subsequently passed the same interactive sequence and bidirectional sharing with Claude. Codex saves were observed in exec mode and the normal terminal. Earlier trials exposed duplicate, scope-selection and tool-discovery failures; their evidence is retained below. The measured support matrix and remaining release gates are below. Semantic search, model-based reranking, general memory aging, and automatic memory injection remain outside v1.
+**Status:** Implemented; not yet released. Updated 2026-10-29. Storage, bridge authorization, the separate memory MCP server, and app inspection controls are implemented. Semantic search, model-based reranking, general memory aging, and automatic memory injection remain outside v1.
 
 Antgrid Memory will automatically save useful findings and let agents retrieve them across sessions on one machine. Start with a lightweight memory service backed by local records and full-text search; a third-party memory engine is not a prerequisite. Antgrid supplies project and task boundaries, provenance, and user controls. Alternative backends, Antgrid-hosted storage, and cross-machine sharing are future directions.
 
@@ -329,9 +329,10 @@ bridge-supplied instructions, records, source identifiers or transcripts.
 Pausing during an existing Codex session still blocks saves in the service;
 already delivered guidance cannot be removed from its conversation.
 
-This is a targeted extension to the original MCP-only trial after Codex failed
-to discover the deferred memory tools. It supplies static tool-use policy,
-not automatic recall or background extraction. OpenCode's custom
+Codex exposes MCP tools through a deferred catalog that is absent from its
+initial model request, so without this guidance it does not discover the memory
+tools. The hook supplies static tool-use policy, not automatic recall or
+background extraction. OpenCode's custom
 `OPENCODE_CONFIG` bypass still suppresses Antgrid's plugin injection, preserving
 the existing user-configuration precedence. Chat mode remains deferred.
 
@@ -382,174 +383,3 @@ pages returns `EXPORT_CHANGED`, so the user can restart the
 export instead of receiving a file assembled from different store revisions.
 Pagination metadata and cursor authentication material are excluded from the
 downloaded file.
-
-## Qualification recorded on 2026-10-28
-
-| Target | Evidence | Verdict |
-| --- | --- | --- |
-| Local storage and isolation | `bun run --filter antgrid-memory test` exercises duplicates, corrections, rollback, restarts, expiry, filtering, limits, index repair, cleanup failure, and replay suppression | Passed 26 tests and package typecheck |
-| Bridge admission and app transport | Bridge memory caller, API, host, protocol, native authorization, and diagnostic suites | Passed 86 focused tests and bridge typecheck; authorization checked again on retry |
-| Authenticated native end-to-end flow | `bun run --filter antgrid-evals test:evals:memory` uses a disposable real bridge and Iroh peers | Passed isolation, paused app edits, history/export, relay outage, restart/reconnect, and forgotten-operation replay |
-| Flutter inspection controls | Focused Memory widget/service tests and `flutter analyze --no-pub` | Passed 15 tests and clean analysis; compact and desktop preview inspected with mock records, without a real account or host |
-| Terminal profiles and MCP retries | `antgrid-agents` suites and bridge memory MCP tests | Passed 326 adapter tests, 15 MCP tests, and adapter typecheck; separate server registered without changing chat or native memory |
-| Windows compiled MCP + SQLite/FTS5 | `bridge/scripts/memory-mcp-smoke.ts`, compiled with Bun 1.3.14, executed on Windows | Passed tool table, full-text search, persistence/restart, correction, forgetting, and old-operation replay |
-| macOS compiled MCP + SQLite/FTS5 | Same smoke harness, compiled with Bun 1.3.14, executed on macOS 27.0.1 arm64 on 2026-10-29 | Passed tool table, full-text search, persistence/restart, correction, forgetting, and old-operation replay |
-| Linux compiled packaging | Same smoke harness is portable but has not run here | Unqualified |
-| Claude Code 2.1.312 automatic saving | Authenticated real Antgrid terminal sessions, print mode, default `claude-opus-5-5`, isolated non-Git fixtures and native homes | Two ordinary-work runs saved source-backed findings without a remember request; full cross-agent sequence remains incomplete |
-| Codex CLI 0.164.0 automatic saving | Authenticated real Antgrid terminal sessions, default `gpt-6.1-sol`; fresh exec and normal interactive runs | Both fresh-store ordinary-work runs completed without saving; automatic-save gate failed |
-| Live duplicate, forget, and restart replay | Claude MCP forgetting plus explicit local verification scripts in the original durable session using inherited live caller identity | Exact duplicate returned `already_present`; original and duplicate operation replays returned `FORGOTTEN` after deletion; history remained empty |
-
-The repeatable non-Git fixture, scenario prompts, required metrics, and execution
-procedure are in [agent-memory-qualification.md](agent-memory-qualification.md).
-The sanitized [live results](agent-memory-qualification-results.json) record
-per-scenario outcomes, tool calls, wall time, native token usage and cache
-counters. Claude's two automatic saves took 36.056 s and 30.581 s end to end;
-their memory-save calls took 26 ms and 31 ms. Codex's fresh exec and interactive
-tasks took 22.255 s and 25.834 s respectively, with no saved record. These are
-individual observations, not latency distributions. Actual charges and extra
-tokens/tool calls attributable to memory remain unknown without a baseline.
-Missing measurements remain null, not zero.
-
-The clean reverse sequence could not qualify cross-agent retrieval because
-Codex had not created an eligible record. Its later correction task edited the
-source guide instead of the saved memory; the prompt's reference to a prior
-finding was ambiguous about which artifact to correct. Claude subsequently
-found and forgot the memory. Explicit duplicate and replay scripts qualify
-bridge behavior, not spontaneous agent tool selection. Live controls used the
-authenticated desktop-owner transport; the Flutter UI was not driven against
-these records. The remaining full sequence, live pause/fork/checkout scenarios,
-and app-connected agent walkthrough remain open.
-
-A credential-free local Responses diagnostic confirmed that Codex exec honors
-the injected MCP configuration and connects the memory server. Its initial
-model request contains neither the memory tool names nor the automatic-save
-guidance. Both become available through the deferred runtime tool catalog. The
-ordinary exec runs did not discover them. The normal interactive terminal also
-missed the save, but its initial request exposure was not captured separately.
-
-The hook follow-up below presents fixed tool guidance through the supported
-Codex lifecycle mechanism. It does not toggle client features, inject saved
-content, add repository instructions, or capture transcripts for a background
-extractor. The original MCP-only failure remains evidence about discovery, not
-a claim that the tools or database were unavailable.
-
-The full bridge run also exposed a scheduler teardown failure outside this
-change: the `scheduler-agent` test's temporary project can be reopened by an
-asynchronous dispatch after host shutdown. The affected memory/transport suites
-pass, but the full suite is not a clean gate until that scheduler race is fixed.
-The isolated dense terminal-history test passed after timing out under the full
-concurrent test load. These results do not qualify automatic agent saving.
-
-## Hook follow-up recorded on 2026-10-29
-
-Codex's supported [`SessionStart` output](https://learn.chatgpt.com/docs/hooks)
-now carries the static policy before tool discovery. OpenCode's pinned
-[`experimental.chat.system.transform` contract](https://github.com/anomalyco/opencode/blob/v1.15.10/packages/plugin/src/index.ts)
-provides the equivalent terminal integration. Both use the authorized narrow
-bootstrap described above; neither retrieves memory content. The sanitized
-[hook qualification results](agent-memory-hook-qualification-results.json)
-retain every policy trial and individual measurement, separate from the
-original MCP-only report. Report timestamps use UTC; this section uses the
-local qualification date.
-
-The first hook trial made a source-backed Codex project save in exec mode in
-40.434 s, and Claude recalled it in 23.402 s. Its repeat task saved a redundant
-paraphrase without searching. Both resulting chains were corrected and forgotten;
-the original Codex operation was refused as `FORGOTTEN` after host restart and
-resume of its durable session. This verifies deletion protection independently
-of the model's duplicate-avoidance mistake.
-
-The second trial added search-before-save guidance. The normal Codex terminal
-saved at task scope, making that otherwise reusable finding inaccessible to
-later sessions by design. The repeat searched but could not see the earlier
-task record. A later forget request failed to discover tools despite receiving
-the hook, leaving an eligible project correction intact. These were scope and
-tool-use failures, not authorization or search-index failures.
-
-The final policy names all four tools, distinguishes tool discovery from MCP
-resource listings, and explicitly chooses project scope for reusable project
-findings while reserving task scope for temporary or unfinished work. It also
-requires checking existing findings before a save; the MCP instructions and
-save description carry those scope and reuse rules. This does not add semantic
-deduplication: exact duplicate suppression remains the deterministic guarantee.
-
-With that final policy, the unchanged five-stage sequence passed: Codex's
-normal terminal automatically saved a project finding (38.863 s), Claude
-recalled it (24.630 s), a fresh Codex session reused it without a duplicate
-(33.965 s), Codex corrected it with `supersedes` while retaining history
-(35.020 s), and Codex forgot the complete chain with successful cleanup
-(27.939 s). Forgetting recovered from one invalid search-limit call. These
-timings include startup and ordinary task work, not just memory overhead.
-The reverse direction also passed in a fresh profile: Claude automatically
-saved a project finding (32.993 s), then Codex recalled that exact record
-without creating another (36.329 s).
-
-| Target | Evidence | Verdict |
-| --- | --- | --- |
-| Final Codex/Claude five-stage sequence | Real Antgrid terminal sessions, isolated non-Git project, default installed models, unchanged task prompts | Passed automatic project save, cross-agent recall, repeat without duplication, correction/history, and forgetting |
-| Reverse cross-agent recall | Fresh profile; Claude Code automatically saves, Codex retrieves the same project record | Passed; neither agent needed an explicit remember request to create the finding |
-| Codex lifecycle output and bootstrap authorization | Caller/API tests, source hook subprocess tests, pause/refusal/size/redirect/timeout cases | Passed; only fixed guidance reaches hook stdout |
-| OpenCode terminal plugin | Pinned plugin contract, 21 plugin tests, compiled asset loading | Passed static checks; the first trial did not locate a CLI. Subsequent live qualification is recorded below; explicit `OPENCODE_CONFIG` still bypasses plugin injection |
-| Adapter regressions | Full adapter suite and typecheck | Passed 347 tests; bridge typecheck also passed |
-| Windows compiled entry point | Compiled MCP, SQLite/FTS5, persistence/restart, correction/forget/replay, assets, and nine hook cases | Passed; ordinary hook subprocess cases took 448–611 ms in the first compiled run; the stalled-bootstrap case completed in 1.950 s |
-
-These observations do not establish a general save reliability rate. Actual
-charges and marginal token/tool overhead remain unmeasured without a matched
-baseline. Linux packaging results, live pause/fork/checkout combinations,
-and the app-connected provider walkthrough still require release qualification.
-
-## OpenCode live follow-up recorded on 2026-10-29
-
-An existing npm installation outside the qualification process's PATH supplied
-OpenCode 1.19.0. Its isolated profile received only an authorized auth-file copy;
-the run selected `openai/gpt-6.1-sol` from its available model catalog and used
-the default approval policy. All OpenCode observations used its normal
-interactive terminal through Antgrid, with the production plugin and separate
-memory MCP configuration. The project was non-Git, and the ordinary prompts
-were unchanged. [Measured results](agent-memory-opencode-qualification-results.json)
-include native SQLite tool/usage records and authenticated app inspection.
-
-| Scenario | Result | Wall time |
-| --- | --- | --- |
-| Automatic save | OpenCode searched and saved one project observation with source evidence and Windows/macOS conditions, without a remember request | 58.894 s |
-| OpenCode to Claude recall | Claude retrieved that exact OpenCode-created record with full applicability | 22.358 s |
-| Independent repeat | A fresh OpenCode session searched/read the existing finding and made no duplicate save | 37.976 s |
-| Correction | OpenCode saved with `supersedes`, leaving one active revision and one inspectable prior revision | 35.919 s |
-| Forget | OpenCode forgot the chain, cleanup completed, and inspection returned no records | 24.587 s |
-| Claude to OpenCode recall | Claude automatically saved a project finding; OpenCode retrieved that exact record without saving another | 30.979 s save; 47.835 s recall |
-| Forgotten-operation replay | After host restart and same-session resume, the verification script received `FORGOTTEN` with HTTP 400; inspection remained empty | 21.997 s, including resumed prompt delivery |
-
-The initial resumed-session replay attempt received no new native user message
-and timed out; it is retained as a prompt-delivery block with unknown usage,
-not a memory failure. OpenCode 1.19.0's
-[`--session` route](https://github.com/anomalyco/opencode/blob/v1.19.0/packages/tui/src/app.tsx)
-does not pass the startup prompt to the history screen; its
-[`--prompt` submission](https://github.com/anomalyco/opencode/blob/v1.19.0/packages/tui/src/routes/home.tsx)
-is implemented on the home screen. The qualification driver now submits the
-unchanged verification prompt once through ordinary authenticated terminal
-input after resume readiness. Production launch behavior was not changed by
-this harness workaround.
-The retry's refusal was verified from the native shell tool result, rather
-than inferred from the model's final answer. Its usage includes only new
-messages from that replay window; the original session's usage is not counted
-again.
-
-Native storage does not contain OpenCode's transformed provider system context,
-and this run did not capture provider requests. Successful tool use proves the
-observed behavior but does not independently prove which instruction surface
-caused it. This Windows/model combination is qualified for the recorded
-scenarios; other OpenCode versions, providers, platforms and custom
-`OPENCODE_CONFIG` integrations are not established by these runs. Actual cost
-and marginal memory overhead remain unknown. The reverse pair and replay
-attempt ran concurrently, so their latency is not a comparative benchmark.
-
-The original design questions retained for reference are now resolved by the
-implementation above, except for measured agent coverage and the outstanding
-platform qualification:
-
-- SQLite/FTS5 packaging, record schema and migrations, atomic record/index/receipt and exact-duplicate handling, recovery, and export format; transaction and retry semantics are defined above.
-- Agent-initiated save coverage and static guidance across supported agents; host-specific capture is conditional on measured misses, and saving without a per-memory user request remains required.
-- Adapter operation identity and durable retry storage for each host, including which tool-call replays the host can distinguish from new invocations.
-- Full-text tokenization and term/phrase query behavior, including identifiers and original-language terms; the baseline uses built-in BM25 ranking without a reranker.
-- The concrete verified caller-to-project/session-backed-task/checkout mapping and any supported explicit completion/cancellation actions. Use unknown status and inactivity expiry where those actions do not exist; agent exit or conversation end alone is not task completion.
-- The stable local owner identity for user-scoped memories and who may read, correct, or forget them. Project/task permissions and authorization to create a separately verified project finding must be explicit; in-place promotion is deferred.
