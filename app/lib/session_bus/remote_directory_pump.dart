@@ -16,9 +16,12 @@ import '../providers/control_plane.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/relay_connection.dart';
 import '../services/account_agents_api.dart' show InventoryAgent;
+import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
 import 'directory_warm_targets.dart';
 import 'remote_directory_source.dart';
+
+const String _kComponent = 'RemoteDirectory';
 
 /// Peek [uuid]'s control-plane client without ever building or dialing it.
 /// `ref.read` on a `controlPlaneClientForProvider` element that does not
@@ -66,6 +69,29 @@ class _RemoteDirectoryPumpHostState
   // Re-entry guard: a slow cycle (a peer near its 6s timeout) must not have a
   // second tick — heartbeat or trigger — start collecting on top of it.
   bool _running = false;
+
+  /// Last `unservedReads` count written to the log, so a count that is not
+  /// being drained prints once rather than on every tick.
+  int _lastUnservedLogged = 0;
+
+  /// When that line was last written. The count alone is not enough of a
+  /// guard: a push DRAINS it, so the ordinary "peer offline, pushes landing"
+  /// state cycles 0 → 1 → 0 → 1 and every one of those moves reads as news.
+  DateTime? _lastUnservedLogAt;
+
+  /// Consecutive `BAD_REQUEST` answers to the status poll, and the control
+  /// port they happened on. [RemoteDirectoryPumpEngine]'s own latch counts
+  /// PUSH failures only, so a bridge that serves `session-bus:remote-directory`
+  /// but predates `session-bus:directory-status` never arms it — and a poll
+  /// with no latch of its own would re-POST a request that bridge can never
+  /// answer every tick, for the life of the app. Recorded against the port for
+  /// the same reason the engine's is: a refusal says nothing about a FUTURE
+  /// bridge process.
+  int _statusBadRequests = 0;
+  int? _statusLatchedPort;
+
+  /// Signature of the last cycle written to the log — see its use below.
+  String? _lastCycleShape;
 
   @override
   void initState() {
@@ -127,9 +153,12 @@ class _RemoteDirectoryPumpHostState
       final refreshRef = RefreshRef.of(ref);
       final RemoteDirectoryCycleResult? cycle;
       try {
+        final triggeredNow =
+            triggered || await _pollStatus(client, now, hostFile.controlPort);
+        if (!mounted) return;
         cycle = await _engine.maybeRunCycle(
           now: now,
-          triggered: triggered,
+          triggered: triggeredNow,
           controlPort: hostFile.controlPort,
           candidates: candidates,
           localUuid: localUuid,
@@ -144,6 +173,28 @@ class _RemoteDirectoryPumpHostState
         client.close();
       }
       if (!mounted || cycle == null) return;
+      // Only when the cycle's shape moved. The heartbeat alone is 2880 cycles
+      // a day and every level AbLog takes reaches the file, so logging each
+      // one would bury the cycles that actually differ.
+      final shape =
+          '${cycle.reports.length}/${cycle.ack.accepted}/${cycle.ack.dropped}/'
+          '${cycle.ack.unservedReads}/${cycle.ack.wantedRepoKeys.length}/'
+          '${candidates.length}';
+      if (shape != _lastCycleShape) {
+        _lastCycleShape = shape;
+        AbLog.info(
+          _kComponent,
+          'directory push cycle',
+          fields: {
+            'machines': cycle.reports.length,
+            'accepted': cycle.ack.accepted,
+            'dropped': cycle.ack.dropped,
+            'unservedReads': cycle.ack.unservedReads,
+            'wantedRepoKeys': cycle.ack.wantedRepoKeys.length,
+            'candidates': candidates.length,
+          },
+        );
+      }
       _warmMissedPeers(refreshRef, cycle, inventory, localUuid, now);
     } catch (_) {
       // peekHost() reads host.json off disk and can throw on a TOCTOU race;
@@ -152,6 +203,77 @@ class _RemoteDirectoryPumpHostState
     } finally {
       _running = false;
     }
+  }
+
+  /// Read the mirror's counters on the tick that already runs, and report
+  /// whether an agent's read went unserved since the last look.
+  ///
+  /// A true answer makes this tick run as a TRIGGER, which still respects
+  /// [kRemoteDirectoryMinSpacing] — so the worst this can do is turn a tick
+  /// that would have idled into the push that serves the read, roughly 25s
+  /// earlier than the heartbeat that would otherwise have carried it.
+  ///
+  /// Every failure is swallowed, and deliberately never reaches
+  /// [RemoteDirectoryPumpEngine]: a bridge predating this verb answers
+  /// `BAD_REQUEST`, and the engine's latch counts those to disable the PUSH.
+  /// Letting a status probe feed that counter would switch the whole directory
+  /// off on exactly the bridges the fallback exists for. It feeds
+  /// [_statusLatchedPort] instead, which disables nothing but this poll.
+  Future<bool> _pollStatus(
+    HostControlClient client,
+    DateTime now,
+    int controlPort,
+  ) async {
+    if (_engine.isLatched) return false;
+    if (_statusLatchedPort != null && _statusLatchedPort != controlPort) {
+      _statusLatchedPort = null;
+      _statusBadRequests = 0;
+    }
+    if (_statusLatchedPort != null) return false;
+    try {
+      final status = await client.directoryStatus();
+      _statusBadRequests = 0;
+      _engine.noteStatus(status.unservedReads, status.wantedRepoKeys, now);
+      if (status.unservedReads > 0) {
+        // Only when the count MOVED, and at most once a fast window. The move
+        // alone is not a guard: a landing push drains the count, so the
+        // ordinary offline-peer state cycles 0 → 1 → 0 → 1 and every read
+        // would otherwise read as news.
+        if (status.unservedReads != _lastUnservedLogged) {
+          _lastUnservedLogged = status.unservedReads;
+          final lastAt = _lastUnservedLogAt;
+          if (lastAt == null ||
+              now.difference(lastAt) >= kRemoteDirectoryFastWindow) {
+            _lastUnservedLogAt = now;
+            AbLog.info(
+              _kComponent,
+              'mirror reports an unserved directory read',
+              fields: {
+                'unservedReads': status.unservedReads,
+                'wantedRepoKeys': status.wantedRepoKeys.length,
+              },
+            );
+          }
+        }
+        return true;
+      }
+      _lastUnservedLogged = 0;
+    } on HostControlException catch (e) {
+      // A bridge that serves the push but not this verb answers BAD_REQUEST on
+      // every tick forever, and the engine's latch never sees it.
+      if (e.code == 'BAD_REQUEST') {
+        _statusBadRequests++;
+        if (_statusBadRequests >= kRemoteDirectoryLatchThreshold) {
+          _statusLatchedPort = controlPort;
+        }
+      } else {
+        _statusBadRequests = 0;
+      }
+    } catch (_) {
+      // A dead host or a loopback hiccup. The ack path still carries these
+      // counters, so losing this poll costs latency, not correctness.
+    }
+    return false;
   }
 
   /// An agent asked this machine something its mirror could not answer

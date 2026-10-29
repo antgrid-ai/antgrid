@@ -15,6 +15,7 @@
 
 import { inProbePool, readRepoCard } from "../capability-card";
 import { agentSpec } from "../agent-runtime";
+import { logger } from "../logger";
 import type { SessionEntry, WorkStatus } from "../protocol";
 import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
 import { namesMachine } from "./address";
@@ -103,6 +104,10 @@ export interface DirectoryRemote {
     staleMachines: number;
     notConnected: number;
     lastPushAt: number | null;
+    /** The mirror's own verdict on this read, not a predicate re-derived
+     *  here: the two drifting apart would log a miss the cache did not
+     *  count, or stay silent on one it did. */
+    served: boolean;
   };
 }
 
@@ -292,8 +297,26 @@ export type SessionDirectoryResult =
     }
   | { ok: false; reason: "no-remote" | "not-probed" };
 
+const log = logger.child({ component: "session-bus" });
+
+const MAX_UNSERVED_LATCH = 64;
+
 export class SessionDirectory {
   constructor(private readonly deps: SessionDirectoryDeps) {}
+
+  /** `projectId:why` pairs already reported as having read an empty mirror. An
+   *  agent that retries a thin answer is the EXPECTED behaviour here — the
+   *  reach line tells it to — so one line per reason per project is the
+   *  signal, and the retries behind it are not. Keyed on the REASON too
+   *  because every process starts with a cold mirror: a first read that latched
+   *  on `projectId` alone would spend the latch on the startup `no-carrier`
+   *  and then stay silent on the `stale-mirror` this line exists to catch.
+   *  Per-instance rather than module-level so one `SessionDirectory` cannot
+   *  silence another's first line. Bounded the way `latchBusWarn`
+   *  (host-server.ts) bounds its own: a machine does not hold enough projects
+   *  for this to grow, and clearing wholesale beats tracking an eviction order
+   *  for a log latch. */
+  private readonly unservedReadLatch = new Set<string>();
 
   /**
    * Every session addressable from `caller`, sorted.
@@ -344,6 +367,7 @@ export class SessionDirectory {
     // clobber a peer's own reported branch with this machine's, including to
     // null for a project this machine has never opened.
     const remoteHalf = this.remoteHalfFor(key, machineId, now);
+    if (!remoteHalf.served) this.noteUnservedRead(caller.projectId, remoteHalf.reach);
     const merged = [...rows, ...remoteHalf.rows];
     const sorted = sortDirectory(merged, branches.get(caller.projectId) ?? null);
     const bounded = withLocalFloor(sorted, machineId, MAX_DIRECTORY_ROWS, LOCAL_ROW_FLOOR);
@@ -447,23 +471,34 @@ export class SessionDirectory {
     repoKey: string,
     machineId: string | null,
     now: number,
-  ): { rows: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach } {
+  ): { rows: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach; served: boolean } {
     // 1. No relay identity: a row this machine cannot be reached at is a row
     //    that renders as sendable and then refuses at the first reply.
     if (machineId === null) {
-      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-machine-id" } };
+      // `served: true` here and in the no-mirror case below, though neither
+      // answers a row: `served` reports what the MIRROR made of the read, and
+      // these two never reach it. Calling them unserved would log a miss
+      // against a cache that was never asked — and the counter the pump reads
+      // does not move on these paths either, so the two stay in step.
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-machine-id" }, served: true };
     }
     // 2. No carrier: nothing wired the mirror in this process, or nobody has
     //    pushed to it recently enough to trust. `lastPushAt` is a fact the app
     //    proves by pushing, never a capability flag Zod could strip silently.
     const view = this.deps.remoteDirectory?.view(repoKey, machineId, now);
     if (view === undefined || view.lastPushAt === null || now - view.lastPushAt > REMOTE_CARRIER_SILENCE_MS) {
-      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-carrier" } };
+      // A mirror that exists and has no live push behind it DID count this
+      // read against itself; one that was never wired cannot have. The TTL on
+      // rows is shorter than the carrier-silence window, so a view reaching
+      // here never holds a live machine either way.
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-carrier" }, served: view === undefined };
     }
-    // 3. Served: whatever the mirror currently holds for this repo.
+    // 3. Served: whatever the mirror currently holds for this repo, with the
+    //    mirror's own verdict on whether that counted as an answer.
     return {
       rows: view.rows,
       truncated: view.truncated,
+      served: view.served,
       reach: {
         scope: "network",
         // How stale the mirror is, not when it was read: the read clock is the
@@ -474,5 +509,28 @@ export class SessionDirectory {
         notConnected: view.notConnected,
       },
     };
+  }
+
+  /**
+   * One line the first time a project reads a mirror that had nothing for it,
+   * per reason.
+   *
+   * This is the only place the bridge can tell "the pump has not filled the
+   * mirror yet" from "there is genuinely nobody else", and the two are the
+   * same empty list to everything above. Carries the reach `why` so the line
+   * separates a missing carrier from a mirror the pump has not caught up on.
+   * Ids and counts only — never a repo key, never a session title.
+   */
+  private noteUnservedRead(projectId: string, reach: DirectoryReach): void {
+    const why = reach.scope === "machine" ? reach.why : "stale-mirror";
+    const latchKey = `${projectId}:${why}`;
+    if (this.unservedReadLatch.has(latchKey)) return;
+    if (this.unservedReadLatch.size >= MAX_UNSERVED_LATCH) this.unservedReadLatch.clear();
+    this.unservedReadLatch.add(latchKey);
+    log.info(
+      "session bus: directory read served no remote rows (project=%s why=%s) — pump has not filled the mirror",
+      projectId,
+      why,
+    );
   }
 }

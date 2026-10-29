@@ -323,6 +323,47 @@ class RemoteDirectoryAck {
   }
 }
 
+/// The mirror's three counters read on their own, with no push attached —
+/// `session-bus:directory-status`. The same fields [RemoteDirectoryAck]
+/// carries minus `accepted`/`dropped`, which only a push can report.
+class DirectoryStatus {
+  const DirectoryStatus({
+    required this.wantedRepoKeys,
+    required this.unservedReads,
+    this.lastReadAt,
+  });
+
+  final List<String> wantedRepoKeys;
+
+  /// Reads an agent made that the mirror could not answer. NOT drained by
+  /// this call — the drain belongs to the push, whose ack is what
+  /// `_warmMissedPeers` dials on, so a poll that consumed the count would
+  /// answer the pump's question by taking away its reason to act.
+  final int unservedReads;
+  final int? lastReadAt;
+
+  factory DirectoryStatus.fromJson(Map<String, dynamic> json) {
+    final unservedReads = json['unservedReads'];
+    if (unservedReads is! num) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed session-bus:directory-status response: $json',
+      );
+    }
+    final rawKeys = json['wantedRepoKeys'];
+    final lastReadAt = json['lastReadAt'];
+    return DirectoryStatus(
+      wantedRepoKeys: <String>[
+        if (rawKeys is List)
+          for (final k in rawKeys)
+            if (k is String) k,
+      ],
+      unservedReads: unservedReads.toInt(),
+      lastReadAt: lastReadAt is num ? lastReadAt.toInt() : null,
+    );
+  }
+}
+
 /// Thrown on a transport error, a non-200 status, or an `ok:false` body.
 class HostControlException implements Exception {
   final String code;
@@ -736,6 +777,24 @@ class HostControlClient {
       'notConnected': notConnected,
     }, timeout: timeout);
     return RemoteDirectoryAck.fromJson(m);
+  }
+
+  /// The reading half of the same mirror: the counters
+  /// [pushRemoteDirectory]'s ack carries, polled WITHOUT pushing and without
+  /// draining them. Lets the pump learn on its own 5s tick that an agent's
+  /// read went unserved, rather than waiting up to a heartbeat for the ack of
+  /// a push it has not made yet.
+  ///
+  /// Short timeout on purpose: this runs every tick, it is a loopback read of
+  /// three in-memory counters, and a tick that blocks on it is a tick that
+  /// does not push.
+  Future<DirectoryStatus> directoryStatus({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final m = await _post({
+      'type': 'session-bus:directory-status',
+    }, timeout: timeout);
+    return DirectoryStatus.fromJson(m);
   }
 
   Future<GitBranchCatalog> gitBranches({
