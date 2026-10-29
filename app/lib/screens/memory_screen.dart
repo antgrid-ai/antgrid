@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart' show Scaffold;
@@ -19,17 +20,33 @@ import '../design/widgets/ab_text_field.dart';
 import '../models/file_tree_models.dart';
 import '../models/memory.dart';
 import '../providers/memory.dart';
+import '../providers/memory_route_targets.dart';
+import '../services/memory_service.dart';
 import '../util/detached.dart';
 import '../widgets/file_download.dart';
 import '../widgets/memory/memory_record_details.dart';
 import '../widgets/memory/memory_error.dart';
 
-Future<void> openMemoryScreen(BuildContext context, MemoryTarget target) =>
-    Navigator.of(context).push<void>(
-      PageRouteBuilder<void>(
-        pageBuilder: (_, _, _) => MemoryScreen(target: target),
-      ),
-    );
+Future<void> openMemoryScreen(BuildContext context, MemoryTarget target) async {
+  final route = PageRouteBuilder<void>(
+    pageBuilder: (_, _, _) => MemoryScreen(target: target),
+  );
+  final machineId = target.machineId;
+  final release = machineId == null
+      ? null
+      : ProviderScope.containerOf(
+          context,
+          listen: false,
+        ).read(memoryRouteTargetsProvider.notifier).retain(machineId);
+  try {
+    // push's future only yields the pop result; it can outlive a disposed
+    // Navigator. completed covers both teardown and the dismissal animation.
+    unawaited(Navigator.of(context).push<void>(route));
+    await route.completed;
+  } finally {
+    release?.call();
+  }
+}
 
 class MemoryScreen extends ConsumerStatefulWidget {
   const MemoryScreen({super.key, required this.target});
@@ -81,15 +98,19 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
 
   Future<void> _export() async {
     if (_busy) return;
+    final route = ModalRoute.of(context);
+    bool isActive() => mounted && (route?.isActive ?? true);
     final request = ref.read(memoryRequestProvider(widget.target));
     setState(() {
       _busy = true;
       _actionError = null;
     });
     try {
-      final exported = await request({'op': 'export'});
-      if (!mounted) return;
-      final text = const JsonEncoder.withIndent('  ').convert(exported);
+      final exported = await collectMemoryExport(request, isActive: isActive);
+      if (!mounted || route?.isActive == false || exported == null) return;
+      final text = const JsonEncoder.withIndent(
+        '  ',
+      ).convert(exported.toJson());
       await downloadFileContent(
         context,
         FileContent(
@@ -101,7 +122,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
         ),
       );
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || route?.isActive == false) return;
       setState(() => _actionError = memoryErrorCopy(error));
     } finally {
       if (mounted) setState(() => _busy = false);

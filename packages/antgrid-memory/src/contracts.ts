@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const LIMITS = { content: 4096, applicability: 1024, record: 16384, query: 1024, response: 8192, excerpt: 512 } as const;
+export const LIMITS = { content: 4096, applicability: 1024, record: 16384, query: 1024, response: 8192, excerpt: 512, exportPage: 256 * 1024, exportRecords: 64, exportCursor: 2048 } as const;
 export const TASK_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 export const bytes = (value: unknown): number => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
 
@@ -13,6 +13,7 @@ function boundedText(field: string, limit: number, nonempty = false) {
 }
 
 const id = z.string().min(1).max(256);
+const exportCursor = boundedText("export cursor", LIMITS.exportCursor, true);
 export const MemoryTypeSchema = z.enum(["preference", "task_state", "observation", "note"]);
 export const MemoryScopeSchema = z.enum(["user", "project", "task"]);
 export const MemorySaveSchema = z.object({
@@ -43,7 +44,7 @@ export const MemoryRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("save"), operation_key: id, save: MemorySaveSchema }).strict(),
   z.object({ op: z.literal("recover") }).strict(),
   z.object({ op: z.literal("forget"), id }).strict(),
-  z.object({ op: z.literal("export") }).strict(),
+  z.object({ op: z.literal("export"), cursor: exportCursor.optional() }).strict(),
   z.object({ op: z.literal("repair") }).strict(),
 ]);
 export type MemoryRequest = z.infer<typeof MemoryRequestSchema>;
@@ -84,7 +85,7 @@ export const MemoryResultSchema = z.union([
   z.object({ operation_key: id, state: z.enum(["pending", "resolved", "suppressed"]) }),
   z.object({ recovered: z.array(SaveResultSchema), pending_operations: z.number(), errors: z.array(z.object({ operation_key: id, code: z.string(), message: z.string() })).optional() }),
   z.object({ forgotten: z.boolean(), cleanup: z.literal("complete") }),
-  z.object({ version: z.literal(1), owner_id: id, exported_at: z.number(), records: z.array(MemoryRecordSchema) }),
+  z.object({ version: z.literal(1), owner_id: id, exported_at: z.number().int(), records: z.array(MemoryRecordSchema).max(LIMITS.exportRecords), next_cursor: exportCursor.nullable() }),
 ]);
 
 export class MemoryError extends Error {

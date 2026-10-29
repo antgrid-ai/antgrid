@@ -1,5 +1,6 @@
 import { Database, type Statement } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { MemoryError } from "./contracts";
 
@@ -16,7 +17,7 @@ export class MemoryStore {
       if (process.platform !== "win32") chmodSync(path, 0o600);
       this.db.exec("PRAGMA busy_timeout=20; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;");
       const version = (this.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-      if (version > 1) throw new MemoryError("UNAVAILABLE", "Memory database was written by a newer version; upgrade Antgrid");
+      if (version > 2) throw new MemoryError("UNAVAILABLE", "Memory database was written by a newer version; upgrade Antgrid");
       if (version === 0) this.db.transaction(() => {
         this.db.exec(`
           CREATE TABLE profile (singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, paused INTEGER NOT NULL DEFAULT 0, cleanup_pending INTEGER NOT NULL DEFAULT 0);
@@ -43,11 +44,27 @@ export class MemoryStore {
         this.query("INSERT INTO profile(singleton,owner_id) VALUES(1,?)").run(crypto.randomUUID());
         this.createIndex();
       }).immediate();
+      if (version < 2) this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE export_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL CHECK(revision>=0), cursor_key TEXT NOT NULL);
+          CREATE INDEX records_export ON records(owner_id,id);
+          CREATE INDEX records_project_export ON records(owner_id,project_id,id);
+          CREATE TRIGGER export_record_insert AFTER INSERT ON records BEGIN UPDATE export_state SET revision=revision+1 WHERE singleton=1; END;
+          CREATE TRIGGER export_record_update AFTER UPDATE ON records BEGIN UPDATE export_state SET revision=revision+1 WHERE singleton=1; END;
+          CREATE TRIGGER export_record_delete AFTER DELETE ON records BEGIN UPDATE export_state SET revision=revision+1 WHERE singleton=1; END;
+          PRAGMA user_version=2;
+        `);
+        this.query("INSERT INTO export_state(singleton,revision,cursor_key) VALUES(1,0,?)").run(randomBytes(32).toString("hex"));
+      }).immediate();
       const profile = this.query("SELECT owner_id FROM profile WHERE singleton=1").get() as { owner_id: string } | null;
       if (!profile?.owner_id) throw new MemoryError("UNAVAILABLE", "Memory profile identity is missing; preserve the database for recovery");
       this.ownerId = profile.owner_id;
       // Do not catch canonical corruption as an index failure and replace the store.
-      this.query("SELECT id, content, applicability FROM records").all();
+      for (const _row of this.query("SELECT id, content, applicability FROM records").iterate()) { /* Read without retaining the store in memory. */ }
+      const exportState = this.query("SELECT revision,cursor_key FROM export_state WHERE singleton=1").get() as { revision: number; cursor_key: string } | null;
+      if (!exportState || !Number.isSafeInteger(exportState.revision) || exportState.revision < 0 || !/^[a-f0-9]{64}$/.test(exportState.cursor_key)) {
+        throw new MemoryError("UNAVAILABLE", "Memory export state is damaged; preserve the database for recovery");
+      }
       try { this.checkIndex(); this.searchReady = true; }
       catch { try { this.repair(); } catch { this.searchReady = false; } }
     } catch (error) { this.close(); throw error; }

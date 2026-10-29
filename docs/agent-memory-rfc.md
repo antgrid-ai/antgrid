@@ -372,6 +372,17 @@ retain scope and checkout restrictions. Export is JSON version 1 with IDs,
 records, provenance, applicability, links, and derived lifecycle state; it
 excludes operational retry payloads and credentials. Import remains deferred.
 
+Remote Memory routes retain their machine in the control-plane alive set until
+the route closes, independently of the active workspace or drawer expansion.
+Export reads use authorized keyset pages capped at 256 KiB of UTF-8 JSON. The
+app assembles a complete version 1 file only after all pages succeed. Signed
+continuation cursors bind the owner/project context, record revision and export
+timestamp; lifecycle state uses that fixed timestamp. A record change between
+pages returns `EXPORT_CHANGED`, so the user can restart the
+export instead of receiving a file assembled from different store revisions.
+Pagination metadata and cursor authentication material are excluded from the
+downloaded file.
+
 ## Qualification recorded on 2026-10-28
 
 | Target | Evidence | Verdict |

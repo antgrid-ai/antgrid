@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import {
   LIMITS, TASK_EXPIRY_MS, MemoryError, MemoryRequestSchema, MemoryRecordSchema, bytes, redactSave,
@@ -25,6 +25,25 @@ type Placement = { scope: MemoryRecord["scope"]; project_id: string | null; task
 type SaveResult = { operation_key: string; id: string; outcome: "saved" | "already_present"; lifecycle: MemoryRecord["lifecycle"] };
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const isBusy = (error: unknown): boolean => !!error && typeof error === "object" && "code" in error && /SQLITE_(BUSY|LOCKED)/.test(String(error.code));
+const ExportCursorSchema = z.object({
+  version: z.literal(1), binding: z.string().regex(/^[a-f0-9]{64}$/), revision: z.number().int().nonnegative(),
+  last_id: z.string().min(1).max(256), exported_at: z.number().int().nonnegative(),
+}).strict();
+type ExportCursor = z.infer<typeof ExportCursorSchema>;
+function signCursor(cursor: ExportCursor, key: string): string {
+  const payload = Buffer.from(JSON.stringify(cursor)).toString("base64url");
+  return `${payload}.${createHmac("sha256", Buffer.from(key, "hex")).update(payload).digest("hex")}`;
+}
+function readCursor(cursor: string, key: string): ExportCursor {
+  const parts = /^([A-Za-z0-9_-]+)\.([a-f0-9]{64})$/.exec(cursor);
+  if (!parts) throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor");
+  const payload = parts[1]!;
+  const signature = Buffer.from(parts[2]!, "hex");
+  const expected = createHmac("sha256", Buffer.from(key, "hex")).update(payload).digest();
+  if (!timingSafeEqual(signature, expected)) throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor");
+  try { return ExportCursorSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))); }
+  catch { throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor"); }
+}
 
 export class MemoryService {
   private readonly store: MemoryStore;
@@ -96,7 +115,7 @@ export class MemoryService {
       case "prepare": return this.prepare(ctx, request.operation_key, redactSave(request.save));
       case "save": return this.save(ctx, request.operation_key, redactSave(request.save));
       case "forget": return this.forget(ctx, request.id);
-      case "export": return { version: 1, owner_id: this.ownerId, exported_at: this.now(), records: this.rows(ctx, true).map(r => this.record(r)) };
+      case "export": return this.exportPage(ctx, request.cursor);
       case "repair": this.store.repair(); this.cleanup(); return this.status(ctx);
       default: throw new MemoryError("INVALID_ARGUMENT", "Unsupported memory operation");
     }
@@ -128,7 +147,7 @@ export class MemoryService {
     if (status.paused || status.project_paused) throw new MemoryError("PAUSED", "Agent saving is paused, including explicit remember requests. Recall and forgetting remain available.");
   }
 
-  private eligible(row: Row): boolean { return !row.superseded_by && !(row.memory_type === "task_state" && this.now() - row.updated_at >= TASK_EXPIRY_MS); }
+  private eligible(row: Row, at = this.now()): boolean { return !row.superseded_by && !(row.memory_type === "task_state" && at - row.updated_at >= TASK_EXPIRY_MS); }
   private allowed(ctx: MemoryContext, row: Row): boolean {
     if (row.owner_id !== ctx.owner_id) return false;
     if (ctx.actor === "app") return !ctx.project_id || (row.scope !== "user" && row.project_id === ctx.project_id);
@@ -141,7 +160,7 @@ export class MemoryService {
     if (!row || !this.allowed(ctx, row) || (!history && !this.eligible(row))) throw new MemoryError("NOT_FOUND", "Memory is not available in this context");
     return row;
   }
-  private record(row: Row): MemoryRecord {
+  private record(row: Row, at = this.now()): MemoryRecord {
     return MemoryRecordSchema.parse({
       id: row.id, owner_id: row.owner_id, scope: row.scope, memory_type: row.memory_type, content: row.content,
       ...(row.project_id === null ? {} : { project_id: row.project_id }), ...(row.task_id === null ? {} : { task_id: row.task_id }),
@@ -149,7 +168,7 @@ export class MemoryService {
       evidence: JSON.parse(row.evidence), source: JSON.parse(row.source),
       ...(row.supersedes === null ? {} : { supersedes: row.supersedes }), ...(row.superseded_by === null ? {} : { superseded_by: row.superseded_by }),
       created_at: row.created_at, updated_at: row.updated_at,
-      lifecycle: row.superseded_by ? "superseded" : this.eligible(row) ? "active" : "expired",
+      lifecycle: row.superseded_by ? "superseded" : this.eligible(row, at) ? "active" : "expired",
     });
   }
 
@@ -165,9 +184,31 @@ export class MemoryService {
     if (!history) { sql += " AND r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?)"; args.push(this.now() - TASK_EXPIRY_MS); }
     return { sql, args };
   }
-  private rows(ctx: MemoryContext, history: boolean): Row[] {
-    const { sql, args } = this.filter(ctx, history);
-    return this.store.query(`SELECT r.* FROM records r WHERE ${sql} ORDER BY r.created_at DESC,r.id`).all(...args) as Row[];
+  private exportPage(ctx: MemoryContext, cursor?: string): Record<string, unknown> {
+    // The revision and rows share a SQLite snapshot. No long-lived transaction
+    // holds forgetting or saves open while the app collects subsequent pages.
+    return this.store.db.transaction(() => {
+      const state = this.store.query("SELECT revision,cursor_key FROM export_state WHERE singleton=1").get() as { revision: number; cursor_key: string };
+      const previous = cursor ? readCursor(cursor, state.cursor_key) : undefined;
+      const binding = this.binding(ctx);
+      if (previous && previous.binding !== binding) throw new MemoryError("FORBIDDEN", "Memory export cursor belongs to a different inspection context");
+      if (previous && previous.revision !== state.revision) throw new MemoryError("EXPORT_CHANGED", "Memories changed during export; discard these pages and start a new export");
+      const exportedAt = previous?.exported_at ?? this.now();
+      const { sql, args } = this.filter(ctx, true);
+      const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} AND r.id>? ORDER BY r.id ASC LIMIT ?`)
+        .all(...args, previous?.last_id ?? "", LIMITS.exportRecords + 1) as Row[];
+      const result = { version: 1, owner_id: this.ownerId, exported_at: exportedAt, records: [] as MemoryRecord[], next_cursor: null as string | null };
+      for (const row of rows.slice(0, LIMITS.exportRecords)) {
+        const record = this.record(row, exportedAt);
+        const nextCursor = signCursor({ version: 1, binding, revision: state.revision, last_id: row.id, exported_at: exportedAt }, state.cursor_key);
+        result.records.push(record);
+        if (bytes({ ...result, next_cursor: nextCursor }) > LIMITS.exportPage) { result.records.pop(); break; }
+        result.next_cursor = nextCursor;
+      }
+      if (rows.length > 0 && result.records.length === 0) throw new MemoryError("UNAVAILABLE", "A memory record exceeds the export page limit; preserve the database for recovery");
+      if (result.records.length === rows.length) result.next_cursor = null;
+      return result;
+    }).deferred();
   }
   private list(ctx: MemoryContext, history: boolean, offset: number): Record<string, unknown> {
     const { sql, args } = this.filter(ctx, history);

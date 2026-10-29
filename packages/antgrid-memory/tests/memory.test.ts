@@ -150,7 +150,7 @@ describe("atomic persistence, duplicates and correction history", () => {
     const verify = new Database(path);
     expect(verify.query("PRAGMA user_version").get()).toEqual({ user_version: 0 });
     expect(verify.query("SELECT owner_id FROM profile").get()).toEqual({ owner_id: app.owner_id });
-    verify.exec("PRAGMA user_version=1");
+    verify.exec("PRAGMA user_version=2");
     verify.close();
     service = new MemoryService({ directory, now: () => now });
   });

@@ -16,6 +16,7 @@ import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
 import 'eager_control_planes.dart';
+import 'memory_route_targets.dart';
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -336,17 +337,18 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
 
 /// Bare deviceUuids whose control-plane socket should stay open right now: the
 /// picker's viewed machine (if any), the focused remote target, every machine
-/// backing >=1 open project, and every expanded remote MACHINE row. The reaper
-/// releases any open control-plane socket NOT in this set. Computed centrally
-/// (not per-tab/per-row) so de-selecting a machine — or collapsing its drawer
-/// row — is observed even though its picker tab / sessions subtree is no longer
-/// rendered.
+/// backing >=1 open project or Memory route, and every expanded remote MACHINE
+/// row. The reaper releases any open control-plane socket NOT in this set.
+/// Computed centrally (not per-tab/per-row) so de-selecting a machine — or
+/// collapsing its drawer row — is observed even though its picker tab / sessions
+/// subtree is no longer rendered.
 final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   ref.watch(projectSessionRegistryProvider); // rebuild on open-set changes
   final expanded = ref.watch(expandedDrawerIdsProvider);
   final alive = ref
       .read(projectSessionRegistryProvider.notifier)
       .machinesWithOpenProjects();
+  alive.addAll(ref.watch(memoryRouteTargetsProvider));
   // Selection changes before ProjectSession finishes opening and touching the
   // registry. Pin the selected remote's machine during that gap; otherwise the
   // reaper closes the control plane immediately after project selection, before
@@ -360,8 +362,8 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   if (focusedTarget != null && !focusedTarget.isLocal) {
     alive.add(baseDeviceUuid(focusedTarget.registrationId));
   }
-  // The New Session picker is the only surface that views a machine's control
-  // plane directly (it's shown when no project is selected or the surface is
+  // The New Session picker also views a machine's control plane directly
+  // (it's shown when no project is selected or the surface is
   // explicitly New Session — mirrors app_shell's route switch). Pin the viewed
   // machine ONLY while that surface is live: off-screen, the picker's fallback
   // source would otherwise hold a socket open forever. That fallback bites on

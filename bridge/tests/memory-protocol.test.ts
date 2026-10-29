@@ -23,3 +23,20 @@ test("memory payloads never enter body-capture diagnostics", () => {
     ]) expect(captureBody(JSON.stringify(frame), frame.type)).toBe(BODY_REDACTED_MARKER);
   } finally { armBodyCapture(false, 0); }
 });
+
+test("memory export pagination is validated on project and machine request paths", () => {
+  const request = createMessage("memory:request", { requestId: "export", request: { op: "export", cursor: "page-token" } });
+  expect(parseMessage(JSON.stringify(request))).toEqual(request);
+  expect(parseMessageFast(JSON.stringify(request))).toEqual(request);
+  expect(ControlRequestSchema.safeParse({ id: "machine", type: "memory:request", request: request.request }).success).toBe(true);
+  for (const cursor of [42, "", "a".repeat(2049)]) {
+    const invalid = { op: "export", cursor };
+    expect(AbMessageSchema.safeParse({ ...request, request: invalid }).success).toBe(false);
+    expect(ControlRequestSchema.safeParse({ id: "machine", type: "memory:request", request: invalid }).success).toBe(false);
+  }
+  const response = createMessage("memory:result", { requestId: "export", ok: true, result: {
+    version: 1, owner_id: "owner", exported_at: 1000, records: [], next_cursor: null,
+  } });
+  expect(parseMessage(JSON.stringify(response))).toEqual(response);
+  expect(parseMessage(JSON.stringify({ ...response, result: { ...response.result, next_cursor: 42 } }))).toBeNull();
+});

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 @immutable
@@ -67,6 +69,163 @@ class MemoryResponse {
       ),
     );
   }
+}
+
+class MemoryExport {
+  const MemoryExport({
+    required this.ownerId,
+    required this.exportedAt,
+    required this.records,
+  });
+
+  final String ownerId;
+  final int exportedAt;
+  final List<Map<String, dynamic>> records;
+
+  Map<String, dynamic> toJson() => {
+    'version': 1,
+    'owner_id': ownerId,
+    'exported_at': exportedAt,
+    'records': records,
+  };
+}
+
+class MemoryExportPage {
+  const MemoryExportPage._({
+    required this.ownerId,
+    required this.exportedAt,
+    required this.records,
+    required this.nextCursor,
+  });
+
+  final String ownerId;
+  final int exportedAt;
+  final List<Map<String, dynamic>> records;
+  final String? nextCursor;
+
+  factory MemoryExportPage.fromJson(Map<String, dynamic> json) {
+    const fields = {
+      'version',
+      'owner_id',
+      'exported_at',
+      'records',
+      'next_cursor',
+    };
+    final owner = json['owner_id'];
+    final timestamp = json['exported_at'];
+    final records = json['records'];
+    final cursor = json['next_cursor'];
+    if (json.length != fields.length ||
+        !json.keys.every(fields.contains) ||
+        json['version'] is! int ||
+        json['version'] != 1 ||
+        !_exportId(owner) ||
+        timestamp is! int ||
+        timestamp < 0 ||
+        records is! List ||
+        records.length > 64 ||
+        (cursor != null &&
+            (cursor is! String ||
+                cursor.trim().isEmpty ||
+                utf8.encode(cursor).length > 2048))) {
+      throw _invalidExportPage;
+    }
+    final parsed = <Map<String, dynamic>>[];
+    for (final record in records) {
+      if (record is! Map<String, dynamic> || !_exportRecord(record, owner)) {
+        throw _invalidExportPage;
+      }
+      parsed.add(
+        Map<String, dynamic>.unmodifiable({
+          ...record,
+          'evidence': List<String>.unmodifiable(record['evidence'] as List),
+          'source': Map<String, dynamic>.unmodifiable(record['source'] as Map),
+        }),
+      );
+    }
+    if ((parsed.isEmpty && cursor != null) ||
+        utf8.encode(jsonEncode(json)).length > 256 * 1024) {
+      throw _invalidExportPage;
+    }
+    return MemoryExportPage._(
+      ownerId: owner as String,
+      exportedAt: timestamp,
+      records: List.unmodifiable(parsed),
+      nextCursor: cursor as String?,
+    );
+  }
+}
+
+const _invalidExportPage = MemoryException(
+  'BAD_RESPONSE',
+  'Malformed memory export page. Start the export again.',
+);
+
+bool _exportId(Object? value) =>
+    value is String && value.isNotEmpty && value.length <= 256;
+
+bool _exportRecord(Map<String, dynamic> record, Object? owner) {
+  const optionalIds = {
+    'project_id',
+    'task_id',
+    'checkout_id',
+    'supersedes',
+    'superseded_by',
+  };
+  const fields = {
+    'id',
+    'owner_id',
+    'content',
+    'memory_type',
+    'scope',
+    'applicability',
+    'evidence',
+    'source',
+    'created_at',
+    'updated_at',
+    'lifecycle',
+    ...optionalIds,
+  };
+  final source = record['source'];
+  final evidence = record['evidence'];
+  if (!record.keys.every(fields.contains) ||
+      !_exportId(record['id']) ||
+      record['owner_id'] != owner ||
+      record['content'] is! String ||
+      !const {
+        'preference',
+        'task_state',
+        'observation',
+        'note',
+      }.contains(record['memory_type']) ||
+      !const {'user', 'project', 'task'}.contains(record['scope']) ||
+      !const {
+        'active',
+        'expired',
+        'superseded',
+      }.contains(record['lifecycle']) ||
+      (record.containsKey('applicability') &&
+          record['applicability'] is! String) ||
+      optionalIds.any(
+        (key) => record.containsKey(key) && !_exportId(record[key]),
+      ) ||
+      record['created_at'] is! int ||
+      (record['created_at'] as int) < 0 ||
+      record['updated_at'] is! int ||
+      (record['updated_at'] as int) < 0 ||
+      evidence is! List ||
+      !evidence.every((value) => value is String) ||
+      source is! Map<String, dynamic> ||
+      !const {'agent', 'app'}.contains(source['actor'])) {
+    return false;
+  }
+  const sourceIds = {'project_id', 'session_id', 'checkout_id', 'agent_id'};
+  return source.keys.every(
+        (key) => key == 'actor' || sourceIds.contains(key),
+      ) &&
+      sourceIds.every(
+        (key) => !source.containsKey(key) || _exportId(source[key]),
+      );
 }
 
 class MemoryStatus {

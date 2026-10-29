@@ -6,6 +6,56 @@ import '../models/ab_message.dart';
 import '../models/memory.dart';
 import '../project/project_session.dart';
 
+Future<MemoryExport?> collectMemoryExport(
+  Future<Map<String, dynamic>> Function(Map<String, dynamic>) request, {
+  bool Function()? isActive,
+}) async {
+  final records = <Map<String, dynamic>>[];
+  final seenCursors = <String>{};
+  final seenRecords = <String>{};
+  MemoryExportPage? first;
+  String? cursor;
+  while (true) {
+    if (isActive?.call() == false) return null;
+    final response = await request({
+      'op': 'export',
+      'cursor': ?cursor,
+    });
+    if (isActive?.call() == false) return null;
+    final page = MemoryExportPage.fromJson(response);
+    first ??= page;
+    if (page.ownerId != first.ownerId || page.exportedAt != first.exportedAt) {
+      throw const MemoryException(
+        'EXPORT_CHANGED',
+        'Memory changed during export. Start the export again.',
+      );
+    }
+    for (final record in page.records) {
+      if (!seenRecords.add(record['id'] as String)) {
+        throw const MemoryException(
+          'BAD_RESPONSE',
+          'Memory export repeated a record. Start the export again.',
+        );
+      }
+      records.add(record);
+    }
+    cursor = page.nextCursor;
+    if (cursor == null) {
+      return MemoryExport(
+        ownerId: first.ownerId,
+        exportedAt: first.exportedAt,
+        records: List.unmodifiable(records),
+      );
+    }
+    if (!seenCursors.add(cursor)) {
+      throw const MemoryException(
+        'BAD_RESPONSE',
+        'Memory export repeated a page. Start the export again.',
+      );
+    }
+  }
+}
+
 /// Each request belongs to the admitted project stream, independent of the
 /// focused checkout. The bridge derives access from that stream's project.
 Future<Map<String, dynamic>> requestProjectMemory(

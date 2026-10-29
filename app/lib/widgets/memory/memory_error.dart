@@ -33,6 +33,9 @@ String memoryErrorCopy(Object error, {bool mutation = false}) {
   if (code.contains('CONFLICT')) {
     return 'Correction conflict. Inspect the latest record before saving again. $message';
   }
+  if (code == 'EXPORT_CHANGED') {
+    return 'Memory changed during export. Start the export again to save a consistent copy.';
+  }
   if (code == 'CLEANUP_FAILED') {
     return 'Cleanup failed. Forgotten content is hidden, but cleanup has not completed. $message';
   }

@@ -89,3 +89,73 @@ test("native memory inspection, correction, forgetting and restart preserve prof
     } finally { restarted.close(); }
   } finally { await env.teardown(); }
 }, 60_000);
+
+test("memory export pages traverse machine and project native responses without losing records", async () => {
+  const env = await setupTestEnv({ fixtureName: "basic", prepareProject: (directory) => {
+    const path = join(directory, "antgrid.yaml");
+    writeFileSync(path, `${readFileSync(path, "utf8").split("services:")[0]}services: []\n`);
+  } });
+  try {
+    const fixture = new MemoryService({ directory: join(env.abDir, "memory") });
+    const caller = { owner_id: fixture.ownerId, actor: "agent" as const, project_id: env.projectId,
+      session_id: "export-session", checkout_id: "main", agent_id: "codex", run_id: "export-run" };
+    const projectIds: string[] = [];
+    let foreignId: string;
+    try {
+      await fixture.execute({ owner_id: fixture.ownerId, actor: "app" }, { op: "settings", enabled: true });
+      for (let index = 0; index < 160; index++) {
+        const saved = await fixture.execute(caller, { op: "save", operation_key: `export-${index}`, save: {
+          content: `Export fixture ${index}: ${'行"\\\n'.repeat(500)}`, memory_type: "observation", scope: "project",
+        } });
+        projectIds.push(saved.id as string);
+      }
+      const foreign = await fixture.execute({ ...caller, project_id: "removed-project" }, {
+        op: "save", operation_key: "retained-export", save: {
+          content: "Retained history from a removed project", memory_type: "note", scope: "project",
+        },
+      });
+      foreignId = foreign.id as string;
+    } finally { fixture.close(); }
+
+    const collect = async (request: (body: Record<string, unknown>) => Promise<any>, expectedIds: string[]) => {
+      const records: any[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      let exportedAt: number | undefined;
+      let ownerId: string | undefined;
+      let pages = 0;
+      do {
+        const response = await request({ op: "export", ...(cursor ? { cursor } : {}) });
+        expect(response.ok).toBe(true);
+        expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(256 * 1024 + 4096);
+        const page = response.result;
+        expect(page.version).toBe(1);
+        expect(page.owner_id).toBe(ownerId ??= page.owner_id);
+        expect(page.exported_at).toBe(exportedAt ??= page.exported_at);
+        records.push(...page.records);
+        pages++;
+        expect(page).toHaveProperty("next_cursor");
+        if (page.next_cursor === null) break;
+        expect(typeof page.next_cursor).toBe("string");
+        expect(cursors.has(page.next_cursor)).toBe(false);
+        cursors.add(page.next_cursor);
+        cursor = page.next_cursor;
+        expect(pages).toBeLessThan(160);
+      } while (true);
+      expect(pages).toBeGreaterThan(1);
+      expect(records.map((record) => record.id).sort()).toEqual([...expectedIds].sort());
+      return records;
+    };
+
+    const machine = await collect((request) => machineRequest(env, request), [...projectIds, foreignId]);
+    const project = await collect((request) => projectRequest(env, env.streamId, request), projectIds);
+    expect(project).toEqual(machine.filter((record) => record.project_id === env.projectId));
+
+    const interrupted = await machineRequest(env, { op: "export" });
+    const cursor = interrupted.result.next_cursor;
+    expect(typeof cursor).toBe("string");
+    expect((await projectRequest(env, env.streamId, { op: "export", cursor })).error.code).toBe("FORBIDDEN");
+    expect((await projectRequest(env, env.streamId, { op: "forget", id: projectIds[0] })).ok).toBe(true);
+    expect((await machineRequest(env, { op: "export", cursor })).error.code).toBe("EXPORT_CHANGED");
+  } finally { await env.teardown(); }
+}, 90_000);

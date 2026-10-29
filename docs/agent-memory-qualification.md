@@ -30,6 +30,23 @@ use the completed job results when updating the RFC support matrix.
 authenticated Iroh project and machine payload paths, including a central
 WebSocket outage and a native reconnect after restart. Its stored findings are
 fixture data; this test does not qualify a provider's automatic-save behavior.
+The export regression checks bounded pages on both native response paths,
+project filtering, complete reconstruction, cursor context binding and a
+forget that invalidates an in-progress export. Storage tests additionally
+export a collection larger than the native per-message limit. Flutter tests
+cover route retention and release, failed or malformed continuation pages,
+and cancellation when the Memory screen closes.
+
+The Windows review regression run on 2026-10-29 passed 38 storage tests, 19
+focused bridge tests, both native memory gates, and 54 focused Flutter tests.
+Memory, bridge and eval typechecks passed; the nonconcurrent
+`flutter analyze --no-pub` gate reported no issues.
+The large-export fixture reconstructed 2,801 records totaling 37,438,193 bytes
+(35.704 MiB) across 148 pages, each within the 256 KiB response budget. It also
+verified v1 database migration, rollback, cursor persistence after restart,
+and refusal after concurrent record changes. The route tests cover overlapping
+Memory screens, dismissal animations and navigator disposal; export tests
+verify that Back cancels both continuation requests and the final save dialog.
 
 ## Agent preparation and execution
 
