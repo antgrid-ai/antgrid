@@ -147,28 +147,54 @@ void main() {
   });
 
   group('notificationHeadline', () {
-    String headline({String? session, String? active, String? title}) =>
-        notificationHeadline(
-          taskLabel: 'Task complete',
-          sessionId: session,
-          activeSessionId: active,
-          sessionTitle: title,
-        );
+    String headline({String? title}) =>
+        notificationHeadline(taskLabel: 'Task complete', sessionTitle: title);
 
-    test('the session being worked in keeps the task as its headline', () {
-      expect(headline(session: 's1', active: 's1', title: 'Fix login'),
-          'Task complete');
-    });
-
-    test('another session is named by its title', () {
-      expect(headline(session: 's2', active: 's1', title: 'Fix login'),
-          'Fix login');
+    test('a session is named by its title', () {
+      expect(headline(title: 'Fix login'), 'Fix login');
     });
 
     test('an unresolved or blank title falls back to the task', () {
-      expect(headline(session: 's2', active: 's1'), 'Task complete');
-      expect(headline(session: 's2', active: 's1', title: '  '),
-          'Task complete');
+      expect(headline(), 'Task complete');
+      expect(headline(title: '  '), 'Task complete');
+    });
+  });
+
+  group('agentNotificationText', () {
+    ({String title, String body}) text(
+      String type, {
+      String? message,
+      String? session,
+    }) => agentNotificationText(
+      notificationType: type,
+      message: message,
+      sessionTitle: session,
+    );
+
+    test('the session titles it and a symbol leads the message', () {
+      expect(
+        text('task_complete', message: 'Added a test', session: 'Fix login'),
+        (title: 'Fix login', body: '✅ Added a test'),
+      );
+    });
+
+    test('with no message the symbol leads the label', () {
+      expect(text('task_complete', session: 'Fix login'), (
+        title: 'Fix login',
+        body: '✅ Task complete',
+      ));
+    });
+
+    test('an unnamed session is titled by the label', () {
+      expect(text('error', message: ''), (
+        title: 'Agent error',
+        body: '⚠️ Agent error',
+      ));
+    });
+
+    test('an unknown kind has no symbol and falls back to words', () {
+      expect(text('mystery'), (title: 'Agent', body: 'Agent'));
+      expect(text('mystery', message: 'hi'), (title: 'Agent', body: 'hi'));
     });
   });
 }

@@ -17,10 +17,16 @@
 // (`push-dispatcher.test.ts` for the bridge). A shared golden fixture the
 // bridge test writes and this one reads is the real fix and is out of scope
 // here; until then these three strings live in four places.
+//
+// The agent notification kinds (labels and body symbols) are mirrored the same
+// way, as `agentNotificationKinds` against the bridge's `AGENT_KINDS`, and are
+// gated here too so every compose.ts scrape shares one path and one skip.
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:antgrid/models/handler_state.dart' show HandlerEscalation;
+import 'package:antgrid/utils/notification_routing.dart'
+    show agentNotificationKinds;
 import 'package:antgrid/widgets/agent_notification_surfacer.dart'
     show handlerEscalationTitle;
 import 'package:flutter_test/flutter_test.dart';
@@ -75,6 +81,28 @@ Set<String> _bridgeTitleLiterals(String source) {
   return RegExp(r'"([^"]*)"').allMatches(expr).map((m) => m.group(1)!).toSet();
 }
 
+/// The bridge's `AGENT_KINDS` table, one `kind: { label, symbol }` row per line.
+///
+/// Throws rather than using `expect` so it is safe to call from `setUpAll`.
+Map<String, ({String label, String symbol})> _bridgeAgentKinds(String source) {
+  const anchor = 'const AGENT_KINDS';
+  final start = source.indexOf(anchor);
+  final end = start < 0 ? -1 : source.indexOf('};', start);
+  if (end < 0) {
+    throw StateError(
+      'Could not find "$anchor = {…};" in ${_compose.absolute.path} — the '
+      'table was renamed or restructured and this gate is scraping nothing.',
+    );
+  }
+  return {
+    for (final m in RegExp(
+      r'^\s*(\w+):\s*\{\s*label:\s*"([^"]*)",\s*symbol:\s*"([^"]*)"\s*\}',
+      multiLine: true,
+    ).allMatches(source.substring(start, end)))
+      m.group(1)!: (label: m.group(2)!, symbol: m.group(3)!),
+  };
+}
+
 void main() {
   group('the escalation notification title', () {
     test('an urgent escalation outranks everything else', () {
@@ -115,9 +143,17 @@ void main() {
             'gate needs both halves of the boundary it couples.';
 
   group('the bridge composes the same words', skip: missing, () {
+    late final String source;
     late final Set<String> literals;
 
-    setUpAll(() => literals = _bridgeTitleLiterals(_compose.readAsStringSync()));
+    setUpAll(() {
+      source = _compose.readAsStringSync();
+      literals = _bridgeTitleLiterals(source);
+    });
+
+    test('every agent notification kind is worded and marked alike', () {
+      expect(_bridgeAgentKinds(source), agentNotificationKinds);
+    });
 
     test('every title this app raises is one the bridge also pushes', () {
       for (final esc in [
