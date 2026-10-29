@@ -781,7 +781,8 @@ function utcOffset(at: number, zone: string): string {
   const name = new Intl.DateTimeFormat("en-GB", { timeZone: zone, timeZoneName: "longOffset" })
     .formatToParts(at).find((p) => p.type === "timeZoneName")?.value ?? "GMT";
   const m = name.match(/^GMT([+-])(\d{1,2})(?::(\d{2}))?$/);
-  if (!m) return "UTC";
+  // Newer ICU spells a zero offset "GMT+00:00" where older ICU gave bare "GMT".
+  if (!m || (Number(m[2]) === 0 && Number(m[3] ?? 0) === 0)) return "UTC";
   const hours = String(Number(m[2]));
   return `UTC${m[1]}${hours}${m[3] && m[3] !== "00" ? `:${m[3]}` : ""}`;
 }

@@ -1,4 +1,4 @@
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createMessage, type AbMessage } from "./protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-search" });
@@ -78,7 +78,7 @@ export function escapeGlob(path: string): string {
   return path.replace(/[\\*?\[\]{}]/g, (ch) => `\\${ch}`);
 }
 
-export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
+export function buildRipgrepArgs(opts: SearchOptions, excludes: readonly string[]): string[] {
   const args = ["rg", "--json", "-n", "--column", "-C", "2"];
   // A leading `/` anchors the glob at ripgrep's WORKING directory, which the
   // spawn below pins to projectPath — without the anchor `!state/` would also
@@ -93,7 +93,11 @@ export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, exclu
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (!opts.regex) args.push("-F");
-  args.push("--", opts.query, projectPath);
+  // `.`, never the project's absolute path: the anchor above resolves against
+  // the cwd the OS hands back canonicalized, so a root reached through a
+  // symlink (every macOS temp dir, /var -> /private/var) never sits under it
+  // and the exclude goes inert.
+  args.push("--", opts.query, ".");
   return args;
 }
 
@@ -186,7 +190,7 @@ export class FileSearcher {
     }
 
     const args = engine === "ripgrep"
-      ? buildRipgrepArgs(opts, this.projectRoot, this.excludes)
+      ? buildRipgrepArgs(opts, this.excludes)
       : buildGitGrepArgs(opts, this.projectRoot, this.excludes);
 
     const proc = Bun.spawn(args, {
@@ -271,12 +275,10 @@ export class FileSearcher {
         } else if (obj.type === "match") {
           flushContextMatch();
           const data = obj.data;
-          // ripgrep echoes the search path it was handed, so this arrives
-          // absolute; the app opens results by project-relative path.
+          // ripgrep echoes the `.` it was handed, so this arrives as `./x`;
+          // the app opens results by bare project-relative path.
           const rawPath: string = data.path?.text ?? "";
-          const relPath = isAbsolute(rawPath)
-            ? relative(this.projectRoot, rawPath).split(sep).join("/")
-            : rawPath;
+          const relPath = relative(this.projectRoot, resolve(this.projectRoot, rawPath)).split(sep).join("/");
           const lineNum = data.line_number ?? 0;
           const col = data.submatches?.[0]?.start ?? 0;
           let lineText = data.lines?.text ?? "";

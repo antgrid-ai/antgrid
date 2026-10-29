@@ -157,7 +157,6 @@ describe("FileSearcher", () => {
         wholeWord: false,
         requestId: "req",
       },
-      "/root",
       ["state", "nested/dir"],
     );
     const globIndex = (rel: string) => args.indexOf(`!/${rel}/**`);
