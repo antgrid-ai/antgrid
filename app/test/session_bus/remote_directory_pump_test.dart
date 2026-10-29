@@ -157,6 +157,50 @@ void main() {
       expect(fastResult, isNotNull);
       expect(pusher.calls, hasLength(3));
     });
+
+    test('noteStatus arms the fast tick and seeds the repo scope without '
+        'pushing', () async {
+      final engine = RemoteDirectoryPumpEngine();
+      final pusher = _RecordingPusher();
+      final t0 = DateTime(2024, 1, 1);
+
+      // Bootstrap, then a real cycle, so the heartbeat slot is spent and only
+      // the fast tick can make the next one due.
+      for (final t in [t0, t0.add(kRemoteDirectoryMinSpacing)]) {
+        await engine.maybeRunCycle(
+          now: t,
+          triggered: false,
+          controlPort: 1,
+          candidates: const {},
+          localUuid: 'local',
+          peekClient: (_) => const RemoteClientResolved(null),
+          inventory: const <InventoryAgent>[],
+          pushFn: pusher.call,
+        );
+      }
+      final t1 = t0.add(kRemoteDirectoryMinSpacing);
+      expect(pusher.calls, hasLength(2));
+
+      // The poll itself must not push — it is a read of the same counters the
+      // ack carries, made on a tick that has nothing new to send.
+      engine.noteStatus(2, const ['github.com/a/b'], t1);
+      expect(pusher.calls, hasLength(2));
+      expect(engine.wantedRepoKeys, ['github.com/a/b']);
+
+      final t2 = t1.add(kRemoteDirectoryFastTick);
+      final fast = await engine.maybeRunCycle(
+        now: t2,
+        triggered: false,
+        controlPort: 1,
+        candidates: const {},
+        localUuid: 'local',
+        peekClient: (_) => const RemoteClientResolved(null),
+        inventory: const <InventoryAgent>[],
+        pushFn: pusher.call,
+      );
+      expect(fast, isNotNull);
+      expect(pusher.calls, hasLength(3));
+    });
   });
 
   group('BAD_REQUEST latch', () {
@@ -322,23 +366,26 @@ void main() {
         pushFn: pusher.call,
       );
 
-      // A real cycle establishes both machines as known. Both peek null (no
-      // live socket to either), which classifies as unreachable and arms
-      // that tracker's own backoff — so by the next cycle neither is asked
-      // again regardless of the trigger, which is exactly the point: the
-      // trigger's own value is in not waiting a full heartbeat, not in
-      // forcing a fresh RPC.
+      // Two real cycles establish both machines as known. Both peek null (no
+      // live socket to either), which classifies as unreachable — and the
+      // SECOND such answer arms that tracker's backoff, so by the next cycle
+      // neither is asked again regardless of the trigger. That is exactly the
+      // point: the trigger's own value is in not waiting a full heartbeat,
+      // not in forcing a fresh RPC.
       final t1 = t0.add(kRemoteDirectoryMinSpacing);
-      await engine.maybeRunCycle(
-        now: t1,
-        triggered: false,
-        controlPort: 1,
-        candidates: const {'m1', 'm2'},
-        localUuid: 'local',
-        peekClient: (_) => const RemoteClientResolved(null),
-        inventory: const <InventoryAgent>[],
-        pushFn: pusher.call,
-      );
+      for (final t in [t1, t1.add(kRemoteDirectoryMinSpacing)]) {
+        await engine.maybeRunCycle(
+          now: t,
+          // Triggered, so the second cycle is due inside the 30s heartbeat.
+          triggered: t != t1,
+          controlPort: 1,
+          candidates: const {'m1', 'm2'},
+          localUuid: 'local',
+          peekClient: (_) => const RemoteClientResolved(null),
+          inventory: const <InventoryAgent>[],
+          pushFn: pusher.call,
+        );
+      }
       expect(pusher.calls.last.machines.map((m) => m['machineId']).toSet(), {
         'm1',
         'm2',
@@ -349,7 +396,7 @@ void main() {
       // relayConnectionChangesProvider notices, not waiting for the
       // heartbeat; minSpacing has to have elapsed since the last push for
       // the trigger to be honoured.
-      final t2 = t1.add(kRemoteDirectoryMinSpacing);
+      final t2 = t1.add(kRemoteDirectoryMinSpacing * 2);
       final asked = <String>[];
       final dropResult = await engine.maybeRunCycle(
         now: t2,
@@ -365,7 +412,7 @@ void main() {
         pushFn: pusher.call,
       );
       expect(dropResult, isNotNull);
-      // No RPC at all: m1 is still inside its backoff window from t1, and
+      // No RPC at all: m1 is inside the backoff its second failure armed, and
       // m2 is no longer a candidate to ask.
       expect(asked, isEmpty);
       final lastPush = pusher.calls.last;

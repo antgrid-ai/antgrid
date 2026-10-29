@@ -2252,6 +2252,19 @@ export class HostServer {
       }
       case "session-bus:remote-directory":
         return this.handleRemoteDirectoryPush(req);
+      // Read-only, and deliberately NOT draining `unservedReads`: the drain
+      // belongs to `replace()`, whose ack is what `_warmMissedPeers` dials on.
+      // A poll that consumed the count would answer the pump's question by
+      // taking away its reason to act on the answer.
+      case "session-bus:directory-status":
+        return {
+          id: req.id,
+          ok: true,
+          type: "session-bus:directory-status",
+          wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
+          unservedReads: this.remoteDirectory.unservedReads(),
+          lastReadAt: this.remoteDirectory.lastReadAt(),
+        };
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -2542,6 +2555,19 @@ export class HostServer {
       req.notConnected,
       selfMachineId,
       Date.now(),
+    );
+    // The only record of what the pump actually found. Outcomes, not rows:
+    // a row carries a session title and a repo key, and
+    // `bridge/tests/session-bus-logging.test.ts` scans every emitted line for
+    // either. The per-machine outcome is what distinguishes a peer that said
+    // no from one that never answered.
+    log.debug(
+      "session bus: remote directory push accepted=%d dropped=%d unservedReads=%d notConnected=%d machines=%s",
+      accepted,
+      dropped,
+      unservedReads,
+      req.notConnected,
+      req.machines.map((m) => `${m.machineId}:${m.outcome}`).join(",") || "none",
     );
     return {
       id: req.id,

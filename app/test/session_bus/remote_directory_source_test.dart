@@ -147,10 +147,11 @@ void main() {
       // RemoteClientResolved(null) is what a genuinely offline target
       // produces — settled, no client, worth a real answer. It must not cost
       // an RPC (there is nothing to ask), but it IS an answer: unreachable,
-      // with a backoff armed so it isn't re-asked every cycle.
+      // and a SECOND one arms the backoff so it isn't re-asked every cycle.
       final peeked = <String>[];
       final tracker = RemoteMachineTracker();
-      final reports = await collectRemoteMachineReports(
+      final now = DateTime(2024, 1, 1);
+      Future<List<RemoteMachineReport>> cycle() => collectRemoteMachineReports(
         candidates: {'m1', 'm2'},
         peekClient: (uuid) {
           peeked.add(uuid);
@@ -159,14 +160,18 @@ void main() {
         repoKeys: const [],
         inventory: const [],
         tracker: tracker,
-        now: DateTime.now(),
+        now: now,
       );
+      final reports = await cycle();
       expect(peeked.toSet(), {'m1', 'm2'});
       expect(reports, hasLength(2));
       for (final r in reports) {
         expect(r.outcome, isA<RemoteMachineUnreachable>());
       }
-      expect(tracker.shouldAsk('m1', DateTime.now()), isFalse);
+      // The first failure deliberately costs one tick, not a minute.
+      expect(tracker.shouldAsk('m1', now), isTrue);
+      await cycle();
+      expect(tracker.shouldAsk('m1', now), isFalse);
     });
 
     test('a pending peek is skipped entirely: no report, no backoff, and the '
@@ -239,15 +244,19 @@ void main() {
         ),
         now,
       );
-      tracker.record(
-        'unreachable',
-        const RemoteMachineReport(
-          machineId: 'unreachable',
-          observedAt: 0,
-          outcome: RemoteMachineUnreachable(),
-        ),
-        now,
-      );
+      // Twice: the first unreachable deliberately arms nothing, so one record
+      // would compare a backoff against no backoff at all.
+      for (var i = 0; i < 2; i++) {
+        tracker.record(
+          'unreachable',
+          const RemoteMachineReport(
+            machineId: 'unreachable',
+            observedAt: 0,
+            outcome: RemoteMachineUnreachable(),
+          ),
+          now,
+        );
+      }
       // Just past the unreachable backoff: unreachable is due again, refused
       // is not.
       final shortlyAfter = now.add(kRemoteDirectoryUnreachableBackoff + const Duration(seconds: 1));
@@ -255,19 +264,65 @@ void main() {
       expect(tracker.shouldAsk('refused', shortlyAfter), isFalse);
     });
 
-    test('rows clear any prior backoff', () {
+    test('a first unreachable retries next tick; a second backs off', () {
       final tracker = RemoteMachineTracker();
       final now = DateTime(2024, 1, 1);
+      const report = RemoteMachineReport(
+        machineId: 'm1',
+        observedAt: 0,
+        outcome: RemoteMachineUnreachable(),
+      );
+      tracker.record('m1', report, now);
+      // A socket caught mid-reconnect answers nothing once; spending a whole
+      // minute on that is a minute of directory reads missing a live peer.
+      expect(tracker.shouldAsk('m1', now), isTrue);
+      tracker.record('m1', report, now);
+      expect(tracker.shouldAsk('m1', now), isFalse);
+      expect(
+        tracker.shouldAsk(
+          'm1',
+          now.add(kRemoteDirectoryUnreachableBackoff + const Duration(seconds: 1)),
+        ),
+        isTrue,
+      );
+    });
+
+    test('any answer resets the unreachable streak', () {
+      final tracker = RemoteMachineTracker();
+      final now = DateTime(2024, 1, 1);
+      const unreachable = RemoteMachineReport(
+        machineId: 'm1',
+        observedAt: 0,
+        outcome: RemoteMachineUnreachable(),
+      );
+      tracker.record('m1', unreachable, now);
+      // A peer that answered at all is reachable, whatever it answered — so
+      // the next timeout after it is a FIRST one again, not the second of a
+      // streak that would arm the long backoff.
       tracker.record(
         'm1',
         const RemoteMachineReport(
           machineId: 'm1',
           observedAt: 0,
-          outcome: RemoteMachineUnreachable(),
+          outcome: RemoteMachineRows(rows: [], truncated: 0),
         ),
         now,
       );
-      // Backed off immediately after an unreachable record.
+      tracker.record('m1', unreachable, now);
+      expect(tracker.shouldAsk('m1', now), isTrue);
+    });
+
+    test('rows clear any prior backoff', () {
+      final tracker = RemoteMachineTracker();
+      final now = DateTime(2024, 1, 1);
+      const unreachable = RemoteMachineReport(
+        machineId: 'm1',
+        observedAt: 0,
+        outcome: RemoteMachineUnreachable(),
+      );
+      tracker.record('m1', unreachable, now);
+      tracker.record('m1', unreachable, now);
+      // Backed off after the second unreachable record.
       expect(tracker.shouldAsk('m1', now), isFalse);
       tracker.record(
         'm1',

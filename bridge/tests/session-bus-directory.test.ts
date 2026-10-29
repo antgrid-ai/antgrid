@@ -445,15 +445,22 @@ function remoteRow(over: Partial<RemoteRow> & { sessionId: string; projectId: st
  *  what these tests exercise, not the mirror's own filtering (that is
  *  `session-bus-remote-directory.test.ts`'s job). */
 function remoteOf(over: Partial<ReturnType<DirectoryRemote["view"]>>): DirectoryRemote {
+  const base = {
+    rows: [],
+    truncated: 0,
+    machines: [],
+    staleMachines: 0,
+    notConnected: 0,
+    lastPushAt: null,
+    ...over,
+  };
   return {
+    // Derived rather than defaulted, so a case that supplies rows or live
+    // machines does not describe itself as an unserved read. Overridable all
+    // the same, for a case that wants the two to disagree.
     view: () => ({
-      rows: [],
-      truncated: 0,
-      machines: [],
-      staleMachines: 0,
-      notConnected: 0,
-      lastPushAt: null,
-      ...over,
+      ...base,
+      served: base.served ?? (base.rows.length > 0 || base.machines.length - base.staleMachines > 0),
     }),
   };
 }

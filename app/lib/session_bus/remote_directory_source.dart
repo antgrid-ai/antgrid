@@ -18,6 +18,9 @@ import '../launcher/host_control_client.dart'
 import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/control_plane_client.dart'
     show ControlPlaneClient, MachineSessionRow;
+import '../util/ab_log.dart';
+
+const String _kComponent = 'RemoteDirectory';
 
 /// The push IS the heartbeat: the bridge's `lastPushAt` is
 /// what proves this machine's carrier is alive, so an unchanged snapshot is
@@ -139,7 +142,15 @@ final class RemoteMachineReachRefused extends RemoteMachineOutcome {
 /// send failure, or a reply this build could not parse. This machine cannot
 /// tell any of those apart from "gone", so they share one bucket.
 final class RemoteMachineUnreachable extends RemoteMachineOutcome {
-  const RemoteMachineUnreachable();
+  const RemoteMachineUnreachable({this.diagnostic});
+
+  /// What actually failed, for the log line only — an [RpcException] code, or
+  /// a short label for the no-client and malformed-reply paths. Never reaches
+  /// the wire ([wireValue] collapses every reason to `unreachable`), because
+  /// the mirror's behaviour must not fork on a string this build happened to
+  /// recognise. Optional so the bare `const RemoteMachineUnreachable()` that
+  /// tests and callers already construct keeps compiling.
+  final String? diagnostic;
 }
 
 /// Peek-then-ask ONE candidate machine. Never dials: [client] must already be
@@ -152,7 +163,9 @@ Future<RemoteMachineOutcome> classifyMachine(
   List<String> repoKeys, {
   Duration timeout = kRemoteDirectoryPerMachineTimeout,
 }) async {
-  if (client == null) return const RemoteMachineUnreachable();
+  if (client == null) {
+    return const RemoteMachineUnreachable(diagnostic: 'no-client');
+  }
   try {
     final card = await client.capabilityCard(
       repoKeys: repoKeys.isEmpty ? null : repoKeys,
@@ -177,11 +190,11 @@ Future<RemoteMachineOutcome> classifyMachine(
     if (e.code == 'E_UNKNOWN_METHOD' || e.code == 'E_BAD_PARAMS') {
       return const RemoteMachineNoCard();
     }
-    return const RemoteMachineUnreachable();
+    return RemoteMachineUnreachable(diagnostic: e.code);
   } catch (_) {
     // A malformed reply (`BAD_RESPONSE`) or anything else this build cannot
     // read — the peer is as good as gone for this cycle.
-    return const RemoteMachineUnreachable();
+    return const RemoteMachineUnreachable(diagnostic: 'other');
   }
 }
 
@@ -334,6 +347,11 @@ class RemoteMachineTracker {
   final Map<String, RemoteMachineReport> _last = {};
   final Map<String, DateTime> _nextAskAt = {};
 
+  /// Consecutive [RemoteMachineUnreachable] answers per machine. Reset by any
+  /// other outcome, including a refusal — a peer that answered at all is
+  /// reachable, whatever it answered.
+  final Map<String, int> _unreachableStreak = {};
+
   /// Whether [uuid] should be asked fresh right now, rather than reported
   /// from [cached].
   bool shouldAsk(String uuid, DateTime now) {
@@ -346,10 +364,23 @@ class RemoteMachineTracker {
   /// Record a fresh ask's result and arm (or clear) that machine's backoff.
   void record(String uuid, RemoteMachineReport report, DateTime now) {
     _last[uuid] = report;
+    final unreachable = report.outcome is RemoteMachineUnreachable;
+    final streak = unreachable ? (_unreachableStreak[uuid] ?? 0) + 1 : 0;
+    if (unreachable) {
+      _unreachableStreak[uuid] = streak;
+    } else {
+      _unreachableStreak.remove(uuid);
+    }
     final backoff = switch (report.outcome) {
       RemoteMachineRefused() => refusedBackoff,
       RemoteMachineReachRefused() => refusedBackoff,
-      RemoteMachineUnreachable() => unreachableBackoff,
+      // Retry once before standing down: the FIRST timeout is as likely to be
+      // a socket caught mid-reconnect as a machine that is genuinely gone,
+      // and a full [unreachableBackoff] spent on the former is a minute in
+      // which an agent's directory read keeps missing a peer that was there.
+      // The two refusals and `no-card` stay first-failure: each is a
+      // deterministic answer the peer gave, not a failure to answer.
+      RemoteMachineUnreachable() => streak < 2 ? null : unreachableBackoff,
       RemoteMachineNoCard() => noCardBackoff,
       RemoteMachineRows() => null,
     };
@@ -366,6 +397,7 @@ class RemoteMachineTracker {
   void prune(Set<String> stillCandidates) {
     _last.removeWhere((k, _) => !stillCandidates.contains(k));
     _nextAskAt.removeWhere((k, _) => !stillCandidates.contains(k));
+    _unreachableStreak.removeWhere((k, _) => !stillCandidates.contains(k));
   }
 }
 
@@ -420,6 +452,7 @@ Future<List<RemoteMachineReport>> collectRemoteMachineReports({
       final peek = peekClient(uuid);
       if (peek is RemoteClientPending) return null;
       final client = (peek as RemoteClientResolved).client;
+      final startedAt = DateTime.now();
       final outcome = await classifyMachine(client, repoKeys, timeout: timeout);
       final report = RemoteMachineReport(
         machineId: uuid,
@@ -427,6 +460,33 @@ Future<List<RemoteMachineReport>> collectRemoteMachineReports({
         observedAt: nowMs,
         outcome: outcome,
       );
+      // Read BEFORE `record`, so this is still the PREVIOUS answer. Only a
+      // change — a first sighting, a failure, a recovery — is written: every
+      // level AbLog takes reaches the file, so a line per peer per cycle
+      // would be megabytes a week of a steady state nobody will read.
+      final elapsed = DateTime.now().difference(startedAt);
+      final changed =
+          tracker.cached(uuid)?.outcome.wireValue != outcome.wireValue;
+      // The ask's own budget is shorter than the capability card's internal
+      // git-probe deadline, so a peer that is merely SLOW reads as gone. An
+      // ask past half the budget is the evidence that distinguishes the two.
+      final slow = elapsed * 2 >= timeout;
+      if (changed || slow) {
+        AbLog.info(
+          _kComponent,
+          changed ? 'peer answer changed' : 'peer answered slowly',
+          fields: {
+            'machine': uuid,
+            'outcome': outcome.wireValue,
+            'ms': elapsed.inMilliseconds,
+            'repoKeys': repoKeys.length,
+            if (outcome is RemoteMachineUnreachable &&
+                outcome.diagnostic != null)
+              'why': outcome.diagnostic,
+            if (outcome is RemoteMachineRows) 'rows': outcome.rows.length,
+          },
+        );
+      }
       tracker.record(uuid, report, now);
       return report;
     }),
@@ -523,6 +583,30 @@ class RemoteDirectoryPumpEngine {
   /// shortcut below — never reset by a failed push, only by one the bridge
   /// actually received (a successful ack, or a `BAD_RESPONSE` — see below).
   bool _everPushed = false;
+
+  /// Feed a `session-bus:directory-status` poll, which reads the same three
+  /// counters the push's ack carries without draining them.
+  ///
+  /// It exists because the bridge has no way to SAY a read missed:
+  /// `unservedReads` otherwise rides the ack of the NEXT push, up to a
+  /// heartbeat away, and the dial of the peers that read missed waits on that
+  /// ack ([RemoteDirectoryPumpHost] `_warmMissedPeers`). Polling closes that
+  /// to one tick.
+  ///
+  /// Does NOT push: it arms the fast window and seeds the repo scope, and the
+  /// caller decides whether to run this tick as `triggered`. Seeding
+  /// [wantedRepoKeys] is what makes the first ask after a miss already
+  /// repo-scoped, instead of asking broadly and learning the scope from an ack
+  /// a cycle later. Assigned unconditionally, exactly as the ack path does —
+  /// both read the same mirror, so a shorter list is news, not a gap.
+  void noteStatus(
+    int unservedReads,
+    List<String> wantedRepoKeys,
+    DateTime now,
+  ) {
+    _wantedRepoKeys = wantedRepoKeys;
+    cadence.noteAck(unservedReads, now);
+  }
 
   /// Run one cycle if due; a no-op (returns null) if not — including while
   /// latched off against [controlPort]. [pushFn] is the loopback POST itself
