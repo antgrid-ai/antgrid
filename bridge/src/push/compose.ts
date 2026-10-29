@@ -1,14 +1,16 @@
 import type { AbMessage } from "../protocol";
 
-// HAND-MIRRORED in the `labels` map of
-// app/lib/widgets/agent_notification_surfacer.dart; keep both sides in sync.
-const AGENT_LABELS: Record<string, string> = {
-  permission_request: "Permission needed",
-  awaiting_input: "Needs your input",
-  question: "Agent asks",
-  task_complete: "Task complete",
-  idle: "Waiting for you",
-  error: "Agent error",
+// HAND-MIRRORED in `agentNotificationKinds`
+// (app/lib/utils/notification_routing.dart); keep both sides in sync. Symbols
+// are Unicode 7.0 or older, so every supported OS has a glyph for them. U+FE0F
+// asks for the colour form; without it ⏸ and ⚠ render as monochrome text.
+const AGENT_KINDS: Record<string, { label: string; symbol: string }> = {
+  permission_request: { label: "Permission needed", symbol: "🔐" },
+  awaiting_input: { label: "Needs your input", symbol: "❓" },
+  question: { label: "Agent asks", symbol: "❓" },
+  task_complete: { label: "Task complete", symbol: "✅" },
+  idle: { label: "Waiting for you", symbol: "⏸️" },
+  error: { label: "Agent error", symbol: "⚠️" },
 };
 
 /** The routing ids ride along with the strings because this is the only
@@ -26,11 +28,13 @@ export interface ComposedPush {
 
 export function composePush(msg: AbMessage): ComposedPush | null {
   if (msg.type === "notification:push") {
-    const label = AGENT_LABELS[msg.notificationType] ?? "Agent";
-    // body deliberately does NOT fall back to sessionTitle: that would make
-    // title === body, which is the whole point of carrying two fields.
-    const title = msg.sessionTitle && msg.sessionTitle.length > 0 ? msg.sessionTitle : label;
-    const body = msg.message && msg.message.length > 0 ? msg.message : label;
+    const kind = AGENT_KINDS[msg.notificationType];
+    const label = kind?.label ?? "Agent";
+    // Trimmed like `notificationHeadline` (app): a blank name must not blank the banner.
+    const title = msg.sessionTitle?.trim() || label;
+    // body never falls back to sessionTitle, or title === body.
+    const text = msg.message || label;
+    const body = kind ? `${kind.symbol} ${text}` : text;
     return { title, body, kind: "agent", sourceMessageId: msg.id, ...(msg.sessionId ? { terminalId: msg.sessionId } : {}) };
   }
   if (msg.type === "handler:escalation") {

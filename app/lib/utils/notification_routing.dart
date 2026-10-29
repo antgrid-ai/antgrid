@@ -57,23 +57,51 @@ bool isViewingSession({
   return activeSessionId == sessionId;
 }
 
-/// The headline of an alert about [sessionId]: the session's own title when it
-/// is not the one the user is working in, otherwise [taskLabel].
+/// The headline of an alert about a session: its own title, or [taskLabel]
+/// when the title is unresolved rather than blanking.
 ///
-/// With several sessions running, a headline that only says "Agent" or
-/// "Task complete" leaves the user guessing which of them is asking. For the
-/// session already open the headline stays the task, since the name is known.
-/// An unresolved [sessionTitle] falls back to [taskLabel] rather than blanking.
+/// Named even for the session the user was working in: an OS banner is read
+/// from another app, and with several sessions running "Task complete" alone
+/// leaves the user guessing which of them finished.
 String notificationHeadline({
   required String taskLabel,
-  required String? sessionId,
-  required String? activeSessionId,
   required String? sessionTitle,
 }) {
   final title = sessionTitle?.trim() ?? '';
-  if (title.isEmpty) return taskLabel;
-  if (sessionId != null && sessionId == activeSessionId) return taskLabel;
-  return title;
+  return title.isEmpty ? taskLabel : title;
+}
+
+/// HAND-MIRRORED in `AGENT_KINDS` (`bridge/src/push/compose.ts`), which words
+/// the same event when it arrives as a push instead; keep both sides in sync.
+///
+/// Symbols are Unicode 7.0 or older, so every supported OS has a glyph for
+/// them. U+FE0F asks for the colour form; without it ⏸ and ⚠ render as
+/// monochrome text.
+const agentNotificationKinds = {
+  'permission_request': (label: 'Permission needed', symbol: '🔐'),
+  'awaiting_input': (label: 'Needs your input', symbol: '❓'),
+  'question': (label: 'Agent asks', symbol: '❓'),
+  'task_complete': (label: 'Task complete', symbol: '✅'),
+  'idle': (label: 'Waiting for you', symbol: '⏸️'),
+  'error': (label: 'Agent error', symbol: '⚠️'),
+};
+
+/// Title and body of an agent `notification:push`. The title names the session
+/// and the body leads with a symbol for the kind, so both survive the narrow
+/// width of an OS banner; the worded label stands in for a missing session
+/// name or message.
+({String title, String body}) agentNotificationText({
+  required String notificationType,
+  required String? message,
+  required String? sessionTitle,
+}) {
+  final kind = agentNotificationKinds[notificationType];
+  final label = kind?.label ?? 'Agent';
+  final text = (message != null && message.isNotEmpty) ? message : label;
+  return (
+    title: notificationHeadline(taskLabel: label, sessionTitle: sessionTitle),
+    body: kind == null ? text : '${kind.symbol} $text',
+  );
 }
 
 /// Whether the Handler is already announcing this agent notification, so the
