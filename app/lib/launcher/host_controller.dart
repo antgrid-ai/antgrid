@@ -1006,7 +1006,9 @@ class HostController {
 
 /// A resolved host launch command: the executable plus any leading args (e.g.
 /// the bridge entry script when we invoke `bun` directly in a dev build).
-typedef HostCommand = ({String binary, List<String> preargs});
+/// [sameBuild] says the bridge was built from the same source as this app, so
+/// it can be relied on to speak this app's bootstrap contract.
+typedef HostCommand = ({String binary, List<String> preargs, bool sameBuild});
 
 /// Pure resolution of the host launch command, factored out of [Platform] so it
 /// is unit-testable. Priority:
@@ -1034,20 +1036,21 @@ HostCommand resolveHostCommand({
 }) {
   final binEnv = env['ANTGRID_AGENT_BIN'];
   if (binEnv != null && exists(binEnv)) {
-    return (binary: binEnv, preargs: const <String>[]);
+    // Dev launchers point it at this checkout's own bridge.
+    return (binary: binEnv, preargs: const <String>[], sameBuild: true);
   }
 
   final bundled = isWindows
       ? '$exeDir/antgrid-bridge.exe'
       : '$exeDir/antgrid-bridge';
   if (exists(bundled)) {
-    return (binary: bundled, preargs: const <String>[]);
+    return (binary: bundled, preargs: const <String>[], sameBuild: true);
   }
 
   if (!isRelease) {
     final script = findBridgeEntry();
     if (script != null) {
-      return (binary: resolveBun(), preargs: <String>[script]);
+      return (binary: resolveBun(), preargs: <String>[script], sameBuild: true);
     }
   }
 
@@ -1060,7 +1063,8 @@ HostCommand resolveHostCommand({
       'of the app as the host.',
     );
   }
-  return (binary: 'antgrid', preargs: const <String>[]);
+  // Whatever `antgrid` is installed, at whatever version.
+  return (binary: 'antgrid', preargs: const <String>[], sameBuild: false);
 }
 
 /// Real resolution: wires [resolveHostCommand] to [Platform].
@@ -1207,12 +1211,26 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
   // and land outside the job. Dev keeps the owner-watchdog as its backstop.
   encloseInAppLifetimeJob(proc.pid);
 
-  // Write the bootstrap line, then close stdin. The host reads exactly one
-  // line and never expects more input.
+  // Write the bootstrap line, then hold the pipe open for the app's whole
+  // life: the kernel closes it however the app dies, SIGKILL included, and the
+  // host shuts down on that EOF (bridge/src/owner-watchdog.ts). Nothing more is
+  // ever written. A host that dies first breaks the pipe, so `done` is
+  // silenced, and the pipe is released on its exit so respawns leak no fds.
+  //
+  // Only for a bridge of our own build: an older one reads stdin to EOF, and
+  // would sit out its whole bootstrap timeout waiting for a close that never
+  // comes. That one keeps the pid watchdog alone.
+  //
+  // Not in debug either: a hot restart may drop the old isolate's handles and
+  // close the pipe, killing a host meant to outlive it. The pid is unchanged
+  // across a restart, so the pid watchdog is the right backstop there.
+  final holdStdin = cmd.sameBuild && !kDebugMode;
+  unawaited(proc.stdin.done.catchError((_) {}));
+  unawaited(proc.exitCode.then((_) => proc.stdin.close()).catchError((_) {}));
   try {
-    proc.stdin.write(payload.toJsonLine());
+    proc.stdin.write(payload.toJsonLine(ownerHoldsStdin: holdStdin));
     await proc.stdin.flush();
-    await proc.stdin.close();
+    if (!holdStdin) await proc.stdin.close();
   } catch (e) {
     AbLog.error(
       'HostController',

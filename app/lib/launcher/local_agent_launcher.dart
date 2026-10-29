@@ -20,7 +20,7 @@ import '../util/netwatch.dart';
 /// Serialized as a single JSON line written to the host's stdin on spawn.
 /// Mirror of `bridge/src/auth/credentials.ts` `BootstrapPayloadSchema`:
 /// `{ machine?, firstProject?: { projectId, projectPath, mode }, ownerPid?,
-/// ownerBuild? }`.
+/// ownerHoldsStdin?, ownerBuild?, telemetryEnabled? }`.
 ///
 /// The desktop driver always opens the first project as `mode: "local"`; the
 /// `machine` block is included whenever a [DeviceRecord] exists so the host can
@@ -92,7 +92,9 @@ class BootstrapPayload {
   final String? licenseApiUrl;
   final String? relayUrl;
 
-  String toJsonLine() {
+  /// [ownerHoldsStdin] is the spawner's to state, since only it knows whether
+  /// it keeps the pipe open (see `spawnHostProcess`).
+  String toJsonLine({bool ownerHoldsStdin = false}) {
     final j = <String, dynamic>{
       if (projectId != null && projectPath != null)
         'firstProject': {
@@ -101,6 +103,7 @@ class BootstrapPayload {
           'mode': mode,
         },
       if (ownerPid != null) 'ownerPid': ownerPid,
+      if (ownerHoldsStdin) 'ownerHoldsStdin': true,
       'ownerBuild': ownerBuild,
       'telemetryEnabled': telemetryEnabled,
     };

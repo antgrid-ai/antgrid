@@ -98,6 +98,18 @@ void main() {
       }
     });
 
+    // An absent flag is the old contract (stdin closed after the bootstrap); a
+    // host told the pipe is held would read that close as its owner dying.
+    test('ownerHoldsStdin is emitted only when the spawner says so', () {
+      final p = BootstrapPayload.machineOnly(ownerPid: 7);
+      final off = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+      expect(off.containsKey('ownerHoldsStdin'), isFalse);
+      final on =
+          jsonDecode(p.toJsonLine(ownerHoldsStdin: true).trim())
+              as Map<String, dynamic>;
+      expect(on['ownerHoldsStdin'], isTrue);
+    });
+
     // The host reads its bootstrap once and treats a missing flag as OFF, so a
     // construction site that forgets to pass consent must fall SILENT — never
     // report on a user who was never asked. Both constructors, both directions.
