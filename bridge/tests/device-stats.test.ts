@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
-import { createDeviceStatsStore, type DeviceStatsStore } from "../src/device-stats";
+import { availableFromVmStat, createDeviceStatsStore, type DeviceStatsStore } from "../src/device-stats";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, parseMessage, type AbMessage } from "../src/protocol";
 import { loadPairedPhones } from "../src/paired-phones";
@@ -80,6 +80,9 @@ async function boot(): Promise<{
   core.attachTransport(bus);
   core.onHandshakeComplete();
   await waitFor(() => sent.some((m) => m.type === "agent:status"), "agent:status");
+  // The read is async; a late handshake report would otherwise satisfy a test
+  // that cleared `sent` to watch for a later one.
+  await waitFor(() => sent.some((m) => m.type === "machine:stats"), "handshake machine:stats");
   core.setPeerSessionProvider((peerId) => {
     if (peerId === PEER_ID) return { peerId, peerPubkey: PHONE_PK };
     if (peerId === STRANGER_PEER_ID) return { peerId, peerPubkey: "PK_STRANGER" };
@@ -144,4 +147,45 @@ test("device:stats rejects negative and fractional byte counts", () => {
   expect(parseMessage(JSON.stringify({ ...base, ramTotalBytes: -1 }))).toBeNull();
   expect(parseMessage(JSON.stringify({ ...base, ramTotalBytes: 1.5 }))).toBeNull();
   expect(parseMessage(JSON.stringify({ ...base, model: "Pixel" }))).not.toBeNull();
+});
+
+// Captured from a 24 GiB macOS machine whose libuv freemem() read 0.15 GiB.
+const VM_STAT = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    17099.
+Pages active:                                 631726.
+Pages inactive:                               641925.
+Pages speculative:                               822.
+Pages throttled:                                   0.
+Pages wired down:                             155038.
+Pages purgeable:                               19278.
+"Translation faults":                     1432715957.
+Pages copy-on-write:                        99602521.
+Pages zero filled:                         660604173.
+Pages reactivated:                           2648912.
+Pages purged:                                1852315.
+File-backed pages:                            711129.
+Anonymous pages:                              563344.
+Pages stored in compressor:                   174763.
+Pages occupied by compressor:                  88746.
+Decompressions:                               725913.
+Compressions:                               13297407.
+Pageins:                                    50369270.
+Pageouts:                                       1430.
+Swapins:                                           0.
+Swapouts:                                          0.
+`;
+const GIB = 2 ** 30;
+
+test("macOS available RAM counts reclaimable file cache, as Activity Monitor does", () => {
+  // Used = (anonymous - purgeable) + wired + compressor = 787,850 pages.
+  expect(availableFromVmStat(VM_STAT, 24 * GIB)).toBe(24 * GIB - 787_850 * 16384);
+});
+
+test("a vm_stat missing a field falls back rather than guessing", () => {
+  expect(availableFromVmStat(VM_STAT.replace(/^Pages wired down:.*$/m, ""), 24 * GIB)).toBeNull();
+  expect(availableFromVmStat(VM_STAT.replace("page size of 16384 bytes", ""), 24 * GIB)).toBeNull();
+});
+
+test("macOS available RAM is clamped to the machine's total", () => {
+  expect(availableFromVmStat(VM_STAT, 1 * GIB)).toBe(0);
 });
