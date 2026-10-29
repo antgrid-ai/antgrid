@@ -20,6 +20,7 @@ import '../../models/memory.dart';
 import '../../providers/memory.dart';
 import 'memory_error.dart';
 import '../../util/detached.dart';
+import '../../util/relative_time.dart';
 
 const kMaxEvidenceReferences = 8;
 
@@ -336,16 +337,16 @@ class _RecordBodyState extends ConsumerState<_RecordBody> {
             ),
             _heading('Provenance'),
             _data('Memory', record.id),
-            if (record.projectId case final id?) _data('Project', id),
+            _data('Project', record.projectId),
             if (record.taskId case final id?) _data('Durable session', id),
             if (record.checkoutId case final id?)
               _data('Checkout restriction', id),
             for (final entry in record.source.entries)
               _data(entry.key, '${entry.value}'),
             if (record.createdAt case final date?)
-              _data('Created', date.toLocal().toIso8601String()),
+              _data('Created', absoluteTime(date)),
             if (record.updatedAt case final date?)
-              _data('Meaningful update', date.toLocal().toIso8601String()),
+              _data('Meaningful update', absoluteTime(date)),
             _heading('Evidence references'),
             if (record.evidence.isEmpty)
               Text(

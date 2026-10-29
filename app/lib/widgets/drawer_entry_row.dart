@@ -23,8 +23,7 @@ import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../models/memory.dart';
-import '../screens/memory_screen.dart';
-import '../util/detached.dart';
+import 'memory/memory_icon_button.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -138,19 +137,10 @@ class _MachineDrawerHeaderRowState
           // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
           // same reason — two owners of one cell is a fight.
           trailing: AbRowTrailingCell.kit([
-            AbIconButton(
-              icon: AbIcons.list,
-              tooltip: 'Machine memory',
-              onTap: () => detached(
-                'Memory',
-                'open failed',
-                () => openMemoryScreen(
-                  context,
-                  MemoryTarget.machine(
-                    machineId: machineUuid,
-                    label: entry.displayName,
-                  ),
-                ),
+            MemoryIconButton(
+              target: MemoryTarget.machine(
+                machineId: machineUuid,
+                label: entry.displayName,
               ),
             ),
             _DrawerEntryTrailing(
@@ -221,18 +211,7 @@ class LocalMachineBand extends ConsumerWidget {
             trailing: ref.watch(demoModeProvider)
                 ? const AbRowTrailingCell()
                 : AbRowTrailingCell.kit([
-                    AbIconButton(
-                      icon: AbIcons.list,
-                      tooltip: 'Machine memory',
-                      onTap: () => detached(
-                        'Memory',
-                        'open failed',
-                        () => openMemoryScreen(
-                          context,
-                          const MemoryTarget.machine(),
-                        ),
-                      ),
-                    ),
+                    const MemoryIconButton(target: MemoryTarget.machine()),
                     const AbRowTrailingCell(child: _LocalHostDot()),
                   ]),
           ),
@@ -686,17 +665,8 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     if (offersRemove || offersNewSession) {
       if (offersMemory) {
         cells.add(
-          AbIconButton(
-            icon: AbIcons.list,
-            tooltip: 'Project memory',
-            onTap: () => detached(
-              'Memory',
-              'open failed',
-              () => openMemoryScreen(
-                context,
-                MemoryTarget.project(entry.id, label: entry.displayName),
-              ),
-            ),
+          MemoryIconButton(
+            target: MemoryTarget.project(entry.id, label: entry.displayName),
           ),
         );
       }

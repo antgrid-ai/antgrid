@@ -216,6 +216,21 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
     );
   }
 
+  Widget _repairButton(String label, String failure) => AbButton(
+    label: label,
+    onTap: _busy
+        ? null
+        : () => detached('Memory', failure, () => _act({'op': 'repair'})),
+  );
+
+  Widget _warning(String text, {double top = AbTokens.space12}) => Padding(
+    padding: EdgeInsets.only(top: top),
+    child: Text(
+      text,
+      style: AbTokens.sansStyle(color: context.antgrid.warning),
+    ),
+  );
+
   Widget _content(MemorySnapshot snapshot) {
     final status = snapshot.status;
     if (!status.available) {
@@ -226,16 +241,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
             '${widget.target.isProject ? '\nOpen machine Memory to retry store recovery.' : ''}',
         action: widget.target.isProject
             ? AbButton(label: 'Refresh status', onTap: _reload)
-            : AbButton(
-                label: 'Retry store recovery',
-                onTap: _busy
-                    ? null
-                    : () => detached(
-                        'Memory',
-                        'recovery failed',
-                        () => _act({'op': 'repair'}),
-                      ),
-              ),
+            : _repairButton('Retry store recovery', 'recovery failed'),
       );
     }
     return ListView(
@@ -244,7 +250,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
         Text(
           widget.target.isProject
               ? 'Project and task memories on this machine.'
-              : 'User memories and all project histories on this machine, including removed projects.',
+              : 'All project histories on this machine, including removed projects.',
           style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
         ),
         const SizedBox(height: AbTokens.space8),
@@ -296,29 +302,18 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
             style: AbTokens.sansStyle(color: context.antgrid.textMuted),
           ),
           if (widget.target.isProject && status.paused)
-            Padding(
-              padding: const EdgeInsets.only(top: AbTokens.space8),
-              child: Text(
-                'All agent saves are paused for this local profile.',
-                style: AbTokens.sansStyle(color: context.antgrid.warning),
-              ),
+            _warning(
+              'All agent saves are paused for this local profile.',
+              top: AbTokens.space8,
             ),
         ],
         if (status.pendingOperations > 0)
-          Padding(
-            padding: const EdgeInsets.only(top: AbTokens.space12),
-            child: Text(
-              '${status.pendingOperations} pending save operations. Recovery waits for a verified live session.',
-              style: AbTokens.sansStyle(color: context.antgrid.warning),
-            ),
+          _warning(
+            '${status.pendingOperations} pending save operations. Recovery waits for a verified live session.',
           ),
         if (status.failedOperations > 0)
-          Padding(
-            padding: const EdgeInsets.only(top: AbTokens.space12),
-            child: Text(
-              '${status.failedOperations} save operations conflicted; inspect current findings before saving again.',
-              style: AbTokens.sansStyle(color: context.antgrid.warning),
-            ),
+          _warning(
+            '${status.failedOperations} save operations conflicted; inspect current findings before saving again.',
           ),
         if (status.recoveryStatus == 'cleanup_failed')
           Padding(
@@ -332,16 +327,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
                       'Open machine Memory to retry cleanup.',
                       style: AbTokens.sansStyle(),
                     )
-                  : AbButton(
-                      label: 'Retry storage cleanup',
-                      onTap: _busy
-                          ? null
-                          : () => detached(
-                              'Memory',
-                              'cleanup failed',
-                              () => _act({'op': 'repair'}),
-                            ),
-                    ),
+                  : _repairButton('Retry storage cleanup', 'cleanup failed'),
             ),
           ),
         if (status.searchStatus != 'ready')
@@ -353,16 +339,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen> {
               color: context.antgrid.warning,
               footer: widget.target.isProject
                   ? null
-                  : AbButton(
-                      label: 'Repair search index',
-                      onTap: _busy
-                          ? null
-                          : () => detached(
-                              'Memory',
-                              'repair failed',
-                              () => _act({'op': 'repair'}),
-                            ),
-                    ),
+                  : _repairButton('Repair search index', 'repair failed'),
             ),
           ),
         const SizedBox(height: AbTokens.space16),

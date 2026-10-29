@@ -147,7 +147,6 @@ bool _exportId(Object? value) =>
 
 bool _exportRecord(Map<String, dynamic> record, Object? owner) {
   const optionalIds = {
-    'project_id',
     'task_id',
     'checkout_id',
     'supersedes',
@@ -165,6 +164,7 @@ bool _exportRecord(Map<String, dynamic> record, Object? owner) {
     'created_at',
     'updated_at',
     'lifecycle',
+    'project_id',
     ...optionalIds,
   };
   final source = record['source'];
@@ -179,7 +179,8 @@ bool _exportRecord(Map<String, dynamic> record, Object? owner) {
         'observation',
         'note',
       }.contains(record['memory_type']) ||
-      !const {'user', 'project', 'task'}.contains(record['scope']) ||
+      !const {'project', 'task'}.contains(record['scope']) ||
+      !_exportId(record['project_id']) ||
       !const {
         'active',
         'expired',
@@ -219,9 +220,7 @@ class MemoryStatus {
       recoveryStatus = json['recovery_status'] as String? ?? 'ready',
       pendingOperations = json['pending_operations'] as int? ?? 0,
       failedOperations = json['failed_operations'] as int? ?? 0,
-      error = json['error'] is Map
-          ? (json['error'] as Map)['message'] as String?
-          : json['error'] as String?;
+      error = (json['error'] as Map?)?['message'] as String?;
   final bool available;
   final bool enabled;
   final bool paused;
@@ -240,7 +239,7 @@ class MemoryRecord {
       memoryType = json['memory_type'] as String,
       scope = json['scope'] as String,
       applicability = json['applicability'] as String? ?? '',
-      projectId = json['project_id'] as String?,
+      projectId = json['project_id'] as String,
       taskId = json['task_id'] as String?,
       checkoutId = json['checkout_id'] as String?,
       supersedes = json['supersedes'] as String?,
@@ -250,15 +249,14 @@ class MemoryRecord {
       evidence = (json['evidence'] as List? ?? const []).cast<String>(),
       createdAt = _date(json['created_at']),
       updatedAt = _date(json['updated_at']),
-      excerpted =
-          json['excerpted'] == true || json['content_complete'] == false;
+      excerpted = json['excerpted'] == true;
 
   final String id;
   final String content;
   final String memoryType;
   final String scope;
   final String applicability;
-  final String? projectId;
+  final String projectId;
   final String? taskId;
   final String? checkoutId;
   final String? supersedes;

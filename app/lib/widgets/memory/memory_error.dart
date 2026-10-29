@@ -6,6 +6,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart'
 import '../../launcher/host_control_client.dart';
 import '../../models/memory.dart';
 import '../../services/pending_reply.dart';
+import '../ab_status_helpers.dart';
 
 String memoryErrorCode(Object error) => switch (error) {
   MemoryException error => error.code,
@@ -19,7 +20,7 @@ String memoryErrorCopy(Object error, {bool mutation = false}) {
     MemoryException error => (error.code, error.message),
     RpcException error => (error.code, error.message),
     HostControlException error => (error.code, error.message),
-    _ => ('', '$error'),
+    _ => ('', ''),
   };
   if (code == 'UNKNOWN_OUTCOME' ||
       (mutation &&
@@ -39,5 +40,8 @@ String memoryErrorCopy(Object error, {bool mutation = false}) {
   if (code == 'CLEANUP_FAILED') {
     return 'Cleanup failed. Forgotten content is hidden, but cleanup has not completed. $message';
   }
-  return message;
+  // A MemoryException message is written for the user; other types go through
+  // the shared copy, which never shows a toString.
+  if (error is MemoryException) return message;
+  return caughtErrorCopy(error, 'Memory request failed. Try again.');
 }

@@ -21,7 +21,7 @@ import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
 import '../models/memory.dart';
 import '../models/session_entry.dart';
-import '../screens/memory_screen.dart';
+import 'memory/memory_icon_button.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
@@ -794,17 +794,8 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // inherits it at rest instead of sitting a full cell inboard of
             // every other row's trailing glyph.
             final memory = revealed && !demo
-                ? AbIconButton(
-                    icon: AbIcons.list,
-                    tooltip: 'Project memory',
-                    onTap: () => detached(
-                      'Memory',
-                      'open failed',
-                      () => openMemoryScreen(
-                        context,
-                        MemoryTarget.project(regId, label: name),
-                      ),
-                    ),
+                ? MemoryIconButton(
+                    target: MemoryTarget.project(regId, label: name),
                   )
                 : null;
             final cells = <Widget?>[];
