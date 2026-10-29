@@ -102,7 +102,7 @@ jobs:
           suffix=""
           if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
           mkdir -p .tmp/memory-qualification
-          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile --outfile ".tmp/memory-qualification/antgrid-bridge$suffix"
+          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile --outfile ".tmp/memory-qualification/antgrid-bridge$suffix" --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
           bun build bridge/scripts/memory-mcp-smoke.ts --compile --outfile ".tmp/memory-qualification/memory-smoke$suffix"
           ".tmp/memory-qualification/memory-smoke$suffix" "$(pwd)/.tmp/memory-qualification/antgrid-bridge$suffix"
 

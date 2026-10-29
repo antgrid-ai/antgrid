@@ -27,13 +27,19 @@ const MEMORY_BOOTSTRAP_MAX_BYTES = 1024;
 
 type Post = { path: string; body: Record<string, unknown> };
 
-async function memoryGuidanceEnabled(): Promise<boolean> {
+// Only a parsed 200 is an answer. A timeout, a non-200 or a malformed body says
+// nothing about the user's setting, so it is `undefined` and callers keep what
+// they last knew rather than flipping guidance on a transient fault.
+async function memoryGuidanceStatus(): Promise<boolean | undefined> {
+  // Set only when the launch registered the memory server; without it the
+  // guidance would name tools this session does not have.
+  if (process.env.ANTGRID_MEMORY_MCP !== "1") return false;
   const portText = process.env.ANTGRID_API_PORT;
   const terminalId = process.env.ANTGRID_TERMINAL_ID?.trim();
   const runId = process.env.ANTGRID_RUN_ID?.trim();
   const port = Number(portText);
   if (!portText || !/^\d+$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535
-    || !terminalId || terminalId.startsWith("${") || !runId || runId.startsWith("${")) return false;
+    || !terminalId || terminalId.startsWith("${") || !runId || runId.startsWith("${")) return undefined;
   try {
     const url = new URL(`http://127.0.0.1:${port}/memory/bootstrap`);
     url.searchParams.set("terminalId", terminalId);
@@ -46,7 +52,7 @@ async function memoryGuidanceEnabled(): Promise<boolean> {
     });
     if (!response.ok || !response.body) {
       await response.body?.cancel();
-      return false;
+      return undefined;
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -57,7 +63,7 @@ async function memoryGuidanceEnabled(): Promise<boolean> {
         const { done, value } = await reader.read();
         if (done) break;
         bytes += value.byteLength;
-        if (bytes > MEMORY_BOOTSTRAP_MAX_BYTES) return false;
+        if (bytes > MEMORY_BOOTSTRAP_MAX_BYTES) return undefined;
         text += decoder.decode(value, { stream: true });
       }
       text += decoder.decode();
@@ -68,13 +74,14 @@ async function memoryGuidanceEnabled(): Promise<boolean> {
     const status: unknown = JSON.parse(text);
     // This installed asset has no runtime dependencies. Mirror the narrow
     // bridge schema and refuse extra fields so memory content cannot enter it.
-    if (!status || typeof status !== "object" || Array.isArray(status)) return false;
+    if (!status || typeof status !== "object" || Array.isArray(status)) return undefined;
     const result = status as Record<string, unknown>;
-    return Object.keys(result).length === 4
-      && result.available === true && result.enabled === true
-      && result.paused === false && result.project_paused === false;
+    if (Object.keys(result).length !== 4 || result.available !== true
+      || typeof result.enabled !== "boolean" || typeof result.paused !== "boolean"
+      || typeof result.project_paused !== "boolean") return undefined;
+    return result.enabled && !result.paused && !result.project_paused;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -108,6 +115,30 @@ export const AntgridSessionNamer: Plugin = async () => {
   // session, publishing session.updated, before every prompt into it, so a child
   // is always classified before its first `busy`.
   const children = new Set<string>();
+  // The system transform runs on every model request and sits on its critical
+  // path. Only the first request waits for the bridge; later ones use the last
+  // definitive answer and refresh it behind the request, so a slow or failing
+  // bridge never delays or flickers the guidance. The answer is the user's
+  // setting for this terminal, not per native session, hence one shared value.
+  const GUIDANCE_REFRESH_MS = 30_000;
+  let guidance: { value: boolean; refreshing: boolean; checkedAt: number } | undefined;
+  let firstGuidance: Promise<boolean> | undefined;
+  const guidanceFor = async (): Promise<boolean> => {
+    if (!guidance) {
+      firstGuidance ??= memoryGuidanceStatus().then((status) => {
+        guidance = { value: status ?? false, refreshing: false, checkedAt: Date.now() };
+        return guidance.value;
+      });
+      return firstGuidance;
+    }
+    const known = guidance;
+    if (!known.refreshing && Date.now() - known.checkedAt >= GUIDANCE_REFRESH_MS) {
+      known.refreshing = true;
+      known.checkedAt = Date.now();
+      void memoryGuidanceStatus().then((fresh) => { if (fresh !== undefined) known.value = fresh; }, () => {}).finally(() => { known.refreshing = false; });
+    }
+    return known.value;
+  };
   // Root sessions this plugin has seen go busy and not yet seen go idle.
   const working = new Set<string>();
   // A root session's own error, held until its run actually stops: opencode
@@ -338,7 +369,7 @@ export const AntgridSessionNamer: Plugin = async () => {
         if (output.system[index] === MEMORY_AGENT_GUIDANCE) output.system.splice(index, 1);
       }
       if (!input.sessionID || children.has(input.sessionID)) return;
-      if (await memoryGuidanceEnabled()) output.system.push(MEMORY_AGENT_GUIDANCE);
+      if (await guidanceFor()) output.system.push(MEMORY_AGENT_GUIDANCE);
     },
     event: async ({ event }: { event: any }) => {
       const port = process.env.ANTGRID_API_PORT;

@@ -47,7 +47,14 @@ export function augmentAgentLaunch(
       const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
       const memoryMcpCommand = options.memoryMcpCommand
         ?? (options.mcpCommand ? undefined : agentHost().memoryMcpCommand?.());
-      if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand, memoryMcpCommand });
+      if (mcpCommand) {
+        mcp = spec.mcp.inject({ abDir, mcpCommand, memoryMcpCommand });
+        // Guidance is offered only for a server the agent was actually handed:
+        // a profile that fails soft (unmergeable config, unwritable file)
+        // returns NO_INJECTION and must not leave the agent told about tools
+        // it does not have.
+        if (memoryMcpCommand && mcp !== NO_INJECTION) mcp = { ...mcp, env: { ...mcp.env, ANTGRID_MEMORY_MCP: "1" } };
+      }
     } catch (err) {
       log.warn("agent MCP augmentation failed for %s: %s", tool, err);
     }

@@ -1,4 +1,5 @@
 import { redactSave } from "antgrid-memory";
+import { readApiPort, readRunId, readTerminalId } from "../session-env";
 
 export interface MemoryApiError {
   error: { code: string; message: string };
@@ -28,11 +29,10 @@ function uncertainRefusal(operation_key: string, current: ApiReply, stage: "prep
 }
 
 export function memoryApiIdentity(env: NodeJS.ProcessEnv = process.env) {
-  const port = Number(env.ANTGRID_API_PORT);
-  const terminalId = env.ANTGRID_TERMINAL_ID?.trim();
-  const runId = env.ANTGRID_RUN_ID?.trim();
-  if (!Number.isInteger(port) || port < 1 || port > 65535
-    || !terminalId || terminalId.startsWith("${") || !runId || runId.startsWith("${")) return null;
+  const port = readApiPort(env);
+  const terminalId = readTerminalId(env);
+  const runId = readRunId(env);
+  if (port === null || !terminalId || !runId) return null;
   return { base: `http://127.0.0.1:${port}`, terminalId, runId };
 }
 

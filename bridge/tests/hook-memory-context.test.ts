@@ -21,7 +21,7 @@ function harness(options: {
   return {
     posts, requests, outputs,
     run: () => runHookInvocation({ agent: options.agent ?? "codex", event: options.event ?? "session-start" }, {
-      env: { ANTGRID_API_PORT: "43123", ANTGRID_TERMINAL_ID: "trusted-session", ANTGRID_RUN_ID: "trusted-run", ...options.env },
+      env: { ANTGRID_API_PORT: "43123", ANTGRID_TERMINAL_ID: "trusted-session", ANTGRID_RUN_ID: "trusted-run", ANTGRID_MEMORY_MCP: "1", ...options.env },
       readStdin: async () => JSON.stringify({ source: options.source, session_id: "native-session", transcript_path: "/unread/transcript", terminalId: "spoof-session", runId: "spoof-run" }),
       readFile: () => { throw new Error("Hook output must not read a fallback or transcript"); },
       post: async (post) => { posts.push(post); },
@@ -83,6 +83,14 @@ describe("Codex static memory guidance", () => {
     expect(h.outputs).toEqual([]);
   });
 
+  test.each([undefined, "0", ""])("without the registered-server flag (%p) no bootstrap request is made", async (flag) => {
+    const h = harness({ response: enabled, env: { ANTGRID_MEMORY_MCP: flag } });
+    await h.run();
+    expect(h.requests).toEqual([]);
+    expect(h.outputs).toEqual([]);
+    expect(h.posts.map((post) => post.path)).toEqual(["/hook-alive", "/session-title"]);
+  });
+
   test.each(["user-prompt", "post-tool-use", "stop", "after-agent", "permission-request", "invented"])("other Codex event %s has no bootstrap request", async (event) => {
     const h = harness({ event, response: enabled });
     await h.run();
@@ -117,7 +125,7 @@ test("source hook emits only validated JSON and bounds bootstrap transport", asy
   try {
     for (reply of ["enabled", "error", "oversized", "redirect", "slow"]) {
       const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "index.ts"), "hook", "codex", "session-start"], {
-        env: { ...process.env, ANTGRID_API_PORT: String(server.port), ANTGRID_TERMINAL_ID: "session-with-?&", ANTGRID_RUN_ID: "run" },
+        env: { ...process.env, ANTGRID_API_PORT: String(server.port), ANTGRID_TERMINAL_ID: "session-with-?&", ANTGRID_RUN_ID: "run", ANTGRID_MEMORY_MCP: "1" },
         stdin: "pipe", stdout: "pipe", stderr: "pipe",
       });
       proc.stdin.write(JSON.stringify({ source: "startup", session_id: "native" }));
@@ -135,4 +143,24 @@ test("source hook emits only validated JSON and bounds bootstrap transport", asy
       expect(request.body).toEqual({ runId: "run" });
     }
   } finally { server.stop(true); }
+}, 15_000);
+
+test("a warning logged while the hook runs goes to stderr, never into the agent's stdout", async () => {
+  const script = `
+    import { runHookCli } from ${JSON.stringify(join(import.meta.dir, "..", "src", "cli", "hook.ts"))};
+    import { logger } from ${JSON.stringify(join(import.meta.dir, "..", "src", "logger.ts"))};
+    await runHookCli("codex", "session-start", undefined, {
+      env: { ANTGRID_API_PORT: "43123", ANTGRID_TERMINAL_ID: "t", ANTGRID_RUN_ID: "r", ANTGRID_MEMORY_MCP: "1" },
+      readStdin: async () => "{}",
+      readFile: () => "",
+      post: async () => { logger.warn("hook post failed"); },
+      request: async () => (${JSON.stringify(enabled)}),
+      writeStdout: (output) => { process.stdout.write(output); },
+    });
+  `;
+  const proc = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
+  const [code, output, errors] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  expect(code).toBe(0);
+  expect(JSON.parse(output)).toEqual({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: MEMORY_AGENT_GUIDANCE } });
+  expect(errors).toContain("hook post failed");
 }, 15_000);

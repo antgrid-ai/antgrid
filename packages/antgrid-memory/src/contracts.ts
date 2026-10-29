@@ -15,7 +15,7 @@ function boundedText(field: string, limit: number, nonempty = false) {
 const id = z.string().min(1).max(256);
 const exportCursor = boundedText("export cursor", LIMITS.exportCursor, true);
 export const MemoryTypeSchema = z.enum(["preference", "task_state", "observation", "note"]);
-export const MemoryScopeSchema = z.enum(["user", "project", "task"]);
+export const MemoryScopeSchema = z.enum(["project", "task"]);
 export const MemorySaveSchema = z.object({
   content: boundedText("content", LIMITS.content, true),
   memory_type: MemoryTypeSchema,
@@ -48,6 +48,12 @@ export const MemoryRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("repair") }).strict(),
 ]);
 export type MemoryRequest = z.infer<typeof MemoryRequestSchema>;
+// Wire messages carry the request as a plain record so their own schema stays
+// a discriminated union; the memory issues are forwarded with their paths.
+export const MemoryRequestRecordSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {
+  const parsed = MemoryRequestSchema.safeParse(value);
+  if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+});
 
 export interface MemoryContext {
   owner_id: string;
@@ -64,7 +70,7 @@ export const MemorySourceSchema = z.object({
 });
 export const MemoryRecordSchema = z.object({
   id, owner_id: id, content: z.string(), memory_type: MemoryTypeSchema, scope: MemoryScopeSchema,
-  project_id: id.optional(), task_id: id.optional(), checkout_id: id.optional(),
+  project_id: id, task_id: id.optional(), checkout_id: id.optional(),
   applicability: z.string().optional(), evidence: z.array(z.string()), source: MemorySourceSchema,
   supersedes: id.optional(), superseded_by: id.optional(), created_at: z.number(), updated_at: z.number(),
   lifecycle: z.enum(["active", "expired", "superseded"]),
@@ -88,9 +94,16 @@ export const MemoryResultSchema = z.union([
   z.object({ version: z.literal(1), owner_id: id, exported_at: z.number().int(), records: z.array(MemoryRecordSchema).max(LIMITS.exportRecords), next_cursor: exportCursor.nullable() }),
 ]);
 
+export const MEMORY_OFF = "Antgrid Memory is turned off; the user can enable it in Antgrid settings";
+
 export class MemoryError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "MemoryError"; }
 }
+
+// A mask is never longer than the secret it replaces, so redaction cannot push a
+// save that passed the byte limits over them. Re-redacting a mask must leave it
+// unchanged, because recovery redacts stored payloads a second time.
+const mask = (secret: string): string => secret.length >= 10 ? "[REDACTED]" : "*".repeat(secret.length);
 
 // Redaction precedes both canonical storage and the adapter's durable retry queue.
 function redact(text: string): string {
@@ -98,11 +111,11 @@ function redact(text: string): string {
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]")
     .replace(/\b(?:sk-[\w-]{16,}|gh[pousr]_[\w]{20,}|github_pat_[\w]{20,}|AKIA[A-Z0-9]{16})\b/g, "[REDACTED]")
     .replace(/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}\b/g, "[REDACTED]")
-    .replace(/\b(Bearer\s+)[\w.+\/-]{8,}=*/gi, "$1[REDACTED]")
-    .replace(/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*["']?)[^\s"',;]+/gi, "$1[REDACTED]")
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@");
+    .replace(/\b(Bearer\s+)([\w.+\/-]{8,}=*)/gi, (_, prefix: string, secret: string) => prefix + mask(secret))
+    .replace(/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*["']?)([^\s"',;]+)/gi, (_, prefix: string, secret: string) => prefix + mask(secret))
+    .replace(/(https?:\/\/)([^\s/@:]+:[^\s/@]+)@/gi, (_, scheme: string, secret: string) => `${scheme}${mask(secret)}@`);
 }
 export function redactSave(raw: unknown): MemorySave {
   const save = MemorySaveSchema.parse(raw);
-  return MemorySaveSchema.parse({ ...save, content: redact(save.content), applicability: save.applicability === undefined ? undefined : redact(save.applicability), evidence: save.evidence.map(redact) });
+  return { ...save, content: redact(save.content), ...(save.applicability === undefined ? {} : { applicability: redact(save.applicability) }), evidence: save.evidence.map(redact) };
 }

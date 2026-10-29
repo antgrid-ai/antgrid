@@ -39,11 +39,9 @@ test("native memory inspection, correction, forgetting and restart preserve prof
     const original = { content: "Quartz build requires tool version 3", memory_type: "observation", scope: "project", applicability: "Windows only; macOS unverified" };
     let own: Record<string, unknown>;
     let foreign: Record<string, unknown>;
-    let user: Record<string, unknown>;
     try {
       own = await fixture.execute(caller, { op: "save", operation_key: "original", save: original });
       foreign = await fixture.execute({ ...caller, project_id: "unrelated-project" }, { op: "save", operation_key: "foreign", save: { ...original, content: "Quartz unrelated project finding" } });
-      user = await fixture.execute(caller, { op: "save", operation_key: "user", save: { ...original, scope: "user", content: "Quartz personal preference" } });
       await fixture.execute(caller, { op: "save", operation_key: "task", save: { ...original, scope: "task", memory_type: "task_state", restrict_to_checkout: true, content: "Quartz temporary progress" } });
       await fixture.execute(caller, { op: "prepare", operation_key: "pending-duplicate", save: original });
     } finally { fixture.close(); }
@@ -52,10 +50,9 @@ test("native memory inspection, correction, forgetting and restart preserve prof
     expect(matches.ok).toBe(true);
     expect(matches.result.results).toHaveLength(2);
     expect((await projectRequest(env, streamId, { op: "get", id: foreign.id })).error.code).toBe("NOT_FOUND");
-    expect((await projectRequest(env, streamId, { op: "get", id: user.id })).error.code).toBe("NOT_FOUND");
     expect((await projectRequest(env, streamId, { op: "get", id: foreign.id, project_id: "unrelated-project" })).error.code).toBe("INVALID_ARGUMENT");
     const exported = await machineRequest(env, { op: "export" });
-    expect(exported.result.records).toHaveLength(4);
+    expect(exported.result.records).toHaveLength(3);
     expect(JSON.stringify(exported.result)).not.toContain("fixture-run");
     expect(exported.result).not.toHaveProperty("operations");
 

@@ -2,7 +2,7 @@ import { clipboardMessages, CLIPBOARD_MESSAGE_TYPES, TerminalClipboardMessageSch
 export * from "./terminal-clipboard/protocol";
 import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
-import { MemoryRequestSchema, MemoryResultSchema } from "antgrid-memory";
+import { MemoryRequestRecordSchema, MemoryResultSchema } from "antgrid-memory";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
 import {
@@ -2701,10 +2701,7 @@ const NetwatchEventsMessage = BaseMessage.extend({
 export const MemoryRequestMessage = BaseMessage.extend({
   type: z.literal("memory:request"),
   requestId: z.string().min(1),
-  request: z.record(z.string(), z.unknown()).superRefine((value, context) => {
-    const parsed = MemoryRequestSchema.safeParse(value);
-    if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-  }),
+  request: MemoryRequestRecordSchema,
 });
 
 const MemoryResultMessage = BaseMessage.extend({

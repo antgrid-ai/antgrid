@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryService, TASK_EXPIRY_MS, MemoryResultSchema, bytes, type MemoryContext, type MemoryRecord } from "../src";
+import { LIMITS, MemoryService, TASK_EXPIRY_MS, MemoryResultSchema, bytes, redactSave, type MemoryContext, type MemoryRecord } from "../src";
 
 let directory: string;
 let service: MemoryService;
@@ -52,19 +52,44 @@ describe("local ownership and controls", () => {
     await rejects(second.execute(agent, { op: "status" }), "FORBIDDEN");
     second.close();
   });
-  test("profile and originating project pause include user saves; edits, reads and forget still work", async () => {
-    const created = await save({ scope: "user" });
+  test("profile and originating project pause stop agent saves; app edits, reads and forget still work", async () => {
+    const created = await save();
     const projectApp = { ...app, project_id: agent.project_id };
     await call(projectApp, { op: "settings", project_paused: true });
-    await rejects(save({ scope: "user" }), "PAUSED");
-    await save({ content: "other project", scope: "user" }, "other-project", { ...agent, project_id: "other" });
+    await rejects(save({ content: "paused project" }), "PAUSED");
+    await save({ content: "other project" }, "other-project", { ...agent, project_id: "other" });
     expect((await record(created.id)).content).toContain("JDK");
     await call(app, { op: "settings", paused: true });
     await rejects(save({}, "paused-other", { ...agent, project_id: "other" }), "PAUSED");
-    const correction = await save({ scope: "user", content: "Corrected finding", supersedes: created.id }, "app-correct", app);
+    expect((await call(agent, { op: "search", query: "JDK" })).results).toMatchObject([{ id: created.id }]);
+    const correction = await save({ content: "JDK 21 is required for the CMake configure step", supersedes: created.id }, "app-correct", app);
     await call(agent, { op: "forget", id: correction.id });
     await rejects(record(created.id, app, true), "NOT_FOUND");
     await rejects(call(projectApp, { op: "settings", paused: false }), "FORBIDDEN");
+  });
+  test("turning memory off withdraws it from agents while the app can still inspect and forget", async () => {
+    const kept = await save();
+    await call(agent, { op: "prepare", operation_key: "queued", save: finding({ content: "queued while enabled" }) });
+    await call(app, { op: "settings", enabled: false });
+    for (const request of [
+      { op: "search", query: "JDK" }, { op: "get", id: kept.id }, { op: "forget", id: kept.id }, { op: "recover" },
+      { op: "prepare", operation_key: "off", save: finding() }, { op: "save", operation_key: "off", save: finding() },
+    ]) await rejects(call(agent, request), "DISABLED");
+    expect(await call(agent, { op: "status" })).toMatchObject({ enabled: false, pending_operations: 1 });
+    expect((await call(app, { op: "list" })).results).toMatchObject([{ id: kept.id }]);
+    expect((await call(app, { op: "export" })).records).toMatchObject([{ id: kept.id }]);
+    expect((await record(kept.id, app)).id).toBe(kept.id);
+    await call(app, { op: "forget", id: kept.id });
+    expect((await call(app, { op: "list", history: true })).results).toEqual([]);
+    await call(app, { op: "settings", enabled: true });
+    expect((await call(agent, { op: "recover" })).recovered).toHaveLength(1);
+  });
+  test("the user scope does not exist, so no caller can save, prepare or correct into it", async () => {
+    const created = await save();
+    await rejects(save({ scope: "user" }), "INVALID_ARGUMENT");
+    await rejects(call(agent, { op: "prepare", operation_key: "user-prepare", save: finding({ scope: "user" }) }), "INVALID_ARGUMENT");
+    await rejects(save({ scope: "user", supersedes: created.id }, "app-user", app), "INVALID_ARGUMENT");
+    expect(sql().query("SELECT count(*) AS n FROM operations").get()).toEqual({ n: 1 });
   });
   test("agents cannot use app-only operations or provide source identities", async () => {
     for (const op of ["export", "list", "repair", "settings"]) await rejects(call(agent, { op }), "FORBIDDEN");
@@ -121,7 +146,7 @@ describe("atomic persistence, duplicates and correction history", () => {
     await call(app, { op: "repair" });
     expect((await save({ content: "new value", supersedes: first.id }, "rollback")).outcome).toBe("saved");
   });
-  test("migration failure never resets a database and derived index loss is repaired", async () => {
+  test("an unopenable database is never reset and derived index loss is repaired", async () => {
     const first = await save();
     service.close();
     const db = sql();
@@ -140,7 +165,7 @@ describe("atomic persistence, duplicates and correction history", () => {
     expect(verify.query("PRAGMA user_version").get()).toEqual({ user_version: 99 });
     verify.close();
   });
-  test("failed first migration rolls back every new table without discarding existing data", () => {
+  test("a failed store creation rolls back every new table without discarding existing data", () => {
     const path = join(directory, "memory.sqlite");
     service.close();
     const existing = new Database(path);
@@ -150,7 +175,7 @@ describe("atomic persistence, duplicates and correction history", () => {
     const verify = new Database(path);
     expect(verify.query("PRAGMA user_version").get()).toEqual({ user_version: 0 });
     expect(verify.query("SELECT owner_id FROM profile").get()).toEqual({ owner_id: app.owner_id });
-    verify.exec("PRAGMA user_version=2");
+    verify.exec("PRAGMA user_version=1");
     verify.close();
     service = new MemoryService({ directory, now: () => now });
   });
@@ -180,14 +205,12 @@ describe("authorization and lifecycle", () => {
   test("search and get enforce the same project/session/checkout and owner restrictions", async () => {
     const task = await save({ scope: "task", restrict_to_checkout: true });
     const project = await save({ content: "project JDK" });
-    const user = await save({ content: "user JDK", scope: "user" });
+    await save({ content: "elsewhere JDK" }, "elsewhere", { ...agent, project_id: "elsewhere" });
     for (const ctx of [{ ...agent, project_id: "elsewhere" }, { ...agent, session_id: "fork" }, { ...agent, checkout_id: "other-tree" }]) {
       await rejects(record(task.id, ctx, true), "NOT_FOUND");
       expect((await call(ctx, { op: "search", query: "initialization" })).results).toHaveLength(0);
     }
     await rejects(record(project.id, { ...agent, project_id: "elsewhere" }), "NOT_FOUND");
-    expect((await record(user.id, { ...agent, project_id: "elsewhere" })).scope).toBe("user");
-    await rejects(record(user.id, { ...app, project_id: agent.project_id }), "NOT_FOUND");
     expect((await call(app, { op: "list" })).results).toHaveLength(3);
     expect((await call({ ...app, project_id: agent.project_id }, { op: "list" })).results).toHaveLength(2);
   });
@@ -233,6 +256,17 @@ describe("pending operation recovery and forgetting", () => {
     expect(await call(agent, { op: "status" })).toMatchObject({ pending_operations: 0, failed_operations: 0 });
     expect(JSON.stringify(sql().query("SELECT * FROM operations").all())).not.toContain("REDACTED");
   });
+  test("redaction never grows a save past its byte limit and redacts its own output identically", async () => {
+    for (const unit of ["Bearer abcdefgh ", "Bearer abcdefghijklmnop ", "password=x ", "secret: 'abcdefghijklmn';", "http://a:b@ ", "https://user:longpassword@example.test/ "]) {
+      const repeated = unit.repeat(Math.floor(LIMITS.content / bytes(unit)));
+      const content = repeated + ".".repeat(LIMITS.content - bytes(repeated));
+      expect(bytes(content)).toBe(LIMITS.content);
+      const stored = (await record((await save({ content })).id)).content;
+      expect(bytes(stored)).toBeLessThanOrEqual(LIMITS.content);
+      expect(stored).not.toMatch(/abcdefgh|=x|a:b@|user:|longpassword/);
+      expect(redactSave({ content: stored, memory_type: "note", scope: "project" }).content).toBe(stored);
+    }
+  });
   test("JSON credential values and bearer tokens are redacted before any durable payload", async () => {
     const content = 'Configuration {"password": "private-password"} Authorization: Bearer abcdefghijklmnop';
     await call(agent, { op: "prepare", operation_key: "credentials", save: finding({ content }) });
@@ -271,6 +305,16 @@ describe("pending operation recovery and forgetting", () => {
     const operations = sql().query("SELECT payload,payload_hash,match_hash,target_id,record_id,state FROM operations").all();
     for (const operation of operations) expect(operation).toEqual({ payload: null, payload_hash: null, match_hash: null, target_id: null, record_id: null, state: "suppressed" });
     expect(sql().query("SELECT count(*) AS n FROM memory_fts").get()).toEqual({ n: 0 });
+  });
+  test("forgetting finds a correction chain and its receipts by index, not by scanning", () => {
+    const db = sql();
+    for (const query of [
+      "SELECT * FROM records WHERE id=? OR id=? OR supersedes=?",
+      "SELECT 1 FROM operations WHERE record_id=? OR target_id=? OR (state='pending' AND match_hash=?)",
+    ]) {
+      const plan = db.query(`EXPLAIN QUERY PLAN ${query}`).all("a", "b", "c") as { detail: string }[];
+      expect(plan.map(row => row.detail).filter(detail => detail.startsWith("SCAN"))).toEqual([]);
+    }
   });
   test("bounded lock retry revalidates caller before another attempt", async () => {
     const db = sql();

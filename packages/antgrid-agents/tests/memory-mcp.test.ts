@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inject as claude } from "../src/agents/claude-code/mcp";
@@ -79,4 +79,35 @@ test("chat launch explicitly suppresses both MCP servers", () => {
   const ctx = context();
   const launch = augmentAgentLaunch("codex", { ...ctx, mcp: false, hookCommand: { binary: "bridge", preargs: ["hook"] } });
   expect(launch.args.some(arg => arg.startsWith("mcp_servers."))).toBe(false);
+});
+
+const hookCommand = { binary: "bridge", preargs: ["hook"] };
+
+test("the guidance flag is set only for a launch that registered the memory server", () => {
+  const ctx = context();
+  const { memoryMcpCommand, ...withoutMemory } = ctx;
+  expect(augmentAgentLaunch("codex", { ...ctx, hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
+  expect(augmentAgentLaunch("codex", { ...withoutMemory, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+  expect(augmentAgentLaunch("codex", { ...ctx, mcp: false, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+});
+
+test("a profile that injects nothing leaves no guidance flag", () => {
+  const previous = process.env.OPENCODE_CONFIG_CONTENT;
+  try {
+    process.env.OPENCODE_CONFIG_CONTENT = "not-json";
+    expect(augmentAgentLaunch("opencode", { ...context(), hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+    delete process.env.OPENCODE_CONFIG_CONTENT;
+    expect(augmentAgentLaunch("opencode", { ...context(), hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT; else process.env.OPENCODE_CONFIG_CONTENT = previous;
+  }
+});
+
+test("a Claude config that cannot be written leaves no guidance flag", () => {
+  const ctx = context();
+  // A file where the directory should be makes every materialization fail.
+  const blocked = join(ctx.abDir, "blocked");
+  writeFileSync(blocked, "");
+  expect(augmentAgentLaunch("claude-code", { ...ctx, abDir: blocked, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+  expect(augmentAgentLaunch("claude-code", { ...ctx, hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
 });

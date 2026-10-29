@@ -19,6 +19,9 @@ test("memory MCP advertises only its four tools and static guidance", async () =
     await client.connect(clientTransport);
     expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(["memory_search", "memory_get", "memory_save", "memory_forget"]);
     expect(client.getInstructions()).toBe(MEMORY_INSTRUCTIONS);
+    const save = (await client.listTools()).tools.find(tool => tool.name === "memory_save")!;
+    expect((save.inputSchema.properties as { scope: { enum: string[] } }).scope.enum).toEqual(["project", "task"]);
+    expect(MEMORY_INSTRUCTIONS).not.toMatch(/use user scope/i);
     const result = await client.callTool({ name: "memory_get", arguments: { id: "expired", history: true } });
     expect(result.isError).toBe(true);
     expect(calls).toEqual([{ op: "get", body: { id: "expired", history: true } }]);

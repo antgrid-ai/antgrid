@@ -1,4 +1,4 @@
-import { agentRuntime } from "./agent-host";
+import { agentRuntime, memoryMcpCommandForLaunch } from "./agent-host";
 import { withAgentHost } from "antgrid-agents/host";
 import { augmentAgentLaunch as augment } from "antgrid-agents/agent-launch-augmenter";
 import { resolveApprovalPolicy as approval } from "antgrid-agents/agent-approval-policy";
@@ -6,7 +6,7 @@ import type { AgentRuntime } from "antgrid-agents/runtime";
 import type { TerminalObservationAvailability } from "antgrid-agents/contracts";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveHookCommand, resolveMcpCommand, resolveMemoryMcpCommand, type ResolveBridgeCommandOptions } from "./hook-command";
+import { resolveHookCommand, resolveMcpCommand, type ResolveBridgeCommandOptions } from "./hook-command";
 import type { AugmentOptions } from "antgrid-agents/agent-launch-augmenter";
 
 export { agentRuntime };
@@ -50,7 +50,7 @@ export const opensProvisionalTurn = (tool: string | undefined) => {
 export const augmentAgentLaunch = (tool: string, { self, ...options }: AugmentOptions & { self?: ResolveBridgeCommandOptions } = {}) =>
   withAgentHost(agentRuntime.host, () => augment(tool, {
     ...options,
-    ...(self ? { hookCommand: resolveHookCommand(self), mcpCommand: resolveMcpCommand(self), memoryMcpCommand: resolveMemoryMcpCommand(self) } : {}),
+    ...(self ? { hookCommand: resolveHookCommand(self), mcpCommand: resolveMcpCommand(self), memoryMcpCommand: memoryMcpCommandForLaunch(self) } : {}),
   }, agentRuntime.get));
 export const resolveApprovalPolicy: typeof approval = (tool, mode, policy) => approval(tool, mode, policy, agentRuntime.get);
 export function useAgentRuntime<T>(runtime: AgentRuntime, operation: (runtime: AgentRuntime) => T): T {

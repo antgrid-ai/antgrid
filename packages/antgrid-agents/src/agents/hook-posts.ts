@@ -28,6 +28,9 @@ export interface HookStdoutContext {
 
 export interface HookStdoutProfile {
   events: readonly string[];
+  /** Skips the request entirely when false, so an agent launched without the
+   *  capability this output advertises is never asked about it. */
+  when?: (env: Readonly<Record<string, string | undefined>>) => boolean;
   request: (ctx: HookStdoutContext) => HookPost;
   /** The provider validates the reply and constructs its own fixed output. */
   formatResponse: (response: unknown) => unknown | null;

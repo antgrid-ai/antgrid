@@ -13,7 +13,7 @@ import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/
 // Every filesystem write is redirected into a fresh temp dir. Nothing here may
 // touch the developer's real ~/.cursor, ~/.claude, ~/.codex or ~/.antgrid —
 // same discipline as runningUnderTest (packages/antgrid-agents/src/agents/test-runner.ts).
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-res
 import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-runtime";
+import { setMemoryLaunchGate } from "../src/agent-host";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
 import { withUserEnv } from "./support/user-env";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
@@ -63,6 +64,11 @@ function tmp(prefix: string): string {
   tmpDirs.push(dir);
   return dir;
 }
+// The memory server is registered only once the user has enabled memory.
+let releaseMemoryGate: (() => void) | undefined;
+beforeEach(() => { releaseMemoryGate = setMemoryLaunchGate(() => true); });
+afterEach(() => releaseMemoryGate?.());
+
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) {
     try {
@@ -419,7 +425,7 @@ describe("launch augmentation", () => {
       // session's own args, which are folded in right after it.
       `--mcp-config=${join(abDir, "mcp", "claude.json")}`,
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
   });
 
@@ -428,7 +434,7 @@ describe("launch augmentation", () => {
     expect(a.args).toEqual([
       "-c", CODEX_NOTIFY_ARG, ...CODEX_TUI_ARGS, ...CODEX_INJECTION, ...CODEX_MCP_INJECTION,
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     // Codex reports no outcome; session-manager reads undefined as success.
     expect(a.notificationsInjected).toBeUndefined();
   });
@@ -437,7 +443,7 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     const a = augment("opencode", abDir, tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
-    expect(Object.keys(a.env).sort()).toEqual(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
+    expect(Object.keys(a.env).sort()).toEqual(["ANTGRID_MEMORY_MCP", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
     expect(a.env.OPENCODE_CONFIG).toBe(join(abDir, "agents", "opencode-session-namer.json"));
     expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
     expect(a.notificationsInjected).toBeUndefined();
@@ -448,7 +454,7 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     const a = augment("cursor-agent", abDir, cursorDir);
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
   });
 
@@ -458,7 +464,7 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     expect(augmentAgentLaunch("cursor-agent", { abDir, cursorDir: notADir, self: BRIDGE_SELF })).toEqual({
       args: ["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")],
-      env: {},
+      env: { ANTGRID_MEMORY_MCP: "1" },
       notificationsInjected: false,
       observation: NO_OBSERVATION,
     });
@@ -473,14 +479,14 @@ describe("launch augmentation", () => {
       "--additional-mcp-config",
       `@${join(abDir, "mcp", "copilot.json").replace(/\\/g, "/")}`,
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBeUndefined();
   });
 
   test("kilo materializes its identity plugin and MCP entry", () => {
     const a = augment("kilo", tmp("ab-spec-"), tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
-    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT"]);
+    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT", "ANTGRID_MEMORY_MCP"]);
     expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
   });
 

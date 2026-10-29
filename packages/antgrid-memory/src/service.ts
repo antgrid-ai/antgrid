@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import {
-  LIMITS, TASK_EXPIRY_MS, MemoryError, MemoryRequestSchema, MemoryRecordSchema, bytes, redactSave,
+  LIMITS, MEMORY_OFF, TASK_EXPIRY_MS, MemoryError, MemoryRequestSchema, MemoryRecordSchema, bytes, redactSave,
   type MemoryContext, type MemoryRecord, type MemoryRequest, type MemorySave,
 } from "./contracts";
 import { ftsQuery, searchResponse } from "./search";
@@ -9,7 +9,7 @@ import { MemoryStore } from "./store";
 
 type ContextSource = MemoryContext | (() => MemoryContext);
 type Row = {
-  id: string; owner_id: string; scope: MemoryRecord["scope"]; project_id: string | null;
+  id: string; owner_id: string; scope: MemoryRecord["scope"]; project_id: string;
   task_id: string | null; checkout_id: string | null; memory_type: MemoryRecord["memory_type"];
   content: string; applicability: string | null; evidence: string; source: string;
   supersedes: string | null; superseded_by: string | null; created_at: number; updated_at: number; match_hash: string;
@@ -21,13 +21,14 @@ type Operation = {
   origin_project_id: string | null;
   failure_code: string | null;
 };
-type Placement = { scope: MemoryRecord["scope"]; project_id: string | null; task_id: string | null; checkout_id: string | null };
+type Placement = { scope: MemoryRecord["scope"]; project_id: string; task_id: string | null; checkout_id: string | null };
 type SaveResult = { operation_key: string; id: string; outcome: "saved" | "already_present"; lifecycle: MemoryRecord["lifecycle"] };
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const isBusy = (error: unknown): boolean => !!error && typeof error === "object" && "code" in error && /SQLITE_(BUSY|LOCKED)/.test(String(error.code));
+const EXPORT_CURSOR_VERSION = 1;
 const ExportCursorSchema = z.object({
-  version: z.literal(1), binding: z.string().regex(/^[a-f0-9]{64}$/), revision: z.number().int().nonnegative(),
-  last_id: z.string().min(1).max(256), exported_at: z.number().int().nonnegative(),
+  version: z.literal(EXPORT_CURSOR_VERSION), binding: z.string().regex(/^[a-f0-9]{64}$/), revision: z.number().int().nonnegative(),
+  high_seq: z.number().int().nonnegative(), last_id: z.string().min(1).max(256), exported_at: z.number().int().nonnegative(),
 }).strict();
 type ExportCursor = z.infer<typeof ExportCursorSchema>;
 function signCursor(cursor: ExportCursor, key: string): string {
@@ -41,8 +42,12 @@ function readCursor(cursor: string, key: string): ExportCursor {
   const signature = Buffer.from(parts[2]!, "hex");
   const expected = createHmac("sha256", Buffer.from(key, "hex")).update(payload).digest();
   if (!timingSafeEqual(signature, expected)) throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor");
-  try { return ExportCursorSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")); }
   catch { throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor"); }
+  const result = ExportCursorSchema.safeParse(parsed);
+  if (!result.success) throw new MemoryError("INVALID_ARGUMENT", "Invalid memory export cursor");
+  return result.data;
 }
 
 export class MemoryService {
@@ -65,27 +70,30 @@ export class MemoryService {
     catch (error) { return Promise.reject(this.validation(error)); }
     const deadline = performance.now() + 2000;
     const task = this.queue.then(async () => {
-      for (let attempt = 0; attempt < (options.maxAttempts ?? 3); attempt++) {
-        const ctx = this.context(context);
-        if (performance.now() >= deadline) throw new MemoryError("BUSY", "Memory request exceeded its queue deadline; retry the same operation key");
-        try {
-          if (request.op === "recover") return await this.recover(context, deadline);
-          return this.dispatch(ctx, request);
-        } catch (error) {
-          if (isBusy(error)) {
-            if (attempt + 1 >= (options.maxAttempts ?? 3) || performance.now() + 80 >= deadline) {
-              throw new MemoryError("BUSY", "Memory storage is busy; no commit was acknowledged. Retry the same operation key.");
-            }
-            await Bun.sleep(20 * (attempt + 1));
-            continue;
-          }
-          throw this.validation(error);
-        }
+      try {
+        return await this.retryBusy(options.maxAttempts ?? 3, deadline, async () => {
+          const ctx = this.context(context);
+          if (performance.now() >= deadline) throw new MemoryError("BUSY", "Memory request exceeded its queue deadline; retry the same operation key");
+          return request.op === "recover" ? await this.recover(context, deadline) : this.dispatch(ctx, request);
+        });
+      } catch (error) {
+        if (isBusy(error)) throw new MemoryError("BUSY", "Memory storage is busy; no commit was acknowledged. Retry the same operation key.");
+        throw this.validation(error);
       }
-      throw new MemoryError("BUSY", "Memory storage is busy");
     });
     this.queue = task.catch(() => {});
     return task;
+  }
+
+  /** Rethrows the busy error once attempts or the deadline margin run out. */
+  private async retryBusy<T>(maxAttempts: number, deadline: number, run: () => T | Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await run(); }
+      catch (error) {
+        if (!isBusy(error) || attempt + 1 >= maxAttempts || performance.now() + 80 >= deadline) throw error;
+        await Bun.sleep(20 * (attempt + 1));
+      }
+    }
   }
 
   private validation(error: unknown): Error {
@@ -106,6 +114,7 @@ export class MemoryService {
 
   private dispatch(ctx: MemoryContext, request: MemoryRequest): Record<string, unknown> {
     if (ctx.actor === "agent" && ["settings", "list", "export", "repair"].includes(request.op)) throw new MemoryError("FORBIDDEN", "This operation requires app inspection");
+    if (request.op !== "status") this.enabled(ctx);
     switch (request.op) {
       case "status": return this.status(ctx);
       case "settings": return this.settings(ctx, request);
@@ -140,18 +149,25 @@ export class MemoryService {
     return this.status(ctx);
   }
 
+  /** Turning memory off withdraws it from agents entirely, while the app can still inspect, export and forget what was kept. */
+  private enabled(ctx: MemoryContext): void {
+    if (ctx.actor !== "agent") return;
+    const profile = this.store.query("SELECT enabled FROM profile WHERE singleton=1").get() as { enabled: number };
+    if (!profile.enabled) throw new MemoryError("DISABLED", MEMORY_OFF);
+  }
   private writable(ctx: MemoryContext): void {
     if (ctx.actor !== "agent") return;
-    const status = this.status(ctx);
-    if (!status.enabled) throw new MemoryError("DISABLED", "Enable Antgrid Memory once in app settings before saving");
-    if (status.paused || status.project_paused) throw new MemoryError("PAUSED", "Agent saving is paused, including explicit remember requests. Recall and forgetting remain available.");
+    const state = this.store.query("SELECT p.enabled, p.paused, coalesce(s.paused,0) AS project_paused FROM profile p LEFT JOIN project_settings s ON s.project_id=? WHERE p.singleton=1")
+      .get(ctx.project_id ?? null) as { enabled: number; paused: number; project_paused: number };
+    if (!state.enabled) throw new MemoryError("DISABLED", MEMORY_OFF);
+    if (state.paused || state.project_paused) throw new MemoryError("PAUSED", "Agent saving is paused, including explicit remember requests. Recall and forgetting remain available.");
   }
 
   private eligible(row: Row, at = this.now()): boolean { return !row.superseded_by && !(row.memory_type === "task_state" && at - row.updated_at >= TASK_EXPIRY_MS); }
   private allowed(ctx: MemoryContext, row: Row): boolean {
     if (row.owner_id !== ctx.owner_id) return false;
-    if (ctx.actor === "app") return !ctx.project_id || (row.scope !== "user" && row.project_id === ctx.project_id);
-    return (row.scope === "user" || row.project_id === ctx.project_id)
+    if (ctx.actor === "app") return !ctx.project_id || row.project_id === ctx.project_id;
+    return row.project_id === ctx.project_id
       && (row.scope !== "task" || row.task_id === ctx.session_id)
       && (!row.checkout_id || row.checkout_id === ctx.checkout_id);
   }
@@ -163,7 +179,7 @@ export class MemoryService {
   private record(row: Row, at = this.now()): MemoryRecord {
     return MemoryRecordSchema.parse({
       id: row.id, owner_id: row.owner_id, scope: row.scope, memory_type: row.memory_type, content: row.content,
-      ...(row.project_id === null ? {} : { project_id: row.project_id }), ...(row.task_id === null ? {} : { task_id: row.task_id }),
+      project_id: row.project_id, ...(row.task_id === null ? {} : { task_id: row.task_id }),
       ...(row.checkout_id === null ? {} : { checkout_id: row.checkout_id }), ...(row.applicability === null ? {} : { applicability: row.applicability }),
       evidence: JSON.parse(row.evidence), source: JSON.parse(row.source),
       ...(row.supersedes === null ? {} : { supersedes: row.supersedes }), ...(row.superseded_by === null ? {} : { superseded_by: row.superseded_by }),
@@ -176,9 +192,9 @@ export class MemoryService {
     let sql = "r.owner_id=?";
     const args: (string | number)[] = [ctx.owner_id];
     if (ctx.actor === "app") {
-      if (ctx.project_id) { sql += " AND r.scope!='user' AND r.project_id=?"; args.push(ctx.project_id); }
+      if (ctx.project_id) { sql += " AND r.project_id=?"; args.push(ctx.project_id); }
     } else {
-      sql += " AND (r.scope='user' OR r.project_id=?) AND (r.scope!='task' OR r.task_id=?) AND (r.checkout_id IS NULL OR r.checkout_id=?)";
+      sql += " AND r.project_id=? AND (r.scope!='task' OR r.task_id=?) AND (r.checkout_id IS NULL OR r.checkout_id=?)";
       args.push(ctx.project_id!, ctx.session_id!, ctx.checkout_id!);
     }
     if (!history) { sql += " AND r.superseded_by IS NULL AND (r.memory_type!='task_state' OR r.updated_at>?)"; args.push(this.now() - TASK_EXPIRY_MS); }
@@ -187,22 +203,33 @@ export class MemoryService {
   private exportPage(ctx: MemoryContext, cursor?: string): Record<string, unknown> {
     // The revision and rows share a SQLite snapshot. No long-lived transaction
     // holds forgetting or saves open while the app collects subsequent pages.
+    // The first page fixes high_seq, so records saved later are simply outside
+    // the export; only an update or delete in its own context invalidates it.
     return this.store.db.transaction(() => {
-      const state = this.store.query("SELECT revision,cursor_key FROM export_state WHERE singleton=1").get() as { revision: number; cursor_key: string };
+      const state = this.store.query("SELECT cursor_key FROM export_state WHERE singleton=1").get() as { cursor_key: string };
       const previous = cursor ? readCursor(cursor, state.cursor_key) : undefined;
       const binding = this.binding(ctx);
       if (previous && previous.binding !== binding) throw new MemoryError("FORBIDDEN", "Memory export cursor belongs to a different inspection context");
-      if (previous && previous.revision !== state.revision) throw new MemoryError("EXPORT_CHANGED", "Memories changed during export; discard these pages and start a new export");
+      const revision = (this.store.query("SELECT revision FROM export_revisions WHERE context=?").get(ctx.project_id ?? "*") as { revision: number } | null)?.revision ?? 0;
+      if (previous && previous.revision !== revision) throw new MemoryError("EXPORT_CHANGED", "Memories changed during export; discard these pages and start a new export");
+      const highSeq = previous?.high_seq ?? (this.store.query("SELECT coalesce(max(seq),0) AS seq FROM records").get() as { seq: number }).seq;
       const exportedAt = previous?.exported_at ?? this.now();
       const { sql, args } = this.filter(ctx, true);
-      const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} AND r.id>? ORDER BY r.id ASC LIMIT ?`)
-        .all(...args, previous?.last_id ?? "", LIMITS.exportRecords + 1) as Row[];
+      const rows = this.store.query(`SELECT r.* FROM records r WHERE ${sql} AND r.seq<=? AND r.id>? ORDER BY r.id ASC LIMIT ?`)
+        .all(...args, highSeq, previous?.last_id ?? "", LIMITS.exportRecords + 1) as Row[];
       const result = { version: 1, owner_id: this.ownerId, exported_at: exportedAt, records: [] as MemoryRecord[], next_cursor: null as string | null };
+      // Serialized size is exact without re-stringifying the page: the empty
+      // envelope, plus each record, plus a comma between records. The cursor is
+      // base64url and hex, so a non-null one replaces `null` by its length + 2 quotes.
+      const emptyBytes = bytes(result) - 4;
+      let total = emptyBytes;
       for (const row of rows.slice(0, LIMITS.exportRecords)) {
         const record = this.record(row, exportedAt);
-        const nextCursor = signCursor({ version: 1, binding, revision: state.revision, last_id: row.id, exported_at: exportedAt }, state.cursor_key);
+        const nextCursor = signCursor({ version: EXPORT_CURSOR_VERSION, binding, revision, high_seq: highSeq, last_id: row.id, exported_at: exportedAt }, state.cursor_key);
+        const recordTotal = total + bytes(record) + (result.records.length ? 1 : 0);
+        if (recordTotal + nextCursor.length + 2 > LIMITS.exportPage) break;
         result.records.push(record);
-        if (bytes({ ...result, next_cursor: nextCursor }) > LIMITS.exportPage) { result.records.pop(); break; }
+        total = recordTotal;
         result.next_cursor = nextCursor;
       }
       if (rows.length > 0 && result.records.length === 0) throw new MemoryError("UNAVAILABLE", "A memory record exceeds the export page limit; preserve the database for recovery");
@@ -220,7 +247,7 @@ export class MemoryService {
     if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index needs repair; direct history inspection remains available");
     const { sql, args } = this.filter(ctx, false);
     try {
-      const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.id=memory_fts.id WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(match, ...args, limit + 1) as Row[];
+      const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(match, ...args, limit + 1) as Row[];
       return searchResponse(rows.map(r => this.record(r)), limit);
     } catch (error) {
       if (isBusy(error)) throw error;
@@ -230,14 +257,13 @@ export class MemoryService {
   }
 
   private binding(ctx: MemoryContext): string { return hash([ctx.owner_id, ctx.actor, ctx.project_id ?? null, ctx.actor === "agent" ? ctx.session_id : null]); }
-  private placement(ctx: MemoryContext, save: MemorySave): Placement {
-    if (save.supersedes) {
-      const old = this.requireRecord(ctx, save.supersedes);
+  private placement(ctx: MemoryContext, save: MemorySave, old?: Row): Placement {
+    if (old) {
       if (save.scope !== old.scope) throw new MemoryError("FORBIDDEN", "Corrections cannot change scope");
       return { scope: old.scope, project_id: old.project_id, task_id: old.task_id, checkout_id: old.checkout_id };
     }
     if (ctx.actor === "app") throw new MemoryError("FORBIDDEN", "App edits must correct an existing memory");
-    return { scope: save.scope, project_id: save.scope === "user" ? null : ctx.project_id!, task_id: save.scope === "task" ? ctx.session_id! : null,
+    return { scope: save.scope, project_id: ctx.project_id!, task_id: save.scope === "task" ? ctx.session_id! : null,
       checkout_id: save.scope === "task" && save.restrict_to_checkout ? ctx.checkout_id! : null };
   }
   private operation(ctx: MemoryContext, key: string): Operation | null {
@@ -248,7 +274,6 @@ export class MemoryService {
   }
   private checkOperation(ctx: MemoryContext, operation: Operation | null, payloadHash: string): SaveResult | undefined {
     if (!operation) return;
-    if (operation.state === "suppressed") throw new MemoryError("FORGOTTEN", "This operation was consumed by forgetting and cannot be replayed");
     if (operation.payload_hash !== payloadHash) throw new MemoryError("IDEMPOTENCY_CONFLICT", "Operation key was already used with different content or scope");
     if (operation.state === "resolved") {
       if (operation.failure_code) throw new MemoryError(operation.failure_code, "This correction conflicted with a newer revision; inspect it before creating another operation");
@@ -266,7 +291,8 @@ export class MemoryService {
     this.writable(ctx);
     return this.store.db.transaction(() => {
       const operation = this.preflightOperation(ctx, key);
-      const placement = this.placement(ctx, save);
+      const target = save.supersedes ? this.requireRecord(ctx, save.supersedes) : undefined;
+      const placement = this.placement(ctx, save, target);
       const { payloadHash, matchHash } = this.identity(ctx, save, placement);
       this.checkOperation(ctx, operation, payloadHash);
       if (operation) return { operation_key: key, state: operation.state };
@@ -277,12 +303,13 @@ export class MemoryService {
     }).immediate();
   }
 
-  private makeRow(ctx: MemoryContext, save: MemorySave, placement: Placement, matchHash: string): Row {
-    const source = { actor: ctx.actor, ...(ctx.project_id ? { project_id: ctx.project_id } : {}), ...(ctx.session_id ? { session_id: ctx.session_id } : {}),
-      ...(ctx.checkout_id ? { checkout_id: ctx.checkout_id } : {}), ...(ctx.agent_id ? { agent_id: ctx.agent_id } : {}) };
+  /** `source` is the one captured when the save was prepared; otherwise it comes from the live caller. */
+  private makeRow(ctx: MemoryContext, save: MemorySave, placement: Placement, matchHash: string, source?: string): Row {
+    source ??= JSON.stringify({ actor: ctx.actor, ...(ctx.project_id ? { project_id: ctx.project_id } : {}), ...(ctx.session_id ? { session_id: ctx.session_id } : {}),
+      ...(ctx.checkout_id ? { checkout_id: ctx.checkout_id } : {}), ...(ctx.agent_id ? { agent_id: ctx.agent_id } : {}) });
     const now = this.now();
     const row: Row = { id: crypto.randomUUID(), owner_id: ctx.owner_id, ...placement, memory_type: save.memory_type, content: save.content,
-      applicability: save.applicability ?? null, evidence: JSON.stringify(save.evidence), source: JSON.stringify(source),
+      applicability: save.applicability ?? null, evidence: JSON.stringify(save.evidence), source,
       supersedes: save.supersedes ?? null, superseded_by: null, created_at: now, updated_at: now, match_hash: matchHash };
     const size = bytes(this.record(row));
     if (size > LIMITS.record) throw new MemoryError("INVALID_ARGUMENT", `record: ${size} bytes exceeds ${LIMITS.record} byte limit`);
@@ -293,11 +320,12 @@ export class MemoryService {
     if (!this.store.searchReady) throw new MemoryError("SEARCH_UNAVAILABLE", "Repair search before saving; a save must commit its index atomically");
     const result = this.store.db.transaction((): SaveResult | MemoryError => {
       const operation = this.preflightOperation(ctx, key);
-      const placement = this.placement(ctx, save);
+      const target = save.supersedes ? this.requireRecord(ctx, save.supersedes) : undefined;
+      const placement = this.placement(ctx, save, target);
       const { payloadHash, matchHash } = this.identity(ctx, save, placement);
       const replay = this.checkOperation(ctx, operation, payloadHash);
       if (replay) return replay;
-      if (save.supersedes && this.requireRecord(ctx, save.supersedes).superseded_by) {
+      if (target?.superseded_by) {
         this.store.query(`INSERT INTO operations(binding,operation_key,payload_hash,target_id,origin_project_id,state,failure_code) VALUES(?,?,?,?,?,'resolved','CONFLICT')
           ON CONFLICT(binding,operation_key) DO UPDATE SET state='resolved',payload=NULL,failure_code='CONFLICT'`)
           .run(this.binding(ctx), key, payloadHash, save.supersedes, ctx.project_id ?? null);
@@ -307,12 +335,9 @@ export class MemoryService {
       if (!save.supersedes) row = (this.store.query("SELECT * FROM records WHERE match_hash=? ORDER BY id").all(matchHash) as Row[]).find(r => this.allowed(ctx, r) && this.eligible(r));
       const outcome = row ? "already_present" : "saved";
       if (!row) {
-        row = this.makeRow(ctx, save, placement, matchHash);
-        if (operation?.payload) row.source = JSON.stringify(JSON.parse(operation.payload).source);
-        const size = bytes(this.record(row));
-        if (size > LIMITS.record) throw new MemoryError("INVALID_ARGUMENT", `record: ${size} bytes exceeds ${LIMITS.record} byte limit`);
-        if (save.supersedes) {
-          const previous = { ...this.requireRecord(ctx, save.supersedes), superseded_by: row.id };
+        row = this.makeRow(ctx, save, placement, matchHash, operation?.payload ? JSON.stringify(JSON.parse(operation.payload).source) : undefined);
+        if (target) {
+          const previous = { ...target, superseded_by: row.id };
           if (bytes(this.record(previous)) > LIMITS.record) throw new MemoryError("INVALID_ARGUMENT", "Correction history metadata would exceed the 16384 byte record limit");
           this.store.query("UPDATE records SET superseded_by=? WHERE id=? AND superseded_by IS NULL").run(row.id, save.supersedes);
         }
@@ -322,17 +347,14 @@ export class MemoryService {
       this.store.query(`INSERT INTO operations(binding,operation_key,payload_hash,match_hash,target_id,record_id,outcome,state) VALUES(?,?,?,?,?,?,?,'resolved')
         ON CONFLICT(binding,operation_key) DO UPDATE SET record_id=excluded.record_id,outcome=excluded.outcome,state='resolved',payload=NULL`)
         .run(this.binding(ctx), key, payloadHash, matchHash, save.supersedes ?? null, row.id, outcome);
-      return { operation_key: key, id: row.id, outcome, lifecycle: this.record(row).lifecycle };
+      return { operation_key: key, id: row.id, outcome, lifecycle: "active" };
     }).immediate();
     if (result instanceof MemoryError) throw result;
     return result;
   }
 
   private pending(ctx: MemoryContext): Operation[] {
-    if (ctx.actor === "agent") return this.store.query("SELECT * FROM operations WHERE binding=? AND state='pending' ORDER BY operation_key").all(this.binding(ctx)) as Operation[];
-    const operations = this.store.query("SELECT * FROM operations WHERE state='pending'").all() as Operation[];
-    if (!ctx.project_id) return operations;
-    return operations.filter(op => op.origin_project_id === ctx.project_id);
+    return this.store.query("SELECT * FROM operations WHERE binding=? AND state='pending' ORDER BY operation_key").all(this.binding(ctx)) as Operation[];
   }
   private operationCount(ctx: MemoryContext, predicate: string): number {
     const args: string[] = [];
@@ -343,23 +365,20 @@ export class MemoryService {
   private async recover(context: ContextSource, deadline: number): Promise<Record<string, unknown>> {
     const ctx = this.context(context);
     if (ctx.actor !== "agent") throw new MemoryError("FORBIDDEN", "Only a verified live agent can recover its durable-session operations");
+    // Refused outright rather than reported per operation: the queue stays
+    // intact for the next session start after the user turns memory back on.
+    this.enabled(ctx);
     const recovered: SaveResult[] = [];
     const errors: { operation_key: string; code: string; message: string }[] = [];
     for (const operation of this.pending(ctx)) {
       if (performance.now() >= deadline) break;
       try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            if (performance.now() >= deadline) throw new MemoryError("BUSY", "Pending save exceeded its recovery deadline");
-            const current = this.context(context);
-            if (this.binding(current) !== operation.binding) throw new MemoryError("FORBIDDEN", "Caller binding changed before recovery");
-            recovered.push(this.save(current, operation.operation_key, redactSave(JSON.parse(operation.payload!).save)));
-            break;
-          } catch (error) {
-            if (!isBusy(error) || attempt === 2 || performance.now() + 80 >= deadline) throw error;
-            await Bun.sleep(20 * (attempt + 1));
-          }
-        }
+        await this.retryBusy(3, deadline, () => {
+          if (performance.now() >= deadline) throw new MemoryError("BUSY", "Pending save exceeded its recovery deadline");
+          const current = this.context(context);
+          if (this.binding(current) !== operation.binding) throw new MemoryError("FORBIDDEN", "Caller binding changed before recovery");
+          recovered.push(this.save(current, operation.operation_key, redactSave(JSON.parse(operation.payload!).save)));
+        });
       } catch (error) {
         const e = isBusy(error) ? new MemoryError("BUSY", "Memory storage is busy") : this.validation(error);
         errors.push({ operation_key: operation.operation_key, code: e instanceof MemoryError ? e.code : "UNAVAILABLE", message: e.message });

@@ -78,7 +78,7 @@ Keep the service contract independent of its storage backend. Define any interna
 | `id` | Durable memory identity owned by the service |
 | `content` | Self-contained finding, preference, or note |
 | `memory_type` | `preference`, `task_state`, `observation`, or `note` |
-| `scope` | `user`, `project`, or `task`; visibility and permissions are separate |
+| `scope` | `project` or `task`; visibility and permissions are separate |
 | `project_id`, `task_id` | Applicable context where required by scope; v1 task bindings use an existing durable Antgrid session |
 | `checkout_id` | Optional enforced restriction on a task-scoped implementation finding, checked against the caller's trusted checkout identity |
 | `applicability` | Optional plain text preserving conditions and uncertainty |
@@ -89,7 +89,7 @@ Keep the service contract independent of its storage backend. Define any interna
 
 For v1, bind task-scoped memory to an existing durable Antgrid session. `task_id` names that service binding, not a new task-management entity, a process run, or an agent-native conversation ID. Resuming the same Antgrid session retains its binding; starting an unrelated session does not inherit it. A native conversation records origin and may change without changing the owning Antgrid session. Grouping multiple Antgrid sessions into one task is deferred. Project-scoped findings remain available across authorized sessions and agents.
 
-Defer `global` scope and `workspace_id` until their meaning is defined independently of project, organization, and checkout. User scope requires an explicitly bound local owner, never an implicit machine-wide namespace. The integration must select that stable owner identity before enabling user-scoped reads or writes.
+Defer `user` scope, `global` scope and `workspace_id`. A future user scope is read in every project, so it needs its own design for who may write it: one repository's agent must not be able to steer agents in all the others. Every record carries the local owner identity, so adding it later needs no owner migration.
 
 The type defines the default lifecycle. Every type can be explicitly forgotten. V1 includes soft expiry for `task_state`; general memory aging is deferred:
 
@@ -277,7 +277,7 @@ Limit and retry checks cover UTF-8 and JSON-escaping boundaries, oversized conte
 
 ## Deferred work and open questions
 
-Semantic search and embedding models, vector indexes, model-based reranking, automatic semantic merging and contradiction resolution, general memory aging, native-agent memory import, standalone distribution, automatic memory injection, Antgrid-hosted persistence and storage migration, cross-machine replication, distributed conflicts/tombstones, public engine plugins, an engine picker, automatic Git merge equivalence, structured environment matching, grouping multiple Antgrid sessions into a task, in-place scope promotion, decision approval workflows, inferred memories, and custom dreaming are outside v1. Standalone host bindings and installation/lifecycle behavior belong to the later packaging design; the v1 package keeps explicit interfaces for that future use.
+Semantic search and embedding models, vector indexes, model-based reranking, automatic semantic merging and contradiction resolution, general memory aging, native-agent memory import, standalone distribution, automatic memory injection, Antgrid-hosted persistence and storage migration, cross-machine replication, distributed conflicts/tombstones, public engine plugins, an engine picker, automatic Git merge equivalence, structured environment matching, grouping multiple Antgrid sessions into a task, user scope, in-place scope promotion, decision approval workflows, inferred memories, and custom dreaming are outside v1. Standalone host bindings and installation/lifecycle behavior belong to the later packaging design; the v1 package keeps explicit interfaces for that future use.
 
 Future storage may use Antgrid's web database or a dedicated server-side store. The choice, migration, and server authorization model need a separate design when scheduled. Off-machine Antgrid payloads must use authenticated Iroh connections and existing authorization boundaries; the control relay must never carry memory payloads.
 
@@ -286,18 +286,32 @@ Future storage may use Antgrid's web database or a dedicated server-side store. 
 `packages/antgrid-memory` owns Zod contracts, a versioned SQLite database, FTS5,
 access filtering, correction history, operation receipts, redacted pending saves,
 settings, and versioned JSON export. It imports no bridge internals.
-`bridge/src/memory.ts` binds one lazily initialized service to each host. The
-database is `<ANTGRID_DIR>/memory/memory.sqlite`; its profile row creates and
-retains the local owner UUID independently of account sign-in. Opening or
-migrating an unreadable store fails visibly and never replaces it with an empty
+`bridge/src/memory.ts` binds one service to each host. The database is
+`<ANTGRID_DIR>/memory/memory.sqlite`; its profile row creates and retains the
+local owner UUID independently of account sign-in. The store is created only by
+the app's first enablement or an explicit repair, so a profile that never opted
+in has no memory directory and does no memory work at launch. Opening an
+unreadable store fails visibly and never replaces it with an empty
 database. Initialization failure does not prevent sessions from starting.
 
+Records carry an autoincrement sequence that is also the FTS row ID, so the
+open-time index check compares counts and joins on it instead of scanning
+content; the FTS `integrity-check` runs only during repair. A store written by a
+newer schema version is refused rather than opened.
+
 Memory starts disabled. One app enablement applies to the local profile; a
-project screen may perform that one-time enablement too. Profile pause blocks
-every agent save. Project pause blocks every save originating in that project,
-including user-scoped saves and explicit remember requests. Reads, forgetting,
-and app corrections remain available while paused. Profile controls live in
-machine Memory; project controls live in project Memory.
+project screen may perform that one-time enablement too. While memory is
+disabled, new agent launches register no `antgrid-memory` server and receive no
+guidance, and every agent operation except `status` is refused with `DISABLED`,
+reads included. The app keeps full inspection, export and forgetting. Turning
+memory on or off applies to sessions launched afterwards: a running session keeps
+the server it started with, and the service refusal is what stops its tools.
+Profile pause blocks every agent save. Project pause blocks every save
+originating in that project, including explicit remember requests. Reads,
+forgetting, and app corrections remain available while paused. Profile controls
+live in machine Memory; project controls live in project Memory.
+
+V1 stores only `project` and `task` records.
 
 The host resolves each terminal tool call from its project core, durable
 session, current checkout, launch-time agent identity, and live run secret.
@@ -315,9 +329,13 @@ opens a second canonical database. Existing terminal MCP profiles add it beside
 server's instructions and tool descriptions. Codex also receives the fixed
 usage guidance through its existing `SessionStart` hook, including startup,
 resume, clear, compact and fork events. OpenCode receives the same fixed text
-through its terminal plugin's `experimental.chat.system.transform`, with
-settings checked before each model request. No repository instructions are
-edited and no saved content is injected. Native agent memory is unchanged.
+through its terminal plugin's `experimental.chat.system.transform`. Both are
+gated on the launch having registered the memory server. OpenCode decides per
+session: the first request awaits the bootstrap answer, and later requests use
+the last definitive answer while refreshing it in the background, so a settings
+change reaches the next request after the refresh lands rather than the one in
+flight. No repository instructions are edited and no saved content is injected.
+Native agent memory is unchanged.
 
 Both adapters call `/memory/bootstrap` using only the inherited API port,
 durable session and live-run identity. The bridge uses the same caller
@@ -367,8 +385,8 @@ previously delivered conversation content.
 The app's project Memory uses admitted project payload streams; machine Memory
 uses authenticated native machine RPC or the local owner's token-protected
 control listener. Neither path carries memory over the control relay. Project
-inspection sees its project/task records; machine inspection also sees user
-records and histories whose projects or sessions were removed. Corrections
+inspection sees its project/task records; machine inspection also sees
+histories whose projects or sessions were removed. Corrections
 retain scope and checkout restrictions. Export is JSON version 1 with IDs,
 records, provenance, applicability, links, and derived lifecycle state; it
 excludes operational retry payloads and credentials. Import remains deferred.
@@ -377,9 +395,15 @@ Remote Memory routes retain their machine in the control-plane alive set until
 the route closes, independently of the active workspace or drawer expansion.
 Export reads use authorized keyset pages capped at 256 KiB of UTF-8 JSON. The
 app assembles a complete version 1 file only after all pages succeed. Signed
-continuation cursors bind the owner/project context, record revision and export
-timestamp; lifecycle state uses that fixed timestamp. A record change between
-pages returns `EXPORT_CHANGED`, so the user can restart the
-export instead of receiving a file assembled from different store revisions.
-Pagination metadata and cursor authentication material are excluded from the
-downloaded file.
+continuation cursors bind the owner/project context, that context's export
+revision, the highest record sequence at the first page, and the export
+timestamp; lifecycle state uses that fixed timestamp. Records inserted after the
+first page are excluded rather than invalidating the export. An update or delete
+of a record in the exported context between pages returns `EXPORT_CHANGED`, so
+the user can restart the export instead of receiving a file assembled from
+different store revisions; writes in other projects do not. Pagination metadata and cursor
+authentication material are excluded from the downloaded file.
+
+Redaction replaces each detected secret with a mask no longer than the text it
+replaces, so a payload within the 4 KiB content limit stays within it after
+redaction, and redacting already-redacted text changes nothing.

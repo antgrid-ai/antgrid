@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { AntgridSessionNamer } from "../assets/opencode/plugin";
 import { MEMORY_AGENT_GUIDANCE } from "../assets/memory-guidance";
 
-const keys = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID"] as const;
+const keys = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID", "ANTGRID_MEMORY_MCP"] as const;
 let saved: Record<string, string | undefined>;
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 beforeEach(() => {
@@ -28,6 +28,7 @@ async function fixture(respond: () => Response | Promise<Response> = () => Respo
   process.env.ANTGRID_API_PORT = String(server.port);
   process.env.ANTGRID_TERMINAL_ID = "durable-antgrid-session";
   process.env.ANTGRID_RUN_ID = "verified-live-run";
+  process.env.ANTGRID_MEMORY_MCP = "1";
   const plugin = await AntgridSessionNamer();
   const transform = plugin["experimental.chat.system.transform"];
   expect(typeof transform).toBe("function");
@@ -84,16 +85,77 @@ test.each([
   expect(requests).toHaveLength(0);
 });
 
-test("each model request rechecks pause and opt-out without accumulating guidance", async () => {
+// A refresh runs behind a request, at most every 30s, and lands on the next
+// one, so a change in the user's setting is seen late and never blocks a request.
+const settle = () => Bun.sleep(50);
+let clock = 0;
+let realNow: () => number;
+beforeEach(() => { clock = 0; realNow = Date.now; Date.now = () => realNow() + clock; });
+afterEach(() => { Date.now = realNow; });
+const later = () => { clock += 31_000; };
+
+test("a refresh runs at most every 30s and never accumulates guidance", async () => {
   let state = enabled;
   const { requests, transform } = await fixture(() => Response.json(state));
   const system = await transform();
   expect(await transform(system)).toHaveLength(2);
+  await settle();
+  expect(requests).toHaveLength(1);
   state = { ...enabled, paused: true };
+  expect(await transform(system)).toHaveLength(2);
+  await settle();
+  expect(requests).toHaveLength(1);
+  later();
+  expect(await transform(system)).toHaveLength(2);
+  await settle();
+  expect(requests).toHaveLength(2);
   expect(await transform(system)).toEqual(["Existing system guidance"]);
-  state = { ...enabled, enabled: false };
+  expect(requests).toHaveLength(2);
+});
+
+test("a paused reply removes guidance on the request after the refresh", async () => {
+  let state = enabled;
+  const { transform } = await fixture(() => Response.json(state));
+  expect(await transform()).toHaveLength(2);
+  state = { ...enabled, paused: true };
+  later();
+  expect(await transform()).toHaveLength(2);
+  await settle();
   expect(await transform()).toEqual(["Existing system guidance"]);
-  expect(requests).toHaveLength(4);
+});
+
+test("a hung or failing bridge keeps the last known guidance without delaying later requests", async () => {
+  const script = ["ok", "hang", "503"];
+  const { transform } = await fixture(() => {
+    const next = script.shift();
+    if (next === "hang") return new Promise<Response>(() => {});
+    if (next === "503") return new Response("down", { status: 503 });
+    return Response.json(enabled);
+  });
+  for (let call = 1; call <= 3; call++) {
+    const started = performance.now();
+    expect(await transform()).toHaveLength(2);
+    if (call > 1) expect(performance.now() - started).toBeLessThan(100);
+    await settle();
+    later();
+  }
+});
+
+test("the first answer is shared by every session", async () => {
+  let state = enabled;
+  const { requests, transform } = await fixture(() => Response.json(state));
+  expect(await transform(undefined, "one")).toHaveLength(2);
+  state = { ...enabled, enabled: false };
+  expect(await transform(undefined, "two")).toHaveLength(2);
+  await settle();
+  expect(requests).toHaveLength(1);
+});
+
+test("without the registered-server flag no request is made and no guidance is added", async () => {
+  const { requests, transform } = await fixture();
+  delete process.env.ANTGRID_MEMORY_MCP;
+  expect(await transform()).toEqual(["Existing system guidance"]);
+  expect(requests).toHaveLength(0);
 });
 
 test("subagents and model calls without a native session receive no memory guidance", async () => {

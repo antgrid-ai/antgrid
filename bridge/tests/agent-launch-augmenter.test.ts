@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
 import { suppressesOscNotifications, suppressesOscTitle } from "../../packages/antgrid-agents/src/known-agents";
 import { augmentAgentLaunch } from "../src/agent-runtime";
+import { setMemoryLaunchGate } from "../src/agent-host";
 import { augmentAgentLaunch as augmentWithRegistry } from "antgrid-agents/agent-launch-augmenter";
 import { type HookCommand } from "../src/hook-command";
 import { cursorHookCommand } from "../../packages/antgrid-agents/src/agents/cursor-agent/global-hooks";
@@ -23,6 +24,11 @@ const CURSOR_HELP = "--trust\n--plugin-dir <dir>";
 beforeAll(() => overrideCursorHelp(CURSOR_HELP));
 afterAll(() => overrideCursorHelp(undefined));
 afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
+// The memory server is registered only once the user has enabled memory; tests
+// that describe the registered shape opt in, and the "off" suite opts out.
+let releaseMemoryGate: (() => void) | undefined;
+beforeEach(() => { releaseMemoryGate = setMemoryLaunchGate(() => true); });
+afterEach(() => releaseMemoryGate?.());
 
 const HOOK_COMMAND: HookCommand = {
   binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe",
@@ -60,7 +66,7 @@ describe("augmentAgentLaunch", () => {
     const a = augmentAgentLaunch("claude-code", { abDir: abdir(), self: BRIDGE_SELF });
     expect(a.args[0]).toBe("--plugin-dir");
     expect(a.args[1].replace(/\\/g, "/")).toMatch(/\/plugin\/claude$/);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
     const hooks = JSON.parse(readFileSync(join(a.args[1], "hooks", "hooks.json"), "utf8"));
     // PostToolUse and PostToolUseFailure each carry a second, catch-all group
@@ -132,7 +138,7 @@ describe("augmentAgentLaunch", () => {
     );
     // Only the hook channel yields; the MCP entry travels in its own variable.
     expect(launch.args).toEqual([]);
-    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
+    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT", "ANTGRID_MEMORY_MCP"]);
     expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid).toEqual({
       type: "local", command: [HOOK_COMMAND.binary, "mcp"],
     });
@@ -150,7 +156,7 @@ describe("augmentAgentLaunch", () => {
     const cursorDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir, self: BRIDGE_SELF });
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
 
     const hooks = JSON.parse(readFileSync(join(cursorDir, "hooks.json"), "utf8"));
@@ -199,7 +205,7 @@ describe("augmentAgentLaunch", () => {
     // hooks channel, and the spawn must not regress to a trust prompt.
     expect(a).toEqual({
       args: ["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")],
-      env: {},
+      env: { ANTGRID_MEMORY_MCP: "1" },
       notificationsInjected: false,
       observation: NO_OBSERVATION,
     });
@@ -607,4 +613,33 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
   });
+});
+
+describe("augmentAgentLaunch with memory disabled", () => {
+  afterEach(() => overrideCursorHelp(CURSOR_HELP));
+
+  const texts = (dir: string): string => readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), "utf8")).join("\n");
+  const launchText = (tool: string, memory: boolean) => {
+    const release = setMemoryLaunchGate(() => memory);
+    try {
+      const abDir = abdir();
+      const launch = withUserEnv({}, () => augmentAgentLaunch(tool, { abDir, cursorDir: abdir(), self: BRIDGE_SELF }));
+      return { launch, text: JSON.stringify({ args: launch.args, env: launch.env }) + texts(abDir) };
+    } finally { release(); }
+  };
+
+  for (const tool of ["claude-code", "codex", "opencode", "kilo", "github-copilot", "cursor-agent"]) {
+    test(`${tool} registers only antgrid and no guidance flag`, () => {
+      const off = launchText(tool, false);
+      expect(off.text).toContain("mcp");
+      expect(off.text).not.toContain("memory-mcp");
+      expect(off.text).not.toMatch(/antgrid-memory(?! tools)/);
+      expect(off.launch.env.ANTGRID_MEMORY_MCP).toBeUndefined();
+      const on = launchText(tool, true);
+      expect(on.text).toContain("memory-mcp");
+      expect(on.launch.env.ANTGRID_MEMORY_MCP).toBe("1");
+    });
+  }
 });

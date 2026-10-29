@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer } from "../src/host-server";
@@ -40,7 +40,7 @@ async function project(name: string) {
   return { id, core, bus: (core as unknown as { bus: MessageBus }).bus };
 }
 
-async function seed(projectId: string, scope: "user" | "project" | "task", content: string) {
+async function seed(projectId: string, scope: "project" | "task", content: string) {
   return await memory().execute(() => ({ actor: "agent", project_id: projectId, session_id: "session", checkout_id: "main", run_id: "run", agent_id: "codex" }), {
     op: "save", operation_key: crypto.randomUUID(), save: { content, memory_type: "note", scope },
   });
@@ -75,7 +75,6 @@ test("project memory stays bound to its admitted core while machine inspection i
   const first = await project("first-non-git");
   const second = await project("second-non-git");
   expect((await ask(first.bus, { op: "settings", enabled: true })).ok).toBe(true);
-  await seed(first.id, "user", "user finding");
   const own = await seed(first.id, "project", "first finding");
   await seed(first.id, "task", "task finding");
   const other = await seed(second.id, "project", "second finding");
@@ -128,7 +127,7 @@ test("native memory RPC gates account membership, current session and remote acc
 test("a queued machine mutation rechecks its native lease before retry while the session still exists", async () => {
   await host.startControlPlane();
   await host.handleRemoteAccessVerb({ id: "enable", type: "mobile-access:set", enabled: true });
-  await memory().execute(app, { op: "status" });
+  await memory().execute(app, { op: "repair" });
   let authorized = true;
   (host as unknown as { controlPlaneRelay: RemoteHostConnection }).controlPlaneRelay = {
     peerSession: () => ({}), isPeerAuthorized: () => authorized,
@@ -156,6 +155,79 @@ test("an unreadable memory location is reported without preventing a project fro
   const opened = await project("ordinary-work");
   const status = await ask(opened.bus, { op: "status" });
   expect(status.ok).toBe(true);
-  expect(status.result.available).toBe(false);
-  expect(status.result.error.code).toBe("UNAVAILABLE");
+  expect(status.result.available).toBe(true);
+  expect(status.result.enabled).toBe(false);
+  const enable = await ask(opened.bus, { op: "settings", enabled: true });
+  expect(enable.ok).toBe(false);
+  expect(enable.error.code).toBe("UNAVAILABLE");
+});
+
+const agentCaller = () => ({ actor: "agent" as const, project_id: "p1", session_id: "s1", checkout_id: "c1", agent_id: "codex", run_id: "r1" });
+const profileDirectory = () => join(root, "profile");
+const save = { op: "save", operation_key: crypto.randomUUID(), save: { content: "x", memory_type: "note", scope: "project" } };
+
+test("a profile that never enabled memory is answered without creating a store", async () => {
+  const profile = new HostMemory(profileDirectory);
+  try {
+    expect(await profile.execute(app, { op: "status" })).toEqual({
+      available: true, search_status: "ready", enabled: false, paused: false, failed_operations: 0,
+      project_paused: false, pending_operations: 0, recovery_status: "ready",
+    });
+    expect(await profile.execute(agentCaller, { op: "status" })).toMatchObject({ available: true, enabled: false, paused: false, project_paused: false });
+    expect(await profile.execute(app, { op: "search", query: "anything" })).toEqual({ results: [], has_more: false });
+    await expect(profile.execute(app, { op: "get", id: "m1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(profile.execute(app, { op: "export" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(profile.execute(app, { op: "bogus" })).rejects.toMatchObject({ name: "ZodError" });
+    const agentRequests = [
+      { op: "recover" }, { op: "search", query: "anything" }, { op: "get", id: "m1" }, { op: "forget", id: "m1" },
+      { ...save, op: "prepare" }, save,
+    ];
+    for (const request of agentRequests) {
+      await expect(profile.execute(agentCaller, request)).rejects.toMatchObject({ code: "DISABLED" });
+    }
+    expect(await profile.execute(app, { op: "settings", enabled: false })).toMatchObject({ enabled: false });
+    expect(profile.launchEnabled()).toBe(false);
+    expect(existsSync(join(profileDirectory(), "memory"))).toBe(false);
+  } finally { profile.close(); }
+});
+
+test("only an app request to enable or repair creates the store, and launches follow the setting", async () => {
+  const profile = new HostMemory(profileDirectory);
+  try {
+    expect(profile.launchEnabled()).toBe(false);
+    expect((await profile.execute(app, { op: "settings", enabled: true })).enabled).toBe(true);
+    expect(existsSync(join(profileDirectory(), "memory", "memory.sqlite"))).toBe(true);
+    expect(profile.launchEnabled()).toBe(true);
+    await profile.execute(app, { op: "settings", enabled: false });
+    expect(profile.launchEnabled()).toBe(false);
+  } finally { profile.close(); }
+  const reopened = new HostMemory(profileDirectory);
+  try {
+    expect(reopened.launchEnabled()).toBe(false);
+    await reopened.execute(app, { op: "settings", enabled: true });
+  } finally { reopened.close(); }
+  const fresh = new HostMemory(profileDirectory);
+  try { expect(fresh.launchEnabled()).toBe(true); } finally { fresh.close(); }
+  const repaired = new HostMemory(() => join(root, "other"));
+  try {
+    await repaired.execute(app, { op: "repair" });
+    expect(existsSync(join(root, "other", "memory", "memory.sqlite"))).toBe(true);
+  } finally { repaired.close(); }
+});
+
+test("warm opens an existing store without a request and does nothing for an absent one", async () => {
+  const absent = new HostMemory(profileDirectory);
+  absent.warm(1);
+  await Bun.sleep(30);
+  absent.close();
+  expect(existsSync(join(profileDirectory(), "memory"))).toBe(false);
+  const seeded = new HostMemory(profileDirectory);
+  await seeded.execute(app, { op: "settings", enabled: true });
+  seeded.close();
+  const warmed = new HostMemory(profileDirectory);
+  try {
+    warmed.warm(1);
+    await Bun.sleep(100);
+    expect((warmed as unknown as { service?: unknown }).service).toBeDefined();
+  } finally { warmed.close(); }
 });

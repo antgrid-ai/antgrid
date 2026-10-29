@@ -4,9 +4,12 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { MemoryService, type MemoryContext } from "antgrid-memory";
+import { resolveMemoryMcpCommand } from "../src/hook-command";
 
 const binary = process.argv[2];
 if (!binary) throw new Error("Usage: memory-mcp-smoke <compiled-antgrid-bridge>");
+// The argv an agent launch registers for a shipped bridge, not a hand-written one.
+const memoryCommand = resolveMemoryMcpCommand({ binary, compiled: true });
 const directory = mkdtempSync(join(tmpdir(), "antgrid-memory-smoke-"));
 let memory = new MemoryService({ directory });
 const owner = memory.ownerId;
@@ -36,7 +39,7 @@ async function connect() {
   clients.push(client);
   const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
   await client.connect(new StdioClientTransport({
-    command: binary!, args: ["memory-mcp"], stderr: "pipe",
+    command: memoryCommand.binary, args: [...memoryCommand.preargs], stderr: "pipe",
     env: { ...env, ANTGRID_API_PORT: String(server.port), ANTGRID_TERMINAL_ID: "durable-session", ANTGRID_RUN_ID: "live-run" },
   }));
   return client;

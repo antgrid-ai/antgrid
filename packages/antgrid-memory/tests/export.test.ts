@@ -115,9 +115,9 @@ test("keyset queries avoid sorting the matching store for every page", () => {
   const db = database();
   try {
     for (const project of [false, true]) {
-      const query = db.prepare(`EXPLAIN QUERY PLAN SELECT r.* FROM records r WHERE r.owner_id=? ${project ? "AND r.scope!='user' AND r.project_id=?" : ""} AND r.id>? ORDER BY r.id ASC LIMIT ?`);
+      const query = db.prepare(`EXPLAIN QUERY PLAN SELECT r.* FROM records r WHERE r.owner_id=? ${project ? "AND r.project_id=?" : ""} AND r.seq<=? AND r.id>? ORDER BY r.id ASC LIMIT ?`);
       try {
-        const plan = query.all(...(project ? [app.owner_id, "project", "", 65] : [app.owner_id, "", 65])) as { detail: string }[];
+        const plan = query.all(...(project ? [app.owner_id, "project", 1, "", 65] : [app.owner_id, 1, "", 65])) as { detail: string }[];
         expect(plan.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
         expect(plan.some(row => row.detail.includes("id>?"))).toBe(true);
       } finally { query.finalize(); }
@@ -125,14 +125,48 @@ test("keyset queries avoid sorting the matching store for every page", () => {
   } finally { db.close(true); }
 });
 
-test.each(["insert", "correction", "forget"])("%s invalidates an in-progress export", async mutation => {
-  const seed = await save("revision seed");
+test.each([["machine", undefined], ["project", "project"]])("correction or forget invalidates an in-progress %s export", async (_label, project) => {
+  const context = project ? { ...app, project_id: project } : app;
+  for (const mutation of ["correction", "forget"]) {
+    const seed = await save(`${mutation} seed`);
+    clone(seed.id as string, 70, "project", app.owner_id, mutation);
+    const first = await page(undefined, context);
+    if (mutation === "correction") await save("corrected record", { supersedes: seed.id });
+    else await service!.execute(app, { op: "forget", id: seed.id });
+    await expect(page(first.next_cursor as string, context)).rejects.toMatchObject({ code: "EXPORT_CHANGED" });
+  }
+});
+
+test("a post-snapshot insert is excluded rather than invalidating the export", async () => {
+  const seed = await save("snapshot seed");
   clone(seed.id as string, 70);
   const first = await page();
-  if (mutation === "insert") await save("new record");
-  else if (mutation === "correction") await save("corrected record", { supersedes: seed.id });
-  else await service!.execute(app, { op: "forget", id: seed.id });
-  await expect(page(first.next_cursor as string)).rejects.toMatchObject({ code: "EXPORT_CHANGED" });
+  // Sorts after every id already paged, so only the snapshot bound excludes it.
+  clone(seed.id as string, 1, "project", app.owner_id, "z-late");
+  const ids = (first.records as MemoryRecord[]).map(record => record.id);
+  for (let cursor = first.next_cursor as string | null; cursor;) {
+    const next = await page(cursor);
+    ids.push(...(next.records as MemoryRecord[]).map(record => record.id));
+    cursor = next.next_cursor as string | null;
+  }
+  expect(ids).toHaveLength(71);
+  expect(ids).not.toContain("z-late-00000");
+  const fresh = await page();
+  expect(((await page(fresh.next_cursor as string)).records as MemoryRecord[]).map(record => record.id)).toContain("z-late-00000");
+});
+
+test("a save in another project does not invalidate a project export", async () => {
+  const other = { ...agent, project_id: "other" };
+  const seed = await save("project seed");
+  clone(seed.id as string, 70);
+  const foreign = await service!.execute(other, { op: "save", operation_key: "foreign", save: { content: "other project", memory_type: "observation", scope: "project" } });
+  const context = { ...app, project_id: "project" };
+  const first = await page(undefined, context);
+  await service!.execute(other, { op: "save", operation_key: "foreign-correction", save: { content: "other project corrected", memory_type: "observation", scope: "project", supersedes: foreign.id } });
+  await service!.execute(app, { op: "forget", id: foreign.id });
+  const second = await page(first.next_cursor as string, context);
+  expect((second.records as MemoryRecord[]).every(record => record.project_id === "project")).toBe(true);
+  expect(second.next_cursor).toBeNull();
 });
 
 test("restart, index repair, duplicate receipts and settings preserve a stable export", async () => {
@@ -177,41 +211,4 @@ test("task lifecycle is fixed at the first page timestamp", async () => {
   expect(second.exported_at).toBe(first.exported_at);
   expect((second.records as MemoryRecord[]).every(record => record.lifecycle === "active")).toBe(true);
   expect(((await page()).records as MemoryRecord[]).every(record => record.lifecycle === "expired")).toBe(true);
-});
-
-function downgradeToV1(): void {
-  service!.close(); service = undefined;
-  const db = database();
-  try { db.exec("DROP TRIGGER IF EXISTS export_record_insert; DROP TRIGGER IF EXISTS export_record_update; DROP TRIGGER IF EXISTS export_record_delete; DROP TABLE IF EXISTS export_state; DROP INDEX IF EXISTS records_export; DROP INDEX IF EXISTS records_project_export; PRAGMA user_version=1;"); }
-  finally { db.close(true); }
-}
-
-test("v1 migration preserves records, owner, receipts and settings", async () => {
-  const seed = await save("migration sentinel");
-  await service!.execute(app, { op: "settings", paused: true });
-  downgradeToV1();
-  service = new MemoryService({ directory, now: () => now });
-  expect(service.ownerId).toBe(app.owner_id);
-  expect((await page()).records).toMatchObject([{ id: seed.id, content: "migration sentinel" }]);
-  expect(await service.execute(app, { op: "status" })).toMatchObject({ enabled: true, paused: true });
-  const db = database();
-  try {
-    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
-    expect(db.query("SELECT count(*) AS count FROM operations").get()).toEqual({ count: 1 });
-  } finally { db.close(true); }
-});
-
-test("failed v2 migration rolls back and preserves the v1 database", async () => {
-  await save("preserve on migration failure");
-  downgradeToV1();
-  const db = database();
-  try { db.exec("CREATE TABLE export_state (keep TEXT); INSERT INTO export_state VALUES('preserved');"); } finally { db.close(true); }
-  expect(() => { service = new MemoryService({ directory }); }).toThrow();
-  const verify = database();
-  try {
-    expect(verify.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
-    expect(verify.query("SELECT keep FROM export_state").get()).toEqual({ keep: "preserved" });
-    expect(verify.query("SELECT content FROM records").get()).toEqual({ content: "preserve on migration failure" });
-    expect(verify.query("SELECT count(*) AS count FROM sqlite_master WHERE type='trigger' AND name LIKE 'export_record_%'").get()).toEqual({ count: 0 });
-  } finally { verify.close(true); }
 });

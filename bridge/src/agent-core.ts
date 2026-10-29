@@ -64,7 +64,7 @@ import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
-import { resolveSchedulerCaller } from "./scheduler-caller";
+import { resolveSchedulerCaller, type SchedulerCallerDeps } from "./scheduler-caller";
 import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MemoryError } from "antgrid-memory";
 import { MemoryRequestMessage } from "./protocol";
@@ -5269,6 +5269,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  const sessionCallerDeps: Pick<SchedulerCallerDeps, "session" | "isLiveRun" | "runAgent"> = {
+    session: (id) => sessions?.get(id),
+    isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+    runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+  };
+
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
     acceptsHookRun: (terminalId, runId) => {
@@ -5297,9 +5303,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessionBus: sessionBusApi,
     memory: async ({ terminalId, runId, request }) => {
       const caller = () => resolveMemoryCaller({
-        session: (id) => sessions?.get(id),
-        isLiveRun: (id, liveRun) => sessions?.isLiveRun(id, liveRun) ?? false,
-        runAgent: (id, liveRun) => sessions?.liveRunAgent(id, liveRun),
+        ...sessionCallerDeps,
         checkoutExists: (id) => {
           const runtime = checkoutRuntimes.runtime(id);
           return runtime !== undefined && !runtime.disposed && sessions?.isCheckoutDeleting(id) !== true;
@@ -5314,10 +5318,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
       }
       const caller = resolveSchedulerCaller({
-        session: (id) => sessions?.get(id),
-        isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+        ...sessionCallerDeps,
         launchedBySchedule: (id) => sessions?.launchedBySchedule(id) ?? false,
-        runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
         registryAgent: (name) => agentSpec(name),
       }, terminalId, runId);
       return opts.schedulerForAgent(caller, method, params);

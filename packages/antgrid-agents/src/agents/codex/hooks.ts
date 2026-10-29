@@ -138,6 +138,7 @@ export const observation = { notifications: true, titles: true, handler: true, t
 
 export const stdout: HookStdoutProfile = {
   events: ["session-start"],
+  when: (env) => env.ANTGRID_MEMORY_MCP === "1",
   request: ({ port, terminalId, runId }) => ({
     port,
     path: "/memory/bootstrap",

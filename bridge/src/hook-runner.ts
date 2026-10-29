@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { HookInvocation, HookPath, HookPost } from "antgrid-agents/hook-posts";
 import type { HookProfile } from "antgrid-agents/contracts";
+import { parsePort, readRunId, readTerminalId } from "./session-env";
 
 export type { HookInvocation, HookPath, HookPost };
 
@@ -30,12 +31,6 @@ export interface HookRunnerDeps {
   writeStdout?: (output: string) => void | Promise<void>;
 }
 
-function parsePort(raw: string | undefined): number | null {
-  if (!raw || !/^\d+$/.test(raw.trim())) return null;
-  const value = Number(raw.trim());
-  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null;
-}
-
 function resolvePort(
   hooks: HookProfile,
   deps: Pick<HookRunnerDeps, "env" | "readFile">,
@@ -51,20 +46,30 @@ function resolvePort(
   }
 }
 
+interface HookTarget {
+  hooks: HookProfile;
+  port: number;
+}
+
 /**
  * The hook dispatch boundary: hook name → registry key → the agent's own hook
- * profile. An unknown name, an agent with no hook profile, or an event outside
- * that profile's allowlist all drop the invocation before any payload is read.
+ * profile. An unknown name, an agent with no hook profile, an event outside
+ * that profile's allowlist, or no resolvable port all drop the invocation
+ * before any payload is read.
  */
+function resolveTarget(invocation: HookInvocation, deps: HookRunnerDeps): HookTarget | null {
+  const key = BY_HOOK_NAME[invocation.agent];
+  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
+  if (!hooks?.events.includes(invocation.event)) return null;
+  const port = resolvePort(hooks, deps);
+  return port === null ? null : { hooks, port };
+}
+
 async function buildPosts(
+  { hooks, port }: HookTarget,
   invocation: HookInvocation,
   deps: HookRunnerDeps,
 ): Promise<HookPost[]> {
-  const key = BY_HOOK_NAME[invocation.agent];
-  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
-  if (!hooks?.events.includes(invocation.event)) return [];
-  const port = resolvePort(hooks, deps);
-  if (port === null) return [];
   const posts = await hooks.toPosts(invocation, {
     port,
     terminalId: deps.env.ANTGRID_TERMINAL_ID,
@@ -118,15 +123,13 @@ async function defaultRequest(post: HookPost): Promise<unknown> {
   }
 }
 
-async function writeHookOutput(invocation: HookInvocation, deps: HookRunnerDeps): Promise<void> {
-  const key = BY_HOOK_NAME[invocation.agent];
-  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
-  const stdout = hooks?.stdout;
-  if (!hooks?.events.includes(invocation.event) || !stdout?.events.includes(invocation.event)) return;
-  const port = parsePort(deps.env.ANTGRID_API_PORT);
-  const terminalId = deps.env.ANTGRID_TERMINAL_ID;
-  const runId = deps.env.ANTGRID_RUN_ID;
-  if (port === null || !terminalId?.trim() || !runId?.trim() || !deps.request || !deps.writeStdout) return;
+async function writeHookOutput({ hooks, port }: HookTarget, invocation: HookInvocation, deps: HookRunnerDeps): Promise<void> {
+  const stdout = hooks.stdout;
+  if (!stdout?.events.includes(invocation.event)) return;
+  const terminalId = readTerminalId(deps.env);
+  const runId = readRunId(deps.env);
+  if (!terminalId || !runId || !deps.request || !deps.writeStdout) return;
+  if (stdout.when && !stdout.when(deps.env)) return;
   const response = await deps.request(stdout.request({ port, terminalId, runId }));
   const output = stdout.formatResponse(response);
   if (output === null) return;
@@ -154,9 +157,11 @@ export async function runHookInvocation(
   deps: HookRunnerDeps = defaultDeps(),
 ): Promise<void> {
   try {
+    const target = resolveTarget(invocation, deps);
+    if (!target) return;
     await Promise.allSettled([
-      buildPosts(invocation, deps).then((posts) => Promise.allSettled(posts.map((post) => deps.post(post)))),
-      writeHookOutput(invocation, deps),
+      buildPosts(target, invocation, deps).then((posts) => Promise.allSettled(posts.map((post) => deps.post(post)))),
+      writeHookOutput(target, invocation, deps),
     ]);
   } catch {
     // Hooks are advisory; an integration failure must never block the agent.

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MemoryRequestSchema } from "antgrid-memory";
+import { MemoryRequestRecordSchema } from "antgrid-memory";
 import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -8,10 +8,7 @@ import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capa
 import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
-  z.object({ id: z.string().min(1), type: z.literal("memory:request"), request: z.record(z.string(), z.unknown()).superRefine((value, context) => {
-    const parsed = MemoryRequestSchema.safeParse(value);
-    if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-  }) }),
+  z.object({ id: z.string().min(1), type: z.literal("memory:request"), request: MemoryRequestRecordSchema }),
   z.object({ id: z.string().min(1), type: z.literal("scheduler:request"), method: z.string().startsWith("scheduler."), params: z.unknown().optional() }),
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
   z.object({ id: z.string().min(1), type: z.literal("project:resolve"), folder: z.string().min(1) }),

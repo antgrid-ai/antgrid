@@ -32,6 +32,7 @@ import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCap
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectAvailableTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./agent-runtime";
+import { setMemoryLaunchGate } from "./agent-host";
 import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
@@ -684,11 +685,13 @@ export class HostServer {
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
   private readonly memory = new HostMemory(resolveAbDir);
+  private releaseMemoryGate: (() => void) | undefined;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
 
   constructor(private readonly opts: HostServerOptions) {
+    this.releaseMemoryGate = setMemoryLaunchGate(() => this.memory.launchEnabled());
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
     // reloads the shared store before the callback runs — push targeting and
     // `phones:list` read the refreshed in-memory `phones` array live. On top of
@@ -825,6 +828,7 @@ export class HostServer {
       this.fatalRevokeArmed = true;
     }
     this.startScheduler();
+    this.memory.warm();
     return { port: listener.port, token };
   }
 
@@ -2700,6 +2704,10 @@ export class HostServer {
       // core would otherwise banner itself as having no relay coordinate.
       relayUrl = this.requireRemoteConfig().relayUrl;
     }
+    // Re-checked per request: the catalog entry can be dropped while the core lives.
+    const admitted = () => {
+      if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+    };
     const core = new ProjectCore({
       folder: projectPath,
       mode,
@@ -2735,13 +2743,13 @@ export class HostServer {
       // Binds the catalog key rather than the core's computed id: schedules are stored under the key.
       schedulerForAgent: (identity, method, params) => this.schedulerRequestForAgent({ ...identity, projectId }, method, params),
       memoryForAgent: (caller, request) => this.memory.execute(() => {
-        if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+        admitted();
         return { ...caller(), actor: "agent", project_id: projectId };
       }, request, 1),
       memoryForApp: (request, validate, peerId) => this.memory.execute(() => {
         validate();
         if (peerId && !this.controlPlaneRelay?.isPeerAuthorized?.(peerId)) throw new MemoryError("FORBIDDEN", "Native memory authorization has expired.");
-        if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+        admitted();
         return { actor: "app", project_id: projectId };
       }, request),
       ...(mode === "remote" ? { remote } : {}),
@@ -3078,6 +3086,7 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
+    this.releaseMemoryGate?.();
     this.memory.close();
     // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.

@@ -17,8 +17,10 @@ The owner ID comes from `service.ownerId`, which is retained in the database.
 Agents require a project, durable session, checkout, and verified live run.
 The run secret is checked by the host and never persisted. App contexts without
 a project may inspect all local records; project app contexts see that project's
-project/task records only. App saves are corrections of existing records and
-cannot widen their scope.
+records only. Scopes are `project` and `task`. App saves are corrections of
+existing records and cannot widen their scope. While memory is disabled every
+agent operation except `status` is refused with `DISABLED`; app inspection,
+export and forgetting remain available.
 
 The service owns write serialization, immediate SQLite transactions, default
 opt-out and pause controls, correction conflicts, task-state inactivity expiry,

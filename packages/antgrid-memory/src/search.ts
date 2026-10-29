@@ -35,7 +35,7 @@ export function searchResponse(records: MemoryRecord[], limit: number): { result
     const hit: MemorySearchHit = {
       id: r.id, memory_type: r.memory_type, scope: r.scope, content, excerpted: content !== r.content,
       source: r.source, lifecycle: r.lifecycle,
-      ...(r.project_id === undefined ? {} : { project_id: r.project_id }),
+      project_id: r.project_id,
       ...(r.task_id === undefined ? {} : { task_id: r.task_id }),
       ...(r.checkout_id === undefined ? {} : { checkout_id: r.checkout_id }),
       ...(r.applicability === undefined ? {} : { applicability: r.applicability }),
