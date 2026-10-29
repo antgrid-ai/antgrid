@@ -5066,7 +5066,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     machineStatsTimer = null;
   }
   function sendMachineStats() {
-    sendAb(createMessage("machine:stats", readMachineStats()));
+    // Caught rather than voided: an escaped rejection reaches index.ts's
+    // `unhandledRejection` hook, which takes the whole host down. A read that
+    // settles after shutdown must not publish into the torn-down transport.
+    readMachineStats()
+      .then((stats) => { if (!isShuttingDown) sendAb(createMessage("machine:stats", stats)); })
+      .catch((err) => log.warn("machine:stats send failed: %s", err));
   }
   /** `onAttach` is a remote client's first frame rather than a handshake, so
    *  it is held to the tick's rule: nothing for a backgrounded app. The timer
