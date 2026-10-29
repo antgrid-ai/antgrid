@@ -1,12 +1,46 @@
-import { freemem, totalmem } from "node:os";
+import { cpus, freemem, totalmem } from "node:os";
 
-/** How often a core re-sends `machine:stats` once an app has attached. */
-export const MACHINE_STATS_INTERVAL_MS = 30_000;
+function sampleCpuTimes(): { busy: number; total: number } {
+  let busy = 0;
+  let total = 0;
+  for (const { times } of cpus()) {
+    const all = times.user + times.nice + times.sys + times.irq + times.idle;
+    total += all;
+    busy += all - times.idle;
+  }
+  return { busy, total };
+}
 
-/** This machine's RAM for `machine:stats`, as the OS reports it. macOS counts
- *  only truly free pages as free, so the available figure reads low there. */
-export function readMachineStats(): { ramTotalBytes: number; ramAvailableBytes: number } {
-  return { ramTotalBytes: totalmem(), ramAvailableBytes: freemem() };
+/** Under this much accumulated CPU time (ms, summed over cores) a delta is too
+ *  small to be a rate, so the previous figure stands. Every core shares one
+ *  sampler and can ask within the same instant. */
+const MIN_CPU_WINDOW_MS = 1000;
+
+let lastCpu = sampleCpuTimes();
+let lastCpuPercent: number | undefined;
+
+/** Whole-machine busy share since the last usable sample, 0-100. Primed at
+ *  import, so the first report averages over the process's lifetime. */
+export function readCpuPercent(): number | undefined {
+  const now = sampleCpuTimes();
+  const total = now.total - lastCpu.total;
+  if (total >= MIN_CPU_WINDOW_MS) {
+    lastCpuPercent = Math.min(100, Math.max(0, Math.round(((now.busy - lastCpu.busy) / total) * 100)));
+    lastCpu = now;
+  }
+  return lastCpuPercent;
+}
+
+/** This machine's RAM and CPU load for `machine:stats`, as the OS reports it.
+ *  macOS counts only truly free pages as free, so the available figure reads
+ *  low there. CPU is absent when the OS reports no per-core times. */
+export function readMachineStats(): { ramTotalBytes: number; ramAvailableBytes: number; cpuPercent?: number } {
+  const cpuPercent = readCpuPercent();
+  return {
+    ramTotalBytes: totalmem(),
+    ramAvailableBytes: freemem(),
+    ...(cpuPercent === undefined ? {} : { cpuPercent }),
+  };
 }
 
 /** What a connected device last said about its own hardware. Every field is

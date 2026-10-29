@@ -14,6 +14,7 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_swipe_actions.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
 import '../models/git_status_index.dart';
@@ -780,7 +781,15 @@ class _FileTreeRowState extends State<_FileTreeRow> {
               ? AbDisclosureChevron(expanded: widget.isExpanded)
               : const SizedBox(width: AbTokens.drawerLeadingSlot),
         ),
-        title: _title(context, isDirectory),
+        // The title ellipsizes in a narrow pane, so the hover tooltip is the
+        // only way to read the full name and folder. Touch has no hover, and
+        // its long-press already opens the row menu.
+        title: isMobilePlatform
+            ? _title(context, isDirectory)
+            : AbTooltip(
+                message: widget.node.path,
+                child: _title(context, isDirectory),
+              ),
         // Actions outermost, badge inboard: at rest the change count is the
         // only tenant and sits flush at the gutter on every row, so the column
         // it forms is what the eye scans. Only a revealed row's badge steps

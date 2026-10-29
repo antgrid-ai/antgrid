@@ -20,6 +20,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../models/ab_message.dart' show createAbMessage;
 import '../models/device_stats.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
@@ -745,6 +746,8 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
         hostMachineName: remoteHost.name,
         platform: remoteHost.platform,
         ram: _focusedHostRam(ref),
+        cpuPercent: _focusedHostCpu(ref),
+        onRequestStats: _requestHostStats(ref),
       ),
   ];
 }
@@ -760,6 +763,34 @@ String? _focusedHostRam(WidgetRef ref) {
       ?.machineStats;
   if (stats == null) return null;
   return ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes);
+}
+
+/// Asks the focused project's host for its current RAM and CPU. The host
+/// samples nothing until asked, so this runs on each hover of the chip and the
+/// answer lands in `machineStats`. Null when nothing is focused.
+VoidCallback? _requestHostStats(WidgetRef ref) {
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  if (selectedId == null) return null;
+  // Captured now: the hover fires long after this build, and a WidgetRef read
+  // on a disposed row throws.
+  final container = ref.container;
+  return () => detached('AgentPanel', 'machine:stats request failed', () async {
+    final session = await container.read(
+      projectSessionProvider(selectedId).future,
+    );
+    await session.send(createAbMessage('machine:stats:request', const {}));
+  });
+}
+
+/// The focused project's host CPU load, read like [_focusedHostRam].
+int? _focusedHostCpu(WidgetRef ref) {
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  if (selectedId == null) return null;
+  return ref
+      .watch(projectStatusProvider(selectedId))
+      .value
+      ?.machineStats
+      ?.cpuPercent;
 }
 
 /// The machine hosting the focused project, or null when it is this one (or

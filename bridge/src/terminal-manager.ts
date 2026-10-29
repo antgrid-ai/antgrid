@@ -58,6 +58,9 @@ const EXIT_DRAIN_MS = 5 * TERMINAL_FRAME_INTERVAL_MS;
  *  for a soft-wrapped line of a few thousand characters, which is longer than
  *  any URL the grammar will link. */
 const HISTORY_CONTEXT_ROWS = 48;
+/** How much of a run's output `onTerminalExited` receives — enough for an agent's
+ *  one-line startup refusal, small enough to hand to every exit. */
+const EXIT_OUTPUT_TAIL_CHARS = 4000;
 
 // --- Terminal history store: the real run lifecycle ---------------------------
 //
@@ -204,7 +207,10 @@ export interface TerminalManagerCallbacks {
   onTerminalOutput?: (terminalId: string, data: string) => void;
   captureClipboardOwner?: (terminalId: string) => import("./terminal-clipboard/router").ClipboardOwner | undefined;
   onClipboardWrite?: (owner: import("./terminal-clipboard/router").ClipboardOwner, text: string) => void;
-  onTerminalExited?: (terminalId: string, runId?: string) => void;
+  /** [readOutputTail] reads the end of the run's output, and stays valid after
+   *  the scrollback is released — a caller that wants no tail pays nothing.
+   *  Absent for a replaced run, whose exit lands after the slot is taken. */
+  onTerminalExited?: (terminalId: string, runId?: string, readOutputTail?: () => string) => void;
   onTerminalNotification?: (terminalId: string) => void;
   onTerminalTitle?: (terminalId: string, title: string) => void;
   /** This terminal is gone for good — not exited, FORGOTTEN: nothing will name
@@ -556,6 +562,9 @@ export class TerminalManager {
             return;
           }
           this.sendMessage(msg);
+          // The buffer itself, not a lookup: the release below may delete it from the map first.
+          const scrollback = this.scrollbacks.get(terminalId);
+          const readOutputTail = () => scrollback?.getContents().slice(-EXIT_OUTPUT_TAIL_CHARS) ?? "";
           // Preserve metadata so the tab stays visible in status
           this.stoppedTerminals.set(terminalId, {
             name: session.name,
@@ -579,7 +588,7 @@ export class TerminalManager {
             this.dropAfterFinalFrame(terminalId, msg.exitCode);
           }
           this.connState.clearTerminal(terminalId);
-          this.callbacks.onTerminalExited?.(terminalId, config.env?.ANTGRID_RUN_ID);
+          this.callbacks.onTerminalExited?.(terminalId, config.env?.ANTGRID_RUN_ID, readOutputTail);
           return;
         }
 
