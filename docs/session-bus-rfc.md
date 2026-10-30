@@ -1,9 +1,11 @@
 # Session bus over a blind relay: architecture proposal
 
-**Status:** Proposed. Written 2026-10-30. Nothing here is implemented. The
-transitional fix on `fix/remote-driven-carrier` (an app session driving a
-machine may carry that machine's outbound bus frames) is unaffected by this
-document and lands first; this proposal replaces the mechanism it patches.
+**Status:** Accepted 2026-10-30, including the three decisions under §Resolved
+implementation choices that amend a standing rule. Nothing here is
+implemented. The transitional fix on `fix/remote-driven-carrier` (an app
+session driving a machine may carry that machine's outbound bus frames) is
+unaffected by this document and lands first; this proposal replaces the
+mechanism it patches.
 
 The session bus lets one agent session reach another. On one machine it works
 with nothing underneath it. Across machines it does not work unless a desktop
@@ -536,3 +538,13 @@ session on it from the other.
 - **`control` as a third `agentReach` value** over a separate switch: one
   setting with three levels is one thing for the owner to understand, and
   `off` remains the default either way.
+- **The central WebSocket may carry sealed blobs.** The root `AGENTS.md`
+  invariant changes to *"never accepts a readable application payload"*, in
+  the phase 2 PR that adds the queue, as §Invariants amended lays out. Agreed
+  2026-10-30.
+- **The orchestrator grant is an account-level device attribute**, set from
+  the CLI first and verified against the authorization snapshot; app surfaces
+  are a later spec. Agreed 2026-10-30.
+- **The carrier path is deleted in the phase 3 PR that adds the seam**, not
+  after it. `fix/remote-driven-carrier` lands first, unchanged. Agreed
+  2026-10-30.
