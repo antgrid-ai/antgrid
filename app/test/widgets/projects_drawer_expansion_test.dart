@@ -1,55 +1,53 @@
-// Verifies the user-visible expansion contract for ProjectsDrawer:
-//   1. A project shows its sessions by default (expanded).
-//   2. Tapping the project row collapses it (sessions hidden).
+// The project-first sidebar: one row per project merged across machines, the
+// machine scope that filters it, and the Needs you section above it.
 //
-// Seeding follows the same pattern as drawer_entry_row_status_test.dart:
-// buildTestStoreOverrides() opens all four stores; the project is written
-// directly to projectStore and the session cache to cachedSessionsStore
-// before pumpWidget, so the providers see real data without provider-level
-// mocking.
+// Seeding writes straight into the real stores (buildTestStoreOverrides) so the
+// providers see real data without provider-level mocking.
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/agent_work_status.dart';
+import 'package:antgrid/models/project_catalog.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
-import 'package:antgrid/providers/control_plane.dart';
-import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/widgets/ab_status_helpers.dart';
+import 'package:antgrid/widgets/machine_scope_menu.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/session_row.dart';
 
 import '../helpers/test_store_overrides.dart';
 import '../helpers/prefs_test_mock.dart';
 
-// The seeded project id and display name used across both tests.
-const _projectId = 'test-proj-1';
-const _displayName = 'test-proj-1';
+const _projectId = 'local-antgrid';
+const _remoteProjectId = 'remote-antgrid';
 const _machineUuid = 'machine-1';
-const _machineName = 'RadhaAI';
+const _machineName = 'MacBook Pro';
+const _remote = 'github.com/acme/antgrid';
 
-AbProject _project() => AbProject(
+AbProject _project({String name = 'antgrid'}) => AbProject(
   projectId: _projectId,
-  folder: '/tmp/$_projectId',
-  displayName: _displayName,
+  folder: '/tmp/$name',
+  displayName: name,
   hostDeviceUuid: _projectId,
   hostMachineName: '',
   lastOpenedAt: DateTime.now(),
 );
 
-SessionEntry _session() => SessionEntry(
-  id: 'sess-1',
-  name: 'Session 1',
-  createdAt: 0,
-  lastUsedAt: 0,
-  archived: false,
-  running: false,
-);
+SessionEntry _session(String id, {int lastUsedAt = 1, bool running = false}) =>
+    SessionEntry(
+      id: id,
+      name: 'Session $id',
+      createdAt: 0,
+      lastUsedAt: lastUsedAt,
+      archived: false,
+      running: running,
+    );
 
 SessionEntry _managedSession(String id, String branch) => SessionEntry(
   id: id,
@@ -73,6 +71,16 @@ RecentAgent _remoteMachine() => RecentAgent(
   hostMachineName: _machineName,
 );
 
+InventoryAgent _heartbeat({required bool fresh}) => InventoryAgent(
+  deviceUuid: _machineUuid,
+  displayName: _machineName,
+  platform: 'macos',
+  ed25519Pub: 'pub',
+  lastSeenAt: fresh
+      ? DateTime.now()
+      : DateTime.now().subtract(const Duration(days: 1)),
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -87,154 +95,163 @@ void main() {
     await stores.close();
   });
 
-  Future<void> seed() async {
+  Future<void> seedLocal(List<SessionEntry> sessions) async {
     await stores.projectStore.upsert(_project());
-    await stores.cachedSessionsStore.put(_projectId, [_session()]);
-    // Drain the debounce timer so flutter_test doesn't see a pending timer
-    // after the widget tree is disposed (CachedSessionsStore debounces writes
-    // by 200ms; flushNow() cancels the timer and writes synchronously).
+    await stores.cachedSessionsStore.put(_projectId, sessions);
+    // Drain the debounce timer so flutter_test sees no pending timer after the
+    // tree is disposed.
     await stores.cachedSessionsStore.flushNow();
   }
 
-  Future<void> seedRemoteMachine() async {
+  /// The same repository on a remote machine, plus that machine's catalog and
+  /// the local catalog naming the shared origin.
+  Future<void> seedRemoteCopy(List<SessionEntry> sessions) async {
     await stores.recentAgentsStore.upsert(_remoteMachine());
+    stores.cachedSessionsStore
+      ..putCatalog(kLocalMachineKey, const [
+        CatalogProject(
+          projectId: _projectId,
+          gitRemote: _remote,
+          gitRemoteProbed: true,
+        ),
+      ])
+      ..putCatalog(_machineUuid, const [
+        CatalogProject(
+          projectId: _remoteProjectId,
+          label: 'antgrid',
+          gitRemote: _remote,
+          gitRemoteProbed: true,
+        ),
+      ]);
+    await stores.cachedSessionsStore.put(
+      '$_machineUuid.$_remoteProjectId',
+      sessions,
+    );
+    await stores.cachedSessionsStore.flushNow();
   }
 
-  Widget buildDrawer() {
+  Widget buildDrawer({bool machineOnline = true}) {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
-        // DrawerEntryRow reads projectStatusProvider — return an empty stream
-        // so the row renders without trying to open a real ProjectSession.
         projectStatusProvider(
           _projectId,
         ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
-        // ProjectsDrawer → AccountFooter reads currentUserProvider. Return
-        // null (not signed in) so the footer renders a static "Sign in" CTA
-        // without hitting the network.
+        // The footer's account row: signed out renders a static CTA with no
+        // network.
         currentUserProvider.overrideWith((_) async => null),
+        accountAgentsProvider.overrideWith(
+          (_) async => [_heartbeat(fresh: machineOnline)],
+        ),
       ],
       child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
     );
   }
 
-  testWidgets('a project is expanded by default and shows its sessions', (
-    tester,
-  ) async {
-    await seed();
+  ProviderContainer containerOf(WidgetTester tester) =>
+      ProviderScope.containerOf(tester.element(find.byType(ProjectsDrawer)));
+
+  testWidgets('a quiet project starts folded and opens on tap', (tester) async {
+    await seedLocal([_session('a')]);
     await tester.pumpWidget(buildDrawer());
     await tester.pumpAndSettle();
 
-    // Expanded by default → at least one SessionRow is visible.
-    expect(find.byType(SessionRow), findsWidgets);
-  });
+    expect(find.text('antgrid'), findsOneWidget);
+    expect(find.byType(SessionRow), findsNothing);
 
-  testWidgets('tapping a project row collapses it (sessions hidden)', (
-    tester,
-  ) async {
-    await seed();
-    await tester.pumpWidget(buildDrawer());
+    await tester.tap(find.text('antgrid'));
     await tester.pumpAndSettle();
+    expect(find.byType(SessionRow), findsOneWidget);
 
-    // Sanity: sessions present before tap.
-    expect(find.byType(SessionRow), findsWidgets);
-
-    // Tap the project row's title text to toggle collapse.
-    // DrawerEntryRow wraps AbListRow with onTap → collapsedDrawerIdsProvider.notifier.toggle(id).
-    await tester.tap(find.text(_displayName));
+    await tester.tap(find.text('antgrid'));
     await tester.pumpAndSettle();
-
-    // After collapse, SessionsList is no longer rendered → no SessionRow.
     expect(find.byType(SessionRow), findsNothing);
   });
 
-  testWidgets('remote machine uses a group header row and expands projects', (
+  testWidgets('one repo on two machines is one row, its sessions tagged by machine', (
     tester,
   ) async {
-    await seedRemoteMachine();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ...stores.overrides,
-          projectStatusProvider(
-            _machineUuid,
-          ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
-          currentUserProvider.overrideWith((_) async => null),
-          accountAgentsProvider.overrideWith((_) async => const []),
-          controlPlaneStateProvider(_machineUuid).overrideWith(
-            (_) => Stream.value(
-              const ControlPlaneState(
-                projects: [
-                  AdvertisedProject(
-                    projectId: 'alpha',
-                    label: 'Alpha',
-                    path: '/alpha',
-                    running: true,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-        child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
-      ),
-    );
+    await seedLocal([_session('local', lastUsedAt: 1)]);
+    await seedRemoteCopy([_session('remote', lastUsedAt: 2)]);
+    await tester.pumpWidget(buildDrawer());
     await tester.pumpAndSettle();
 
-    final rowFinder = find.ancestor(
-      of: find.text(_machineName),
-      matching: find.byType(AbListRow),
-    );
-    final row = tester.widget<AbListRow>(rowFinder);
-    expect(row.leading, isNull);
-    expect(row.title, isA<Row>());
-    expect(find.text('Alpha'), findsNothing);
-
-    await tester.tap(find.text(_machineName));
+    expect(find.text('antgrid'), findsOneWidget);
+    await tester.tap(find.text('antgrid'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.byType(SessionRow), findsNWidgets(2));
+    // The tag sits where a pointer reveals the kebab — on touch the kebab is
+    // always there, so this is a desktop assertion.
+    expect(find.text(_machineName), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('an offline machine is out of scope until picked in the menu', (
+    tester,
+  ) async {
+    await seedRemoteCopy([_session('remote')]);
+    await tester.pumpWidget(buildDrawer(machineOnline: false));
+    await tester.pumpAndSettle();
+
+    // Its only project is on a machine the default scope leaves out.
+    expect(find.text('antgrid'), findsNothing);
+    expect(find.text('No projects on the machines in scope.'), findsOneWidget);
+
+    await tester.tap(find.byType(MachineScopeButton));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(_machineName).last);
+    await tester.pumpAndSettle();
+    // Close the menu.
+    await tester.tapAt(const Offset(1, 1));
+    await tester.pumpAndSettle();
+
+    expect(find.text('antgrid'), findsOneWidget);
+    expect(find.text('offline'), findsOneWidget);
   });
 
-  testWidgets(
-    'expanded machine explains an advert with remoteAccessEnabled:false',
-    (tester) async {
-      // The bridge advertises [] while its remote-access switch is off, and the
-      // machine-level flag is what lets the subtree say WHY instead of the
-      // neutral "Offline — no projects advertised." wording. The copy is the
-      // NOT_ALLOWED verb refusal's, pinned via friendlyErrorCopy so the two
-      // surfaces can't drift.
-      await seedRemoteMachine();
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            ...stores.overrides,
-            projectStatusProvider(
-              _machineUuid,
-            ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
-            currentUserProvider.overrideWith((_) async => null),
-            accountAgentsProvider.overrideWith((_) async => const []),
-            controlPlaneStateProvider(_machineUuid).overrideWith(
-              (_) => Stream.value(
-                const ControlPlaneState(
-                  projects: [],
-                  remoteAccessEnabled: false,
-                ),
-              ),
-            ),
-          ],
-          child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
-        ),
-      );
-      await tester.pumpAndSettle();
+  testWidgets('Show all machines brings a hidden project back', (tester) async {
+    await seedRemoteCopy([_session('remote')]);
+    await tester.pumpWidget(buildDrawer(machineOnline: false));
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.text(_machineName));
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('Show all machines'));
+    await tester.pumpAndSettle();
+    expect(find.text('antgrid'), findsOneWidget);
+  });
 
-      expect(find.text(friendlyErrorCopy('NOT_ALLOWED')!), findsOneWidget);
-      expect(find.text('Offline — no projects advertised.'), findsNothing);
-    },
-  );
+  testWidgets('a session waiting on the user is listed under Needs you', (
+    tester,
+  ) async {
+    await seedLocal([_session('a', running: true)]);
+    await tester.pumpWidget(buildDrawer());
+    await tester.pumpAndSettle();
+    expect(find.text('NEEDS YOU'), findsNothing);
+
+    containerOf(tester)
+        .read(remoteSessionStatusProvider.notifier)
+        .setLocalSessionStatuses({
+          _projectId: {'a': AgentWorkStatus.attention},
+        });
+    await tester.pump();
+
+    expect(find.text('NEEDS YOU'), findsOneWidget);
+    expect(find.text('This machine · antgrid'), findsOneWidget);
+  });
+
+  testWidgets('the scope menu says when a machine has remote access off', (
+    tester,
+  ) async {
+    await seedRemoteCopy([_session('remote')]);
+    await tester.pumpWidget(buildDrawer());
+    await tester.pumpAndSettle();
+    containerOf(tester)
+        .read(machineAdvertisedProjectsProvider.notifier)
+        .setAdvert(_machineUuid, (projectCount: 0, remoteAccessEnabled: false));
+
+    await tester.tap(find.byType(MachineScopeButton));
+    await tester.pumpAndSettle();
+    expect(find.text('remote off'), findsOneWidget);
+  });
 
   for (final layout in <({String name, Size size})>[
     (name: 'phone', size: const Size(390, 844)),
@@ -249,14 +266,14 @@ void main() {
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
       });
-      await stores.projectStore.upsert(_project());
-      await stores.cachedSessionsStore.put(_projectId, [
+      await seedLocal([
         _managedSession('1', 'antgrid/session-1'),
         _managedSession('2', 'antgrid/session-2'),
       ]);
-      await stores.cachedSessionsStore.flushNow();
 
       await tester.pumpWidget(buildDrawer());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('antgrid'));
       await tester.pumpAndSettle();
 
       expect(find.byType(SessionRow), findsNWidgets(2));

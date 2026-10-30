@@ -89,7 +89,17 @@ final Set<String> _forksInFlight = <String>{};
 class SessionRow extends ConsumerStatefulWidget {
   final String entryId;
   final SessionEntry session;
-  const SessionRow({super.key, required this.entryId, required this.session});
+
+  /// Short name of the machine the session runs on, shown where the kebab
+  /// would be while the row is at rest. Set only under a project merged across
+  /// machines, where nothing else on the row says which machine it is.
+  final String? machineTag;
+  const SessionRow({
+    super.key,
+    required this.entryId,
+    required this.session,
+    this.machineTag,
+  });
 
   @override
   ConsumerState<SessionRow> createState() => _SessionRowState();
@@ -390,7 +400,17 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     },
                   ),
                 )
-              : null,
+              : widget.machineTag == null
+              ? null
+              : Text(
+                  widget.machineTag!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
           selected: selected,
           enabled: !deleting,
           contentFloor: AbRowContentFloor.iconButton,

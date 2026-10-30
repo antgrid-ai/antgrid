@@ -22,9 +22,11 @@ import '../providers/removed_machine_prune.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
 import '../providers/device_provisioning.dart';
+import '../providers/demo_mode.dart';
 import '../providers/machine_catalog.dart';
 import '../providers/machine_directory.dart';
 import '../providers/projects.dart';
+import '../providers/scope_control_planes.dart';
 import '../providers/supervisor_status.dart';
 import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
@@ -57,6 +59,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   late final AppLifecycleListener _lifecycleListener;
   MobileLifecycleObserver? _mobileLifecycle;
   Future<void>? _eagerKick;
+  Timer? _inventoryRefresh;
   DateTime? _lastRemint;
   bool _wasBackgrounded = false;
 
@@ -101,6 +104,27 @@ class _AppShellState extends ConsumerState<AppShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _kickEagerDials();
     });
+    // Desktop's scope targets are known only once the account inventory has
+    // loaded, which is after the launch kick above; a machine coming into scope
+    // later (picked in the menu, or its heartbeat resuming) needs its dial too.
+    ref.listenManual<Set<String>>(scopeControlPlaneTargetsProvider, (
+      prev,
+      next,
+    ) {
+      if (!mounted) return;
+      if (next.difference(prev ?? const {}).isEmpty) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _kickEagerDials();
+      });
+    });
+    // Presence of a machine nothing has dialed comes from its account
+    // heartbeat, which the inventory carries; re-read it so a machine going
+    // dark (or coming back) shows within a few minutes rather than at the next
+    // launch.
+    _inventoryRefresh = Timer.periodic(kPresenceFreshWindow, (_) {
+      if (!mounted || ref.read(demoModeProvider)) return;
+      ref.invalidate(accountAgentsProvider);
+    });
     // Cold start: nothing else would notice a device revoked while the app was
     // closed — the session cookie outlives the device row, so the account still
     // resolves and desktop may never dial a relay at all.
@@ -121,6 +145,7 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   void dispose() {
+    _inventoryRefresh?.cancel();
     _mobileLifecycle?.dispose();
     _lifecycleListener.dispose();
     super.dispose();

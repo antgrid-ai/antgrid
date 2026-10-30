@@ -2,7 +2,6 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../launcher/host_controller.dart';
 import '../models/drawer_entry.dart';
 import '../models/project_catalog.dart';
 import '../services/account_agents_api.dart';
@@ -11,8 +10,8 @@ import 'account_agents.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'drawer_entries.dart';
-import 'host_status.dart';
 import 'machine_scope.dart';
+import 'projects.dart';
 import 'recent_sessions.dart';
 
 /// How long after a bridge's last account heartbeat it still reads as online.
@@ -171,16 +170,21 @@ final machineDirectoryProvider = Provider<List<MachineInfo>>((ref) {
   final localName =
       inventory.firstWhereOrNull((a) => a.deviceUuid == localUuid)?.displayName ??
       'This machine';
-  final hostUp = isMobilePlatform
-      ? false
-      : ref.watch(hostStatusProvider).value?.phase == HostPhase.up;
   final adverts = ref.watch(machineAdvertisedProjectsProvider);
   return buildMachineDirectory(
     entries: entries,
     inventory: inventory,
-    includeLocal: !isMobilePlatform,
+    // A phone runs no bridge of its own, but a local project, wherever it
+    // came from, still needs a machine to belong to.
+    includeLocal:
+        !isMobilePlatform ||
+        ref.watch(projectsProvider.select((p) => p.isNotEmpty)),
     localName: localName,
-    localOnline: hostUp,
+    // Not the host's phase: the app spawns its own bridge on demand, so this
+    // machine is reachable whenever the app is running. Keying it to `up`
+    // would drop every local project out of the default scope at launch and
+    // during any host restart.
+    localOnline: true,
     connected: ref.watch(machineLiveConnectionProvider),
     remoteAccess: {
       for (final e in adverts.entries) e.key: e.value.remoteAccessEnabled,

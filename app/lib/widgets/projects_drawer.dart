@@ -12,47 +12,25 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_tap_target.dart';
-import '../models/drawer_entry.dart';
-import '../project/project_session_registry.dart'
-    show projectSessionRegistryProvider;
-import '../models/session_entry.dart';
-import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
-import '../providers/drawer_entries.dart';
-import '../providers/drawer_expansion.dart';
-import '../providers/drawer_order.dart';
-import '../providers/collapsed_drawer.dart';
-import '../providers/new_session_action.dart';
-import '../providers/new_session_picker.dart';
+import '../providers/new_session_picker.dart' show enterNewSession;
+import '../providers/project_index.dart';
 import '../providers/providers.dart';
-import '../providers/sessions.dart';
-import '../services/control_plane_client.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
-import 'ab_status_helpers.dart' show emptyAdvertHint;
 import 'account_footer.dart';
-import 'drawer_entry_row.dart'
-    show
-        DrawerEntryRow,
-        DrawerProjectAggregateDot,
-        DrawerProjectLeading,
-        HoverableDrawerRow,
-        LocalMachineBand,
-        MachineDrawerHeaderRow,
-        drawerProjectTitleStyle;
 import 'first_run_checklist.dart';
+import 'machine_scope_menu.dart';
 import 'open_folder_button.dart';
-import 'session_row.dart';
+import 'project_sidebar.dart';
 import 'update_row.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
@@ -103,12 +81,6 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
 
   @override
   Widget build(BuildContext context) {
-    // Unfiltered by design. The session search lives in the window title bar
-    // and aims at the Recent list, which is the complete flat view of sessions;
-    // narrowing THIS list by its projects' sessions only hid rows the user was
-    // looking straight at.
-    final entries = ref.watch(drawerEntriesProvider);
-
     return MenuBoundsScope(
       child: Container(
         width: 288,
@@ -141,10 +113,11 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           minBodyExtent: MediaQuery.textScalerOf(
             context,
           ).scale(AbTokens.rowHeightLg),
-          header: _TopChrome(
+          header: const _TopChrome(),
+          body: _Body(
+            refreshKey: _refreshKey,
             onRefresh: _refreshBusy ? null : _refreshFromButton,
           ),
-          body: _Body(entries: entries, refreshKey: _refreshKey),
           // Docked here, not on the New Session canvas: the drawer is the only
           // desktop surface mounted on both routes, and the last setup steps
           // are performed from inside a session.
@@ -175,21 +148,16 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
 /// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
 class _TopChrome extends StatelessWidget {
-  const _TopChrome({required this.onRefresh});
-
-  /// Null while a refresh the button started is still on screen — see
-  /// [_ProjectsDrawerState._refreshBusy].
-  final Future<void> Function()? onRefresh;
+  const _TopChrome();
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    // The scope switcher sits above everything it filters — Needs you and the
+    // project list below are both answers to "on which machines".
+    return const Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const _NavActions(),
-        _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
-      ],
+      children: [_NavActions(), MachineScopeButton()],
     );
   }
 }
@@ -405,12 +373,14 @@ class _Footer extends ConsumerWidget {
 }
 
 class _Body extends ConsumerWidget {
-  final List<DrawerEntry> entries;
-
-  /// Owned by [_ProjectsDrawerState] so the header's refresh button can show
+  /// Owned by [_ProjectsDrawerState] so the PROJECTS refresh button can show
   /// this indicator too.
   final GlobalKey<RefreshIndicatorState> refreshKey;
-  const _Body({required this.entries, required this.refreshKey});
+
+  /// Null while a refresh the button started is still on screen — see
+  /// [_ProjectsDrawerState._refreshBusy].
+  final Future<void> Function()? onRefresh;
+  const _Body({required this.refreshKey, required this.onRefresh});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -444,30 +414,31 @@ class _Body extends ConsumerWidget {
   }
 
   Widget _list(BuildContext context, WidgetRef ref) {
-    if (entries.isEmpty) {
-      // Point at the real entry points rather than a nonexistent "[+]". On
-      // desktop the New Session canvas (with its "Open local folder" / "Pair
-      // remote project" cards) sits right beside this drawer, so steer there;
-      // local folders aren't supported on mobile, so name only pairing.
-      //
+    // Unfiltered by the session search, by design: that search lives in the
+    // title bar and aims at the Recent list. The machine scope is the only
+    // filter this list answers to.
+    final views = ref.watch(projectViewsProvider);
+    if (views.isEmpty) {
       // A scrollable (not a bare Center) so the pull-to-refresh gesture works
       // with zero rows — overscroll needs something scrollable to grab.
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
+          // Kept with nothing under it: its refresh is how a machine whose
+          // projects have not loaded yet gets asked again.
+          _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
             child:
                 // Mobile has no local folders — this drawer fills from machines
-                // on the account, so point there (the New Session canvas
-                // carries the full connect steps).
+                // on the account, so point there.
                 isMobilePlatform
                 ? const AbEmptyState(
                     title: 'No projects yet',
                     subtitle: 'Connect a machine to see its projects here.',
                   )
-                // Desktop's real entry point is a local folder; offer it
-                // in place instead of describing where else to find it.
+                // Desktop's real entry point is a local folder; offer it in
+                // place instead of describing where else to find it.
                 : const AbEmptyState(
                     title: 'No projects yet',
                     subtitle: 'Open a folder to get started.',
@@ -477,46 +448,22 @@ class _Body extends ConsumerWidget {
         ],
       );
     }
-    // The band names ONE machine, so it is emitted once for the whole list —
-    // at the first local project, wherever the persisted order happens to put
-    // it. Derived from the list rather than from each row's neighbour: an
-    // order that interleaves locals with machines (a drag, or a newly opened
-    // folder appended after them by `applyDrawerOrder`) would otherwise open a
-    // second, identically-labelled "This machine".
-    final firstLocal = entries.indexWhere((e) => e.kind == EntryKind.local);
-    return ReorderableListView.builder(
+    final inScope = [
+      for (final v in views)
+        if (v.inScope) v,
+    ];
+    return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AbTokens.space4),
-      buildDefaultDragHandles: false,
-      itemCount: entries.length,
-      proxyDecorator: (child, _, _) =>
-          Material(color: context.antgrid.bgElevated, child: child),
-      onReorderItem: (from, to) {
-        final ids = entries.map((e) => e.id).toList(growable: false);
-        // The persist call is fire-and-forget by design — the in-memory state
-        // updates synchronously and the SharedPreferences write is best-effort.
-        unawaited(
-          ref
-              .read(drawerOrderProvider.notifier)
-              .move(currentIds: ids, from: from, to: to),
-        );
-      },
-      itemBuilder: (_, i) => _EntryWithSessions(
-        // ValueKey lives on the wrapper so the reorder framework keys the
-        // whole Column (entry row + optional SessionsList), not the inner row.
-        key: ValueKey(entries[i].id),
-        entry: entries[i],
-        reorderIndex: i,
-        // Attached to the row rather than partitioning the list, so reordering
-        // keeps working exactly as it did: drag the first local project and
-        // the band simply follows it. A LEGACY per-project remote row
-        // (compound id, so `machineUuid` is null) is not local and opens no
-        // band — it keeps its own REMOTE chip instead.
-        showLocalBand: i == firstLocal,
-        // Every band but the first gets a hairline above it; the first already
-        // has the PROJECTS label.
-        showRule: i > 0,
-      ),
+      children: [
+        const NeedsYouSection(),
+        _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
+        if (inScope.isEmpty)
+          const ScopeHidesEverything()
+        else
+          for (final v in inScope)
+            ProjectGroupRow(key: ValueKey(v.group.key), view: v),
+      ],
     );
   }
 }
@@ -553,374 +500,4 @@ Future<void> _refreshFocusedSessions(WidgetRef ref) async {
     // resolving — nothing to refresh in that case.
     await ref.read(sessionsServiceProvider).requestList();
   } catch (_) {}
-}
-
-/// Renders a project row plus, when this entry is expanded
-/// (id absent from [collapsedDrawerIdsProvider]), its sessions tree below it. Expansion is
-/// independent of activation: a project can be expanded without being active
-/// (it shows cached sessions) and active without being expanded (the user
-/// collapsed it manually).
-///
-/// [reorderIndex] is non-null only when this row is in the
-/// [ReorderableListView.builder] branch of `_Body`. When set, the
-/// [ReorderableDelayedDragStartListener] wraps ONLY the entry row — never the
-/// nested [SessionsList] — so a long-press on a [SessionRow] or the "+ New
-/// session" tile cannot initiate a project-reorder drag.
-class _EntryWithSessions extends ConsumerWidget {
-  final DrawerEntry entry;
-  final int? reorderIndex;
-  final bool showLocalBand;
-  final bool showRule;
-  const _EntryWithSessions({
-    super.key,
-    required this.entry,
-    this.reorderIndex,
-    this.showLocalBand = false,
-    this.showRule = false,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // A remote MACHINE entry (same-account or inventory) defaults to COLLAPSED
-    // and tracks its open state in [expandedDrawerIdsProvider] — expanding it is
-    // what opens the machine's control-plane socket. A local project (or a
-    // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
-    // collapse in [collapsedDrawerIdsProvider].
-    // A folded "This machine" keeps only its band (on the first local row);
-    // every other local row folds to nothing but keeps its keyed slot so the
-    // reorder indices stay valid.
-    final folded =
-        entry.kind == EntryKind.local &&
-        ref.watch(localMachineCollapsedProvider);
-    if (folded) {
-      return showLocalBand
-          ? LocalMachineBand(showRule: showRule)
-          : const SizedBox.shrink();
-    }
-    final machineUuid = entry.machineUuid;
-    final expanded = machineUuid != null
-        ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
-        : !ref.watch(collapsedDrawerIdsProvider).contains(entry.id);
-    final entryRow = machineUuid != null
-        ? MachineDrawerHeaderRow(entry, showRule: showRule)
-        : DrawerEntryRow(entry);
-    final entryRowWrapped = reorderIndex != null
-        ? ReorderableDelayedDragStartListener(
-            index: reorderIndex!,
-            child: entryRow,
-          )
-        : entryRow;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (showLocalBand) LocalMachineBand(showRule: showRule),
-        entryRowWrapped,
-        if (expanded)
-          machineUuid != null
-              ? _MachineProjects(machineUuid: machineUuid)
-              : SessionsList(projectId: entry.id),
-      ],
-    );
-  }
-}
-
-/// Muted, indented one-liner under a machine row — used for the loading,
-/// offline, and empty states so the machine subtree always says *something*
-/// rather than collapsing to nothing.
-///
-/// [indent] is the depth of the rows this hint STANDS IN FOR, which is not
-/// always the depth of the row above it: under a project it replaces session
-/// rows ([AbTokens.drawerSessionIndent]), under a machine band it replaces
-/// project rows, which sit at the gutter.
-Widget _machineHint(
-  BuildContext context,
-  String text, {
-  double indent = AbTokens.drawerSessionIndent,
-}) {
-  return Padding(
-    padding: EdgeInsets.fromLTRB(
-      indent,
-      AbTokens.space2,
-      AbTokens.drawerGutter,
-      AbTokens.space4,
-    ),
-    child: Text(
-      text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontXs,
-        color: context.antgrid.textMuted,
-      ),
-    ),
-  );
-}
-
-/// The advertised project tree of a remote machine, fetched lazily once its
-/// drawer row is expanded. Watching [controlPlaneStateProvider] opens the
-/// machine's control-plane socket — kept alive while the row stays open by the
-/// expanded-machine union in [controlPlaneAliveTargetsProvider]; collapsing the
-/// row drops it from that set and the reaper closes the socket. An empty/errored
-/// FLAG-LESS advert reads as "offline" (an absent control-plane client yields an
-/// empty [ControlPlaneState], not an error), matching the New Session picker; an
-/// advert carrying the machine-level `remoteAccessEnabled` flag says WHY it is
-/// empty (switch off vs genuinely no projects) and is rendered as such.
-class _MachineProjects extends ConsumerWidget {
-  final String machineUuid;
-  const _MachineProjects({required this.machineUuid});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final stateAsync = ref.watch(controlPlaneStateProvider(machineUuid));
-    // Everything here stands in for the machine's PROJECT rows, which sit at
-    // the gutter like a local project — not at session depth.
-    return stateAsync.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.fromLTRB(
-          AbTokens.drawerGutter,
-          AbTokens.space6,
-          AbTokens.drawerGutter,
-          AbTokens.space6,
-        ),
-        child: Align(alignment: Alignment.centerLeft, child: AbLoading()),
-      ),
-      error: (_, _) => _machineHint(
-        context,
-        'Machine offline',
-        indent: AbTokens.drawerGutter,
-      ),
-      data: (state) {
-        final projects = state.projects;
-        if (projects.isEmpty) {
-          return _machineHint(
-            context,
-            emptyAdvertHint(state.remoteAccessEnabled),
-            indent: AbTokens.drawerGutter,
-          );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (final p in projects)
-              // Keyed: the row is stateful (focus latch) and the advert list is
-              // reordered and filtered live, so positional reconciliation would
-              // hand one project's state to another.
-              _AdvertisedProjectRow(
-                key: ValueKey(p.projectId),
-                machineUuid: machineUuid,
-                project: p,
-              ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-/// One advertised project under an expanded machine row: name + run-state
-/// icon, collapsed by default, expanding to its session list. The compound
-/// `<uuid>.<projectId>` regId is the key in [expandedDrawerIdsProvider] (its dot
-/// keeps it out of the machine-socket keep-alive set, which only counts
-/// bare-uuid ids).
-class _AdvertisedProjectRow extends ConsumerStatefulWidget {
-  final String machineUuid;
-  final AdvertisedProject project;
-  const _AdvertisedProjectRow({
-    super.key,
-    required this.machineUuid,
-    required this.project,
-  });
-
-  @override
-  ConsumerState<_AdvertisedProjectRow> createState() =>
-      _AdvertisedProjectRowState();
-}
-
-class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
-  /// Keyboard focus reveals the row's action alongside hover: an affordance
-  /// that only a pointer can summon is unreachable by keyboard entirely.
-  bool _focused = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final regId = RemoteProject(
-      machineUuid: widget.machineUuid,
-      projectId: widget.project.projectId,
-    ).registrationId;
-    final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
-    final isWarm = ref.watch(
-      projectSessionRegistryProvider.select((open) => open.contains(regId)),
-    );
-    // Watched HERE and not inside the builder below. A `ref.watch` reached from
-    // a descendant element's build is closed and re-subscribed on every rebuild
-    // of this element — `ConsumerStatefulElement` retires whatever the build
-    // itself did not re-read before its children run — so hovering the row
-    // would cancel and resume the work-status subscription on each frame.
-    final needsUser =
-        !expanded && DrawerProjectAggregateDot.needsUser(ref, regId);
-    final label = widget.project.label;
-    final name = (label != null && label.isNotEmpty)
-        ? label
-        : widget.project.projectId;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        HoverableDrawerRow(
-          builder: (context, hovered, pointerOver) {
-            final revealed = hovered || _focused;
-            // No permanent run-state glyph: it made the remote half of the
-            // drawer read as busier than the local half for no reason the user
-            // could name. The same collapsed-only attention dot a local project
-            // shows takes its place, built in the same order as
-            // `_DrawerEntryTrailing`'s — rollup inboard, action outermost — so
-            // the two halves of the drawer are one row grammar down to their
-            // metrics.
-            final aggregate = needsUser
-                ? DrawerProjectAggregateDot(entryId: regId)
-                : null;
-            final newSession = revealed
-                // Create a session in THIS project (not the machine): lands on
-                // New Session already targeting it — the user only picks the
-                // agent and hits Start.
-                ? AbIconButton(
-                    icon: AbIcons.add,
-                    tooltip: 'New session',
-                    onTap: _newSessionForProject,
-                  )
-                : null;
-            // The rail cell goes to whichever element is outermost, so the dot
-            // inherits it at rest instead of sitting a full cell inboard of
-            // every other row's trailing glyph.
-            final cells = <Widget?>[];
-            if (newSession == null) {
-              if (aggregate != null) {
-                cells.add(AbRowTrailingCell(child: aggregate));
-              }
-            } else {
-              cells.add(aggregate);
-              cells.add(AbRowTrailingCell(child: newSession));
-            }
-            return AbListRow(
-              horizontalPadding: 0,
-              density: AbRowDensity.sm,
-              contentFloor: AbRowContentFloor.iconButton,
-              // No `hoverable`: matches the local project row, which never took
-              // it — the fill previews selection, and this row's tap expands.
-              // See `DrawerBand` for the rule.
-              leading: DrawerProjectLeading(
-                expanded: expanded,
-                pointerOver: pointerOver,
-                warm: isWarm,
-              ),
-              title: Text(
-                name,
-                overflow: TextOverflow.ellipsis,
-                style: drawerProjectTitleStyle(context),
-              ),
-              trailing: AbRowTrailingCell.kit(cells),
-              margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-              onFocusChange: (v) => setState(() => _focused = v),
-              onTap: () =>
-                  ref.read(expandedDrawerIdsProvider.notifier).toggle(regId),
-            );
-          },
-        ),
-        if (expanded) _ProjectSessions(regId: regId),
-      ],
-    );
-  }
-
-  void _newSessionForProject() {
-    enterNewSessionForRemoteProject(
-      ref.container,
-      machineUuid: widget.machineUuid,
-      project: widget.project,
-    );
-    closeDrawerIfOverlay(context);
-  }
-}
-
-extension _DrawerSessionVisibility on Iterable<SessionEntry> {
-  List<SessionEntry> whereVisibleInDrawer() =>
-      where((s) => !s.archived).toList(growable: false);
-}
-
-/// Triggers the drawer's per-project session-list peek
-/// ([drawerProjectSessionsProvider]) and renders whatever
-/// [sessionsForEntryProvider] holds (cached first, then the freshly-fetched list
-/// once it lands). Falls back to a hint while the fetch is in flight or yields
-/// nothing. The peek is read-only — it never starts the project.
-class _ProjectSessions extends ConsumerWidget {
-  final String regId;
-  const _ProjectSessions({required this.regId});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final fetch = ref.watch(drawerProjectSessionsProvider(regId));
-    final sessions = ref
-        .watch(sessionsForEntryProvider(regId))
-        .whereVisibleInDrawer();
-    if (sessions.isNotEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final s in sessions)
-            SessionRow(key: ValueKey(s.id), entryId: regId, session: s),
-        ],
-      );
-    }
-    return fetch.when(
-      loading: () => _machineHint(context, 'Loading sessions…'),
-      // A control-plane error (NOT_ALLOWED / timeout) is recoverable — make it a
-      // tap to re-run the peek rather than a dead end.
-      error: (_, _) => _RetryHint(
-        text: 'Could not load sessions — tap to retry.',
-        onTap: () => ref.invalidate(drawerProjectSessionsProvider(regId)),
-      ),
-      data: (_) => _machineHint(context, 'No sessions yet.'),
-    );
-  }
-}
-
-/// Tappable variant of [_machineHint] for a recoverable error under a project
-/// row. Plain [GestureDetector] (no Material ripple/ink) per the design rules.
-class _RetryHint extends StatelessWidget {
-  final String text;
-  final VoidCallback onTap;
-  const _RetryHint({required this.text, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: _machineHint(context, text),
-    );
-  }
-}
-
-/// Branches on whether `projectId` matches the currently-live project (active
-/// local folder selection OR connected remote agent): see
-/// [sessionsForEntryProvider] for the live-or-cached selection.
-///
-/// Tapping a session row in a non-live panel switches projects via
-/// [activateDrawerEntryById] and carries the desired session id through
-/// [pendingActiveSessionIdProvider].
-class SessionsList extends ConsumerWidget {
-  final String projectId;
-  const SessionsList({super.key, required this.projectId});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final sessions = ref
-        .watch(sessionsForEntryProvider(projectId))
-        .whereVisibleInDrawer();
-    // No wrapper Padding — session rows own their own gutter.
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final s in sessions)
-          SessionRow(key: ValueKey(s.id), entryId: projectId, session: s),
-      ],
-    );
-  }
 }

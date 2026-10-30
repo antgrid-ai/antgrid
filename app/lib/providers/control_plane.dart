@@ -21,6 +21,7 @@ import 'provider_retry.dart';
 import 'relay_connection.dart';
 import 'ui_attention_providers.dart';
 import 'scheduler.dart' show schedulerTargetProvider;
+import 'scope_control_planes.dart';
 
 /// The machine-level loopback host controller (singleton; spawns/attaches the
 /// host daemon and hands out a verified port+token via `ensureHost`).
@@ -307,7 +308,10 @@ Future<void> refreshMachineInventoryAndControlPlanes(
 /// and pull-to-refresh remains the manual retry — the eager targets sit in the
 /// reaper's alive set, so refreshDrawer force-retries them too.
 Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
-  final targets = ref.read(eagerControlPlaneTargetsProvider);
+  final targets = {
+    ...ref.read(eagerControlPlaneTargetsProvider),
+    ...ref.read(scopeControlPlaneTargetsProvider),
+  };
   if (targets.isEmpty) return;
   final mgr = ref.read(relayConnectionManagerProvider);
   await Future.wait(
@@ -420,6 +424,9 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // or expansion exists to claim them. Without this union the reaper would
   // close each eager socket moments after the kick opened it.
   alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
+  // Desktop's counterpart: the in-scope machines the sidebar's Needs you and
+  // live counts read adverts from (capped — see [kScopeControlPlaneCap]).
+  alive.addAll(ref.watch(scopeControlPlaneTargetsProvider));
   // Every machine on the far side of a leg this app carries. The session bus
   // routes through this app, so its socket is not a nicety: closing it strands
   // an agent mid-exchange with no way to say so. Derived purely from the links,

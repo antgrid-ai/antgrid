@@ -15,7 +15,6 @@ import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/widgets/account_footer.dart';
-import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:flutter/foundation.dart';
@@ -148,7 +147,7 @@ void main() {
     // prevent — a bound in scaled pixels, because the row it has to contain
     // grows with the scaler and a raw token does not.
     expect(
-      tester.getBottomLeft(find.byType(LocalMachineBand)).dy,
+      tester.getBottomLeft(find.text('PROJECTS')).dy,
       lessThanOrEqualTo(section),
     );
     expect(tester.getSize(find.byType(AccountFooter)).height, 45);

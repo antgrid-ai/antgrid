@@ -117,7 +117,7 @@ class _MachineDrawerHeaderRowState
     final entry = widget.entry;
     final machineUuid = entry.machineUuid!;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
-    final offersRemove = _RemoveButton.offersFor(ref, entry);
+    final offersRemove = DrawerRemoveButton.offersFor(ref, entry);
 
     return HoverableDrawerRow(
       above: widget.showRule ? const DrawerBandRule() : null,
@@ -146,7 +146,7 @@ class _MachineDrawerHeaderRowState
               AbRowTrailingSwap(
                 revealed: revealed,
                 resting: _MachineOnlineDot(machineUuid: machineUuid),
-                action: _RemoveButton(entry: entry, onLatch: _setLatched),
+                action: DrawerRemoveButton(entry: entry, onLatch: _setLatched),
               )
             else
               AbRowTrailingCell(
@@ -617,7 +617,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // performs would be retired every time the row un-reveals and re-added on
     // the next hover, and `MachineDrawerHeaderRow` already asks it that way —
     // one predicate must not have two subscription lifetimes.
-    final offersRemove = _RemoveButton.offersFor(ref, entry) && actions;
+    final offersRemove = DrawerRemoveButton.offersFor(ref, entry) && actions;
     // No per-machine "New session" +: a machine is a container, not a project,
     // so a session must name a project. The + lives on each advertised project
     // row instead (see `_AdvertisedProjectRow`).
@@ -656,7 +656,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
       if (offersRemove) {
         cells.add(
           AbRowTrailingCell(
-            child: _RemoveButton(entry: entry, onLatch: onLatch),
+            child: DrawerRemoveButton(entry: entry, onLatch: onLatch),
           ),
         );
       }
@@ -710,7 +710,7 @@ class DrawerProjectAggregateDot extends ConsumerWidget {
 /// `ProjectsNotifier.remove` still handles a non-empty project correctly (it
 /// stops the sessions, disposes the services, then clears the selection) —
 /// this is a guard rail, not a correctness fix.
-class _RemoveButton extends ConsumerStatefulWidget {
+class DrawerRemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
 
   /// Held true while the confirm dialog is up. The row that revealed this
@@ -718,7 +718,7 @@ class _RemoveButton extends ConsumerStatefulWidget {
   /// modal opens — without the latch the trash unmounts under its own dialog.
   final ValueChanged<bool>? onLatch;
 
-  const _RemoveButton({required this.entry, this.onLatch});
+  const DrawerRemoveButton({super.key, required this.entry, this.onLatch});
 
   /// Whether [entry] has a trash to offer at all. Asked by the row rather than
   /// answered by a self-shrinking build, because the trailing kit reserves the
@@ -750,10 +750,10 @@ class _RemoveButton extends ConsumerStatefulWidget {
   }
 
   @override
-  ConsumerState<_RemoveButton> createState() => _RemoveButtonState();
+  ConsumerState<DrawerRemoveButton> createState() => _DrawerRemoveButtonState();
 }
 
-class _RemoveButtonState extends ConsumerState<_RemoveButton> {
+class _DrawerRemoveButtonState extends ConsumerState<DrawerRemoveButton> {
   // Self-disable while a confirmed removal's async teardown is in flight so a
   // second tap can't re-enter `_confirmRemove` (matching `_NewSessionButton`).
   bool _busy = false;
