@@ -2,10 +2,11 @@
 
 **Status:** Accepted 2026-10-30, including the three decisions under §Resolved
 implementation choices that amend a standing rule. Nothing here is
-implemented. The transitional fix on `fix/remote-driven-carrier` (an app
-session driving a machine may carry that machine's outbound bus frames) is
-unaffected by this document and lands first; this proposal replaces the
-mechanism it patches.
+implemented. It ships as one pull request, with the phases under §Delivery
+and validation as its commits. A transitional fix that let an app driving a
+machine carry that machine's outbound frames was built and dropped unmerged;
+its two parts that outlive it, warming a cold project on delivery and the
+refusal wording, open the implementation branch.
 
 The session bus lets one agent session reach another. On one machine it works
 with nothing underneath it. Across machines it does not work unless a desktop
@@ -341,8 +342,8 @@ and nothing else; the receiving machine's `control` setting is the off switch.
 
 `session:start` on a stopped session is `startLocalSession` today. A request
 naming a session in a cold project warms the project first, bounded as
-`warmForInboundBus` is (catalog, safe id, folder exists, opened `local`). This
-is the transitional fix's Fix 2, kept and generalized.
+`warmForInboundBus` is (catalog, safe id, folder exists, opened `local`), the
+same-machine warming the implementation branch starts from, generalized.
 
 ### MCP surface
 
@@ -405,9 +406,8 @@ reasoning around it go with them.
 
 ## What is removed
 
-On the bridge: `ClientBusCarrierMessage` and the `client:bus-carrier` handling,
-`ProjectCore.sendLead` / `carrierPresent` / `sendToAppSession` /
-`sendToOwner`'s bus use, `AgentCore.busCarrierPeers`, the coordinator's route
+On the bridge: `carrierPresent` / `sendToAppSession` / `sendToOwner`'s bus use
+in `ProjectCore`, the carrier refusal in `api.ts`, the coordinator's route
 table (`noteRoute`, `routeFor`, `route-store.ts`, `MAX_BUS_ROUTES`,
 `BUS_ROUTE_TTL_MS`, `BUS_ROUTE_PERSIST_INTERVAL_MS`), the host's
 `busRouteMissWarned` / `busOwnerMissWarned` latches, `ownerCarriesSessionBus`
@@ -416,7 +416,6 @@ and the loopback hello's `capabilities.sessionBusCarrier`, the
 and the `session-bus:ack` wire type.
 
 On the app: `app/lib/session_bus/session_bus_carrier.dart`, its test, the
-`declareBusCarrier` router call, `remoteOpenProjects` on the registry, the
 directory pump, and the `sessionBusCarrier` capability on the loopback hello.
 The app keeps reading its own bridge's bus (`session-bus:inbox`, `:thread`,
 `:directory`) and gains a delivery-state column from the stamps.
@@ -426,7 +425,7 @@ On the relay: nothing is removed.
 ## Invariants amended
 
 These lines are true today and false after this lands; each changes in the
-same PR as the code that invalidates it.
+same commit as the code that invalidates it.
 
 - Root `AGENTS.md`, Project Overview: *"The central WebSocket is control-only
   and never accepts application payloads."* becomes: *"The central WebSocket
@@ -448,7 +447,8 @@ same PR as the code that invalidates it.
 
 ## Delivery and validation
 
-Phases, each mergeable on its own and each leaving the bus working:
+One pull request. The phases are its commits, in order, each gated before the
+next starts and each leaving the bus working:
 
 1. **Keys and the snapshot.** Bus keypair on the bridge; `busPublicKey` on
    `Device` with its migration; heartbeat registration; `machines` in the
@@ -466,8 +466,8 @@ Phases, each mergeable on its own and each leaving the bus working:
    documented code.
 3. **The seam.** `send(frame, ctx)` seals and enqueues; inbound opens and
    dispatches; dedup in `handleInbound`; `bus:ack` replaces `session-bus:ack`;
-   `SendResultView` and `sendLine` say the rung. The transitional carrier path
-   is deleted in this phase, not later, so there is never a build with two
+   `SendResultView` and `sendLine` say the rung. The app-carried path is
+   deleted in this phase, not later, so there is never a build with two
    outbound paths. Gate: every suite under `bridge/tests/session-bus-*.test.ts`
    and `host-server.test.ts` green with the carrier tests deleted; the eval
    above extended with the thread round trip and the pair budget crossing the
@@ -515,9 +515,9 @@ session on it from the other.
 
 - **Relay queue over a machine-level native carrier.** A carrier declared on
   the native session stream instead of the project stream was examined and
-  would be strictly better than the transitional fix, but it keeps a consumer
-  device on the delivery path and cannot serve a machine whose owner's devices
-  are asleep, which is the orchestrator's normal case.
+  would be strictly better than the dropped transitional fix, but it keeps a
+  consumer device on the delivery path and cannot serve a machine whose owner's
+  devices are asleep, which is the orchestrator's normal case.
 - **In-memory relay queue with bridge-side durability** over a relay database:
   the outbox already exists and already survives restarts; a relay store would
   put a database on every message and a migration on every change.
@@ -540,11 +540,12 @@ session on it from the other.
   `off` remains the default either way.
 - **The central WebSocket may carry sealed blobs.** The root `AGENTS.md`
   invariant changes to *"never accepts a readable application payload"*, in
-  the phase 2 PR that adds the queue, as §Invariants amended lays out. Agreed
+  the phase 2 commit that adds the queue, as §Invariants amended lays out. Agreed
   2026-10-30.
 - **The orchestrator grant is an account-level device attribute**, set from
   the CLI first and verified against the authorization snapshot; app surfaces
   are a later spec. Agreed 2026-10-30.
-- **The carrier path is deleted in the phase 3 PR that adds the seam**, not
-  after it. `fix/remote-driven-carrier` lands first, unchanged. Agreed
-  2026-10-30.
+- **The carrier path is deleted in the phase 3 commit that adds the seam**,
+  not after it. Agreed 2026-10-30.
+- **One pull request for the whole implementation**, phases as commits, and
+  the transitional fix dropped rather than landed first. Agreed 2026-10-30.
