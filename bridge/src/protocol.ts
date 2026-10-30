@@ -656,6 +656,13 @@ const AgentProjectsMessage = BaseMessage.extend({
       // `status` for every session.
       sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
+      // The project's normalized origin (`host/path`, credentials stripped —
+      // `normalizeRemoteUrl`), which is what lets the app show one repo held on
+      // several machines as one project: project ids hash the path and never
+      // match across machines. `null` = probed, no remote; ABSENT = not probed
+      // yet or an older bridge, and the app must keep those apart the way
+      // `SessionBusRepoKeys.probed` does.
+      gitRemote: z.string().nullable().optional(),
     }),
   ),
   // Machine-level: the remote-access switch's live state, stamped on every

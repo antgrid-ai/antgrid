@@ -97,6 +97,12 @@ class ProjectSummary {
   /// Per-running-session status keyed by session id — [workStatus] is only their
   /// rollup. Null for a cold core (or an older host); `{}` when nothing runs.
   final Map<String, AgentWorkStatus>? sessionStatuses;
+
+  /// Normalized origin, the key that matches this repo across machines. Read
+  /// only when [gitRemoteProbed]: null then means "no remote", while an
+  /// unprobed project (or an older host) has not answered at all.
+  final String? gitRemote;
+  final bool gitRemoteProbed;
   const ProjectSummary({
     required this.projectId,
     required this.path,
@@ -104,6 +110,8 @@ class ProjectSummary {
     required this.mode,
     this.workStatus,
     this.sessionStatuses,
+    this.gitRemote,
+    this.gitRemoteProbed = false,
   });
 }
 
@@ -566,6 +574,8 @@ class HostControlClient {
             mode: mode,
             workStatus: e['workStatus'] as String?,
             sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
+            gitRemote: e['gitRemote'] as String?,
+            gitRemoteProbed: e.containsKey('gitRemote'),
           );
         })
         .toList(growable: false);

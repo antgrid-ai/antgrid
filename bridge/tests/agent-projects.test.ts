@@ -193,3 +193,43 @@ test("state.snapshot recompute stamps remoteAccessEnabled on the fresh advert", 
   expect(advert.remoteAccessEnabled).toBe(true);
   expect(advert.projects.length).toBe(1);
 });
+
+async function git(cwd: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  await proc.exited;
+}
+
+async function waitUntil(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("the advert carries each project's normalized git remote, re-advertised once the probe lands", async () => {
+  host = new HostServer({});
+  await setMobileAccess(host, true);
+  const bus = new MessageBus();
+  const seen: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => seen.push(m) });
+  host.readvertiseForTest(bus);
+
+  const repo = tempFolder();
+  await git(repo, ["init", "-b", "main"]);
+  await git(repo, ["remote", "add", "origin", "https://user:token@github.com/Owner/Repo.git"]);
+  const repoId = computeProjectId(repo);
+  await host.open(repoId, repo, "local");
+  const plainId = await openTemp(host);
+
+  // The core-start advert goes out before git answers, so the key must arrive
+  // on a LATER advert rather than only on the next unrelated one.
+  const lastFor = (id: string) =>
+    (seen.filter((m) => m.type === "agent:projects").at(-1) as any)?.projects.find((p: any) => p.projectId === id);
+  await waitUntil(() => lastFor(repoId)?.gitRemote !== undefined && lastFor(plainId)?.gitRemote !== undefined);
+
+  expect(lastFor(repoId).gitRemote).toBe("github.com/owner/repo");
+  // Probed with no remote is null, never absent: absent means "not probed yet".
+  expect(lastFor(plainId).gitRemote).toBeNull();
+  expect(host.list().find((p) => p.projectId === repoId)?.gitRemote).toBe("github.com/owner/repo");
+});

@@ -723,6 +723,7 @@ export class HostServer {
     // project, and nothing the bus resumes is waiting on a repo key.
     void this.repoKeys
       .hydrate([...this.seenProjects].map(([id, seen]) => ({ id, path: seen.path })))
+      .then((changed) => { if (changed) this.readvertiseToControlPlane(); })
       .catch((err) => log.warn({ err }, "host: repo key hydrate failed"));
   }
 
@@ -963,7 +964,8 @@ export class HostServer {
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt };
+        const gitRemote = this.repoKeys.probed(id) ? this.repoKeys.keyFor(id) : undefined;
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, gitRemote };
       });
   }
 
@@ -2714,7 +2716,7 @@ export class HostServer {
     // start-time half only: what a session created LATER in this core needs is
     // the cold-edge refresh in noteColdSnapshot().
     this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true));
-    void this.repoKeys.note(core.projectId, projectPath);
+    this.noteRepoKey(core.projectId, projectPath);
     // Re-advertise on a real work-status transition so the phone's Recent/sidebar
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
@@ -2852,6 +2854,7 @@ export class HostServer {
       projectId, path: e.path, running: true, mode: e.mode,
       workStatus: e.core.workStatus,
       sessionStatuses: e.core.sessionWorkStatuses,
+      gitRemote: this.repoKeys.probed(projectId) ? this.repoKeys.keyFor(projectId) : undefined,
     }));
   }
 
@@ -2867,7 +2870,16 @@ export class HostServer {
     const id = entry.core.projectId;
     if (!id) return;
     this.sessionIndex.noteProject(id, basename(entry.path), entry.core.listSessions(true));
-    void this.repoKeys.note(id, entry.path);
+    this.noteRepoKey(id, entry.path);
+  }
+
+  /** Refresh one project's repo key, re-advertising if it moved: the advert
+   *  carries it as `gitRemote`, and the advert a core start triggers goes out
+   *  before the git probe answers. */
+  private noteRepoKey(projectId: string, projectPath: string): void {
+    void this.repoKeys
+      .note(projectId, projectPath)
+      .then((changed) => { if (changed) this.readvertiseToControlPlane(); });
   }
 
   async stop(projectId: string): Promise<void> {

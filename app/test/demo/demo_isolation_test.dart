@@ -8,6 +8,9 @@ import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
 import 'package:antgrid/main.dart' show telemetryAllowed;
 import 'package:antgrid/models/preferences_models.dart';
+import 'package:antgrid/models/project_catalog.dart';
+import 'package:antgrid/providers/machine_scope.dart';
+import 'package:antgrid/storage/machine_scope_store.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -362,6 +365,38 @@ void main() {
     await store.write(<String>{'real-project', kDemoProjectId});
 
     expect(store.read(), <String>{'real-project'});
+  });
+
+  test('the machine catalog cache drops the demo', () async {
+    useInMemoryPrefs();
+    final store = await CachedSessionsStore.open();
+
+    store.putCatalog(kLocalMachineKey, const [
+      CatalogProject(projectId: 'real-project'),
+      CatalogProject(projectId: kDemoProjectId),
+    ]);
+
+    expect(store.catalogs()[kLocalMachineKey]!.map((p) => p.projectId), [
+      'real-project',
+    ]);
+  });
+
+  test('the machine scope neither inherits nor persists a choice in demo mode', () async {
+    useInMemoryPrefs();
+    final store = await MachineScopeStore.open();
+    await store.write(included: const {}, excluded: {'real'}, hideOffline: true);
+    final container = ProviderContainer(
+      overrides: [machineScopeStoreProvider.overrideWithValue(store)],
+    );
+    addTearDown(container.dispose);
+    container.read(demoModeProvider.notifier).set(true);
+
+    expect(container.read(machineScopeProvider), const MachineScope());
+    container.read(machineScopeProvider.notifier).toggle('real', online: true);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(store.read().excluded, {'real'});
+    expect(store.read().hideOffline, isTrue);
   });
 
   test('the preview origin owner store drops the demo', () async {

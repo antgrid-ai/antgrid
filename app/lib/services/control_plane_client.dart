@@ -48,6 +48,13 @@ class AdvertisedProject {
   final Map<String, AgentWorkStatus>? sessionStatuses;
   final String? lastActiveAt;
 
+  /// Normalized origin (`host/path`), the key that matches this repo across
+  /// machines — project ids hash the path and never do. Read only when
+  /// [gitRemoteProbed]: null then means "no remote", while an unprobed project
+  /// or an older bridge has not answered at all.
+  final String? gitRemote;
+  final bool gitRemoteProbed;
+
   const AdvertisedProject({
     required this.projectId,
     this.label,
@@ -57,6 +64,8 @@ class AdvertisedProject {
     this.runningSessions,
     this.sessionStatuses,
     this.lastActiveAt,
+    this.gitRemote,
+    this.gitRemoteProbed = false,
   });
 
   static AdvertisedProject? fromJson(Map<String, dynamic> json) {
@@ -72,6 +81,8 @@ class AdvertisedProject {
       runningSessions: (json['runningSessions'] as num?)?.toInt(),
       sessionStatuses: parseSessionStatuses(json['sessionStatuses']),
       lastActiveAt: json['lastActiveAt'] as String?,
+      gitRemote: json['gitRemote'] as String?,
+      gitRemoteProbed: json.containsKey('gitRemote'),
     );
   }
 }

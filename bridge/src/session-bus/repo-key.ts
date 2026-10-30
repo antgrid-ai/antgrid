@@ -38,26 +38,38 @@ export class SessionBusRepoKeys {
    * addressable is exactly a project the index can enumerate, and an edge that
    * refreshed one but not the other would leave sessions listed with no key or
    * a key with no sessions.
+   *
+   * Resolves true when the recorded answer changed, which is what the project
+   * advert re-publishes on: it carries the key, and the first advert after a
+   * core starts goes out before this probe settles.
    */
-  async note(projectId: string, projectPath: string | undefined): Promise<void> {
-    if (!projectPath) return;
+  async note(projectId: string, projectPath: string | undefined): Promise<boolean> {
+    if (!projectPath) return false;
     try {
-      this.keys.set(projectId, await readRepoKey(projectPath));
+      const key = await readRepoKey(projectPath);
+      const changed = !this.keys.has(projectId) || this.keys.get(projectId) !== key;
+      this.keys.set(projectId, key);
+      return changed;
     } catch (err) {
       // A probe that threw is not evidence the project has no remote, so an
       // existing key survives it. A project that has never answered is left
       // unrecorded, which reads as "not addressable yet" rather than as "not
       // addressable" — see the class doc for why those must stay separable.
       log.warn("session-bus: could not read the repo key for %s: %s", projectId, err);
+      return false;
     }
   }
 
   /** Probe every project this machine has ever opened, at host start. Serial on
    *  purpose: `readRepoKey` spawns git, this runs beside live PTY I/O, and
    *  nothing is waiting on the answer — the first read that needs it is a human
-   *  typing a tool call. */
-  async hydrate(projects: Iterable<{ id: string; path?: string }>): Promise<void> {
-    for (const project of projects) await this.note(project.id, project.path);
+   *  typing a tool call. Resolves true if any project's answer changed. */
+  async hydrate(projects: Iterable<{ id: string; path?: string }>): Promise<boolean> {
+    let changed = false;
+    for (const project of projects) {
+      if (await this.note(project.id, project.path)) changed = true;
+    }
+    return changed;
   }
 
   /** The key, or null for a project with no remote OR one never probed. A

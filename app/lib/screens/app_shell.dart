@@ -4,8 +4,10 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/supervisor_state.dart';
 import '../constants/breakpoints.dart';
 import '../design/ab_colors.dart';
+import '../models/project_catalog.dart';
 import '../project/limits.dart';
 import '../project/mobile_lifecycle.dart';
 import '../project/project_session_registry.dart';
@@ -20,7 +22,10 @@ import '../providers/removed_machine_prune.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
 import '../providers/device_provisioning.dart';
+import '../providers/machine_catalog.dart';
+import '../providers/machine_directory.dart';
 import '../providers/projects.dart';
+import '../providers/supervisor_status.dart';
 import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -392,6 +397,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // remoteProjectLabelsProvider. See _syncLabelSubscriptions.
   final Map<String, ProviderSubscription<AsyncValue<ControlPlaneState>>>
   _labelSubs = {};
+  // Beside each label subscription: the same machine's connection health,
+  // feeding machineLiveConnectionProvider.
+  final Map<String, ProviderSubscription<AsyncValue<SupervisorStatus?>>>
+  _presenceSubs = {};
 
   // Periodic poll of the HOST CONTROL PLANE (desktop only) for LOCAL project
   // work status. Feeds bare-key entries into remoteProjectStatusProvider so the
@@ -524,6 +533,8 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     for (final uuid in _labelSubs.keys.toList()) {
       if (!openIds.contains(uuid)) {
         _labelSubs.remove(uuid)?.close();
+        _presenceSubs.remove(uuid)?.close();
+        ref.read(machineLiveConnectionProvider.notifier).clear(uuid);
         // Socket closed → its advert can't refresh; drop the machine's live
         // status so rows read "done" (no advert) instead of showing stale work
         // state. Labels intentionally persist; status is cleared from both
@@ -563,6 +574,20 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         (prev, next) => _onControlPlaneState(uuid, next),
         fireImmediately: true,
       );
+      _presenceSubs[uuid] = ref.listenManual<AsyncValue<SupervisorStatus?>>(
+        supervisorStatusProvider(uuid),
+        (prev, next) {
+          // Nothing to say until the supervisor reports: absent already reads
+          // as "not connected", and writing on the immediate (loading) fire
+          // would modify a provider mid-build.
+          final status = next.value;
+          if (status == null) return;
+          ref
+              .read(machineLiveConnectionProvider.notifier)
+              .set(uuid, status is Connected);
+        },
+        fireImmediately: true,
+      );
     }
   }
 
@@ -589,6 +614,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       sub.close();
     }
     _labelSubs.clear();
+    for (final sub in _presenceSubs.values) {
+      sub.close();
+    }
+    _presenceSubs.clear();
+    ref.invalidate(machineLiveConnectionProvider);
+    ref.invalidate(machineCatalogsProvider);
     ref.invalidate(accountAgentsProvider);
     ref.invalidate(agentCatalogProvider);
     ref.invalidate(remoteProjectLabelsProvider);
@@ -624,6 +655,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       projectCount: state.projects.length,
       remoteAccessEnabled: state.remoteAccessEnabled,
     ));
+    final catalog = catalogFromAdvert(state);
+    if (catalog != null) {
+      ref.read(machineCatalogsProvider.notifier).setMachine(uuid, catalog);
+    }
     // Same fold for the per-session map the session rows dot themselves from.
     // Absent (older bridge / cold project) stays absent — that's what tells the
     // rows to fall back to the project status above.
@@ -806,6 +841,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       sub.close();
     }
     _labelSubs.clear();
+    for (final sub in _presenceSubs.values) {
+      sub.close();
+    }
+    _presenceSubs.clear();
     try {
       ref.read(controlPlaneResetProvider.notifier).set(null);
     } catch (_) {
@@ -878,6 +917,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
           ref
               .read(remoteSessionStatusProvider.notifier)
               .setLocalSessionStatuses(sessionStatuses);
+          final catalogs = ref.read(machineCatalogsProvider.notifier);
+          catalogs.setMachine(
+            kLocalMachineKey,
+            mergeLocalCatalog(
+              ref.read(machineCatalogsProvider)[kLocalMachineKey] ?? const [],
+              projects,
+            ),
+          );
           // Re-peek a local project's session LIST — never touched by the
           // status write-through above — whenever it can't already account
           // for every live session id `project:list` just reported, or on a

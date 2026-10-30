@@ -7,6 +7,7 @@ import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/ho
 import { installFakeSession } from "./fake-session";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
+import { SessionBusRepoKeys } from "../src/session-bus/repo-key";
 import { hostFilePath, readHostFile } from "../src/host-discovery";
 
 // --- shared fakes (mirror host-server.test.ts) -----------------------------
@@ -199,6 +200,7 @@ function standaloneForSnapshot(opts: {
   (standalone as any).cores = new Map();
   (standalone as any).streamIds = new Map();
   (standalone as any).remoteAccessPolicy = { isEnabled: () => opts.mobileAccess ?? false };
+  (standalone as any).repoKeys = new SessionBusRepoKeys();
   return standalone;
 }
 

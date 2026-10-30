@@ -241,6 +241,9 @@ export interface ProjectSummary {
    *  the relay advert carries, so a LOCAL project's session rows dot themselves
    *  instead of inheriting the project rollup. Absent for a cold core. */
   sessionStatuses?: Record<string, string>;
+  /** Normalized origin, as on the relay advert's `gitRemote`: null = probed with
+   *  no remote, absent = not probed yet. */
+  gitRemote?: string | null;
 }
 
 /** One paired phone as surfaced to the desktop mobile-devices hub. Mirror of the

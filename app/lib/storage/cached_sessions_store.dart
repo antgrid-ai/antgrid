@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:collection/collection.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'scoped_prefs.dart';
 
 import '../config/storage_scope.dart';
 import '../demo/demo_identity.dart';
+import '../models/project_catalog.dart';
 import '../models/session_entry.dart';
 
 /// SharedPreferences-backed cache of `List<SessionEntry>` keyed by drawer entry
@@ -35,6 +37,12 @@ class CachedSessionsStore {
   // remoteProjectStatusProvider.build). Cleared per machine
   // on socket close so an offline machine doesn't re-seed on the next boot.
   static final _statusKey = scopedStorageKey('antgrid.session_cache.status.v1');
+  // Each machine's last-advertised project list, keyed by bare machine uuid
+  // (`kLocalMachineKey` for this device). Unlike [_labelsKey] it is REPLACED per
+  // machine on every advert, so a project the machine forgot leaves it.
+  static final _catalogKey = scopedStorageKey(
+    'antgrid.session_cache.catalog.v1',
+  );
   static const _flushDebounce = Duration(milliseconds: 200);
 
   final SharedPreferencesWithCache _prefs;
@@ -46,9 +54,11 @@ class CachedSessionsStore {
   // row can fall back to a real name instead of the raw projectId.
   final Map<String, String> _labels = {};
   final Map<String, String> _statuses = {};
+  final Map<String, List<CatalogProject>> _catalogs = {};
   bool _entriesDirty = false;
   bool _labelsDirty = false;
   bool _statusesDirty = false;
+  bool _catalogsDirty = false;
   Timer? _flushTimer;
 
   CachedSessionsStore._(this._prefs) {
@@ -56,7 +66,7 @@ class CachedSessionsStore {
   }
 
   static Future<CachedSessionsStore> open() async => CachedSessionsStore._(
-    await openScopedPrefs({_key, _labelsKey, _statusKey}),
+    await openScopedPrefs({_key, _labelsKey, _statusKey, _catalogKey}),
   );
 
   /// Returns an unmodifiable view of the cached sessions for [entryId], or
@@ -128,9 +138,11 @@ class CachedSessionsStore {
     _mem.clear();
     _labels.clear();
     _statuses.clear();
+    _catalogs.clear();
     _entriesDirty = true;
     _labelsDirty = true;
     _statusesDirty = true;
+    _catalogsDirty = true;
     for (final entryId in cleared) {
       if (!_changes.isClosed) _changes.add(entryId);
     }
@@ -186,6 +198,26 @@ class CachedSessionsStore {
       _statuses.remove(k);
     }
     _statusesDirty = true;
+    _scheduleFlush();
+  }
+
+  /// Unmodifiable snapshot of every persisted machine → project catalog.
+  Map<String, List<CatalogProject>> catalogs() => Map.unmodifiable(_catalogs);
+
+  /// Replace [machineKey]'s catalog wholesale. No-ops if unchanged; does not
+  /// emit on [changes]. The sample project is dropped on the way in, like every
+  /// other writer here.
+  void putCatalog(String machineKey, List<CatalogProject> projects) {
+    final next = [
+      for (final p in projects)
+        if (!isDemoProjectId(p.projectId)) p,
+    ];
+    final prev = _catalogs[machineKey];
+    if (prev != null && const ListEquality<CatalogProject>().equals(prev, next)) {
+      return;
+    }
+    _catalogs[machineKey] = List.unmodifiable(next);
+    _catalogsDirty = true;
     _scheduleFlush();
   }
 
@@ -279,6 +311,22 @@ class CachedSessionsStore {
         // Corrupt blob — treat as empty. Next write replaces it.
       }
     }
+    final rawCatalogs = _prefs.getString(_catalogKey);
+    if (rawCatalogs != null) {
+      try {
+        final decoded = jsonDecode(rawCatalogs);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            if (k is! String || v is! List) return;
+            _catalogs[k] = List.unmodifiable([
+              for (final item in v) ?CatalogProject.fromJson(item),
+            ]);
+          });
+        }
+      } catch (_) {
+        // Corrupt blob — treat as empty. Next write replaces it.
+      }
+    }
   }
 
   void _scheduleFlush() {
@@ -336,6 +384,17 @@ class CachedSessionsStore {
       final encoded = jsonEncode(_statuses);
       if (_prefs.getString(_statusKey) != encoded) {
         await _prefs.setString(_statusKey, encoded);
+      }
+    }
+    if (_catalogsDirty) {
+      _catalogsDirty = false;
+      final encoded = jsonEncode(
+        _catalogs.map(
+          (k, v) => MapEntry(k, [for (final p in v) p.toJson()]),
+        ),
+      );
+      if (_prefs.getString(_catalogKey) != encoded) {
+        await _prefs.setString(_catalogKey, encoded);
       }
     }
   }
