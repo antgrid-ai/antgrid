@@ -309,16 +309,25 @@ bool pickerMatchesFocus(PickerProject p, String? focusId) {
 ///   - remote target → the bare-deviceUuid control plane's `agent:tools`
 ///     ([controlPlaneStateProvider]);
 ///   - local target  → the loopback host's `tools:list` ([HostControlClient]).
-/// While the control-plane connection is in flight (or on any error / offline
-/// target / no host yet) this resolves to an empty map and the dropdown falls
-/// back to the persisted catalog.
-final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>(
-  (ref) => ref.watch(
-    detectedToolsForProvider(
-      sessionTargetOf(ref.watch(selectedTargetProjectProvider)),
-    ).future,
-  ),
-);
+///
+/// Loading or null while the machine has not answered, an error when it could
+/// not be asked; an empty map is its answer that nothing is installed.
+///
+/// The family's state passed through rather than awaited, which would carry
+/// the previous target's map into a newly picked one's reload; and an error
+/// rebuilt without the map Riverpod keeps beside it, which a machine that can
+/// no longer be asked is not vouching for.
+final newSessionDetectedToolsProvider =
+    Provider<AsyncValue<Map<String, String?>?>>((ref) {
+      final tools = ref.watch(
+        detectedToolsForProvider(
+          sessionTargetOf(ref.watch(selectedTargetProjectProvider)),
+        ),
+      );
+      return tools.hasError
+          ? AsyncError(tools.error!, tools.stackTrace!)
+          : tools;
+    });
 
 /// The typed target a picker row addresses, or null for no row.
 ///
@@ -342,49 +351,50 @@ SessionTarget? sessionTargetOf(PickerProject? project) {
 /// pointing at: driving the composer's own selection to answer that would
 /// silently change what the composer creates next.
 final detectedToolsForProvider =
-    FutureProvider.family<Map<String, String?>, SessionTarget?>((
+    FutureProvider.family<Map<String, String?>?, SessionTarget?>((
       ref,
       target,
     ) async {
-      if (target == null) return const <String, String?>{};
+      if (target == null) return null;
 
       // Before the local arm, same as [newSessionBranchCatalogProvider]: that arm
-      // spawns the real bridge host, and the demo's own agent is canned. The
-      // failure is silent — the surrounding catch swallows it — so nothing on
-      // screen would say the sample project had just started a bridge.
+      // spawns the real bridge host, and the demo's own agent is canned.
       if (ref.watch(demoModeProvider)) {
         return const <String, String?>{kDemoAgentTool: null};
       }
 
       if (target.isLocal) {
-        // The catch below turns a failed spawn into `{}` and this family is
-        // never invalidated, so a pick made before the warm-up supplied a
-        // bootstrap would stay empty for the launch without this.
+        // This family is never invalidated, so a pick made before the warm-up
+        // supplied a bootstrap would hold its failed spawn for the launch
+        // without this.
         ref.watch(hostUpGenerationProvider);
+        final host = await ref.watch(hostControllerProvider).ensureHost();
+        final client = HostControlClient(
+          port: host.controlPort,
+          token: host.token,
+        );
         try {
-          final host = await ref.watch(hostControllerProvider).ensureHost();
-          final client = HostControlClient(
-            port: host.controlPort,
-            token: host.token,
-          );
-          try {
-            final listed = await client.toolsList();
-            return {for (final t in listed.tools) t.tool: t.label};
-          } finally {
-            client.close();
-          }
-        } catch (_) {
-          return const <String, String?>{};
+          final listed = await client.toolsList();
+          return {for (final t in listed.tools) t.tool: t.label};
+        } finally {
+          client.close();
         }
       }
 
       // Tools are per-MACHINE, so key the control-plane state by the bare
       // deviceUuid rather than by the compound registration id.
       final machineUuid = baseDeviceUuid(target.registrationId);
-      final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
-      final tools = state?.tools;
-      if (tools == null) return const <String, String?>{};
-      return {for (final t in tools) t.tool: t.label};
+      final plane = ref.watch(controlPlaneStateProvider(machineUuid));
+      // Ahead of the value: Riverpod keeps the last advert beside an error, and
+      // an unreachable machine's old list is not what it has installed now.
+      if (plane.hasError) {
+        Error.throwWithStackTrace(plane.error!, plane.stackTrace!);
+      }
+      final state = plane.value;
+      // `tools` is an empty list until the advert lands, indistinguishable
+      // from a machine with nothing installed.
+      if (state == null || !state.toolsReceived) return null;
+      return {for (final t in state.tools) t.tool: t.label};
     });
 
 /// [sourceTool] labelled for the fork dialog to show before [handoffTargetsFor]
@@ -407,8 +417,8 @@ final detectedToolsForProvider =
 ///
 /// Throws [TimeoutException] when the machine does not answer within [timeout],
 /// so the open dialog can say it could not list them instead of checking
-/// forever on a machine that may be offline, and [StateError] when a local
-/// lookup comes back with no agents at all. Takes a [ProviderContainer]
+/// forever on a machine that may be offline, and rethrows the lookup's own
+/// failure when the machine could not be asked. Takes a [ProviderContainer]
 /// because the caller is an activation handler that must not hold a `WidgetRef`
 /// across the await.
 Future<List<({String tool, String label})>> handoffTargetsFor(
@@ -417,22 +427,7 @@ Future<List<({String tool, String label})>> handoffTargetsFor(
   required String sourceTool,
   Duration timeout = const Duration(seconds: 8),
 }) async {
-  // [detectedToolsForProvider] answers a remote machine at once, with an empty
-  // map until its `agent:tools` advert lands: right for a picker that rebuilds,
-  // wrong for a one-shot read, which would take "not heard yet" as "nothing
-  // installed".
-  if (!target.isLocal) {
-    await _toolsAdvertised(ref, baseDeviceUuid(target.registrationId), timeout);
-  }
-  final detected = await ref
-      .read(detectedToolsForProvider(target).future)
-      .timeout(timeout);
-  // [detectedToolsForProvider] turns every failed local lookup into an empty
-  // map, so locally nothing at all is a lookup that failed. A remote machine
-  // has already advertised by here, and its empty list is its answer.
-  if (detected.isEmpty && target.isLocal) {
-    throw StateError('No agents reported for $target');
-  }
+  final detected = await _detectedOnceAnswered(ref, target, timeout);
   final catalog = ref.read(agentCatalogProvider);
   String labelOf(String key) =>
       newSessionAgentLabel(KnownAgent(key), detected, catalog);
@@ -443,23 +438,26 @@ Future<List<({String tool, String label})>> handoffTargetsFor(
   ];
 }
 
-Future<void> _toolsAdvertised(
+/// [target]'s tools once its machine has answered. [detectedToolsForProvider]
+/// reports "not heard yet" as null rather than waiting: right for a picker that
+/// rebuilds, wrong for a one-shot read, which would take it as final.
+Future<Map<String, String?>> _detectedOnceAnswered(
   ProviderContainer ref,
-  String machineUuid,
+  SessionTarget target,
   Duration timeout,
 ) {
-  final heard = Completer<void>();
-  final sub = ref.listen(controlPlaneStateProvider(machineUuid), (_, next) {
-    if (heard.isCompleted) return;
+  final answered = Completer<Map<String, String?>>();
+  final sub = ref.listen(detectedToolsForProvider(target), (_, next) {
+    if (answered.isCompleted) return;
     // No retry follows an error here, so waiting would only run the clock out.
     // A rebuild under way still carries the previous error and is not one.
     if (next.hasError && !next.isLoading) {
-      heard.completeError(next.error!, next.stackTrace);
-    } else if (next.value?.toolsReceived ?? false) {
-      heard.complete();
+      answered.completeError(next.error!, next.stackTrace);
+    } else if (next.value case final tools?) {
+      answered.complete(tools);
     }
   }, fireImmediately: true);
-  return heard.future.timeout(timeout).whenComplete(sub.close);
+  return answered.future.timeout(timeout).whenComplete(sub.close);
 }
 
 /// Wire-advertised chat-capable tool keys for the selected target's MACHINE, or

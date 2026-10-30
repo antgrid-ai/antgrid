@@ -1,4 +1,4 @@
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createMessage, type AbMessage } from "./protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-search" });
@@ -78,7 +78,7 @@ export function escapeGlob(path: string): string {
   return path.replace(/[\\*?\[\]{}]/g, (ch) => `\\${ch}`);
 }
 
-export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
+export function buildRipgrepArgs(opts: SearchOptions, excludes: readonly string[]): string[] {
   const args = ["rg", "--json", "-n", "--column", "-C", "2"];
   // A leading `/` anchors the glob at ripgrep's WORKING directory, which the
   // spawn below pins to projectPath — without the anchor `!state/` would also
@@ -93,12 +93,19 @@ export function buildRipgrepArgs(opts: SearchOptions, projectPath: string, exclu
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (!opts.regex) args.push("-F");
-  args.push("--", opts.query, projectPath);
+  // `.`, never the project's absolute path: the anchor above resolves against
+  // the cwd the OS hands back canonicalized, so a root reached through a
+  // symlink (every macOS temp dir, /var -> /private/var) never sits under it
+  // and the exclude goes inert.
+  args.push("--", opts.query, ".");
   return args;
 }
 
 function buildGitGrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
-  const args = ["git", "-C", projectPath, "grep", "-n", "--column", "-C", "2", "--untracked"];
+  // --no-index rather than --untracked: plain `git grep` refuses a folder that
+  // is not a repository, and a project need not be one. --exclude-standard keeps
+  // .gitignore honoured, as it is inside a repo.
+  const args = ["git", "-C", projectPath, "grep", "-n", "--column", "-C", "2", "--no-index", "--exclude-standard"];
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (opts.regex) args.push("-P");
@@ -183,7 +190,7 @@ export class FileSearcher {
     }
 
     const args = engine === "ripgrep"
-      ? buildRipgrepArgs(opts, this.projectRoot, this.excludes)
+      ? buildRipgrepArgs(opts, this.excludes)
       : buildGitGrepArgs(opts, this.projectRoot, this.excludes);
 
     const proc = Bun.spawn(args, {
@@ -192,6 +199,8 @@ export class FileSearcher {
       cwd: this.projectRoot,
     });
     this.activeProcess = proc;
+    // Drained concurrently: an unread pipe that fills would stall the engine.
+    const stderrText = new Response(proc.stderr).text().catch(() => "");
 
     const batch: SearchMatchData[] = [];
     const filesWithMatches = new Set<string>();
@@ -266,7 +275,10 @@ export class FileSearcher {
         } else if (obj.type === "match") {
           flushContextMatch();
           const data = obj.data;
-          const relPath = data.path?.text ?? "";
+          // ripgrep echoes the `.` it was handed, so this arrives as `./x`;
+          // the app opens results by bare project-relative path.
+          const rawPath: string = data.path?.text ?? "";
+          const relPath = relative(this.projectRoot, resolve(this.projectRoot, rawPath)).split(sep).join("/");
           const lineNum = data.line_number ?? 0;
           const col = data.submatches?.[0]?.start ?? 0;
           let lineText = data.lines?.text ?? "";
@@ -356,6 +368,17 @@ export class FileSearcher {
 
     await proc.exited;
 
+    // Exit 1 is "no matches" for both engines; anything above it is a failure
+    // (bad regex, not a repository) that would otherwise read as zero results.
+    // A process we killed ourselves reports a signal, not a failure.
+    let error = truncated ? `Results truncated at ${MAX_RESULTS} matches` : undefined;
+    const code = proc.exitCode;
+    if (!error && totalMatches === 0 && !proc.signalCode && code !== null && code > 1) {
+      const detail = (await stderrText).trim().split("\n")[0]?.slice(0, 300);
+      error = detail || `Search failed (exit ${code})`;
+      log.warn({ code, detail }, "search engine failed");
+    }
+
     this.sendMessage(createMessage("file:search-done", {
       projectId: this.projectId,
       requestId: opts.requestId,
@@ -363,7 +386,7 @@ export class FileSearcher {
       totalFiles: filesWithMatches.size,
       duration: Date.now() - startTime,
       engine,
-      error: truncated ? `Results truncated at ${MAX_RESULTS} matches` : undefined,
+      error,
     }));
 
     this.activeProcess = null;

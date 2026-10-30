@@ -373,11 +373,11 @@ describe("FileWatcher", () => {
     }
   });
 
-  it("says an outside file that is not an image exists, without naming it", async () => {
+  it("says an outside file with no viewer exists, without naming it", async () => {
     const watcher = newWatcher();
 
     const outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-external-"));
-    const notes = join(outsideDir, "notes.txt");
+    const notes = join(outsideDir, "notes.bin");
     writeFileSync(notes, "text");
     try {
       const reply = await watcher.resolvePath(notes, {}, new PathStatCache());
@@ -631,7 +631,7 @@ describe("FileWatcher", () => {
 
     beforeEach(() => {
       outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-linked-"));
-      writeFileSync(join(outsideDir, "notes.txt"), "text");
+      writeFileSync(join(outsideDir, "notes.bin"), "text");
       writeFileSync(join(outsideDir, "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
       expect(link(outsideDir, join(tempDir, "out"))).toBe(true);
     });
@@ -651,10 +651,10 @@ describe("FileWatcher", () => {
       rmSync(outsideDir, { recursive: true, force: true });
     });
 
-    it("gives a non-image behind a link out of the checkout no checkout-relative path", async () => {
+    it("gives a file with no viewer behind a link out of the checkout no checkout-relative path", async () => {
       const watcher = newWatcher();
 
-      const reply = await watcher.resolvePath(join(tempDir, "out", "notes.txt"), {}, new PathStatCache());
+      const reply = await watcher.resolvePath(join(tempDir, "out", "notes.bin"), {}, new PathStatCache());
 
       expect(reply.relPath).toBeNull();
       expect(reply.externalImagePath).toBeNull();
@@ -705,7 +705,7 @@ describe("FileWatcher", () => {
     it("does not let an image name stand for a file that is not one", async () => {
       const watcher = newWatcher();
       try {
-        symlinkSync(join(outsideDir, "notes.txt"), join(tempDir, "disguised.png"), "file");
+        symlinkSync(join(outsideDir, "notes.bin"), join(tempDir, "disguised.png"), "file");
       } catch {
         // Creating a file link needs a privilege some Windows accounts lack.
         watcher.stop();

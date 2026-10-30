@@ -5,6 +5,7 @@ import {
   userEvent,
   type HandoffEventsFn,
 } from "../handoff/events";
+import { isNonHumanOrigin } from "./transcript-read";
 
 /** Wrapper tags Claude puts around records that are not something the user typed. */
 const NOISE_PREFIX = /^\s*(?:<(?:command-name|command-message|local-command-[a-z]+|task-notification|bash-[a-z]+|system-reminder)[\s>]|\[Request interrupted)/;
@@ -113,8 +114,7 @@ export const claudeHandoffEvents: HandoffEventsFn = async (dir, manifest, sink, 
         return;
       }
 
-      // Records without an origin predate the field and were typed by a person.
-      if (isObj(value.origin) && value.origin.kind !== "human") return;
+      if (isNonHumanOrigin(value)) return;
       const raw = contentText(content);
       const text = userText(raw);
       if (text === undefined) return;

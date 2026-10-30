@@ -590,6 +590,39 @@ test("gate 1: ingest is refused when this machine has no relay identity", async 
   expect((h as any).remoteDirectory.lastPushAt()).toBeNull();
 });
 
+test("directory-status answers the mirror's counters without draining them", async () => {
+  // The pump polls this on its own 5s tick because the bridge has no way to
+  // SAY a read missed. Draining here would answer the pump's question by
+  // taking away the signal it acts on: `_warmMissedPeers` dials off the
+  // count the PUSH's ack carries, and replace() is what drains it.
+  const h = host!;
+  giveMachineIdentity(h, "self-machine");
+  await setMobileAccess(h, true);
+
+  const statusReq = { id: "s-1", type: "session-bus:directory-status" };
+  expect(ControlRequestSchema.safeParse(statusReq).success).toBe(true);
+
+  const cold = await ask(h, statusReq);
+  expect(cold.ok).toBe(true);
+  expect(cold.unservedReads).toBe(0);
+  expect(cold.wantedRepoKeys).toEqual([]);
+  expect(cold.lastReadAt).toBeNull();
+
+  // An agent read a repo this machine has nothing mirrored for.
+  (h as any).remoteDirectory.view(KEY, "self-machine", Date.now());
+
+  const hot = await ask(h, statusReq);
+  expect(hot.unservedReads).toBe(1);
+  expect(hot.wantedRepoKeys).toEqual([KEY]);
+  expect(hot.lastReadAt).not.toBeNull();
+
+  // Polled twice, still 1 — and the push that follows still sees it.
+  expect((await ask(h, statusReq)).unservedReads).toBe(1);
+  const pushed = await ask(h, pushRequest([livePush({ machineId: "peer-1", rows: [wireRow({ sessionId: "a" })] })]));
+  expect(pushed.unservedReads).toBe(1);
+  expect((await ask(h, statusReq)).unservedReads).toBe(0);
+});
+
 test("gate 2: a push is sanitised and counted, reporting accepted/dropped rather than failing the whole push", async () => {
   const h = host!;
   giveMachineIdentity(h, "self-machine");

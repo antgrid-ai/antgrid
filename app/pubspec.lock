@@ -83,10 +83,10 @@ packages:
     dependency: transitive
     description:
       name: archive
-      sha256: a96e8b390886ee8abb49b7bd3ac8df6f451c621619f52a26e815fdcf568959ff
+      sha256: "0d58d1fa1fddf6588251ccf2819f3fb3b6d0452c1b2813ac7413a05592bfbefe"
       url: "https://pub.dev"
     source: hosted
-    version: "4.0.9"
+    version: "4.5.2"
   args:
     dependency: transitive
     description:
@@ -99,18 +99,18 @@ packages:
     dependency: transitive
     description:
       name: artisanal
-      sha256: "9e79856b60b3f5d8334058c44243def8759731434f86ee7e2de6362f9aff9650"
+      sha256: "1b3377825650dd2a47ce0bc971c5bc9f98d63d84060fc9040492d23de9e629b3"
       url: "https://pub.dev"
     source: hosted
-    version: "0.4.0"
+    version: "0.5.0"
   artisanal_widgets:
     dependency: transitive
     description:
       name: artisanal_widgets
-      sha256: "5af51aac97900a7f6bdb500a6629203b5bbbde987dbd4ab73aff51ca6e73b90e"
+      sha256: e5fd2393b24d67118bacbce16231af5bf21da1690398bf976cd433822ba9fc07
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.2"
+    version: "0.3.0"
   async:
     dependency: transitive
     description:
@@ -218,10 +218,10 @@ packages:
     dependency: transitive
     description:
       name: code_assets
-      sha256: bf394f466ba9205f1812a0433b392d6af280f155f56651eda7c18cc32ed493b8
+      sha256: "828110d598123b5ea96c00c9f3c72105bf79f8ee36c20a39b26209ade421ec57"
       url: "https://pub.dev"
     source: hosted
-    version: "1.2.1"
+    version: "2.1.0"
   collection:
     dependency: "direct main"
     description:
@@ -302,6 +302,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.2"
+  cupertino_ui:
+    dependency: transitive
+    description:
+      name: cupertino_ui
+      sha256: a47c4e7c66fd7444a063a602597fceb238f705c3f6b1322bc0053d0a2638ee6e
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.4"
   d4_array:
     dependency: transitive
     description:
@@ -712,20 +720,20 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
-      resolved-ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
+      resolved-ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
-    version: "0.1.4+antgrid.1"
+    version: "0.2.0-beta.2+antgrid.1"
   ghostty_vte_flutter:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
-      resolved-ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
+      resolved-ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
-    version: "0.1.4+antgrid.1"
+    version: "0.2.0-beta.2+antgrid.1"
   glob:
     dependency: transitive
     description:
@@ -754,10 +762,10 @@ packages:
     dependency: transitive
     description:
       name: hooks
-      sha256: "03a564c3704524ee0f7fc56fc621e8796cc2eb8c24d1f1a33b34979815b285c4"
+      sha256: eaac480a35ec0814146c2c48d96aaa829e0e44a7662c88ae84c9edf4bc35651f
       url: "https://pub.dev"
     source: hosted
-    version: "2.1.0"
+    version: "2.2.0"
   hotreloader:
     dependency: transitive
     description:
@@ -818,10 +826,10 @@ packages:
     dependency: transitive
     description:
       name: image
-      sha256: f9881ff4998044947ec38d098bc7c8316ae1186fa786eddffdb867b9bc94dfce
+      sha256: "89ed75b2f8231fe676808c5564f9590d728024ded7ac782a7ed8474f1c95b72a"
       url: "https://pub.dev"
     source: hosted
-    version: "4.8.0"
+    version: "4.12.0"
   in_app_update:
     dependency: "direct main"
     description:
@@ -1006,6 +1014,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.13.0"
+  material_ui:
+    dependency: transitive
+    description:
+      name: material_ui
+      sha256: e4031746f96c8316864d9b92bce375f1320a36ed56e166307e1e1bda9d90b4ab
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.8.0"
   meta:
     dependency: "direct overridden"
     description:
@@ -1042,10 +1058,10 @@ packages:
     dependency: transitive
     description:
       name: native_prebuilt
-      sha256: "3464f88ba5062c84399aa1721cb838150e45d94c39ab2402fa9fd74b6588ad79"
+      sha256: f528f49fe7c06c7051e47b98bdec5a44f4eef36bd022ec80f85840a6e76b3303
       url: "https://pub.dev"
     source: hosted
-    version: "0.4.0"
+    version: "0.5.0"
   node_preamble:
     dependency: transitive
     description:
@@ -1058,10 +1074,10 @@ packages:
     dependency: transitive
     description:
       name: objective_c
-      sha256: b7fb95a6d9a4f009edd63dc5ac69f07420b23a16161c6dd8660290b59c602e8e
+      sha256: "5c80c2ad6e2c0397de5db38c6d653e69616a3397e13aa7633bf39eb668f2041b"
       url: "https://pub.dev"
     source: hosted
-    version: "9.5.0"
+    version: "9.6.2"
   openapi_types:
     dependency: transitive
     description:
@@ -1178,34 +1194,34 @@ packages:
     dependency: transitive
     description:
       name: pdfium_dart
-      sha256: "86e95c66b09f3245b95c4924f2edce8d4f7c9786876e5c5ee8e36b104a94bbb0"
+      sha256: e296a26c030e6e0fb34b32ce7481a3cfa0c2d35ce80f6269551c685759f4c91f
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.5"
+    version: "0.3.1"
   pdfium_flutter:
     dependency: transitive
     description:
       name: pdfium_flutter
-      sha256: "0b115c0917aef9cf6bb9c4d47d0efc61d97f44844cd76287c921f997c26cf15d"
+      sha256: "59897274513984b347fc98e7bf71ba457678daea8b5568cd7c688979aeb77765"
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.3"
+    version: "0.3.1"
   pdfrx:
     dependency: "direct main"
     description:
       name: pdfrx
-      sha256: acce61944c31bd36f0c3031b1bbf41f59d0b0d4e5e27614fbdc74ff093d55464
+      sha256: "475eacf00b7e96895380af6322d3dd6f572c6b233bcc2eb25bed856ee82f31ce"
       url: "https://pub.dev"
     source: hosted
-    version: "2.4.7"
+    version: "2.6.6"
   pdfrx_engine:
     dependency: transitive
     description:
       name: pdfrx_engine
-      sha256: ef8f8cfa64255bfc91a559dd2d32d7cfe7a0f8003bac297bbf9a0aed1182fae5
+      sha256: f74ca9ea4ec722545f054a1d6ee1bf01222409ecd9458e5945c0cc5feaa3d2c6
       url: "https://pub.dev"
     source: hosted
-    version: "0.4.6"
+    version: "0.6.1"
   petitparser:
     dependency: transitive
     description:
@@ -1250,11 +1266,11 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
-      resolved-ref: dadeb40efb006c169d4bcd4c54e231d8e8e8797c
+      ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
+      resolved-ref: "9967e5982067b3223782e31dbd0ad3a89cba8f41"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
-    version: "0.0.6+antgrid.2"
+    version: "0.0.7-beta.2+antgrid.1"
   posix:
     dependency: transitive
     description:
@@ -1279,6 +1295,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  pure_svg:
+    dependency: transitive
+    description:
+      name: pure_svg
+      sha256: "0b440fbdd8487db70b247429328a2c8e35ef6c667d9390b61323c20bc3c67d16"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.0"
+  pure_ui:
+    dependency: transitive
+    description:
+      name: pure_ui
+      sha256: "7d1680b75de161e98f246124061034f7e77174e54adc1991a7caef8be76788c9"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.7"
   push:
     dependency: "direct main"
     description:
@@ -1697,10 +1729,10 @@ packages:
     dependency: transitive
     description:
       name: ultraviolet
-      sha256: "5b81c9118dad4b64caf816a461c2563794abafdd692dc8a4849a69d90b718b1c"
+      sha256: c82ed967f3e976d0c95e3a141cd06c9318b099883e38350d4748171d3cbf0471
       url: "https://pub.dev"
     source: hosted
-    version: "0.3.0"
+    version: "0.5.1"
   universal_io:
     dependency: transitive
     description:
@@ -1998,5 +2030,5 @@ packages:
     source: hosted
     version: "2.1.0"
 sdks:
-  dart: ">=3.12.0 <4.0.0"
-  flutter: ">=3.44.0"
+  dart: ">=3.13.0 <4.0.0"
+  flutter: ">=3.47.0"

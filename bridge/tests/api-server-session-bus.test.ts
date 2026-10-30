@@ -314,6 +314,7 @@ function mirrorDirectory(
         staleMachines: 0,
         notConnected: 0,
         lastPushAt: now,
+        served: rows.length > 0,
       }),
     },
   });

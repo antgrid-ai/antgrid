@@ -32,6 +32,7 @@ import {
   submittedLine,
 } from "./keystrokes";
 import { transcriptInterruptFor } from "antgrid-agents/builtins";
+import { authoredText } from "antgrid-agents/handoff";
 import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
@@ -2160,6 +2161,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sendStatus();
         break;
       }
+      case "terminal:forget": {
+        // Closing a user terminal's tab. A stop alone leaves the stopped row and
+        // its saved screen behind, so the tab returns on the next connection
+        // (a restart, another device). Services and sessions are never closed
+        // this way: their rows belong to the config and the session list.
+        if (sessions?.get(msg.terminalId)
+          || (runtime.config.services ?? []).some((s) => s.name === msg.terminalId)) break;
+        const forgetId = internalTerminalId(runtime, msg.terminalId);
+        manager.kill(forgetId, AGENT_GRACE_MS);
+        manager.forget(forgetId);
+        sendStatus();
+        break;
+      }
       case "terminal:resize":
         manager.resize(
           internalTerminalId(runtime, msg.terminalId),
@@ -3858,8 +3872,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       const owner = terminalOwner(terminal.terminalId);
       const session = sessions?.get(terminal.terminalId);
+      // A shell left over from an earlier host lifetime has no process, no
+      // Restart and nobody who asked for it: listed, it is only a dead tab that
+      // the app cannot get rid of. Sessions and services are named by other
+      // means, so only an untyped, unowned row is dropped.
+      const { archived, ...status } = terminal;
+      if (archived && !status.type && !session
+        && !(runtime.config.services ?? []).some((s) => s.name === owner.externalId)) return [];
       return owner.runtime === runtime
-        ? [{ ...terminal, terminalId: owner.externalId, name: session?.name ?? terminal.name,
+        ? [{ ...status, terminalId: owner.externalId, name: session?.name ?? terminal.name,
           type: terminal.type ?? (session ? "agent" as const : undefined) }]
         : [];
     });
@@ -5045,7 +5066,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     machineStatsTimer = null;
   }
   function sendMachineStats() {
-    sendAb(createMessage("machine:stats", readMachineStats()));
+    // Caught rather than voided: an escaped rejection reaches index.ts's
+    // `unhandledRejection` hook, which takes the whole host down. A read that
+    // settles after shutdown must not publish into the torn-down transport.
+    readMachineStats()
+      .then((stats) => { if (!isShuttingDown) sendAb(createMessage("machine:stats", stats)); })
+      .catch((err) => log.warn("machine:stats send failed: %s", err));
   }
   /** `onAttach` is a remote client's first frame rather than a handshake, so
    *  it is held to the tick's rule: nothing for a backgrounded app. The timer
@@ -5148,7 +5174,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // A post carrying `prompt` needs no read at all: the hook handed us the
     // message the user just submitted, which is both the context and the reason
     // this fires before the transcript has been written.
-    const submitted = target.prompt?.trim();
+    //
+    // Unless it is Antgrid's handoff prompt, which names no task: the read below
+    // drops it too, and the row keeps its fork name until the agent has worked.
+    const submitted = target.prompt ? authoredText(target.prompt)?.trim() : undefined;
     const context = submitted || await buildTitleContext({
       tool,
       transcriptPath: target.transcriptPath,

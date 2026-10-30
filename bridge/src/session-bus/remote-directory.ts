@@ -184,6 +184,10 @@ export interface RemoteDirectoryView {
   staleMachines: number;
   notConnected: number;
   lastPushAt: number | null;
+  /** Whether this read was one the mirror could answer — the same verdict
+   *  {@link RemoteDirectoryCache.unservedReads} counts, surfaced so a caller
+   *  can report it without re-deriving the predicate and drifting from it. */
+  served: boolean;
 }
 
 interface StoredMachine {
@@ -393,7 +397,8 @@ export class RemoteDirectoryCache {
     // has not caught up on yet — a stale entry stays NAMED above for the
     // agent's sake, but it must not stop this signal from asking the pump to
     // push sooner.
-    this.noteRead(rows.length > 0 || liveMachines > 0, repoKey, now);
+    const served = rows.length > 0 || liveMachines > 0;
+    this.noteRead(served, repoKey, now);
 
     return {
       rows,
@@ -402,6 +407,7 @@ export class RemoteDirectoryCache {
       staleMachines,
       notConnected: this.notConnectedCount,
       lastPushAt: this.lastPush,
+      served,
     };
   }
 

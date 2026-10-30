@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/widgets/binary_file_viewer.dart';
 import 'package:antgrid/widgets/file_viewer_router.dart';
 import 'package:antgrid/widgets/markdown_preview.dart';
 import 'package:antgrid/widgets/svg_preview.dart';
@@ -65,6 +66,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(FileContentViewer), findsOneWidget);
     expect(find.byType(MarkdownPreview), findsNothing);
+  });
+
+  testWidgets('a binary with no viewer keeps its download button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        const FileContent(
+          path: 'app.exe',
+          content: 'AAECAAM=',
+          size: 5,
+          encoding: 'base64',
+          mimeType: 'application/octet-stream',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(BinaryFileViewer), findsOneWidget);
+    expect(find.byKey(const Key('file-download')), findsOneWidget);
   });
 
   testWidgets('uses a per-file key so state resets when path changes', (

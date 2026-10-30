@@ -1,5 +1,7 @@
 import { logger } from "../host";
+import { authoredText } from "./handoff/events";
 import { AGENTS, BY_HOOK_NAME } from "./registry";
+import { firstMessage } from "./title-read";
 import type { ResolvedTitle, TitleArgs } from "./types";
 
 const log = logger.child({ component: "title-resolver" });
@@ -27,7 +29,13 @@ export async function resolveStructuredTitle(
   const resolve = key ? AGENTS[key].resolveTitle : undefined;
   if (!resolve) return null;
   try {
-    return await resolve({ ...args, ...opts });
+    const resolved = await resolve({ ...args, ...opts });
+    if (resolved?.kind !== "first-message") return resolved;
+    // A handoff target's first message is Antgrid's own prompt, which every
+    // agent stores like a typed one. Named after it, the session would lose
+    // the "<source> fork" name its row was given.
+    const own = authoredText(resolved.title);
+    return own ? firstMessage(own) : null;
   } catch (err) {
     log.warn("title resolution failed: %s", err);
     return null;

@@ -1,6 +1,6 @@
 import type { ResolvedTitle } from "../types";
 import { firstMessage, manualTitle, readOrNull } from "../title-read";
-import { isLocalCommandNoise } from "./transcript-read";
+import { isLocalCommandNoise, isNonHumanOrigin } from "./transcript-read";
 
 /** Extract plain text from a Claude message `content` field (string or parts array).
  *  Returns the FIRST text part — not the same function as ./transcript.ts's
@@ -30,12 +30,16 @@ function titleField(value: unknown): string | null {
  *  the `<local-command-caveat>` preamble and a prompt command's expanded body
  *  (isMeta), injected inter-session messages (isMeta), the summary a compacted
  *  session restarts from (isCompactSummary), and a slash command's echo and
- *  stdout, which carry no flag at all. Taking any of them as the first message
- *  names the session after Claude Code's plumbing. A session opened with a
- *  slash command therefore takes its title from the first prompt typed after
- *  it, the same messages transcript-read.ts keeps for the visible history. */
+ *  stdout, which carry no flag at all. A background task's completion
+ *  (`<task-notification>`) carries no flag either, only an `origin` whose kind
+ *  is not "human"; a session that resumes from a compaction summary can reach
+ *  one before anything typed. Taking any of them as the first message names
+ *  the session after Claude Code's plumbing. A session opened with a slash
+ *  command therefore takes its title from the first prompt typed after it, the
+ *  same messages transcript-read.ts keeps for the visible history. */
 function isUnauthoredUserRecord(obj: any): boolean {
-  return obj.isMeta === true || obj.isCompactSummary === true || obj.isSidechain === true || isLocalCommandNoise(obj);
+  return obj.isMeta === true || obj.isCompactSummary === true || obj.isSidechain === true ||
+    isNonHumanOrigin(obj) || isLocalCommandNoise(obj);
 }
 
 /**

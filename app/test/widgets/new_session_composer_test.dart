@@ -23,7 +23,8 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/sessions_service.dart'
     show SessionOperationException;
 import 'package:antgrid/utils/platform_utils.dart';
-import 'package:antgrid/widgets/ab_status_helpers.dart' show friendlyErrorCopy;
+import 'package:antgrid/widgets/ab_status_helpers.dart'
+    show agentsCheckingCopy, agentsUnlistedCopy, friendlyErrorCopy;
 import 'package:antgrid/widgets/new_session/branch_menu.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
@@ -115,12 +116,13 @@ final _fullCatalog = <String, AgentDescriptor>{
 
 /// Base overrides every test needs: one local source, and detection/chat-
 /// capability futures stubbed so the widget never touches a real host
-/// controller. The agent catalog is seeded to what a current bridge advertises;
-/// pass `catalog: const {}` for the older-bridge case where nothing has
-/// described any agent. Callers append target/agent overrides on top.
+/// controller. Detection defaults to "the target has not answered"; the agent
+/// catalog is seeded to what a current bridge advertises, and `catalog: const
+/// {}` is the older-bridge case where nothing has described any agent. Callers
+/// append target/agent overrides on top.
 List<Override> _baseOverrides({
   PickerProject? target,
-  Map<String, String?> detected = const <String, String?>{},
+  Future<Map<String, String?>?>? detection,
   Set<String>? chatCapable,
   Map<String, AgentDescriptor>? catalog,
   bool worktreeSupported = false,
@@ -129,7 +131,9 @@ List<Override> _baseOverrides({
 }) {
   return [
     pickerSourcesProvider.overrideWithValue(sources),
-    newSessionDetectedToolsProvider.overrideWith((ref) async => detected),
+    detectedToolsForProvider.overrideWith(
+      (ref, target) => detection ?? Future.value(),
+    ),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => chatCapable),
     agentCatalogProvider.overrideWith(
       () => _SeededCatalog(catalog ?? _fullCatalog),
@@ -174,6 +178,32 @@ Future<void> _pickMode(WidgetTester tester, String mode) async {
   await _openModeMenu(tester);
   await tester.tap(find.byKey(Key('new-session-mode-$mode')));
   await tester.pumpAndSettle();
+}
+
+/// What [_project]'s machine reports installed: a subset of [_fullCatalog].
+const _installed = <String, String?>{
+  'claude-code': 'Claude Code',
+  'codex': 'Codex',
+};
+
+/// Mount the composer on [_project] with detection held open and open the agent
+/// menu; the caller settles detection through the returned completer.
+Future<Completer<Map<String, String?>?>> _openAgentMenuPending(
+  WidgetTester tester,
+) async {
+  final detection = Completer<Map<String, String?>?>();
+  await tester.pumpWidget(
+    _host(
+      overrides: _baseOverrides(
+        target: _project,
+        detection: detection.future,
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('new-session-agent-selector')));
+  await tester.pumpAndSettle();
+  return detection;
 }
 
 Widget _host({
@@ -396,8 +426,8 @@ void main() {
               machineUuid: 'M',
             ),
           ]),
-          newSessionDetectedToolsProvider.overrideWith(
-            (ref) async => const <String, String?>{},
+          detectedToolsForProvider.overrideWith(
+            (ref, target) async => const <String, String?>{},
           ),
           newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
         ],
@@ -616,7 +646,14 @@ void main() {
   testWidgets('agent selector picks an agent and sets the touched flag', (
     tester,
   ) async {
-    await tester.pumpWidget(_host(overrides: _baseOverrides(target: _project)));
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(
+          target: _project,
+          detection: Future.value(_installed),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('new-session-agent-selector')));
@@ -632,6 +669,43 @@ void main() {
     expect(container.read(newSessionAgentTouchedProvider), isTrue);
   });
 
+  testWidgets('agent menu holds the catalog back until detection answers', (
+    tester,
+  ) async {
+    final detection = await _openAgentMenuPending(tester);
+    expect(find.text(agentsCheckingCopy), findsOneWidget);
+    expect(find.text('Codex'), findsNothing);
+    expect(find.text('Cursor'), findsNothing);
+    expect(find.text('Custom'), findsOneWidget);
+
+    // Still open: the answer has to reach the menu the user is looking at.
+    detection.complete(_installed);
+    await tester.pumpAndSettle();
+    expect(find.text(agentsCheckingCopy), findsNothing);
+    expect(find.text('Cursor'), findsNothing);
+    expect(find.text('Copilot'), findsNothing);
+
+    await tester.tap(find.text('Codex'));
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(NewSessionComposer)),
+    );
+    expect(container.read(newSessionAgentProvider), const KnownAgent('codex'));
+  });
+
+  testWidgets('a failed lookup says so instead of checking forever', (
+    tester,
+  ) async {
+    final detection = await _openAgentMenuPending(tester);
+    detection.completeError(StateError('host did not start'));
+    await tester.pumpAndSettle();
+
+    expect(find.text(agentsUnlistedCopy), findsOneWidget);
+    expect(find.text(agentsCheckingCopy), findsNothing);
+    expect(find.text('Cursor'), findsNothing);
+    expect(find.text('Custom'), findsOneWidget);
+  });
+
   testWidgets('manual mode toggle survives a chat-capability re-emission', (
     tester,
   ) async {
@@ -644,8 +718,8 @@ void main() {
       _host(
         overrides: [
           pickerSourcesProvider.overrideWithValue(const [_localSource]),
-          newSessionDetectedToolsProvider.overrideWith(
-            (ref) async => const {'claude-code': 'Claude Code'},
+          detectedToolsForProvider.overrideWith(
+            (ref, target) async => const {'claude-code': 'Claude Code'},
           ),
           newSessionChatCapableToolsProvider.overrideWith(
             (ref) async => ref.watch(_chatCapDriver),
@@ -703,8 +777,8 @@ void main() {
         ProviderScope(
           overrides: [
             pickerSourcesProvider.overrideWithValue(const [_localSource]),
-            newSessionDetectedToolsProvider.overrideWith(
-              (ref) async => const {'claude-code': 'Claude Code'},
+            detectedToolsForProvider.overrideWith(
+              (ref, target) async => const {'claude-code': 'Claude Code'},
             ),
             newSessionChatCapableToolsProvider.overrideWith(
               (ref) async => ref.watch(_chatCapDriver),

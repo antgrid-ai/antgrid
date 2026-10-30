@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
-import { startOwnerWatchdog, pidAlive } from "../src/owner-watchdog";
+import { PassThrough } from "node:stream";
+import { startOwnerWatchdog, pidAlive, watchOwnerStdin } from "../src/owner-watchdog";
 
 /** A scheduler seam the test drives by hand — no real timers. */
 function manualScheduler() {
@@ -93,5 +94,64 @@ test("stop() halts polling before the owner dies", () => {
   expect(sched.cleared).toBe(true);
   alive = false;
   sched.tick(); // no-op: scheduler was cleared
+  expect(gone).toEqual([]);
+});
+
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+function watchedPipe(pipe = new PassThrough()) {
+  const gone: string[] = [];
+  const watcher = watchOwnerStdin({ stdin: pipe, onOwnerGone: (r) => gone.push(r) });
+  return { pipe, gone, watcher };
+}
+
+test("watchOwnerStdin fires once when the owner closes the pipe", async () => {
+  const { pipe, gone } = watchedPipe();
+  pipe.write("trailing bytes nobody reads");
+  await tick();
+  expect(gone).toEqual([]);
+  pipe.end();
+  await tick();
+  expect(gone).toEqual(["owner stdin closed"]);
+});
+
+test("watchOwnerStdin fires for a pipe that ended before it attached", async () => {
+  const ended = new PassThrough();
+  ended.resume();
+  ended.end();
+  await tick();
+  expect(ended.readableEnded).toBe(true);
+  const { gone } = watchedPipe(ended);
+  await tick();
+  expect(gone).toEqual(["owner stdin closed"]);
+});
+
+test("watchOwnerStdin does not treat a close without an end as the owner dying", async () => {
+  const { pipe, gone } = watchedPipe();
+  pipe.destroy();
+  await tick();
+  expect(gone).toEqual([]);
+});
+
+test("watchOwnerStdin detaches its listeners after firing", async () => {
+  const { pipe, gone } = watchedPipe();
+  pipe.end();
+  await tick();
+  expect(gone).toEqual(["owner stdin closed"]);
+  expect(pipe.listenerCount("end") + pipe.listenerCount("error")).toBe(0);
+});
+
+test("watchOwnerStdin does not treat a stream error as the owner dying", async () => {
+  const { pipe, gone } = watchedPipe();
+  pipe.destroy(new Error("EIO"));
+  await tick();
+  expect(gone).toEqual([]);
+});
+
+test("watchOwnerStdin stop() prevents a later fire", async () => {
+  const { pipe, gone, watcher } = watchedPipe();
+  watcher.stop();
+  pipe.end();
+  await tick();
   expect(gone).toEqual([]);
 });

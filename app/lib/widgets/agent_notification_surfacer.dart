@@ -173,8 +173,6 @@ class _AgentNotificationSurfacerState
     final taskLabel = hasTitle ? msg.title! : 'Agent';
     final title = notificationHeadline(
       taskLabel: taskLabel,
-      sessionId: msg.terminalId,
-      activeSessionId: ref.read(activeSessionIdProvider),
       sessionTitle: _sessionTitle(entryId, msg.terminalId),
     );
     // The agent's own title is the task; once the session name takes the
@@ -242,33 +240,16 @@ class _AgentNotificationSurfacerState
     )) {
       return;
     }
-    const labels = {
-      'permission_request': 'Permission needed',
-      'awaiting_input': 'Needs your input',
-      'question': 'Agent asks',
-      'task_complete': 'Task complete',
-      'idle': 'Waiting for you',
-      'error': 'Agent error',
-    };
-    final label = labels[msg.notificationType] ?? 'Agent';
-    // body deliberately does not fall back to sessionTitle, or title == body.
-    // Unlike the OS push composed by bridge/src/push/compose.ts, the session
-    // being worked in is not named: the user already knows which it is.
-    final title = notificationHeadline(
-      taskLabel: label,
-      sessionId: msg.sessionId,
-      activeSessionId: ref.read(activeSessionIdProvider),
-      sessionTitle:
-          (msg.sessionTitle != null && msg.sessionTitle!.isNotEmpty)
+    final text = agentNotificationText(
+      notificationType: msg.notificationType,
+      message: msg.message,
+      sessionTitle: (msg.sessionTitle?.trim().isNotEmpty ?? false)
           ? msg.sessionTitle
           : _sessionTitle(entryId, msg.sessionId),
     );
-    final body = (msg.message != null && msg.message!.isNotEmpty)
-        ? msg.message!
-        : label;
     _onAgentNotification(
-      title: title,
-      body: body,
+      title: text.title,
+      body: text.body,
       route: NotificationRoute(
         registrationId: entryId,
         terminalId: msg.sessionId,
@@ -289,8 +270,6 @@ class _AgentNotificationSurfacerState
         : handlerFallbackQuestion;
     final title = notificationHeadline(
       taskLabel: label,
-      sessionId: esc.terminalId,
-      activeSessionId: ref.read(activeSessionIdProvider),
       sessionTitle: _sessionTitle(entryId, esc.terminalId),
     );
     _onAgentNotification(

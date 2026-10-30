@@ -652,11 +652,11 @@ class FileContentMessage {
 /// the bridge can make this call.
 ///
 /// [externalImagePath] is set only when [relPath] is null AND the bridge
-/// recognized the path as a safe image type outside the checkout (an
-/// image-generation tool's own output directory, typically) — see
-/// `EXTERNAL_SAFE_IMAGE_MIME` in the bridge's `file-tree.ts`. It carries the
-/// ABSOLUTE path, unlike [relPath]; `file:read` accepts it as-is (the
-/// bridge's traversal guard has the matching narrow exception), so the app
+/// recognized the path as a file the viewer can show outside the checkout —
+/// `externalSafePreview` in the bridge's `file-tree.ts` (images, PDF, markdown
+/// and text/code, never a credential file). Named for its first use, an image
+/// tool's output. It carries the ABSOLUTE path, unlike [relPath]; `file:read`
+/// accepts it as-is (the bridge's traversal guard has the matching exception), so the app
 /// can preview it read-only via [FileService.openPreview] instead of
 /// refusing the link outright.
 class FileResolvePathResultMessage {

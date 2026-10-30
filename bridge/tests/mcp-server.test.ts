@@ -716,7 +716,7 @@ describe("the scheduler tools", () => {
 
   test("times are shown in the schedule's own zone with the offset in force", () => {
     // 06:00 UTC is 02:00 EDT (UTC-4) on 2026-10-09.
-    expect(formatInZone(Date.UTC(2026, 9, 9, 6, 0, 0), "America/New_York", NOW).replace(",", "")).toBe("Fri 9 Oct 02:00 America/New_York (UTC-4), in 18h");
+    expect(formatInZone(Date.UTC(2026, 9, 9, 6, 0, 0), "America/New_York", NOW).replace(/^(\w+),/, "$1")).toBe("Fri 9 Oct 02:00 America/New_York (UTC-4), in 18h");
   });
 
   test("the time of day alone leads when the instant is today in that zone", () => {

@@ -219,6 +219,13 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
       .max(MAX_REMOTE_DIRECTORY_WIRE_MACHINES),
     notConnected: z.number().int().min(0).default(0),
   }),
+  // The pump's read half, polled on the tick it already runs. It exists because
+  // the bridge has no way to SAY a read missed: `unservedReads` otherwise
+  // reaches the app only on the ack of its next push, up to a heartbeat away,
+  // and the dial of the peers that read missed waits on that ack. Carries no
+  // payload for the same reason it is cheap to call — every field it answers is
+  // a counter the mirror already keeps.
+  z.object({ id: z.string().min(1), type: z.literal("session-bus:directory-status") }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -310,6 +317,13 @@ export type ControlResponse =
   | {
       id: string; ok: true; type: "session-bus:remote-directory";
       accepted: number; dropped: number;
+      wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
+    }
+  /** The same three counters the push's ack carries, read WITHOUT draining
+   *  them: the drain belongs to `replace()`, and a poll that consumed the
+   *  count would take the signal `_warmMissedPeers` dials on. */
+  | {
+      id: string; ok: true; type: "session-bus:directory-status";
       wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
     }
   /** `ttlMs` is the window actually armed, which is not always the one asked

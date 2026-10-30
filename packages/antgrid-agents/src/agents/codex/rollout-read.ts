@@ -132,8 +132,29 @@ export async function readLastCodexMessages(path: string, n: number): Promise<st
   // rollout interleaves its conversation with response_item twins and tool
   // traffic this drops, so the share of a byte window that survives to here is
   // small and varies by session.
-  return (await readTailUntil(path, n, codexMessagesIn)).slice(-n);
+  return (await readTailUntil(path, n, codexMessagesIn, { keepOversized: readsLine })).slice(-n);
 }
+
+// The first "type" in a rollout line is its own; only timestamp and ordinal
+// come before it. A compaction checkpoint carries the history it replaces, so
+// it can be oversized and must still be read to reset the list. An event_msg is
+// claimed only when it can be a message: paginated rollouts also carry tool
+// output (MCP screenshots, command output) as item_completed events, and
+// claiming those would let them fill the windows again. A head too short to
+// name the payload or item is claimed rather than risk dropping a message.
+const LINE_TYPE = /"type":"([a-z_]+)"/;
+const PAYLOAD_TYPE = /"payload":\{"type":"([a-z_]+)"/;
+const ITEM_TYPE = /"item":\{"type":"([A-Za-z]+)"/;
+const readsLine = (head: string) => {
+  const type = LINE_TYPE.exec(head)?.[1];
+  if (type === "compacted") return true;
+  if (type !== "event_msg") return false;
+  const payload = PAYLOAD_TYPE.exec(head)?.[1];
+  if (payload === undefined || payload === "user_message" || payload === "agent_message") return true;
+  if (payload !== "item_completed") return false;
+  const item = ITEM_TYPE.exec(head)?.[1];
+  return item === undefined || item === "UserMessage" || item === "AgentMessage";
+};
 
 function codexMessagesIn(raw: string): string[] {
   let out: string[] = [];
@@ -184,15 +205,41 @@ export function retainedTurns(payload: any): { role: "user" | "assistant"; text:
     .map(({ role, text }) => ({ role, text }));
 }
 
-// Legacy checkpoints carry a summary in `message`. Current ones (codex 0.162
-// and later at least) leave it empty and keep the recent turns instead.
+// Injected user-role messages (AGENTS.md dumps, environment context, plugin
+// lists) are not something the user said.
+const INJECTED_USER_TEXT = /^\s*(?:<|# AGENTS)/;
+export const isInjectedUserText = (text: string) => INJECTED_USER_TEXT.test(text);
+
+/** The user's own messages from a checkpoint's replacement_history, the only
+ * plaintext an older checkpoint (empty `message`, no retained turns) keeps:
+ * its summary item is encrypted and its agent_message entries are traffic
+ * between sub-agents, not replies to the user. */
+export function replacementUserTexts(payload: any): string[] {
+  if (!Array.isArray(payload?.replacement_history)) return [];
+  const texts: string[] = [];
+  for (const entry of payload.replacement_history) {
+    if (entry?.type !== "message" || entry.role !== "user" || !Array.isArray(entry.content)) continue;
+    const raw = entry.content.map((part: any) => (typeof part?.text === "string" ? part.text : "")).join("");
+    if (isInjectedUserText(raw)) continue;
+    const text = withoutRequestWrapper(raw);
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+// Legacy checkpoints carry a summary in `message`. Later ones leave it empty
+// and keep the recent turns in retained_context (codex 0.162 and later at
+// least); those in between keep only the user's messages, in
+// replacement_history.
 function compactedBase(payload: any): string[] {
   const summary = typeof payload?.message === "string" ? payload.message.trim() : "";
   if (summary) return [summary];
-  return retainedTurns(payload).map((turn) => turn.text);
+  const turns = retainedTurns(payload);
+  if (turns.length > 0) return turns.map((turn) => turn.text);
+  return replacementUserTexts(payload);
 }
 
-function withoutRequestWrapper(message: string): string {
+export function withoutRequestWrapper(message: string): string {
   const idx = message.indexOf(USER_MESSAGE_BEGIN);
   return (idx >= 0 ? message.slice(idx + USER_MESSAGE_BEGIN.length) : message).trim();
 }

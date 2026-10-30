@@ -13,7 +13,11 @@ const MAX_CHILDREN = 64;
 const MAX_REFERENCES = 500;
 const ERROR_REDACTION = "message.info.error (kept name, data.message, data.statusCode, data.isRetryable)";
 const REASONING_REDACTION = "part reasoningEncryptedContent (removed)";
-const BOARD_TABLES = ["kilo_board", "kilo_board_message"] as const;
+// Kilo keys its board by the conversation's root session, not by a session_id.
+const BOARD_TABLES = [
+  { table: "kilo_board", scope: "root_session_id" },
+  { table: "kilo_board_message", scope: "board_root_session_id" },
+] as const;
 
 export interface OpencodeSerializeOptions {
   includeKiloBoard: boolean;
@@ -141,16 +145,26 @@ function hasTable(db: Database, name: string): boolean {
 
 function readBoard(db: Database, sessionId: string, ctx: Context): Record<string, unknown[]> | undefined {
   const board: Record<string, unknown[]> = {};
-  for (const table of BOARD_TABLES) {
+  let clearedSeq = 0;
+  for (const { table, scope } of BOARD_TABLES) {
     if (!hasTable(db, table)) continue;
     const columns = (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name);
     // The board schema is Kilo's and may change; a table with no session link
     // cannot be scoped to this conversation, so it is left out rather than leaked whole.
-    if (!columns.includes("session_id")) {
-      ctx.warnings.push(`Skipped ${table}: it has no session_id column.`);
+    if (!columns.includes(scope)) {
+      ctx.warnings.push(`Skipped ${table}: it has no ${scope} column.`);
       continue;
     }
-    const rows = db.query(`SELECT * FROM ${table} WHERE session_id = ?`).all(sessionId);
+    let rows = db.query(`SELECT * FROM ${table} WHERE ${scope} = ?`).all(sessionId) as Record<string, unknown>[];
+    if (table === "kilo_board") {
+      const cleared = rows[0]?.cleared_seq;
+      if (typeof cleared === "number") clearedSeq = cleared;
+    } else {
+      // Kilo shows only messages after the board's last clear, in seq order.
+      rows = rows
+        .filter((row) => typeof row.seq !== "number" || row.seq > clearedSeq)
+        .sort((a, b) => (typeof a.seq === "number" && typeof b.seq === "number" ? a.seq - b.seq : 0));
+    }
     if (rows.length) board[table] = rows;
   }
   return Object.keys(board).length ? board : undefined;
@@ -170,15 +184,10 @@ function readTodo(db: Database, sessionId: string, ctx: Context): unknown[] {
   }
 }
 
-function readSession(db: Database, sessionId: string, opts: OpencodeSerializeOptions, ctx: Context): OpencodeSessionDoc | undefined {
+function readSession(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc | undefined {
   const row = db.query("SELECT * FROM session WHERE id = ?").get(sessionId) as Record<string, unknown> | null;
   if (!row) return undefined;
-  const doc: OpencodeSessionDoc = { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
-  if (opts.includeKiloBoard) {
-    const board = readBoard(db, sessionId, ctx);
-    if (board) doc.board = board;
-  }
-  return doc;
+  return { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
 }
 
 /** Output has the `opencode export` shape so a target (or the user) can read or
@@ -187,8 +196,13 @@ function readSession(db: Database, sessionId: string, opts: OpencodeSerializeOpt
  * database holds account and credential tables that must never be selected. */
 export function serializeOpencodeSession(db: Database, sessionId: string, opts: OpencodeSerializeOptions): OpencodeSerialized | undefined {
   const ctx: Context = { redactions: new Set(), warnings: [], references: [] };
-  const doc = readSession(db, sessionId, opts, ctx);
+  const doc = readSession(db, sessionId, ctx);
   if (!doc) return undefined;
+  // The board hangs off the root session only, so a child never has one.
+  if (opts.includeKiloBoard) {
+    const board = readBoard(db, sessionId, ctx);
+    if (board) doc.board = board;
+  }
 
   const children: OpencodeSerialized["children"] = [];
   const seen = new Set([sessionId]);
@@ -207,7 +221,7 @@ export function serializeOpencodeSession(db: Database, sessionId: string, opts: 
           ctx.warnings.push(`Stopped after ${MAX_CHILDREN} child sessions.`);
           continue;
         }
-        const childDoc = readSession(db, id, opts, ctx);
+        const childDoc = readSession(db, id, ctx);
         if (!childDoc) continue;
         children.push({ id, doc: childDoc });
         next.push(id);

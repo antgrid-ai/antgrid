@@ -1247,6 +1247,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
                 onNotification: _onPageScroll,
                 child: PageView(
                   controller: _pageController,
+                  // Only on the workspace page: a zoomed PDF kept mounted
+                  // behind the agent page must not strand the pager there.
+                  physics:
+                      ref.watch(pagerSwipeLockedProvider) &&
+                          !ref.watch(agentSurfaceVisibleProvider)
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
                   onPageChanged: _publishVisibleSurfaces,
                   children: [
                     // The page's leading overscroll below is the primary way to

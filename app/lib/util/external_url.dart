@@ -425,11 +425,10 @@ const String _unreachableMessage =
 /// the path, and [FileService.revealDirectory] for the folder case.
 ///
 /// A path outside the checkout falls back to
-/// [FileResolvePathResultMessage.externalImagePath] — a recognized image type
-/// (an image-generation tool's own output, typically), previewed read-only in
-/// the attachment-preview dialog instead of refused outright. Anything else
-/// outside the checkout is still refused: see that field's own doc for the
-/// narrow, extension-only trust the bridge extends it.
+/// [FileResolvePathResultMessage.externalImagePath] — any file type the viewer
+/// can show, previewed read-only in the attachment-preview dialog instead of
+/// refused outright. Anything else outside the checkout is still refused: see
+/// that field's own doc for the extension-only trust the bridge extends it.
 Future<void> _openFileLink(
   BuildContext context,
   String rawUri,

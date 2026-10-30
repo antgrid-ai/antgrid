@@ -157,7 +157,6 @@ describe("FileSearcher", () => {
         wholeWord: false,
         requestId: "req",
       },
-      "/root",
       ["state", "nested/dir"],
     );
     const globIndex = (rel: string) => args.indexOf(`!/${rel}/**`);
@@ -207,5 +206,38 @@ describe("FileSearcher", () => {
         expect(match.lineContent).not.toContain("catalog");
       }
     }
+  });
+});
+
+describe("FileSearcher outside a git repository", () => {
+  const dir = join(tmpdir(), "antgrid-search-norepo-" + Date.now());
+  let messages: AbMessage[];
+  const run = (query: string, regex = false) =>
+    new FileSearcher(dir, "p", (m) => messages.push(m)).search({
+      projectId: "p",
+      query,
+      caseSensitive: false,
+      regex,
+      wholeWord: false,
+      requestId: "r",
+    });
+
+  beforeEach(() => {
+    messages = [];
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    writeFileSync(join(dir, "sub", "a.txt"), "needle here\n");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("finds matches in a folder that is not a repository", async () => {
+    await run("needle");
+    const paths = messages.flatMap((m) => (m.type === "file:search-result" ? m.matches.map((x) => x.path) : []));
+    expect(paths).toEqual(["sub/a.txt"]);
+  });
+
+  test("reports an invalid regex instead of an empty result", async () => {
+    await run("(", true);
+    const done = messages.find((m) => m.type === "file:search-done");
+    expect(done?.type === "file:search-done" && done.error).toBeTruthy();
   });
 });
