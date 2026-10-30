@@ -31,16 +31,58 @@ export function readCpuPercent(): number | undefined {
   return lastCpuPercent;
 }
 
-/** This machine's RAM and CPU load for `machine:stats`, as the OS reports it.
- *  macOS counts only truly free pages as free, so the available figure reads
- *  low there. CPU is absent when the OS reports no per-core times. */
-export function readMachineStats(): { ramTotalBytes: number; ramAvailableBytes: number; cpuPercent?: number } {
+type MachineStats = { ramTotalBytes: number; ramAvailableBytes: number; cpuPercent?: number };
+
+// Shared by every caller while one read is outstanding: a host runs one core per
+// open project, and several can ask at once, so without this each would spawn
+// its own vm_stat and could deliver out of order.
+let inFlight: Promise<MachineStats> | null = null;
+
+/** This machine's RAM and CPU load for `machine:stats`. Never rejects: any
+ *  failure reading the macOS figure falls back to `freemem()`. CPU is absent
+ *  when the OS reports no per-core times. */
+export function readMachineStats(): Promise<MachineStats> {
+  return (inFlight ??= readMachineStatsNow().finally(() => { inFlight = null; }));
+}
+
+async function readMachineStatsNow(): Promise<MachineStats> {
   const cpuPercent = readCpuPercent();
+  const ramTotalBytes = totalmem();
+  const fromVmStat = process.platform === "darwin" ? await readDarwinAvailable(ramTotalBytes) : null;
   return {
-    ramTotalBytes: totalmem(),
-    ramAvailableBytes: freemem(),
+    ramTotalBytes,
+    ramAvailableBytes: fromVmStat ?? freemem(),
     ...(cpuPercent === undefined ? {} : { cpuPercent }),
   };
+}
+
+// freemem() on macOS counts only never-used pages, so a machine with
+// gigabytes of reclaimable file cache reads as nearly full. Spawned rather than
+// FFI'd to host_statistics64; async so a request never stalls the loop.
+async function readDarwinAvailable(totalBytes: number): Promise<number | null> {
+  try {
+    const proc = Bun.spawn(["/usr/bin/vm_stat"], { stdout: "pipe", stderr: "ignore", timeout: 2000 });
+    const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return code === 0 ? availableFromVmStat(text, totalBytes) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Available bytes from `vm_stat` output, using Activity Monitor's "Memory
+ *  Used" (app memory + wired + compressed) so the figure matches what a Mac
+ *  user sees there. Null when a field is missing — a format change must fall
+ *  back, never report a confident wrong number. */
+export function availableFromVmStat(output: string, totalBytes: number): number | null {
+  const pageSize = Number(/page size of (\d+) bytes/.exec(output)?.[1]);
+  const pages = (label: string): number => {
+    const m = new RegExp(`^${label}:\\s+(\\d+)\\.?$`, "m").exec(output);
+    return m ? Number(m[1]) : NaN;
+  };
+  const appPages = pages("Anonymous pages") - pages("Pages purgeable");
+  const usedPages = appPages + pages("Pages wired down") + pages("Pages occupied by compressor");
+  if (!Number.isFinite(usedPages) || !(pageSize > 0)) return null;
+  return Math.min(totalBytes, Math.max(0, totalBytes - usedPages * pageSize));
 }
 
 /** What a connected device last said about its own hardware. Every field is

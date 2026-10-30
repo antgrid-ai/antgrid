@@ -9,7 +9,7 @@ import { readBootstrapPayload } from "./auth/credentials";
 import { VERSION } from "./version";
 import { HostServer } from "./host-server";
 import { resolveAbDir } from "./antgrid-dir";
-import { startOwnerWatchdog } from "./owner-watchdog";
+import { startOwnerWatchdog, watchOwnerStdin } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
 import { runHookInvocation } from "./hook-runner";
 import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
@@ -121,6 +121,8 @@ program
       else log.warn(`ignoring invalid log level "${level}"`);
     }
 
+    // No await between this read and `watchOwnerStdin` below: an owner that
+    // dies in that gap is invisible to it (see watchOwnerStdin).
     let payload;
     try {
       payload = await readBootstrapPayload();
@@ -234,11 +236,15 @@ program
     // signal during bring-up or the first-project open can't leave the host
     // registered on the relay for an app that's already gone. `host.shutdown()`
     // is null-safe against a host that never started, which is what lets this
-    // sit ahead of it. The owner-watchdog self-exits when the spawning app's
-    // pid vanishes — the backstop for exits that never reach
-    // the app's didRequestAppExit teardown (force-kill, crash, or a window close
-    // under `flutter run --machine`), which would otherwise orphan this
-    // machine-level host.
+    // sit ahead of it. The owner watchdogs (owner-watchdog.ts) self-exit when
+    // the spawning app goes away by a path that never reaches its
+    // didRequestAppExit teardown. Both may fire; `shutdown` runs once.
+    if (payload.ownerHoldsStdin) {
+      watchOwnerStdin({
+        stdin: process.stdin,
+        onOwnerGone: (reason) => void shutdown(reason),
+      });
+    }
     if (payload.ownerPid !== undefined) {
       startOwnerWatchdog({
         ownerPid: payload.ownerPid,

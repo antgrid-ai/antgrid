@@ -1,9 +1,21 @@
-// Parent-death backstop: the host is a machine-level daemon whose only tie to
+// Parent-death backstops: the host is a machine-level daemon whose only tie to
 // the app's lifetime is the app's `didRequestAppExit` teardown — which does NOT
 // fire on a force-kill, a crash, OR (observed) a window close under
 // `flutter run --machine` (aspire dev). Without a backstop the host orphans and
-// accumulates. This watchdog polls the owning app's pid and self-exits the host
-// when it disappears, covering every exit path uniformly.
+// accumulates.
+//
+// Two run side by side. `watchOwnerStdin` is the prompt one: the app holds our
+// stdin pipe open for its life, and the kernel closes it however the app dies,
+// so EOF arrives the instant it does. macOS and Linux have nothing like the
+// Windows kill-on-close job the app also encloses us in, so this is the
+// standard POSIX substitute. `startOwnerWatchdog` polls the owner's pid and is
+// kept as the slower floor: EOF never arrives if any other process inherited
+// the pipe's write end.
+
+import { finished, type Readable } from "node:stream";
+import { logger } from "./logger";
+
+const log = logger.child({ component: "owner-watchdog" });
 
 export interface OwnerWatchdog {
   stop(): void;
@@ -84,4 +96,34 @@ export function startOwnerWatchdog(opts: OwnerWatchdogOptions): OwnerWatchdog {
       cancel = null;
     },
   };
+}
+
+export interface OwnerStdinOptions {
+  /** The pipe whose write end the owner holds for its whole life. */
+  stdin: Readable;
+  /** Called once when the pipe reaches EOF; wired to graceful shutdown. */
+  onOwnerGone: (reason: string) => void;
+}
+
+/**
+ * Invoke `onOwnerGone` once when the owner's end of `stdin` closes.
+ *
+ * Only a clean end counts. An error or a close without an end is a probe
+ * quirk rather than proof of death — the pid watchdog is still running to
+ * catch a real one (the same fail-safe rule as {@link pidAlive}).
+ */
+export function watchOwnerStdin(opts: OwnerStdinOptions): OwnerWatchdog {
+  // Attach in the same tick the bootstrap read resolves. Bun's process.stdin
+  // never sets `readableEnded`, so `finished` reports one that already ended
+  // as a premature close, and that EOF would be lost to the pid poll.
+  const cleanup = finished(opts.stdin, (err) => {
+    // No cleanup here: its error listener is what keeps a later error from
+    // surfacing as an uncaught exception.
+    if (err) return log.warn("owner stdin errored (%s); leaving the pid watchdog to decide", err);
+    cleanup();
+    opts.onOwnerGone("owner stdin closed");
+  });
+  // Nobody else reads past the bootstrap line; `end` fires only on a flowing stream.
+  opts.stdin.resume();
+  return { stop: cleanup };
 }
