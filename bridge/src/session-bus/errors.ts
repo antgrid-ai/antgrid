@@ -41,18 +41,28 @@ export const SESSION_BUS_ERRORS = {
    *  the far side — a machine with remote access off publishes none at all — so
    *  the failure is about this machine's knowledge, not the peer's existence.
    *
-   *  503 is the transport's answer, and the two ADDRESSING refusals under it —
-   *  no row and no thread to route by, and a thread whose way home has lapsed —
-   *  are not an invitation to retry, which is why both of those texts say so: a
-   *  refusal returns before `coordinator.message`, the only place that charges
-   *  the pair budget, so a retry loop here trips no ceiling and costs the caller
-   *  nothing it would notice. What clears them is a frame from that machine or a
-   *  row once it is reachable again, never another attempt.
+   *  503 is the transport's answer, and neither ADDRESSING refusal under it is
+   *  an invitation to retry blindly: a refusal returns before
+   *  `coordinator.message`, the only place that charges the pair budget, so a
+   *  retry loop here trips no ceiling and costs the caller nothing it would
+   *  notice. What clears them is a frame from that machine or a row once it is
+   *  reachable again.
    *
-   *  The third text under this code is the carrier one — this machine's own
-   *  desktop app is not attached, and it is what carries an exchange this
-   *  session is OPENING — and it deliberately makes no such claim, because that
-   *  condition does clear on its own the moment the app reattaches. */
+   *  The two phrase it differently on purpose. A lapsed thread says outright
+   *  that retrying will not clear it, because the route it named is gone. The
+   *  no-row text says instead what WOULD clear it — the directory listing that
+   *  peer — because the mirror refills on its own schedule, so a send landing
+   *  between two of its pushes is refused here and the very next attempt
+   *  succeeds unchanged (observed live). Told flatly that a retry cannot help,
+   *  a caller reads a peer it can reach as gone.
+   *
+   *  The third text under this code is the carrier one — the desktop app on the
+   *  machine this session runs on does not have the project open, and it is
+   *  what carries an exchange this session is OPENING — and it deliberately
+   *  makes no such claim, because that condition does clear on its own the
+   *  moment the app attaches. It names the machine rather than saying "this
+   *  machine", because the reader is as often driving it from somewhere else as
+   *  sitting at it. */
   PEER_UNREACHABLE: 503,
   /** The caller's own project cannot be addressed at all: it has no git
    *  remote, so it has no repo key and therefore no peers.

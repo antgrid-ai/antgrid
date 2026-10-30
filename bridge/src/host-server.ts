@@ -473,6 +473,10 @@ export class HostServer {
   // home for a peer, no desktop attached to this machine) get separate sets.
   private readonly busRouteMissWarned = new Set<string>();
   private readonly busOwnerMissWarned = new Set<string>();
+  /** Projects being opened right now to receive a held bus delivery — see
+   *  {@link warmForInboundBus}. Bounded by the number of projects on the
+   *  machine and emptied as each open settles. */
+  private readonly busWarming = new Set<string>();
   // The host-side no-progress-halt store, machine-wide like
   // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
   // `sessionIndex.lookup` is what lets it answer for a session whose project
@@ -571,7 +575,17 @@ export class HostServer {
     // forever.
     deliverLocal: (frame, to) => {
       const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
-      if (projectId === null || !this.cores.has(projectId)) return false;
+      if (projectId === null) return false;
+      if (!this.cores.has(projectId)) {
+        // The index answers for a COLD project from its snapshot, so the target
+        // resolves before the core exists — and a false return holds the frame
+        // rather than dropping it, which is what makes warming and letting the
+        // coordinator retry sound. Only the same-machine case reaches here: a
+        // frame from another machine arrives on a project stream, and admitting
+        // one already warms the core it names.
+        this.warmForInboundBus(projectId);
+        return false;
+      }
       try {
         return this.sessionBus.handleInbound(frame) === "applied";
       } catch (err) {
@@ -664,6 +678,43 @@ export class HostServer {
     if (!entry) return false;
     entry.core.startSession(sessionId);
     return true;
+  }
+
+  /**
+   * Bring up a cold project a bus frame was addressed into, so the frame the
+   * coordinator is holding has somewhere to land.
+   *
+   * Bounded the way the scheduler's launch is (`prepare`, above): the id must
+   * be well-formed, the path must come from this host's OWN catalog rather than
+   * from anything on the wire, and the folder must still exist. Opened `local`
+   * for the same reason the scheduler does — nothing is driving it, and a core
+   * that later needs a native binding is promoted rather than reopened.
+   *
+   * Deliberately NOT the rule {@link startLocalSession} follows. Waking a
+   * session is a wake of something already running; this delivers a message the
+   * target's own machine accepted, and holding it against a project the user
+   * has merely closed is how an exchange goes quiet with nothing to say why.
+   *
+   * Fire-and-forget: the caller is a synchronous delivery that has already
+   * answered "held". One open in flight per project, because the coordinator
+   * retries on a timer and would otherwise start a second before the first
+   * finishes.
+   */
+  private warmForInboundBus(projectId: string): void {
+    if (this.busWarming.has(projectId)) return;
+    if (!isSafeProjectId(projectId)) return;
+    const seen = this.seenProjects.get(projectId);
+    if (!seen || !existsSync(seen.path)) return;
+    this.busWarming.add(projectId);
+    void this.open(projectId, seen.path, "local")
+      .catch((err) => {
+        log.warn(
+          "session bus: could not open project %s for a held delivery: %s",
+          projectId,
+          err instanceof Error ? err.message : String(err),
+        );
+      })
+      .finally(() => this.busWarming.delete(projectId));
   }
 
   // The host-owned NativeHostConnection uses the BARE deviceUuid for its central

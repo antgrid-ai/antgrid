@@ -626,9 +626,11 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // the context in, so refusing it here would refuse a reply whose
       // transport is intact.
       if (!deps.carrierPresent()) {
+        // Says which machine, because the reader is routinely not at it: a
+        // session driven from elsewhere read "this machine's app" as its own.
         return refuse(
           "PEER_UNREACHABLE",
-          "this machine's desktop app is not attached, and it is what carries a message to another machine",
+          "the Antgrid desktop app on the machine this session runs on does not have this project open, and it is what carries a message to another machine — open the project in the desktop app there; driving the machine from another device does not carry it",
         );
       }
     }
@@ -675,7 +677,12 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (!thread) {
         return refuse(
           "PEER_UNREACHABLE",
-          "no row for that address here, and without a threadId there is nothing else to route by; this does not clear by retrying — a machine that offers no row can still be answered on a thread it opened, but it cannot be opened with",
+          // Says what clears it rather than "retrying will not help": the
+          // mirror is refilled by a pump on its own schedule, so a send landing
+          // between two of its pushes is refused here and the very next attempt
+          // succeeds unchanged. Told it could not retry, a caller reads an
+          // addressable peer as gone.
+          "no row for that address here, and without a threadId there is nothing else to route by; what clears this is the directory listing that peer again, not the wording of the send — a machine that offers no row can still be answered on a thread it opened, but it cannot be opened with",
         );
       }
       // The half that bounds it in TIME, and it takes two reads because neither

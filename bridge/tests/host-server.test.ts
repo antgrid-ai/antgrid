@@ -8,7 +8,7 @@ import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/ho
 import { computeProjectId } from "../src/project-id";
 import { createMessage } from "../src/protocol";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
-import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { OUTBOX_TICK_MS, type SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadHeld } from "../src/session-bus/held-store";
 import { LOCAL_MACHINE_ID } from "../src/session-bus/constants";
 
@@ -903,6 +903,78 @@ test(
     sessionBus.pump();
     expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
     expect(loadHeld(abDir!, projectIdA, sessionA).held).toHaveLength(0);
+  },
+  20_000,
+);
+
+test(
+  "a send to a cold local project warms that project on its own and lands without a second push",
+  async () => {
+    host = createHostPolicyFixture({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const folderB = tempFolder();
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
+    await host.stop(projectIdB);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    // Still held on the first attempt: `open()` is async and `deliverLocal` is
+    // not, so warming can only start here, never finish here.
+    expect(res.held).toBe(true);
+
+    // Nothing reopens the project in this test. A human opening it is what the
+    // family above needed, and it is exactly what a machine nobody is sitting
+    // at does not have.
+    await waitFor(
+      () => host!.list().some((p) => p.projectId === projectIdB),
+      "project B warmed by the held delivery",
+    );
+    await waitFor(
+      () => sessionBus.mailbox(sessionB).posts.length === 1,
+      "the held post delivered once project B was warm",
+    );
+  },
+  20_000,
+);
+
+test(
+  "a cold project that is not in the host's catalog is never opened by an inbound send",
+  async () => {
+    // The gate that keeps warming from being a way to spend this machine's
+    // resources on a name the sender chose: `seenProjects` is the same catalog
+    // that bounds every project verb a remote peer may name, and a session
+    // index row alone must not be enough to start a core.
+    host = createHostPolicyFixture({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const folderB = tempFolder();
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
+    await host.stop(projectIdB);
+    (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(projectIdB);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.held).toBe(true);
+
+    // Several retry ticks, so this is "never opened", not "not opened yet".
+    await new Promise((r) => setTimeout(r, OUTBOX_TICK_MS * 3));
+    expect(host.list().some((p) => p.projectId === projectIdB)).toBe(false);
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
   },
   20_000,
 );

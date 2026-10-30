@@ -848,10 +848,14 @@ describe("the send verbs over the loopback route", () => {
       });
       expect(res.status).toBe(503);
       expect(res.body.code).toBe("PEER_UNREACHABLE");
-      // The status alone says "try again", and this one never resolves by
-      // trying again: the mirror is the only thing that could offer this row,
-      // and an address that was never in it will not appear in it.
-      expect(res.body.error).toContain("retrying");
+      // The status alone says "try again", and the text has to say what would
+      // actually make a difference. It is deliberately NOT "retrying will not
+      // help": the same refusal answers a real peer whose mirror row has not
+      // landed yet, and that one does clear on an unchanged retry (observed
+      // live — the send after it succeeded with the same body). What never
+      // clears it is re-sending at an address the directory was never going to
+      // offer, which is this case.
+      expect(res.body.error).toContain("directory listing that peer");
       expect(lead.routes).toHaveLength(attempted);
     } finally { stop(); }
   });
