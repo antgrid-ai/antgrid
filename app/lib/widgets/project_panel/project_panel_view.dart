@@ -34,13 +34,17 @@ import '../recent_sessions/starting_session_row.dart';
 /// One project, merged across machines, in place of the Recent list on the New
 /// Session canvas: who holds it, what is waiting, what is running.
 class ProjectPanelView extends ConsumerWidget {
-  const ProjectPanelView({super.key, required this.view});
+  const ProjectPanelView({super.key, required this.view, this.compact = false});
 
   final ProjectView view;
 
+  /// Phone width: machines as a scrolling chip strip instead of cards, and the
+  /// grouping control on a row of its own.
+  final bool compact;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!view.inScope) return _OutOfScope(view: view);
+    if (!view.inScope) return _OutOfScope(view: view, compact: compact);
 
     final filter = ref.watch(projectMachineFilterProvider);
     final cards = machineCardsFor(view);
@@ -74,9 +78,13 @@ class ProjectPanelView extends ConsumerWidget {
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
-        SliverToBoxAdapter(child: _Header(view: view, grouping: grouping)),
         SliverToBoxAdapter(
-          child: _MachineCards(cards: cards, activeFilter: activeFilter),
+          child: _Header(view: view, grouping: grouping, compact: compact),
+        ),
+        SliverToBoxAdapter(
+          child: compact
+              ? _MachineChips(cards: cards, activeFilter: activeFilter)
+              : _MachineCards(cards: cards, activeFilter: activeFilter),
         ),
         const SliverToBoxAdapter(child: StartingSessionRow()),
         if (groups.isEmpty)
@@ -130,15 +138,43 @@ class ProjectPanelView extends ConsumerWidget {
 }
 
 class _Header extends ConsumerWidget {
-  const _Header({required this.view, required this.grouping});
+  const _Header({
+    required this.view,
+    required this.grouping,
+    this.compact = false,
+  });
 
   final ProjectView view;
   final SessionGrouping grouping;
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     void pick(SessionGrouping g) =>
         ref.read(projectGroupingProvider.notifier).set(g);
+    final groupBy = Semantics(
+      container: true,
+      label: 'Group by',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final (g, label) in const [
+            (SessionGrouping.status, 'Status'),
+            (SessionGrouping.machine, 'Machine'),
+            (SessionGrouping.agent, 'Agent'),
+          ]) ...[
+            if (g != SessionGrouping.status)
+              const SizedBox(width: AbTokens.space6),
+            AbChip.toggle(
+              label: label,
+              selected: grouping == g,
+              onTap: () => pick(g),
+              color: grouping == g ? context.antgrid.accent : null,
+            ),
+          ],
+        ],
+      ),
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space8,
@@ -180,31 +216,14 @@ class _Header extends ConsumerWidget {
                   ],
                 ),
               ),
-              Semantics(
-                container: true,
-                label: 'Group by',
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    for (final (g, label) in const [
-                      (SessionGrouping.status, 'Status'),
-                      (SessionGrouping.machine, 'Machine'),
-                      (SessionGrouping.agent, 'Agent'),
-                    ]) ...[
-                      if (g != SessionGrouping.status)
-                        const SizedBox(width: AbTokens.space6),
-                      AbChip.toggle(
-                        label: label,
-                        selected: grouping == g,
-                        onTap: () => pick(g),
-                        color: grouping == g ? context.antgrid.accent : null,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
+              if (!compact) groupBy,
             ],
           ),
+          // A phone has no room beside the title for three chips.
+          if (compact) ...[
+            const SizedBox(height: AbTokens.space8),
+            Align(alignment: Alignment.centerRight, child: groupBy),
+          ],
           const SizedBox(height: AbTokens.space12),
           const AbSeparator.horizontal(),
         ],
@@ -272,6 +291,135 @@ class _MachineCards extends ConsumerWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// The phone's machine filter: "All" and one chip per machine holding the
+/// project, scrolling sideways. Each is a full touch target however small the
+/// pill it draws.
+class _MachineChips extends ConsumerWidget {
+  const _MachineChips({required this.cards, required this.activeFilter});
+
+  final List<MachineCardInfo> cards;
+  final String? activeFilter;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final total = cards.fold<int>(0, (n, c) => n + c.sessionCount);
+    void pick(String? id) =>
+        ref.read(projectMachineFilterProvider.notifier).set(id);
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
+      child: Row(
+        children: [
+          _FilterChip(
+            label: 'All',
+            count: total,
+            selected: activeFilter == null,
+            onTap: () => pick(null),
+          ),
+          for (final c in cards)
+            _FilterChip(
+              key: ValueKey(c.machine.id),
+              label: c.machine.name,
+              count: c.sessionCount,
+              online: c.machine.online,
+              selected: c.machine.id == activeFilter,
+              onTap: () => pick(c.machine.id == activeFilter ? null : c.machine.id),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FilterChip extends StatelessWidget {
+  const _FilterChip({
+    super.key,
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+    this.online,
+  });
+
+  final String label;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+
+  /// Null for "All", which is no machine.
+  final bool? online;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final online = this.online;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: [
+        label,
+        if (online != null) online ? 'online' : 'offline',
+        '$count sessions',
+      ].join(', '),
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: AbTokens.tapTargetMin),
+          child: Padding(
+            padding: const EdgeInsets.only(right: AbTokens.space6),
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space10,
+                  vertical: AbTokens.space6,
+                ),
+                decoration: BoxDecoration(
+                  color: selected ? p.bgSelected : null,
+                  border: Border.all(
+                    color: selected ? p.accentMuted : p.borderStrong,
+                  ),
+                  borderRadius: AbTokens.borderRadius3,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (online != null) ...[
+                      AbStatusDot(
+                        tone: online
+                            ? AbStatusTone.success
+                            : AbStatusTone.disabled,
+                        style: online ? AbDotStyle.filled : AbDotStyle.hollow,
+                      ),
+                      const SizedBox(width: AbTokens.space6),
+                    ],
+                    Text(
+                      label,
+                      style: AbTokens.monoStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: selected ? p.textPrimary : p.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(width: AbTokens.space6),
+                    Text(
+                      '$count',
+                      style: AbTokens.monoStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: p.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -476,9 +624,10 @@ class _PanelRow extends ConsumerWidget {
 /// The project is known but the scope hides every machine holding it. Never a
 /// blank panel: it says where the project is and offers the way back.
 class _OutOfScope extends ConsumerWidget {
-  const _OutOfScope({required this.view});
+  const _OutOfScope({required this.view, required this.compact});
 
   final ProjectView view;
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -491,7 +640,11 @@ class _OutOfScope extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Header(view: view, grouping: ref.watch(projectGroupingProvider)),
+        _Header(
+          view: view,
+          grouping: ref.watch(projectGroupingProvider),
+          compact: compact,
+        ),
         Expanded(
           child: AbEmptyState(
             icon: AbIcons.deviceDesktop,

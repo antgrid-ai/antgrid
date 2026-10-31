@@ -9,12 +9,13 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toast.dart';
-import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
 import '../../providers/project_panel.dart';
 import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
+import '../machine_scope_sheet.dart';
+import '../mobile/mobile_home.dart';
 import '../open_folder_button.dart';
 import '../project_panel/project_panel_view.dart';
 import '../recent_sessions/recent_sessions_summary.dart';
@@ -63,6 +64,7 @@ class NewSessionContent extends ConsumerWidget {
     // from platform+width in two places is how you end up with two or neither.
     final showTopBar = onOpenDrawer != null || showSearchButton;
     final projectView = ref.watch(selectedProjectViewProvider);
+    final isPhoneWidth = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -142,8 +144,15 @@ class NewSessionContent extends ConsumerWidget {
                             // the fixed top bar above already shows, so
                             // exactly one of the two mounts — decided here,
                             // where both answers are in hand.
+                            // A phone's home is what needs the user and the
+                            // projects; the flat list stays on wider screens.
                             child: projectView != null
-                                ? ProjectPanelView(view: projectView)
+                                ? ProjectPanelView(
+                                    view: projectView,
+                                    compact: isPhoneWidth,
+                                  )
+                                : isPhoneWidth
+                                ? const MobileHomeList()
                                 : RecentSessionsTab(showHeader: !showTopBar),
                           ),
                         ),
@@ -239,9 +248,8 @@ class NewSessionContent extends ConsumerWidget {
 
 /// Top bar: the mobile drawer button and the session-search icon, sharing
 /// the row with either the sessions title + group-by chips + status badges
-/// (tablet/desktop, one line) or the old combined title+badges summary line
-/// (phone width, no chips — there's no room for a third element on a phone
-/// row without overflowing).
+/// (tablet/desktop, one line) or, at phone width, the machine scope switcher
+/// that heads the phone home.
 ///
 /// This bar is mobile's navigation bar, which is where both platforms' search
 /// guidance puts a search icon — reachable without scrolling, and costing a
@@ -274,7 +282,9 @@ class _TopBar extends StatelessWidget {
               const SizedBox(width: AbTokens.space8),
             ],
             if (isPhoneWidth) ...[
-              const Expanded(child: RecentSessionsSummaryLine()),
+              // The phone home is scoped by machine, so the scope switcher is
+              // what heads it.
+              const Expanded(child: MobileScopeButton()),
               const SizedBox(width: AbTokens.space8),
               const SessionSearchButton(),
             ] else ...[
@@ -305,32 +315,6 @@ class _TopBar extends StatelessWidget {
             ],
           ],
         ),
-        // A phone has no room for the chips on the row above — the summary
-        // line and the search icon already fill it — so they get a row of
-        // their own rather than being dropped, which left Recent stuck on its
-        // default grouping with nothing anywhere to change it. Right-aligned
-        // and self-hiding when there are no sessions to group, exactly as the
-        // scrolling header used to render them at this width.
-        if (isPhoneWidth) ...[
-          const SizedBox(height: AbTokens.space8),
-          // Capped so the toggle chips' touch footprint is clamped to a dense
-          // bar's height: this row is fixed chrome above the list, and the
-          // chips still floor at the touch extent wide. A cap, not a fixed
-          // height, so the row still collapses when the chips hide themselves;
-          // only where the chips inflate, so a narrow desktop window never
-          // clips them.
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: AbTouchSizing.extentOf(context) > 0
-                  ? AbTokens.rowHeightSm
-                  : double.infinity,
-            ),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [RecentGroupByChips()],
-            ),
-          ),
-        ],
         const SizedBox(height: AbTokens.space8),
         const AbSeparator.horizontal(),
       ],

@@ -199,10 +199,24 @@ final machineDirectoryProvider = Provider<List<MachineInfo>>((ref) {
 final scopedMachineIdsProvider = Provider<Set<String>>((ref) {
   final scope = ref.watch(machineScopeProvider);
   return {
-    for (final m in ref.watch(machineDirectoryProvider))
+    for (final m in scopeCandidates(ref.watch(machineDirectoryProvider)))
       if (scope.includes(m.id, online: m.online)) m.id,
   };
 });
+
+/// The machines a scope can include on this device. A phone cannot drive a
+/// machine whose remote-access switch is off — its advert is empty and every
+/// verb is refused — so there such a machine is shown locked, never in scope.
+List<MachineInfo> scopeCandidates(
+  List<MachineInfo> machines, {
+  bool? mobile,
+}) {
+  if (!(mobile ?? isMobilePlatform)) return machines;
+  return [
+    for (final m in machines)
+      if (m.remoteAccessEnabled != false) m,
+  ];
+}
 
 /// What the scope button says, e.g. "All online machines" / "MacBook Pro" /
 /// "3 of 5 machines".
