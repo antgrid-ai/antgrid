@@ -2,6 +2,7 @@ import { clipboardMessages, CLIPBOARD_MESSAGE_TYPES, TerminalClipboardMessageSch
 export * from "./terminal-clipboard/protocol";
 import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
+import { MemoryRequestRecordSchema, MemoryResultSchema } from "antgrid-memory";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
 import {
@@ -1831,6 +1832,10 @@ const SessionEntrySchema = z.object({
   // `default(false)` is the safe read of an older bridge's omission — a row
   // that never shows pending beats one stuck pending forever.
   deleting: z.boolean().default(false),
+  // Memory is decided at launch and a running process cannot gain it, so this
+  // marks a running session that was started while Memory was off. Runtime-only,
+  // like `deleting`: it never reaches sessions.json. Emitted only when true.
+  startedWithoutMemory: z.boolean().optional(),
   tool: z.string().optional(),
   command: z.string().optional(),
   // A current bridge derives this from the registry adapter. False by default
@@ -2006,6 +2011,14 @@ const SessionSetModeMessage = BaseMessage.extend({
   mode: z.enum(["terminal", "chat"]),
 });
 
+// Not CheckoutScoped, for the reason given on SessionSetupMessage below.
+const SessionRestartMessage = BaseMessage.extend({
+  type: z.literal("session:restart"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  reason: z.literal("memory"),
+});
+
 // Skip releases the queued start immediately and lets setup keep running;
 // cancel kills the run; rerun starts a fresh one from a terminal state.
 // Deliberately NOT in CHECKOUT_VARIABLE_MESSAGE_TYPES: every `session:*` verb
@@ -2035,6 +2048,8 @@ const SessionResultMessage = BaseMessage.extend({
   error: z.string().optional(),
   ...CheckoutScoped,
   errorCode: z.string().optional(),
+  // Set only on a session:restart reply with ok:true.
+  restarted: z.boolean().optional(),
   session: SessionEntrySchema.optional(),
 });
 
@@ -2697,7 +2712,23 @@ const NetwatchEventsMessage = BaseMessage.extend({
   sentAt: z.number().optional(),
 });
 
+export const MemoryRequestMessage = BaseMessage.extend({
+  type: z.literal("memory:request"),
+  requestId: z.string().min(1),
+  request: MemoryRequestRecordSchema,
+});
+
+const MemoryResultMessage = BaseMessage.extend({
+  type: z.literal("memory:result"),
+  requestId: z.string().min(1),
+  ok: z.boolean(),
+  result: z.record(z.string(), z.unknown()).refine((value) => MemoryResultSchema.safeParse(value).success, "Invalid memory result").optional(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
+  MemoryRequestMessage,
+  MemoryResultMessage,
   ...clipboardMessages,
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2795,6 +2826,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionUnarchiveMessage,
   SessionDeleteMessage,
   SessionSetModeMessage,
+  SessionRestartMessage,
   SessionSetupMessage,
   SessionFocusMessage,
   SessionResultMessage,
@@ -2976,6 +3008,7 @@ export type SessionArchive = z.infer<typeof SessionArchiveMessage>;
 export type SessionUnarchive = z.infer<typeof SessionUnarchiveMessage>;
 export type SessionDelete = z.infer<typeof SessionDeleteMessage>;
 export type SessionSetMode = z.infer<typeof SessionSetModeMessage>;
+export type SessionRestart = z.infer<typeof SessionRestartMessage>;
 export type SessionSetup = z.infer<typeof SessionSetupMessage>;
 export type SessionFocus = z.infer<typeof SessionFocusMessage>;
 export type SessionResult = z.infer<typeof SessionResultMessage>;
@@ -3007,6 +3040,8 @@ export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessag
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
 export type RpcRequest = z.infer<typeof RequestMessage>;
+export type MemoryRequest = z.infer<typeof MemoryRequestMessage>;
+export type MemoryResult = z.infer<typeof MemoryResultMessage>;
 export type RpcResponse = z.infer<typeof ResponseMessage>;
 export type AgentItem = z.infer<typeof AgentItemSchema>;
 export type AgentError = z.infer<typeof AgentErrorSchema>;
@@ -3069,6 +3104,7 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * Add a type here in the same commit that gives it a secret-bearing field.
  */
 export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "agent:question-resolve",
   "terminal:input",
@@ -3203,6 +3239,7 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:forget", "terminal:resize", "terminal:size", "agent:status",
@@ -3231,7 +3268,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:list", "session:list:result",
   "session:create", "session:fork", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
-  "session:delete", "session:set-mode", "session:setup", "session:focus",
+  "session:delete", "session:set-mode", "session:restart", "session:setup", "session:focus",
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",

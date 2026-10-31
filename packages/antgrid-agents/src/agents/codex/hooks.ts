@@ -1,5 +1,7 @@
 import { resolveHookCommand } from "../../host";
 import { z } from "zod";
+import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema } from "../../memory-guidance";
+import type { HookStdoutProfile } from "../hook-posts";
 import {
   computeCommandHookHash,
   hookStateKey,
@@ -131,8 +133,30 @@ export const turnBoundaryEvents = {
 // where SessionStart runs first.
 export const provisionalTurnStart = true;
 
-export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start"] as const;
+export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start", "/memory/bootstrap"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: true } as const;
+
+export const stdout: HookStdoutProfile = {
+  events: ["session-start"],
+  when: (env) => env.ANTGRID_MEMORY_MCP === "1",
+  request: ({ port, terminalId, runId }) => ({
+    port,
+    path: "/memory/bootstrap",
+    query: { terminalId },
+    body: { runId },
+  }),
+  formatResponse(response) {
+    const parsed = MemoryBootstrapSchema.safeParse(response);
+    if (!parsed.success || !parsed.data.enabled || parsed.data.paused || parsed.data.project_paused) return null;
+    return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: MEMORY_AGENT_GUIDANCE } };
+  },
+  outputSchema: z.strictObject({
+    hookSpecificOutput: z.strictObject({
+      hookEventName: z.literal("SessionStart"),
+      additionalContext: z.literal(MEMORY_AGENT_GUIDANCE),
+    }),
+  }),
+};
 
 export async function toPosts(
   invocation: HookInvocation,

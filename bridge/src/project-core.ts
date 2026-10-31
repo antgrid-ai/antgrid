@@ -448,6 +448,10 @@ export class ProjectCore {
     return this.core?.listSessions(includeArchived) ?? null;
   }
 
+  listStartedWithoutMemory(): SessionEntry[] {
+    return this.core?.listStartedWithoutMemory() ?? [];
+  }
+
   /** Host-level checkouts bypass the core's inbound bus handler. */
   async refreshGitState(): Promise<void> {
     await this.core?.refreshGitState();
@@ -527,6 +531,8 @@ export class ProjectCore {
       // answer every scheduler tool SCHEDULER_UNAVAILABLE on a real bridge while
       // a test that builds the core directly stays green.
       ...(this.deps.schedulerForAgent ? { schedulerForAgent: this.deps.schedulerForAgent } : {}),
+      ...(this.deps.memoryForAgent ? { memoryForAgent: this.deps.memoryForAgent } : {}),
+      ...(this.deps.memoryForApp ? { memoryForApp: this.deps.memoryForApp } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,

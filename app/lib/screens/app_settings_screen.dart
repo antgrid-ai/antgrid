@@ -16,6 +16,8 @@ import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
+import '../models/memory.dart';
+import '../utils/platform_utils.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
 import '../providers/auth.dart';
@@ -28,6 +30,7 @@ import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
+import 'memory_screen.dart';
 
 class _UiScaleStep {
   const _UiScaleStep(this.label, this.value);
@@ -149,8 +152,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           body:
               message ??
               'Your account still has team members. Remove them on the Team '
-              'page, or contact support to transfer ownership, before deleting '
-              'your account.',
+                  'page, or contact support to transfer ownership, before deleting '
+                  'your account.',
           confirmLabel: 'Manage team',
         );
         if (!mounted) return;
@@ -164,7 +167,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           body:
               message ??
               'Something on your account has to be resolved first. Your '
-              'account page says what it is.',
+                  'account page says what it is.',
           confirmLabel: 'Open account',
         );
         if (!mounted) return;
@@ -419,6 +422,23 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.privacy,
                     body: [
+                      if (!isMobilePlatform) ...[
+                        const SizedBox(height: AbTokens.space8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AbButton(
+                            label: 'Manage machine memory',
+                            onTap: () => detached(
+                              'Memory',
+                              'open failed',
+                              () => openMemoryScreen(
+                                context,
+                                const MemoryTarget.machine(),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: AbTokens.space8),
                       _ToggleRow(
                         title: 'Allow terminal programs to copy text',

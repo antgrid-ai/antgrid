@@ -21,6 +21,7 @@
         "@xterm/addon-unicode11": "0.9.0",
         "@xterm/headless": "^6.0.0",
         "antgrid-agents": "workspace:*",
+        "antgrid-memory": "workspace:*",
         "antgrid-wire": "workspace:*",
         "bun-pty": "^0.4.8",
         "chokidar": "^5.0.0",
@@ -61,6 +62,17 @@
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "0.3.201",
         "@opencode-ai/sdk": "1.15.10",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.2.4",
+        "typescript": "^5.7.3",
+      },
+    },
+    "packages/antgrid-memory": {
+      "name": "antgrid-memory",
+      "version": "0.1.0",
+      "dependencies": {
         "zod": "^4.3.6",
       },
       "devDependencies": {
@@ -626,6 +638,8 @@
     "antgrid-bridge": ["antgrid-bridge@workspace:bridge"],
 
     "antgrid-evals": ["antgrid-evals@workspace:evals"],
+
+    "antgrid-memory": ["antgrid-memory@workspace:packages/antgrid-memory"],
 
     "antgrid-relay": ["antgrid-relay@workspace:relay"],
 

@@ -22,6 +22,9 @@ import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
+import '../models/memory.dart';
+import 'memory/memory_project_button.dart';
+import '../providers/memory.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -199,11 +202,9 @@ class LocalMachineBand extends ConsumerWidget {
             // a desktop that opened a project earlier in the session that is a
             // live green dot pinned to a project it has nothing to do with. Every
             // other real-source surface in this drawer is gated the same way.
-            // The empty cell stays, so the demo band's title ellipsizes where
-            // the real one's does instead of running a cell further right.
-            trailing: AbRowTrailingCell(
-              child: ref.watch(demoModeProvider) ? null : const _LocalHostDot(),
-            ),
+            trailing: ref.watch(demoModeProvider)
+                ? const AbRowTrailingCell()
+                : const AbRowTrailingCell(child: _LocalHostDot()),
           ),
         ],
       ),
@@ -622,6 +623,20 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // so a session must name a project. The + lives on each advertised project
     // row instead (see `_AdvertisedProjectRow`).
     final offersNewSession = actions && entry.machineUuid == null;
+    // Read ahead of `actions` for the same subscription-lifetime reason as
+    // above. The sample project has no memory store behind it.
+    final demo = ref.watch(demoModeProvider);
+    final offersMemory = offersNewSession && !demo;
+    // Selected down to this row's count, and only for rows that can ever show
+    // one (stable per row, unlike [offersMemory], which follows hover): a
+    // summary reload must not rebuild every demo and remote row.
+    final memoryCount = !demo && entry.machineUuid == null && entry is! RemoteAgentEntry
+        ? ref.watch(
+            memoryDrawerSummaryProvider.select(
+              (s) => s.value == null ? null : (s.value![entry.id]?.memories ?? 0),
+            ),
+          )
+        : null;
 
     final cells = <Widget>[
       if (status.configError)
@@ -638,7 +653,11 @@ class _DrawerEntryTrailing extends ConsumerWidget {
       // user — that is a call to action, and the sessions that would carry it
       // are off screen. It does NOT say how many sessions it holds: a count is
       // a number to read rather than a state to notice, and the drawer is
-      // scanned.
+      // scanned. Memory is the one exception, and only on local rows: the local
+      // host answers without a socket or spawn
+      // ([memoryDrawerSummaryProvider] waits for the host to be up), the number
+      // is the item's size rather than an attention signal, and remote rows
+      // deliberately carry none.
       if (expanded == false &&
           DrawerProjectAggregateDot.needsUser(ref, entry.id))
         DrawerProjectAggregateDot(entryId: entry.id),
@@ -649,6 +668,9 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // Actions outermost, and whatever ends up last carries the cell: the rail
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
+      if (offersMemory) {
+        cells.add(_memoryButton(entry, memoryCount));
+      }
       if (offersNewSession) {
         final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
         cells.add(offersRemove ? plus : AbRowTrailingCell(child: plus));
@@ -669,6 +691,27 @@ class _DrawerEntryTrailing extends ConsumerWidget {
 
     return AbRowTrailingCell.kit(cells, ownsColumn: hostsActions) ??
         const SizedBox.shrink();
+  }
+
+  static Widget _memoryButton(DrawerEntry entry, int? count) {
+    // A legacy compound id is `<machineUuid>.<projectId>`; a leading dot has no
+    // machine part, so it is not one.
+    if (entry is RemoteAgentEntry && entry.id.indexOf('.') > 0) {
+      return MemoryProjectButton(
+        target: MemoryTarget.machine(
+          machineId: baseDeviceUuid(entry.id),
+          label: entry.subtitle,
+        ),
+        projectId: baseProjectId(entry.id),
+        projectName: entry.displayName,
+      );
+    }
+    return MemoryProjectButton(
+      target: const MemoryTarget.machine(),
+      projectId: entry.id,
+      projectName: entry.displayName,
+      count: count,
+    );
   }
 }
 

@@ -11,7 +11,6 @@ import { HostServer } from "./host-server";
 import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog, watchOwnerStdin } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
-import { runHookInvocation } from "./hook-runner";
 import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
 
 // Component-tagged child for this module's own lifecycle logs.
@@ -69,7 +68,8 @@ program
     // that is otherwise immediate. The field failure this would seem to catch
     // (a hook that never runs at all — see the MSIX `<Application>` note in
     // AGENTS.md) is a CreateProcess denial, which no in-process SDK can observe.
-    await runHookInvocation({ agent, event, payload });
+    const { runHookCli } = await import("./cli/hook");
+    await runHookCli(agent, event, payload);
     // Exit explicitly: hooks are advisory and must never linger. An agent that
     // holds this process's stdin open (copilot does) would otherwise keep the
     // event loop alive until its own hook timeout kills us. Matches the deleted
@@ -106,6 +106,14 @@ program
   .action(async () => {
     const { runMcpCli } = await import("./cli/mcp");
     await runMcpCli();
+  });
+
+program
+  .command("memory-mcp", { hidden: true })
+  .description("Run the Antgrid Memory MCP server over stdio")
+  .action(async () => {
+    const { runMemoryMcpCli } = await import("./cli/memory-mcp");
+    await runMemoryMcpCli();
   });
 
 // Single default action — reads bootstrap payload from stdin, branches on mode.

@@ -32,6 +32,7 @@ import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCap
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectAvailableTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./agent-runtime";
+import { setMemoryLaunchGate } from "./agent-host";
 import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
@@ -80,6 +81,8 @@ import { agentSpec, schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
 import { SchedulerInvalidCronError, nextOccurrences, resolveRunAt, schedulerErrorCode } from "./scheduler/cron";
+import { MemoryError } from "antgrid-memory";
+import { HostMemory, memoryFailure, type SessionWithoutMemory } from "./memory";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -681,11 +684,40 @@ export class HostServer {
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
+  private readonly memory = new HostMemory(
+    resolveAbDir,
+    () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: projectLabel(seen) })),
+    (projectId) => this.seenProjects.has(projectId),
+    () => this.sessionsWithoutMemory(),
+  );
+  private releaseMemoryGate: (() => void) | undefined;
+
+  private sessionsWithoutMemory(): SessionWithoutMemory[] {
+    const rows: SessionWithoutMemory[] = [];
+    // A cold project has no core, so nothing is running there and walking `cores` is complete.
+    for (const [projectId, entry] of this.cores) {
+      const seen = this.seenProjects.get(projectId);
+      // The remote RPC must not disclose a project outside the catalog.
+      if (!seen) continue;
+      for (const s of entry.core.listStartedWithoutMemory()) {
+        rows.push({
+          project_id: projectId,
+          project_label: projectLabel(seen),
+          session_id: s.id,
+          name: s.name,
+          ...(s.workStatus ? { work_status: s.workStatus } : {}),
+          agent_session_resumable: s.agentSessionResumable,
+        });
+      }
+    }
+    return rows;
+  }
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
 
   constructor(private readonly opts: HostServerOptions) {
+    this.releaseMemoryGate = setMemoryLaunchGate(() => this.memory.launchEnabled());
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
     // reloads the shared store before the callback runs — push targeting and
     // `phones:list` read the refreshed in-memory `phones` array live. On top of
@@ -822,6 +854,7 @@ export class HostServer {
       this.fatalRevokeArmed = true;
     }
     this.startScheduler();
+    this.memory.warm();
     return { port: listener.port, token };
   }
 
@@ -1084,7 +1117,7 @@ export class HostServer {
     for (const [projectId, seen] of this.seenProjects) {
       if (!isSafeProjectId(projectId) || !existsSync(seen.path)) continue;
       const resolved = await resolveProject(seen.path);
-      projects.push({ projectId, label: seen.label ?? basename(seen.path), isGitRepository: resolved.isGitRepository });
+      projects.push({ projectId, label: projectLabel(seen), isGitRepository: resolved.isGitRepository });
     }
     return projects;
   }
@@ -1389,6 +1422,24 @@ export class HostServer {
     }
   }
 
+  async handleMemoryRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
+    try {
+      const validate = () => {
+        if (!peerId || !this.controlPlaneRelay?.isPeerAuthorized?.(peerId) || !this.remoteAccessPolicy.isEnabled()) {
+          throw new MemoryError("FORBIDDEN", "An authorized native machine connection with remote access enabled is required.");
+        }
+      };
+      validate();
+      if (!await this.controlPlaneRelay!.authorizeDevice?.(baseSlotDeviceId(peerId!))) {
+        throw new MemoryError("FORBIDDEN", "Device account authorization is unavailable.");
+      }
+      const result = await this.memory.execute(() => { validate(); return { actor: "app" }; }, req.params);
+      return createMessage("response", { requestId: req.requestId, ok: true, result });
+    } catch (error) {
+      return createMessage("response", { requestId: req.requestId, ok: false, error: memoryFailure(error) });
+    }
+  }
+
   /** Answer one control-plane RPC to the app session that ASKED, rather than to
    *  every established session on this machine.
    *
@@ -1435,6 +1486,11 @@ export class HostServer {
     // tools/projects until an unrelated re-advertise. It exposes no authority
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
+      if (msg.method === "memory.request") {
+        void this.handleMemoryRpc(msg, peerId)
+          .then((res) => this.answerAsker(res, channel, bus, peerId));
+        return;
+      }
       if (msg.method.startsWith("scheduler.")) {
         void this.handleSchedulerRpc(msg, peerId)
           .then((res) => this.answerAsker(res, channel, bus, peerId));
@@ -2144,6 +2200,13 @@ export class HostServer {
 
   private async handleControl(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
+      case "memory:request": {
+        try {
+          return { id: req.id, ok: true, type: req.type, result: await this.memory.execute(() => ({ actor: "app" }), req.request) };
+        } catch (error) {
+          return { id: req.id, ok: false, error: memoryFailure(error) };
+        }
+      }
       case "scheduler:request": {
         try {
           return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
@@ -2667,6 +2730,10 @@ export class HostServer {
       // core would otherwise banner itself as having no relay coordinate.
       relayUrl = this.requireRemoteConfig().relayUrl;
     }
+    // Re-checked per request: the catalog entry can be dropped while the core lives.
+    const admitted = () => {
+      if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+    };
     const core = new ProjectCore({
       folder: projectPath,
       mode,
@@ -2701,6 +2768,16 @@ export class HostServer {
       startSession: (sessionId) => this.startLocalSession(sessionId),
       // Binds the catalog key rather than the core's computed id: schedules are stored under the key.
       schedulerForAgent: (identity, method, params) => this.schedulerRequestForAgent({ ...identity, projectId }, method, params),
+      memoryForAgent: (caller, request) => this.memory.execute(() => {
+        admitted();
+        return { ...caller(), actor: "agent", project_id: projectId };
+      }, request, 1),
+      memoryForApp: (request, validate, peerId) => this.memory.execute(() => {
+        validate();
+        if (peerId && !this.controlPlaneRelay?.isPeerAuthorized?.(peerId)) throw new MemoryError("FORBIDDEN", "Native memory authorization has expired.");
+        admitted();
+        return { actor: "app", project_id: projectId };
+      }, request),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
@@ -3035,6 +3112,8 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
+    this.releaseMemoryGate?.();
+    this.memory.close();
     // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.
     closeTerminalHistoryStore();
@@ -3302,6 +3381,8 @@ interface SeenProjectsFileShape {
   version: 1;
   projects: Record<string, SeenProject>;
 }
+
+function projectLabel(seen: SeenProject): string { return seen.label ?? basename(seen.path); }
 
 function seenProjectsPath(): string {
   return join(resolveAbDir(), "agents", "projects.json");

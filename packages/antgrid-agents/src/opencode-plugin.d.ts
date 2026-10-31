@@ -5,6 +5,10 @@
 declare module "@opencode-ai/plugin" {
   export type Plugin = (input?: unknown) => Promise<{
     event?: (input: { event: any }) => unknown | Promise<unknown>;
+    "experimental.chat.system.transform"?: (
+      input: { sessionID?: string; model: unknown },
+      output: { system: string[] },
+    ) => Promise<void>;
     dispose?: () => Promise<void>;
   }>;
 }

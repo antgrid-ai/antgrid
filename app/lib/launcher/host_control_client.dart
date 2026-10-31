@@ -645,6 +645,20 @@ class HostControlClient {
     return payload.cast<String, dynamic>();
   }
 
+  Future<Map<String, dynamic>> memoryRequest(
+    Map<String, dynamic> request,
+  ) async {
+    final response = await _post({
+      'type': 'memory:request',
+      'request': request,
+    }, timeout: const Duration(seconds: 15));
+    final result = response['result'];
+    if (result is! Map) {
+      throw HostControlException('BAD_RESPONSE', 'Malformed memory response');
+    }
+    return result.cast<String, dynamic>();
+  }
+
   /// Erase every machine-side trace of [projectId]. Called on project delete so
   /// reopening the same folder doesn't reload the old sessions — `sessions.json`
   /// on the bridge is authoritative; the app only caches it.

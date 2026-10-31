@@ -10,12 +10,31 @@ export type HookPath =
   | "/handler-event"
   | "/turn-start"
   | "/turn-activity"
-  | "/hook-alive";
+  | "/hook-alive"
+  | "/memory/bootstrap";
 
 export interface HookPost {
   port: number;
   path: HookPath;
+  query?: Record<string, string>;
   body: Record<string, unknown>;
+}
+
+export interface HookStdoutContext {
+  port: number;
+  terminalId: string;
+  runId: string;
+}
+
+export interface HookStdoutProfile {
+  events: readonly string[];
+  /** Skips the request entirely when false, so an agent launched without the
+   *  capability this output advertises is never asked about it. */
+  when?: (env: Readonly<Record<string, string | undefined>>) => boolean;
+  request: (ctx: HookStdoutContext) => HookPost;
+  /** The provider validates the reply and constructs its own fixed output. */
+  formatResponse: (response: unknown) => unknown | null;
+  outputSchema: z.ZodType;
 }
 
 export interface HookInvocation {

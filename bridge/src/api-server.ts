@@ -2,8 +2,10 @@ import { join } from "node:path";
 import { writeFileSync, unlinkSync, readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import { MemoryBootstrapSchema } from "antgrid-agents/memory-guidance";
 import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
+import { memoryFailure } from "./memory";
 const log = logger.child({ component: "api-server" });
 import { agentNotification, createMessage, type AbMessage } from "./protocol";
 import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
@@ -33,6 +35,14 @@ export interface SchedulerCall {
   method: SchedulerAgentMethod;
   params: Record<string, unknown>;
 }
+
+export interface MemoryCall {
+  terminalId?: string;
+  runId?: string;
+  request: unknown;
+}
+
+const MemoryBootstrapRequestSchema = z.strictObject({ runId: z.string().optional() });
 
 const SCHEDULER_ROUTES: Record<string, SchedulerAgentMethod> = {
   list: "list",
@@ -143,6 +153,7 @@ export interface AgentContext {
    *  (or a ZodError the route flattens). Absent means this core has no scheduler
    *  plumbing at all, and every route answers SCHEDULER_UNAVAILABLE. */
   scheduler?: (call: SchedulerCall) => Promise<Record<string, unknown>>;
+  memory?: (call: MemoryCall) => Promise<Record<string, unknown>>;
 }
 
 const VERSION = "0.1.0";
@@ -646,6 +657,43 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
+      }
+
+      if (path.startsWith("/memory/")) {
+        const op = path.slice("/memory/".length);
+        if (req.method !== "POST") return json({ error: { code: "INVALID_ARGUMENT", message: "Memory requires POST." } }, 405);
+        if (req.headers.get("host") !== `127.0.0.1:${server.port}`
+          || !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+          return json({ error: { code: "NOT_A_SESSION", message: "Memory requires a live Antgrid terminal session." } }, 403);
+        }
+        if (!ctx.memory) return json({ error: { code: "UNAVAILABLE", message: "Memory is unavailable in this process." } }, 503);
+        let raw: unknown;
+        try { raw = await req.json(); } catch { raw = undefined; }
+        const { runId, ...params } = (typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+        try {
+          if (op === "bootstrap") MemoryBootstrapRequestSchema.parse(raw);
+          const result = await ctx.memory({
+            terminalId: url.searchParams.get("terminalId") ?? undefined,
+            runId: typeof runId === "string" ? runId : undefined,
+            request: op === "bootstrap" ? { op: "status" } : { ...params, op },
+          });
+          if (op === "bootstrap") {
+            // Hook output may enter provider instructions. Only local settings,
+            // never stored content or service error details, cross this boundary.
+            const bootstrap = MemoryBootstrapSchema.safeParse({
+              available: result.available, enabled: result.enabled,
+              paused: result.paused, project_paused: result.project_paused,
+            });
+            if (!bootstrap.success) return json({ error: { code: "UNAVAILABLE", message: "Memory guidance is unavailable." } }, 503);
+            return json(bootstrap.data);
+          }
+          return json(result);
+        } catch (error) {
+          const failure = memoryFailure(error);
+          const status = failure.code === "BUSY" || failure.code === "UNAVAILABLE" ? 503
+            : failure.code === "NOT_A_SESSION" || failure.code === "FORBIDDEN" ? 403 : 400;
+          return json({ error: failure }, status);
+        }
       }
 
       // The scheduler tools. Every route is a POST with a JSON body, so a page in

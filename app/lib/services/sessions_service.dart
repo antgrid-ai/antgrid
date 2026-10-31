@@ -25,6 +25,11 @@ const _kPendingReplyTimeout = Duration(seconds: 15);
 /// a failure that did not happen.
 const _kModeReplyTimeout = Duration(seconds: 25);
 
+/// `session:restart` waits out the same teardown as set-mode and then the
+/// relaunch, so it must stay strictly above the bridge's `TEARDOWN_TIMEOUT_MS`
+/// (15s) with room for the start.
+const _kRestartReplyTimeout = Duration(seconds: 30);
+
 /// `session:fork` stages the source agent's transcript before it answers, and a
 /// long conversation makes that the slow part. Keep this strictly greater than
 /// the bridge's staging bound (`HANDOFF_STAGE_DEADLINE_MS`, 60s) plus worktree
@@ -52,6 +57,18 @@ enum SessionSetupAction {
 /// has to snap the toggle back and name the reason, so it carries the reply's
 /// `ok` and `error` through instead.
 typedef SessionModeResult = ({bool ok, String? error});
+
+/// Outcome of a `session:restart`. [restarted] separates "restarted" from the
+/// bridge's `ok` no-op (nothing needed restarting). [errorCode] is
+/// `MEMORY_OFF` or `SCHEDULED_RUN` for a refusal that changed nothing, and
+/// `TEARDOWN_TIMEOUT` or `RESTART_FAILED` for the two failures that leave the
+/// session stopped.
+typedef SessionRestartResult = ({
+  bool ok,
+  bool restarted,
+  String? error,
+  String? errorCode,
+});
 
 /// Typed bridge refusal. UI code can make a safe choice (for example, a dirty
 /// worktree confirmation) without parsing a translated/display error string.
@@ -137,6 +154,7 @@ class SessionsService {
   final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
   final Map<String, PendingReply<SessionDeleteAck>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
+  final Map<String, PendingReply<SessionRestartResult>> _pendingRestarts = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   Stream<SessionListing> get listings => _listingsController.stream;
@@ -273,6 +291,17 @@ class SessionsService {
       } else {
         deletePending.fail(SessionOperationException(errorCode, error));
       }
+      return;
+    }
+
+    final restartPending = _pendingRestarts.remove(requestId);
+    if (restartPending != null) {
+      restartPending.complete((
+        ok: ok,
+        restarted: j['restarted'] == true,
+        error: error,
+        errorCode: errorCode,
+      ));
       return;
     }
 
@@ -517,6 +546,29 @@ class SessionsService {
     return pending.future;
   }
 
+  /// Restarts [id] so its agent relaunches with Memory, resuming the same
+  /// conversation. The bridge re-checks that a restart is still needed and
+  /// answers `ok` with `restarted: false` when it is not, so a stale list never
+  /// interrupts an agent.
+  Future<SessionRestartResult> restartForMemory(String id) {
+    final requestId = _newRequestId();
+    final pending = _newPending<SessionRestartResult>(
+      () => _pendingRestarts.remove(requestId),
+      timeout: _kRestartReplyTimeout,
+    );
+    _pendingRestarts[requestId] = pending;
+    unawaited(
+      _send(
+        createAbMessage('session:restart', {
+          'requestId': requestId,
+          'sessionId': id,
+          'reason': 'memory',
+        }),
+      ),
+    );
+    return pending.future;
+  }
+
   /// Delete [id]. A bridge refusal raises [SessionOperationException]; no reply
   /// completes [SessionDeleteAck.outcomeUnknown]; silence cannot mean failure.
   Future<SessionDeleteAck> delete(
@@ -611,34 +663,19 @@ class SessionsService {
   // `onAbandon`, which is exactly this map's own removal callback — iterating
   // the live map while it fails would be a ConcurrentModificationError.
   void _failPending(Object error) {
-    final list = _pendingList.values.toList();
-    _pendingList.clear();
-    for (final p in list) {
-      p.fail(error);
-    }
-    final mutations = _pendingMutations.values.toList();
-    _pendingMutations.clear();
-    for (final p in mutations) {
-      p.fail(error);
-    }
-    final refusable = _pendingRefusableMutations.values.toList();
-    _pendingRefusableMutations.clear();
-    for (final p in refusable) {
-      p.fail(error);
-    }
-    final creates = _pendingCreates.values.toList();
-    _pendingCreates.clear();
-    for (final p in creates) {
-      p.fail(error);
-    }
-    final deletes = _pendingDeletes.values.toList();
-    _pendingDeletes.clear();
-    for (final p in deletes) {
-      p.fail(error);
-    }
-    final modeChanges = _pendingModeChanges.values.toList();
-    _pendingModeChanges.clear();
-    for (final p in modeChanges) {
+    _failAll(_pendingList, error);
+    _failAll(_pendingMutations, error);
+    _failAll(_pendingRefusableMutations, error);
+    _failAll(_pendingCreates, error);
+    _failAll(_pendingDeletes, error);
+    _failAll(_pendingModeChanges, error);
+    _failAll(_pendingRestarts, error);
+  }
+
+  static void _failAll<T>(Map<String, PendingReply<T>> pending, Object error) {
+    final replies = pending.values.toList();
+    pending.clear();
+    for (final p in replies) {
       p.fail(error);
     }
   }

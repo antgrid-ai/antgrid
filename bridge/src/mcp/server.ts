@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readApiPort, readRunId, readTerminalId } from "../session-env";
 
 // Stub: the interactive 'antgrid init' bootstrap lives in the CLI.
 // For the MCP antgrid_init action we emit a minimal starter config.
@@ -46,9 +47,8 @@ function generateDefaultConfig(_targetPath: string): string {
  * delivers that literal, which must read as "absent" rather than as a host.
  */
 export function getApiUrl(): string | null {
-  const port = process.env.ANTGRID_API_PORT?.trim();
-  if (!port || isNaN(Number(port))) return null;
-  return `http://127.0.0.1:${port}`;
+  const port = readApiPort();
+  return port === null ? null : `http://127.0.0.1:${port}`;
 }
 
 /**
@@ -62,9 +62,7 @@ export function getApiUrl(): string | null {
  * reference that arrived verbatim names no terminal.
  */
 export function getTerminalId(): string | undefined {
-  const id = process.env.ANTGRID_TERMINAL_ID?.trim();
-  if (!id || id.startsWith("${")) return undefined;
-  return id;
+  return readTerminalId();
 }
 
 /**
@@ -76,9 +74,7 @@ export function getTerminalId(): string | undefined {
  * expanded arrives verbatim and names no run.
  */
 export function getRunId(): string | undefined {
-  const id = process.env.ANTGRID_RUN_ID?.trim();
-  if (!id || id.startsWith("${")) return undefined;
-  return id;
+  return readRunId();
 }
 
 type ApiResult = { ok: boolean; status: number; data: any };

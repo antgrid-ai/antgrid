@@ -56,7 +56,7 @@ export const turnBoundaryEvents = {
 // Posted by assets/opencode/plugin.ts from inside opencode's own Bun
 // runtime, not by `toPosts` — which is why this list is not derivable from
 // `events`.
-export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event", "/memory/bootstrap"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // Unreachable while `events` is empty — hook-runner drops every invocation at

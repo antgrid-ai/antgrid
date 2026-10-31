@@ -491,6 +491,111 @@ void main() {
     await session.close();
   });
 
+  group('restartForMemory', () {
+    Future<(FakeAgentTransport, ProjectSession, SessionsService)> open() async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      return (t, session, SessionsService.fromSession(session, cache: cache));
+    }
+
+    Future<Map<String, dynamic>> sentFrame(FakeAgentTransport t) async {
+      await Future<void>.delayed(Duration.zero);
+      return t.sent.firstWhere((m) => m['type'] == 'session:restart');
+    }
+
+    Future<SessionRestartResult> roundTrip(
+      FakeAgentTransport t,
+      SessionsService svc,
+      Map<String, dynamic> reply,
+    ) async {
+      t.sent.clear();
+      final result = svc.restartForMemory('s');
+      final sent = await sentFrame(t);
+      t.emit('session:result', {'requestId': sent['requestId'], ...reply});
+      return result;
+    }
+
+    test('sends the memory-reason frame', () async {
+      final (t, session, svc) = await open();
+      final future = svc.restartForMemory('sess-1');
+      final sent = await sentFrame(t);
+      expect(sent['sessionId'], 'sess-1');
+      expect(sent['reason'], 'memory');
+      expect(sent['requestId'], isA<String>());
+      t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
+      await future;
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('decodes restarted and not-restarted successes', () async {
+      final (t, session, svc) = await open();
+      final r = await roundTrip(t, svc, {'ok': true, 'restarted': true});
+      expect((r.ok, r.restarted, r.error, r.errorCode), (
+        true,
+        true,
+        null,
+        null,
+      ));
+      final noop = await roundTrip(t, svc, {'ok': true, 'restarted': false});
+      expect((noop.ok, noop.restarted), (true, false));
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('decodes a coded failure and an uncoded one', () async {
+      final (t, session, svc) = await open();
+      final coded = await roundTrip(t, svc, {
+        'ok': false,
+        'errorCode': 'MEMORY_OFF',
+        'error': 'Memory is off',
+      });
+      expect((coded.ok, coded.restarted, coded.errorCode), (
+        false,
+        false,
+        'MEMORY_OFF',
+      ));
+      final uncoded = await roundTrip(t, svc, {
+        'ok': false,
+        'error': 'session not found: s',
+      });
+      expect(uncoded.ok, isFalse);
+      expect(uncoded.errorCode, isNull);
+      expect(uncoded.error, contains('session not found'));
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('fails the future when no reply arrives in 30 s', () async {
+      final (_, session, svc) = await open();
+      fakeAsync((async) {
+        Object? outcome;
+        svc.restartForMemory('a').then<void>((_) {}, onError: (Object e) {
+          outcome = e;
+        });
+        async.elapse(const Duration(seconds: 29));
+        async.flushMicrotasks();
+        expect(outcome, isNull, reason: 'still waiting at 29 s');
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+        expect(outcome, isA<TimeoutException>());
+      });
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('dispose fails a pending restart', () async {
+      final (t, session, svc) = await open();
+      final pending = svc.restartForMemory('a');
+      final expectation = expectLater(pending, throwsA(isA<StateError>()));
+      await sentFrame(t);
+      await svc.dispose();
+      await expectation;
+      await session.close();
+    });
+  });
+
   test('setMode completes ok on success', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

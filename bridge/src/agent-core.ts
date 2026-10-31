@@ -64,8 +64,11 @@ import { neutralizeFenced } from "./session-bus/delivery";
 import type { BusInjectOutcome, QueuedLine } from "./session-bus/delivery-queue";
 import { agentNotification, CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HANDLER_HISTORY_RECORDS, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerHistoryRequestWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
-import { resolveSchedulerCaller } from "./scheduler-caller";
+import { resolveSchedulerCaller, type SchedulerCallerDeps } from "./scheduler-caller";
 import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
+import { MemoryError } from "antgrid-memory";
+import { MemoryRequestMessage } from "./protocol";
+import { memoryFailure, resolveMemoryCaller, type MemoryForAgent, type MemoryForApp } from "./memory";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -74,7 +77,7 @@ import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } fr
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
+import { SessionManager, SessionVerbError, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -381,6 +384,8 @@ export interface AgentCore {
    *  session not-running. Returns null before sessions are initialized
    *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
   listSessions(includeArchived: boolean): SessionEntry[] | null;
+  /** The running sessions flagged `startedWithoutMemory`; empty before sessions are initialized. */
+  listStartedWithoutMemory(): SessionEntry[];
   /** True when the Handler is ARMED on [terminalId]. A blocking prompt on an
    *  armed slot is escalated unconditionally and that escalation is pushed, so
    *  the agent's own question notification would buzz the phone a second time
@@ -612,6 +617,8 @@ export interface BuildAgentCoreOptions {
    *  decides what that session may do. Absent means a bare core, and every
    *  scheduler route answers SCHEDULER_UNAVAILABLE. */
   schedulerForAgent?: SchedulerForAgent;
+  memoryForAgent?: MemoryForAgent;
+  memoryForApp?: MemoryForApp;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -1611,6 +1618,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     switch (msg.type) {
+      case "memory:request": {
+        const validate = () => {
+          if ((clientGenerations.get(client) ?? 0) !== clientGeneration
+            || (client !== "loopback" && (!remoteFrameAllowed("relay") || !peerId || !peerSessionProvider?.(peerId)))) {
+            throw new MemoryError("FORBIDDEN", "The authenticated project connection is no longer available.");
+          }
+        };
+        try { validate(); } catch { break; }
+        const request = MemoryRequestMessage.safeParse(msg);
+        if (!request.success) {
+          sendAbTo(createMessage("memory:result", { requestId: msg.requestId, ok: false, error: memoryFailure(request.error) }), client);
+          break;
+        }
+        const respond = (fields: { ok: boolean; result?: Record<string, unknown>; error?: { code: string; message: string } }) => {
+          try { validate(); } catch { return; }
+          sendAbTo(createMessage("memory:result", { requestId: request.data.requestId, ...fields }), client);
+        };
+        if (!opts.memoryForApp) {
+          respond({ ok: false, error: { code: "UNAVAILABLE", message: "Memory is unavailable in this process." } });
+          break;
+        }
+        void opts.memoryForApp(request.data.request, validate, peerId)
+          .then((result) => respond({ ok: true, result }))
+          .catch((error) => respond({ ok: false, error: memoryFailure(error) }));
+        break;
+      }
+      case "memory:result": break;
       // A remote bus frame is relayed by an app session between two bridges that
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
       // coordinator applies only frames addressed to a session it holds, and a
@@ -2621,6 +2655,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:unarchive":
       case "session:delete":
       case "session:set-mode":
+      case "session:restart":
       case "session:setup": {
         // Bound to consts so the switch's narrowing and the not-null check below
         // survive into the async closure.
@@ -2632,13 +2667,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
           break;
         }
-        // Only set-mode (it waits out the old runtime's teardown before
-        // restarting on the new one) and setup (a cancel waits out the setup
+        // Only set-mode and restart (they wait out the old runtime's teardown
+        // before relaunching) and setup (a cancel waits out the setup
         // process tree) await. Every other verb still runs straight through to
         // its reply without yielding, since an async body runs synchronously
         // until its first await.
         void (async () => {
           const checkoutId = s.get(verb.sessionId)?.checkoutId ?? "main";
+          let restarted: boolean | undefined;
           try {
             if (verb.type === "session:start") await s.start(verb.sessionId, verb.initialPrompt);
             else if (verb.type === "session:stop") s.stop(verb.sessionId);
@@ -2670,17 +2706,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               }
             }
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
+            else if (verb.type === "session:restart") restarted = await s.restartForMemory(verb.sessionId);
             else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
               requestId: verb.requestId, ok: true, session: entry, checkoutId,
+              ...(restarted !== undefined ? { restarted } : {}),
             }));
           } catch (err) {
             sendAb(createMessage("session:result", {
               requestId: verb.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Session operation failed.",
-              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              ...(err instanceof SessionVerbError || err instanceof WorktreeError ? { errorCode: err.code } : {}),
               checkoutId,
             }));
           }
@@ -4417,12 +4455,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         interruptConfirmer.cancel(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
-        // mode flip is exempt for the same reason the handler's arming is: the
+        // mode flip or restart is exempt for the same reason the handler's arming is: the
         // agent-native conversation carries over across the runtime swap, so
         // its name — and the precedence rank protecting it — must too.
         if (!sessions?.isFlipping(id)) { namer?.forget(id); forgetTitleAttempts(id); }
         // Reclaim the handler's per-terminal guard + pending state for the dead
-        // terminal. A mode flip keeps the arming: the session outlives the PTY.
+        // terminal. A mode flip or restart keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
       },
       // The owner row outlives the PTY and dies with the manager's own
@@ -4754,7 +4792,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
         // auto-disarm — a stopped driver can't be supervised. Same flip
-        // exemption: swapping runtimes is not the session ending.
+        // exemption: swapping runtimes (or restarting) is not the session ending.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
         // A chat slot has no PTY, so onTerminalExited never runs for it and
         // nothing else would ever release its buffered title — leaving the
@@ -5237,6 +5275,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  const sessionCallerDeps: Pick<SchedulerCallerDeps, "session" | "isLiveRun" | "runAgent"> = {
+    session: (id) => sessions?.get(id),
+    isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+    runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+  };
+
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
     acceptsHookRun: (terminalId, runId) => {
@@ -5263,15 +5307,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
+    memory: async ({ terminalId, runId, request }) => {
+      const caller = () => resolveMemoryCaller({
+        ...sessionCallerDeps,
+        checkoutExists: (id) => {
+          const runtime = checkoutRuntimes.runtime(id);
+          return runtime !== undefined && !runtime.disposed && sessions?.isCheckoutDeleting(id) !== true;
+        },
+      }, terminalId, runId);
+      caller();
+      if (!opts.memoryForAgent) throw new MemoryError("UNAVAILABLE", "Memory is unavailable in this process.");
+      return opts.memoryForAgent(caller, request);
+    },
     scheduler: async ({ terminalId, runId, method, params }) => {
       if (!opts.schedulerForAgent) {
         throw new SchedulerRefusal("SCHEDULER_UNAVAILABLE", "The scheduler is not available in this process.");
       }
       const caller = resolveSchedulerCaller({
-        session: (id) => sessions?.get(id),
-        isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+        ...sessionCallerDeps,
         launchedBySchedule: (id) => sessions?.launchedBySchedule(id) ?? false,
-        runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
         registryAgent: (name) => agentSpec(name),
       }, terminalId, runId);
       return opts.schedulerForAgent(caller, method, params);
@@ -5802,6 +5856,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
+    },
+    listStartedWithoutMemory(): SessionEntry[] {
+      return sessions?.listStartedWithoutMemory() ?? [];
     },
     isHandlerArmed(terminalId: string): boolean {
       return handlerArmedSlots.has(terminalId);

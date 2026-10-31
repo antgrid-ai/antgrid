@@ -588,6 +588,10 @@ export class NativePeerSessions extends PeerSessionOwner {
       return false;
     }
   }
+  isPeerAuthorized(peerId: string): boolean {
+    const peer = this.nativePeers.get(peerId);
+    return !!peer && this.sessions.has(peerId) && this.authorized(peerId, peer.endpointId);
+  }
   notePolicyGeneration(generation: string): void {
     this.lease.observePolicyGeneration(generation);
     void this.lease.refresh().catch(() => {});
@@ -795,6 +799,7 @@ export class NativeHostConnection implements RemoteHostConnection {
   noteResume(): Promise<boolean> { return this.peers.noteResume(); }
   recheckAuthorization(): void { this.peers.recheckAuthorization(); }
   authorizeDevice(deviceId: string): Promise<boolean> { return this.peers.authorizeDevice(deviceId); }
+  isPeerAuthorized(peerId: string): boolean { return this.peers.isPeerAuthorized(peerId); }
 }
 
 async function deadline<T>(operation: Promise<T>, cancel: () => void,

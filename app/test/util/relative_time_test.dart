@@ -76,6 +76,22 @@ void main() {
     );
   });
 
+  group('compactRelativeTime', () {
+    String c(Duration d) => compactRelativeTime(now.subtract(d), now: now);
+    test('buckets', () {
+      expect(c(const Duration(seconds: 59)), 'now');
+      expect(c(const Duration(minutes: 5)), '5m ago');
+      expect(c(const Duration(hours: 3)), '3h ago');
+      expect(c(const Duration(days: 6)), '6d ago');
+      expect(c(const Duration(days: 14)), '2w ago');
+      expect(c(const Duration(days: 60)), '2mo ago');
+      expect(c(const Duration(days: 800)), '2y ago');
+    });
+    test('future clamps to now', () {
+      expect(c(const Duration(minutes: -5)), 'now');
+    });
+  });
+
   group('absoluteTime', () {
     test('afternoon uses 12-hour PM', () {
       expect(

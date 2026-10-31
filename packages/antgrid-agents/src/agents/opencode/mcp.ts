@@ -1,5 +1,6 @@
 import { logger } from "../../host";
 import { NO_INJECTION } from "../launch-inject";
+import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx, McpProfile } from "../types";
 
 const log = logger.child({ component: "agent-launch" });
@@ -13,12 +14,12 @@ const log = logger.child({ component: "agent-launch" });
  * agent's environment, so no `environment` block is declared.
  *
  * A user who already sets the variable keeps every key of theirs; only
- * `mcp.antgrid` is added. A value that is not a JSON object cannot be merged
+ * the managed MCP entries are added. A value that is not a JSON object cannot be merged
  * into, and replacing it would discard what they wrote, so nothing is injected.
  */
 export function opencodeFamilyMcp(envVar: string): McpProfile {
   return {
-    inject({ mcpCommand }: McpInjectCtx): LaunchAugmentation {
+    inject(ctx: McpInjectCtx): LaunchAugmentation {
       const base = ownConfig(process.env[envVar]);
       if (!base) {
         log.warn("%s is set but is not a JSON object; not adding the antgrid MCP server", envVar);
@@ -26,7 +27,9 @@ export function opencodeFamilyMcp(envVar: string): McpProfile {
       }
       const mcp = {
         ...(isRecord(base.mcp) ? base.mcp : {}),
-        antgrid: { type: "local", command: [mcpCommand.binary, ...mcpCommand.preargs] },
+        ...Object.fromEntries(mcpCommands(ctx).map(([name, command]) => [name,
+          { type: "local", command: [command.binary, ...command.preargs] },
+        ])),
       };
       return { args: [], env: { [envVar]: JSON.stringify({ ...base, mcp }) } };
     },

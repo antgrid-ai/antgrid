@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { HookInvocation, HookPath, HookPost } from "antgrid-agents/hook-posts";
 import type { HookProfile } from "antgrid-agents/contracts";
+import { parsePort, readRunId, readTerminalId } from "./session-env";
 
 export type { HookInvocation, HookPath, HookPost };
 
@@ -17,18 +18,17 @@ const HOOK_STDIN_TIMEOUT_MS = 4500;
 // the single-threaded bridge was busy > 500ms (e.g. /session-title reading a
 // transcript). Loopback normally completes in milliseconds.
 const HOOK_POST_TIMEOUT_MS = 4000;
+const HOOK_OUTPUT_TIMEOUT_MS = 1500;
+const MAX_HOOK_REPLY_BYTES = 1024;
+const MAX_HOOK_OUTPUT_BYTES = 4096;
 
 export interface HookRunnerDeps {
   env: Record<string, string | undefined>;
   readStdin: () => Promise<string>;
   readFile: (path: string) => string;
   post: (post: HookPost) => Promise<void>;
-}
-
-function parsePort(raw: string | undefined): number | null {
-  if (!raw || !/^\d+$/.test(raw.trim())) return null;
-  const value = Number(raw.trim());
-  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null;
+  request?: (post: HookPost) => Promise<unknown>;
+  writeStdout?: (output: string) => void | Promise<void>;
 }
 
 function resolvePort(
@@ -46,20 +46,30 @@ function resolvePort(
   }
 }
 
+interface HookTarget {
+  hooks: HookProfile;
+  port: number;
+}
+
 /**
  * The hook dispatch boundary: hook name → registry key → the agent's own hook
- * profile. An unknown name, an agent with no hook profile, or an event outside
- * that profile's allowlist all drop the invocation before any payload is read.
+ * profile. An unknown name, an agent with no hook profile, an event outside
+ * that profile's allowlist, or no resolvable port all drop the invocation
+ * before any payload is read.
  */
+function resolveTarget(invocation: HookInvocation, deps: HookRunnerDeps): HookTarget | null {
+  const key = BY_HOOK_NAME[invocation.agent];
+  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
+  if (!hooks?.events.includes(invocation.event)) return null;
+  const port = resolvePort(hooks, deps);
+  return port === null ? null : { hooks, port };
+}
+
 async function buildPosts(
+  { hooks, port }: HookTarget,
   invocation: HookInvocation,
   deps: HookRunnerDeps,
 ): Promise<HookPost[]> {
-  const key = BY_HOOK_NAME[invocation.agent];
-  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
-  if (!hooks?.events.includes(invocation.event)) return [];
-  const port = resolvePort(hooks, deps);
-  if (port === null) return [];
   const posts = await hooks.toPosts(invocation, {
     port,
     terminalId: deps.env.ANTGRID_TERMINAL_ID,
@@ -70,12 +80,63 @@ async function buildPosts(
 }
 
 async function defaultPost(post: HookPost): Promise<void> {
-  await fetch(`http://127.0.0.1:${post.port}${post.path}`, {
+  await fetch(hookUrl(post), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(post.body),
     signal: AbortSignal.timeout(HOOK_POST_TIMEOUT_MS),
   });
+}
+
+function hookUrl(post: HookPost): string {
+  const url = new URL(post.path, `http://127.0.0.1:${post.port}`);
+  for (const [key, value] of Object.entries(post.query ?? {})) url.searchParams.set(key, value);
+  return url.href;
+}
+
+async function defaultRequest(post: HookPost): Promise<unknown> {
+  const response = await fetch(hookUrl(post), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(post.body),
+    redirect: "error",
+    signal: AbortSignal.timeout(HOOK_OUTPUT_TIMEOUT_MS),
+  });
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    return null;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > MAX_HOOK_REPLY_BYTES) return null;
+      chunks.push(part.value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } finally {
+    await reader.cancel();
+  }
+}
+
+async function writeHookOutput({ hooks, port }: HookTarget, invocation: HookInvocation, deps: HookRunnerDeps): Promise<void> {
+  const stdout = hooks.stdout;
+  if (!stdout?.events.includes(invocation.event)) return;
+  const terminalId = readTerminalId(deps.env);
+  const runId = readRunId(deps.env);
+  if (!terminalId || !runId || !deps.request || !deps.writeStdout) return;
+  if (stdout.when && !stdout.when(deps.env)) return;
+  const response = await deps.request(stdout.request({ port, terminalId, runId }));
+  const output = stdout.formatResponse(response);
+  if (output === null) return;
+  const parsed = stdout.outputSchema.safeParse(output);
+  if (!parsed.success) return;
+  const serialized = JSON.stringify(parsed.data);
+  if (Buffer.byteLength(serialized, "utf8") <= MAX_HOOK_OUTPUT_BYTES) await deps.writeStdout(`${serialized}\n`);
 }
 
 function defaultDeps(): HookRunnerDeps {
@@ -84,6 +145,10 @@ function defaultDeps(): HookRunnerDeps {
     readStdin: () => readHookStdin(process.stdin),
     readFile: (path) => readFileSync(path, "utf8"),
     post: defaultPost,
+    request: defaultRequest,
+    writeStdout: (output) => new Promise((resolve, reject) => {
+      process.stdout.write(output, (error) => error ? reject(error) : resolve());
+    }),
   };
 }
 
@@ -92,8 +157,12 @@ export async function runHookInvocation(
   deps: HookRunnerDeps = defaultDeps(),
 ): Promise<void> {
   try {
-    const posts = await buildPosts(invocation, deps);
-    await Promise.allSettled(posts.map((post) => deps.post(post)));
+    const target = resolveTarget(invocation, deps);
+    if (!target) return;
+    await Promise.allSettled([
+      buildPosts(target, invocation, deps).then((posts) => Promise.allSettled(posts.map((post) => deps.post(post)))),
+      writeHookOutput(target, invocation, deps),
+    ]);
   } catch {
     // Hooks are advisory; an integration failure must never block the agent.
   }

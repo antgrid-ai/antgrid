@@ -270,6 +270,16 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 ## Shared packages (`packages/`)
 
+- **`antgrid-memory`** — MPL-2.0 Bun workspace for local memory contracts,
+  SQLite/FTS5 storage, access policy, lifecycle, bounded retrieval, and export.
+  `bridge/src/memory.ts` supplies verified local-profile/session/checkout context;
+  the package never imports bridge. Its database lives under the local profile's
+  `memory/`, outside projects and disposable checkouts. The separate
+  `memory-mcp` entry point forwards tools to the host service; app inspection
+  uses the authenticated machine payload transport (native `memory.request` RPC
+  or the local control listener). See
+  [agent-memory-rfc.md](agent-memory-rfc.md) for the contract and release gates.
+
 - **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,
   shared chat runtime, and integration assets. Bridge consumes public exports;
   this package never imports bridge. Terminal preparation accepts conversation
