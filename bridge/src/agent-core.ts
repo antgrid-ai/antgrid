@@ -77,7 +77,7 @@ import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } fr
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
+import { SessionManager, SessionRestartRefusal, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -2653,6 +2653,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:unarchive":
       case "session:delete":
       case "session:set-mode":
+      case "session:restart":
       case "session:setup": {
         // Bound to consts so the switch's narrowing and the not-null check below
         // survive into the async closure.
@@ -2664,13 +2665,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
           break;
         }
-        // Only set-mode (it waits out the old runtime's teardown before
-        // restarting on the new one) and setup (a cancel waits out the setup
+        // Only set-mode and restart (they wait out the old runtime's teardown
+        // before relaunching) and setup (a cancel waits out the setup
         // process tree) await. Every other verb still runs straight through to
         // its reply without yielding, since an async body runs synchronously
         // until its first await.
         void (async () => {
           const checkoutId = s.get(verb.sessionId)?.checkoutId ?? "main";
+          let restarted: boolean | undefined;
           try {
             if (verb.type === "session:start") await s.start(verb.sessionId, verb.initialPrompt);
             else if (verb.type === "session:stop") s.stop(verb.sessionId);
@@ -2702,17 +2704,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               }
             }
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
+            else if (verb.type === "session:restart") restarted = await s.restartForMemory(verb.sessionId);
             else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
               requestId: verb.requestId, ok: true, session: entry, checkoutId,
+              ...(restarted !== undefined ? { restarted } : {}),
             }));
           } catch (err) {
             sendAb(createMessage("session:result", {
               requestId: verb.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Session operation failed.",
-              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              ...(err instanceof SessionRestartRefusal ? { errorCode: err.code }
+                : err instanceof WorktreeError ? { errorCode: err.code } : {}),
               checkoutId,
             }));
           }
@@ -4449,12 +4454,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         interruptConfirmer.cancel(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
-        // mode flip is exempt for the same reason the handler's arming is: the
+        // mode flip or restart is exempt for the same reason the handler's arming is: the
         // agent-native conversation carries over across the runtime swap, so
         // its name — and the precedence rank protecting it — must too.
         if (!sessions?.isFlipping(id)) { namer?.forget(id); forgetTitleAttempts(id); }
         // Reclaim the handler's per-terminal guard + pending state for the dead
-        // terminal. A mode flip keeps the arming: the session outlives the PTY.
+        // terminal. A mode flip or restart keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
       },
       // The owner row outlives the PTY and dies with the manager's own
@@ -4786,7 +4791,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
         // auto-disarm — a stopped driver can't be supervised. Same flip
-        // exemption: swapping runtimes is not the session ending.
+        // exemption: swapping runtimes (or restarting) is not the session ending.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
         // A chat slot has no PTY, so onTerminalExited never runs for it and
         // nothing else would ever release its buffered title — leaving the

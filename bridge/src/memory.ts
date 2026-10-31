@@ -6,10 +6,21 @@ import {
 } from "antgrid-memory";
 import type { SchedulerCallerDeps } from "./scheduler-caller";
 import { formatZodIssues } from "./config";
+import type { WorkStatus } from "./protocol";
 
 export type MemoryCaller = Pick<MemoryContext, "session_id" | "checkout_id" | "agent_id" | "run_id">;
 export type MemoryForAgent = (caller: () => MemoryCaller, request: unknown) => Promise<Record<string, unknown>>;
 export type MemoryForApp = (request: unknown, validate: () => void, peerId?: string) => Promise<Record<string, unknown>>;
+
+/** A running session launched without the Memory MCP server, as the app's status answer lists it. */
+export type SessionWithoutMemory = {
+  project_id: string;
+  project_label: string;
+  session_id: string;
+  name: string;
+  work_status?: WorkStatus;
+  agent_session_resumable: boolean;
+};
 
 export interface MemoryCallerDeps extends Pick<SchedulerCallerDeps, "session" | "isLiveRun" | "runAgent"> {
   checkoutExists(id: string): boolean;
@@ -60,6 +71,7 @@ export class HostMemory {
       for (const entry of this.catalog()) if (entry.project_id === projectId) return true;
       return false;
     },
+    private readonly sessionsWithoutMemory: () => SessionWithoutMemory[] = () => [],
   ) {}
 
   private directory(): string { return join(this.profileDirectory(), "memory"); }
@@ -169,6 +181,9 @@ export class HostMemory {
       return { ...context(), owner_id: service.ownerId };
     }, request, { maxAttempts });
     if ((op === "status" || op === "settings" || op === "repair" || op === "dismiss") && typeof result.enabled === "boolean") this.enabledCache = result.enabled;
+    if (caller.actor === "app" && !caller.project_id && op === "status" && result.enabled === true) {
+      return { ...result, sessions_without_memory: this.sessionsWithoutMemory() };
+    }
     return enrich ? this.enrichProjects(result, !!caller.project_id) : result;
   }
 

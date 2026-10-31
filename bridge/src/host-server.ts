@@ -82,7 +82,7 @@ import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
 import { SchedulerInvalidCronError, nextOccurrences, resolveRunAt, schedulerErrorCode } from "./scheduler/cron";
 import { MemoryError } from "antgrid-memory";
-import { HostMemory, memoryFailure } from "./memory";
+import { HostMemory, memoryFailure, type SessionWithoutMemory } from "./memory";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -688,6 +688,27 @@ export class HostServer {
     resolveAbDir,
     () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: projectLabel(seen) })),
     (projectId) => this.seenProjects.has(projectId),
+    () => {
+      const rows: SessionWithoutMemory[] = [];
+      // A cold project has no core, so nothing is running there and walking `cores` is complete.
+      for (const [projectId, entry] of this.cores) {
+        const seen = this.seenProjects.get(projectId);
+        // The remote RPC must not disclose a project outside the catalog.
+        if (!seen) continue;
+        for (const s of entry.core.listSessions(false) ?? []) {
+          if (!s.startedWithoutMemory) continue;
+          rows.push({
+            project_id: projectId,
+            project_label: projectLabel(seen),
+            session_id: s.id,
+            name: s.name,
+            ...(s.workStatus ? { work_status: s.workStatus } : {}),
+            agent_session_resumable: s.agentSessionResumable,
+          });
+        }
+      }
+      return rows;
+    },
   );
   private releaseMemoryGate: (() => void) | undefined;
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the

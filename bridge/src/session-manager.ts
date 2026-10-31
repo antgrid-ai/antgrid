@@ -1,4 +1,4 @@
-import "./agent-host";
+import { memoryLaunchEnabled } from "./agent-host";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -145,6 +145,8 @@ export interface DeleteSessionOptions {
 
 export interface SessionManagerOpts {
   agentRuntime?: AgentRuntime;
+  /** Test seam for the Memory launch gate; defaults to the one the launch reads. */
+  memoryLaunchEnabled?: () => boolean;
   onAgentEvent?: (sessionId: string, event: TerminalAgentEvent) => void;
   onScheduledObservation?: (observation: ScheduledSessionObservation) => void;
   projectId: string;
@@ -528,25 +530,32 @@ const FLUSH_DEBOUNCE_MS = 200;
  *  volumes. */
 const CLOSE_PLACEMENT_WAIT_MS = 3_000;
 const PLACEMENT_LAUNCH_CANCELLED = "The launch was cancelled while the handoff files were being placed.";
-// Upper bound on how long a mode flip waits for the OLD runtime to be really
+// Upper bound on how long a mode flip or restart waits for the OLD runtime to be really
 // gone. A wedged PTY or a driver whose dispose never settles must fail the flip
 // rather than hang it forever.
 const TEARDOWN_TIMEOUT_MS = 15_000;
 
-/** Leading text of `session:result.error` when a mode flip aborted because the
- *  old runtime never tore down. This is the ONLY setMode failure that leaves
- *  the session stopped, so the app branches its copy on it rather than telling
+/** Leading text of `session:result.error` when a mode flip or restart aborted
+ *  because the old runtime never tore down. This is the ONLY setMode failure
+ *  that leaves the session stopped, so the app branches its copy on it rather than telling
  *  every failure to go restart something — keep in lockstep with
  *  `kTeardownTimeoutError` in app/lib/widgets/session_mode_control.dart. */
 export const TEARDOWN_TIMEOUT_ERROR = "timed out tearing down session";
 
-/** Leading text of `session:result.error` when a mode flip tore the old runtime
- *  down but could not bring the new one up. Like {@link TEARDOWN_TIMEOUT_ERROR}
+/** Leading text of `session:result.error` when a mode flip or restart tore the
+ *  old runtime down but could not bring the new one up. Like {@link TEARDOWN_TIMEOUT_ERROR}
  *  it leaves the session STOPPED — the app must not tell the user it is
  *  untouched — but the shutdown itself worked, so it gets its own copy. Keep in
  *  lockstep with `kRestartFailedError` in
  *  app/lib/widgets/session_mode_control.dart. */
-export const RESTART_FAILED_ERROR = "failed to restart session after mode switch";
+export const RESTART_FAILED_ERROR = "failed to restart session";
+
+/** A restart refused before anything was stopped; `code` reaches the app as `session:result.errorCode`. */
+export class SessionRestartRefusal extends Error {
+  constructor(readonly code: "MEMORY_OFF" | "SCHEDULED_RUN", message: string) {
+    super(message);
+  }
+}
 // Live activity (keystrokes, notification bursts) fires many times a second;
 // coalesce the session:updated emit so the drawer re-sort doesn't thrash.
 const ACTIVITY_EMIT_DEBOUNCE_MS = 750;
@@ -623,6 +632,11 @@ export class SessionManager {
    *  its runtime without restarting anything), so the file as it reads now is
    *  not evidence of what is running. Set and cleared with `terminalRunIds`. */
   private terminalRunAgents = new Map<string, string>();
+  /** Whether each live run launched with the Memory MCP server. Set at spawn and
+   *  cleared with the run, never persisted. `true` launched with Memory,
+   *  `false` launched while the gate was off, unset is not eligible, unknown, or
+   *  a profile that failed soft (a restart cannot fix that one). */
+  private terminalRunMemory = new Map<string, boolean>();
   private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
   private readonly scheduleOwnedCheckouts = new Set<string>();
   private readonly setupSettlements = new Map<string, Promise<void>>();
@@ -664,6 +678,7 @@ export class SessionManager {
   private unbindRun(id: string): void {
     this.terminalRunIds.delete(id);
     this.terminalRunAgents.delete(id);
+    this.terminalRunMemory.delete(id);
   }
 
   acceptsHookRun(id: string, runId?: string): boolean {
@@ -753,7 +768,7 @@ export class SessionManager {
   // Callbacks waiting for a session's PTY to actually be gone, keyed by session
   // id and fired from noteExited(). See awaitTerminalExit().
   private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
-  /** Sessions mid-`setMode`, counted rather than flagged. The exit-driven
+  /** Sessions mid-`setMode` or `restartForMemory`, counted rather than flagged. The exit-driven
    *  teardown reads this to tell a runtime swap apart from a session that is
    *  actually going away, and nothing serializes the verb — two clients can have
    *  flips in flight on one session at once, so the first one to finish must not
@@ -2812,6 +2827,13 @@ export class SessionManager {
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
       const runtimeSpec = (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name);
+      // Mirrors prepareCliTerminalLaunch's augment branches: only a per-session tool, or a
+      // default spec with augmentsDefaultSpec, is offered MCP. A missing marker while the gate
+      // is on is a profile that failed soft — a restart cannot fix it, so it is never listed.
+      const offered = !entry.command && !!runtimeSpec?.mcp && (!!entry.tool || !!runtimeSpec.augmentsDefaultSpec);
+      if (offered && launch.env?.ANTGRID_MEMORY_MCP === "1") this.terminalRunMemory.set(id, true);
+      else if (offered && !(this.opts.memoryLaunchEnabled ?? memoryLaunchEnabled)()) this.terminalRunMemory.set(id, false);
+      else this.terminalRunMemory.delete(id);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2883,7 +2905,10 @@ export class SessionManager {
           await this.releaseTerminalPreparation(id);
           throw error;
         }).finally(() => {
-          if (this.terminalPreparing.get(id) === pending) this.terminalPreparing.delete(id);
+          if (this.terminalPreparing.get(id) !== pending) return;
+          this.terminalPreparing.delete(id);
+          // toWire withholds startedWithoutMemory until preparation settles.
+          this.changed();
         });
         this.terminalPreparing.set(id, pending);
         return pending;
@@ -3134,9 +3159,55 @@ export class SessionManager {
   }
 
   /** True while this session is swapping runtimes, i.e. the teardown now in
-   *  flight is a mode flip and not the session going away. */
+   *  flight is a mode flip or restart and not the session going away. */
   isFlipping(id: string): boolean {
     return this.flipping.has(id);
+  }
+
+  /**
+   * Restart a running terminal session so its agent is launched with the Memory
+   * server it was started without. Returns whether it restarted: a session that
+   * no longer needs it (stopped, preparing, already has Memory, not eligible) is
+   * a no-op rather than an interruption, since the caller's list can be stale.
+   * Resume is free through `launchResumeId`, which falls back to a fresh
+   * conversation when the transcript is gone.
+   */
+  async restartForMemory(id: string): Promise<boolean> {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`session not found: ${id}`);
+    if (entry.archived) throw new Error(`cannot restart archived session: ${id}`);
+    if (this.awaitingNativeForkIdentity(entry) || entry.forkNativeMigrationError) {
+      throw new Error("Complete or recover this native fork before restarting it.");
+    }
+    if (entry.mode !== "terminal" || !this.isRunning(entry) || this.terminalPreparing.has(id)
+      || this.terminalRunMemory.get(id) !== false) return false;
+    if (!(this.opts.memoryLaunchEnabled ?? memoryLaunchEnabled)()) {
+      throw new SessionRestartRefusal("MEMORY_OFF", "Memory is off, so restarting would not add it.");
+    }
+    // stop() would mark the schedule's run interrupted.
+    if (this.activeScheduledRun(id)) {
+      throw new SessionRestartRefusal("SCHEDULED_RUN", "A scheduled run is in progress on this session.");
+    }
+    // Held across the teardown for the same reason as in setMode.
+    this.flipping.set(id, (this.flipping.get(id) ?? 0) + 1);
+    try {
+      if (!(await this.stopAndAwait(id))) throw new Error(`${TEARDOWN_TIMEOUT_ERROR}: ${id}`);
+      try {
+        await this.start(id);
+      } catch (err) {
+        throw new Error(`${RESTART_FAILED_ERROR}: ${id}: ${err}`);
+      }
+    } finally {
+      const left = (this.flipping.get(id) ?? 1) - 1;
+      if (left > 0) this.flipping.set(id, left);
+      else this.flipping.delete(id);
+    }
+    return true;
+  }
+
+  private activeScheduledRun(id: string): boolean {
+    const scheduled = this.scheduledLaunches.get(id);
+    return !!scheduled && !scheduled.terminal;
   }
 
   private async setModeInner(
@@ -3340,6 +3411,11 @@ export class SessionManager {
       archived: e.archived,
       running: this.isRunning(e),
       deleting: this.deleting.has(e.id),
+      // Same "preparing" test as restartForMemory: a spawned run whose readiness is still
+      // pending would be flagged here and then refused as a no-op there.
+      ...(this.isRunning(e) && !this.terminalPreparing.has(e.id)
+        && this.terminalRunMemory.get(e.id) === false && !this.activeScheduledRun(e.id)
+        ? { startedWithoutMemory: true } : {}),
       tool: e.tool,
       command: e.command,
       forkSupported,

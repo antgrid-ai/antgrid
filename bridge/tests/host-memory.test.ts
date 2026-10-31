@@ -290,3 +290,69 @@ test("warm opens an existing store without a request and does nothing for an abs
     expect((warmed as unknown as { service?: unknown }).service).toBeDefined();
   } finally { warmed.close(); }
 });
+
+const unlaunched = [{
+  project_id: "p1", project_label: "One", session_id: "s1", name: "Session", agent_session_resumable: true,
+}];
+
+test("an unscoped app status lists sessions without Memory only while Memory is enabled", async () => {
+  const rows = () => unlaunched;
+  const absent = new HostMemory(profileDirectory, undefined, undefined, rows);
+  try {
+    expect(await absent.execute(app, { op: "status" })).not.toHaveProperty("sessions_without_memory");
+    await absent.execute(app, { op: "settings", enabled: true });
+    expect((await absent.execute(app, { op: "status" })).sessions_without_memory).toEqual(unlaunched);
+    await absent.execute(app, { op: "settings", enabled: false });
+    expect(await absent.execute(app, { op: "status" })).not.toHaveProperty("sessions_without_memory");
+  } finally { absent.close(); }
+});
+
+test("sessions without Memory are withheld from agents and project-scoped app calls", async () => {
+  const hostMemory = new HostMemory(profileDirectory, undefined, undefined, () => unlaunched);
+  try {
+    await hostMemory.execute(app, { op: "settings", enabled: true });
+    const agent = await hostMemory.execute(() => ({
+      actor: "agent", project_id: "p1", session_id: "s", checkout_id: "main", run_id: "r", agent_id: "codex",
+    }), { op: "status" });
+    expect(agent).not.toHaveProperty("sessions_without_memory");
+    const scoped = await hostMemory.execute(() => ({ actor: "app", project_id: "p1" }), { op: "status" });
+    expect(scoped).not.toHaveProperty("sessions_without_memory");
+  } finally { hostMemory.close(); }
+});
+
+test("sessions without Memory are never listed for an absent store", async () => {
+  const hostMemory = new HostMemory(profileDirectory, undefined, undefined, () => unlaunched);
+  try {
+    const answer = await hostMemory.execute(app, { op: "status" });
+    expect(answer.enabled).toBe(false);
+    expect(answer).not.toHaveProperty("sessions_without_memory");
+  } finally { hostMemory.close(); }
+});
+
+test("the host lists only flagged sessions of cataloged warm projects", async () => {
+  const flagged = await project("flagged-non-git");
+  const hidden = await project("hidden-non-git");
+  const idle = await project("idle-non-git");
+  const row = (id: string, extra: object = {}) => ({
+    id, name: `name-${id}`, agentSessionResumable: false, ...extra,
+  }) as never;
+  spyOn(flagged.core, "listSessions").mockReturnValue([
+    row("a", { startedWithoutMemory: true, workStatus: "working", agentSessionResumable: true }),
+    row("b"),
+    row("c", { startedWithoutMemory: true }),
+  ]);
+  spyOn(hidden.core, "listSessions").mockReturnValue([row("d", { startedWithoutMemory: true })]);
+  spyOn(idle.core, "listSessions").mockReturnValue([row("e")]);
+  (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(hidden.id);
+  await memory().execute(app, { op: "settings", enabled: true });
+
+  const listed = (await memory().execute(app, { op: "status" }) as any).sessions_without_memory;
+
+  expect(listed).toEqual([
+    {
+      project_id: flagged.id, project_label: "flagged-non-git", session_id: "a", name: "name-a",
+      work_status: "working", agent_session_resumable: true,
+    },
+    { project_id: flagged.id, project_label: "flagged-non-git", session_id: "c", name: "name-c", agent_session_resumable: false },
+  ]);
+});

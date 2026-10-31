@@ -12,6 +12,8 @@ export function setMemoryLaunchGate(gate: () => boolean): () => void {
   memoryLaunchGate = gate;
   return () => { if (memoryLaunchGate === gate) memoryLaunchGate = () => false; };
 }
+/** The same gate a launch reads, so a caller asking whether a restart would add Memory agrees with the launch that follows. */
+export const memoryLaunchEnabled = (): boolean => memoryLaunchGate();
 export const memoryMcpCommandForLaunch = (self?: ResolveBridgeCommandOptions) =>
   memoryLaunchGate() ? resolveMemoryMcpCommand(self) : undefined;
 
