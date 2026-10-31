@@ -8,7 +8,9 @@ import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
 import {
+  BUS_IDENTITY_RESET,
   checkCapAndUpsert,
+  isNewBusIdentity,
   isMobilePlatform,
   listActiveDevices,
   PlatformSchema,
@@ -177,6 +179,7 @@ export function deviceRoutes(deps: {
           publicKey: Buffer.from(body.ed25519Pub, "base64"),
           oauthClientId: oauth.clientId,
           revokedAt: null,
+          ...(isNewBusIdentity(existing, Buffer.from(body.ed25519Pub, "base64")) ? BUS_IDENTITY_RESET : {}),
         },
       });
     } catch (err) {

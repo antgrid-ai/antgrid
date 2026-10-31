@@ -5,6 +5,7 @@ export * from "./relay-slot";
 export * from "./push-protocol";
 export * from "./peer-authorization";
 export * from "./peer-protocol";
+export * from "./machine-directory";
 
 export {
   SessionStreamOpen,

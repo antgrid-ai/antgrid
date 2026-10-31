@@ -6,11 +6,11 @@ import { PeerAuthorizationFixture } from "./peer-authorization-fixture";
 test("eval authority binds enrollment to a device credential and denies revoked snapshots", async () => {
   const ed = generateKeyPairSync("ed25519");
   const raw = (key: typeof ed.publicKey, type: "spki" | "pkcs8") => key.export({ format: "der", type }).subarray(-32).toString("base64");
-  const auth = { clientId: "fixture-client", clientSecret: "secret", deviceUuid: randomUUID(), userId: "fixture-account", ed25519Pub: raw(ed.publicKey, "spki") };
+  const auth = { clientId: "fixture-client", clientSecret: "secret", deviceUuid: randomUUID(), userId: "fixture-account", ed25519Pub: raw(ed.publicKey, "spki"), kind: "agent" as const };
   const peerEd = generateKeyPairSync("ed25519");
   const peer = { deviceId: randomUUID(), ed25519Pub: raw(peerEd.publicKey, "spki") };
   const peerAuth = { clientId: "fixture-peer", clientSecret: "peer-secret", deviceUuid: peer.deviceId,
-    userId: auth.userId, ed25519Pub: peer.ed25519Pub };
+    userId: auth.userId, ed25519Pub: peer.ed25519Pub, kind: "app" as const };
   const authority = new PeerAuthorizationFixture(() => [peer]);
   authority.provision(auth);
   authority.provision(peerAuth);
@@ -51,4 +51,37 @@ test("eval authority binds enrollment to a device credential and denies revoked 
     expect(denied.endpoint).toBeNull();
     expect(denied.leaseMs).toBe(0);
   } finally { enrollment.close(); }
+});
+
+test("eval authority serves the machine directory and captures bus keys, agents only", async () => {
+  const pub = () => randomBytes(32).toString("base64");
+  const mk = (id: string, kind: "agent" | "app" = "agent") => ({ clientId: `c-${id}`, clientSecret: "s", deviceUuid: randomUUID(),
+    userId: "acct", ed25519Pub: pub(), kind });
+  const self = mk("self"), other = mk("other"), gone = mk("gone"), app = mk("app", "app");
+  const authority = new PeerAuthorizationFixture(() => []);
+  for (const c of [self, other, gone, app]) authority.provision(c);
+  const tokens = new Map<string, string>();
+  const bearer = (c: typeof self) => {
+    if (!tokens.has(c.clientId)) tokens.set(c.clientId, authority.token(`Basic ${Buffer.from(`${c.clientId}:s`).toString("base64")}`)!);
+    return { authorization: `Bearer ${tokens.get(c.clientId)}` };
+  };
+  // Tokens are minted before the revoke: a revoked credential cannot mint one.
+  for (const c of [self, other, gone, app]) bearer(c);
+  const get = async (c: typeof self) => (await authority.handle(new Request("https://f.invalid/account/devices/me/machines", { headers: bearer(c) })))!;
+  const key = pub();
+  const post = async (c: typeof self, body: unknown) => (await authority.handle(new Request("https://f.invalid/account/devices/me/bus-key",
+    { method: "POST", headers: bearer(c), body: JSON.stringify(body) })))!;
+  expect((await post(other, { busPublicKey: key })).status).toBe(200);
+  expect((await post(other, { busPublicKey: "short" })).status).toBe(400);
+  expect(authority.busKeyOf(other.deviceUuid)).toBe(key);
+  authority.setOrchestrator(self.deviceUuid, true);
+  authority.setBusControl(other.deviceUuid, true);
+  authority.revoke(gone.deviceUuid);
+  const dir = await (await get(self)).json() as any;
+  expect(dir.self).toEqual({ busPublicKey: null, orchestrator: true, busControl: false });
+  expect(dir.machines).toHaveLength(1);
+  expect(dir.machines[0]).toMatchObject({ deviceId: other.deviceUuid, busPublicKey: key, orchestrator: false, busControl: true, machineName: null });
+  expect((await get(app)).status).toBe(403);
+  expect((await post(app, { busPublicKey: key })).status).toBe(403);
+  expect((await get(gone)).status).toBe(401);
 });

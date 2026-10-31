@@ -1,4 +1,4 @@
-import { generateKeyPairSync, diffieHellman, createPublicKey, createPrivateKey } from "node:crypto";
+import { generateKeyPairSync, diffieHellman, createPublicKey, createPrivateKey, type KeyObject } from "node:crypto";
 
 // DER prefix for X25519 SPKI public key (12 bytes before the 32-byte raw key)
 const SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
@@ -36,4 +36,13 @@ export function deriveSharedSecret(myPrivateKey: Buffer, theirPublicKey: Buffer)
   });
 
   return Buffer.from(diffieHellman({ privateKey: privKeyObj, publicKey: pubKeyObj }));
+}
+
+export function x25519PrivateKeyFromRaw(raw: Buffer): KeyObject {
+  return createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, raw]), format: "der", type: "pkcs8" });
+}
+
+export function x25519RawPublicKey(key: KeyObject): Buffer {
+  const der = key.export({ type: "spki", format: "der" });
+  return Buffer.from(der.subarray(SPKI_PREFIX.length));
 }

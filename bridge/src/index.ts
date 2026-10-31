@@ -158,6 +158,8 @@ program
                 createdAt: new Date().toISOString(),
                 ed25519PublicKey: payload.machine.auth.ed25519Pub,
                 ed25519PrivateKey: payload.machine.auth.ed25519Priv,
+                busX25519PublicKey: payload.machine.auth.x25519Pub,
+                busX25519PrivateKey: payload.machine.auth.x25519Priv,
               },
               auth: {
                 clientId: payload.machine.auth.clientId,

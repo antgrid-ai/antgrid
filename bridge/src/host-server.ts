@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node
 import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
-import { sendHeartbeat } from "./heartbeat";
+import { sendHeartbeat, registerBusKey } from "./heartbeat";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
@@ -42,6 +42,8 @@ import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
 import { RemoteDirectoryCache } from "./session-bus/remote-directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
+import { loadBusKey, type BusKeyPair } from "./session-bus/bus-key";
+import { MachineDirectory } from "./session-bus/machine-directory";
 import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
 import {
   MAX_BUS_ROUTES,
@@ -222,6 +224,7 @@ export interface OpenResult {
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
+const BUS_KEY_REGISTER_MIN_MS = 60_000;
 
 /**
  * Ceiling on a capture window armed over this plane.
@@ -729,6 +732,13 @@ export class HostServer {
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  // Null when the keychain pair is missing or inconsistent; the machine then
+  // never registers a bus key and no peer can seal to it.
+  private busKey: BusKeyPair | null = null;
+  private machineDirectory: MachineDirectory | null = null;
+  private stopBusKeyWatch: (() => void) | null = null;
+  private lastBusKeyRegisterAt = Number.NEGATIVE_INFINITY;
+  private busKeyRegistering = false;
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
@@ -976,6 +986,21 @@ export class HostServer {
     this.controlPlaneBus = bus;
     client.connect();
     log.info("host: native remote connection opened (device=%s)", client.deviceId);
+
+    if (!this.machineDirectory) {
+      this.busKey = loadBusKey(identity.busX25519PublicKey, identity.busX25519PrivateKey);
+      if (!this.busKey) {
+        log.warn("no usable bus key; this machine cannot receive cross-machine bus messages");
+      }
+      const directory = new MachineDirectory({
+        licenseApiUrl: r.licenseApiUrl,
+        getToken: getLicenseToken,
+        selfDeviceId: r.auth.deviceUuid,
+      });
+      this.machineDirectory = directory;
+      this.stopBusKeyWatch = directory.onChange(() => this.registerBusKeyIfStale());
+      directory.start();
+    }
 
     // pushHeartbeat() was previously event-triggered only (onAuthenticated +
     // mobile-access mutations), so a long-lived, stably-connected bridge never
@@ -2881,6 +2906,7 @@ export class HostServer {
     const r = this.remoteConfig();
     if (!r || !this.remoteRuntime) return;
     const rt = this.remoteRuntime;
+    this.registerBusKeyIfStale();
     void sendHeartbeat({
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
@@ -2891,6 +2917,40 @@ export class HostServer {
     }).then((ok) => {
       if (!ok) log.warn("heartbeat POST failed (non-2xx or network error)", { deviceUuid: r.auth.deviceUuid });
     });
+  }
+
+  /** Publishes the bus key when the directory's view of this machine lacks it
+   *  or holds another. Throttled because a rejected registration would
+   *  otherwise repeat on every directory refresh and heartbeat. */
+  private registerBusKeyIfStale(): void {
+    const r = this.remoteConfig();
+    const directory = this.machineDirectory;
+    const key = this.busKey;
+    if (!r || !this.remoteRuntime || !directory || !key) return;
+    if (directory.current()?.self.busPublicKey === key.publicKey) return;
+    if (this.busKeyRegistering) return;
+    const now = Date.now();
+    if (now - this.lastBusKeyRegisterAt < BUS_KEY_REGISTER_MIN_MS) return;
+    this.lastBusKeyRegisterAt = now;
+    this.busKeyRegistering = true;
+    const rt = this.remoteRuntime;
+    void registerBusKey({
+      licenseApiUrl: r.licenseApiUrl,
+      getToken: rt.maint.getToken,
+      busPublicKey: key.publicKey,
+    })
+      .then((ok) => {
+        if (ok) directory.kick();
+        else log.warn("bus key registration failed", { deviceUuid: r.auth.deviceUuid });
+      })
+      .finally(() => {
+        this.busKeyRegistering = false;
+      });
+  }
+
+  /** Test seam: the machine directory client, null until the control plane starts. */
+  get busMachineDirectory(): MachineDirectory | null {
+    return this.machineDirectory;
   }
 
   get(projectId: string): OpenResult | null {
@@ -3063,6 +3123,10 @@ export class HostServer {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    this.stopBusKeyWatch?.();
+    this.stopBusKeyWatch = null;
+    this.machineDirectory?.stop();
+    this.machineDirectory = null;
     await this.controlPlaneRelay?.close();
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;

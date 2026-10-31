@@ -4,7 +4,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { verifyAsync } from "@noble/ed25519";
 import {
-  ENDPOINT_CHALLENGE_MS, PEER_LEASE_MS, endpointChallengeBytes,
+  ENDPOINT_CHALLENGE_MS, MAX_ACCOUNT_MACHINES, MachineDirectorySchema, PEER_LEASE_MS, endpointChallengeBytes,
   peerAuthorizationSnapshotSchema, type EndpointChallenge,
 } from "antgrid-wire";
 import type { DB, Tx } from "../db/index.js";
@@ -15,7 +15,7 @@ import { parseDeviceOAuthMetadata } from "./device-oauth.js";
 
 type Identity = NonNullable<AuthVars["deviceAuthorization"]> & { userId: string };
 export class PeerAuthorizationError extends Error {
-  constructor(readonly code: "UNAUTHENTICATED" | "STALE_GENERATION" | "INVALID_CHALLENGE" | "INVALID_SIGNATURE" | "ENDPOINT_REUSED" | "NOT_ENTITLED") {
+  constructor(readonly code: "UNAUTHENTICATED" | "STALE_GENERATION" | "INVALID_CHALLENGE" | "INVALID_SIGNATURE" | "ENDPOINT_REUSED" | "NOT_ENTITLED" | "NOT_AGENT") {
     super(code);
   }
 }
@@ -134,6 +134,22 @@ export async function peerAuthorizationSnapshot(db: DB, identity: Identity, rela
   return serializable(db, (tx) => authorizationSnapshot(tx, identity, relayUrls, options));
 }
 
+type DeviceRow = Awaited<ReturnType<Tx["device"]["findMany"]>>[number];
+
+/** Devices whose OAuth credential is live and binds this row's user, device UUID and key. */
+async function credentialBoundDevices(tx: Tx, devices: DeviceRow[]): Promise<DeviceRow[]> {
+  const credentials = await tx.oauthClient.findMany({ where: {
+    clientId: { in: devices.flatMap((peer) => peer.oauthClientId ? [peer.oauthClientId] : []) },
+  } });
+  return devices.filter((peer) => {
+    const credential = credentials.find((item) => item.clientId === peer.oauthClientId);
+    const metadata = parseDeviceOAuthMetadata(credential?.metadata);
+    return credential && !credential.disabled && credential.grantTypes.includes("client_credentials") &&
+      metadata.success && metadata.data.userId === peer.userId && metadata.data.deviceUuid === peer.deviceId &&
+      metadata.data.ed25519Pub === Buffer.from(peer.publicKey).toString("base64");
+  });
+}
+
 async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: string[],
   options: RelayOptions) {
     const device = await currentIdentity(tx, identity);
@@ -155,16 +171,7 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
       kind: device.kind === "agent" ? "app" : "agent",
       ...(device.kind === "app" ? { mobileAccessEnabled: true } : {}),
     }, take: 1025, orderBy: { id: "asc" } }) : [];
-    const credentials = await tx.oauthClient.findMany({ where: {
-      clientId: { in: devices.flatMap((peer) => peer.oauthClientId ? [peer.oauthClientId] : []) },
-    } });
-    const peers = devices.filter((peer) => {
-      const credential = credentials.find((item) => item.clientId === peer.oauthClientId);
-      const metadata = parseDeviceOAuthMetadata(credential?.metadata);
-      return credential && !credential.disabled && credential.grantTypes.includes("client_credentials") &&
-        metadata.success && metadata.data.userId === peer.userId && metadata.data.deviceUuid === peer.deviceId &&
-        metadata.data.ed25519Pub === Buffer.from(peer.publicKey).toString("base64");
-    }).map((peer) => ({ deviceId: peer.deviceId, ed25519Pub: Buffer.from(peer.publicKey).toString("base64"),
+    const peers = (await credentialBoundDevices(tx, devices)).map((peer) => ({ deviceId: peer.deviceId, ed25519Pub: Buffer.from(peer.publicKey).toString("base64"),
       endpoint: endpoints.get(peer.oauthClientId!) ?? null }));
     // Subscription expiry can precede the normal authorization lease boundary.
     const deadlines = sub ? [sub.cancelledAt, sub.trialEndsAt, sub.currentPeriodEnd]
@@ -174,6 +181,55 @@ async function authorizationSnapshot(tx: Tx, identity: Identity, relayUrls: stri
       registrationGeneration: (await generation(tx, identity.enrollmentId)).toString(),
       allowed, leaseMs: allowed ? Math.max(0, Math.min(PEER_LEASE_MS, ...deadlines)) : 0,
       endpoint: endpoints.get(identity.enrollmentId) ?? null, peers, relayUrls: allowed ? relayUrls : [] });
+}
+
+async function accountAllowed(tx: Tx, userId: string): Promise<boolean> {
+  const sub = await activeSubscriptionForUser(tx, userId);
+  const billingId = await resolveBillingAccountId(tx, userId);
+  const billing = billingId ? await tx.productAccount.findUnique({ where: { id: billingId } }) : null;
+  return sub !== null && billing !== null && billing.deletedAt === null;
+}
+
+/**
+ * The account's other agent machines with their bus keys, for an agent caller.
+ * Device-bound like the lease, but a sibling route: the snapshot is strictly
+ * parsed by shipped clients and cannot grow a field.
+ */
+export async function machineDirectory(db: DB, identity: Identity) {
+  return serializable(db, async (tx) => {
+    const device = await currentIdentity(tx, identity);
+    if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
+    const allowed = await accountAllowed(tx, identity.userId);
+    const rows = allowed ? await credentialBoundDevices(tx, await tx.device.findMany({ where: {
+      userId: identity.userId, revokedAt: null, kind: "agent", id: { not: device.id },
+    }, take: MAX_ACCOUNT_MACHINES + 1, orderBy: { id: "asc" } })) : [];
+    if (rows.length > MAX_ACCOUNT_MACHINES) {
+      console.warn(`[machine-directory] truncated to ${MAX_ACCOUNT_MACHINES} machines`);
+    }
+    const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+    return MachineDirectorySchema.parse({
+      accountId: identity.userId, deviceId: identity.deviceId, allowed,
+      self: { busPublicKey: device.busPublicKey ? b64(device.busPublicKey) : null,
+        orchestrator: device.orchestrator, busControl: device.busControl },
+      machines: rows.slice(0, MAX_ACCOUNT_MACHINES).map((peer) => ({
+        deviceId: peer.deviceId, displayName: peer.displayName, machineName: peer.machineName || null,
+        ed25519Pub: b64(peer.publicKey), busPublicKey: peer.busPublicKey ? b64(peer.busPublicKey) : null,
+        orchestrator: peer.orchestrator, busControl: peer.busControl })),
+    });
+  });
+}
+
+/**
+ * Stores the caller's own bus key; bound to the token's device row, never a body-supplied id.
+ * The identity re-check shares the write's transaction so a token minted before a
+ * re-provision cannot land the old machine's key on the new identity's row.
+ */
+export async function registerBusKey(db: DB, identity: Identity, busPublicKey: string): Promise<void> {
+  await serializable(db, async (tx) => {
+    const device = await currentIdentity(tx, identity);
+    if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
+    await tx.device.update({ where: { id: device.id }, data: { busPublicKey: Buffer.from(busPublicKey, "base64") } });
+  });
 }
 
 /**

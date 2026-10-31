@@ -1,7 +1,7 @@
 import { createHmac, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
 import {
   EndpointChallengeRequestSchema, EndpointRegistrationRequestSchema,
-  PeerAuthorizationSnapshotSchema, endpointChallengeBytes,
+  PeerAuthorizationSnapshotSchema, BusKeyRegistrationSchema, MachineDirectorySchema, endpointChallengeBytes,
   type EndpointChallenge,
 } from "antgrid-wire";
 
@@ -11,6 +11,8 @@ export interface FixtureCredential {
   deviceUuid: string;
   ed25519Pub: string;
   userId: string;
+  /** Required so a phone can never silently surface as an agent machine in the directory. */
+  kind: "agent" | "app";
 }
 
 /** In-memory authorization authority for transport evaluations, not a JWT/backend qualification. */
@@ -23,11 +25,21 @@ export class PeerAuthorizationFixture {
   private challenges = new Map<string, { value: EndpointChallenge; expires: number }>();
   private revoked = new Set<string>();
   private generation = 0n;
+  private busKeys = new Map<string, string>();
+  private orchestrators = new Set<string>();
+  private busControls = new Set<string>();
 
   constructor(private peers: () => Array<{ deviceId: string; ed25519Pub: string }>) {}
 
   provision(auth: FixtureCredential): void { this.credentials.set(auth.clientId, auth); }
   revoke(deviceId: string): void { this.revoked.add(deviceId); this.generation++; }
+  busKeyOf(deviceUuid: string): string | null { return this.busKeys.get(deviceUuid) ?? null; }
+  setOrchestrator(deviceUuid: string, on: boolean): void {
+    if (on) this.orchestrators.add(deviceUuid); else this.orchestrators.delete(deviceUuid);
+  }
+  setBusControl(deviceUuid: string, on: boolean): void {
+    if (on) this.busControls.add(deviceUuid); else this.busControls.delete(deviceUuid);
+  }
 
   token(authorization: string | null): string | null {
     if (!authorization?.startsWith("Basic ")) return null;
@@ -47,14 +59,39 @@ export class PeerAuthorizationFixture {
     return token;
   }
 
+  private async handleBus(route: "machines" | "bus-key", req: Request, auth: FixtureCredential, allowed: boolean): Promise<Response> {
+    if (!allowed) return Response.json({ error: "UNAUTHENTICATED" }, { status: 401 });
+    if (auth.kind !== "agent") return Response.json({ error: "NOT_AGENT" }, { status: 403 });
+    if (route === "machines") {
+      if (req.method !== "GET") return new Response(null, { status: 405 });
+      return Response.json(MachineDirectorySchema.parse({
+        accountId: auth.userId, deviceId: auth.deviceUuid, allowed,
+        self: { busPublicKey: this.busKeys.get(auth.deviceUuid) ?? null,
+          orchestrator: this.orchestrators.has(auth.deviceUuid), busControl: this.busControls.has(auth.deviceUuid) },
+        machines: [...this.credentials.values()]
+          .filter((c) => c.userId === auth.userId && c.kind === "agent"
+            && c.deviceUuid !== auth.deviceUuid && !this.revoked.has(c.deviceUuid))
+          .map((c) => ({ deviceId: c.deviceUuid, displayName: c.deviceUuid, machineName: null,
+            ed25519Pub: c.ed25519Pub, busPublicKey: this.busKeys.get(c.deviceUuid) ?? null,
+            orchestrator: this.orchestrators.has(c.deviceUuid), busControl: this.busControls.has(c.deviceUuid) })),
+      }), { headers: { "cache-control": "no-store" } });
+    }
+    if (req.method !== "POST") return new Response(null, { status: 405 });
+    const parsed = BusKeyRegistrationSchema.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) return new Response(null, { status: 400 });
+    this.busKeys.set(auth.deviceUuid, parsed.data.busPublicKey);
+    return Response.json({ ok: true });
+  }
+
   async handle(req: Request): Promise<Response | null> {
     const route = new URL(req.url).pathname.split("/").at(-1);
-    if (!["authorization", "endpoint-challenge", "endpoint-registration"].includes(route!)) return null;
+    if (!["authorization", "endpoint-challenge", "endpoint-registration", "machines", "bus-key"].includes(route!)) return null;
     const token = req.headers.get("authorization")?.replace(/^Bearer /, "");
     const issued = token ? this.tokens.get(token) : undefined;
     const auth = issued && issued.expires > Date.now() / 1000 ? this.credentials.get(issued.clientId) : undefined;
     if (!auth) return Response.json({ error: "invalid_device" }, { status: 401 });
     const allowed = !this.revoked.has(auth.deviceUuid);
+    if (route === "machines" || route === "bus-key") return this.handleBus(route, req, auth, allowed);
     const existing = this.registrations.get(auth.clientId);
     const identity = { accountId: auth.userId, deviceId: auth.deviceUuid, enrollmentId: auth.clientId };
     if (route === "authorization" && req.method === "GET") {
@@ -75,7 +112,7 @@ export class PeerAuthorizationFixture {
           }),
       }));
     }
-    if (!allowed) return Response.json({ error: "revoked" }, { status: 403 });
+    if (!allowed) return Response.json({ error: "UNAUTHENTICATED" }, { status: 401 });
     if (req.method !== "POST") return new Response(null, { status: 405 });
     const body = await req.json().catch(() => null);
     if (route === "endpoint-challenge") {

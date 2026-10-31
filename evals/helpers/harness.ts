@@ -282,6 +282,7 @@ export function generateEvalAuth(): EvalAuth {
 }
 
 export interface FakeLicenseApi {
+  /** Registers an APP (phone) credential; bridges are registered as agents by `spawnAgent`. */
   provision(auth: EvalAuth): void;
   url: string;
   stop(): void;
@@ -312,6 +313,11 @@ export interface FakeLicenseApi {
    *  Requires `startFakeLicenseApi({ relayInternalUrl })` to have been set —
    *  `setupTestEnv` wires this to `relay.httpUrl` automatically. */
   revokeDevice(deviceId: string): Promise<void>;
+  /** The bus public key a device registered through `POST /bus-key`, or null. */
+  busKeyOf(deviceUuid: string): string | null;
+  /** Owner-set directory flags, served on the next machine-directory read. */
+  setOrchestrator(deviceUuid: string, on: boolean): void;
+  setBusControl(deviceUuid: string, on: boolean): void;
 }
 
 /**
@@ -362,7 +368,10 @@ export function startFakeLicenseApi(
   fixtureAuthorities.set(apiUrl, authority);
   return {
     url: apiUrl,
-    provision(auth) { authority.provision(auth); },
+    provision(auth) { authority.provision({ ...auth, kind: "app" }); },
+    busKeyOf(deviceUuid) { return authority.busKeyOf(deviceUuid); },
+    setOrchestrator(deviceUuid, on) { authority.setOrchestrator(deviceUuid, on); },
+    setBusControl(deviceUuid, on) { authority.setBusControl(deviceUuid, on); },
     stop() {
       fixtureAuthorities.delete(apiUrl);
       server.stop(true);
@@ -489,7 +498,7 @@ export async function spawnAgent(opts: {
   /** Extra env vars (e.g. ANTGRID_EVAL_TEST=1 for pair-flow test hooks). */
   env?: Record<string, string>;
 }): Promise<AgentHandle> {
-  fixtureAuthorities.get(opts.licenseApiUrl)?.provision(opts.auth);
+  fixtureAuthorities.get(opts.licenseApiUrl)?.provision({ ...opts.auth, kind: "agent" });
   const payload = {
     machine: {
       relayUrl: opts.relayUrl,
