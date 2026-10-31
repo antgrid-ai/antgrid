@@ -17,9 +17,11 @@ import '../providers/agent_transport.dart' show selectedRegistrationIdProvider;
 import '../providers/machine_directory.dart';
 import '../providers/machine_scope.dart';
 import '../providers/project_index.dart';
+import '../providers/project_panel.dart';
 import '../providers/project_work_status.dart' show recentStatusKey;
 import '../providers/projects.dart';
 import '../providers/recent_sessions.dart';
+import '../providers/ui_attention_providers.dart';
 import '../util/detached.dart';
 import 'drawer_entry_row.dart'
     show
@@ -27,6 +29,7 @@ import 'drawer_entry_row.dart'
         DrawerRemoveButton,
         HoverableDrawerRow,
         drawerProjectTitleStyle;
+import 'projects_drawer.dart' show closeDrawerIfOverlay;
 import 'session_row.dart';
 
 /// Which merged project rows are open in the sidebar, keyed by
@@ -229,6 +232,9 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
         return null;
       }),
     );
+    final open =
+        ref.watch(selectedProjectGroupProvider) == key &&
+        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
     final multiMachine = view.group.members.length > 1;
     final machineNames = {
       for (final m in ref.watch(machineDirectoryProvider)) m.id: m.name,
@@ -293,10 +299,24 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
                 ),
                 trailing: AbRowTrailingCell.kit(cells),
                 margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+                selected: open,
+                selectionStyle: AbRowSelection.surface,
                 onFocusChange: (v) => setState(() => _focused = v),
-                onTap: () => ref
-                    .read(projectGroupExpansionProvider.notifier)
-                    .toggle(key, byDefault: openByDefault),
+                // The first click opens the project's panel (and its sessions
+                // here); once it is the open project, a click folds or unfolds
+                // the sessions instead.
+                onTap: () {
+                  final expansion = ref.read(
+                    projectGroupExpansionProvider.notifier,
+                  );
+                  if (open) {
+                    expansion.toggle(key, byDefault: openByDefault);
+                    return;
+                  }
+                  if (!expanded) expansion.toggle(key, byDefault: openByDefault);
+                  openProjectPanel(ref.container, view);
+                  closeDrawerIfOverlay(context);
+                },
               ),
             );
           },

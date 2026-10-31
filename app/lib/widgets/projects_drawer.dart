@@ -22,6 +22,7 @@ import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/project_index.dart';
+import '../providers/project_panel.dart';
 import '../providers/providers.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -266,8 +267,15 @@ class _NavActions extends ConsumerWidget {
             navigationRow(
               label: 'New Session',
               icon: AbIcons.add,
-              selected: surface == WorkbenchSurface.newSession,
-              onTap: () => enterNewSession(ref.container),
+              // A project panel is the New Session surface too, but the row
+              // that is lit then is the project's.
+              selected:
+                  surface == WorkbenchSurface.newSession &&
+                  ref.watch(selectedProjectGroupProvider) == null,
+              onTap: () {
+                closeProjectPanel(ref.container);
+                enterNewSession(ref.container);
+              },
             ),
             const SizedBox(height: AbTokens.space4),
             navigationRow(

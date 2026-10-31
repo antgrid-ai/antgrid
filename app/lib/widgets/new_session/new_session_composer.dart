@@ -661,17 +661,19 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                   final capBox = BoxConstraints(maxWidth: cap);
                   return Row(
                     children: [
-                      ConstrainedBox(
-                        constraints: capBox,
-                        child: EnvironmentChip(enabled: !starting),
-                      ),
-                      const SizedBox(width: AbTokens.space6),
+                      // Project first: the machine chip then picks among the
+                      // machines that hold it.
                       ConstrainedBox(
                         constraints: capBox,
                         child: ProjectChip(
                           onOpenFolder: widget.onOpenFolder,
                           enabled: !starting,
                         ),
+                      ),
+                      const SizedBox(width: AbTokens.space6),
+                      ConstrainedBox(
+                        constraints: capBox,
+                        child: EnvironmentChip(enabled: !starting),
                       ),
                       const SizedBox(width: AbTokens.space6),
                       Flexible(child: BranchChip(enabled: !starting)),

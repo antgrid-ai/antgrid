@@ -11,7 +11,9 @@ import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
+import '../../providers/project_panel.dart';
 import 'picker_sources.dart';
+import 'project_first_menus.dart';
 
 /// Environment chip for the New Session composer: shows the picker's visible
 /// source (Local or a machine) and opens a grouped source panel on tap.
@@ -40,13 +42,21 @@ class EnvironmentChip extends ConsumerWidget {
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
+        // Once a project is picked, this chip picks among the machines holding
+        // it; before that it browses machines the old way. Read at the tap, not
+        // watched: the label never depends on it, and the merged view is the
+        // whole project index.
+        final project = ref.read(composerProjectViewProvider);
         await showAbPanel<void>(
           context: ctx,
           anchorRect: anchor,
+          width: project == null ? 280 : 320,
           // The composer sits at the bottom of the screen, so the panel
           // should open upward toward the visible content.
           preferred: AbMenuPlacement.above,
-          builder: (_) => const EnvironmentPanel(),
+          builder: (_) => project == null
+              ? const EnvironmentPanel()
+              : ComposerMachinePanel(view: project),
         );
       },
     );

@@ -12,9 +12,11 @@ import '../../design/widgets/ab_toast.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
+import '../../providers/project_panel.dart';
 import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
 import '../open_folder_button.dart';
+import '../project_panel/project_panel_view.dart';
 import '../recent_sessions/recent_sessions_summary.dart';
 import '../recent_sessions/recent_sessions_tab.dart';
 import '../session_search_modal.dart';
@@ -60,6 +62,7 @@ class NewSessionContent extends ConsumerWidget {
     // same title/chips/badges, so exactly one may mount — and re-deriving that
     // from platform+width in two places is how you end up with two or neither.
     final showTopBar = onOpenDrawer != null || showSearchButton;
+    final projectView = ref.watch(selectedProjectViewProvider);
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -133,11 +136,15 @@ class NewSessionContent extends ConsumerWidget {
                             onRefresh: () => _refresh(ref),
                             color: context.antgrid.accent,
                             backgroundColor: context.antgrid.bgElevated,
-                            // The scrolling header duplicates what the
-                            // fixed top bar above already shows, so exactly
-                            // one of the two mounts — decided here, where
-                            // both answers are in hand.
-                            child: RecentSessionsTab(showHeader: !showTopBar),
+                            // A project picked in the sidebar replaces the
+                            // flat list with that project across machines.
+                            // Otherwise the scrolling header duplicates what
+                            // the fixed top bar above already shows, so
+                            // exactly one of the two mounts — decided here,
+                            // where both answers are in hand.
+                            child: projectView != null
+                                ? ProjectPanelView(view: projectView)
+                                : RecentSessionsTab(showHeader: !showTopBar),
                           ),
                         ),
                         Padding(
