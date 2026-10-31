@@ -523,6 +523,42 @@ export function isDefaultSessionName(name: string): boolean {
 }
 
 const FLUSH_DEBOUNCE_MS = 200;
+/** An exit later than this after a resume launch is the agent running, not an
+ *  agent refusing to start. */
+const RESUME_REFUSAL_WINDOW_MS = 30_000;
+const RESUME_RESTART_WAIT_MS = 2_000;
+const NO_CONVERSATION_FOUND = /no conversation found/i;
+
+/** Plain text from raw PTY output: control sequences removed and every run of
+ *  whitespace (including a wrap's line break) collapsed, so a message the
+ *  terminal coloured or wrapped still reads as the phrase it was. */
+function flattenTerminalText(raw: string): string {
+  const ESC = 27;
+  const BEL = 7;
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    if (code === ESC) {
+      const next = raw[i + 1];
+      if (next === "[") {
+        // CSI: parameter and intermediate bytes, then one final byte.
+        i += 2;
+        while (i < raw.length && raw.charCodeAt(i) < 0x40) i++;
+      } else if (next === "]") {
+        // OSC: up to BEL or ST (ESC followed by a backslash).
+        i += 2;
+        while (i < raw.length && raw.charCodeAt(i) !== BEL && raw.charCodeAt(i) !== ESC) i++;
+        if (raw.charCodeAt(i) === ESC) i++;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    // Any whitespace or control character, so a wrap's line break reads as a space.
+    out += code <= 32 ? " " : raw[i];
+  }
+  return out.split(" ").filter(Boolean).join(" ");
+}
 /** close()'s wait for handoff placements, kept inside the seconds a supervisor
  *  gives a shutting-down host. A placement is one rename, or a copy across
  *  volumes. */
@@ -778,6 +814,10 @@ export class SessionManager {
   // something new. Launches let the provider validate the saved identity, save
   // for the one verdict agentSessionGone acts on: a positive disown.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
+  /** The latest terminal launch that was handed a saved conversation, until it
+   *  exits. Lets noteResumeOutcome tell "the agent refused my resume" from any
+   *  other exit. In memory: the run it describes dies with the bridge. */
+  private readonly resumeLaunches = new Map<string, { runId: string; at: number }>();
   /** Sessions launched to CONTINUE their previous conversation, until the agent
    *  reports the identity it continued under. Per-run and therefore in memory:
    *  a launch always precedes the report, and a bridge that died between them
@@ -1808,6 +1848,7 @@ export class SessionManager {
     this.hookSessionIds.add(id);
     this.tm.forget(id);
     this.entries.delete(id);
+    this.resumeLaunches.delete(id);
     this.scheduledLaunches.delete(id);
     this.setupSettlements.delete(id);
     this.resumableCache.delete(id);
@@ -2804,6 +2845,8 @@ export class SessionManager {
         });
       }
       this.noteConversationStart(entry, launch.resumed);
+      if (launch.resumed) this.resumeLaunches.set(id, { runId, at: Date.now() });
+      else this.resumeLaunches.delete(id);
       const notificationsInjected = launch.observation ?? launch.notificationsInjected;
       // A fresh launch is not bound by the last one's verdict.
       this.blindedTerminals.delete(id);
@@ -3261,6 +3304,44 @@ export class SessionManager {
     }
     if (!this.entries.has(id)) return;
     this.changed();
+  }
+
+  /**
+   * Recover a resume the agent refused. A session opened and closed before
+   * anything was sent has an id but no conversation behind it (claude reports
+   * the id at SessionStart, before it writes the transcript), so the next
+   * launch's `--resume` exits at once with "No conversation found". That text
+   * is the agent's own positive verdict, unlike a missing transcript file, which
+   * the resume tests pin as inconclusive — so only it releases the id, and the
+   * session starts a fresh conversation in place.
+   *
+   * One attempt per launch: the retry launches fresh, registers no resume, and
+   * so cannot loop. An exit the user asked for, or one outside the startup
+   * window, is never taken for a refusal.
+   */
+  noteResumeOutcome(id: string, runId: string | undefined, readOutputTail: (() => string) | undefined): void {
+    const launch = this.resumeLaunches.get(id);
+    if (!launch || launch.runId !== runId) return;
+    this.resumeLaunches.delete(id);
+    const entry = this.entries.get(id);
+    if (!entry || !readOutputTail || this.stopping.has(id) || this.deleting.has(id) || this.closed) return;
+    if (Date.now() - launch.at > RESUME_REFUSAL_WINDOW_MS) return;
+    if (!NO_CONVERSATION_FOUND.test(flattenTerminalText(readOutputTail()))) return;
+    log.warn(`session ${id}: ${entry.tool ?? "agent"} has no conversation ${entry.agentSessionId}; starting a fresh one`);
+    entry.agentSessionId = undefined;
+    entry.agentTranscriptPath = undefined;
+    this.resumableCache.delete(id);
+    this.changed();
+    // Past the exit's own teardown, which a same-tick start would race. The id is
+    // already released, so a start that never happens would strand the session
+    // with nothing saying why — hence waiting on the PTY rather than skipping.
+    void this.awaitTerminalExit(id, RESUME_RESTART_WAIT_MS).then((exited) => {
+      if (!exited || this.closed || this.entries.get(id) !== entry || this.tm.has(id)) {
+        log.warn(`session ${id}: not restarting after a refused resume`);
+        return;
+      }
+      return this.start(id);
+    }).catch((error) => log.warn(`session ${id}: fresh start after a refused resume failed: ${error}`));
   }
 
   onChange(fn: () => void): () => void {

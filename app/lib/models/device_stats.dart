@@ -10,6 +10,10 @@ class DeviceStats {
   final int? storageTotalBytes;
   final int? storageFreeBytes;
 
+  /// Whole-machine CPU busy share, 0-100. Only a host's `machine:stats`
+  /// carries it; a roster `device:stats` never does and never sends it.
+  final int? cpuPercent;
+
   /// Stamped by the bridge on receipt; absent on a report not yet sent.
   final String? reportedAt;
 
@@ -19,6 +23,7 @@ class DeviceStats {
     this.ramAvailableBytes,
     this.storageTotalBytes,
     this.storageFreeBytes,
+    this.cpuPercent,
     this.reportedAt,
   });
 
@@ -38,6 +43,9 @@ class DeviceStats {
       ramAvailableBytes: bytes('ramAvailableBytes'),
       storageTotalBytes: bytes('storageTotalBytes'),
       storageFreeBytes: bytes('storageFreeBytes'),
+      cpuPercent: json['cpuPercent'] is num
+          ? (json['cpuPercent'] as num).clamp(0, 100).round()
+          : null,
       reportedAt: reportedAt is String ? reportedAt : null,
     );
   }
@@ -56,7 +64,8 @@ class DeviceStats {
       ramTotalBytes == null &&
       ramAvailableBytes == null &&
       storageTotalBytes == null &&
-      storageFreeBytes == null;
+      storageFreeBytes == null &&
+      cpuPercent == null;
 
   @override
   bool operator ==(Object other) =>
@@ -67,6 +76,7 @@ class DeviceStats {
           ramAvailableBytes == other.ramAvailableBytes &&
           storageTotalBytes == other.storageTotalBytes &&
           storageFreeBytes == other.storageFreeBytes &&
+          cpuPercent == other.cpuPercent &&
           reportedAt == other.reportedAt;
 
   @override
@@ -76,6 +86,7 @@ class DeviceStats {
     ramAvailableBytes,
     storageTotalBytes,
     storageFreeBytes,
+    cpuPercent,
     reportedAt,
   );
 }

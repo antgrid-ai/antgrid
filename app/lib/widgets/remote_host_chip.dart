@@ -21,11 +21,20 @@ class RemoteHostChip extends StatelessWidget {
   /// until a bridge new enough to send one has.
   final String? ram;
 
+  /// Host CPU busy share, 0-100, from the same `machine:stats` as [ram].
+  final int? cpuPercent;
+
+  /// Called when the pointer enters the chip: the host reports its load only
+  /// on request, and the tooltip it feeds appears on this same hover.
+  final VoidCallback? onRequestStats;
+
   const RemoteHostChip({
     super.key,
     required this.hostMachineName,
     required this.platform,
     this.ram,
+    this.cpuPercent,
+    this.onRequestStats,
   });
 
   /// Unstated reads as desktop, not unknown: every machine that can host an
@@ -41,31 +50,38 @@ class RemoteHostChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
     final label = hostMachineName.isEmpty ? 'Remote host' : hostMachineName;
-    return Tooltip(
-      // The title bar is crowded enough; the figure is a hover-only detail.
-      message: ram == null ? 'Running on $label' : 'Running on $label\n$ram',
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space8,
-          vertical: AbTokens.space4,
-        ),
-        decoration: BoxDecoration(
-          borderRadius: AbTokens.borderRadius,
-          border: Border.all(color: antgrid.textSecondary),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AbIcon(_iconName, size: 12, color: antgrid.textSecondary),
-            const SizedBox(width: AbTokens.space4),
-            Text(
-              label,
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontXs,
-                color: antgrid.textSecondary,
+    return MouseRegion(
+      onEnter: (_) => onRequestStats?.call(),
+      child: Tooltip(
+        // The title bar is crowded enough; the figure is a hover-only detail.
+        message: [
+          'Running on $label',
+          ?(cpuPercent == null ? null : 'CPU $cpuPercent%'),
+          ?ram,
+        ].join('\n'),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space8,
+            vertical: AbTokens.space4,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: AbTokens.borderRadius,
+            border: Border.all(color: antgrid.textSecondary),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AbIcon(_iconName, size: 12, color: antgrid.textSecondary),
+              const SizedBox(width: AbTokens.space4),
+              Text(
+                label,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: antgrid.textSecondary,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

@@ -230,10 +230,12 @@ List<_SessionGroup> _groupSessions(
   RecentGroupBy groupBy,
   Map<RecentSessionRow, AgentWorkStatus> statusFor,
 ) {
-  // Bucket by a STABLE identity (machineUuid / registrationId), never by a
-  // user-facing display string — two different machines or projects can
-  // share the same display name, and keying on the name would silently merge
-  // their sessions into one group.
+  // Machine and status buckets key on a STABLE identity (machineUuid / status
+  // name), never a display string — two machines can share a name. Project
+  // grouping is the deliberate exception: a project's id is a hash of its
+  // folder path, so the same repo on two machines never shares an id and only
+  // its name can unite them. The cost is that two unrelated projects with the
+  // same name merge into one group; rows still name their machine.
   final buckets = <String, List<RecentSessionRow>>{};
   final labels = <String, String>{};
   for (final row in rows) {
@@ -244,7 +246,7 @@ List<_SessionGroup> _groupSessions(
         key = row.origin.machineUuid ?? 'local';
         label = row.origin.deviceName;
       case RecentGroupBy.project:
-        key = row.origin.registrationId;
+        key = row.origin.projectName.toLowerCase();
         label = row.origin.projectName;
       case RecentGroupBy.status:
         final s = statusFor[row] ?? AgentWorkStatus.done;
