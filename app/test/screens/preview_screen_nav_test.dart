@@ -680,4 +680,33 @@ void main() {
       expect(controller.retirements, 1);
     });
   });
+
+  group('PreviewScreen element picker', () {
+    testWidgets('a picker whose script the page refuses shows as off', (
+      tester,
+    ) async {
+      // Desktop: mobile keeps the picker behind the overflow menu.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final rig = await boot(tester);
+      await openLocalTab(rig.preview, _kPort);
+      await tester.pumpWidget(host(rig.container, showPreview: true));
+      await settle(tester);
+      final controller = platform.controllers.single;
+
+      controller.scriptError = StateError('page refused the script');
+      await tester.tap(find.byTooltip('Pick an element'));
+      await settle(tester);
+      expect(controller.scripts, hasLength(1));
+      expect(toolbarButton(tester, 'Pick an element').selected, isFalse);
+
+      // Once the page accepts it, the same tap arms.
+      controller.scriptError = null;
+      await tester.tap(find.byTooltip('Pick an element'));
+      await settle(tester);
+      expect(controller.scripts, hasLength(2));
+      expect(toolbarButton(tester, 'Pick an element').selected, isTrue);
+      await tester.pump(const Duration(seconds: 10));
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
 }

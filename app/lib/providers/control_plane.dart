@@ -103,9 +103,20 @@ final controlPlaneStateProvider = StreamProvider.family<ControlPlaneState, Strin
   ref,
   bareDeviceUuid,
 ) async* {
-  final client = await ref.watch(
-    controlPlaneClientForProvider(bareDeviceUuid).future,
-  );
+  // A rebuild cancels this generator, but cannot cancel an `await` it is parked
+  // on. The eager kick, refresh and Retry all invalidate this provider mid-dial,
+  // so the superseded build's await later rejects (up to awaitSession's 90s
+  // TimeoutException) with no subscriber left; rethrown from here it lands in
+  // the zone as an uncaught fatal. Only a live build may surface the error.
+  final ControlPlaneClient? client;
+  try {
+    client = await ref.watch(
+      controlPlaneClientForProvider(bareDeviceUuid).future,
+    );
+  } catch (_) {
+    if (!ref.mounted) return;
+    rethrow;
+  }
   if (client == null) {
     yield const ControlPlaneState();
     return;

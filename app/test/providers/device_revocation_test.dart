@@ -23,6 +23,7 @@ import 'package:antgrid/services/license_token_minter.dart';
 import 'package:antgrid/services/push_identity.dart';
 import 'package:antgrid/services/sign_out_service.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/sign_out_action.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -89,12 +90,18 @@ class _CountingSignOut extends SignOutService {
 
   int calls = 0;
 
+  /// Native teardown that never confirmed it released a connection.
+  bool cleanupIncomplete = false;
+
   @override
   Future<void> hardSignOut() async {
     calls++;
     // The real teardown awaits network + storage; a synchronous stub would hide
     // the concurrency the idempotence guard exists for.
     await Future<void>.delayed(const Duration(milliseconds: 5));
+    if (cleanupIncomplete) {
+      throw SignOutCleanupIncomplete(StateError('machine cleanup incomplete'));
+    }
   }
 }
 
@@ -244,6 +251,26 @@ void main() {
 
     expect(signOut.calls, 1);
     expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  // Every caller drops the future (a relay signal, a resume probe, a tap), so a
+  // teardown that cannot finish must not escape as an uncaught error.
+  test('a teardown that cannot finish still raises the notice', () async {
+    final container = await containerWith();
+    signOut.cleanupIncomplete = true;
+
+    await expectLater(handleDeviceRevoked(container), completes);
+
+    expect(signOut.calls, 1);
+    expect(container.read(revokedNoticeProvider), isTrue);
+  });
+
+  test('a UI sign-out that cannot finish reports false, not a throw', () async {
+    final container = await containerWith();
+    signOut.cleanupIncomplete = true;
+
+    expect(await hardSignOutFromUi(container, null), isFalse);
+    expect(signOut.calls, 1);
   });
 
   test('the probe is skipped once the device is known revoked', () async {

@@ -600,7 +600,15 @@ final projectPreferencesProvider = StreamProvider<ProjectPreferences>((ref) {
       stream,
     ) async* {
       if (prefsService.projectId != projectId) {
-        final prefs = await prefsService.load(projectId);
+        // Guarded like `controlPlaneStateProvider`'s await: a project switch
+        // supersedes this build while the load (a malformed entry) can reject.
+        final ProjectPreferences prefs;
+        try {
+          prefs = await prefsService.load(projectId);
+        } catch (_) {
+          if (!ref.mounted) return;
+          rethrow;
+        }
         fileService.applyPreferences(prefs);
         yield prefs;
       } else {

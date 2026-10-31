@@ -60,6 +60,12 @@ void main() {
       expect(await cache.read('local__x'), isNull);
     });
 
+    test('write swallows a filesystem failure (does not throw)', () async {
+      // A regular file where the cache directory belongs: `create` fails.
+      await File(p.join(tmp.path, 'cache')).writeAsString('');
+      await expectLater(cache.write('local__x', catalog), completes);
+    });
+
     test('clear removes the key file', () async {
       await cache.write('local__x', catalog);
       await cache.clear('local__x');

@@ -116,8 +116,19 @@ class RecordingWebViewController extends PlatformWebViewController {
   @override
   Future<bool> canGoForward() async => false;
 
+  /// Scripts the screen ran on this page, in order.
+  final scripts = <String>[];
+
+  /// While set, [runJavaScript] rejects with it, as a page that refuses the
+  /// injection does.
+  Object? scriptError;
+
   @override
-  Future<void> runJavaScript(String javaScript) async {}
+  Future<void> runJavaScript(String javaScript) async {
+    scripts.add(javaScript);
+    final error = scriptError;
+    if (error != null) throw error;
+  }
 }
 
 /// Keeps the page callbacks the screen registers so a test can fire them, and

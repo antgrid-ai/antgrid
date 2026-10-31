@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kReleaseMode, visibleForTesting;
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
@@ -327,35 +328,92 @@ class ConnectionBlockReporter {
   final ConnectionBlockSink _sink;
   final Set<(BlockReason, String)> _captured = {};
 
-  void report(BlockReason reason, String? code) {
-    try {
-      final safeCode = reportableFailureCode(code);
-      _sink.addBreadcrumb(
-        Breadcrumb(
-          category: 'connection',
-          message: 'connection blocked',
-          level: SentryLevel.warning,
-          data: <String, String>{'reason': reason.name, 'code': safeCode},
-        ),
-      );
-      if (!capturesConnectionBlock(reason)) return;
-      // Marked before sending: a sink that throws is not retried, so a failing
-      // send cannot turn a flapping ladder into a loop.
-      if (!_captured.add((reason, safeCode))) return;
-      _sink.captureWarning(
-        'Connection blocked: ${reason.name} ($safeCode)',
-        tags: {
-          'connection.block_reason': reason.name,
-          'connection.failure_code': safeCode,
-        },
-        fingerprint: ['connection-blocked', reason.name, safeCode],
-      );
-    } catch (error) {
-      AbLog.warn(
-        'crashReporting',
-        'connection block report failed',
-        fields: {'error': error.runtimeType.toString()},
-      );
-    }
+  void report(BlockReason reason, String? code) =>
+      _guardedReport('connection block', () {
+        final safeCode = reportableFailureCode(code);
+        _sink.addBreadcrumb(
+          Breadcrumb(
+            category: 'connection',
+            message: 'connection blocked',
+            level: SentryLevel.warning,
+            data: <String, String>{'reason': reason.name, 'code': safeCode},
+          ),
+        );
+        if (!capturesConnectionBlock(reason)) return;
+        // Marked before sending: a sink that throws is not retried, so a
+        // failing send cannot turn a flapping ladder into a loop.
+        if (!_captured.add((reason, safeCode))) return;
+        _sink.captureWarning(
+          'Connection blocked: ${reason.name} ($safeCode)',
+          tags: {
+            'connection.block_reason': reason.name,
+            'connection.failure_code': safeCode,
+          },
+          fingerprint: ['connection-blocked', reason.name, safeCode],
+        );
+      });
+}
+
+/// Reports a hard sign-out whose ownership cleanup failed. `SignOutService`
+/// then keeps the session cookie and keychain records at rest on purpose, yet a
+/// revocation still drops the user on the sign-in screen, so this warning is
+/// the only off-device sign that credentials outlived a sign-out.
+///
+/// Only the cause's type leaves the device: its message can name connections.
+void reportSignOutCleanupIncomplete(
+  Object cause, {
+  ConnectionBlockSink? sink,
+}) => _guardedReport('sign-out cleanup', () {
+  final causeType = cause.runtimeType.toString();
+  (sink ?? const _SentryConnectionBlockSink()).captureWarning(
+    'Sign-out cleanup incomplete ($causeType)',
+    tags: {'sign_out.cleanup_cause': causeType},
+    fingerprint: ['sign-out-cleanup-incomplete', causeType],
+  );
+});
+
+/// Reports a push keypair that secure storage would not hand back. The
+/// registration that needed it is skipped, so that machine's notifications
+/// stop with nothing on screen, and this warning is the only sign.
+///
+/// One event per failure kind per process: a locked iPhone fails every
+/// reconnect the same way. The kind carries the keychain's numeric OSStatus
+/// where there is one, so a locked device (-25308) is told apart from a
+/// keychain that is actually broken; nothing else about the error is sent.
+class PushKeypairReporter {
+  PushKeypairReporter({ConnectionBlockSink? sink})
+    : _sink = sink ?? const _SentryConnectionBlockSink();
+
+  static final PushKeypairReporter shared = PushKeypairReporter();
+
+  final ConnectionBlockSink _sink;
+  final Set<String> _captured = {};
+
+  void report(Object cause) => _guardedReport('push keypair', () {
+    final kind = switch (cause) {
+      PlatformException(details: final int status) =>
+        'PlatformException:$status',
+      _ => cause.runtimeType.toString(),
+    };
+    if (!_captured.add(kind)) return;
+    _sink.captureWarning(
+      'Push keypair unavailable ($kind)',
+      tags: {'push.keypair_failure': kind},
+      fingerprint: ['push-keypair-unavailable', kind],
+    );
+  });
+}
+
+/// Telemetry is a side channel: a sink that throws must never fail the path
+/// being reported on, so the failure is logged by type and dropped.
+void _guardedReport(String what, void Function() send) {
+  try {
+    send();
+  } catch (error) {
+    AbLog.warn(
+      'crashReporting',
+      '$what report failed',
+      fields: {'error': error.runtimeType.toString()},
+    );
   }
 }

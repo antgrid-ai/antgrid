@@ -1,42 +1,17 @@
 import 'package:antgrid/analytics/crash_reporting.dart';
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
-typedef _Capture = ({
-  String message,
-  Map<String, String> tags,
-  List<String> fingerprint,
-});
-
-class _RecordingSink implements ConnectionBlockSink {
-  final breadcrumbs = <Breadcrumb>[];
-  final captures = <_Capture>[];
-  bool throwing = false;
-
-  @override
-  void addBreadcrumb(Breadcrumb breadcrumb) {
-    if (throwing) throw StateError('sink');
-    breadcrumbs.add(breadcrumb);
-  }
-
-  @override
-  void captureWarning(
-    String message, {
-    required Map<String, String> tags,
-    required List<String> fingerprint,
-  }) {
-    if (throwing) throw StateError('sink');
-    captures.add((message: message, tags: tags, fingerprint: fingerprint));
-  }
-}
+import '../helpers/recording_warning_sink.dart';
 
 void main() {
-  late _RecordingSink sink;
+  late RecordingWarningSink sink;
   late ConnectionBlockReporter reporter;
 
   setUp(() {
-    sink = _RecordingSink();
+    sink = RecordingWarningSink();
     reporter = ConnectionBlockReporter(sink: sink);
   });
 
@@ -142,5 +117,63 @@ void main() {
       () => ConnectionBlockReporter().report(BlockReason.peerRejected, 'X'),
       returnsNormally,
     );
+  });
+
+  group('sign-out cleanup', () {
+    test('captures a warning naming only the cause type', () {
+      reportSignOutCleanupIncomplete(
+        StateError('machine cleanup incomplete for 2 connection(s)'),
+        sink: sink,
+      );
+
+      final capture = sink.captures.single;
+      expect(capture.tags, {'sign_out.cleanup_cause': 'StateError'});
+      expect(capture.fingerprint, [
+        'sign-out-cleanup-incomplete',
+        'StateError',
+      ]);
+      expect(capture.message, isNot(contains('machine cleanup')));
+    });
+
+    test('a throwing sink never escapes the report', () {
+      sink.throwing = true;
+      expect(
+        () => reportSignOutCleanupIncomplete(StateError('x'), sink: sink),
+        returnsNormally,
+      );
+    });
+  });
+
+  group('push keypair', () {
+    late PushKeypairReporter keypair;
+    setUp(() => keypair = PushKeypairReporter(sink: sink));
+
+    PlatformException keychain(int status) => PlatformException(
+      code: 'Unexpected security result code',
+      message: 'Code: $status, Message: secret detail',
+      details: status,
+    );
+
+    test('one warning per failure kind, keeping only the OSStatus', () {
+      keypair.report(keychain(-25308));
+      keypair.report(keychain(-25308));
+      keypair.report(keychain(-34018));
+      keypair.report(StateError('a message that must stay local'));
+
+      expect(sink.captures.map((c) => c.tags['push.keypair_failure']), [
+        'PlatformException:-25308',
+        'PlatformException:-34018',
+        'StateError',
+      ]);
+      for (final capture in sink.captures) {
+        expect(capture.message, isNot(contains('detail')));
+        expect(capture.message, isNot(contains('must stay local')));
+      }
+    });
+
+    test('a throwing sink never escapes the report', () {
+      sink.throwing = true;
+      expect(() => keypair.report(StateError('x')), returnsNormally);
+    });
   });
 }

@@ -341,7 +341,16 @@ final projectStatusProvider = StreamProvider.family<ProjectStatus, String>((
     return;
   }
   // Warm: stream from the session's status notifier (existing logic).
-  final session = await ref.watch(projectSessionProvider(projectId).future);
+  // Guarded like `controlPlaneStateProvider`'s await, and checked again after
+  // success: a superseded build would hit `ref.onDispose` on a disposed ref.
+  final ProjectSession session;
+  try {
+    session = await ref.watch(projectSessionProvider(projectId).future);
+  } catch (_) {
+    if (!ref.mounted) return;
+    rethrow;
+  }
+  if (!ref.mounted) return;
   final ctrl = StreamController<ProjectStatus>();
   ctrl.add(session.status.value);
   void listener() => ctrl.add(session.status.value);

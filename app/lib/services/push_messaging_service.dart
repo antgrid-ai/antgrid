@@ -4,21 +4,59 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:push/push.dart';
 
+import '../analytics/crash_reporting.dart';
 import '../models/ab_message.dart';
 import '../models/agent_hello.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import 'push_identity.dart';
 
 class PushMessagingService {
   final PushIdentity _pushIdentity;
   final FlutterLocalNotificationsPlugin _localNotifications;
+  final PushKeypairReporter _keypairReporter;
   PushMessagingService({
     PushIdentity? pushIdentity,
     FlutterLocalNotificationsPlugin? localNotifications,
+    PushKeypairReporter? keypairReporter,
   }) : _pushIdentity = pushIdentity ?? PushIdentity.secure(),
        _localNotifications =
-           localNotifications ?? FlutterLocalNotificationsPlugin();
+           localNotifications ?? FlutterLocalNotificationsPlugin(),
+       _keypairReporter = keypairReporter ?? PushKeypairReporter.shared;
+
+  /// Null when the keychain refused, and the caller skips its registration.
+  /// Every caller would otherwise only log the failure, so this is where a
+  /// keychain that keeps refusing gets reported off the device.
+  Future<PushKeypair?> _readKeypair(PushIdentity identity) async {
+    try {
+      return await identity.ensureKeypair();
+    } catch (error, stack) {
+      _keypairReporter.report(error);
+      AbLog.error(
+        'PushMessagingService',
+        'push keypair unavailable',
+        fields: {'error': '$error', 'stack': '$stack'},
+      );
+      return null;
+    }
+  }
+
+  /// Registers the relay sessions whose current handshake went unregistered,
+  /// as a failed keypair read or send leaves it; reads no keychain when there
+  /// are none. For the app returning to the foreground: an iPhone's keychain
+  /// unlocks with the device, and the connection whose handshake hit the lock
+  /// can outlive it, so waiting for the next handshake could leave that
+  /// machine's notifications off.
+  Future<void> retryUnregistered(Iterable<ProjectSession> sessions) {
+    final outstanding = sessions.any((s) {
+      if (s.mode != ProjectSessionMode.relay) return false;
+      final hello = s.status.value.agentHello;
+      return hello != null && !identical(_registered[s.projectId], hello);
+    });
+    if (!outstanding) return Future<void>.value();
+    return registerNewSessions(sessions);
+  }
 
   /// The FCM token last obtained. Held so a session that becomes warm AFTER
   /// startup ([registerNewSessions]) can be registered without a fresh
@@ -203,7 +241,8 @@ class PushMessagingService {
     if (_signedOut) return;
     _identity = pushIdentity;
     final watched = _watched;
-    final kp = await pushIdentity.ensureKeypair();
+    final kp = await _readKeypair(pushIdentity);
+    if (kp == null) return;
     // A sign-out across an await here already sent the empty-token clear.
     // Checked before the pubkey bookkeeping too: a pass outliving a sign-out
     // and re-sign-in holds the discarded key, and must not repoint
@@ -272,6 +311,10 @@ class PushMessagingService {
     if (_watched[s] == true) return;
     final watched = _watched;
     watched[s] = true;
+    // Every status change re-fires this listener with the same hello (machine
+    // stats alone tick every 30s), so a keychain read that failed for a hello
+    // waits for the next handshake instead of repeating on each tick.
+    AgentHello? keypairFailedFor;
     void onStatus() {
       if (!identical(watched, _watched)) {
         s.status.removeListener(onStatus);
@@ -281,9 +324,19 @@ class PushMessagingService {
       final token = _token;
       final identity = _identity;
       if (hello == null || token == null || identity == null) return;
-      if (identical(_registered[s.projectId], hello)) return;
-      unawaited(() async {
-        final kp = await identity.ensureKeypair();
+      if (identical(_registered[s.projectId], hello) ||
+          identical(keypairFailedFor, hello)) {
+        return;
+      }
+      // The keypair is re-read from secure storage on every hello, and an iOS
+      // keychain item is unreadable while the device is locked: a reconnect
+      // just after locking must cost this registration, not crash the app.
+      detached('PushMessagingService', 'register on hello', () async {
+        final kp = await _readKeypair(identity);
+        if (kp == null) {
+          keypairFailedFor = hello;
+          return;
+        }
         // A sign-out during that await already sent the empty-token clear;
         // registering now would undo it.
         if (!identical(watched, _watched)) return;
@@ -293,7 +346,7 @@ class PushMessagingService {
           token: token,
           pushPubkeyB64: kp.pubkeyB64,
         );
-      }());
+      });
     }
 
     s.status.addListener(onStatus);
