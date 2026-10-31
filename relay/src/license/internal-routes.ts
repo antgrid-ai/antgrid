@@ -8,10 +8,12 @@ import type { ServerWebSocket } from "bun";
 import { logger } from "../logger.js";
 import type { LicenseCache } from "./cache.js";
 import type { Connections, Connection, WsData } from "../connections.js";
+import type { BusQueue } from "../bus-queue.js";
 
 export interface InternalRouteDeps {
   licenseCache: LicenseCache;
   connections: Connections;
+  busQueue: BusQueue;
   relayInternalSecret: string;
 }
 
@@ -109,6 +111,9 @@ export async function handleRevoke(req: Request, deps: InternalRouteDeps): Promi
   }
   const { deviceId, userId } = verified.data;
   deps.licenseCache.markRevoked(deviceId, userId);
+  // Queued mail is purged with the credential: a revoked machine must not be
+  // handed its backlog if it ever reconnects under the same id.
+  deps.busQueue.purgeDevice(userId, deviceId);
   // Every socket the account device holds, not just `getByDeviceId(deviceId)`:
   // an app registers one per-machine slot (`<deviceId>#<machine>`) per machine
   // it controls, so a bare-id lookup would leave a revoked phone's live E2E
@@ -159,6 +164,7 @@ export async function handleExpire(req: Request, deps: InternalRouteDeps): Promi
   }
   const { userId } = verified.data;
   const ids = deps.licenseCache.dropByUser(userId);
+  deps.busQueue.purgeUser(userId);
   let closed = 0;
   for (const conn of deps.connections.getConnectionsForUser(userId)) {
     if (closeWithLicense(conn, "LICENSE_EXPIRED")) closed += 1;

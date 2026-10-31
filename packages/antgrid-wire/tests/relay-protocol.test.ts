@@ -143,6 +143,16 @@ describe("ClientMessage", () => {
   });
 });
 
+describe("bus opt-in flag", () => {
+  it("hello and welcome accept bus: 1 only", () => {
+    expect(HelloMessage.safeParse({ ...validHello, bus: 1 }).success).toBe(true);
+    expect(HelloMessage.safeParse({ ...validHello, bus: 2 }).success).toBe(false);
+    const welcome = { type: "welcome", deviceId: "d", epoch: 1, serverTime: "2026-06-08T12:36:33.442Z" };
+    expect(WelcomeMessage.safeParse({ ...welcome, bus: 1 }).success).toBe(true);
+    expect(WelcomeMessage.safeParse({ ...welcome, bus: true }).success).toBe(false);
+  });
+});
+
 describe("ErrorCode", () => {
   it("rejects removed v2 codes", () => {
     expect(ErrorCode.safeParse("AGENT_ALREADY_ACTIVE").success).toBe(false);

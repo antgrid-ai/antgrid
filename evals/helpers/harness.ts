@@ -176,6 +176,10 @@ export interface RelayHandle {
   /** Live relay connection count (past hello). X3's drill-in test asserts zero
    *  additional connections; the multi-stream test asserts one per side. */
   connectionCount(): number;
+  /** Sealed bus blobs the relay is holding right now. */
+  busStats(): { messages: number; bytes: number };
+  /** Make the relay swallow the next `bus:ack` it receives, as a dropped frame would. */
+  dropNextBusAck(): void;
   stop(): void;
 }
 
@@ -425,6 +429,12 @@ export async function startRelay(opts: {
    *  JSON-flood test lowers it to force MESSAGE_RATE_LIMITED). */
   jsonRateLimitPerSec?: number;
   jsonRateLimitBurst?: number;
+  /** Ceiling on a sender-chosen bus TTL (default 6h). */
+  busMaxTtlMs?: number;
+  /** Per-recipient bus queue count (default 256). */
+  busQueueMessagesPerDevice?: number;
+  /** Per-agent sealed bytes per minute (default 16 MiB). */
+  busSendBytesPerMin?: number;
 }): Promise<RelayHandle> {
   // Static specifier, not `import(resolve(ROOT, ...))`: a computed specifier
   // types `startServer` as `any`, which silently stops type-checking BOTH the
@@ -442,6 +452,13 @@ export async function startRelay(opts: {
     replayTtlMs: opts.replayTtlMs ?? 300_000,
     pingIntervalMs: 30_000,
     pongTimeoutMs: 10_000,
+    busQueueMessagesPerDevice: opts.busQueueMessagesPerDevice ?? 256,
+    busQueueBytesPerDevice: 8 * 1024 * 1024,
+    busQueueMessagesPerSender: 512,
+    busQueueBytesPerSender: 16 * 1024 * 1024,
+    busQueueBytesTotal: 256 * 1024 * 1024,
+    busMaxTtlMs: opts.busMaxTtlMs ?? 6 * 60 * 60_000,
+    busSendBytesPerMin: opts.busSendBytesPerMin ?? 16 * 1024 * 1024,
     trustedProxyIps: [],
     logLevel: "error",
     licenseApiUrl: "http://license-api.eval",
@@ -461,10 +478,18 @@ export async function startRelay(opts: {
     },
   };
 
+  let dropAck = false;
   const server = startServer(cfg, {
     licenseGate: fakeLicenseGate(),
     fcmSender: recordingSender,
     apnsSender: recordingSender,
+    busFaults: {
+      dropAck: () => {
+        const armed = dropAck;
+        dropAck = false;
+        return armed;
+      },
+    },
   });
 
   return {
@@ -476,6 +501,12 @@ export async function startRelay(opts: {
     },
     connectionCount() {
       return server.connections.getConnectionCount();
+    },
+    busStats() {
+      return server.busQueue.stats();
+    },
+    dropNextBusAck() {
+      dropAck = true;
     },
     stop() {
       server.stop();

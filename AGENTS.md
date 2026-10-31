@@ -29,14 +29,14 @@ This file provides guidance to Coding Agents (like Claude, Codex, etc) when work
 
 ## Project Overview
 
-Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is a fully encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app payload traffic runs over native Iroh connections between two endpoint IDs the authorization snapshot names; QUIC/TLS 1.3 between those authorized endpoints is the confidentiality layer, with no app-layer sealing on top of it. The central WebSocket is control-only and never accepts application payloads.
+Antgrid is a modern agent-first IDE, focused as coding agent (Claude Code, Codex, etc.) command centre with remote control. Remote control is a fully encrypted platform for monitoring and controlling AI coding agents from mobile/desktop. All agent↔app payload traffic runs over native Iroh connections between two endpoint IDs the authorization snapshot names; QUIC/TLS 1.3 between those authorized endpoints is the confidentiality layer, with no app-layer sealing on top of it. The central WebSocket carries control frames and sealed bus blobs it cannot read; it never accepts a readable application payload.
 
 The app should feel agent command centre, not a web dashboard. It prioritizes information density, fast scanning, and keyboard/gesture efficiency. The agent's terminal output is the primary view; files, git, and preview are supporting context.
 
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript/Bun | Runs on dev machine: terminals (PTY), file watching, port scanning, HTTP tunneling. Entry: `src/index.ts`. |
-| **Relay** | `relay/` | TypeScript/Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery. Rejects application payloads. Entry: `src/index.ts`. |
+| **Relay** | `relay/` | TypeScript/Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery. Never accepts a readable application payload; queues agents' sealed bus blobs it cannot open. Entry: `src/index.ts`. |
 | **App** | `app/` | Flutter/Dart + Riverpod | Mobile/desktop UI: terminal viewer, file explorer, browser preview. |
 | **Web** | `web/` | TS/Bun + Hono + Postgres | Licensing, subscriptions, OAuth device-flow, Ed25519 JWT minting, Better-Auth sign-in. Entry: `src/index.ts`. |
 

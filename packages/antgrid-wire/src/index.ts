@@ -1,5 +1,6 @@
 export * from "./client-ip";
 export * from "./relay-protocol";
+export * from "./bus-protocol";
 export * from "./relay-auth";
 export * from "./relay-slot";
 export * from "./push-protocol";

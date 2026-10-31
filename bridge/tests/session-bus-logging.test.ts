@@ -23,6 +23,9 @@ import { selfMachineLabel } from "../src/machine-label";
 import { TerminalManager } from "../src/terminal-manager";
 import { createConnState } from "../src/conn-state";
 import { __setRootForTest } from "../src/logger";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { generateEphemeralKeypair } from "../src/key-exchange";
+import { openBus, sealBus } from "../src/session-bus/seal";
 
 // -- capture ----------------------------------------------------------------
 
@@ -405,4 +408,51 @@ test("a held message that expires without ever leaving is named, and named witho
   } finally {
     coordinator.stop();
   }
+});
+
+test("sealing and opening bus mail logs nothing of the body or the keys, on success or on any failure", () => {
+  const ed = generateKeyPairSync("ed25519");
+  const seed = Buffer.from(ed.privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32)).toString("base64");
+  const pub = Buffer.from(ed.publicKey.export({ type: "spki", format: "der" }).subarray(-32)).toString("base64");
+  const recipient = generateEphemeralKeypair();
+  const recipientPriv = recipient.privateKey.toString("base64");
+  const recipientPub = recipient.publicKey.toString("base64");
+  const body = sentinel("BDYZ", 600);
+  const header = {
+    v: 1 as const, from: randomUUID(), to: randomUUID(), id: randomUUID(),
+    role: "agent" as const, kind: "message" as const, sentAt: 1_000, expiresAt: 61_000,
+  };
+
+  captureAtEveryLevel();
+  const sealed = sealBus({ header, body, signSeedB64: seed, recipientBusPubB64: recipientPub });
+  if (!sealed.ok) throw new Error("seal refused");
+  const open = (over: Partial<Parameters<typeof openBus>[0]>) => openBus({
+    blob: sealed.blob, from: header.from, to: header.to, id: header.id,
+    ownBusPrivB64: recipientPriv, ownBusPubB64: recipientPub, senderEd25519PubB64: pub, ...over,
+  });
+  const wrong = generateEphemeralKeypair();
+  const results = [
+    open({}),
+    open({ id: randomUUID() }),
+    open({ senderEd25519PubB64: Buffer.from(ed.publicKey.export({ type: "spki", format: "der" }).subarray(-32)).fill(1).toString("base64") }),
+    open({ ownBusPrivB64: wrong.privateKey.toString("base64"), ownBusPubB64: wrong.publicKey.toString("base64") }),
+    open({ blob: { ...sealed.blob, epk: Buffer.alloc(32).toString("base64") } }),
+    open({ blob: { ...sealed.blob, box: "A".repeat(60) } }),
+  ];
+  const refused = [
+    sealBus({ header, body: body.repeat(200), signSeedB64: seed, recipientBusPubB64: recipientPub }),
+    sealBus({ header, body, signSeedB64: seed, recipientBusPubB64: "AAAA" }),
+    sealBus({ header, body, signSeedB64: "not-a-seed", recipientBusPubB64: recipientPub }),
+  ];
+  const captured = [...lines];
+  __setRootForTest(process.stdout);
+
+  expect(results.map((r) => (r.ok ? "ok" : r.code))).toEqual([
+    "ok", "UNOPENABLE", "BAD_SIGNATURE", "UNOPENABLE", "UNOPENABLE", "UNOPENABLE",
+  ]);
+  expect(refused.every((r) => !r.ok)).toBe(true);
+  assertNoSentinelAnywhere([body], captured);
+  // Keys and the sealed box are base64, so a window of one could in principle
+  // collide with ordinary log text; a hit on these is still worth a look.
+  assertNoSentinelAnywhere([seed, recipientPriv, sealed.blob.box], captured);
 });

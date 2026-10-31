@@ -21,6 +21,8 @@ export interface CentralForgeOptions {
   skewTsMs?: number;
   epoch?: number;
   licenseToken?: string;
+  /** Ask the relay to send bus frames; it delivers none to a client that did not. */
+  bus?: boolean;
 }
 
 type ConnectOptions = {
@@ -182,6 +184,7 @@ export class CentralTestClient {
       ts,
       nonce,
       sig: signed.toString("base64"),
+      ...(this.forge.bus ? { bus: 1 } : {}),
     });
     this.onOutbound?.(raw);
     this.ws?.send(raw);

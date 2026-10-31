@@ -18,6 +18,7 @@
     "test:evals:isolation": "bun test tests/gate-worktree-isolation.test.ts",
     "test:evals:terminal": "bun test scenarios/terminal/",
     "test:evals:session-bus": "bun test tests/gate-session-bus.test.ts",
+    "test:evals:session-bus-relay": "bun test tests/gate-session-bus-relay.test.ts",
     "test:evals:terminal-frames": "bun test tests/gate-terminal-frames.test.ts",
     "test:evals:terminal-clipboard": "bun test tests/gate-terminal-clipboard.test.ts",
     "test:evals:file-explorer": "bun test scenarios/file-explorer/",

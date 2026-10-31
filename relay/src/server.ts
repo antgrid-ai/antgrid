@@ -10,7 +10,8 @@ import { ClientMessage, HelloMessage } from "./protocol.js";
 import { MessageRateLimiter, TokenBucketRateLimiter } from "./rate-limiter.js";
 import { logger, setLogLevel } from "./logger.js";
 import { ConnectionLivenessTracker } from "./connection-liveness.js";
-import { buildHelloSigBody } from "antgrid-wire";
+import { buildHelloSigBody, RELAY_MAX_CONTROL_FRAME_BYTES, type BusRefusalReason } from "antgrid-wire";
+import { BusQueue, type BusEntry } from "./bus-queue.js";
 import { JwksCache } from "./license/jwks-cache.js";
 import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
@@ -23,14 +24,22 @@ import type { PushSender } from "./push/delivery.js";
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const HELLO_TIMEOUT_MS = 10_000;
-// Largest legitimate control frame: push:deliver (pushToken ≤4096 + epk ≤256 + box ≤8192, ~12.7 KiB)
-// or hello (licenseToken ≤8192 …, ~9.2 KiB); 64 KiB leaves ~5x headroom for JSON escaping.
-const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
+// A maximal bus:send (a sealed blob of up to ~120 KiB of base64) is the largest
+// legitimate control frame, so the bus blob bound, not push or hello, sets this
+// cap. It is shared with the bridge so both sides agree on what fits.
+const MAX_CONTROL_FRAME_BYTES = RELAY_MAX_CONTROL_FRAME_BYTES;
+// A sooner second bus:drain is ignored: each one re-sends a recipient's whole
+// queue, and a bridge-side throttle is not a relay control.
+const BUS_DRAIN_MIN_INTERVAL_MS = 5_000;
+const BUS_SWEEP_INTERVAL_MS = 30_000;
 
 export interface RelayServer {
   server: ReturnType<typeof Bun.serve>;
   connections: Connections;
   licenseCache: LicenseCache;
+  busQueue: BusQueue;
+  /** Expire and redeliver now instead of waiting for the interval (test seam). */
+  sweepBus(): void;
   stop(): void;
 }
 
@@ -39,6 +48,10 @@ export interface RelayServerDeps {
   licenseCache?: LicenseCache;
   fcmSender?: PushSender;
   apnsSender?: PushSender;
+  /** Clock for queue expiry and redelivery; tests inject one to cross TTLs without waiting. */
+  busNow?: () => number;
+  /** Fault seam, consulted only on `bus:ack`. Never driven by config. */
+  busFaults?: { dropAck?: () => boolean };
 }
 
 /**
@@ -84,6 +97,22 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   const replayCache = new ReplayCache({ ttlMs: config.replayTtlMs });
   const pushRateLimiter = new MessageRateLimiter(config.pushRateLimitPerSec);
   const jsonRateLimiter = new TokenBucketRateLimiter(config.jsonRateLimitPerSec, config.jsonRateLimitBurst);
+  const busNow = deps.busNow ?? Date.now;
+  const busQueue = new BusQueue({
+    maxMessagesPerRecipient: config.busQueueMessagesPerDevice,
+    maxBytesPerRecipient: config.busQueueBytesPerDevice,
+    maxMessagesPerSender: config.busQueueMessagesPerSender,
+    maxBytesPerSender: config.busQueueBytesPerSender,
+    maxBytesTotal: config.busQueueBytesTotal,
+    maxTtlMs: config.busMaxTtlMs,
+    now: busNow,
+  });
+  // Sealed bytes are budgeted apart from the frame-count bucket above: a few
+  // frames can carry megabytes. Redelivery and drain egress get their own bucket
+  // per recipient so neither can turn one small frame into unbounded output.
+  const busByteLimiter = new TokenBucketRateLimiter(config.busSendBytesPerMin / 60, config.busSendBytesPerMin);
+  const busRedeliverLimiter = new TokenBucketRateLimiter(config.busSendBytesPerMin / 60, config.busSendBytesPerMin);
+  const lastDrainAt = new Map<string, number>();
   const licenseCache = deps.licenseCache ?? new LicenseCache({ maxEntries: config.licenseCacheMaxEntries });
   const licenseGate: LicenseGate = deps.licenseGate ?? createLicenseGate({
     licenseIssuerUrl: issuerBaseUrl,
@@ -120,9 +149,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   }
 
 
-  function sendJson(ws: ServerWebSocket<WsData>, data: unknown): void {
-    if (ws.readyState !== 1) return;
-    ws.send(JSON.stringify(data));
+  /** The `ws.send` result: 0 means the frame was dropped (also when the socket is not open). */
+  function sendJson(ws: ServerWebSocket<WsData>, data: unknown): number {
+    if (ws.readyState !== 1) return 0;
+    return ws.send(JSON.stringify(data));
   }
 
   interface ErrorOpts {
@@ -152,8 +182,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     try { ws.close(closeCode, code); } catch { /* already closing */ }
   }
 
-  /** Live peers to notify about [conn]'s presence: all same-account
-   *  connections of the OPPOSITE device type, deduped. Cross-type only — the
+  /** Live same-account peers of [deviceType], deduped, excluding [conn]
+   *  itself. Apps are only ever told about agents (never sibling apps): the
    *  app's presence handler treats any frame on a machine's socket as that
    *  machine's presence, so sibling-app noise must never reach it. */
   function sameAccountPeers(conn: Connection, deviceType: Connection["deviceType"]): Connection[] {
@@ -175,6 +205,66 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     if (conn.deviceType !== "agent") return;
     for (const peer of sameAccountPeers(conn, "app")) {
       sendJson(peer.ws, { type: event, peerId: conn.deviceId });
+    }
+    // Agents learn of each other so a bridge can retry held bus mail the moment
+    // its peer appears.
+    for (const peer of sameAccountPeers(conn, "agent")) {
+      sendJson(peer.ws, { type: event, peerId: conn.deviceId });
+    }
+  }
+
+  /**
+   * The live agent socket for (uid, deviceId). `Connections.byDeviceId` is
+   * account-blind and apps share the table, so every bus lookup re-checks both.
+   */
+  function busPeer(uid: string, deviceId: string): Connection | undefined {
+    const live = connections.getByDeviceId(deviceId);
+    return live && live.uid === uid && live.deviceType === "agent" ? live : undefined;
+  }
+
+  function busRefuse(
+    ws: ServerWebSocket<WsData>,
+    id: string,
+    to: string,
+    reason: BusRefusalReason,
+    retryable: boolean,
+  ): void {
+    logger.debug("bus refused", { id, to, reason });
+    sendJson(ws, { type: "bus:refused", id, to, reason, retryable });
+  }
+
+  function busReceipt(ws: ServerWebSocket<WsData>, entry: BusEntry, state: "queued" | "delivered-to-socket"): void {
+    sendJson(ws, { type: "bus:receipt", id: entry.id, to: entry.to, state });
+  }
+
+  /** Hand [entry] to its live recipient; on success the sender's current socket learns it reached a socket. */
+  function busDeliver(entry: BusEntry, recipient: Connection): boolean {
+    const sent = sendJson(recipient.ws, { type: "bus:deliver", id: entry.id, from: entry.from, blob: entry.blob });
+    if (sent === 0) return false;
+    busQueue.markDelivered(entry, recipient.connectionId, busNow());
+    const sender = busPeer(entry.uid, entry.from);
+    if (sender) busReceipt(sender.ws, entry, "delivered-to-socket");
+    logger.debug("bus delivered", { id: entry.id, to: entry.to, bytes: entry.bytes });
+    return true;
+  }
+
+  function busRedeliverAllowed(recipientDeviceId: string, bytes: number): boolean {
+    return busRedeliverLimiter.allow(`bus-rx:${recipientDeviceId}`, bytes);
+  }
+
+  function sweepBus(): void {
+    for (const entry of busQueue.sweep()) {
+      const sender = busPeer(entry.uid, entry.from);
+      if (sender) busRefuse(sender.ws, entry.id, entry.to, "expired", false);
+    }
+    const t = busNow();
+    for (const live of connections.getAll()) {
+      if (live.deviceType !== "agent" || !live.busCapable) continue;
+      for (const entry of busQueue.pending(live.uid, live.deviceId)) {
+        if (!busQueue.redeliverable(entry, live.connectionId, t)) continue;
+        if (!busRedeliverAllowed(live.deviceId, entry.bytes)) break;
+        busDeliver(entry, live);
+      }
     }
   }
 
@@ -314,6 +404,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       epoch: hello.epoch,
       helloNonce: hello.nonce,
       helloTs: tsMs,
+      busCapable: hello.deviceType === "agent" && hello.bus === 1,
       ws,
       connectedAt: now,
       lastSeen: now,
@@ -329,15 +420,28 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       deviceId: hello.deviceId,
       epoch: hello.epoch,
       serverTime: new Date(now).toISOString(),
+      // Advertises the relay, not the client: a bridge sends bus frames only
+      // after seeing this, so it never trips an older relay's INVALID_MESSAGE.
+      ...(conn.deviceType === "agent" ? { bus: 1 } : {}),
     });
 
-    // Apps discover already-online agents on admission; agents only publish
-    // their own availability to apps.
+    // Apps and agents discover already-online agents on admission; agents also
+    // publish their own availability to both.
     if (conn.deviceType === "agent") {
       fanOutAgentPresence(conn, "peer-online");
-    } else {
-      for (const agent of sameAccountPeers(conn, "agent")) {
-        sendJson(ws, { type: "peer-online", peerId: agent.deviceId });
+    }
+    for (const agent of sameAccountPeers(conn, "agent")) {
+      sendJson(ws, { type: "peer-online", peerId: agent.deviceId });
+    }
+
+    // Mail that queued while this agent was away, oldest first. Never sent to a
+    // client that did not ask for bus frames. Charged to the same per-recipient
+    // budget as drain, or a redial loop would egress the whole queue per hello;
+    // what does not fit goes out on the next sweep or drain.
+    if (conn.busCapable) {
+      for (const entry of [...busQueue.pending(conn.uid, conn.deviceId)]) {
+        if (!busRedeliverAllowed(conn.deviceId, entry.bytes)) break;
+        busDeliver(entry, conn);
       }
     }
   }
@@ -384,6 +488,116 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         return;
 
 
+      // The bus cases hold no `await` before they touch the queue, so frames
+      // from one sender are queued in the order they arrived.
+      case "bus:send": {
+        if (conn.deviceType !== "agent") {
+          busRefuse(ws, msg.id, msg.to, "not-agent", false);
+          return;
+        }
+        const bytes = msg.blob.epk.length + msg.blob.box.length;
+        if (!busByteLimiter.allow(`bus:${conn.deviceId}`, bytes)) {
+          busRefuse(ws, msg.id, msg.to, "rate-limited", true);
+          return;
+        }
+        if (msg.to === conn.deviceId) {
+          busRefuse(ws, msg.id, msg.to, "self", false);
+          return;
+        }
+        const live = busPeer(conn.uid, msg.to);
+        // A recipient that did not ask for bus frames would drop the frame as
+        // invalid and never ack, so refuse now rather than hold mail for hours.
+        if (live && !live.busCapable) {
+          busRefuse(ws, msg.id, msg.to, "recipient-outdated", true);
+          return;
+        }
+        // `from` is the authenticated sender, never anything the client supplied.
+        const enq = busQueue.enqueue({
+          uid: conn.uid,
+          from: conn.deviceId,
+          to: msg.to,
+          id: msg.id,
+          blob: msg.blob,
+          ttlMs: msg.ttlMs,
+        });
+        switch (enq.result) {
+          case "recipient-full":
+          case "sender-full":
+          case "global-full":
+            if (enq.result === "global-full") logger.warn("bus queue at its global bound", { bytes });
+            busRefuse(ws, msg.id, msg.to, "queue-full", true);
+            return;
+          case "duplicate": {
+            // The sender resends a relayed entry on a timer; if its ack was lost
+            // the recipient needs the blob again so it can re-ack.
+            const t = busNow();
+            if (
+              live &&
+              busQueue.redeliverable(enq.entry, live.connectionId, t) &&
+              busRedeliverAllowed(msg.to, enq.entry.bytes) &&
+              busDeliver(enq.entry, live)
+            ) {
+              return;
+            }
+            busReceipt(ws, enq.entry, enq.entry.deliveredConn !== null ? "delivered-to-socket" : "queued");
+            return;
+          }
+          case "queued":
+            logger.debug("bus queued", { id: msg.id, to: msg.to, bytes });
+            if (live && busDeliver(enq.entry, live)) return;
+            busReceipt(ws, enq.entry, "queued");
+            return;
+        }
+        return;
+      }
+
+      case "bus:ack": {
+        // An app hello is not bound to its deviceId, so an app could otherwise
+        // claim an offline agent's id and clear that agent's queued mail.
+        if (conn.deviceType !== "agent" || !conn.busCapable) return;
+        if (deps.busFaults?.dropAck?.()) {
+          logger.debug("bus ack dropped by fault seam", { id: msg.id });
+          return;
+        }
+        // The relay does not check `sig`: it holds no bus keys, and the sender,
+        // which does, verifies it on arrival.
+        const entry = busQueue.ack(conn.uid, conn.deviceId, msg.id);
+        if (!entry) {
+          logger.debug("bus ack ignored", { id: msg.id, outcome: "no-entry" });
+          return;
+        }
+        // Resolved now, not at send time: the sender may have reconnected since.
+        // An offline sender resends, and the recipient's dedup re-acks.
+        const sender = busPeer(entry.uid, entry.from);
+        if (!sender) return;
+        sendJson(sender.ws, {
+          type: "bus:acked",
+          id: entry.id,
+          to: conn.deviceId,
+          outcome: msg.outcome,
+          ...(msg.code !== undefined ? { code: msg.code } : {}),
+          sig: msg.sig,
+        });
+        logger.debug("bus acked", { id: entry.id, to: conn.deviceId, outcome: msg.outcome });
+        return;
+      }
+
+      case "bus:drain": {
+        const t = Date.now();
+        const last = lastDrainAt.get(conn.connectionId);
+        if (last !== undefined && t - last < BUS_DRAIN_MIN_INTERVAL_MS) {
+          logger.debug("bus drain ignored", { outcome: "too-soon" });
+          return;
+        }
+        lastDrainAt.set(conn.connectionId, t);
+        if (conn.deviceType !== "agent" || !conn.busCapable) return;
+        for (const entry of [...busQueue.pending(conn.uid, conn.deviceId)]) {
+          if (!busRedeliverAllowed(conn.deviceId, entry.bytes)) break;
+          busDeliver(entry, conn);
+        }
+        return;
+      }
+
       case "push:deliver": {
         if (conn.deviceType !== "agent") {
           sendError(ws, "NOT_AUTHENTICATED", "Must be an authenticated agent to deliver push", false);
@@ -429,6 +643,9 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   }
 
 
+  const busSweep = setInterval(sweepBus, BUS_SWEEP_INTERVAL_MS);
+  busSweep.unref?.();
+
   const pingInterval = config.pingIntervalMs > 0 ? setInterval(() => {
     const t = Date.now();
     const windowMs = config.pingIntervalMs + config.pongTimeoutMs;
@@ -465,27 +682,29 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         return Response.json({
           activeConnections: connections.getConnectionCount(),
           uptime: Math.floor((Date.now() - startTime) / 1000),
+          relay_bus_queue_messages: busQueue.stats().messages,
+          relay_bus_queue_bytes: busQueue.stats().bytes,
         });
       }
 
       if (url.pathname === "/internal/revoke") {
         if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-        return handleRevoke(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
+        return handleRevoke(req, { licenseCache, connections, busQueue, relayInternalSecret: config.relayInternalSecret });
       }
 
       if (url.pathname === "/internal/peer-policy") {
         if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-        return handlePeerPolicy(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
+        return handlePeerPolicy(req, { licenseCache, connections, busQueue, relayInternalSecret: config.relayInternalSecret });
       }
 
       if (url.pathname === "/internal/connections") {
         if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-        return handleListConnections(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
+        return handleListConnections(req, { licenseCache, connections, busQueue, relayInternalSecret: config.relayInternalSecret });
       }
 
       if (url.pathname === "/internal/expire") {
         if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-        return handleExpire(req, { licenseCache, connections, relayInternalSecret: config.relayInternalSecret });
+        return handleExpire(req, { licenseCache, connections, busQueue, relayInternalSecret: config.relayInternalSecret });
       }
 
       if (url.pathname === "/ws") {
@@ -555,6 +774,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         ws.data.phase = "closed";
         admissions.release(connectionId);
         clearHelloTimer(connectionId);
+        lastDrainAt.delete(connectionId);
 
         const conn = connections.getByConnectionId(connectionId);
         if (!conn) {
@@ -585,8 +805,15 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     server,
     connections,
     licenseCache,
+    busQueue,
+    sweepBus,
     stop() {
       if (pingInterval) clearInterval(pingInterval);
+      clearInterval(busSweep);
+      busQueue.clear();
+      lastDrainAt.clear();
+      busByteLimiter.destroy();
+      busRedeliverLimiter.destroy();
       for (const t of helloTimers.values()) clearTimeout(t);
       helloTimers.clear();
       connections.clear();

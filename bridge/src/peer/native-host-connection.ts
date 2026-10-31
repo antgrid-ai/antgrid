@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { BusClientMessage } from "antgrid-wire";
 import { PEER_ALPN, PEER_MAX_RECORD_BYTES, STREAM_MAX_BIDI_STREAMS_PER_CONNECTION, type PeerAuthorizationSnapshot } from "antgrid-wire";
 import type { Connection, Endpoint, Incoming } from "@number0/iroh";
 import { CentralControlClient, type CentralControlOptions } from "../central-control-client";
@@ -9,7 +10,7 @@ import { AuthorizationLease, type EnrollmentIdentity, type LeaseFailure } from "
 import { EndpointApiError, EndpointEnrollment } from "./enrollment";
 import { PeerSessionOwner, type PeerSessionOwnerOptions, MAX_APP_SESSIONS } from "../peer-session-owner";
 import { EndpointLifecycle, EndpointFailure } from "./endpoint-lifecycle";
-import type { RemoteHostConnection } from "../remote-host-connection";
+import type { BusHandler, RemoteHostConnection } from "../remote-host-connection";
 import { frameIdFor, NETWATCH_SESSION_STREAM_LABEL } from "../netwatch";
 import { AdmissionRegistry, type AdmissionReservation } from "./admission-registry";
 import { PeerStreamAcceptor, readStreamOpen, STREAM_RESET_SCOPED, type ScopedStreamOptions, type StreamDiagnostic } from "./stream-dispatch";
@@ -761,15 +762,29 @@ export class NativePeerSessions extends PeerSessionOwner {
   }
 }
 
-/** Central control has no reference to peer keys, queues or project readiness. */
+/** Central control has no reference to peer keys, queues or project readiness.
+ *  It carries opaque session-bus frames for a registered handler but holds no
+ *  bus keys and cannot read a blob. */
 export class NativeHostConnection implements RemoteHostConnection {
   private closed = false;
+  private busHandler: BusHandler | null = null;
   readonly peers: NativePeerSessions;
   readonly central: CentralControlClient;
   constructor(options: NativeHostOptions) {
     this.peers = new NativePeerSessions(options.native);
     this.central = new CentralControlClient({
       ...options.central,
+      onBus: (message) => this.busHandler?.onFrame(message),
+      onControl: (message) => {
+        options.central.onControl?.(message);
+        if (message.type === "peer-online" || message.type === "peer-offline") {
+          this.busHandler?.onPresence(message.peerId, message.type === "peer-online");
+        }
+      },
+      onAuthenticated: () => {
+        options.central.onAuthenticated?.();
+        this.busHandler?.onAuthenticated();
+      },
       onPeerPolicyChanged: (generation) => this.peers.notePolicyGeneration(generation),
       onAuthRevoked: () => { this.peers.invalidateAuthorization(); options.central.onAuthRevoked?.(); },
     });
@@ -784,6 +799,10 @@ export class NativeHostConnection implements RemoteHostConnection {
   }
   redialWithFreshToken(): void { this.central.redialWithFreshToken(); }
   sendPushDeliver(message: Parameters<CentralControlClient["sendPushDeliver"]>[0]): void { this.central.sendPushDeliver(message); }
+  sendBus(frame: BusClientMessage): boolean { return this.central.sendBus(frame); }
+  busLinkState(): "ready" | "offline" | "unsupported" { return this.central.busLinkState(); }
+  busNow(): number { return this.central.busNow(); }
+  setBusHandler(handler: BusHandler | null): void { this.busHandler = handler; }
   accountDisowns(deviceId: string, ed25519Pub: string): boolean { return this.peers.accountDisowns(deviceId, ed25519Pub); }
   setBus(...args: Parameters<NativePeerSessions["setBus"]>) { return this.peers.setBus(...args); }
   attachStream(...args: Parameters<NativePeerSessions["attachStream"]>) { return this.peers.attachStream(...args); }
