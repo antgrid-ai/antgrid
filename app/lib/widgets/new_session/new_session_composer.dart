@@ -628,7 +628,11 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
               //     isn't.
               child: LayoutBuilder(
                 builder: (context, rowConstraints) {
-                  const gaps = AbTokens.space6 * 3;
+                  // The project and machine chips share the capped width; a
+                  // phone holding one machine shows only the project chip,
+                  // which then takes both shares.
+                  final capped = oneMachine ? 1 : 2;
+                  final gaps = AbTokens.space6 * (capped + 1);
                   // Guards against Infinity - Infinity = NaN below: the only
                   // production ancestor bounds this row (see
                   // new_session_content.dart's ConstrainedBox), but an
@@ -646,19 +650,19 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                   final cap = math.max(
                     0.0,
                     math.min(
-                      row * _chipLabelCapFraction,
+                      row * _chipLabelCapFraction * (3 - capped),
                       (row -
                               gaps -
                               kComposerChipGlyphWidth -
                               _branchChipFloor) /
-                          2,
+                          capped,
                     ),
                   );
                   // Whatever the caps left above the branch's floor: enough for
                   // the isolation chip's word, or it falls back to its glyph.
                   final isolationChipMax = math.max(
                     0.0,
-                    row - gaps - cap * 2 - _branchChipFloor,
+                    row - gaps - cap * capped - _branchChipFloor,
                   );
                   final capBox = BoxConstraints(maxWidth: cap);
                   return Row(
