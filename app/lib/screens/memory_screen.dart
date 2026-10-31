@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../constants/breakpoints.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_adaptive_sheet.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_inline_banner.dart';
@@ -34,6 +35,7 @@ import '../widgets/memory/memory_mutation.dart';
 import '../widgets/memory/memory_off_state.dart';
 import '../widgets/memory/memory_problems.dart';
 import '../widgets/memory/memory_record_details.dart';
+import '../widgets/memory/memory_restart_sheet.dart';
 import '../widgets/memory/memory_settings_dialog.dart';
 import '../widgets/memory/memory_toolbar.dart';
 
@@ -186,6 +188,15 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       'op': 'settings',
       'enabled': true,
     }, onError: (e) => setState(() => _offError = memoryErrorCopy(e, mutation: true)));
+  }
+
+  Future<void> _reviewSessions(List<MemorySessionWithoutMemory> rows) async {
+    await showAbAdaptiveSheet<void>(
+      context,
+      maxWidth: 560,
+      child: MemoryRestartSheet(target: _target, sessions: rows),
+    );
+    if (mounted) invalidateMemoryViews(ref, _target);
   }
 
   Future<void> _export({String? projectId}) async {
@@ -462,6 +473,11 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
         'Memory',
         'show memory failed',
         () => _showMemory(f, wide: wide),
+      ),
+      onReviewSessions: () => detached(
+        'Memory',
+        'review sessions failed',
+        () => _reviewSessions(status.sessionsWithoutMemory),
       ),
     );
     final listPane = MemoryListPane(

@@ -25,6 +25,11 @@ const _kPendingReplyTimeout = Duration(seconds: 15);
 /// a failure that did not happen.
 const _kModeReplyTimeout = Duration(seconds: 25);
 
+/// `session:restart` waits out the same teardown as set-mode and then the
+/// relaunch, so it must stay strictly above the bridge's `TEARDOWN_TIMEOUT_MS`
+/// (15s) with room for the start.
+const _kRestartReplyTimeout = Duration(seconds: 30);
+
 /// `session:fork` stages the source agent's transcript before it answers, and a
 /// long conversation makes that the slow part. Keep this strictly greater than
 /// the bridge's staging bound (`HANDOFF_STAGE_DEADLINE_MS`, 60s) plus worktree
@@ -52,6 +57,17 @@ enum SessionSetupAction {
 /// has to snap the toggle back and name the reason, so it carries the reply's
 /// `ok` and `error` through instead.
 typedef SessionModeResult = ({bool ok, String? error});
+
+/// Outcome of a `session:restart`. [restarted] separates "restarted" from the
+/// bridge's `ok` no-op (nothing needed restarting), and [errorCode] carries the
+/// typed refusals (`MEMORY_OFF`, `SCHEDULED_RUN`) that leave the session as it
+/// was; every other failure is told apart by [error] text alone.
+typedef SessionRestartResult = ({
+  bool ok,
+  bool restarted,
+  String? error,
+  String? errorCode,
+});
 
 /// Typed bridge refusal. UI code can make a safe choice (for example, a dirty
 /// worktree confirmation) without parsing a translated/display error string.
@@ -137,6 +153,7 @@ class SessionsService {
   final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
   final Map<String, PendingReply<SessionDeleteAck>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
+  final Map<String, PendingReply<SessionRestartResult>> _pendingRestarts = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   Stream<SessionListing> get listings => _listingsController.stream;
@@ -273,6 +290,17 @@ class SessionsService {
       } else {
         deletePending.fail(SessionOperationException(errorCode, error));
       }
+      return;
+    }
+
+    final restartPending = _pendingRestarts.remove(requestId);
+    if (restartPending != null) {
+      restartPending.complete((
+        ok: ok,
+        restarted: j['restarted'] == true,
+        error: error,
+        errorCode: errorCode,
+      ));
       return;
     }
 
@@ -517,6 +545,29 @@ class SessionsService {
     return pending.future;
   }
 
+  /// Restarts [id] so its agent relaunches with Memory, resuming the same
+  /// conversation. The bridge re-checks that a restart is still needed and
+  /// answers `ok` with `restarted: false` when it is not, so a stale list never
+  /// interrupts an agent.
+  Future<SessionRestartResult> restartForMemory(String id) {
+    final requestId = _newRequestId();
+    final pending = _newPending<SessionRestartResult>(
+      () => _pendingRestarts.remove(requestId),
+      timeout: _kRestartReplyTimeout,
+    );
+    _pendingRestarts[requestId] = pending;
+    unawaited(
+      _send(
+        createAbMessage('session:restart', {
+          'requestId': requestId,
+          'sessionId': id,
+          'reason': 'memory',
+        }),
+      ),
+    );
+    return pending.future;
+  }
+
   /// Delete [id]. A bridge refusal raises [SessionOperationException]; no reply
   /// completes [SessionDeleteAck.outcomeUnknown]; silence cannot mean failure.
   Future<SessionDeleteAck> delete(
@@ -639,6 +690,11 @@ class SessionsService {
     final modeChanges = _pendingModeChanges.values.toList();
     _pendingModeChanges.clear();
     for (final p in modeChanges) {
+      p.fail(error);
+    }
+    final restarts = _pendingRestarts.values.toList();
+    _pendingRestarts.clear();
+    for (final p in restarts) {
       p.fail(error);
     }
   }

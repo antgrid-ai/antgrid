@@ -14,18 +14,30 @@ class MemoryProblems extends StatelessWidget {
     required this.busy,
     required this.onRepair,
     required this.onShowMemory,
+    required this.onReviewSessions,
   });
 
   final MemoryStatus status;
   final bool busy;
   final VoidCallback onRepair;
   final ValueChanged<MemoryFailure> onShowMemory;
+  final VoidCallback onReviewSessions;
 
   @override
   Widget build(BuildContext context) {
     final pending = status.pendingOperations;
     final failed = status.failedOperations;
+    final unrestarted = status.sessionsWithoutMemory.length;
     final lines = <Widget>[
+      if (unrestarted > 0)
+        _ProblemLine(
+          warning: false,
+          text: unrestarted == 1
+              ? '1 running session started without Memory.'
+              : '$unrestarted running sessions started without Memory.',
+          action: 'Review',
+          onAction: busy ? null : onReviewSessions,
+        ),
       if (!status.searchReady)
         _ProblemLine(
           warning: true,

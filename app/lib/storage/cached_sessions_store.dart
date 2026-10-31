@@ -80,7 +80,8 @@ class CachedSessionsStore {
   /// emits on the next microtask so listeners can react synchronously.
   ///
   /// `deleting` and `setup` are dropped on the way IN, not just on the way to
-  /// disk. The cache is what every surface falls back to the moment the live
+  /// disk. `startedWithoutMemory` is not: like `running`, it describes the live
+  /// process and only its disk copy is neutralised. The cache is what every surface falls back to the moment the live
   /// stream stops matching an entry, and nothing here is subscribed to the push
   /// that would clear either — so a connection lost inside the delete window
   /// would leave the row inert, unopenable and undeletable, and a rebuilt
@@ -219,16 +220,18 @@ class CachedSessionsStore {
             for (final item in v) {
               if (item is Map<String, dynamic>) {
                 try {
-                  // `running`, `deleting` and `setup` are in-memory state only
-                  // — even if a build that wrote this blob persisted them,
-                  // clear them on load so a fresh launch never resurrects a
-                  // stale green status dot, a pending row with nothing left
-                  // alive to clear it, or a workspace forever preparing.
+                  // `running`, `deleting`, `startedWithoutMemory` and `setup`
+                  // are in-memory state only — even if a build that wrote this
+                  // blob persisted them, clear them on load so a fresh launch
+                  // never resurrects a stale green status dot, a pending row
+                  // with nothing left alive to clear it, a workspace forever
+                  // preparing, or a restart hint for a process that is gone.
                   list.add(
                     SessionEntry.fromJson({
                       ...item,
                       'running': false,
                       'deleting': false,
+                      'startedWithoutMemory': false,
                       'setup': null,
                     }),
                   );
@@ -292,8 +295,8 @@ class CachedSessionsStore {
   Future<void> _flush() async {
     if (_entriesDirty) {
       _entriesDirty = false;
-      // Strip `running`, `workStatus`, `deleting` and `setup` before
-      // persisting: all four are process-lifetime state owned by
+      // Strip `running`, `workStatus`, `deleting`, `startedWithoutMemory` and
+      // `setup` before persisting: all five are process-lifetime state owned by
       // SessionsService, not durable metadata. A restored `running` renders
       // sessions as live before the agent reports; a restored `attention`
       // claims an agent is blocked on a prompt that died with the process; a
@@ -314,6 +317,7 @@ class CachedSessionsStore {
               final j = {...s.toJson(), 'running': false};
               j.remove('workStatus');
               j.remove('deleting');
+              j.remove('startedWithoutMemory');
               j.remove('setup');
               return j;
             }).toList(),

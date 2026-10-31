@@ -192,6 +192,12 @@ void main() {
         'requestId': 'q',
         'sessionId': kDemoSessionCartId,
       },
+      {
+        'type': 'session:restart',
+        'requestId': 'q',
+        'sessionId': kDemoSessionCartId,
+        'reason': 'memory',
+      },
       {'type': 'file:read', 'path': kDemoFileContents.keys.first},
       {'type': 'file:read', 'path': 'not/in/the/sample.ts'},
       {'type': 'file:tree:root:request', 'includeIgnored': true},

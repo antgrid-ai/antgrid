@@ -154,4 +154,46 @@ void main() {
       expect(store.get('p1').single.running, isFalse);
     },
   );
+
+  // Like `running`, the flag describes a live process: the memory copy keeps it
+  // so the drawer can badge the row, and the disk copy never carries it.
+  test(
+    'startedWithoutMemory is kept in memory, stripped on disk, false on load',
+    () async {
+      final store = await CachedSessionsStore.open();
+      await store.put('p1', [
+        s('a', running: true).copyWith(startedWithoutMemory: true),
+      ]);
+      expect(store.get('p1').single.startedWithoutMemory, isTrue);
+      await store.flushNow();
+
+      final blob = await SharedPreferencesAsync().getString(
+        'antgrid.session_cache.v1',
+      );
+      expect(blob, isNot(contains('startedWithoutMemory')));
+
+      final reopened = await CachedSessionsStore.open();
+      expect(reopened.get('p1').single.startedWithoutMemory, isFalse);
+    },
+  );
+
+  test(
+    'a startedWithoutMemory flag persisted by another build is forced false',
+    () async {
+      await SharedPreferencesAsync().setString(
+        'antgrid.session_cache.v1',
+        jsonEncode({
+          'version': 1,
+          'entries': {
+            'p1': [
+              {...s('a').toJson(), 'startedWithoutMemory': true},
+            ],
+          },
+        }),
+      );
+
+      final store = await CachedSessionsStore.open();
+      expect(store.get('p1').single.startedWithoutMemory, isFalse);
+    },
+  );
 }

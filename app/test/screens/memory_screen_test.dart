@@ -41,6 +41,7 @@ Map<String, dynamic> statusJson({
   int pending = 0,
   int failed = 0,
   List<Map<String, dynamic>> failures = const [],
+  List<Map<String, dynamic>>? sessionsWithoutMemory,
 }) => {
   'available': available,
   'enabled': enabled,
@@ -51,6 +52,16 @@ Map<String, dynamic> statusJson({
   'pending_operations': pending,
   'failed_operations': failed,
   'failures': failures,
+  'sessions_without_memory': ?sessionsWithoutMemory,
+};
+
+Map<String, dynamic> unrestartedJson(String id, {String status = 'done'}) => {
+  'project_id': 'p1',
+  'project_label': 'antgrid',
+  'session_id': id,
+  'name': 'Session $id',
+  'work_status': status,
+  'agent_session_resumable': true,
 };
 
 Map<String, dynamic> rec(
@@ -616,6 +627,89 @@ void main() {
       expect(fake.ops('status'), isNotEmpty);
       expect(fake.ops('get').last['id'], 'm1');
       expect(find.text('Applies when'), findsOneWidget);
+    });
+  });
+
+  group('sessions without memory', () {
+    testWidgets('one session reads singular, with a Review action', (
+      tester,
+    ) async {
+      useWide(tester);
+      await mount(
+        tester,
+        Fake(status: statusJson(sessionsWithoutMemory: [unrestartedJson('a')])),
+      );
+      expect(
+        find.text('1 running session started without Memory.'),
+        findsOneWidget,
+      );
+      expect(find.text('Review'), findsOneWidget);
+    });
+
+    testWidgets('several sessions read plural and lead the problem lines', (
+      tester,
+    ) async {
+      useWide(tester);
+      await mount(
+        tester,
+        Fake(
+          status: statusJson(
+            pending: 1,
+            sessionsWithoutMemory: [
+              unrestartedJson('a'),
+              unrestartedJson('b'),
+              unrestartedJson('c'),
+            ],
+          ),
+        ),
+      );
+      final line = find.text('3 running sessions started without Memory.');
+      expect(line, findsOneWidget);
+      expect(
+        tester.getTopLeft(line).dy,
+        lessThan(tester.getTopLeft(find.textContaining('1 save is waiting')).dy),
+      );
+    });
+
+    testWidgets('an empty list shows no line', (tester) async {
+      useWide(tester);
+      await mount(
+        tester,
+        Fake(status: statusJson(sessionsWithoutMemory: const [])),
+      );
+      expect(find.textContaining('started without Memory'), findsNothing);
+      expect(find.text('Review'), findsNothing);
+    });
+
+    testWidgets('turning Memory on then shows the line', (tester) async {
+      useWide(tester);
+      final fake = Fake(
+        status: statusJson(
+          enabled: false,
+          sessionsWithoutMemory: [unrestartedJson('a')],
+        ),
+      );
+      await mount(tester, fake);
+      expect(find.textContaining('started without Memory'), findsNothing);
+      await tester.tap(find.text('Turn on Memory'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('1 running session started without Memory.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Review opens the restart sheet', (tester) async {
+      useWide(tester);
+      await mount(
+        tester,
+        Fake(status: statusJson(sessionsWithoutMemory: [unrestartedJson('a')])),
+      );
+      await tester.tap(find.text('Review'));
+      await tester.pumpAndSettle();
+      expect(find.text('Restart to use Memory'), findsOneWidget);
+      expect(find.text('Session a'), findsOneWidget);
+      expect(find.text('Restart 1 session'), findsOneWidget);
     });
   });
 

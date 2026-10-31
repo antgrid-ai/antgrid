@@ -162,8 +162,8 @@ class SessionModeMenuItem extends ConsumerWidget {
   }
 }
 
-/// Marker text of the `session:set-mode` failure where the old runtime never
-/// shut down. Kept in lockstep with `TEARDOWN_TIMEOUT_ERROR` in
+/// Marker text of the `session:set-mode` and `session:restart` failure where the
+/// old runtime never shut down. Kept in lockstep with `TEARDOWN_TIMEOUT_ERROR` in
 /// bridge/src/session-manager.ts.
 ///
 /// Matched with `contains`, never `startsWith`: the bridge reports the reason as
@@ -171,13 +171,13 @@ class SessionModeMenuItem extends ConsumerWidget {
 /// `"Error: "` and an anchored match silently never fires.
 const kTeardownTimeoutError = 'timed out tearing down session';
 
-/// Marker text of the `session:set-mode` failure where the old runtime shut down
-/// but the new one wouldn't start. Kept in lockstep with `RESTART_FAILED_ERROR`
+/// Marker text of the `session:set-mode` and `session:restart` failure where the
+/// old runtime shut down but the new one wouldn't start. Kept in lockstep with `RESTART_FAILED_ERROR`
 /// in bridge/src/session-manager.ts. Same `contains` matching as above.
 ///
 /// These two are the only refusals that leave the session STOPPED; every other
 /// one leaves it running in its original mode.
-const kRestartFailedError = 'failed to restart session after mode switch';
+const kRestartFailedError = 'failed to restart session';
 
 /// What this session stands to lose by restarting right now, or null when it
 /// has nothing in flight and the plain idle copy applies.

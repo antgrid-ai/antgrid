@@ -491,6 +491,121 @@ void main() {
     await session.close();
   });
 
+  group('restartForMemory', () {
+    Future<(FakeAgentTransport, ProjectSession, SessionsService)> open() async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      return (t, session, SessionsService.fromSession(session, cache: cache));
+    }
+
+    Future<Map<String, dynamic>> sentFrame(FakeAgentTransport t) async {
+      await Future<void>.delayed(Duration.zero);
+      return t.sent.firstWhere((m) => m['type'] == 'session:restart');
+    }
+
+    test('sends the memory-reason frame', () async {
+      final (t, session, svc) = await open();
+      final future = svc.restartForMemory('sess-1');
+      final sent = await sentFrame(t);
+      expect(sent['sessionId'], 'sess-1');
+      expect(sent['reason'], 'memory');
+      expect(sent['requestId'], isA<String>());
+      t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
+      await future;
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('decodes restarted and not-restarted successes', () async {
+      final (t, session, svc) = await open();
+      final first = svc.restartForMemory('a');
+      var sent = await sentFrame(t);
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': true,
+        'restarted': true,
+      });
+      var r = await first;
+      expect((r.ok, r.restarted, r.error, r.errorCode), (
+        true,
+        true,
+        null,
+        null,
+      ));
+
+      t.sent.clear();
+      final second = svc.restartForMemory('b');
+      sent = await sentFrame(t);
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': true,
+        'restarted': false,
+      });
+      r = await second;
+      expect((r.ok, r.restarted), (true, false));
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('decodes an errorCode refusal and an error-text failure', () async {
+      final (t, session, svc) = await open();
+      final refused = svc.restartForMemory('a');
+      var sent = await sentFrame(t);
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': false,
+        'errorCode': 'MEMORY_OFF',
+        'error': 'Memory is off',
+      });
+      var r = await refused;
+      expect((r.ok, r.restarted, r.errorCode), (false, false, 'MEMORY_OFF'));
+
+      t.sent.clear();
+      final failed = svc.restartForMemory('b');
+      sent = await sentFrame(t);
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': false,
+        'error': 'Error: failed to restart session: b',
+      });
+      r = await failed;
+      expect(r.ok, isFalse);
+      expect(r.errorCode, isNull);
+      expect(r.error, contains('failed to restart session'));
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('fails the future when no reply arrives in 30 s', () async {
+      final (_, session, svc) = await open();
+      fakeAsync((async) {
+        Object? outcome;
+        svc.restartForMemory('a').then<void>((_) {}, onError: (Object e) {
+          outcome = e;
+        });
+        async.elapse(const Duration(seconds: 29));
+        async.flushMicrotasks();
+        expect(outcome, isNull, reason: 'still waiting at 29 s');
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+        expect(outcome, isA<TimeoutException>());
+      });
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('dispose fails a pending restart', () async {
+      final (t, session, svc) = await open();
+      final pending = svc.restartForMemory('a');
+      final expectation = expectLater(pending, throwsA(isA<StateError>()));
+      await sentFrame(t);
+      await svc.dispose();
+      await expectation;
+      await session.close();
+    });
+  });
+
   test('setMode completes ok on success', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

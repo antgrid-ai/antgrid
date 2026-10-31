@@ -1,3 +1,4 @@
+import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,6 +74,115 @@ void main() {
           'project_id': null,
         }).showId,
         'a',
+      );
+    });
+  });
+
+  group('sessions_without_memory', () {
+    Map<String, dynamic> row(
+      String project,
+      String session, [
+      Map<String, dynamic>? extra,
+    ]) => {
+      'project_id': project,
+      'project_label': 'Label $project',
+      'session_id': session,
+      'name': 'Name $session',
+      'work_status': 'done',
+      'agent_session_resumable': true,
+      ...?extra,
+    };
+
+    test('parses rows', () {
+      final s = MemoryStatus.fromJson({
+        'enabled': true,
+        'sessions_without_memory': [
+          row('p1', 's1'),
+          row('p2', 's2', {
+            'work_status': 'attention',
+            'agent_session_resumable': false,
+          }),
+        ],
+      });
+      expect(s.sessionsWithoutMemory, hasLength(2));
+      final first = s.sessionsWithoutMemory.first;
+      expect(first.projectId, 'p1');
+      expect(first.projectLabel, 'Label p1');
+      expect(first.sessionId, 's1');
+      expect(first.name, 'Name s1');
+      expect(first.workStatus, AgentWorkStatus.done);
+      expect(first.resumable, isTrue);
+      expect(
+        s.sessionsWithoutMemory.last.workStatus,
+        AgentWorkStatus.attention,
+      );
+      expect(s.sessionsWithoutMemory.last.resumable, isFalse);
+    });
+
+    test('is not folded into needsAttention', () {
+      final s = MemoryStatus.fromJson({
+        'available': true,
+        'enabled': true,
+        'search_status': 'ready',
+        'sessions_without_memory': [row('p1', 's1')],
+      });
+      expect(s.needsAttention, isFalse);
+    });
+
+    test('absent, empty and page-shaped answers give an empty list', () {
+      expect(MemoryStatus.fromJson({}).sessionsWithoutMemory, isEmpty);
+      expect(
+        MemoryStatus.fromJson({
+          'sessions_without_memory': [],
+        }).sessionsWithoutMemory,
+        isEmpty,
+      );
+      expect(
+        MemoryStatus.fromJson({
+          'results': [rec('a')],
+          'has_more': false,
+          'total': 1,
+        }).sessionsWithoutMemory,
+        isEmpty,
+      );
+      expect(
+        MemoryStatus.fromJson({
+          'sessions_without_memory': 'nope',
+        }).sessionsWithoutMemory,
+        isEmpty,
+      );
+    });
+
+    test('skips malformed rows and keeps the rest', () {
+      final s = MemoryStatus.fromJson({
+        'sessions_without_memory': [
+          'junk',
+          7,
+          {'project_id': 'p'},
+          {'session_id': 's'},
+          {'project_id': '', 'session_id': 's'},
+          row('p', 'ok'),
+        ],
+      });
+      expect(s.sessionsWithoutMemory.map((r) => r.sessionId), ['ok']);
+    });
+
+    test('an unknown work status is null and resumable defaults true', () {
+      final s = MemoryStatus.fromJson({
+        'sessions_without_memory': [
+          {'project_id': 'p', 'session_id': 's', 'work_status': 'weird'},
+        ],
+      });
+      expect(s.sessionsWithoutMemory.single.workStatus, isNull);
+      expect(s.sessionsWithoutMemory.single.resumable, isTrue);
+    });
+
+    test('registrationId is bare locally and compound for a remote machine', () {
+      final r = MemorySessionWithoutMemory.fromJson(row('proj', 'sess'))!;
+      expect(r.registrationId(const MemoryTarget.machine()), 'proj');
+      expect(
+        r.registrationId(const MemoryTarget.machine(machineId: 'm-1')),
+        'm-1.proj',
       );
     });
   });

@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'agent_work_status.dart';
+
 @immutable
 class MemoryTarget {
   const MemoryTarget.machine({this.machineId, this.label = 'This machine'});
@@ -295,6 +297,65 @@ class MemoryFailure {
   String get showId => latestId ?? targetId;
 }
 
+/// A running session whose agent was launched before Memory was turned on, so a
+/// restart is the only way it gets Memory. Mirrors a `sessions_without_memory`
+/// row of the unscoped app `status` answer.
+@immutable
+class MemorySessionWithoutMemory {
+  const MemorySessionWithoutMemory({
+    required this.projectId,
+    required this.projectLabel,
+    required this.sessionId,
+    required this.name,
+    this.workStatus,
+    this.resumable = true,
+  });
+
+  /// Null for a row missing either id: it cannot be addressed, so the caller
+  /// drops it rather than the list around it.
+  static MemorySessionWithoutMemory? fromJson(Map<String, dynamic> json) {
+    final projectId = json['project_id'];
+    final sessionId = json['session_id'];
+    if (projectId is! String || projectId.isEmpty) return null;
+    if (sessionId is! String || sessionId.isEmpty) return null;
+    return MemorySessionWithoutMemory(
+      projectId: projectId,
+      projectLabel: json['project_label'] as String? ?? projectId,
+      sessionId: sessionId,
+      name: json['name'] as String? ?? sessionId,
+      workStatus: AgentWorkStatus.fromWire(json['work_status']),
+      // Optimistic on absence, like [SessionEntry.agentSessionResumable]: a
+      // wrong "new conversation" chip is worse than a missing one.
+      resumable: json['agent_session_resumable'] != false,
+    );
+  }
+
+  final String projectId;
+  final String projectLabel;
+  final String sessionId;
+  final String name;
+  final AgentWorkStatus? workStatus;
+  final bool resumable;
+
+  /// The id the app registers this project under: bare for the local host,
+  /// `machine.project` for a remote one.
+  String registrationId(MemoryTarget target) =>
+      target.machineId == null ? projectId : '${target.machineId}.$projectId';
+
+  @override
+  bool operator ==(Object other) =>
+      other is MemorySessionWithoutMemory &&
+      other.projectId == projectId &&
+      other.projectLabel == projectLabel &&
+      other.sessionId == sessionId &&
+      other.name == name &&
+      other.workStatus == workStatus &&
+      other.resumable == resumable;
+  @override
+  int get hashCode =>
+      Object.hash(projectId, projectLabel, sessionId, name, workStatus, resumable);
+}
+
 class MemoryStatus {
   MemoryStatus.fromJson(Map<String, dynamic> json)
     : available = json['available'] == true,
@@ -310,6 +371,16 @@ class MemoryStatus {
           if (failure is Map)
             MemoryFailure.fromJson(failure.cast<String, dynamic>()),
       ],
+      sessionsWithoutMemory = switch (json['sessions_without_memory']) {
+        final List rows => [
+          for (final row in rows)
+            if (row is Map)
+              ?MemorySessionWithoutMemory.fromJson(
+                row.cast<String, dynamic>(),
+              ),
+        ],
+        _ => const [],
+      },
       error = (json['error'] as Map?)?['message'] as String?;
   final bool available;
   final bool enabled;
@@ -320,6 +391,9 @@ class MemoryStatus {
   final int pendingOperations;
   final int failedOperations;
   final List<MemoryFailure> failures;
+
+  /// Not part of [needsAttention]: a restart is an offer, not a fault.
+  final List<MemorySessionWithoutMemory> sessionsWithoutMemory;
   final String? error;
 
   bool get searchReady => searchStatus == 'ready';

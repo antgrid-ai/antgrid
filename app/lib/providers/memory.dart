@@ -150,10 +150,35 @@ final memoryDrawerSummaryProvider = FutureProvider.autoDispose<MemoryProjects?>(
   },
 );
 
+/// Whether this desktop's Memory is on right now, for the drawer's restart
+/// badge. Same gating as [memoryDrawerSummaryProvider]: it must never spawn a
+/// host, so anything short of a live host answers false.
+final memoryDrawerEnabledProvider = FutureProvider.autoDispose<bool>((
+  ref,
+) async {
+  if (ref.watch(demoModeProvider) || isMobilePlatform) return false;
+  if (ref.watch(hostStatusProvider).value?.phase != HostPhase.up) return false;
+  try {
+    final host = await ref.read(hostControllerProvider).peekHost();
+    if (host == null) return false;
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      return MemoryStatus.fromJson(
+        await client.memoryRequest({'op': 'status'}),
+      ).enabled;
+    } finally {
+      client.close();
+    }
+  } catch (_) {
+    return false;
+  }
+});
+
 void invalidateMemoryViews(WidgetRef ref, MemoryTarget target) {
   ref.invalidate(memoryStatusProvider(target));
   ref.invalidate(memoryProjectsProvider(target));
   ref.invalidate(memoryPageProvider);
   ref.invalidate(memoryDetailProvider);
   ref.invalidate(memoryDrawerSummaryProvider);
+  ref.invalidate(memoryDrawerEnabledProvider);
 }
