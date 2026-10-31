@@ -688,29 +688,30 @@ export class HostServer {
     resolveAbDir,
     () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: projectLabel(seen) })),
     (projectId) => this.seenProjects.has(projectId),
-    () => {
-      const rows: SessionWithoutMemory[] = [];
-      // A cold project has no core, so nothing is running there and walking `cores` is complete.
-      for (const [projectId, entry] of this.cores) {
-        const seen = this.seenProjects.get(projectId);
-        // The remote RPC must not disclose a project outside the catalog.
-        if (!seen) continue;
-        for (const s of entry.core.listSessions(false) ?? []) {
-          if (!s.startedWithoutMemory) continue;
-          rows.push({
-            project_id: projectId,
-            project_label: projectLabel(seen),
-            session_id: s.id,
-            name: s.name,
-            ...(s.workStatus ? { work_status: s.workStatus } : {}),
-            agent_session_resumable: s.agentSessionResumable,
-          });
-        }
-      }
-      return rows;
-    },
+    () => this.sessionsWithoutMemory(),
   );
   private releaseMemoryGate: (() => void) | undefined;
+
+  private sessionsWithoutMemory(): SessionWithoutMemory[] {
+    const rows: SessionWithoutMemory[] = [];
+    // A cold project has no core, so nothing is running there and walking `cores` is complete.
+    for (const [projectId, entry] of this.cores) {
+      const seen = this.seenProjects.get(projectId);
+      // The remote RPC must not disclose a project outside the catalog.
+      if (!seen) continue;
+      for (const s of entry.core.listStartedWithoutMemory()) {
+        rows.push({
+          project_id: projectId,
+          project_label: projectLabel(seen),
+          session_id: s.id,
+          name: s.name,
+          ...(s.workStatus ? { work_status: s.workStatus } : {}),
+          agent_session_resumable: s.agentSessionResumable,
+        });
+      }
+    }
+    return rows;
+  }
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;

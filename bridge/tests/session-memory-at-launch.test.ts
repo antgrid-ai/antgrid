@@ -4,47 +4,45 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentRuntime } from "antgrid-agents/runtime";
 import { createAgentRegistry } from "antgrid-agents/registry";
-import { NO_INJECTION } from "antgrid-agents/launch-inject";
 import { serviceAdapter } from "../../packages/antgrid-agents/tests/fixtures/service-adapter";
-import { agentHostServices } from "../src/agent-host";
+import { agentHostServices, setMemoryLaunchGate } from "../src/agent-host";
 import { SessionManager } from "../src/session-manager";
 
-// `startedWithoutMemory` is derived from what a run was actually launched with,
-// so the launch env is the only input that matters: a prepared launch carrying
-// ANTGRID_MEMORY_MCP means the MCP profile was handed over, and the gate says
-// whether its absence is a choice or a soft failure.
+// `startedWithoutMemory` is derived from what a run was actually launched with:
+// the prepared launch's `memoryWithheld`, which the augmenter sets (its own
+// tests cover when). Every other input is the run's lifecycle.
 
 let dir: string;
+let releaseGate: (() => void) | undefined;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "antgrid-memory-launch-")); });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  releaseGate?.();
+  releaseGate = undefined;
+  rmSync(dir, { recursive: true, force: true });
+});
 
-function harness(opts: { augmentsDefaultSpec?: true } = {}) {
-  let marker: string | undefined;
-  let gateOn = false;
+function harness() {
+  let withheld = true;
   const live = new Set<string>();
   const runIds: string[] = [];
   const kills: string[] = [];
   let onSpawn: (() => void) | undefined;
   const definition = serviceAdapter();
-  const withMcp = (name: string, mcp: boolean) => ({
-    ...definition,
-    hookName: name,
-    create(host: Parameters<typeof definition.create>[0]) {
-      const spec = definition.create(host);
-      return {
-        ...spec,
-        hookName: name,
-        ...(mcp ? { mcp: { inject: () => NO_INJECTION }, ...(opts.augmentsDefaultSpec ? { augmentsDefaultSpec: true as const } : {}) } : {}),
-        prepareTerminal: async (request: Parameters<NonNullable<typeof spec.prepareTerminal>>[0]) => {
-          const launch = await spec.prepareTerminal!(request);
-          return { ...launch, env: { ...launch.env, ...(marker ? { ANTGRID_MEMORY_MCP: marker } : {}) } };
-        },
-      };
-    },
-  });
   const runtime = createAgentRuntime({
     host: { ...agentHostServices, stateDirectory: () => dir },
-    registry: createAgentRegistry([["service", withMcp("fixture-service", true)], ["plain", withMcp("fixture-plain", false)]]),
+    registry: createAgentRegistry([["service", {
+      ...definition,
+      create(host: Parameters<typeof definition.create>[0]) {
+        const spec = definition.create(host);
+        return {
+          ...spec,
+          prepareTerminal: async (request: Parameters<NonNullable<typeof spec.prepareTerminal>>[0]) => {
+            const launch = await spec.prepareTerminal!(request);
+            return withheld ? { ...launch, memoryWithheld: true as const } : launch;
+          },
+        };
+      },
+    }]]),
   });
   const tm = {
     spawn: (cfg: { terminalId: string; env: Record<string, string> }) => {
@@ -61,156 +59,121 @@ function harness(opts: { augmentsDefaultSpec?: true } = {}) {
   const sessions = new SessionManager({
     agentRuntime: runtime, projectId: "p", projectPath: dir, storeDir: dir,
     terminalManager: tm as never, agentSpec: { name: "service", command: "" }, sendMessage: () => {},
-    memoryLaunchEnabled: () => gateOn,
   });
+  const started = async (opts: { tool?: string; command?: string } = { tool: "service" }) => {
+    const s = sessions.create("s", opts);
+    await sessions.start(s.id);
+    return s.id;
+  };
   return {
-    sessions, runIds, live, kills,
+    sessions, runIds, live, kills, started,
     setOnSpawn: (fn: (() => void) | undefined) => { onSpawn = fn; },
-    setMarker: (value: string | undefined) => { marker = value; },
-    setGate: (on: boolean) => { gateOn = on; },
+    setWithheld: (value: boolean) => { withheld = value; },
     wire: (id: string) => sessions.list(true).find((e) => e.id === id),
   };
 }
 
 describe("startedWithoutMemory", () => {
-  it("is absent when the launch was handed the Memory server", async () => {
-    const h = harness();
-    h.setMarker("1");
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.running).toBe(true);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
-    h.sessions.flushNow();
+  let h: ReturnType<typeof harness>;
+  beforeEach(() => { h = harness(); });
+  afterEach(() => { h.sessions.flushNow(); });
+
+  it("is true for a launch that withheld the Memory server", async () => {
+    const id = await h.started();
+    expect(h.wire(id)?.startedWithoutMemory).toBe(true);
+  });
+
+  it("is absent for a launch that did not withhold it", async () => {
+    h.setWithheld(false);
+    const id = await h.started();
+    expect(h.wire(id)?.running).toBe(true);
+    expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
   });
 
   it("is withheld while the launch is still preparing, matching restartForMemory's refusal", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
     let during: boolean | undefined;
+    const s = h.sessions.create("s", { tool: "service" });
     h.setOnSpawn(() => { during = h.wire(s.id)?.startedWithoutMemory; });
     await h.sessions.start(s.id);
     expect(during).toBeUndefined();
     expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
-    h.sessions.flushNow();
-  });
-
-  it("is true when the gate was off at launch", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
-    h.sessions.flushNow();
   });
 
   it("stays true after the gate turns on, since the process cannot gain Memory", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    h.setGate(true);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
-    h.sessions.flushNow();
+    const id = await h.started();
+    releaseGate = setMemoryLaunchGate(() => true);
+    expect(h.wire(id)?.startedWithoutMemory).toBe(true);
   });
 
-  it("is absent when the gate was on but the profile failed soft", async () => {
-    const h = harness();
-    h.setGate(true);
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
-    h.sessions.flushNow();
-  });
-
-  it("restartForMemory is a no-op for a run launched with Memory", async () => {
-    const h = harness();
-    h.setMarker("1");
-    h.setGate(true);
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    expect(await h.sessions.restartForMemory(s.id)).toBe(false);
-    expect(h.kills).toEqual([]);
-    expect(h.runIds.length).toBe(1);
-    h.sessions.flushNow();
-  });
-
-  it("is absent for an agent with no MCP profile", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "plain" });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
-    h.sessions.flushNow();
-  });
-
-  it("is absent for a custom command", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { command: process.execPath });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
-    h.sessions.flushNow();
-  });
-
-  it("is absent for a default-spec session unless the agent augments its default spec", async () => {
-    const plain = harness();
-    const a = plain.sessions.create("s");
-    await plain.sessions.start(a.id);
-    expect(plain.wire(a.id)?.startedWithoutMemory).toBeUndefined();
-    plain.sessions.flushNow();
-
-    const augmenting = harness({ augmentsDefaultSpec: true });
-    const b = augmenting.sessions.create("s");
-    await augmenting.sessions.start(b.id);
-    expect(augmenting.wire(b.id)?.startedWithoutMemory).toBe(true);
-    augmenting.sessions.flushNow();
+  it("is absent for a custom command, which never takes the agent's launch preparation", async () => {
+    const id = await h.started({ command: process.execPath });
+    expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
   });
 
   it("is absent while a scheduled run is active on the session", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
+    const id = await h.started();
     const scheduled = { runtimeGeneration: "g", launched: true, cancelled: false, terminal: false };
-    (h.sessions as any).scheduledLaunches.set(s.id, scheduled);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
+    (h.sessions as any).scheduledLaunches.set(id, scheduled);
+    expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
+    expect(h.sessions.listStartedWithoutMemory()).toEqual([]);
 
     scheduled.terminal = true;
-    expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
-    h.sessions.flushNow();
+    expect(h.wire(id)?.startedWithoutMemory).toBe(true);
   });
 
   it("is absent after the run stops or exits", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    h.sessions.stop(s.id);
-    h.sessions.noteExited(s.id, h.runIds[0]);
-    expect(h.wire(s.id)?.running).toBe(false);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBeUndefined();
-    expect((h.sessions as any).terminalRunMemory.has(s.id)).toBe(false);
-    h.sessions.flushNow();
+    const id = await h.started();
+    h.sessions.stop(id);
+    h.sessions.noteExited(id, h.runIds[0]);
+    expect(h.wire(id)?.running).toBe(false);
+    expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
+    expect((h.sessions as any).terminalRunsWithoutMemory.has(id)).toBe(false);
   });
 
   it("is not cleared by a stale exit that arrives after a same-slot relaunch", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    h.sessions.stop(s.id);
-    await h.sessions.start(s.id);
+    const id = await h.started();
+    h.sessions.stop(id);
+    await h.sessions.start(id);
     expect(h.runIds.length).toBe(2);
 
-    h.sessions.noteExited(s.id, h.runIds[0]);
+    h.sessions.noteExited(id, h.runIds[0]);
 
-    expect(h.wire(s.id)?.running).toBe(true);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
-    h.sessions.flushNow();
+    expect(h.wire(id)?.running).toBe(true);
+    expect(h.wire(id)?.startedWithoutMemory).toBe(true);
+  });
+
+  it("is cleared by a relaunch that did not withhold it", async () => {
+    const id = await h.started();
+    h.sessions.stop(id);
+    h.setWithheld(false);
+    await h.sessions.start(id);
+    expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
+  });
+
+  it("listStartedWithoutMemory returns exactly the flagged sessions", async () => {
+    const flagged = await h.started();
+    h.setWithheld(false);
+    await h.started();
+    expect(h.sessions.listStartedWithoutMemory().map((e) => e.id)).toEqual([flagged]);
+    expect(h.sessions.listStartedWithoutMemory()).toEqual(h.sessions.list(false).filter((e) => e.startedWithoutMemory));
+  });
+
+  it("restartForMemory is a no-op for a run that has Memory", async () => {
+    releaseGate = setMemoryLaunchGate(() => true);
+    h.setWithheld(false);
+    const id = await h.started();
+    expect(await h.sessions.restartForMemory(id)).toBe(false);
+    expect(h.kills).toEqual([]);
+    expect(h.runIds.length).toBe(1);
   });
 
   it("is never persisted", async () => {
-    const h = harness();
-    const s = h.sessions.create("s", { tool: "service" });
-    await h.sessions.start(s.id);
-    expect(h.wire(s.id)?.startedWithoutMemory).toBe(true);
+    const id = await h.started();
+    expect(h.wire(id)?.startedWithoutMemory).toBe(true);
     h.sessions.flushNow();
 
     expect(readFileSync(join(dir, "agents", "p", "sessions.json"), "utf8")).not.toContain("startedWithoutMemory");
     const peeked = await SessionManager.readPersisted(dir, "p");
-    expect(peeked.find((e) => e.id === s.id)?.startedWithoutMemory).toBeUndefined();
+    expect(peeked.find((e) => e.id === id)?.startedWithoutMemory).toBeUndefined();
   });
 });

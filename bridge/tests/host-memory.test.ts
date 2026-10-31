@@ -329,20 +329,19 @@ test("sessions without Memory are never listed for an absent store", async () =>
   } finally { hostMemory.close(); }
 });
 
-test("the host lists only flagged sessions of cataloged warm projects", async () => {
+test("the host lists flagged sessions of cataloged warm projects only", async () => {
   const flagged = await project("flagged-non-git");
   const hidden = await project("hidden-non-git");
   const idle = await project("idle-non-git");
   const row = (id: string, extra: object = {}) => ({
     id, name: `name-${id}`, agentSessionResumable: false, ...extra,
   }) as never;
-  spyOn(flagged.core, "listSessions").mockReturnValue([
+  spyOn(flagged.core, "listStartedWithoutMemory").mockReturnValue([
     row("a", { startedWithoutMemory: true, workStatus: "working", agentSessionResumable: true }),
-    row("b"),
     row("c", { startedWithoutMemory: true }),
   ]);
-  spyOn(hidden.core, "listSessions").mockReturnValue([row("d", { startedWithoutMemory: true })]);
-  spyOn(idle.core, "listSessions").mockReturnValue([row("e")]);
+  spyOn(hidden.core, "listStartedWithoutMemory").mockReturnValue([row("d", { startedWithoutMemory: true })]);
+  spyOn(idle.core, "listStartedWithoutMemory").mockReturnValue([]);
   (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(hidden.id);
   await memory().execute(app, { op: "settings", enabled: true });
 

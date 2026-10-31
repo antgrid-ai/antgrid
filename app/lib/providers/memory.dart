@@ -127,51 +127,49 @@ final memoryDetailProvider = FutureProvider.autoDispose
       );
     });
 
-/// Local desktop host only. Null on mobile, in demo, unless the host is up
-/// right now, or on any error: a drawer count must never spawn a host or dial a
-/// remote. Gated on the live phase because "was ever up" would let a rebuild
-/// during `failed` or `restarting` respawn the host through `ensureHost`.
-final memoryDrawerSummaryProvider = FutureProvider.autoDispose<MemoryProjects?>(
-  (ref) async {
-    if (ref.watch(demoModeProvider) || isMobilePlatform) return null;
-    if (ref.watch(hostStatusProvider).value?.phase != HostPhase.up) return null;
-    try {
-      final host = await ref.read(hostControllerProvider).peekHost();
-      if (host == null) return null;
-      final client = HostControlClient(port: host.controlPort, token: host.token);
-      try {
-        return MemoryProjects.fromJson(await client.memoryRequest({'op': 'projects'}));
-      } finally {
-        client.close();
-      }
-    } catch (_) {
-      return null;
-    }
-  },
-);
-
-/// Whether this desktop's Memory is on right now, for the drawer's restart
-/// badge. Same gating as [memoryDrawerSummaryProvider]: it must never spawn a
-/// host, so anything short of a live host answers false.
-final memoryDrawerEnabledProvider = FutureProvider.autoDispose<bool>((
-  ref,
+/// Asks the local desktop host, for the drawer. Null on mobile, in demo, unless
+/// the host is up right now, or on any error: the drawer must never spawn a
+/// host or dial a remote. Gated on the live phase because "was ever up" would
+/// let a rebuild during `failed` or `restarting` respawn the host through
+/// `ensureHost`.
+Future<T?> _peekLocalMemory<T>(
+  Ref ref,
+  Map<String, dynamic> request,
+  T Function(Map<String, dynamic> answer) parse,
 ) async {
-  if (ref.watch(demoModeProvider) || isMobilePlatform) return false;
-  if (ref.watch(hostStatusProvider).value?.phase != HostPhase.up) return false;
+  if (ref.watch(demoModeProvider) || isMobilePlatform) return null;
+  if (ref.watch(hostStatusProvider).value?.phase != HostPhase.up) return null;
   try {
     final host = await ref.read(hostControllerProvider).peekHost();
-    if (host == null) return false;
+    if (host == null) return null;
     final client = HostControlClient(port: host.controlPort, token: host.token);
     try {
-      return MemoryStatus.fromJson(
-        await client.memoryRequest({'op': 'status'}),
-      ).enabled;
+      return parse(await client.memoryRequest(request));
     } finally {
       client.close();
     }
   } catch (_) {
-    return false;
+    return null;
   }
+}
+
+final memoryDrawerSummaryProvider = FutureProvider.autoDispose<MemoryProjects?>(
+  (ref) async {
+    return _peekLocalMemory(ref, {'op': 'projects'}, MemoryProjects.fromJson);
+  },
+);
+
+/// Whether this desktop's Memory is on right now, for the drawer's restart
+/// badge. Anything short of a live host's answer is false.
+final memoryDrawerEnabledProvider = FutureProvider.autoDispose<bool>((
+  ref,
+) async {
+  final enabled = await _peekLocalMemory(
+    ref,
+    {'op': 'status'},
+    (answer) => MemoryStatus.fromJson(answer).enabled,
+  );
+  return enabled ?? false;
 });
 
 void invalidateMemoryViews(WidgetRef ref, MemoryTarget target) {

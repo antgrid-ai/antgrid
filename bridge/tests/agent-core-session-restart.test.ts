@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
-import { SessionManager, SessionRestartRefusal } from "../src/session-manager";
+import { SessionManager, SessionVerbError } from "../src/session-manager";
 
 let prevAbDir: string | undefined;
 let abDir: string;
@@ -93,23 +93,23 @@ test("a no-op restart carries restarted:false", async () => {
   expect(reply.restarted).toBe(false);
 });
 
-test("a refused restart carries the refusal's errorCode", async () => {
+test("a failed restart carries the error's code", async () => {
   const { restart } = await openCore();
   const spy = spyOn(SessionManager.prototype, "restartForMemory");
-  spy.mockRejectedValueOnce(new SessionRestartRefusal("MEMORY_OFF", "Memory is off, so restarting would not add it."));
+  spy.mockRejectedValueOnce(new SessionVerbError("MEMORY_OFF", "Memory is off, so restarting would not add it."));
   const off = await restart("r3");
   expect(off).toMatchObject({ ok: false, errorCode: "MEMORY_OFF" });
   expect(off.restarted).toBeUndefined();
 
-  spy.mockRejectedValueOnce(new SessionRestartRefusal("SCHEDULED_RUN", "A scheduled run is in progress on this session."));
-  expect(await restart("r4")).toMatchObject({ ok: false, errorCode: "SCHEDULED_RUN" });
+  spy.mockRejectedValueOnce(new SessionVerbError("TEARDOWN_TIMEOUT", "timed out tearing down session: s"));
+  expect(await restart("r4")).toMatchObject({ ok: false, errorCode: "TEARDOWN_TIMEOUT" });
 });
 
 test("a restart failure without a code carries only the error text", async () => {
   const { restart } = await openCore();
-  spyOn(SessionManager.prototype, "restartForMemory").mockRejectedValue(new Error("failed to restart session: x"));
+  spyOn(SessionManager.prototype, "restartForMemory").mockRejectedValue(new Error("spawn failed"));
   const reply = await restart("r5");
   expect(reply.ok).toBe(false);
-  expect(reply.error).toContain("failed to restart session");
+  expect(reply.error).toContain("spawn failed");
   expect(reply.errorCode).toBeUndefined();
 });

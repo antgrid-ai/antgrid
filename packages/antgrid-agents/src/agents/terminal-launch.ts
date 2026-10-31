@@ -44,6 +44,7 @@ export interface PreparedTerminalLaunch {
   promptArgCount?: number;
   notificationsInjected?: boolean;
   observation?: LaunchAugmentation["observation"];
+  memoryWithheld?: LaunchAugmentation["memoryWithheld"];
   /** The host durably records the attempt before this provider mutation, and
    * persists the returned identity before dispatching its resume invocation. */
   createNativeFork?: () => Promise<{ nativeId: string; launch: PreparedTerminalLaunch }>;
@@ -146,6 +147,7 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime
     promptArgCount: promptArgs.length > 0 && (process.platform === "win32" || !raw) ? promptArgs.length : undefined,
     notificationsInjected: augmentation?.notificationsInjected,
     observation: augmentation?.observation,
+    memoryWithheld: augmentation?.memoryWithheld,
   };
 }
 

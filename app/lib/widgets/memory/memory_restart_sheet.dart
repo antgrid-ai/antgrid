@@ -19,8 +19,6 @@ import '../../providers/providers.dart';
 import '../../services/sessions_service.dart';
 import '../../util/detached.dart';
 import '../agent_work_status_dot.dart';
-import '../session_mode_control.dart'
-    show kRestartFailedError, kTeardownTimeoutError;
 
 /// Restarts sessions that were already running when Memory was turned on, which
 /// is the only way their agents gain it.
@@ -43,56 +41,70 @@ class MemoryRestartSheet extends ConsumerStatefulWidget {
   ConsumerState<MemoryRestartSheet> createState() => _MemoryRestartSheetState();
 }
 
-class _RowResult {
-  const _RowResult(
-    this.text, {
-    this.ok = false,
-    this.restarted = false,
-    this.stopped = false,
-  });
-
-  final String text;
-  final bool ok;
-  final bool restarted;
+enum _Outcome {
+  restarted,
+  unchanged,
+  failed,
 
   /// The session was left stopped. Retrying would only meet the bridge's
   /// "not running" no-op and read as up to date, so the row is locked and its
   /// instruction stays on screen.
-  final bool stopped;
+  stopped,
 }
 
-const _restarted = _RowResult('Restarted.', ok: true, restarted: true);
+class _RowResult {
+  const _RowResult(this.text, this.outcome);
+
+  final String text;
+  final _Outcome outcome;
+
+  bool get ok =>
+      outcome == _Outcome.restarted || outcome == _Outcome.unchanged;
+  bool get locked => outcome != _Outcome.failed;
+}
+
+const _restarted = _RowResult('Restarted.', _Outcome.restarted);
 const _alreadyFine = _RowResult(
   'Already up to date. Nothing was restarted.',
-  ok: true,
+  _Outcome.unchanged,
 );
-const _unreachable = _RowResult("Couldn't reach this project.");
+const _unreachable = _RowResult(
+  "Couldn't reach this project.",
+  _Outcome.failed,
+);
 const _noAnswer = _RowResult(
   'No answer from the machine. Check the session before retrying.',
+  _Outcome.failed,
 );
 
 _RowResult _classify(SessionRestartResult r) {
   if (r.ok) return r.restarted ? _restarted : _alreadyFine;
-  final error = r.error ?? '';
   return switch (r.errorCode) {
     'MEMORY_OFF' => const _RowResult(
       'Memory was turned off. Nothing was restarted.',
+      _Outcome.failed,
     ),
     'SCHEDULED_RUN' => const _RowResult(
       'A scheduled run is in progress. Its next run will use Memory.',
+      _Outcome.failed,
     ),
-    _ when error.contains(kTeardownTimeoutError) => const _RowResult(
+    'TEARDOWN_TIMEOUT' => const _RowResult(
       "Didn't shut down in time. It's stopped; start it again.",
-      stopped: true,
+      _Outcome.stopped,
     ),
-    _ when error.contains(kRestartFailedError) => const _RowResult(
+    'RESTART_FAILED' => const _RowResult(
       "Shut down but didn't start again. It's stopped; start it again.",
-      stopped: true,
+      _Outcome.stopped,
     ),
-    _ => const _RowResult("Couldn't restart. Nothing was changed."),
+    _ => const _RowResult(
+      "Couldn't restart. Nothing was changed.",
+      _Outcome.failed,
+    ),
   };
 }
 
+// Not the shared workStatusLabel: here the words answer whether a restart
+// would interrupt the session, and "Unread" does not.
 String _statusLabel(AgentWorkStatus? status) => switch (status) {
   AgentWorkStatus.done => 'Idle',
   AgentWorkStatus.unread => 'Finished',
@@ -155,11 +167,7 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
     setState(() {
       _running = true;
       // A retried row must show progress, not its previous failure.
-      for (final rows in groups.values) {
-        for (final s in rows) {
-          _results.remove(_rowKey(s));
-        }
-      }
+      _ticked.forEach(_results.remove);
     });
     // One project at a time bounds churn in the app's warm-project LRU.
     for (final MapEntry(key: registrationId, value: rows) in groups.entries) {
@@ -182,7 +190,7 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
         for (final (i, s) in rows.indexed) {
           final key = _rowKey(s);
           _results[key] = answers[i];
-          if (answers[i].ok || answers[i].stopped) _ticked.remove(key);
+          if (answers[i].locked) _ticked.remove(key);
         }
       });
     }
@@ -191,8 +199,10 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
     // Over every result, not just this run's: a stopped row from an earlier
     // attempt still owes the user its instruction.
     if (!_results.values.every((r) => r.ok)) return;
-    final restarted = _results.values.where((r) => r.restarted).length;
-    final noops = _results.values.where((r) => r.ok && !r.restarted).length;
+    final restarted = _results.values
+        .where((r) => r.outcome == _Outcome.restarted)
+        .length;
+    final noops = _results.length - restarted;
     showAbToast(
       context,
       '${restarted == 1 ? 'Restarted 1 session.' : 'Restarted $restarted sessions.'}'
@@ -207,7 +217,7 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
     final ticked = _ticked.contains(key);
     final result = _results[key];
     final restarting = _running && ticked && result == null;
-    final locked = (result?.ok ?? false) || (result?.stopped ?? false);
+    final locked = result?.locked ?? false;
     return AbListRow(
       key: ValueKey(key),
       leading: Semantics(

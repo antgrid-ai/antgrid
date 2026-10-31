@@ -53,11 +53,16 @@ export function augmentAgentLaunch(
         // a profile that fails soft (unmergeable config, unwritable file)
         // returns NO_INJECTION and must not leave the agent told about tools
         // it does not have.
-        if (memoryMcpCommand && mcp !== NO_INJECTION) mcp = { ...mcp, env: { ...mcp.env, ANTGRID_MEMORY_MCP: "1" } };
+        if (mcp !== NO_INJECTION) {
+          mcp = memoryMcpCommand ? { ...mcp, env: { ...mcp.env, ANTGRID_MEMORY_MCP: "1" } } : { ...mcp, memoryWithheld: true };
+        }
       }
     } catch (err) {
       log.warn("agent MCP augmentation failed for %s: %s", tool, err);
     }
   }
-  return { ...hooks, args: [...hooks.args, ...mcp.args], env: { ...hooks.env, ...mcp.env } };
+  return {
+    ...hooks, args: [...hooks.args, ...mcp.args], env: { ...hooks.env, ...mcp.env },
+    ...(mcp.memoryWithheld ? { memoryWithheld: true as const } : {}),
+  };
 }

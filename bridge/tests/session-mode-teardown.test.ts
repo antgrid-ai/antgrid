@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionManager, SessionRestartRefusal } from "../src/session-manager";
+import { RESTART_FAILED_ERROR, SessionManager, SessionVerbError } from "../src/session-manager";
+import { setMemoryLaunchGate } from "../src/agent-host";
 import { HandlerEngine } from "../src/handler/engine";
 import type { AbMessage } from "../src/protocol";
 
@@ -18,6 +19,10 @@ const GOAL = "Migrating auth";
 const BACKLOG = [{ id: "i1", text: "run the tests", status: "queued" as const, createdAt: 1 }];
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+// The Memory gate is process-global; each core installs its own and hands it back.
+const gateReleases: Array<() => void> = [];
+afterEach(() => { for (const release of gateReleases.splice(0)) release(); });
 
 function deferred() {
   let resolve!: () => void;
@@ -39,6 +44,7 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
   const sent: AbMessage[] = [];
   const spawns: Spawned[] = [];
   let memoryOn = false;
+  gateReleases.push(setMemoryLaunchGate(() => memoryOn));
   const live = new Set<string>();
 
   // kill() is fire-and-forget in the real TerminalManager — the session stays in
@@ -82,7 +88,6 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
     agentSpec: { command: "codex", name: "codex" },
     sendMessage: () => {},
     teardownTimeoutMs: opts.teardownTimeoutMs,
-    memoryLaunchEnabled: () => memoryOn,
     onStartChat: () => { order.push("chat-start"); },
     onStopChat: (id) => {
       // agent-core's order: reclaim the handler first, then hand back the
@@ -430,7 +435,7 @@ describe("restartForMemory", () => {
     c.setMemory(false);
 
     const refusal = await c.sessions.restartForMemory(s.id).catch((e) => e);
-    expect(refusal).toBeInstanceOf(SessionRestartRefusal);
+    expect(refusal).toBeInstanceOf(SessionVerbError);
     expect(refusal.code).toBe("MEMORY_OFF");
     expect(c.order).toEqual(["pty-spawn"]);
     c.sessions.flushNow();
@@ -441,30 +446,34 @@ describe("restartForMemory", () => {
     (c.sessions as any).scheduledLaunches.set(s.id, { runtimeGeneration: "g", launched: true, cancelled: false, terminal: false });
 
     const refusal = await c.sessions.restartForMemory(s.id).catch((e) => e);
-    expect(refusal).toBeInstanceOf(SessionRestartRefusal);
+    expect(refusal).toBeInstanceOf(SessionVerbError);
     expect(refusal.code).toBe("SCHEDULED_RUN");
     expect(c.order).toEqual(["pty-spawn"]);
     c.sessions.flushNow();
   });
 
-  it("fails with the teardown marker when the PTY never exits", async () => {
+  it("fails with TEARDOWN_TIMEOUT when the PTY never exits", async () => {
     const { c, s } = await flagged({ teardownTimeoutMs: 10 });
 
-    await expect(c.sessions.restartForMemory(s.id)).rejects.toThrow(/^timed out tearing down session/);
+    const failure = await c.sessions.restartForMemory(s.id).catch((e) => e);
+    expect(failure).toBeInstanceOf(SessionVerbError);
+    expect(failure.code).toBe("TEARDOWN_TIMEOUT");
 
     expect(c.spawns.length).toBe(1);
     expect(c.sessions.isFlipping(s.id)).toBe(false);
     c.sessions.flushNow();
   });
 
-  it("fails with the restart marker and leaves the session stopped when the relaunch throws", async () => {
+  it("fails with RESTART_FAILED and leaves the session stopped when the relaunch throws", async () => {
     const { c, s } = await flagged();
     const restart = c.sessions.restartForMemory(s.id);
     await tick();
     c.term.spawn = () => { throw new Error("spawn failed"); };
     c.exitPty(s.id);
 
-    await expect(restart).rejects.toThrow(/^failed to restart session/);
+    const failure = await restart.catch((e) => e);
+    expect(failure).toBeInstanceOf(SessionVerbError);
+    expect(failure.code).toBe("RESTART_FAILED");
 
     expect(c.sessions.get(s.id)?.running).toBe(false);
     expect(c.sessions.isFlipping(s.id)).toBe(false);
@@ -489,13 +498,15 @@ describe("restartForMemory", () => {
     c.sessions.flushNow();
   });
 
-  it("tags a set-mode relaunch failure with the same restart marker", async () => {
+  it("codes a set-mode relaunch failure RESTART_FAILED and keeps its marker text", async () => {
     const c = makeCore(dir);
     const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
     await c.sessions.start(s.id);
     c.term.spawn = () => { throw new Error("spawn failed"); };
 
-    await expect(c.sessions.setMode(s.id, "terminal")).rejects.toThrow(/^failed to restart session/);
+    const failure = await c.sessions.setMode(s.id, "terminal").catch((e) => e);
+    expect(failure.code).toBe("RESTART_FAILED");
+    expect(failure.message).toStartWith(RESTART_FAILED_ERROR);
     c.sessions.flushNow();
   });
 });

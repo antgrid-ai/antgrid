@@ -4,6 +4,7 @@ import 'package:antgrid/design/widgets/ab_adaptive_sheet.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
+import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -20,31 +21,19 @@ import '../helpers/toast_host.dart';
 MemorySessionWithoutMemory _row(
   String id, {
   String project = 'p1',
-  AgentWorkStatusArg status = AgentWorkStatusArg.done,
+  AgentWorkStatus? status = AgentWorkStatus.done,
   bool resumable = true,
 }) => MemorySessionWithoutMemory.fromJson({
   'project_id': project,
   'project_label': 'Label $project',
   'session_id': id,
   'name': 'Session $id',
-  if (status.wire != null) 'work_status': status.wire,
+  'work_status': ?status?.name,
   'agent_session_resumable': resumable,
 })!;
 
-// A local alias keeps the table below readable; null is "no status reported".
-enum AgentWorkStatusArg {
-  done('done'),
-  unread('unread'),
-  working('working'),
-  attention('attention'),
-  error('error'),
-  none(null);
-
-  const AgentWorkStatusArg(this.wire);
-  final String? wire;
-}
-
 const _ok = {'ok': true, 'restarted': true};
+const _noop = {'ok': true, 'restarted': false};
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -145,12 +134,12 @@ void main() {
     tester,
   ) async {
     await open(tester, [
-      _row('done', status: AgentWorkStatusArg.done),
-      _row('unread', status: AgentWorkStatusArg.unread),
-      _row('working', status: AgentWorkStatusArg.working),
-      _row('attention', status: AgentWorkStatusArg.attention),
-      _row('error', status: AgentWorkStatusArg.error),
-      _row('none', status: AgentWorkStatusArg.none),
+      _row('done', status: AgentWorkStatus.done),
+      _row('unread', status: AgentWorkStatus.unread),
+      _row('working', status: AgentWorkStatus.working),
+      _row('attention', status: AgentWorkStatus.attention),
+      _row('error', status: AgentWorkStatus.error),
+      _row('none', status: null),
     ]);
     expect(tickOf('p1/done'), findsOneWidget);
     expect(tickOf('p1/unread'), findsOneWidget);
@@ -170,12 +159,12 @@ void main() {
     tester,
   ) async {
     await open(tester, [
-      _row('a', status: AgentWorkStatusArg.done),
-      _row('b', status: AgentWorkStatusArg.unread),
-      _row('c', status: AgentWorkStatusArg.working),
-      _row('d', status: AgentWorkStatusArg.attention),
-      _row('e', status: AgentWorkStatusArg.error),
-      _row('f', status: AgentWorkStatusArg.none),
+      _row('a', status: AgentWorkStatus.done),
+      _row('b', status: AgentWorkStatus.unread),
+      _row('c', status: AgentWorkStatus.working),
+      _row('d', status: AgentWorkStatus.attention),
+      _row('e', status: AgentWorkStatus.error),
+      _row('f', status: null),
     ]);
     for (final label in [
       'Idle',
@@ -194,7 +183,7 @@ void main() {
   ) async {
     await open(tester, [
       _row('idle'),
-      _row('busy', status: AgentWorkStatusArg.working),
+      _row('busy', status: AgentWorkStatus.working),
     ]);
     const warning = "Restarting interrupts what it's doing now.";
     expect(find.text(warning), findsNothing);
@@ -274,17 +263,11 @@ void main() {
     await tester.tap(find.text('Restart 7 sessions'));
     await answer(tester, {
       'restarted': _ok,
-      'already': {'ok': true, 'restarted': false},
+      'already': _noop,
       'off': {'ok': false, 'errorCode': 'MEMORY_OFF', 'error': 'x'},
       'scheduled': {'ok': false, 'errorCode': 'SCHEDULED_RUN', 'error': 'x'},
-      'teardown': {
-        'ok': false,
-        'error': 'Error: timed out tearing down session: teardown',
-      },
-      'failed': {
-        'ok': false,
-        'error': 'Error: failed to restart session: failed: boom',
-      },
+      'teardown': {'ok': false, 'errorCode': 'TEARDOWN_TIMEOUT', 'error': 'x'},
+      'failed': {'ok': false, 'errorCode': 'RESTART_FAILED', 'error': 'x'},
       'other': {'ok': false, 'error': 'session not found: other'},
     });
     await tester.pumpAndSettle();
@@ -355,7 +338,7 @@ void main() {
     await tester.tap(find.text('Restart 2 sessions'));
     await answer(tester, {
       'a': _ok,
-      'b': {'ok': true, 'restarted': false},
+      'b': _noop,
     });
     await tester.pumpAndSettle();
     expect(find.text('Restart to use Memory'), findsNothing);
@@ -408,7 +391,7 @@ void main() {
     await open(tester, [_row('a'), _row('b')]);
     await tester.tap(find.text('Restart 2 sessions'));
     await answer(tester, {
-      'a': {'ok': false, 'error': 'Error: failed to restart session: a: boom'},
+      'a': {'ok': false, 'errorCode': 'RESTART_FAILED', 'error': 'x'},
       'b': {'ok': false, 'errorCode': 'MEMORY_OFF', 'error': 'x'},
     });
     await tester.pumpAndSettle();

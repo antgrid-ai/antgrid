@@ -637,9 +637,27 @@ describe("augmentAgentLaunch with memory disabled", () => {
       expect(off.text).not.toContain("memory-mcp");
       expect(off.text).not.toMatch(/antgrid-memory(?! tools)/);
       expect(off.launch.env.ANTGRID_MEMORY_MCP).toBeUndefined();
+      expect(off.launch.memoryWithheld).toBe(true);
       const on = launchText(tool, true);
       expect(on.text).toContain("memory-mcp");
       expect(on.launch.env.ANTGRID_MEMORY_MCP).toBe("1");
+      expect(on.launch.memoryWithheld).toBeUndefined();
     });
   }
+
+  test("a profile that failed soft is not reported as withheld, since a relaunch would not fix it", () => {
+    const spec = AGENTS["claude-code"];
+    const a = augmentWithRegistry("claude-code", {
+      abDir: abdir(), hookCommand: HOOK_COMMAND,
+      mcpCommand: { binary: HOOK_COMMAND.binary, preargs: ["mcp"] },
+    }, () => ({ ...spec, mcp: { inject: () => NO_INJECTION } }));
+    expect(a.memoryWithheld).toBeUndefined();
+  });
+
+  test("a chat spawn, which skips the MCP profile, is not reported as withheld", () => {
+    const release = setMemoryLaunchGate(() => false);
+    try {
+      expect(augmentAgentLaunch("claude-code", { abDir: abdir(), mcp: false }).memoryWithheld).toBeUndefined();
+    } finally { release(); }
+  });
 });

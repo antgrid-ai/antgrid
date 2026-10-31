@@ -176,24 +176,4 @@ void main() {
       expect(reopened.get('p1').single.startedWithoutMemory, isFalse);
     },
   );
-
-  test(
-    'a startedWithoutMemory flag persisted by another build is forced false',
-    () async {
-      await SharedPreferencesAsync().setString(
-        'antgrid.session_cache.v1',
-        jsonEncode({
-          'version': 1,
-          'entries': {
-            'p1': [
-              {...s('a').toJson(), 'startedWithoutMemory': true},
-            ],
-          },
-        }),
-      );
-
-      final store = await CachedSessionsStore.open();
-      expect(store.get('p1').single.startedWithoutMemory, isFalse);
-    },
-  );
 }

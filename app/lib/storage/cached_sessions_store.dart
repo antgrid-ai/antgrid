@@ -220,18 +220,16 @@ class CachedSessionsStore {
             for (final item in v) {
               if (item is Map<String, dynamic>) {
                 try {
-                  // `running`, `deleting`, `startedWithoutMemory` and `setup`
-                  // are in-memory state only — even if a build that wrote this
-                  // blob persisted them, clear them on load so a fresh launch
-                  // never resurrects a stale green status dot, a pending row
-                  // with nothing left alive to clear it, a workspace forever
-                  // preparing, or a restart hint for a process that is gone.
+                  // `running`, `deleting` and `setup` are in-memory state only
+                  // — even if a build that wrote this blob persisted them,
+                  // clear them on load so a fresh launch never resurrects a
+                  // stale green status dot, a pending row with nothing left
+                  // alive to clear it, or a workspace forever preparing.
                   list.add(
                     SessionEntry.fromJson({
                       ...item,
                       'running': false,
                       'deleting': false,
-                      'startedWithoutMemory': false,
                       'setup': null,
                     }),
                   );

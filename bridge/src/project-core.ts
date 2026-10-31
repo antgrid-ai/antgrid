@@ -448,6 +448,10 @@ export class ProjectCore {
     return this.core?.listSessions(includeArchived) ?? null;
   }
 
+  listStartedWithoutMemory(): SessionEntry[] {
+    return this.core?.listStartedWithoutMemory() ?? [];
+  }
+
   /** Host-level checkouts bypass the core's inbound bus handler. */
   async refreshGitState(): Promise<void> {
     await this.core?.refreshGitState();

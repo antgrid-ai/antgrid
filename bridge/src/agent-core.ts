@@ -77,7 +77,7 @@ import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } fr
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, SessionRestartRefusal, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
+import { SessionManager, SessionVerbError, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -384,6 +384,8 @@ export interface AgentCore {
    *  session not-running. Returns null before sessions are initialized
    *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
   listSessions(includeArchived: boolean): SessionEntry[] | null;
+  /** The running sessions flagged `startedWithoutMemory`; empty before sessions are initialized. */
+  listStartedWithoutMemory(): SessionEntry[];
   /** True when the Handler is ARMED on [terminalId]. A blocking prompt on an
    *  armed slot is escalated unconditionally and that escalation is pushed, so
    *  the agent's own question notification would buzz the phone a second time
@@ -2716,8 +2718,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               requestId: verb.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Session operation failed.",
-              ...(err instanceof SessionRestartRefusal ? { errorCode: err.code }
-                : err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              ...(err instanceof SessionVerbError || err instanceof WorktreeError ? { errorCode: err.code } : {}),
               checkoutId,
             }));
           }
@@ -5855,6 +5856,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
+    },
+    listStartedWithoutMemory(): SessionEntry[] {
+      return sessions?.listStartedWithoutMemory() ?? [];
     },
     isHandlerArmed(terminalId: string): boolean {
       return handlerArmedSlots.has(terminalId);

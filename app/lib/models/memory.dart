@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'agent_work_status.dart';
+import 'session_target.dart';
 
 @immutable
 class MemoryTarget {
@@ -337,23 +338,13 @@ class MemorySessionWithoutMemory {
   final AgentWorkStatus? workStatus;
   final bool resumable;
 
-  /// The id the app registers this project under: bare for the local host,
-  /// `machine.project` for a remote one.
-  String registrationId(MemoryTarget target) =>
-      target.machineId == null ? projectId : '${target.machineId}.$projectId';
-
-  @override
-  bool operator ==(Object other) =>
-      other is MemorySessionWithoutMemory &&
-      other.projectId == projectId &&
-      other.projectLabel == projectLabel &&
-      other.sessionId == sessionId &&
-      other.name == name &&
-      other.workStatus == workStatus &&
-      other.resumable == resumable;
-  @override
-  int get hashCode =>
-      Object.hash(projectId, projectLabel, sessionId, name, workStatus, resumable);
+  String registrationId(MemoryTarget target) => switch (target.machineId) {
+    null => LocalProject(projectId),
+    final machineUuid => RemoteProject(
+      machineUuid: machineUuid,
+      projectId: projectId,
+    ),
+  }.registrationId;
 }
 
 class MemoryStatus {

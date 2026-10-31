@@ -504,6 +504,18 @@ void main() {
       return t.sent.firstWhere((m) => m['type'] == 'session:restart');
     }
 
+    Future<SessionRestartResult> roundTrip(
+      FakeAgentTransport t,
+      SessionsService svc,
+      Map<String, dynamic> reply,
+    ) async {
+      t.sent.clear();
+      final result = svc.restartForMemory('s');
+      final sent = await sentFrame(t);
+      t.emit('session:result', {'requestId': sent['requestId'], ...reply});
+      return result;
+    }
+
     test('sends the memory-reason frame', () async {
       final (t, session, svc) = await open();
       final future = svc.restartForMemory('sess-1');
@@ -519,60 +531,38 @@ void main() {
 
     test('decodes restarted and not-restarted successes', () async {
       final (t, session, svc) = await open();
-      final first = svc.restartForMemory('a');
-      var sent = await sentFrame(t);
-      t.emit('session:result', {
-        'requestId': sent['requestId'],
-        'ok': true,
-        'restarted': true,
-      });
-      var r = await first;
+      final r = await roundTrip(t, svc, {'ok': true, 'restarted': true});
       expect((r.ok, r.restarted, r.error, r.errorCode), (
         true,
         true,
         null,
         null,
       ));
-
-      t.sent.clear();
-      final second = svc.restartForMemory('b');
-      sent = await sentFrame(t);
-      t.emit('session:result', {
-        'requestId': sent['requestId'],
-        'ok': true,
-        'restarted': false,
-      });
-      r = await second;
-      expect((r.ok, r.restarted), (true, false));
+      final noop = await roundTrip(t, svc, {'ok': true, 'restarted': false});
+      expect((noop.ok, noop.restarted), (true, false));
       await svc.dispose();
       await session.close();
     });
 
-    test('decodes an errorCode refusal and an error-text failure', () async {
+    test('decodes a coded failure and an uncoded one', () async {
       final (t, session, svc) = await open();
-      final refused = svc.restartForMemory('a');
-      var sent = await sentFrame(t);
-      t.emit('session:result', {
-        'requestId': sent['requestId'],
+      final coded = await roundTrip(t, svc, {
         'ok': false,
         'errorCode': 'MEMORY_OFF',
         'error': 'Memory is off',
       });
-      var r = await refused;
-      expect((r.ok, r.restarted, r.errorCode), (false, false, 'MEMORY_OFF'));
-
-      t.sent.clear();
-      final failed = svc.restartForMemory('b');
-      sent = await sentFrame(t);
-      t.emit('session:result', {
-        'requestId': sent['requestId'],
+      expect((coded.ok, coded.restarted, coded.errorCode), (
+        false,
+        false,
+        'MEMORY_OFF',
+      ));
+      final uncoded = await roundTrip(t, svc, {
         'ok': false,
-        'error': 'Error: failed to restart session: b',
+        'error': 'session not found: s',
       });
-      r = await failed;
-      expect(r.ok, isFalse);
-      expect(r.errorCode, isNull);
-      expect(r.error, contains('failed to restart session'));
+      expect(uncoded.ok, isFalse);
+      expect(uncoded.errorCode, isNull);
+      expect(uncoded.error, contains('session not found'));
       await svc.dispose();
       await session.close();
     });

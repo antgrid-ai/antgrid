@@ -99,6 +99,10 @@ export interface LaunchAugmentation {
    * caller keeps OSC notifications enabled for this spawn. */
   notificationsInjected?: boolean;
   observation?: TerminalObservationAvailability;
+  /** The MCP profile went in without the Memory server because Memory was
+   * off, so a relaunch after it is turned on would add it. Unset when the
+   * profile failed soft: a relaunch would not fix that. */
+  memoryWithheld?: true;
 }
 
 export interface TerminalObservationAvailability {

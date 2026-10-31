@@ -59,9 +59,10 @@ enum SessionSetupAction {
 typedef SessionModeResult = ({bool ok, String? error});
 
 /// Outcome of a `session:restart`. [restarted] separates "restarted" from the
-/// bridge's `ok` no-op (nothing needed restarting), and [errorCode] carries the
-/// typed refusals (`MEMORY_OFF`, `SCHEDULED_RUN`) that leave the session as it
-/// was; every other failure is told apart by [error] text alone.
+/// bridge's `ok` no-op (nothing needed restarting). [errorCode] is
+/// `MEMORY_OFF` or `SCHEDULED_RUN` for a refusal that changed nothing, and
+/// `TEARDOWN_TIMEOUT` or `RESTART_FAILED` for the two failures that leave the
+/// session stopped.
 typedef SessionRestartResult = ({
   bool ok,
   bool restarted,
@@ -662,39 +663,19 @@ class SessionsService {
   // `onAbandon`, which is exactly this map's own removal callback — iterating
   // the live map while it fails would be a ConcurrentModificationError.
   void _failPending(Object error) {
-    final list = _pendingList.values.toList();
-    _pendingList.clear();
-    for (final p in list) {
-      p.fail(error);
-    }
-    final mutations = _pendingMutations.values.toList();
-    _pendingMutations.clear();
-    for (final p in mutations) {
-      p.fail(error);
-    }
-    final refusable = _pendingRefusableMutations.values.toList();
-    _pendingRefusableMutations.clear();
-    for (final p in refusable) {
-      p.fail(error);
-    }
-    final creates = _pendingCreates.values.toList();
-    _pendingCreates.clear();
-    for (final p in creates) {
-      p.fail(error);
-    }
-    final deletes = _pendingDeletes.values.toList();
-    _pendingDeletes.clear();
-    for (final p in deletes) {
-      p.fail(error);
-    }
-    final modeChanges = _pendingModeChanges.values.toList();
-    _pendingModeChanges.clear();
-    for (final p in modeChanges) {
-      p.fail(error);
-    }
-    final restarts = _pendingRestarts.values.toList();
-    _pendingRestarts.clear();
-    for (final p in restarts) {
+    _failAll(_pendingList, error);
+    _failAll(_pendingMutations, error);
+    _failAll(_pendingRefusableMutations, error);
+    _failAll(_pendingCreates, error);
+    _failAll(_pendingDeletes, error);
+    _failAll(_pendingModeChanges, error);
+    _failAll(_pendingRestarts, error);
+  }
+
+  static void _failAll<T>(Map<String, PendingReply<T>> pending, Object error) {
+    final replies = pending.values.toList();
+    pending.clear();
+    for (final p in replies) {
       p.fail(error);
     }
   }
