@@ -21,6 +21,8 @@ import {
 } from "../protocol";
 import {
   ARTIFACT_CHUNK_BYTES,
+  BUS_REQUEST_DEFAULT_TIMEOUT_MS,
+  BUS_REQUEST_MAX_TIMEOUT_MS,
   LOCAL_MACHINE_ID,
   MAX_PART_CHARS,
   MAX_PARTS,
@@ -45,7 +47,8 @@ import type { BusHeldReason } from "./relay-transport";
 import { entriesForThread, type LoggedEnvelope } from "./message-log";
 import { unreadPosts, type MailboxPost } from "./mailbox";
 import { threadById, type ThreadRow } from "./thread-store";
-import { isRefusal, refuse, type SessionBusRefusal } from "./errors";
+import { REMOTE_CODE_PATTERN, SESSION_BUS_ERRORS, isRefusal, refuse, refusalSentence, type SessionBusErrorCode, type SessionBusRefusal } from "./errors";
+import type { BusRequestResult } from "./bus-requests";
 import { selfMachineLabel } from "../machine-label";
 
 // -- request bodies ---------------------------------------------------------
@@ -73,6 +76,24 @@ export const PublishArtifactBodySchema = z
   });
 
 export type PublishArtifactBody = z.infer<typeof PublishArtifactBodySchema>;
+
+/** A request to another of the account's machines. `method` is not checked
+ *  here: the responder owns the allowlist, and a bridge that pre-filtered would
+ *  be a second list to keep in step with it. */
+export const BusRequestBodySchema = z
+  .object({
+    to: z.string().uuid(),
+    method: z.string().min(1).max(64),
+    params: z.unknown().optional(),
+    // Clamped rather than refused: the tool tells agents the bridge bounds it,
+    // and a wait an agent overestimated is still a request worth sending.
+    timeoutMs: z.number().finite()
+      .transform((v) => Math.max(1, Math.min(Math.round(v), BUS_REQUEST_MAX_TIMEOUT_MS)))
+      .optional(),
+  })
+  .strict();
+
+export type BusRequestBody = z.infer<typeof BusRequestBodySchema>;
 
 /** Where a send is aimed. `machineId` is nullable AND optional, and an absent
  *  one means THIS machine: {@link SessionDirectoryRow.machineId} is null in
@@ -296,6 +317,14 @@ export interface SessionBusApi {
    *  anywhere would report the loss. Whoever adds the next surface picks the
    *  read by asking who is looking, never by which one is closer to hand. */
   inboxPeek(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
+  /** Ask another of the account's machines to do something and wait for its
+   *  answer. The caller still names a session of its own; what the other
+   *  machine allows is decided there, from the role the account's directory
+   *  gives this one. */
+  request(
+    terminalId: string | undefined,
+    body: BusRequestBody,
+  ): Promise<{ ok: true; result: unknown } | SessionBusRefusal>;
   /** One exchange, both directions, with the receipt on each outbound entry. */
   thread(
     terminalId: string | undefined,
@@ -362,6 +391,9 @@ export interface SessionBusApiDeps {
    *  finished — the notify is let through either way and rides the same
    *  "line held across a restart" delivery edge a real restart already uses. */
   startSession?: (sessionId: string) => boolean;
+  /** Sends a request to another machine and resolves with its answer. Absent
+   *  for a bare bus with no host above it. */
+  request?: (i: { to: string; method: string; params?: unknown; timeoutMs: number }) => Promise<BusRequestResult>;
   now?: () => number;
   newId?: () => string;
 }
@@ -892,6 +924,28 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // would be wrong in exactly the state that matters: a peer whose rows all
       // expired is still named there while contributing none.
       return { sessions: answer.rows, truncated: answer.truncated, reach: answer.reach, machineId: deps.machineId() };
+    },
+
+    async request(terminalId, body) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      if (!deps.request) return refuse("AGENT_NOT_READY", "this bridge cannot send requests to other machines");
+      if (!deps.remoteAccessEnabled()) {
+        return refuse("REMOTE_ACCESS_OFF", "remote access is off on this machine, so it sends nothing to other machines");
+      }
+      const answer = await deps.request({
+        to: body.to, method: body.method, params: body.params,
+        timeoutMs: body.timeoutMs ?? BUS_REQUEST_DEFAULT_TIMEOUT_MS,
+      });
+      if (answer.ok) return { ok: true, result: answer.result };
+      const known = Object.hasOwn(SESSION_BUS_ERRORS, answer.code);
+      const code: SessionBusErrorCode = known ? (answer.code as SessionBusErrorCode) : "REQUEST_FAILED";
+      const refusal = refuse(code, refusalSentence(answer.code));
+      return {
+        ...refusal,
+        ...(!known && REMOTE_CODE_PATTERN.test(answer.code) ? { remoteCode: answer.code } : {}),
+        ...(answer.held ? { held: answer.held } : {}),
+      };
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

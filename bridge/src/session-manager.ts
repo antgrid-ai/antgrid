@@ -79,6 +79,9 @@ export interface SessionLaunchSpec {
   scheduleOwnerId?: string;
   /** Host-internal: the permission mode a scheduled chat run starts in. */
   scheduledChatMode?: string;
+  /** Host-internal: start from the backend's default permission mode rather
+   *  than the last-used one, for a session another machine asked for. */
+  withoutInheritedChatMode?: boolean;
 }
 
 export interface ScheduledSessionSpec {
@@ -999,6 +1002,11 @@ export class SessionManager {
     return e ? this.toWire(e) : undefined;
   }
 
+  /** The persisted chat permission mode, which the wire entry does not carry. */
+  chatModeOf(id: string): string | undefined {
+    return this.entries.get(id)?.config?.mode;
+  }
+
   /**
    * The config a brand-new chat session for `tool` should start from: the
    * selection of the most-recently-used, non-archived chat session of the same
@@ -1387,8 +1395,9 @@ export class SessionManager {
     if (entry.mode === "chat" && entry.tool) {
       const inherited = this.lastUsedConfigForTool(entry.tool);
       // A schedule's permission mode is its own explicit setting. The last-used `mode` is whatever the user picked in
-      // an unrelated chat (auto, acceptEdits), and replaying it would loosen a gated schedule's runs.
-      if (inherited && spec?.scheduleOwnerId) delete inherited.mode;
+      // an unrelated chat (auto, acceptEdits), and replaying it would loosen a gated schedule's runs, or hand another
+      // machine's prompt a session that never asks before running tools.
+      if (inherited && (spec?.scheduleOwnerId || spec?.withoutInheritedChatMode)) delete inherited.mode;
       const config = spec?.scheduleOwnerId && spec.scheduledChatMode ? { ...inherited, mode: spec.scheduledChatMode } : inherited;
       if (config && Object.keys(config).length > 0) entry.config = config;
     }

@@ -1,7 +1,7 @@
 import { createHmac, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
 import {
   EndpointChallengeRequestSchema, EndpointRegistrationRequestSchema,
-  PeerAuthorizationSnapshotSchema, BusKeyRegistrationSchema, MachineDirectorySchema, endpointChallengeBytes,
+  PeerAuthorizationSnapshotSchema, BusKeyRegistrationSchema, MachineDirectorySchema, SessionBusGrantsSchema, SessionBusGrantsPatchSchema, endpointChallengeBytes,
   type EndpointChallenge,
 } from "antgrid-wire";
 
@@ -59,9 +59,25 @@ export class PeerAuthorizationFixture {
     return token;
   }
 
-  private async handleBus(route: "machines" | "bus-key", req: Request, auth: FixtureCredential, allowed: boolean): Promise<Response> {
+  private async handleBus(route: "machines" | "bus-key" | "session-bus", req: Request, auth: FixtureCredential, allowed: boolean): Promise<Response> {
     if (!allowed) return Response.json({ error: "UNAUTHENTICATED" }, { status: 401 });
     if (auth.kind !== "agent") return Response.json({ error: "NOT_AGENT" }, { status: 403 });
+    if (route === "session-bus") {
+      const grants = () => SessionBusGrantsSchema.parse({
+        orchestrator: this.orchestrators.has(auth.deviceUuid), busControl: this.busControls.has(auth.deviceUuid) });
+      if (req.method === "GET") return Response.json(grants(), { headers: { "cache-control": "no-store" } });
+      if (req.method !== "POST") return new Response(null, { status: 405 });
+      const input = SessionBusGrantsPatchSchema.safeParse(await req.json().catch(() => null));
+      if (!input.success) return Response.json({ error: "BAD_REQUEST" }, { status: 400 });
+      const patch = input.data;
+      // Lower-only, like the real route: a credential on the agent's machine must not elevate it.
+      if (patch.orchestrator === true || patch.busControl === true) {
+        return Response.json({ error: "OWNER_SESSION_REQUIRED" }, { status: 403 });
+      }
+      if (patch.orchestrator === false) this.orchestrators.delete(auth.deviceUuid);
+      if (patch.busControl === false) this.busControls.delete(auth.deviceUuid);
+      return Response.json(grants());
+    }
     if (route === "machines") {
       if (req.method !== "GET") return new Response(null, { status: 405 });
       return Response.json(MachineDirectorySchema.parse({
@@ -85,13 +101,13 @@ export class PeerAuthorizationFixture {
 
   async handle(req: Request): Promise<Response | null> {
     const route = new URL(req.url).pathname.split("/").at(-1);
-    if (!["authorization", "endpoint-challenge", "endpoint-registration", "machines", "bus-key"].includes(route!)) return null;
+    if (!["authorization", "endpoint-challenge", "endpoint-registration", "machines", "bus-key", "session-bus"].includes(route!)) return null;
     const token = req.headers.get("authorization")?.replace(/^Bearer /, "");
     const issued = token ? this.tokens.get(token) : undefined;
     const auth = issued && issued.expires > Date.now() / 1000 ? this.credentials.get(issued.clientId) : undefined;
     if (!auth) return Response.json({ error: "invalid_device" }, { status: 401 });
     const allowed = !this.revoked.has(auth.deviceUuid);
-    if (route === "machines" || route === "bus-key") return this.handleBus(route, req, auth, allowed);
+    if (route === "machines" || route === "bus-key" || route === "session-bus") return this.handleBus(route, req, auth, allowed);
     const existing = this.registrations.get(auth.clientId);
     const identity = { accountId: auth.userId, deviceId: auth.deviceUuid, enrollmentId: auth.clientId };
     if (route === "authorization" && req.method === "GET") {

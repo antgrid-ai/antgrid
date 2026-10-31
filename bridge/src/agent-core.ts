@@ -53,6 +53,7 @@ import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from ".
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
 import { augmentAgentLaunch } from "./agent-runtime";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
+import type { BusRequestResult } from "./session-bus/bus-requests";
 import type { SessionDirectory } from "./session-bus/directory";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
@@ -72,7 +73,7 @@ import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } fr
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type SessionLaunchSpec, type DeleteSessionOptions, type ScheduledSessionSpec, type ScheduledSessionIdentity, type ScheduledSessionObservation, type PreparedScheduledSession } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -262,6 +263,19 @@ export function buildChatSpawnAugment(
   };
 }
 
+export interface BusSessionSpec {
+  name?: string;
+  tool?: string;
+  mode?: "terminal" | "chat";
+  isolation?: "shared" | "worktree";
+  baseBranch?: string;
+}
+
+export interface BusSessionFailure {
+  ok: false;
+  code: "AGENT_NOT_READY" | "UNKNOWN_SESSION" | "SESSION_NOT_BUS_ELIGIBLE" | "REQUEST_FAILED";
+}
+
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
    *  transport can dispatch incoming messages back into core. */
@@ -370,6 +384,14 @@ export interface AgentCore {
    *  calls through here, since only that core's own `SessionManager` can start
    *  a session it persists. */
   startSession(id: string): void;
+  /** The session-bus request seams. They return their outcome instead of
+   *  broadcasting `session:result`, because the asker is another machine and not
+   *  an attached app. `createSessionForBus` takes no command, args or approval
+   *  policy; `startSessionForBus` refuses a session a person made with any of
+   *  them. */
+  createSessionForBus(spec: BusSessionSpec): Promise<{ ok: true; session: SessionEntry } | BusSessionFailure>;
+  startSessionForBus(sessionId: string, initialPrompt?: string): Promise<{ ok: true } | BusSessionFailure>;
+  stopSessionForBus(sessionId: string): Promise<{ ok: true } | BusSessionFailure>;
   prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession>;
   observeScheduledSessions(callback: (observation: ScheduledSessionObservation & { projectId: string }) => void): () => void;
   stopScheduledSession(sessionId: string): Promise<void>;
@@ -550,6 +572,9 @@ export interface BuildAgentCoreOptions {
    *  the host has no relay identity at all, and a session with no address is
    *  refused `AGENT_NOT_READY` rather than given a synthesized one. */
   machineId?: () => string | null;
+  /** Sends a bus request to another machine (the host's `BusRequests`). Absent
+   *  for a core with no host, which then cannot make requests. */
+  busRequest?: (i: { to: string; method: string; params?: unknown; timeoutMs: number }) => Promise<BusRequestResult>;
   /** A host-injected, MACHINE-level session bus shared with every
    *  other project the host has open. Absent means a per-core fallback is
    *  built instead, scoped to this project alone — the same
@@ -1360,6 +1385,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  /** The one place a session is built from a launch spec, shared by the app's
+   *  `session:create` and the bus's, so the two cannot drift on defaults. */
+  function createSessionFromSpec(
+    s: SessionManager,
+    name: string | undefined,
+    spec: SessionLaunchSpec,
+  ): SessionEntry | Promise<SessionEntry> {
+    return s.create(name, {
+      ...spec,
+      approvalPolicy: spec.approvalPolicy ?? "default",
+      isolation: spec.isolation ?? "shared",
+    });
+  }
+
   const sessionBusApi: SessionBusApi = createSessionBusApi({
     coordinator: sessionBus,
     abDir,
@@ -1371,6 +1410,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // answered as having no bus surface at all.
     ...(opts.sessionDirectory ? { directory: opts.sessionDirectory } : {}),
     ...(opts.startSession ? { startSession: opts.startSession } : {}),
+    ...(opts.busRequest ? { request: opts.busRequest } : {}),
     membership: (terminalId) => {
       const entry = sessions?.get(terminalId);
       if (!entry) return null;
@@ -2435,13 +2475,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         void (async () => {
           try {
-            const created = await sessions.create(msg.name, {
+            const created = await createSessionFromSpec(sessions, msg.name, {
               tool: msg.tool,
               command: msg.command,
               args: msg.args,
               mode: msg.mode,
-              approvalPolicy: msg.approvalPolicy ?? "default",
-              isolation: msg.isolation ?? "shared",
+              approvalPolicy: msg.approvalPolicy,
+              isolation: msg.isolation,
               baseBranch: msg.baseBranch,
             });
             sendAb(createMessage("session:result", {
@@ -5634,6 +5674,54 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const result = sessions?.start(id);
         if (result instanceof Promise) result.catch(() => {});
       } catch { /* fire-and-forget */ }
+    },
+    async createSessionForBus(spec) {
+      if (!sessions) return { ok: false, code: "AGENT_NOT_READY" };
+      try {
+        const session = await createSessionFromSpec(sessions, spec.name, {
+          tool: spec.tool, mode: spec.mode, isolation: spec.isolation, baseBranch: spec.baseBranch,
+          withoutInheritedChatMode: true,
+        });
+        return { ok: true, session };
+      } catch (err) {
+        log.warn({ err: errorName(err), ...(err instanceof WorktreeError ? { code: err.code } : {}) }, "bus session.create failed");
+        return { ok: false, code: "REQUEST_FAILED" };
+      }
+    },
+    async startSessionForBus(sessionId, initialPrompt) {
+      const s = sessions;
+      if (!s) return { ok: false, code: "AGENT_NOT_READY" };
+      const entry = s.get(sessionId);
+      if (!entry) return { ok: false, code: "UNKNOWN_SESSION" };
+      // Checked in the same synchronous step as the start below, so no edit can
+      // land between the look and the launch: a person's bypass, custom-command
+      // or ungated-chat-mode session is never woken by another machine. A chat
+      // mode the agent does not list as gated counts as ungated.
+      const chatMode = s.chatModeOf(sessionId);
+      const ungatedChat = chatMode !== undefined
+        && !agentSpec(entry.tool ?? "")?.chatPermissionModes?.some((m) => m.id === chatMode && m.gated);
+      if (entry.approvalPolicy !== "default" || entry.command !== undefined || entry.args !== undefined || ungatedChat) {
+        return { ok: false, code: "SESSION_NOT_BUS_ELIGIBLE" };
+      }
+      try {
+        await s.start(sessionId, initialPrompt);
+        return { ok: true };
+      } catch (err) {
+        log.warn({ err: errorName(err), ...(err instanceof WorktreeError ? { code: err.code } : {}) }, "bus session.start failed");
+        return { ok: false, code: "REQUEST_FAILED" };
+      }
+    },
+    async stopSessionForBus(sessionId) {
+      const s = sessions;
+      if (!s) return { ok: false, code: "AGENT_NOT_READY" };
+      if (!s.get(sessionId)) return { ok: false, code: "UNKNOWN_SESSION" };
+      try {
+        await s.stop(sessionId);
+        return { ok: true };
+      } catch (err) {
+        log.warn({ err: errorName(err) }, "bus session.stop failed");
+        return { ok: false, code: "REQUEST_FAILED" };
+      }
     },
     async prepareScheduledSession(spec, bind): Promise<PreparedScheduledSession> {
       if (!sessions) throw new Error("Project sessions are not ready");

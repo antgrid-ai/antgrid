@@ -31,6 +31,7 @@ const REQUIRED_TOOLS = [
   "antgrid_reply",
   "antgrid_inbox",
   "antgrid_thread",
+  "antgrid_request",
   "antgrid_list_schedules",
   "antgrid_schedule_runs",
   "antgrid_create_schedule",

@@ -85,3 +85,31 @@ test("eval authority serves the machine directory and captures bus keys, agents 
   expect((await post(app, { busPublicKey: key })).status).toBe(403);
   expect((await get(gone)).status).toBe(401);
 });
+
+test("eval authority serves session-bus grants lower-only and refuses a raise", async () => {
+  const mk = (id: string, kind: "agent" | "app") => ({ clientId: `c-${id}`, clientSecret: "s", deviceUuid: randomUUID(),
+    userId: "acct", ed25519Pub: randomBytes(32).toString("base64"), kind });
+  const agent = mk("agent", "agent"), app = mk("app", "app");
+  const authority = new PeerAuthorizationFixture(() => []);
+  authority.provision(agent);
+  authority.provision(app);
+  const bearer = (c: typeof agent) => ({ authorization: `Bearer ${authority.token(`Basic ${Buffer.from(`${c.clientId}:s`).toString("base64")}`)!}` });
+  const call = async (c: typeof agent, method: string, body?: unknown) => (await authority.handle(new Request(
+    "https://f.invalid/account/devices/me/session-bus",
+    { method, headers: bearer(c), body: body === undefined ? undefined : JSON.stringify(body) })))!;
+  authority.setOrchestrator(agent.deviceUuid, true);
+  authority.setBusControl(agent.deviceUuid, true);
+  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: true, busControl: true });
+  const raise = await call(agent, "POST", { orchestrator: true });
+  expect(raise.status).toBe(403);
+  expect(await raise.json()).toEqual({ error: "OWNER_SESSION_REQUIRED" });
+  for (const bad of [{}, { orchestrator: "no" }, { other: false }]) {
+    const refused = await call(agent, "POST", bad);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "BAD_REQUEST" });
+  }
+  expect(await (await call(agent, "POST", { orchestrator: false })).json()).toEqual({ orchestrator: false, busControl: true });
+  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: false, busControl: true });
+  expect((await call(app, "GET")).status).toBe(403);
+  expect((await call(app, "POST", { busControl: false })).status).toBe(403);
+});

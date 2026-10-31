@@ -5,7 +5,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { verifyAsync } from "@noble/ed25519";
 import {
   ENDPOINT_CHALLENGE_MS, MAX_ACCOUNT_MACHINES, MachineDirectorySchema, PEER_LEASE_MS, endpointChallengeBytes,
-  peerAuthorizationSnapshotSchema, type EndpointChallenge,
+  peerAuthorizationSnapshotSchema, type EndpointChallenge, type SessionBusGrants, type SessionBusGrantsPatch,
 } from "antgrid-wire";
 import type { DB, Tx } from "../db/index.js";
 import type { AuthVars } from "../auth/middleware.js";
@@ -15,7 +15,7 @@ import { parseDeviceOAuthMetadata } from "./device-oauth.js";
 
 type Identity = NonNullable<AuthVars["deviceAuthorization"]> & { userId: string };
 export class PeerAuthorizationError extends Error {
-  constructor(readonly code: "UNAUTHENTICATED" | "STALE_GENERATION" | "INVALID_CHALLENGE" | "INVALID_SIGNATURE" | "ENDPOINT_REUSED" | "NOT_ENTITLED" | "NOT_AGENT") {
+  constructor(readonly code: "UNAUTHENTICATED" | "STALE_GENERATION" | "INVALID_CHALLENGE" | "INVALID_SIGNATURE" | "ENDPOINT_REUSED" | "NOT_ENTITLED" | "NOT_AGENT" | "OWNER_SESSION_REQUIRED") {
     super(code);
   }
 }
@@ -230,6 +230,48 @@ export async function registerBusKey(db: DB, identity: Identity, busPublicKey: s
     if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
     await tx.device.update({ where: { id: device.id }, data: { busPublicKey: Buffer.from(busPublicKey, "base64") } });
   });
+}
+
+/** The caller's own grants, read from its device row. */
+export async function ownSessionBusGrants(db: DB, identity: Identity): Promise<SessionBusGrants> {
+  return serializable(db, async (tx) => {
+    const device = await currentIdentity(tx, identity);
+    if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
+    return { orchestrator: device.orchestrator, busControl: device.busControl };
+  });
+}
+
+/**
+ * A credential that lives on the agent's machine may only lower its own grants:
+ * raising goes through setOwnedSessionBusGrants with the owner's session, so a
+ * compromised machine cannot elevate itself.
+ */
+export async function lowerOwnSessionBusGrants(db: DB, identity: Identity,
+  patch: SessionBusGrantsPatch): Promise<SessionBusGrants> {
+  if (patch.orchestrator === true || patch.busControl === true) {
+    throw new PeerAuthorizationError("OWNER_SESSION_REQUIRED");
+  }
+  return serializable(db, async (tx) => {
+    const device = await currentIdentity(tx, identity);
+    if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
+    const updated = await tx.device.update({ where: { id: device.id }, data: {
+      ...(patch.orchestrator === false ? { orchestrator: false } : {}),
+      ...(patch.busControl === false ? { busControl: false } : {}),
+    } });
+    return { orchestrator: updated.orchestrator, busControl: updated.busControl };
+  });
+}
+
+/** Owner-session path: the only place a grant can be raised. Null for a foreign, app or revoked row. */
+export async function setOwnedSessionBusGrants(db: DB, userId: string, id: string,
+  patch: SessionBusGrantsPatch): Promise<SessionBusGrants | null> {
+  const result = await db.device.updateMany({ where: { id, userId, kind: "agent", revokedAt: null }, data: {
+    ...(patch.orchestrator !== undefined ? { orchestrator: patch.orchestrator } : {}),
+    ...(patch.busControl !== undefined ? { busControl: patch.busControl } : {}),
+  } });
+  if (result.count === 0) return null;
+  const row = await db.device.findUniqueOrThrow({ where: { id } });
+  return { orchestrator: row.orchestrator, busControl: row.busControl };
 }
 
 /**

@@ -397,6 +397,28 @@ program
     process.exit(await runLogLevelCli({ ...(level === undefined ? {} : { level }), ...(ttlMs === undefined ? {} : { ttlMs }), ...(opts.dir === undefined ? {} : { dir: opts.dir }) }));
   });
 
+// antgrid orchestrator / agent-reach: read or lower this machine's session-bus
+// grants on the running host. Raising is app-only; see cli/agent-reach.ts.
+program
+  .command("orchestrator")
+  .description("Show or lower this machine's orchestrator grant (raise it in the app)")
+  .argument("[action]", "off | status (default status)")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .action(async (action: string | undefined, opts: { dir?: string }) => {
+    const { runOrchestratorCli } = await import("./cli/orchestrator");
+    process.exit(await runOrchestratorCli(action, opts));
+  });
+
+program
+  .command("agent-reach")
+  .description("Show or lower how far other machines' agents may reach this one (raise it in the app)")
+  .argument("[action]", "off | messages | status (default status)")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .action(async (action: string | undefined, opts: { dir?: string }) => {
+    const { runAgentReachCli } = await import("./cli/agent-reach");
+    process.exit(await runAgentReachCli(action, opts));
+  });
+
 // antgrid phones subcommand — inspect and drop local phone records. Whether a
 // phone may drive this machine is one machine-wide switch (mobile-access), not
 // anything this CLI manages.

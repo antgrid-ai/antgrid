@@ -11,6 +11,8 @@ class DeviceSummary {
     required this.kind,
     required this.platform,
     required this.displayName,
+    this.orchestrator,
+    this.busControl,
   });
 
   final String id;
@@ -18,6 +20,23 @@ class DeviceSummary {
   final String kind;
   final String platform;
   final String displayName;
+
+  /// Session-bus grants. Null for a device the server sends none for (an app
+  /// device, or a server that predates the fields), never read as false.
+  final bool? orchestrator;
+  final bool? busControl;
+}
+
+/// The two grants an agent machine holds on the session bus: whether it may
+/// drive the account's other machines, and whether it accepts being driven.
+class SessionBusGrants {
+  const SessionBusGrants({
+    required this.orchestrator,
+    required this.busControl,
+  });
+
+  final bool orchestrator;
+  final bool busControl;
 }
 
 class DevicesApi extends CookieApiClient implements DevicesApiCreator {
@@ -53,6 +72,8 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
             kind: d['kind'] as String,
             platform: d['platform'] as String,
             displayName: d['display_name'] as String,
+            orchestrator: d['orchestrator'] as bool?,
+            busControl: d['busControl'] as bool?,
           ),
         )
         .toList();
@@ -68,6 +89,36 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
       headers: {'cookie': cookie},
     );
     return res.statusCode == 200;
+  }
+
+  /// Raising a grant needs the owner's account session, which is why this
+  /// lives on the cookie client: nothing on the agent's machine can do it.
+  /// Throws on any failure so a switch never claims a grant that did not land.
+  Future<SessionBusGrants> setSessionBusGrants(
+    String id, {
+    bool? orchestrator,
+    bool? busControl,
+  }) async {
+    final cookie = await cookieProvider();
+    if (cookie == null) throw Exception('Not signed in');
+    final res = await boundedHttpRequest(
+      client,
+      'PATCH',
+      Uri.parse('$licenseApiUrl/account/devices/$id/session-bus'),
+      headers: {'content-type': 'application/json', 'cookie': cookie},
+      body: jsonEncode({
+        'orchestrator': ?orchestrator,
+        'busControl': ?busControl,
+      }),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Session bus grant update failed: ${res.statusCode}');
+    }
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    return SessionBusGrants(
+      orchestrator: body['orchestrator'] as bool,
+      busControl: body['busControl'] as bool,
+    );
   }
 
   @override

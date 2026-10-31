@@ -134,6 +134,7 @@ describe("the session-bus tools", () => {
     expect(isSessionBusTool("antgrid_reply")).toBe(true);
     expect(isSessionBusTool("antgrid_inbox")).toBe(true);
     expect(isSessionBusTool("antgrid_thread")).toBe(true);
+    expect(isSessionBusTool("antgrid_request")).toBe(true);
   });
 
   // The bridge authored the refusal and owns the wording; this process appends
@@ -539,6 +540,48 @@ describe("the session-bus tools", () => {
       const result = await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s", text: "t" });
       expect(result.isError).toBe(true);
       expect(result.content[0]!.text).toContain("antgrid_post lands in its mailbox instead (NOT_RUNNING)");
+    });
+  });
+
+  describe("antgrid_request", () => {
+    test("posts the request to its route and renders the result", async () => {
+      let received: unknown;
+      let path = "";
+      stub((p, sent) => {
+        path = p;
+        received = sent;
+        return Response.json({ ok: true, result: { sessions: [] } });
+      });
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list", params: {}, timeoutMs: 5000 });
+      expect(path).toBe("/session-bus/request");
+      expect(received).toEqual({ to: "m-1", method: "sessions.list", params: {}, timeoutMs: 5000 });
+      expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [] });
+    });
+
+    test("requires to and method", async () => {
+      expect((await callSessionBusTool("antgrid_request", { method: "x" })).isError).toBe(true);
+      expect((await callSessionBusTool("antgrid_request", { to: "m-1" })).isError).toBe(true);
+    });
+
+    test("a refusal carries its code and a held reason says not delivered yet", async () => {
+      stub(() => Response.json({ error: "no", code: "REQUEST_TIMEOUT", held: "central-offline" }, { status: 504 }));
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("no (REQUEST_TIMEOUT)");
+      expect(result.content[0]!.text).toContain(`not delivered yet: ${BUS_HELD_REASON_TEXT["central-offline"]}`);
+    });
+
+    test("a remote code the bridge forwarded is printed, digits included", async () => {
+      stub(() => Response.json({ error: "no", code: "REQUEST_FAILED", remoteCode: "E2BIG_42" }, { status: 502 }));
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list" });
+      expect(result.content[0]!.text).toContain("remote code: E2BIG_42");
+    });
+
+    test("states the control and orchestrator conditions", () => {
+      const tool = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_request")!;
+      for (const needle of ["accepts control", "orchestrator", "not delivered yet", "does not mean its agent acted"]) {
+        expect(tool.description).toContain(needle);
+      }
     });
   });
 

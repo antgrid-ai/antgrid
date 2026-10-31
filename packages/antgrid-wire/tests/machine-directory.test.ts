@@ -4,6 +4,8 @@ import {
   MAX_ACCOUNT_MACHINES,
   MachineDirectorySchema,
   RawKey32Schema,
+  SessionBusGrantsPatchSchema,
+  SessionBusGrantsSchema,
 } from "../src/machine-directory";
 
 const KEY = Buffer.alloc(32, 7).toString("base64");
@@ -77,5 +79,21 @@ describe("BusKeyRegistrationSchema", () => {
   test("accepts one key and rejects extra fields", () => {
     expect(BusKeyRegistrationSchema.safeParse({ busPublicKey: KEY }).success).toBe(true);
     expect(BusKeyRegistrationSchema.safeParse({ busPublicKey: KEY, x: 1 }).success).toBe(false);
+  });
+});
+
+describe("session-bus grants schemas", () => {
+  test("grants require both booleans and refuse extra keys", () => {
+    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true, busControl: false }).success).toBe(true);
+    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true }).success).toBe(false);
+    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true, busControl: false, x: 1 }).success).toBe(false);
+  });
+
+  test("a patch needs at least one key and refuses extras", () => {
+    expect(SessionBusGrantsPatchSchema.safeParse({}).success).toBe(false);
+    expect(SessionBusGrantsPatchSchema.safeParse({ busControl: false }).success).toBe(true);
+    expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: true, busControl: true }).success).toBe(true);
+    expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: "yes" }).success).toBe(false);
+    expect(SessionBusGrantsPatchSchema.safeParse({ busControl: true, x: 1 }).success).toBe(false);
   });
 });

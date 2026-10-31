@@ -1081,7 +1081,7 @@ test("a request as another machine's BusRequests sends it is served, not refused
 
 test("a bus request for a method outside the allowlist is refused and answered with nothing", async () => {
   const { frames, cardCalls, inbound } = busRig();
-  for (const method of ["git.checkout", "sessions.list", "scheduler.run", "machine.capability-card.x"]) {
+  for (const method of ["git.checkout", "sessions.delete", "scheduler.run", "scheduler.list", "state.snapshot", "machine.capability-card.x"]) {
     expect(await inbound(busRequest(method))).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
   }
   const notARequest: VerifiedInbound = { ...busRequest("machine.capability-card"), body: { type: "session-bus:post" } };

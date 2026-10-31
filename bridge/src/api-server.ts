@@ -12,6 +12,7 @@ import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 import {
   PublishArtifactBodySchema,
+  BusRequestBodySchema,
   SendBodySchema,
   ReplyBodySchema,
   type SendResultView,
@@ -259,7 +260,12 @@ function textResponse(data: string, status = 200) {
  *  a route and the tool calling it can never disagree about what a code means. */
 function sessionBusJson(result: unknown): Response {
   if (isRefusal(result)) {
-    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
+    return json({
+      error: result.error,
+      code: result.code,
+      ...(result.remoteCode ? { remoteCode: result.remoteCode } : {}),
+      ...(result.held ? { held: result.held } : {}),
+    }, SESSION_BUS_ERRORS[result.code]);
   }
   return json(result);
 }
@@ -764,6 +770,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         if (rest === "notify") {
           return sessionBusSend(bus, SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "request") {
+          const parsed = BusRequestBodySchema.safeParse(body);
+          if (!parsed.success) return json({ error: "Invalid body" }, 400);
+          return sessionBusJson(await bus.request(terminalId, parsed.data));
         }
         if (rest === "reply") {
           return sessionBusSend(bus, ReplyBodySchema, body, (b) => bus.reply(terminalId, b));

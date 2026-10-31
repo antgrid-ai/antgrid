@@ -3,13 +3,13 @@
 
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { BusKeyRegistrationSchema, EndpointChallengeRequestSchema, EndpointRegistrationRequestSchema } from "antgrid-wire";
+import { BusKeyRegistrationSchema, SessionBusGrantsPatchSchema, EndpointChallengeRequestSchema, EndpointRegistrationRequestSchema } from "antgrid-wire";
 import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "../auth/middleware.js";
 import { requireDeviceBearerJwt } from "../auth/jwt-bearer.js";
-import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, machineDirectory, registerBusKey, PeerAuthorizationError } from "../models/peer-authorization.js";
+import { createEndpointChallenge, registerEndpoint, peerAuthorizationSnapshot, machineDirectory, registerBusKey, ownSessionBusGrants, lowerOwnSessionBusGrants, PeerAuthorizationError } from "../models/peer-authorization.js";
 import { tokenBucket } from "../util/rate-limit.js";
 
 export function peerAuthorizationRoutes(deps: { db: DB; auth: Auth; env: Env }) {
@@ -17,7 +17,7 @@ export function peerAuthorizationRoutes(deps: { db: DB; auth: Auth; env: Env }) 
   r.onError((error, c) => {
     if (!(error instanceof PeerAuthorizationError)) throw error;
     return c.json({ error: error.code }, error.code === "UNAUTHENTICATED" ? 401 :
-      error.code === "INVALID_SIGNATURE" || error.code === "NOT_ENTITLED" || error.code === "NOT_AGENT" ? 403 : 409);
+      error.code === "INVALID_SIGNATURE" || error.code === "NOT_ENTITLED" || error.code === "NOT_AGENT" || error.code === "OWNER_SESSION_REQUIRED" ? 403 : 409);
   });
   const prefix = "/account/devices/me";
   const limiter = tokenBucket(10, 0.5);
@@ -30,7 +30,7 @@ export function peerAuthorizationRoutes(deps: { db: DB; auth: Auth; env: Env }) 
   }
   // Own bucket: bus directory kicks must never drain the one the 20 s lease refresh depends on.
   const busLimiter = tokenBucket(10, 0.5);
-  for (const path of ["machines", "bus-key"]) {
+  for (const path of ["machines", "bus-key", "session-bus"]) {
     r.use(`${prefix}/${path}`, requireDeviceBearerJwt(deps), bodyLimit({ maxSize: 4096 }), async (c, next) => {
       c.header("Cache-Control", "no-store");
       if (!busLimiter(c.get("deviceAuthorization")!.enrollmentId)) return c.json({ error: "RATE_LIMITED" }, 429);
@@ -60,6 +60,14 @@ export function peerAuthorizationRoutes(deps: { db: DB; auth: Auth; env: Env }) 
     await registerBusKey(deps.db, { ...c.get("deviceAuthorization")!, userId: c.get("userId") },
       input.data.busPublicKey);
     return c.json({ ok: true });
+  });
+  r.get(`${prefix}/session-bus`, async (c) => c.json(await ownSessionBusGrants(deps.db,
+    { ...c.get("deviceAuthorization")!, userId: c.get("userId") })));
+  r.post(`${prefix}/session-bus`, async (c) => {
+    const input = SessionBusGrantsPatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!input.success) return c.json({ error: "BAD_REQUEST" }, 400);
+    return c.json(await lowerOwnSessionBusGrants(deps.db,
+      { ...c.get("deviceAuthorization")!, userId: c.get("userId") }, input.data));
   });
   return r;
 }

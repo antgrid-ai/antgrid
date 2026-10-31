@@ -3,6 +3,8 @@ import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus } from "./git-branches";
 import type { DeviceStats } from "./device-stats";
+import type { SessionBusGrants } from "antgrid-wire";
+import type { AgentReachLevel } from "./session-bus/request-policy";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
@@ -42,6 +44,18 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // remote access off this bit grants nothing. See `agent-reach-policy.ts`.
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:get") }),
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:set"), enabled: z.boolean() }),
+  // Read and LOWER only. The orchestrator and bus-control grants are raised by
+  // the owner's account session from the app; nothing on this machine, this
+  // loopback included, may raise them, so there is deliberately no raise verb.
+  z.object({ id: z.string().min(1), type: z.literal("bus-grants:get") }),
+  z
+    .object({
+      id: z.string().min(1),
+      type: z.literal("bus-grants:lower"),
+      orchestrator: z.literal(false).optional(),
+      busControl: z.literal(false).optional(),
+    })
+    .refine((b) => b.orchestrator !== undefined || b.busControl !== undefined, { message: "name at least one grant to lower" }),
   // The machine half of the Capability Card over the LOOPBACK plane. The relay
   // plane already answers `machine.capability-card`, so without this the app
   // cannot read the NORMALISED remote of a project on its own machine — the key
@@ -264,8 +278,10 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
-  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean }
-  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "bus-grants:get"; grants: SessionBusGrants; reachEnabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "bus-grants:lower"; grants: SessionBusGrants; reachEnabled: boolean; level: AgentReachLevel }
   | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }

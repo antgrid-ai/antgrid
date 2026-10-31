@@ -158,6 +158,32 @@ the set of invariants a future edit breaks silently.
   loopback or app-fed way to write rows. Rows carry `asOf` and expire on
   `REMOTE_ROWS_TTL_MS` (`session-bus/constants.ts`), a refresh interval and
   not a lease.
+- **Agent reach has three effective levels, and the top one is not set here.**
+  `off` and `messages` are the machine's local switch (`agent-reach-policy.ts`,
+  a boolean). `control` is `effectiveReachLevel` (`session-bus/request-policy.ts`):
+  local on AND the account directory's `self.busControl`, which only the
+  owner's account session can raise (from the app, on web). Local off always
+  wins. Nothing on this machine raises an elevated grant: the loopback verbs
+  `bus-grants:get` and `bus-grants:lower` read and lower them, and there is
+  deliberately no raise verb, because a credential that lives on this machine
+  must not elevate it. A directory refresh that raises one logs a warn.
+- **Bus requests are answered by `HostServer.dispatchBusRequest`, never by
+  `dispatchControlPlaneInbound`.** Order: body parse, method allowlist, the
+  per-machine rate (charged before any refusal, so refusals are bounded too),
+  then `busRequestVerdict` over method x role x level. The requester's role is
+  the directory's `orchestrator` for the sealed sender, never anything the
+  request carries. The methods are `BUS_READ_METHODS` and
+  `BUS_CONTROL_METHODS` in `session-bus/request-policy.ts`; `sessions.list`
+  rows go through the `busSessionRow` allowlist, so a new session field stays
+  local until chosen. `scheduler.*` is never a method, and `session.create`
+  takes no command, args or approval policy and never inherits the last-used
+  chat permission mode. A mutation warms its project `local` from this host's
+  catalog, then calls the `*SessionForBus` seams on the core; `session.start`
+  refuses a session a person made with bypass, a custom command or a chat mode
+  the agent does not list as gated, checked in the same step as the start.
+  Answers go only to the asker, and one that cannot be sealed becomes
+  `RESPONSE_TOO_LARGE`. The pair budgets do not apply to requests. The sending half is `POST
+  /session-bus/request`.
 - **What each rung is witnessed by, and `delivered` means the recipient's
   store, not its agent.** `held` is a local fact: the frame never left. `relayed`
   is the relay's `bus:receipt` and says only that ciphertext is queued. The one

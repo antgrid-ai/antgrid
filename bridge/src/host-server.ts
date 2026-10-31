@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node
 import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
-import { sendHeartbeat, registerBusKey } from "./heartbeat";
+import { sendHeartbeat, registerBusKey, getSessionBusGrants, lowerSessionBusGrants, type SessionBusGrantsResult } from "./heartbeat";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
@@ -21,9 +21,6 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger, armLogLevel, currentLogLevel } from "./logger";
 import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "host-server" });
-// Bus request methods this machine serves. Never a mutating one, and never
-// `scheduler.*`: a scheduled run is the owner's, not another machine's.
-const BUS_REQUEST_METHODS: ReadonlySet<string> = new Set([CAPABILITY_CARD_METHOD]);
 import { NativeHostConnection, type NativeHostOptions } from "./peer/native-host-connection";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
@@ -36,7 +33,7 @@ import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectAvailableTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./agent-runtime";
 import { buildAgentCatalog } from "./agent-catalog";
-import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
+import type { AbMessage, ProjectAdvertEntry, RpcRequest, SessionEntry } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { removeHandoff } from "./handoff/handoff-dir";
@@ -44,8 +41,18 @@ import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
 import { RemoteDirectoryCache } from "./session-bus/remote-directory";
-import { BusRequests } from "./session-bus/bus-requests";
+import { BusRequests, tooLargeResponse } from "./session-bus/bus-requests";
 import { CAPABILITY_CARD_METHOD, DirectoryRefresher } from "./session-bus/directory-refresh";
+import {
+  BUS_PARAMS,
+  busRequestVerdict,
+  busSessionRow,
+  effectiveReachLevel,
+  isBusMethod,
+  type AgentReachLevel,
+  type BusParamsMethod,
+} from "./session-bus/request-policy";
+import { BUS_MAX_PLAINTEXT_BYTES } from "antgrid-wire";
 import { RequestRateLimiter } from "./session-bus/request-rate";
 import { refusalSentence, type SessionBusErrorCode } from "./session-bus/errors";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
@@ -167,6 +174,8 @@ export interface HostServerOptions {
    *  real `new NativeHostConnection(opts)` — overridden in tests to observe native stream
    *  binding without live central or native endpoints. */
   remoteHostFactory?: (opts: NativeHostOptions) => RemoteHostConnection;
+  /** Test seam: the fetch the session-bus grant verbs call web with. */
+  fetchFn?: typeof fetch;
   /** Test seam: override the pushHeartbeat() cadence. Defaults to
    *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
   heartbeatIntervalMs?: number;
@@ -761,7 +770,7 @@ export class HostServer {
 
   /**
    * A bus request from another machine. The only methods served are those in
-   * {@link BUS_REQUEST_METHODS}, and the answer goes back to the asker as a
+   * `request-policy.ts`, and the answer goes back to the asker as a
    * sealed response and nowhere else — this never reaches
    * `dispatchControlPlaneInbound`, whose replies are addressed to a phone's
    * peer session, not to a machine.
@@ -773,22 +782,92 @@ export class HostServer {
   private async dispatchBusRequest(v: VerifiedInbound): Promise<InboundVerdict> {
     const parsed = AbMessageSchema.safeParse(v.body);
     const req = parsed.success && parsed.data.type === "request" ? parsed.data : null;
-    if (req === null || !BUS_REQUEST_METHODS.has(req.method)) return { outcome: "refused", code: "METHOD_NOT_ALLOWED" };
+    if (req === null || !isBusMethod(req.method)) return { outcome: "refused", code: "METHOD_NOT_ALLOWED" };
     // Keyed on the signed header's id, which is what the transport records the
     // verdict under; the body's own requestId is the sender's claim.
     const answer = (res: AbMessage): InboundVerdict => {
+      // Stored beside the verdict for replay, so an oversized answer is replaced
+      // here as well: a stored copy cut to fit would not parse.
+      let json = JSON.stringify(res);
+      if (Buffer.byteLength(json) > BUS_MAX_PLAINTEXT_BYTES) {
+        res = tooLargeResponse(res);
+        json = JSON.stringify(res);
+      }
       this.busRequests?.respond(v.from, v.id, res, v.header.expiresAt);
-      return { outcome: "applied", response: JSON.stringify(res) };
+      return { outcome: "applied", response: json };
     };
     const failure = (code: SessionBusErrorCode): InboundVerdict =>
       answer(createMessage("response", { requestId: req.requestId, ok: false, error: { code, message: refusalSentence(code) } }));
     // Charged before anything else: even a refusal costs a sealed response.
     if (!this.requestRate.take(v.from)) return failure("REQUEST_RATE");
+    // The requester's role is what the account's directory says about the
+    // machine the transport authenticated, never anything the request claims.
+    const role = this.machineDirectory?.machine(v.from)?.orchestrator === true ? "orchestrator" : "agent";
     // Every request, the session-less card included: asked over the bus, the
     // asker is another machine's agent, and the card names this machine's
     // projects, remotes and branches at the price of git spawns.
-    if (!this.agentReachPolicy.isEnabled()) return failure("NOT_ALLOWED_AGENT_REACH");
-    return answer(await this.handleCapabilityCardRpc(req));
+    const verdict = busRequestVerdict({ method: req.method, role, level: this.effectiveReachLevel() });
+    if (verdict !== "allow") return failure(verdict.code);
+    if (req.method === CAPABILITY_CARD_METHOD) return answer(await this.handleCapabilityCardRpc(req));
+
+    const method = req.method as BusParamsMethod;
+    const params = BUS_PARAMS[method].safeParse(req.params ?? {});
+    if (!params.success) return failure("BAD_PARAMS");
+    const { projectId } = params.data;
+    const succeed = (result: unknown): InboundVerdict =>
+      answer(createMessage("response", { requestId: req.requestId, ok: true, result }));
+
+    // The catalog and the id's shape are all that bound which project a request
+    // may name; the path always comes from this host's own catalog.
+    const seen = isSafeProjectId(projectId) ? this.seenProjects.get(projectId) : undefined;
+    if (!seen || !existsSync(seen.path)) return failure("UNKNOWN_PROJECT");
+
+    if (method === "sessions.list") {
+      const listed = await this.handleSessionsListRpc({ ...req, params: { projectId } });
+      const rows = listed.type === "response" && listed.ok ? (listed.result as { sessions: SessionEntry[] }).sessions : null;
+      return rows ? succeed({ sessions: rows.map(busSessionRow) }) : failure("REQUEST_FAILED");
+    }
+
+    // Opened `local`, never remote or promoted: nothing is driving the core, and
+    // the phone-facing project start must not be reused for another machine.
+    if (!this.cores.has(projectId)) {
+      try {
+        await this.open(projectId, seen.path, "local");
+      } catch (err) {
+        log.warn("session bus: could not open project %s for a request: %s", projectId, err instanceof Error ? err.message : String(err));
+        return failure("REQUEST_FAILED");
+      }
+    }
+    const core = this.cores.get(projectId)?.core;
+    if (!core) return failure("REQUEST_FAILED");
+
+    switch (method) {
+      case "project.start":
+        return succeed({ projectId, started: true });
+      case "session.create": {
+        const { projectId: _p, ...spec } = BUS_PARAMS["session.create"].parse(params.data);
+        const created = await core.createSessionForBus(spec);
+        return created.ok ? succeed({ session: busSessionRow(created.session) }) : failure(created.code);
+      }
+      case "session.start": {
+        const p = BUS_PARAMS["session.start"].parse(params.data);
+        const started = await core.startSessionForBus(p.sessionId, p.initialPrompt);
+        return started.ok ? succeed({ sessionId: p.sessionId }) : failure(started.code);
+      }
+      case "session.stop": {
+        const p = BUS_PARAMS["session.stop"].parse(params.data);
+        const stopped = await core.stopSessionForBus(p.sessionId);
+        return stopped.ok ? succeed({ sessionId: p.sessionId }) : failure(stopped.code);
+      }
+      default:
+        return failure("METHOD_NOT_ALLOWED");
+    }
+  }
+
+  /** What an agent reaching this machine is allowed to do: the local switch,
+   *  raised to `control` only by the owner's grant in the directory. */
+  private effectiveReachLevel(): AgentReachLevel {
+    return effectiveReachLevel(this.agentReachPolicy.isEnabled(), this.machineDirectory?.selfBusControl() ?? false);
   }
 
   /** The responder side of a replayed request: the transport found it already
@@ -820,6 +899,7 @@ export class HostServer {
   private busKey: BusKeyPair | null = null;
   private machineDirectory: MachineDirectory | null = null;
   private stopBusKeyWatch: (() => void) | null = null;
+  private lastGrants: { orchestrator: boolean; busControl: boolean } | null = null;
   private lastBusKeyRegisterAt = Number.NEGATIVE_INFINITY;
   private busKeyRegistering = false;
   private scheduler: SchedulerService | null = null;
@@ -1078,7 +1158,10 @@ export class HostServer {
         selfDeviceId: r.auth.deviceUuid,
       });
       this.machineDirectory = directory;
-      this.stopBusKeyWatch = directory.onChange(() => this.registerBusKeyIfStale());
+      this.stopBusKeyWatch = directory.onChange(() => {
+        this.registerBusKeyIfStale();
+        this.noteGrantTransitions();
+      });
       directory.start();
     }
 
@@ -1813,14 +1896,75 @@ export class HostServer {
   async handleAgentReachVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "agent-reach:get":
-        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel() };
       case "agent-reach:set": {
         this.agentReachPolicy.setEnabled(req.enabled);
-        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel() };
       }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not an agent-reach verb: ${(req as ControlRequest).type}` } };
     }
+  }
+
+  /** Reads and lowers this machine's orchestrator and bus-control grants on web.
+   *  There is no raise: that needs the owner's account session, and a credential
+   *  that lives on this machine must not be able to elevate it. A lower asks the
+   *  directory to refresh so the change takes effect without waiting out the
+   *  cadence. */
+  async handleBusGrantsVerb(req: ControlRequest): Promise<ControlResponse> {
+    if (req.type !== "bus-grants:get" && req.type !== "bus-grants:lower") {
+      return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a bus-grants verb: ${(req as ControlRequest).type}` } };
+    }
+    const r = this.remoteConfig();
+    if (!r) return { id: req.id, ok: false, error: { code: "NOT_SIGNED_IN", message: "this machine is not signed in to an account" } };
+    let rt: RemoteRuntime;
+    try {
+      rt = await this.ensureRemoteRuntime();
+    } catch {
+      return { id: req.id, ok: false, error: { code: "WEB_UNREACHABLE", message: "could not reach the account service (WEB_UNREACHABLE)" } };
+    }
+    const base = { licenseApiUrl: r.licenseApiUrl, getToken: rt.maint.getToken, ...(this.opts.fetchFn ? { fetchFn: this.opts.fetchFn } : {}) };
+    let result: SessionBusGrantsResult;
+    if (req.type === "bus-grants:get") {
+      result = await getSessionBusGrants(base);
+    } else {
+      result = await lowerSessionBusGrants({
+        ...base,
+        patch: {
+          ...(req.orchestrator === false ? { orchestrator: false as const } : {}),
+          ...(req.busControl === false ? { busControl: false as const } : {}),
+        },
+      });
+    }
+    if (!result.ok) {
+      // The code rides in the message too: the CLI prints only the message, and
+      // a 403, a 429 and an outage call for different next steps.
+      if (result.status === null) {
+        return { id: req.id, ok: false, error: { code: "WEB_UNREACHABLE", message: "could not reach the account service (WEB_UNREACHABLE)" } };
+      }
+      const code = `WEB_${result.status}`;
+      return { id: req.id, ok: false, error: { code, message: `the account service refused the request (${code})` } };
+    }
+    if (req.type === "bus-grants:lower") this.machineDirectory?.kick();
+    // `grants` is what the account says now; `level` is what the dispatcher
+    // enforces, which follows the directory and so catches up at its next refresh.
+    return {
+      id: req.id, ok: true, type: req.type, grants: result.grants,
+      reachEnabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel(),
+    };
+  }
+
+  /** One warn when a grant goes from off to on, naming only which one. Raising
+   *  happens in the app under the owner's account session, so this is the trace
+   *  that a machine was elevated. */
+  private noteGrantTransitions(): void {
+    const self = this.machineDirectory?.current()?.self;
+    if (!self) return;
+    if (this.lastGrants) {
+      if (!this.lastGrants.orchestrator && self.orchestrator) log.warn({ grant: "orchestrator" }, "session bus grant raised");
+      if (!this.lastGrants.busControl && self.busControl) log.warn({ grant: "busControl" }, "session bus grant raised");
+    }
+    this.lastGrants = { orchestrator: self.orchestrator, busControl: self.busControl };
   }
 
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
@@ -2450,6 +2594,9 @@ export class HostServer {
       case "agent-reach:get":
       case "agent-reach:set":
         return this.handleAgentReachVerb(req);
+      case "bus-grants:get":
+      case "bus-grants:lower":
+        return this.handleBusGrantsVerb(req);
       case "machine:capability-card": {
         try {
           const card = await readCapabilityCard(
@@ -2828,6 +2975,11 @@ export class HostServer {
       // a machine is added to one of its sessions — which is a local core's
       // business as often as a remote one's.
       machineDeviceId: () => this.controlPlaneRegistrationId,
+      // Read live: the requests object is rebuilt on every control plane start,
+      // and a core opened before it exists must still reach the current one.
+      busRequest: (i) => this.busRequests
+        ? this.busRequests.request(i)
+        : Promise.resolve({ ok: false, code: "PEER_UNREACHABLE" }),
       // One coordinator for every project this host has open — see the field's
       // own doc for why the route table and `self()` are keyed off the shared
       // session index rather than this core's own id.

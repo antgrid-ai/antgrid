@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./agent-core";
+import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions, type BusSessionFailure, type BusSessionSpec } from "./agent-core";
 import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./project-streams";
 import type { AbMessage, SessionEntry, WorkStatus } from "./protocol";
+import type { BusRequestResult } from "./session-bus/bus-requests";
 import type { DeleteSessionOptions, ScheduledSessionSpec, ScheduledSessionIdentity, ScheduledSessionObservation, PreparedScheduledSession } from "./session-manager";
 import { answerRequest, becameDeliverable, busDeliverable, clientFocusState, clientGone, closeInterruptedTurn, DEFAULT_TURN_IDLE_MS, expireTurns, hookTurnEnd, initialWorkStatus, isIdleAtPrompt, isStaleIdleNudge, noteHookChannelLost, noteHookChannelRestored, openedTurns, PROVISIONAL_TURN_GRACE_MS, reduceWorkStatus, retractProvisionalTurn, sessionFocus, turnActivity, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { SessionBusDeliveryQueue, type QueuedLine } from "./session-bus/delivery-queue";
@@ -59,6 +60,8 @@ export interface ProjectCoreDeps extends BuildAgentCoreOptions {
    *  rather than a session this bridge does not hold — see the coordinator's
    *  `addressable`. */
   machineDeviceId?: () => string | null;
+  /** The host's bus request sender; forwarded to the core by name. */
+  busRequest?: (i: { to: string; method: string; params?: unknown; timeoutMs: number }) => Promise<BusRequestResult>;
 }
 
 /** Handle for a native project binding added to an already-open core via {@link ProjectCore.promote}.
@@ -398,6 +401,20 @@ export class ProjectCore {
     this.core?.startSession(id);
   }
 
+  /** The bus request seams, forwarded to the live AgentCore. A core that is not
+   *  started answers `AGENT_NOT_READY` rather than throwing. */
+  async createSessionForBus(spec: BusSessionSpec): Promise<{ ok: true; session: SessionEntry } | BusSessionFailure> {
+    return this.core?.createSessionForBus(spec) ?? { ok: false, code: "AGENT_NOT_READY" };
+  }
+
+  async startSessionForBus(sessionId: string, initialPrompt?: string): Promise<{ ok: true } | BusSessionFailure> {
+    return this.core?.startSessionForBus(sessionId, initialPrompt) ?? { ok: false, code: "AGENT_NOT_READY" };
+  }
+
+  async stopSessionForBus(sessionId: string): Promise<{ ok: true } | BusSessionFailure> {
+    return this.core?.stopSessionForBus(sessionId) ?? { ok: false, code: "AGENT_NOT_READY" };
+  }
+
   async prepareScheduledSession(spec: ScheduledSessionSpec, bind: (identity: ScheduledSessionIdentity) => Promise<void>): Promise<PreparedScheduledSession> {
     if (!this.core) throw new Error("Project is not open");
     return this.core.prepareScheduledSession(spec, bind);
@@ -490,6 +507,9 @@ export class ProjectCore {
       // with no host (evals, most of this file's own test callers) offers no
       // wake at all, and the refusal falls back to its unconditional shape.
       ...(this.deps.startSession ? { startSession: this.deps.startSession } : {}),
+      // Forwarded by name for the same reason: dropped here, `antgrid_request`
+      // would answer AGENT_NOT_READY on a real bridge.
+      ...(this.deps.busRequest ? { busRequest: this.deps.busRequest } : {}),
       // Forwarded by name for the same reason: dropped here, the core would
       // answer every scheduler tool SCHEDULER_UNAVAILABLE on a real bridge while
       // a test that builds the core directly stays green.

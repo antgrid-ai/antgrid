@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { createMessage, type AbMessage } from "../protocol";
 import { BUS_REQUEST_MAX_TIMEOUT_MS } from "./constants";
+import { refusalSentence } from "./errors";
 import type { BusHeldReason, BusSendInput, RelayBusTransport, TransportOutcome } from "./relay-transport";
 
 export const BUS_REQUEST_RESEND_MIN_MS = 1_000;
@@ -22,6 +23,8 @@ export type BusRequestResult =
 
 export interface BusRequestsDeps {
   transport: Pick<RelayBusTransport, "send">;
+  /** This machine's own role as the account's directory reports it, never
+   *  anything configured here. */
   selfRole: () => "agent" | "orchestrator";
   /** The wall clock: the transport maps it onto the relay's. */
   now?: () => number;
@@ -50,6 +53,15 @@ interface PendingResponse {
   sentAt: number;
   expiresAt: number;
   cancel: (() => void) | null;
+}
+
+export function tooLargeResponse(original: AbMessage): AbMessage {
+  const requestId = (original as { requestId?: unknown }).requestId;
+  return createMessage("response", {
+    requestId: typeof requestId === "string" ? requestId : "",
+    ok: false,
+    error: { code: "RESPONSE_TOO_LARGE", message: refusalSentence("RESPONSE_TOO_LARGE") },
+  });
 }
 
 function defaultSchedule(fn: () => void, ms: number): () => void {
@@ -199,7 +211,13 @@ export class BusRequests {
       this.dropResponse(p);
       return;
     }
-    const r = this.deps.transport.send(this.input(p, "response", p.body, p.id, p.requestId));
+    let r = this.deps.transport.send(this.input(p, "response", p.body, p.id, p.requestId));
+    if ("refused" in r && r.refused === "PLAINTEXT_TOO_LARGE") {
+      // The asker still gets an answer, and a short one: without it the request
+      // would resend until its deadline against a response that can never fit.
+      p.body = tooLargeResponse(p.body);
+      r = this.deps.transport.send(this.input(p, "response", p.body, p.id, p.requestId));
+    }
     if ("refused" in r || (!r.sent && r.reason === "remote-access-off")) {
       this.dropResponse(p);
       return;

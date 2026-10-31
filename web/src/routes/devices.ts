@@ -16,6 +16,8 @@ import {
   PlatformSchema,
   type DeviceKind,
 } from "../models/device.js";
+import { SessionBusGrantsPatchSchema } from "antgrid-wire";
+import { setOwnedSessionBusGrants } from "../models/peer-authorization.js";
 import { revokeUserDevice } from "../services/device.js";
 import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../services/account.js";
 import {
@@ -265,6 +267,7 @@ export function deviceRoutes(deps: {
         display_name: d.displayName,
         activated_at: d.activatedAt,
         last_seen_at: d.lastSeenAt,
+        ...(d.kind === "agent" ? { orchestrator: d.orchestrator, busControl: d.busControl } : {}),
       })),
     });
   });
@@ -281,6 +284,16 @@ export function deviceRoutes(deps: {
     });
     if (result === "not_found") return c.json({ error: "NOT_FOUND" }, 404);
     return c.json({ ok: true });
+  });
+
+  r.patch("/account/devices/:id/session-bus", gate, async (c) => {
+    const id = c.req.param("id");
+    if (!UuidSchema.safeParse(id).success) return c.json({ error: "NOT_FOUND" }, 404);
+    const input = SessionBusGrantsPatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!input.success) return c.json({ error: "BAD_REQUEST" }, 400);
+    const grants = await setOwnedSessionBusGrants(deps.db, c.get("userId"), id, input.data);
+    if (!grants) return c.json({ error: "NOT_FOUND" }, 404);
+    return c.json(grants);
   });
 
   return r;

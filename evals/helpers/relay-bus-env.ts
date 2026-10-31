@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { createMessage } from "../../bridge/src/protocol";
@@ -80,6 +81,14 @@ export async function setupRelayBusEnv(opts: { tmp: string }): Promise<RelayBusE
     const sinkPath = join(opts.tmp, `machine-${name}.log`);
     const project = createTestProject("basic", { __RELAY_URL__: relay.url.replace(/\/ws$/, "") });
     cleanups.push(() => project.cleanup());
+    // A bus-created session has no command of its own, so it runs the project's
+    // agent; pointing that at the sink gives it a guest that can actually start.
+    appendFileSync(join(project.dir, "antgrid.yaml"),
+      `
+agent:
+  command: node
+  flags: ["${SINK_SCRIPT_NAME}"]
+`);
     await prepareBusProject(project.dir);
     const projectId = computeProjectId(project.dir);
     const { mkdirSync } = await import("node:fs");

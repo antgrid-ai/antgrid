@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allocatePort, setMobileAccess, startRelay, type RelayHandle } from "../helpers/harness";
 import { setupRelayBusEnv, startSinkSession, type RelayBusEnv, type RelayBusMachine } from "../helpers/relay-bus-env";
-import { busCall, persistedSessions, setAgentReach, untilAsync } from "../support/session-bus";
+import {
+  authorityGrants, busCall, localVerb, lowerGrants, persistedSessions, setAgentReach, untilAsync,
+} from "../support/session-bus";
+import { createMessage } from "../../bridge/src/protocol";
 import { NO_PROGRESS_EXCHANGES } from "../../bridge/src/session-bus/constants";
 import { CentralTestClient } from "../helpers/central-test-client";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
@@ -391,4 +394,125 @@ describe("gate: session bus relay, two bridges", () => {
     expect(halted.status).toBe(429);
     expect(halted.body.code).toBe("NO_PROGRESS");
   }, ROW_TIMEOUT_MS);
+});
+
+// The bridge's directory refreshes about every 20 s and on kicks, so a grant
+// change reaches the other machine inside this bound.
+const GRANT_TIMEOUT_MS = 45_000;
+
+describe("gate: session bus relay, orchestration", () => {
+  let env: RelayBusEnv | undefined;
+  let tmp: string | undefined;
+
+  afterEach(async () => {
+    await env?.teardown();
+    env = undefined;
+    if (tmp) try { rmSync(tmp, { recursive: true, force: true }); } catch { /* the PTY still has it */ }
+    tmp = undefined;
+  });
+
+  async function boot(): Promise<RelayBusEnv & { sa: string }> {
+    tmp = mkdtempSync(join(tmpdir(), "antgrid-relay-orch-"));
+    env = await setupRelayBusEnv({ tmp });
+    await env.waitForBusKeys();
+    return Object.assign(env, { sa: await startSinkSession(env.a, "alpha") });
+  }
+
+  function request(a: RelayBusMachine, sa: string, b: RelayBusMachine, method: string, params: object) {
+    return busCall(a.abDir, "request", { terminalId: sa, body: { to: b.machineId, method, params, timeoutMs: 20_000 } });
+  }
+
+  /** Repeats a request until its answer satisfies `done`, which is how a test
+   *  waits out the directory refresh without a hook into it. */
+  async function requestUntil(
+    a: RelayBusMachine, sa: string, b: RelayBusMachine, method: string, params: object,
+    done: (res: { status: number; body: any }) => boolean, what: string,
+  ) {
+    let last = "";
+    try {
+      return await untilAsync(async () => {
+        const res = await request(a, sa, b, method, params);
+        last = `${res.status} ${JSON.stringify(res.body)}`;
+        return done(res) ? res : undefined;
+      }, GRANT_TIMEOUT_MS, what);
+    } catch (err) {
+      throw new Error(`${(err as Error).message}; last answer: ${last}`);
+    }
+  }
+
+  const ok = (res: { body: any }) => res.body?.ok === true;
+  const refusedWith = (code: string) => (res: { status: number; body: any }) => res.status === 403 && res.body?.code === code;
+
+  async function reachControl(e: RelayBusEnv, sa: string): Promise<void> {
+    e.license.setOrchestrator(e.a.machineId, true);
+    e.license.setBusControl(e.b.machineId, true);
+    await requestUntil(e.a, sa, e.b, "project.start", { projectId: e.b.projectId }, ok, "A's project.start to be allowed on B");
+  }
+
+  test("a granted orchestrator creates and starts a session on a control machine", async () => {
+    const e = await boot();
+    await reachControl(e, e.sa);
+    const created = await request(e.a, e.sa, e.b, "session.create", { projectId: e.b.projectId, name: "driven" });
+    expect(`${created.status} ${JSON.stringify(created.body)}`).toMatch(/^200 /);
+    const sessionId = created.body.result.session.id as string;
+    // No initialPrompt: the sink guest is a generic agent, which cannot take an
+    // opening prompt through its terminal invocation.
+    const started = await request(e.a, e.sa, e.b, "session.start", { projectId: e.b.projectId, sessionId });
+    expect(`${started.status} ${JSON.stringify(started.body)}`).toMatch(/^200 /);
+    const listed = await requestUntil(e.a, e.sa, e.b, "sessions.list", { projectId: e.b.projectId }, (res) =>
+      (res.body?.result?.sessions ?? []).some((r: any) => r.id === sessionId && r.running === true),
+      "B to list the driven session as running");
+    expect(listed.body.result.sessions.find((r: any) => r.id === sessionId).name).toBe("driven");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS * 2);
+
+  test("a machine without the busControl grant refuses control requests", async () => {
+    const e = await boot();
+    e.license.setOrchestrator(e.a.machineId, true);
+    await requestUntil(e.a, e.sa, e.b, "sessions.list", { projectId: e.b.projectId }, ok, "A's read request to be allowed on B");
+    const res = await request(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("NOT_ALLOWED_AGENT_REACH");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS);
+
+  test("local reach off wins over a busControl grant", async () => {
+    const e = await boot();
+    await reachControl(e, e.sa);
+    await setAgentReach(e.b.abDir, false);
+    const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
+      refusedWith("NOT_ALLOWED_AGENT_REACH"), "B's local off to refuse control");
+    expect(res.body.code).toBe("NOT_ALLOWED_AGENT_REACH");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS * 2);
+
+  test("a machine that is not an orchestrator is refused NOT_ORCHESTRATOR", async () => {
+    const e = await boot();
+    e.license.setBusControl(e.b.machineId, true);
+    const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
+      refusedWith("NOT_ORCHESTRATOR"), "B to answer NOT_ORCHESTRATOR");
+    expect(res.body.code).toBe("NOT_ORCHESTRATOR");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS);
+
+  test("lowering through the bridge reaches the authority and the next refresh refuses", async () => {
+    const e = await boot();
+    await reachControl(e, e.sa);
+    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: true, busControl: false });
+    const lowered = await lowerGrants(e.a.abDir, { orchestrator: false });
+    expect(lowered.grants.orchestrator).toBe(false);
+    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: false, busControl: false });
+    const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
+      refusedWith("NOT_ORCHESTRATOR"), "B to refuse the lowered orchestrator");
+    expect(res.body.code).toBe("NOT_ORCHESTRATOR");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS * 2);
+
+  test("a session with a bypassed approval policy cannot be started over the bus", async () => {
+    const e = await boot();
+    await reachControl(e, e.sa);
+    const bridge = await e.b.local();
+    const created = await localVerb(bridge, createMessage("session:create", {
+      requestId: crypto.randomUUID(), name: "elevated", tool: "claude-code", mode: "terminal", approvalPolicy: "bypass",
+    }));
+    const sessionId = created.session.id as string;
+    const res = await request(e.a, e.sa, e.b, "session.start", { projectId: e.b.projectId, sessionId });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("SESSION_NOT_BUS_ELIGIBLE");
+  }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS);
 });

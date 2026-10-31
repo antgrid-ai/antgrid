@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BUS_HELD_REASON_TEXT, refusalSentence } from "../session-bus/errors";
+import { BUS_HELD_REASON_TEXT, REMOTE_CODE_PATTERN, refusalSentence } from "../session-bus/errors";
 
 // Stub: the interactive 'antgrid init' bootstrap lives in the CLI.
 // For the MCP antgrid_init action we emit a minimal starter config.
@@ -281,6 +281,20 @@ export const SESSION_BUS_TOOLS: McpTool[] = [
       required: ["threadId"],
     },
   },
+  {
+    name: "antgrid_request",
+    description: "Ask another of the user's machines to do something and wait for its answer: read-only methods (machine.capability-card, sessions.list) and, on a machine that accepts control, project.start, session.create (default approval policy only), session.start {initialPrompt?} and session.stop. It executes there only if that machine accepts control, a setting the account owner makes in the Antgrid app, and this machine is an orchestrator, also set in the app; otherwise it is refused and the code says which. A timeout that names a held reason means the request was not delivered yet, not that it failed. A started session that received a prompt does not mean its agent acted on it: read the session with antgrid_list_sessions, or wait for a post back. Use the machineId from an antgrid_list_sessions row as to.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: str("The machineId of the machine to ask, copied from an antgrid_list_sessions row."),
+        method: str("One of machine.capability-card, sessions.list, project.start, session.create, session.start, session.stop."),
+        params: { type: "object", description: "The method's parameters. Omit for methods that take none." },
+        timeoutMs: { type: "number", description: "How long to wait for the answer, in milliseconds. The bridge clamps it." },
+      },
+      required: ["to", "method"],
+    },
+  },
 ];
 
 const BUS_TOOL_NAMES = new Set(SESSION_BUS_TOOLS.map((t) => t.name));
@@ -313,6 +327,22 @@ function busError(result: ApiResult): string {
     }
   }
   return String(data);
+}
+
+/** A request refusal: busError plus the two optional fields the bridge adds. A
+ *  held reason is the difference between "not delivered yet" and "refused", so
+ *  it is spelled out; both are shape-checked because they come off the wire. */
+function requestError(result: ApiResult): string {
+  const base = busError(result);
+  const data = result.data;
+  if (!data || typeof data !== "object") return base;
+  const { remoteCode, held } = data as { remoteCode?: unknown; held?: unknown };
+  const parts = [base];
+  if (typeof held === "string" && Object.hasOwn(BUS_HELD_REASON_TEXT, held)) {
+    parts.push(`not delivered yet: ${BUS_HELD_REASON_TEXT[held as keyof typeof BUS_HELD_REASON_TEXT]}`);
+  }
+  if (typeof remoteCode === "string" && REMOTE_CODE_PATTERN.test(remoteCode)) parts.push(`remote code: ${remoteCode}`);
+  return parts.join("; ");
 }
 
 function argStr(args: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -681,6 +711,22 @@ export async function callSessionBusTool(
       const now = Date.now();
       const head = `Thread ${r.data.threadId} (${entries.length} message${entries.length === 1 ? "" : "s"}, oldest first):`;
       return toolText([head, ...entries.map((entry) => threadEntryLine(entry, now))].join("\n"));
+    }
+
+    case "antgrid_request": {
+      const to = argStr(args, "to");
+      const method = argStr(args, "method");
+      if (!to) return toolError("Missing required argument: to");
+      if (!method) return toolError("Missing required argument: method");
+      const params = args?.params;
+      const r = await api("POST", "/session-bus/request", body({
+        to,
+        method,
+        params: params && typeof params === "object" ? params : undefined,
+        timeoutMs: argNum(args, "timeoutMs"),
+      }));
+      if (!r.ok) return toolError(requestError(r));
+      return toolText(JSON.stringify(r.data.result ?? null, null, 2));
     }
 
     default:

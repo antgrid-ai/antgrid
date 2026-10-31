@@ -125,6 +125,21 @@ export const SESSION_BUS_ERRORS = {
   /** A request got no response before its deadline. What it was waiting on, if
    *  anything, is the held reason that travels beside this code. */
   REQUEST_TIMEOUT: 504,
+  /** A mutating request came from a machine the account has not made an
+   *  orchestrator. Read from the directory, never from the request. */
+  NOT_ORCHESTRATOR: 403,
+  /** The answer did not fit in one sealed message. */
+  RESPONSE_TOO_LARGE: 413,
+  /** The session was made with elevated settings by a human, so another
+   *  machine may not wake it. */
+  SESSION_NOT_BUS_ELIGIBLE: 403,
+  /** The request's params did not match the method's schema. */
+  BAD_PARAMS: 400,
+  UNKNOWN_PROJECT: 404,
+  UNKNOWN_SESSION: 404,
+  /** The method ran and failed here, or the other machine answered with a code
+   *  this bridge has no word for. */
+  REQUEST_FAILED: 502,
 } as const;
 
 export type SessionBusErrorCode = keyof typeof SESSION_BUS_ERRORS;
@@ -136,6 +151,10 @@ export interface SessionBusRefusal {
   ok: false;
   code: SessionBusErrorCode;
   error: string;
+  /** A request answered with a code this bridge has no entry for: the other
+   *  machine's own word, shape-checked and never interpolated into `error`. */
+  remoteCode?: string;
+  held?: BusHeldReason;
 }
 
 export function refuse(code: SessionBusErrorCode, error: string): SessionBusRefusal {
@@ -176,6 +195,13 @@ export const BUS_REFUSAL_TEXT: Record<string, string> = {
   NO_BUS_KEY: "that machine has not published a messaging key yet",
   REQUEST_RATE: "that machine is receiving requests from this one faster than it answers; wait a minute and ask again",
   REQUEST_TIMEOUT: "that machine did not answer in time",
+  NOT_ORCHESTRATOR: "that machine takes this kind of request only from a machine the account has made an orchestrator",
+  RESPONSE_TOO_LARGE: "the answer was too large to send between machines",
+  SESSION_NOT_BUS_ELIGIBLE: "that session was set up by a person with settings another machine may not start it under",
+  BAD_PARAMS: "the request's parameters were not what that method takes",
+  UNKNOWN_PROJECT: "that machine has no such project",
+  UNKNOWN_SESSION: "that machine has no such session in that project",
+  REQUEST_FAILED: "that machine could not carry out the request",
 };
 
 /** The sentence for a terminal code, with a generic one for a code this bridge
@@ -183,6 +209,11 @@ export const BUS_REFUSAL_TEXT: Record<string, string> = {
 export function refusalSentence(code: string): string {
   return BUS_REFUSAL_TEXT[code] ?? "the other machine refused the message";
 }
+
+/** The shape a code another machine sent must have before it is echoed to a
+ *  caller. One pattern for the api that forwards it and the tool that prints
+ *  it, so a code the one passes is never dropped by the other. */
+export const REMOTE_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/;
 
 /** Why a message is still on this machine, for the held send line. Exhaustive,
  *  so a new reason fails to compile until it has a sentence. */

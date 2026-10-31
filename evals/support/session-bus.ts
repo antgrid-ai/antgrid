@@ -549,3 +549,38 @@ export async function setAgentReach(abDir: string, enabled: boolean): Promise<vo
   );
   if (!res.ok || res.enabled !== enabled) throw new Error(`agent-reach:set ${enabled} failed: ${JSON.stringify(res)}`);
 }
+
+async function controlVerb(abDir: string, body: Record<string, unknown>): Promise<any> {
+  const hf = readHostFile(join(abDir, "host.json"));
+  if (!hf) throw new Error(`no host.json in ${abDir}`);
+  return postJson(`http://127.0.0.1:${hf.controlPort}/control`, { id: `bus-grants-${randomUUID()}`, ...body }, hf.token);
+}
+
+/** Lower this machine's owner-set grants through the loopback verb the CLI
+ *  drives. There is no raise counterpart: raising needs the owner's session. */
+export async function lowerGrants(
+  abDir: string,
+  patch: { orchestrator?: false; busControl?: false },
+): Promise<{ grants: { orchestrator: boolean; busControl: boolean }; reachEnabled: boolean; level: string }> {
+  const res = await controlVerb(abDir, { type: "bus-grants:lower", ...patch });
+  if (!res.ok) throw new Error(`bus-grants:lower failed: ${JSON.stringify(res)}`);
+  return res;
+}
+
+/** The grants the web authority holds for a machine, read with that machine's
+ *  own credential, so a lowering the bridge never delivered shows here. */
+export async function authorityGrants(
+  licenseUrl: string,
+  auth: { clientId: string; clientSecret: string },
+): Promise<{ orchestrator: boolean; busControl: boolean }> {
+  const basic = Buffer.from(`${auth.clientId}:${auth.clientSecret}`).toString("base64");
+  const minted = await fetch(`${licenseUrl}/api/auth/oauth2/token`, {
+    method: "POST", headers: { authorization: `Basic ${basic}`, "content-type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+  }).then((r) => r.json()) as { access_token: string };
+  const res = await fetch(`${licenseUrl}/account/devices/me/session-bus`, {
+    headers: { authorization: `Bearer ${minted.access_token}` },
+  });
+  if (!res.ok) throw new Error(`session-bus read failed: ${res.status}`);
+  return await res.json() as { orchestrator: boolean; busControl: boolean };
+}

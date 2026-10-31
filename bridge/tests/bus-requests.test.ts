@@ -199,3 +199,13 @@ test("a duplicate respond for the same request does not start a second retry loo
   advance(2_000);
   expect(sent).toHaveLength(3);
 });
+
+test("a response the transport cannot seal is replaced by a short RESPONSE_TOO_LARGE for the same request", () => {
+  const { requests, sent } = rig((i) => (i.kind === "response" && (i.body as { ok?: boolean }).ok === true
+    ? { sent: false, refused: "PLAINTEXT_TOO_LARGE" }
+    : { sent: true }));
+  requests.respond(PEER, "req-1", response("req-body-1"), 2_000_000);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]!.body).toMatchObject({ type: "response", requestId: "req-body-1", ok: false, error: { code: "RESPONSE_TOO_LARGE" } });
+  expect(sent[1]).toMatchObject({ to: PEER, kind: "response", correlationId: "req-1" });
+});
