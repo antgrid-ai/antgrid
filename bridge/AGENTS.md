@@ -149,18 +149,15 @@ the set of invariants a future edit breaks silently.
   inbound is `HostServer.handleBusInbound` (`host-server.ts`), which refuses
   relay-origin bus mail while the switch is off. Gating one and not the other ships a machine that can speak
   and cannot be answered, because the peer's reply dies at our own inbound gate.
-- **The remote half of the directory arrives by loopback push and by nothing
-  else.** The app peeks at control-plane sessions it already holds, asks each
-  machine for a session-bearing `machine.capability-card`, and pushes the
-  answers to the `session-bus:remote-directory` control verb. Never give it a
-  relay-side arm: `bus.setInboundHandler` accepts frames from any
-  account-trusted peer while the machine switch is on, so a directory verb
-  reachable there lets a phone write rows a local agent then reads as peers.
-  Mirrored rows are re-validated on arrival and decay on a TTL
-  (`REMOTE_ROWS_TTL_MS`, `session-bus/constants.ts`) rather than persisting,
-  because a bridge cannot dial another bridge and so can never ask again — and
-  the near end proves a carrier exists by having been pushed to, not by a
-  capability flag Zod could strip in silence.
+- **The remote half of the directory arrives over the bus and by nothing
+  else.** `DirectoryRefresher` (`session-bus/directory-refresh.ts`) asks each
+  account machine for a session-bearing `machine.capability-card` as a sealed
+  bus request; the rows come only from a response signed by the machine they
+  describe. `RemoteDirectoryCache.ingest` re-validates every row and
+  `sanitizeRow` is the only way a peer's text reaches an agent. Never add a
+  loopback or app-fed way to write rows. Rows carry `asOf` and expire on
+  `REMOTE_ROWS_TTL_MS` (`session-bus/constants.ts`), a refresh interval and
+  not a lease.
 - **What each rung is witnessed by, and `delivered` means the recipient's
   store, not its agent.** `held` is a local fact: the frame never left. `relayed`
   is the relay's `bus:receipt` and says only that ciphertext is queued. The one
@@ -180,17 +177,15 @@ the set of invariants a future edit breaks silently.
   list.
 - **A bus address is matched on machine + session; the project id is a LABEL.**
   `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
-  gates on, and the carrier matches a session on its id alone
-  (`classifyBusFrame`). One checkout can be open as more than one project — a
+  gates on, and `handleBusInbound` (`host-server.ts`) finds the target project
+  from the session id alone. One checkout can be open as more than one project — a
   managed worktree opened in its own right hashes to an id of its own — so the
   two machines legitimately hold different project ids for the same session, and
   comparing them refused every frame forever over a display string. `sameAddress`
   stays strict and stays correct for a session the app names on this bridge's
   own row: both sides of that comparison come from one record. When the ids do
-  differ, both processes say so once (`the other machine addresses session … as
-  project …`, and the app's `this app holds the session under a project the
-  other machine does not address it by`) — routing no longer depends on it, but
-  the row still renders it.
+  differ, the bridge says so once (`the other machine addresses session … as
+  project …`) — routing no longer depends on it, but the row still renders it.
 - **One coordinator answers for every project a host has open, which is what
   makes the machine+session matching above load-bearing rather than academic:**
   a frame from another machine may name a session in any project this machine

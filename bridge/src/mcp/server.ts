@@ -379,6 +379,8 @@ function reachMachineClause(m: any): string {
       return `${name}: reachable by agents is off there`;
     case "no-card":
       return `${name}: running a bridge older than this feature`;
+    case "not-asked":
+      return `${name}: not asked about this repository yet`;
     default:
       return m.rows > 0
         ? `${name}: did not answer; its ${m.rows} rows above were read ${seconds(m.ageMs)} ago`
@@ -397,14 +399,16 @@ function reachLine(reach: any): string {
         return "Reach: this machine has no relay identity yet, so nothing on it can be addressed from elsewhere and only its own sessions are listed.";
       case "remote-access-off":
         return "Reach: this machine's remote access is off, so it exchanges messages only with sessions on itself. Only its own sessions are listed, and sending to another machine is refused until someone turns remote access on here.";
+      case "central-offline":
+        return "Reach: this machine is not connected to the relay right now, so no other machine can be asked and only its own sessions are listed. Cross-machine sends wait for the connection and go out when it returns.";
       default:
-        return "Reach: no desktop app is carrying a cross-machine read for this machine, so only its own sessions are listed.";
+        return "Reach: other machines have not been asked yet, so only this machine's own sessions are listed. They are asked shortly after startup and every half minute after; ask again in a moment.";
     }
   }
-  const parts = [`Reach: ${reach.machines.length} other machine${reach.machines.length === 1 ? "" : "s"} read ${seconds(reach.lastPushAgoMs)} ago.`];
+  const parts = [`Reach: ${reach.machines.length} other machine${reach.machines.length === 1 ? "" : "s"} asked, last answer ${typeof reach.asOfAgoMs === "number" ? `${seconds(reach.asOfAgoMs)} ago` : "never"}.`];
   for (const m of reach.machines) parts.push(`${reachMachineClause(m)}.`);
   if (reach.notConnected > 0) {
-    parts.push(`${reach.notConnected} machine${reach.notConnected === 1 ? "" : "s"} in your account ${reach.notConnected === 1 ? "is" : "are"} not connected to this desktop and ${reach.notConnected === 1 ? "was" : "were"} not asked.`);
+    parts.push(`${reach.notConnected} machine${reach.notConnected === 1 ? "" : "s"} in your account ${reach.notConnected === 1 ? "has" : "have"} no messaging key yet and ${reach.notConnected === 1 ? "was" : "were"} not asked.`);
   }
   return parts.join(" ");
 }
@@ -520,7 +524,7 @@ function threadEntryLine(entry: any, now: number): string {
       case "delivered":
         stamp = entry.deliveredAt === undefined
           ? " [delivered]"
-          : ` [delivered ${seconds(now - entry.deliveredAt)} ago: stored on the other machine, not read]`;
+          : ` [delivered ${seconds(now - entry.deliveredAt)} ago: stored by the receiving bridge, not read]`;
         break;
       case "relayed":
         stamp = " [relayed: the relay has it, nothing has read it]";

@@ -337,7 +337,7 @@ test("narrows the directory to this machine while the switch is off, with no rel
       ok: true as const,
       rows: [localRow(), peerRow()],
       truncated: 0,
-      reach: { scope: "network" as const, lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "network" as const, asOfAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
     }),
   } as unknown as SessionDirectory;
 

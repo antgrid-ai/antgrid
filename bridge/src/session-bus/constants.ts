@@ -113,11 +113,7 @@ export const MAX_ENVELOPE_BYTES = 64 * 1024;
 /** Rows one peer machine's capability card may carry. Separate from
  *  `MAX_DIRECTORY_ROWS` (session-bus/directory.ts): this bounds what one
  *  answering machine spends per request, not what a merged directory reads
- *  back afterward. This cap times `MAX_REMOTE_DIRECTORY_MACHINES` is also
- *  what sizes control-listener.ts's `MAX_CONTROL_BODY_BYTES` — raise one
- *  without the other and a legitimate full `session-bus:remote-directory`
- *  push starts 400ing at the socket, before `RemoteDirectoryCache.replace()`
- *  ever sees it to bound it. */
+ *  back afterward. */
 export const MAX_MACHINE_CARD_ROWS = 40;
 
 /** Local rows `withLocalFloor` (session-bus/directory.ts) never lets a peer
@@ -132,36 +128,30 @@ export const LOCAL_ROW_FLOOR = 20;
  *  cached `readRepoKey` probes one request can spend, not what it may see. */
 export const MAX_DIRECTORY_REPO_KEYS = 8;
 
-/** How long a pushed machine's rows are trusted before `RemoteDirectoryCache`
- *  drops them and counts the machine stale. Independent of carrier silence
- *  below: the app can be pushing on schedule while ONE machine's card is old
- *  because its own per-machine backoff has not re-asked it yet. */
-export const REMOTE_ROWS_TTL_MS = 45_000;
+/** How long a refreshed machine's rows are trusted before
+ *  `RemoteDirectoryCache` drops them and counts the machine stale. Two refresh
+ *  intervals, so one missed ask (a slow peer, a relay blip) leaves the rows in
+ *  place rather than blanking the directory. */
+export const REMOTE_ROWS_TTL_MS = 120_000;
 
-/** Past this much silence since the last push, `SessionDirectory` treats this
- *  machine as having no carrier at all — a closed desktop, a headless bridge,
- *  or one too old to know the ingest verb — rather than reporting a network
- *  with zero live machines. */
-export const REMOTE_CARRIER_SILENCE_MS = 90_000;
+/** How often this machine asks each of the account's other machines for its
+ *  capability card. */
+export const REMOTE_DIRECTORY_REFRESH_MS = 30_000;
 
-/** Machines one `session-bus:remote-directory` push may describe. This is the
- *  PRODUCT bound, enforced by `RemoteDirectoryCache.replace()`, which slices
- *  rather than rejects — see `MAX_REMOTE_DIRECTORY_WIRE_MACHINES` for the
- *  separate, looser bound the wire schema itself enforces. */
+/** Machines one refresh cycle asks. A product bound, not a wire one: the rest
+ *  wait for a later cycle, least recently refreshed first. */
 export const MAX_REMOTE_DIRECTORY_MACHINES = 8;
 
-/** Wire-layer ceilings for one `session-bus:remote-directory` push
- *  (control-protocol.ts's `ControlRequestSchema` arm), deliberately far
- *  looser than the product bounds above. A tight wire cap turns an ordinary
- *  account fact — one more open peer machine, one machine's session count
- *  growing past the product cap — into a whole-request `BAD_REQUEST`, which
- *  the app reads as "the local bridge predates this verb" and latches the
- *  pump off (see the degradation table this verb's request arm points at).
- *  These exist only to bound one POST's size against a DoS, never to express
- *  a business rule — `replace()` is what actually enforces the product caps,
- *  by slicing and counting the excess into `dropped`. */
-export const MAX_REMOTE_DIRECTORY_WIRE_MACHINES = 64;
-export const MAX_REMOTE_DIRECTORY_WIRE_ROWS = 200;
+/** A bus request waits this long for its response unless the caller says
+ *  otherwise, and is never allowed to wait longer than the ceiling. */
+export const BUS_REQUEST_DEFAULT_TIMEOUT_MS = 30_000;
+export const BUS_REQUEST_MAX_TIMEOUT_MS = 300_000;
+
+/** Requests one sending machine may have answered per minute. Every request
+ *  costs this machine real work (the session-less capability card is up to two
+ *  git spawns per project), so the bound is charged per sender before any of it
+ *  is done. */
+export const BUS_REQUESTS_PER_MIN_PER_MACHINE = 60;
 
 /** A bridge's name for ITSELF on a purely local exchange when it has no
  *  relay identity to be addressed by — a machine launched local-only, or one

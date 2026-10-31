@@ -869,7 +869,8 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // taught to refuse. Listing them anyway is the same "renders as sendable,
       // refuses on use" failure the `no-machine-id` rung exists to prevent, one
       // switch further out — so the rows are narrowed to this machine and the
-      // reach report says which fact did it, rather than blaming the carrier.
+      // reach report says which fact did it, rather than blaming a mirror that
+      // is in fact fresh.
       if (!deps.remoteAccessEnabled()) {
         const self = deps.machineId();
         return {

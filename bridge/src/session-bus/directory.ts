@@ -17,7 +17,7 @@ import { inProbePool, readRepoCard } from "../capability-card";
 import { agentSpec } from "../agent-runtime";
 import { logger } from "../logger";
 import type { SessionEntry, WorkStatus } from "../protocol";
-import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
+import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR } from "./constants";
 import { namesMachine } from "./address";
 import type { ReachMachine } from "./remote-directory";
 
@@ -40,6 +40,9 @@ export interface SessionDirectoryRow {
    *  itself. Present on a merged remote row, stamped by `RemoteDirectoryCache`
    *  (`remote-directory.ts`) from the machine entry the row arrived under. */
   machineLabel?: string;
+  /** Remote rows only: when the card this row came off was received. A row is
+   *  never more current than this. */
+  asOf?: number;
   projectId: string;
   projectLabel?: string;
   sessionId: string;
@@ -103,7 +106,7 @@ export interface DirectoryRemote {
     machines: ReachMachine[];
     staleMachines: number;
     notConnected: number;
-    lastPushAt: number | null;
+    asOf: number | null;
     /** The mirror's own verdict on this read, not a predicate re-derived
      *  here: the two drifting apart would log a miss the cache did not
      *  count, or stay silent on one it did. */
@@ -126,11 +129,15 @@ export interface SessionDirectoryDeps {
   readBranch?(projectPath: string): Promise<string | null>;
   /** The asking-side mirror of peer machines' capability cards. Absent for a
    *  bare bus in a unit test or a core with no host above it — {@link
-   *  SessionDirectory.list} then reports `no-carrier` rather than treating a
-   *  wire that was never wired as an empty network. */
+   *  SessionDirectory.list} then reports `not-refreshed` rather than treating a
+   *  mirror that was never wired as an empty network. */
   remoteDirectory?: DirectoryRemote;
-  /** Injectable clock, so a remote-half test can control TTL and silence
-   *  expiry without a real timer. */
+  /** Whether the central link that carries refresh requests is up. Absent
+   *  means up. While it is down nothing can refresh the mirror, so a row it
+   *  still holds is not offered as current. */
+  centralOnline?(): boolean;
+  /** Injectable clock, so a remote-half test can control TTL expiry without a
+   *  real timer. */
   now?(): number;
 }
 
@@ -273,8 +280,8 @@ export function withLocalFloor(
  *  reasons mean no network read was attempted at all; `"network"` means one
  *  was, and names what it found. */
 export type DirectoryReach =
-  | { scope: "machine"; why: "no-machine-id" | "no-carrier" | "remote-access-off" }
-  | { scope: "network"; lastPushAgoMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
+  | { scope: "machine"; why: "no-machine-id" | "central-offline" | "not-refreshed" | "remote-access-off" }
+  | { scope: "network"; asOfAgoMs: number | null; machines: ReachMachine[]; staleMachines: number; notConnected: number };
 
 /**
  * Either the directory, or why there is none.
@@ -309,7 +316,7 @@ export class SessionDirectory {
    *  reach line tells it to — so one line per reason per project is the
    *  signal, and the retries behind it are not. Keyed on the REASON too
    *  because every process starts with a cold mirror: a first read that latched
-   *  on `projectId` alone would spend the latch on the startup `no-carrier`
+   *  on `projectId` alone would spend the latch on the startup `not-refreshed`
    *  and then stay silent on the `stale-mirror` this line exists to catch.
    *  Per-instance rather than module-level so one `SessionDirectory` cannot
    *  silence another's first line. Cleared wholesale at its cap: a machine
@@ -474,25 +481,26 @@ export class SessionDirectory {
     // 1. No relay identity: a row this machine cannot be reached at is a row
     //    that renders as sendable and then refuses at the first reply.
     if (machineId === null) {
-      // `served: true` here and in the no-mirror case below, though neither
-      // answers a row: `served` reports what the MIRROR made of the read, and
-      // these two never reach it. Calling them unserved would log a miss
-      // against a cache that was never asked — and the counter the pump reads
-      // does not move on these paths either, so the two stay in step.
+      // `served: true` here and in the two cases below, though none answers a
+      // row: `served` reports what the MIRROR made of the read, and these
+      // never reach it. Calling them unserved would log a miss against a cache
+      // that was never asked, and kick a refresh that cannot be sent.
       return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-machine-id" }, served: true };
     }
-    // 2. No carrier: nothing wired the mirror in this process, or nobody has
-    //    pushed to it recently enough to trust. `lastPushAt` is a fact the app
-    //    proves by pushing, never a capability flag Zod could strip silently.
-    const view = this.deps.remoteDirectory?.view(repoKey, machineId, now);
-    if (view === undefined || view.lastPushAt === null || now - view.lastPushAt > REMOTE_CARRIER_SILENCE_MS) {
-      // A mirror that exists and has no live push behind it DID count this
-      // read against itself; one that was never wired cannot have. The TTL on
-      // rows is shorter than the carrier-silence window, so a view reaching
-      // here never holds a live machine either way.
-      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-carrier" }, served: view === undefined };
+    // 2. Central link down: refresh requests cannot leave, so whatever the
+    //    mirror holds only ages. Saying so beats offering it as current.
+    if (this.deps.centralOnline?.() === false) {
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "central-offline" }, served: true };
     }
-    // 3. Served: whatever the mirror currently holds for this repo, with the
+    // 3. Not refreshed: nothing wired the mirror in this process, or no
+    //    machine has been asked yet. One asked and silent is named below.
+    const view = this.deps.remoteDirectory?.view(repoKey, machineId, now);
+    if (view === undefined || (view.asOf === null && view.machines.length === 0)) {
+      // A mirror that exists and has received nothing DID count this read
+      // against itself; one that was never wired cannot have.
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "not-refreshed" }, served: view === undefined };
+    }
+    // 4. Served: whatever the mirror currently holds for this repo, with the
     //    mirror's own verdict on whether that counted as an answer.
     return {
       rows: view.rows,
@@ -500,9 +508,10 @@ export class SessionDirectory {
       served: view.served,
       reach: {
         scope: "network",
-        // How stale the mirror is, not when it was read: the read clock is the
-        // caller's own and says nothing an agent could weigh a row against.
-        lastPushAgoMs: now - view.lastPushAt,
+        // How old the newest answer is, not when it was read: the read clock is
+        // the caller's own and says nothing an agent could weigh a row against.
+        // Null while every machine asked has stayed silent.
+        asOfAgoMs: view.asOf === null ? null : Math.max(0, now - view.asOf),
         machines: view.machines,
         staleMachines: view.staleMachines,
         notConnected: view.notConnected,
@@ -514,10 +523,10 @@ export class SessionDirectory {
    * One line the first time a project reads a mirror that had nothing for it,
    * per reason.
    *
-   * This is the only place the bridge can tell "the pump has not filled the
-   * mirror yet" from "there is genuinely nobody else", and the two are the
+   * This is the only place the bridge can tell "the refresher has not filled
+   * the mirror yet" from "there is genuinely nobody else", and the two are the
    * same empty list to everything above. Carries the reach `why` so the line
-   * separates a missing carrier from a mirror the pump has not caught up on.
+   * separates a mirror never refreshed from one that has fallen behind.
    * Ids and counts only — never a repo key, never a session title.
    */
   private noteUnservedRead(projectId: string, reach: DirectoryReach): void {
@@ -527,7 +536,7 @@ export class SessionDirectory {
     if (this.unservedReadLatch.size >= MAX_UNSERVED_LATCH) this.unservedReadLatch.clear();
     this.unservedReadLatch.add(latchKey);
     log.info(
-      "session bus: directory read served no remote rows (project=%s why=%s) — pump has not filled the mirror",
+      "session bus: directory read served no remote rows (project=%s why=%s) — mirror not filled yet",
       projectId,
       why,
     );

@@ -11,6 +11,13 @@ import type { RemoteHostConnection } from "../src/remote-host-connection";
 import { OUTBOX_TICK_MS, type SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadHeld } from "../src/session-bus/held-store";
 import { LOCAL_MACHINE_ID } from "../src/session-bus/constants";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import type { BusServerMessage, MachineEntry } from "antgrid-wire";
+import { generateEphemeralKeypair } from "../src/key-exchange";
+import { BusRequests } from "../src/session-bus/bus-requests";
+import { RelayBusTransport, type BusSendInput, type InboundVerdict, type VerifiedInbound } from "../src/session-bus/relay-transport";
+import { openSeenStore } from "../src/session-bus/seen-store";
+import { sealBus, type InnerHeader } from "../src/session-bus/seal";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
 // because these tests inject `remoteRuntimeFactory`; RemoteHostConnection.connect() is
@@ -992,3 +999,256 @@ test("the control-plane bus dispatches only for a peer that holds its own sessio
   expect(dispatched).toEqual(["phone-a#uuid-1"]);
 });
 
+// -- bus requests -------------------------------------------------------------
+// `handleBusInbound` and `replayBusResponse` are private on purpose: the
+// transport is their only caller, so these reach them the way it does.
+
+const BUS_SELF = randomUUID();
+const BUS_PEER = randomUUID();
+
+interface BusRig {
+  h: HostServer;
+  frames: BusSendInput[];
+  cardCalls: () => number;
+  inbound: (v: VerifiedInbound) => Promise<InboundVerdict>;
+}
+
+function busRig(opts: { remote?: boolean; reach?: boolean } = {}): BusRig {
+  const h = createHostPolicyFixture({});
+  host = h;
+  const frames: BusSendInput[] = [];
+  (h as any).busRequests = new BusRequests({
+    transport: { send: (i) => { frames.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  (h as any).remoteAccessPolicy.setEnabled(opts.remote ?? true);
+  (h as any).agentReachPolicy.setEnabled(opts.reach ?? true);
+  const card = spyOn(h, "handleCapabilityCardRpc");
+  return { h, frames, cardCalls: () => card.mock.calls.length, inbound: (v) => (h as any).handleBusInbound(v) };
+}
+
+function busRequest(method: string, params: unknown = { includeSessions: true }, id = randomUUID()): VerifiedInbound {
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id, role: "agent", kind: "request",
+    sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+  };
+  return { from: BUS_PEER, id, header, role: "agent", body: createMessage("request", { requestId: id, method, params }) };
+}
+
+const answerOf = (v: InboundVerdict): { ok: boolean; result?: any; error?: { code: string } } =>
+  JSON.parse((v as { response: string }).response);
+
+test("a bus capability-card request is answered to the asker only", async () => {
+  const { h, frames, inbound } = busRig();
+  const asker = spyOn(h as any, "answerAsker");
+  const control = spyOn(h as any, "dispatchControlPlaneInbound");
+  const req = busRequest("machine.capability-card");
+
+  const verdict = await inbound(req);
+  expect(verdict.outcome).toBe("applied");
+  const answer = answerOf(verdict);
+  expect(answer.ok).toBe(true);
+  expect(answer.result.sessions).toEqual([]);
+
+  expect(frames).toHaveLength(1);
+  expect(frames[0]).toMatchObject({ to: BUS_PEER, kind: "response", correlationId: req.id });
+  expect(frames[0]!.body).toMatchObject({ type: "response", ok: true });
+  // The control plane answers a phone's peer session; nothing of this reached it.
+  expect(asker).not.toHaveBeenCalled();
+  expect(control).not.toHaveBeenCalled();
+}, 20_000);
+
+test("a request as another machine's BusRequests sends it is served, not refused as malformed", async () => {
+  const { inbound } = busRig();
+  const asked: BusSendInput[] = [];
+  const asker = new BusRequests({
+    transport: { send: (i) => { asked.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  void asker.request({ to: BUS_SELF, method: "machine.capability-card", params: { includeSessions: false }, timeoutMs: 30_000 }).catch(() => {});
+  const frame = asked[0]!;
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id: frame.id, role: "agent", kind: "request",
+    sentAt: frame.sentAt, expiresAt: frame.expiresAt,
+  };
+  // Through JSON, as the sealed body crosses the wire.
+  const body = JSON.parse(JSON.stringify(frame.body));
+  const verdict = await inbound({ from: BUS_PEER, id: frame.id, header, role: "agent", body });
+  asker.stop();
+  expect(verdict.outcome).toBe("applied");
+  expect(answerOf(verdict).ok).toBe(true);
+}, 20_000);
+
+test("a bus request for a method outside the allowlist is refused and answered with nothing", async () => {
+  const { frames, cardCalls, inbound } = busRig();
+  for (const method of ["git.checkout", "sessions.list", "scheduler.run", "machine.capability-card.x"]) {
+    expect(await inbound(busRequest(method))).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
+  }
+  const notARequest: VerifiedInbound = { ...busRequest("machine.capability-card"), body: { type: "session-bus:post" } };
+  expect(await inbound(notARequest)).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
+  expect(frames).toEqual([]);
+  expect(cardCalls()).toBe(0);
+});
+
+test("with agent reach off a capability-card request is answered NOT_ALLOWED_AGENT_REACH and the card is never built", async () => {
+  const { h, frames, cardCalls, inbound } = busRig({ reach: false });
+  // A project the catalog holds, so building the card WOULD spawn git for it.
+  const dir = tempFolder();
+  writeFileSync(join(dir, "antgrid.yaml"), "name: reach\n");
+  (h as any).seenProjects.set(computeProjectId(dir), { path: dir, label: "reach", lastActiveAt: Date.now() });
+
+  for (const includeSessions of [false, true]) {
+    const verdict = await inbound(busRequest("machine.capability-card", { includeSessions }));
+    expect(verdict.outcome).toBe("applied");
+    expect(answerOf(verdict)).toMatchObject({ ok: false, error: { code: "NOT_ALLOWED_AGENT_REACH" } });
+  }
+  expect(cardCalls()).toBe(0);
+  expect(frames).toHaveLength(2);
+  expect(frames.every((f) => f.kind === "response" && f.to === BUS_PEER)).toBe(true);
+}, 20_000);
+
+test("the 61st request from one machine inside a minute is answered REQUEST_RATE", async () => {
+  const { frames, inbound } = busRig();
+  for (let i = 0; i < 60; i++) {
+    const v = await inbound(busRequest("machine.capability-card", { includeSessions: false }));
+    expect(answerOf(v).ok).toBe(true);
+  }
+  const over = await inbound(busRequest("machine.capability-card", { includeSessions: false }));
+  expect(over.outcome).toBe("applied");
+  expect(answerOf(over)).toMatchObject({ ok: false, error: { code: "REQUEST_RATE" } });
+  expect(frames).toHaveLength(61);
+}, 30_000);
+
+test("remote access off refuses a bus request before anything else", async () => {
+  const { frames, cardCalls, inbound } = busRig({ remote: false });
+  expect(await inbound(busRequest("machine.capability-card"))).toEqual({ outcome: "refused", code: "REMOTE_ACCESS_OFF" });
+  expect(frames).toEqual([]);
+  expect(cardCalls()).toBe(0);
+});
+
+test("a bus response is handed to the request waiting on it, from the machine that was asked only", async () => {
+  const { h, inbound } = busRig();
+  const sent: BusSendInput[] = [];
+  const requests = new BusRequests({
+    transport: { send: (i) => { sent.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  (h as any).busRequests = requests;
+  const pending = requests.request({ to: BUS_PEER, method: "machine.capability-card", timeoutMs: 30_000 });
+  const id = sent[0]!.id;
+  const reply = (from: string): VerifiedInbound => ({
+    from, id: randomUUID(), role: "agent",
+    header: {
+      v: 1, from, to: BUS_SELF, id: randomUUID(), role: "agent", kind: "response", correlationId: id,
+      sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+    },
+    body: createMessage("response", { requestId: id, ok: true, result: { sessions: [] } }),
+  });
+
+  // Acknowledged either way, so the sender stops resending it.
+  expect(await inbound(reply(randomUUID()))).toEqual({ outcome: "applied" });
+  expect(await inbound(reply(BUS_PEER))).toEqual({ outcome: "applied" });
+  expect(await pending).toEqual({ ok: true, result: { sessions: [] } });
+});
+
+// A duplicate request is answered from the transport's record of the first
+// answer, in-process and after a restart, and the method never runs twice.
+
+function ed25519Pair() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const seed = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
+  const pub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+  return { seed: Buffer.from(seed).toString("base64"), pub: Buffer.from(pub).toString("base64") };
+}
+
+function busPair() {
+  const k = generateEphemeralKeypair();
+  return { privateKey: k.privateKey.toString("base64"), publicKey: k.publicKey.toString("base64") };
+}
+
+test("a duplicate bus request returns the cached response without re-execution, in-process and across a host restart", async () => {
+  const me = { sign: ed25519Pair(), bus: busPair() };
+  const them = { sign: ed25519Pair(), bus: busPair() };
+  const entry: MachineEntry = {
+    deviceId: BUS_PEER, displayName: "them", machineName: null, ed25519Pub: them.sign.pub,
+    busPublicKey: them.bus.publicKey, orchestrator: false, busControl: false,
+  };
+  const directory = {
+    current: () => ({ machines: [entry], allowed: true }) as never,
+    machine: (id: string) => (id === BUS_PEER ? entry : null),
+    busKeyFor: (id: string) => (id === BUS_PEER ? them.bus.publicKey : null),
+    selfOrchestrator: () => false,
+    ensureFresh: async () => true,
+    kick: () => {},
+  };
+
+  const requestId = randomUUID();
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id: requestId, role: "agent", kind: "request",
+    sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+  };
+  const sealed = sealBus({
+    header,
+    body: JSON.stringify(createMessage("request", { requestId, method: "machine.capability-card", params: { includeSessions: true } })),
+    signSeedB64: them.sign.seed,
+    recipientBusPubB64: me.bus.publicKey,
+  });
+  if (!sealed.ok) throw new Error(sealed.code);
+  const deliver = { type: "bus:deliver", id: requestId, from: BUS_PEER, blob: sealed.blob } as BusServerMessage;
+
+  const waitFor = async (what: string, pred: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!pred()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  // One transport wired as the host wires its own, over the shared abDir.
+  const transportFor = (rig: BusRig, acks: unknown[]) =>
+    new RelayBusTransport({
+      selfDeviceId: () => BUS_SELF,
+      signSeed: () => me.sign.seed,
+      busKey: () => me.bus,
+      directory: directory as never,
+      link: () => ({ sendBus: (f: unknown) => { acks.push(f); return true; }, busLinkState: () => "ready" as const, busNow: () => Date.now() }),
+      remoteAccessEnabled: () => true,
+      seen: openSeenStore(abDir!),
+      onInbound: (v) => rig.inbound(v),
+      onOutcome: () => {},
+      onReplayResponse: (from, id, response, expiresAt) => (rig.h as any).replayBusResponse(from, id, response, expiresAt),
+    });
+
+  const first = busRig();
+  const acks1: unknown[] = [];
+  const t1 = transportFor(first, acks1);
+  t1.handleFrame(deliver);
+  await waitFor("an ack", () => acks1.length >= 1);
+  expect(first.cardCalls()).toBe(1);
+  expect(first.frames).toHaveLength(1);
+  const original = JSON.stringify(first.frames[0]!.body);
+
+  // The same delivery again, in the same process.
+  t1.handleFrame(deliver);
+  await waitFor("the repeated ack", () => acks1.length >= 2);
+  expect(first.cardCalls()).toBe(1);
+  expect(first.frames.length).toBeGreaterThanOrEqual(2);
+  expect(first.frames.every((f) => JSON.stringify(f.body) === original)).toBe(true);
+  expect(new Set(first.frames.map((f) => f.id)).size).toBe(1);
+  t1.stop();
+
+  await host!.shutdown();
+  host = null;
+
+  // A new host on the same abDir: nothing in memory, only the seen-store.
+  const second = busRig();
+  const acks2: unknown[] = [];
+  const t2 = transportFor(second, acks2);
+  t2.handleFrame(deliver);
+  await waitFor("an ack after the restart", () => acks2.length >= 1);
+  expect(second.cardCalls()).toBe(0);
+  expect(second.frames).toHaveLength(1);
+  expect(second.frames[0]).toMatchObject({ to: BUS_PEER, kind: "response", correlationId: requestId });
+  expect(JSON.stringify(second.frames[0]!.body)).toBe(original);
+  t2.stop();
+}, 30_000);

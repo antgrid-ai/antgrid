@@ -451,7 +451,7 @@ function remoteOf(over: Partial<ReturnType<DirectoryRemote["view"]>>): Directory
     machines: [],
     staleMachines: 0,
     notConnected: 0,
-    lastPushAt: null,
+    asOf: null,
     ...over,
   };
   return {
@@ -479,7 +479,7 @@ test("a same-branch remote row outranks an off-branch local one", async () => {
     readBranch: async (path) => (path.endsWith("caller") ? "fix/auth" : "main"),
     remoteDirectory: remoteOf({
       rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project", branch: "fix/auth" })],
-      lastPushAt: 1_000,
+      asOf: 1_000,
     }),
     now: () => 1_000,
   });
@@ -508,7 +508,7 @@ test("a remote row keeps the branch its own machine reported, even when its proj
     // "fix/auth" (the caller's own branch) rather than kept as reported.
     remoteDirectory: remoteOf({
       rows: [remoteRow({ sessionId: "peer-sess", projectId: "caller", branch: "release" })],
-      lastPushAt: 1_000,
+      asOf: 1_000,
     }),
     now: () => 1_000,
   });
@@ -532,7 +532,7 @@ test("truncated counts the far side's own cap plus the merge overflow", async ()
     readBranch: async () => "main",
     // The far side already reported 7 of its OWN card cap's drops — separate
     // from anything this merge overflows, and both must show up together.
-    remoteDirectory: remoteOf({ rows: remoteRows, truncated: 7, lastPushAt: 1_000 }),
+    remoteDirectory: remoteOf({ rows: remoteRows, truncated: 7, asOf: 1_000 }),
     now: () => 1_000,
   });
   const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
@@ -567,7 +567,7 @@ test("list() applies the local floor to the merged list, not just to an all-loca
     // The caller is on the SAME branch the remote rows report, so nothing
     // but the floor stands between the local rows and eviction.
     readBranch: async () => "fix/auth",
-    remoteDirectory: remoteOf({ rows: remoteRows, lastPushAt: 1_000 }),
+    remoteDirectory: remoteOf({ rows: remoteRows, asOf: 1_000 }),
     now: () => 1_000,
   });
   const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
@@ -576,7 +576,7 @@ test("list() applies the local floor to the merged list, not just to an all-loca
   expect(survivingLocal.length).toBe(3);
 });
 
-test("reach says no-machine-id before it says no-carrier", async () => {
+test("reach says no-machine-id before it says not-refreshed", async () => {
   const d = new SessionDirectory({
     repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
     sessionIndex: { *sessionsIn(projectId) { if (projectId === "caller") yield { entry: session({ id: "me" }) }; } },
@@ -584,14 +584,53 @@ test("reach says no-machine-id before it says no-carrier", async () => {
     machineId: () => null,
     readBranch: async () => "main",
     // No `remoteDirectory` at all — both conditions are true at once, and the
-    // identity has to win: a machine that cannot be addressed back reads "no
-    // desktop app is carrying this" otherwise, and keeps reading it after the
-    // app attaches, which sends its user hunting the wrong thing. Since E15
-    // this is the FIRST arm — the machine's own remote-access switch is no
-    // longer consulted here at all.
+    // identity has to win: a machine that cannot be addressed back reads "not
+    // refreshed yet" otherwise, and keeps reading it after the first refresh
+    // lands, which sends its user hunting the wrong thing. This is the FIRST
+    // arm — the machine's own remote-access switch is not consulted here at
+    // all.
   });
   const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
   expect(answer.reach).toEqual({ scope: "machine", why: "no-machine-id" });
+});
+
+function reachDirectory(over: Partial<ConstructorParameters<typeof SessionDirectory>[0]>): SessionDirectory {
+  return new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: { *sessionsIn(projectId) { if (projectId === "caller") yield { entry: session({ id: "me" }) }; } },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "main",
+    now: () => 5_000,
+    ...over,
+  });
+}
+
+test("reach says not-refreshed for a mirror that was never wired, and for one that has received nothing", async () => {
+  const unwired = served(await reachDirectory({}).list({ projectId: "caller", sessionId: "me" }));
+  expect(unwired.reach).toEqual({ scope: "machine", why: "not-refreshed" });
+
+  const empty = served(await reachDirectory({ remoteDirectory: remoteOf({ asOf: null, served: false }) }).list({ projectId: "caller", sessionId: "me" }));
+  expect(empty.reach).toEqual({ scope: "machine", why: "not-refreshed" });
+});
+
+test("reach says central-offline, and offers no mirrored row as current, while the central link is down", async () => {
+  const d = reachDirectory({
+    centralOnline: () => false,
+    remoteDirectory: remoteOf({ rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })], asOf: 1_000 }),
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.reach).toEqual({ scope: "machine", why: "central-offline" });
+  expect(answer.rows.map((r) => r.sessionId)).toEqual([]);
+});
+
+test("a refreshed mirror reports how old its newest card is, never negative", async () => {
+  const remote = remoteOf({ rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })], asOf: 1_000 });
+  const answer = served(await reachDirectory({ remoteDirectory: remote }).list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.reach).toMatchObject({ scope: "network", asOfAgoMs: 4_000 });
+
+  const future = served(await reachDirectory({ remoteDirectory: remoteOf({ asOf: 9_000 }) }).list({ projectId: "caller", sessionId: "me" }));
+  expect(future.reach).toMatchObject({ scope: "network", asOfAgoMs: 0 });
 });
 
 test("reach says no-machine-id rather than offering rows that cannot be sent to", async () => {
@@ -603,7 +642,7 @@ test("reach says no-machine-id rather than offering rows that cannot be sent to"
     readBranch: async () => "main",
     remoteDirectory: remoteOf({
       rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })],
-      lastPushAt: 1_000,
+      asOf: 1_000,
     }),
     now: () => 1_000,
   });
@@ -673,7 +712,7 @@ test("rowFor returns a remote-mirror hit's canReply exactly as the owning machin
     readBranch: async () => "main",
     remoteDirectory: remoteOf({
       rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project", canReply: true })],
-      lastPushAt: 1_000,
+      asOf: 1_000,
     }),
     now: () => 1_000,
   });
@@ -711,7 +750,7 @@ test("rowFor returns null for a remote target no mirrored row matches", () => {
     readBranch: async () => "main",
     remoteDirectory: remoteOf({
       rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })],
-      lastPushAt: 1_000,
+      asOf: 1_000,
     }),
     now: () => 1_000,
   });

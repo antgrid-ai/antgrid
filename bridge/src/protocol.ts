@@ -2511,6 +2511,8 @@ const SessionBusDirectoryRowSchema = z.object({
    *  receive-only vendor is offered saying so, never as a peer that will
    *  silently never answer. */
   canReply: z.boolean(),
+  /** Remote rows only: when the card the row came off was received. */
+  asOf: z.number().optional(),
 });
 
 /** One machine in the reach report. It rides beside the rows and never in them:
@@ -2520,7 +2522,7 @@ const SessionBusDirectoryRowSchema = z.object({
 const SessionBusReachMachineSchema = z.object({
   machineId: z.string().max(200),
   machineLabel: z.string().max(120).optional(),
-  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable"]),
+  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable", "not-asked"]),
   rows: z.number(),
   droppedRows: z.number(),
   truncatedCard: z.number(),
@@ -2533,11 +2535,11 @@ const SessionBusReachMachineSchema = z.object({
 const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   z.object({
     scope: z.literal("machine"),
-    why: z.enum(["no-machine-id", "no-carrier", "remote-access-off"]),
+    why: z.enum(["no-machine-id", "central-offline", "not-refreshed", "remote-access-off"]),
   }),
   z.object({
     scope: z.literal("network"),
-    lastPushAgoMs: z.number(),
+    asOfAgoMs: z.number().nullable(),
     machines: z.array(SessionBusReachMachineSchema),
     staleMachines: z.number(),
     notConnected: z.number(),

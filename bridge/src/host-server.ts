@@ -21,12 +21,15 @@ import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } fr
 import { logger, armLogLevel, currentLogLevel } from "./logger";
 import { selfMachineLabel, selfMachineName } from "./machine-label";
 const log = logger.child({ component: "host-server" });
+// Bus request methods this machine serves. Never a mutating one, and never
+// `scheduler.*`: a scheduled run is the owner's, not another machine's.
+const BUS_REQUEST_METHODS: ReadonlySet<string> = new Set([CAPABILITY_CARD_METHOD]);
 import { NativeHostConnection, type NativeHostOptions } from "./peer/native-host-connection";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { joinRelayWsPath } from "./relay-url";
-import { BusMessageBodySchema, createMessage } from "./protocol";
+import { AbMessageSchema, BusMessageBodySchema, createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
 import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCaptureArmed } from "./modelwatch";
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
@@ -41,6 +44,10 @@ import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
 import { RemoteDirectoryCache } from "./session-bus/remote-directory";
+import { BusRequests } from "./session-bus/bus-requests";
+import { CAPABILITY_CARD_METHOD, DirectoryRefresher } from "./session-bus/directory-refresh";
+import { RequestRateLimiter } from "./session-bus/request-rate";
+import { refusalSentence, type SessionBusErrorCode } from "./session-bus/errors";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { RelayBusTransport, type InboundVerdict, type VerifiedInbound } from "./session-bus/relay-transport";
 import { openSeenStore } from "./session-bus/seen-store";
@@ -456,11 +463,11 @@ export class HostServer {
   // repository. Refreshed on the same three edges as the index, for the
   // reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
-  // The asking half of the remote directory: an in-memory mirror of what the
-  // app's pump last learned peeking peer capability cards.
-  // Machine-level like `sessionIndex`/`repoKeys` above, filled by the
-  // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
-  // below — declared first so that construction can hand it over.
+  // The asking half of the remote directory: an in-memory mirror of the
+  // capability cards this machine last asked the account's other machines for.
+  // Machine-level like `sessionIndex`/`repoKeys` above, filled by
+  // `directoryRefresher` over the bus and read by `sessionDirectory` below —
+  // declared first so that construction can hand it over.
   private readonly remoteDirectory = new RemoteDirectoryCache();
   // The session directory, assembled from the two machine-level halves above.
   // The machine id is read live rather than captured: a core can be built before the
@@ -471,6 +478,7 @@ export class HostServer {
     projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
     machineId: () => this.controlPlaneRegistrationId ?? null,
     remoteDirectory: this.remoteDirectory,
+    centralOnline: () => this.controlPlaneRelay?.busLinkState?.() !== "offline",
     now: () => Date.now(),
   });
   /** Projects being opened right now to receive a bus delivery — see
@@ -482,6 +490,13 @@ export class HostServer {
   // resends across this machine's restarts too.
   private readonly busSeen = openSeenStore(resolveAbDir());
   private busTransport: RelayBusTransport | null = null;
+  private busRequests: BusRequests | null = null;
+  private directoryRefresher: DirectoryRefresher | null = null;
+  // Machines the relay reports present right now, so a refresh asks those first.
+  private readonly onlinePeers = new Set<string>();
+  // Charged per sending machine before any request is answered, so one machine
+  // cannot make this one spend git spawns faster than the bound.
+  private readonly requestRate = new RequestRateLimiter();
   // Resolves when the session index hydrate attempt has finished, whether or not
   // it succeeded. A bus delivery that lands first must wait on it: a lookup miss
   // before then is timing, not an unknown session.
@@ -708,10 +723,14 @@ export class HostServer {
   private async handleBusInbound(v: VerifiedInbound): Promise<InboundVerdict> {
     const refused = (code: string): InboundVerdict => ({ outcome: "refused", code });
     if (!this.remoteAccessPolicy.isEnabled()) return refused("REMOTE_ACCESS_OFF");
-    // Nothing waits on a response yet, and one that arrives is acknowledged so
-    // the sender stops resending it.
-    if (v.header.kind === "response") return { outcome: "applied" };
-    if (v.header.kind === "request") return refused("METHOD_NOT_ALLOWED");
+    // A response that matches no waiter (a late one, or one for a request that
+    // timed out) is still acknowledged so the sender stops resending it.
+    if (v.header.kind === "response") {
+      const correlationId = v.header.correlationId;
+      if (correlationId) this.busRequests?.onResponse(v.from, correlationId, v.body);
+      return { outcome: "applied" };
+    }
+    if (v.header.kind === "request") return this.dispatchBusRequest(v);
     const parsed = BusMessageBodySchema.safeParse(v.body);
     if (!parsed.success) return refused("MALFORMED");
     const body = parsed.data;
@@ -738,6 +757,50 @@ export class HostServer {
       log.warn("session bus: applying a delivery to %s failed: %s", body.to.sessionId, err instanceof Error ? err.message : String(err));
       return { outcome: "defer" };
     }
+  }
+
+  /**
+   * A bus request from another machine. The only methods served are those in
+   * {@link BUS_REQUEST_METHODS}, and the answer goes back to the asker as a
+   * sealed response and nowhere else — this never reaches
+   * `dispatchControlPlaneInbound`, whose replies are addressed to a phone's
+   * peer session, not to a machine.
+   *
+   * The answer, error or not, is returned for the transport to store beside the
+   * verdict, so a resend of the same request is answered from that record and
+   * the method does not run twice.
+   */
+  private async dispatchBusRequest(v: VerifiedInbound): Promise<InboundVerdict> {
+    const parsed = AbMessageSchema.safeParse(v.body);
+    const req = parsed.success && parsed.data.type === "request" ? parsed.data : null;
+    if (req === null || !BUS_REQUEST_METHODS.has(req.method)) return { outcome: "refused", code: "METHOD_NOT_ALLOWED" };
+    // Keyed on the signed header's id, which is what the transport records the
+    // verdict under; the body's own requestId is the sender's claim.
+    const answer = (res: AbMessage): InboundVerdict => {
+      this.busRequests?.respond(v.from, v.id, res, v.header.expiresAt);
+      return { outcome: "applied", response: JSON.stringify(res) };
+    };
+    const failure = (code: SessionBusErrorCode): InboundVerdict =>
+      answer(createMessage("response", { requestId: req.requestId, ok: false, error: { code, message: refusalSentence(code) } }));
+    // Charged before anything else: even a refusal costs a sealed response.
+    if (!this.requestRate.take(v.from)) return failure("REQUEST_RATE");
+    // Every request, the session-less card included: asked over the bus, the
+    // asker is another machine's agent, and the card names this machine's
+    // projects, remotes and branches at the price of git spawns.
+    if (!this.agentReachPolicy.isEnabled()) return failure("NOT_ALLOWED_AGENT_REACH");
+    return answer(await this.handleCapabilityCardRpc(req));
+  }
+
+  /** The responder side of a replayed request: the transport found it already
+   *  answered, so the stored response is sent again rather than re-run. */
+  private replayBusResponse(from: string, requestId: string, response: string, expiresAt: number): void {
+    let body: AbMessage;
+    try {
+      body = JSON.parse(response) as AbMessage;
+    } catch {
+      return;
+    }
+    this.busRequests?.respond(from, requestId, body, expiresAt);
   }
 
   // The host-owned NativeHostConnection uses the BARE deviceUuid for its central
@@ -1023,6 +1086,10 @@ export class HostServer {
     // the pending inbound chain of one socket's lifetime, and the handler below
     // is registered on this client only.
     this.busTransport?.stop();
+    this.busRequests?.stop();
+    this.directoryRefresher?.stop();
+    this.remoteDirectory.setUnservedListener(null);
+    this.onlinePeers.clear();
     const transport = new RelayBusTransport({
       selfDeviceId: () => r.auth.deviceUuid,
       signSeed: () => identity.ed25519PrivateKey ?? null,
@@ -1032,15 +1099,40 @@ export class HostServer {
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
       seen: this.busSeen,
       onInbound: (v) => this.handleBusInbound(v),
-      onOutcome: (id, to, outcome) => this.sessionBus.onTransportOutcome(id, to, outcome),
+      onOutcome: (id, to, outcome) => {
+        this.sessionBus.onTransportOutcome(id, to, outcome);
+        this.busRequests?.onTransportOutcome(id, to, outcome);
+      },
+      onReplayResponse: (from, requestId, response, expiresAt) => this.replayBusResponse(from, requestId, response, expiresAt),
     });
     this.busTransport = transport;
+    const directory = this.machineDirectory!;
+    this.busRequests = new BusRequests({
+      transport,
+      selfRole: () => (directory.selfOrchestrator() ? "orchestrator" : "agent"),
+    });
+    const refresher = new DirectoryRefresher({
+      directory,
+      requests: this.busRequests,
+      cache: this.remoteDirectory,
+      online: () => this.onlinePeers,
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+    });
+    this.directoryRefresher = refresher;
+    this.remoteDirectory.setUnservedListener(() => void refresher.kick());
+    refresher.start();
     client.setBusHandler?.({
       onFrame: (frame) => transport.handleFrame(frame),
       onPresence: (peerId, online) => {
-        if (!online) return;
+        if (!online) {
+          this.onlinePeers.delete(peerId);
+          return;
+        }
+        this.onlinePeers.add(peerId);
         this.sessionBus.retryNow({ machineId: peerId });
+        this.busRequests?.retryNow(peerId);
         this.machineDirectory?.kick();
+        void refresher.kick(peerId);
       },
       onAuthenticated: () => {
         transport.onAuthenticated();
@@ -2372,21 +2464,6 @@ export class HostServer {
           };
         }
       }
-      case "session-bus:remote-directory":
-        return this.handleRemoteDirectoryPush(req);
-      // Read-only, and deliberately NOT draining `unservedReads`: the drain
-      // belongs to `replace()`, whose ack is what `_warmMissedPeers` dials on.
-      // A poll that consumed the count would answer the pump's question by
-      // taking away its reason to act on the answer.
-      case "session-bus:directory-status":
-        return {
-          id: req.id,
-          ok: true,
-          type: "session-bus:directory-status",
-          wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
-          unservedReads: this.remoteDirectory.unservedReads(),
-          lastReadAt: this.remoteDirectory.lastReadAt(),
-        };
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -2643,64 +2720,6 @@ export class HostServer {
       return { id: req.id, ok: false, error: { code: "CHECKOUT_MISSING", message: "the working directory no longer exists" } };
     }
     return { id: req.id, ok: true, type: "checkout:path", path };
-  }
-
-  /** The asking half of the remote directory's fill path: the app's pump
-   *  hands over one cycle of what it learned peeking peer capability cards.
-   *  Exempt from THIS machine's own remote-access switch, like the rest of this
-   *  plane: every row here was offered by the peer that owns it, under
-   *  that peer's own switch, and mirroring one discloses nothing about this
-   *  machine. `clear()` on the refusal branch is what makes losing a relay
-   *  identity take effect immediately rather than riding out the mirror's
-   *  TTL. */
-  private handleRemoteDirectoryPush(
-    req: Extract<ControlRequest, { type: "session-bus:remote-directory" }>,
-  ): ControlResponse {
-    const selfMachineId = this.controlPlaneRegistrationId;
-    if (selfMachineId === null) {
-      // A row offered while this machine has no remote device identity is
-      // un-messageable (SessionBusCoordinator.message -> self() refuses
-      // AGENT_NOT_READY on a null machine id), so mirroring it would hand
-      // agents a directory that lies about what it can reach.
-      this.remoteDirectory.clear("no remote device identity");
-      return {
-        id: req.id,
-        ok: false,
-        error: { code: "NOT_ADDRESSABLE", message: "this machine has no remote device identity yet, so it cannot accept a peer directory" },
-      };
-    }
-    // unservedReads comes off replace()'s own return, not a follow-up
-    // `.unservedReads()` call — replace() drains that counter as part of this
-    // push, so a call made after it would always read back 0.
-    const { accepted, dropped, unservedReads } = this.remoteDirectory.replace(
-      req.machines,
-      req.notConnected,
-      selfMachineId,
-      Date.now(),
-    );
-    // The only record of what the pump actually found. Outcomes, not rows:
-    // a row carries a session title and a repo key, and
-    // `bridge/tests/session-bus-logging.test.ts` scans every emitted line for
-    // either. The per-machine outcome is what distinguishes a peer that said
-    // no from one that never answered.
-    log.debug(
-      "session bus: remote directory push accepted=%d dropped=%d unservedReads=%d notConnected=%d machines=%s",
-      accepted,
-      dropped,
-      unservedReads,
-      req.notConnected,
-      req.machines.map((m) => `${m.machineId}:${m.outcome}`).join(",") || "none",
-    );
-    return {
-      id: req.id,
-      ok: true,
-      type: "session-bus:remote-directory",
-      accepted,
-      dropped,
-      wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
-      unservedReads,
-      lastReadAt: this.remoteDirectory.lastReadAt(),
-    };
   }
 
   private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {
@@ -3164,6 +3183,11 @@ export class HostServer {
     this.stopBusKeyWatch = null;
     this.machineDirectory?.stop();
     this.machineDirectory = null;
+    this.remoteDirectory.setUnservedListener(null);
+    this.directoryRefresher?.stop();
+    this.directoryRefresher = null;
+    this.busRequests?.stop();
+    this.busRequests = null;
     this.busTransport?.stop();
     this.busTransport = null;
     await this.controlPlaneRelay?.close();

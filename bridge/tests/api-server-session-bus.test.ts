@@ -295,7 +295,7 @@ function mirrorDirectory(
         machines: [],
         staleMachines: 0,
         notConnected: 0,
-        lastPushAt: now,
+        asOf: now,
         served: rows.length > 0,
       }),
     },
@@ -678,14 +678,14 @@ describe("GET /session-bus/sessions", () => {
     try {
       const res = await get(m, "sessions", PEER_SESSION);
       expect(res.status).toBe(200);
-      expect(res.body.reach).toEqual({ scope: "machine", why: "no-carrier" });
+      expect(res.body.reach).toEqual({ scope: "machine", why: "not-refreshed" });
     } finally { m.stop(); }
   });
 
   test("with remote access off the listing keeps only this machine and says which fact narrowed it", async () => {
-    // The blaming matters as much as the narrowing: `no-carrier` would send
-    // someone after a desktop app, and reattaching it would not widen this
-    // listing by one row.
+    // The blaming matters as much as the narrowing: `not-refreshed` would tell
+    // the agent to wait for a refresh, and no refresh widens this listing by
+    // one row while the switch is off.
     const { lead, stop } = linkedPair({ leadRemoteAccess: false });
     try {
       const res = await get(lead, "sessions", LEAD_SESSION);

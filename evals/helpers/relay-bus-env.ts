@@ -18,7 +18,6 @@ import {
 } from "./harness";
 import { LocalTestClient, type LocalConnectInfo } from "./local-client";
 import {
-  BUS_REPO_KEY,
   SINK_SCRIPT_NAME,
   localVerb,
   postJson,
@@ -188,66 +187,4 @@ export async function startSinkSession(m: RelayBusMachine, name: string): Promis
   const sessionId = created.session.id as string;
   await localVerb(bridge, createMessage("session:start", { requestId: randomUUID(), sessionId }));
   return sessionId;
-}
-
-
-/**
- * Offer `into` a directory row for one of `about`'s sessions.
- *
- * A send that opens an exchange needs a row for its target in the sender's
- * remote mirror, and the loopback `session-bus:remote-directory` verb is the
- * only thing that fills it. The row is built from what the test created rather
- * than read back from the peer, so it names the session as the test knows it.
- */
-async function pushPeerRow(
-  into: RelayBusMachine,
-  about: RelayBusMachine,
-  sessionId: string,
-  title: string,
-): Promise<void> {
-  const host = await waitForHostFile(into.abDir, 15_000);
-  const ack = await postJson(
-    `http://127.0.0.1:${host.controlPort}/control`,
-    {
-      id: `relay-bus-directory-${randomUUID()}`,
-      type: "session-bus:remote-directory",
-      machines: [{
-        machineId: about.machineId,
-        observedAt: Date.now(),
-        outcome: "rows",
-        rows: [{
-          repoKey: BUS_REPO_KEY,
-          projectId: about.projectId,
-          sessionId,
-          title,
-          branch: null,
-          activity: "running",
-          lastActiveAt: Date.now(),
-          canReply: true,
-        }],
-        truncated: 0,
-      }],
-      notConnected: 0,
-    },
-    host.token,
-  );
-  if (!ack.ok || !(ack.accepted > 0)) throw new Error(`remote-directory push refused: ${JSON.stringify(ack)}`);
-}
-
-/**
- * Seed the row, then keep re-offering it until the env is torn down.
- *
- * The mirror ages a machine out after a stretch with no push, which a real
- * pump prevents by pushing on a cadence; a row that outlives that window (a
- * kill and restart) would otherwise see its held send refused `UNKNOWN_PEER`.
- */
-export async function seedPeerRow(
-  into: RelayBusMachine,
-  about: RelayBusMachine,
-  sessionId: string,
-  title: string,
-): Promise<void> {
-  await pushPeerRow(into, about, sessionId, title);
-  const timer = setInterval(() => { void pushPeerRow(into, about, sessionId, title).catch(() => {}); }, 5_000);
-  into.onStop(() => clearInterval(timer));
 }

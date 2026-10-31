@@ -119,6 +119,12 @@ export const SESSION_BUS_ERRORS = {
   RELAY_NOT_AGENT: 403,
   /** The relay refused because the message named its own sender. */
   RELAY_SELF: 400,
+  /** One machine sent more requests in a minute than this one answers. Waiting
+   *  clears it. */
+  REQUEST_RATE: 429,
+  /** A request got no response before its deadline. What it was waiting on, if
+   *  anything, is the held reason that travels beside this code. */
+  REQUEST_TIMEOUT: 504,
 } as const;
 
 export type SessionBusErrorCode = keyof typeof SESSION_BUS_ERRORS;
@@ -168,6 +174,8 @@ export const BUS_REFUSAL_TEXT: Record<string, string> = {
   RELAY_NOT_AGENT: "the relay says the target is not one of this account's machines",
   RELAY_SELF: "a message cannot be addressed to the machine it is sent from",
   NO_BUS_KEY: "that machine has not published a messaging key yet",
+  REQUEST_RATE: "that machine is receiving requests from this one faster than it answers; wait a minute and ask again",
+  REQUEST_TIMEOUT: "that machine did not answer in time",
 };
 
 /** The sentence for a terminal code, with a generic one for a code this bridge

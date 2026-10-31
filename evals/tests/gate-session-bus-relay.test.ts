@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allocatePort, setMobileAccess, startRelay, type RelayHandle } from "../helpers/harness";
-import { seedPeerRow, setupRelayBusEnv, startSinkSession, type RelayBusEnv, type RelayBusMachine } from "../helpers/relay-bus-env";
-import { busCall, persistedSessions, untilAsync } from "../support/session-bus";
+import { setupRelayBusEnv, startSinkSession, type RelayBusEnv, type RelayBusMachine } from "../helpers/relay-bus-env";
+import { busCall, persistedSessions, setAgentReach, untilAsync } from "../support/session-bus";
 import { NO_PROGRESS_EXCHANGES } from "../../bridge/src/session-bus/constants";
 import { CentralTestClient } from "../helpers/central-test-client";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
@@ -181,6 +181,7 @@ describe("gate: session bus relay carrier", () => {
 // Long enough for two bridges, their PTY trees and a shared relay to come up.
 const ROW_TIMEOUT_MS = 240_000;
 const CROSS_TIMEOUT_MS = 30_000;
+const DIRECTORY_TIMEOUT_MS = 60_000;
 
 describe("gate: session bus relay, two bridges", () => {
   let env: RelayBusEnv | undefined;
@@ -240,11 +241,47 @@ describe("gate: session bus relay, two bridges", () => {
     return busCall(m.abDir, "post", { terminalId: from, body });
   }
 
+  /** The row a send needs in A's mirror arrives by A's own refresh over the
+   *  relay; waiting on it is the only way a test can have one. */
+  async function seedPeerRow(a: RelayBusMachine, sa: string, b: RelayBusMachine, sb: string): Promise<void> {
+    let last = "";
+    try {
+      await untilAsync(async () => {
+        const res = await busCall(a.abDir, "sessions", { terminalId: sa });
+        last = `${res.status} ${JSON.stringify(res.body.reach ?? res.body)}`;
+        return res.status === 200 && (res.body.sessions ?? []).some((r: any) => r.sessionId === sb) ? true : undefined;
+      }, DIRECTORY_TIMEOUT_MS, "B's session to appear in A's directory");
+    } catch (err) {
+      throw new Error(`${(err as Error).message}; last read: ${last}`);
+    }
+  }
+
+  test("with no app, A lists B's session within a minute and B's reach switch is reported", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, sa, b, sb);
+    const listed = await busCall(a.abDir, "sessions", { terminalId: sa });
+    const row = listed.body.sessions.find((r: any) => r.sessionId === sb);
+    expect(row.machineId).toBe(b.machineId);
+    expect(row.title).toBe("beta");
+    expect(typeof row.asOf).toBe("number");
+    expect(listed.body.reach.scope).toBe("network");
+
+    await setAgentReach(b.abDir, false);
+    const refused = await untilAsync(async () => {
+      const res = await busCall(a.abDir, "sessions", { terminalId: sa });
+      const m = res.body?.reach?.machines?.find((x: any) => x.machineId === b.machineId);
+      return m?.status === "reach-refused" ? res.body : undefined;
+    }, DIRECTORY_TIMEOUT_MS, "A's reach line to show B as reach-refused");
+    expect((refused.sessions ?? []).some((r: any) => r.machineId === b.machineId)).toBe(false);
+  }, ROW_TIMEOUT_MS + DIRECTORY_TIMEOUT_MS);
+
   test("a post crosses A to B and A's thread shows it delivered", async () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     const sent = await post(a, sa, { to: addressOf(b, sb), summary: "crosses", text: "hello across" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
     expect(sent.body.ok).toBe(true);
@@ -260,7 +297,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     // The session list flushes behind the verb; a kill before it lands loses the
     // session the post is addressed to.
     await untilAsync(async () => (persistedSessions(b.abDir, b.projectId).some((s) => s.id === sb) ? true : undefined), 15_000, "B to persist its session");
@@ -281,7 +318,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b, relay } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     relay.dropNextBusAck();
     const sent = await post(a, sa, { to: addressOf(b, sb), summary: "ack lost", text: "once only" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
@@ -297,7 +334,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     await setMobileAccess(a.abDir, false);
     const sent = await post(a, sa, { to: addressOf(b, sb), summary: "nope", text: "nope" });
     expect(sent.status).toBe(403);
@@ -308,7 +345,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     await setMobileAccess(b.abDir, false);
     const sent = await post(a, sa, { to: addressOf(b, sb), summary: "refused", text: "refused" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
@@ -321,7 +358,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     const sent = await post(a, sa, { to: addressOf(b, sb), summary: "question", text: "which one?" });
     const threadId = sent.body.threadId as string;
     await awaitPosts(b, sb);
@@ -342,7 +379,7 @@ describe("gate: session bus relay, two bridges", () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
-    await seedPeerRow(a, b, sb, "beta");
+    await seedPeerRow(a, sa, b, sb);
     const opener = await post(a, sa, { to: addressOf(b, sb), summary: "round 0", text: "round 0" });
     expect(opener.status).toBe(200);
     const threadId = opener.body.threadId as string;

@@ -173,7 +173,7 @@ describe("the session-bus tools", () => {
       ],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "network", lastPushAgoMs: 12_000, machines: [{ machineId: "peer", machineLabel: "macbook-pro", status: "answered", rows: 1, droppedRows: 0, truncatedCard: 0, ageMs: 12_000 }], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "network", asOfAgoMs: 12_000, machines: [{ machineId: "peer", machineLabel: "macbook-pro", status: "answered", rows: 1, droppedRows: 0, truncatedCard: 0, ageMs: 12_000 }], staleMachines: 0, notConnected: 0 },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const text = result.content[0]!.text;
@@ -243,7 +243,7 @@ describe("the session-bus tools", () => {
       sessions: [row],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "machine", lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "machine", why: "not-refreshed" },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const line = result.content[0]!.text.split("\n").find((l) => l.startsWith("- ["));
@@ -263,10 +263,10 @@ describe("the session-bus tools", () => {
       sessions: [],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "network", lastPushAgoMs: 3_000, machines: [{ machineId: "peer", machineLabel: "thinkpad", status: "answered", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 3_000 }], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "network", asOfAgoMs: 3_000, machines: [{ machineId: "peer", machineLabel: "thinkpad", status: "answered", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 3_000 }], staleMachines: 0, notConnected: 0 },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
-    expect(result.content[0]!.text).toContain("Reach: 1 other machine read 3s ago.");
+    expect(result.content[0]!.text).toContain("Reach: 1 other machine asked, last answer 3s ago.");
     expect(result.content[0]!.text).toContain("thinkpad: nothing on this repository as of 3s ago");
   });
 
@@ -277,11 +277,12 @@ describe("the session-bus tools", () => {
       machineId: "self",
       reach: {
         scope: "network",
-        lastPushAgoMs: 1_000,
+        asOfAgoMs: 1_000,
         machines: [
           { machineId: "m1", machineLabel: "thinkpad", status: "refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
           { machineId: "m2", machineLabel: "old-mini", status: "no-card", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
           { machineId: "m3", machineLabel: "studio", status: "reach-refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
+          { machineId: "m4", machineLabel: "laptop", status: "not-asked", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
         ],
         staleMachines: 0,
         notConnected: 2,
@@ -294,7 +295,27 @@ describe("the session-bus tools", () => {
     // the second one has remote access ON, so sending its user to that setting
     // is sending them somewhere they will find nothing to change.
     expect(text).toContain("studio: reachable by agents is off there");
-    expect(text).toContain("2 machines in your account are not connected to this desktop and were not asked");
+    // Answered about other repositories only: never "nothing on this repository".
+    expect(text).toContain("laptop: not asked about this repository yet");
+    expect(text).toContain("2 machines in your account have no messaging key yet and were not asked");
+  });
+
+  test("machines asked that never answered give no answer age", async () => {
+    stub(() => Response.json({
+      sessions: [],
+      truncated: 0,
+      machineId: "self",
+      reach: {
+        scope: "network",
+        asOfAgoMs: null,
+        machines: [{ machineId: "m1", machineLabel: "thinkpad", status: "unreachable", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 0 }],
+        staleMachines: 0,
+        notConnected: 0,
+      },
+    }));
+    const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+    expect(text).toContain("Reach: 1 other machine asked, last answer never.");
+    expect(text).toContain("thinkpad: did not answer");
   });
 
   test("a machine-scope reach says which of the two reasons it was", async () => {
@@ -307,6 +328,15 @@ describe("the session-bus tools", () => {
     const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
     expect(text).toContain("Reach: this machine has no relay identity yet");
     expect(text).not.toContain("desktop app");
+  });
+
+  test("central-offline and not-refreshed each say why only this machine is listed", async () => {
+    for (const [why, needle] of [["central-offline", "not connected to the relay"], ["not-refreshed", "have not been asked yet"]] as const) {
+      stub(() => Response.json({ sessions: [], truncated: 0, machineId: "self", reach: { scope: "machine", why } }));
+      const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+      expect(text).toContain(needle);
+      expect(text).not.toContain("desktop");
+    }
   });
 
   test("a directory refusal reaches the caller with its code, not re-worded", async () => {
@@ -575,7 +605,7 @@ describe("the session-bus tools", () => {
       const text = (await callSessionBusTool("antgrid_thread", { threadId: "th-1" })).content[0]!.text;
       expect(search).toContain("threadId=th-1");
       expect(text).toContain("Thread th-1 (5 messages, oldest first):");
-      expect(text).toContain("- -> you, 5m ago [delivered 4m ago: stored on the other machine, not read] — asked");
+      expect(text).toContain("- -> you, 5m ago [delivered 4m ago: stored by the receiving bridge, not read] — asked");
       expect(text).toContain("  what broke?");
       expect(text).toContain("- <- peer/p2/9c11de, 3m ago — answered");
       expect(text).toContain("- -> you, 30s ago [held on this machine] — thanks");
