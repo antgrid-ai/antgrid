@@ -201,7 +201,7 @@ void main() {
 
       expect(find.text('stop refused'), findsOneWidget);
       expect(find.text('Build finished'), findsOneWidget);
-      expect(find.text('Tests pass'), findsOneWidget);
+      expect(find.text('✅ Tests pass'), findsOneWidget);
       await tester.pump(const Duration(seconds: 10));
       clearAbToasts(tester.element(find.byType(AppShell)));
     },
