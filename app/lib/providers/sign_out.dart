@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../analytics/crash_reporting.dart';
 import '../connection/connection_supervisor.dart';
 import '../connection/peer_runtime_owner.dart';
 import '../project/project_session.dart';
@@ -91,8 +92,10 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
         throw PeerRuntimeOwnerLockedException(peerRuntimeOwner.cleanupFailure!);
       }
     },
-    onCleanupLocked: (failure) =>
-        ref.read(signOutCleanupErrorProvider.notifier).set(failure),
+    onCleanupLocked: (failure) {
+      reportSignOutCleanupIncomplete(failure.cause);
+      ref.read(signOutCleanupErrorProvider.notifier).set(failure);
+    },
   );
 });
 

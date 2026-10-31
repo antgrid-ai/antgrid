@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/analytics/crash_reporting.dart';
 import 'package:antgrid/models/agent_hello.dart';
 import 'package:antgrid/services/push_identity.dart';
 import 'package:antgrid/services/push_messaging_service.dart';
@@ -7,6 +10,7 @@ import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/recording_warning_sink.dart';
 
 /// A relay session is "ready" for push:register only once its transport has
 /// handshaken (agentHello landed) — mirror that in tests.
@@ -130,6 +134,117 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(registers(), hasLength(2));
       await session.close();
+    },
+  );
+
+  test(
+    'a keychain that cannot be read on a reconnect costs that registration, not a crash',
+    () async {
+      // iOS keychain items are unreadable while the device is locked, and the
+      // keypair is re-read on every agent:hello.
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.status.hydrate(_connected);
+      final identity = _LockableIdentity();
+      final sink = RecordingWarningSink();
+      final svc = PushMessagingService(
+        pushIdentity: identity,
+        keypairReporter: PushKeypairReporter(sink: sink),
+      );
+      await svc.registerToken(
+        token: 'fcm-tok',
+        pushIdentity: identity,
+        sessions: [session],
+      );
+
+      identity.locked = true;
+      final escaped = <Object>[];
+      await runZonedGuarded(() async {
+        session.status.hydrate(
+          ProjectStatus(
+            // ignore: prefer_const_constructors
+            agentHello: AgentHello(version: '0'),
+            lastUpdatedAt: DateTime.now(),
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        final readsAfterFailure = identity.reads;
+        // A status tick on the same handshake must not retry the keychain.
+        session.status.hydrate(
+          session.status.value.copyWith(lastUpdatedAt: DateTime.now()),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(identity.reads, readsAfterFailure);
+      }, (e, _) => escaped.add(e));
+
+      expect(escaped, isEmpty);
+      expect(t.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
+      // The skipped registration is reported off the device, not just logged.
+      expect(sink.captures.map((c) => c.tags), [
+        {'push.keypair_failure': 'StateError'},
+      ]);
+
+      // Unlocking does not re-handshake; coming back to the foreground retries.
+      identity.locked = false;
+      await svc.retryUnregistered([session]);
+      expect(t.sent.where((m) => m['type'] == 'push:register'), hasLength(2));
+      // With nothing outstanding, a resume reads no keychain.
+      final readsAfterRetry = identity.reads;
+      await svc.retryUnregistered([session]);
+      expect(identity.reads, readsAfterRetry);
+      await session.close();
+    },
+  );
+
+  test(
+    'a resume retries a session the lock skipped, though another registered since',
+    () async {
+      Future<(ProjectSession, FakeAgentTransport)> relay(String id) async {
+        final t = FakeAgentTransport();
+        final s = ProjectSession(
+          projectId: id,
+          transport: t,
+          mode: ProjectSessionMode.relay,
+          cachedSessionsStore: await CachedSessionsStore.open(),
+          onClose: () async => t.dispose(),
+        );
+        return (s, t);
+      }
+
+      final (a, ta) = await relay('a');
+      final (b, tb) = await relay('b');
+      final identity = _LockableIdentity();
+      final svc = PushMessagingService(
+        pushIdentity: identity,
+        keypairReporter: PushKeypairReporter(sink: RecordingWarningSink()),
+      );
+      await svc.registerToken(
+        token: 'fcm-tok',
+        pushIdentity: identity,
+        sessions: [a, b],
+      );
+      identity.locked = true;
+      a.status.hydrate(_connected);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      identity.locked = false;
+      b.status.hydrate(_connected);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(tb.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
+      expect(ta.sent.where((m) => m['type'] == 'push:register'), isEmpty);
+
+      await svc.retryUnregistered([a, b]);
+      expect(ta.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
+      expect(tb.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
+      await a.close();
+      await b.close();
     },
   );
 
@@ -345,4 +460,20 @@ void main() {
     expect(t.sent.where((m) => m['type'] == 'push:register'), hasLength(1));
     await session.close();
   });
+}
+
+class _LockableIdentity implements PushIdentity {
+  final _inner = PushIdentity.inMemory();
+  bool locked = false;
+  int reads = 0;
+
+  @override
+  Future<PushKeypair> ensureKeypair() async {
+    reads++;
+    if (locked) throw StateError('errSecInteractionNotAllowed');
+    return _inner.ensureKeypair();
+  }
+
+  @override
+  Future<void> clear() => _inner.clear();
 }

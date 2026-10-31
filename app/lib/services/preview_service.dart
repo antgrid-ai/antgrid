@@ -218,15 +218,22 @@ class PreviewService {
     _autoOpenConsidered.add(msg.port);
     final onDetect = msg.attributes.onDetect;
     if (onDetect != 'notify' && onDetect != 'openPreview') return;
-    unawaited(
-      openTab(
-        msg.port,
-        scheme: msg.scheme,
-        focus: _state.tabs.isEmpty,
-        reportErrors: false,
-      ),
-    );
+    _autoOpen(msg.port, msg.scheme);
   }
+
+  /// An open nobody asked for, so nothing waits on it: `reportErrors: false`
+  /// keeps a probe failure off the screen, but a local listener that cannot
+  /// bind any loopback port still rejects, and must not land as a crash.
+  void _autoOpen(int port, String scheme) => detached(
+    'PreviewService',
+    'auto-open of port $port failed',
+    () => openTab(
+      port,
+      scheme: scheme,
+      focus: _state.tabs.isEmpty,
+      reportErrors: false,
+    ),
+  );
 
   /// Auto-open ports the bridge already knew about before this checkout's
   /// service subscribed — replayed via the `ports:update`/`preview:snapshot`
@@ -243,14 +250,7 @@ class PreviewService {
       if (!_autoOpenConsidered.add(port.port)) continue;
       final onDetect = port.onDetect ?? 'notify';
       if (onDetect != 'notify' && onDetect != 'openPreview') continue;
-      unawaited(
-        openTab(
-          port.port,
-          scheme: port.scheme ?? 'http',
-          focus: _state.tabs.isEmpty,
-          reportErrors: false,
-        ),
-      );
+      _autoOpen(port.port, port.scheme ?? 'http');
     }
   }
 
