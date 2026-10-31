@@ -34,7 +34,7 @@ class LocalTransportHandshakeException implements Exception {
 ///
 /// Wire protocol (mirror of `evals/helpers/local-client.ts`):
 ///   1. Open WS to ws://127.0.0.1:[port]
-///   2. Send `{type:'hello', token, appPid, appVersion, capabilities}`
+///   2. Send `{type:'hello', token, appPid, appVersion}`
 ///   3. Wait for `{type:'ready'}` (anything else = handshake failure)
 ///   4. Subsequent frames are `{channel, ...message}` JSON envelopes.
 class LocalTransport extends BufferedAgentTransport {
@@ -59,13 +59,6 @@ class LocalTransport extends BufferedAgentTransport {
   /// first project open (`WS connect timed out`) even though the bridge had
   /// accepted the connection; 15s absorbs it, costing nothing on the warm path.
   final Duration connectTimeout;
-
-  /// Whether this app forwards session-bus frames for other bridges (the
-  /// desktop app is the only carrier — see `session_bus/` in `app/AGENTS.md`).
-  /// Sent as the hello's `capabilities.sessionBusCarrier` only when true; the
-  /// key is omitted for a non-carrier owner, which the agent treats the same
-  /// as an owner that sends no `capabilities` at all.
-  final bool sessionBusCarrier;
 
   /// Where a loopback upload writes the temp file whose path it hands the
   /// bridge. Must be a directory the bridge process can read too: a packaged
@@ -97,7 +90,6 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
-    this.sessionBusCarrier = false,
     this.uploadTempDir,
   });
 
@@ -335,7 +327,6 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        if (sessionBusCarrier) 'capabilities': {'sessionBusCarrier': true},
       }),
     );
 

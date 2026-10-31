@@ -2514,25 +2514,11 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'agent:updateResult':
       return parseAgentEvent(json);
 
-    // Session-bus frames are CARRIED, not consumed: the app is a transport leg
-    // between the two bridges of one exchange, so the payload is handed on
-    // verbatim rather than modelled — a field a newer bridge adds must survive
-    // an older app. Recognized here (returning the raw map, as the preview
-    // tunnel's frames effectively are) only so the classification gate sees a
-    // type that is deliberately unrouted; see kUnroutedInboundTypes.
-    case 'session-bus:post':
-    case 'session-bus:notify':
-    case 'session-bus:fetch':
-    case 'session-bus:fetch:result':
-    case 'session-bus:ack':
-      return json;
-
     // The app's own reads of its bridge's session bus, plus the unsolicited
-    // note that one of those mailboxes grew. Handed on raw like the
-    // carried frames above, but for the opposite reason: these ARE this app's
-    // messages, and their one reader (`providers/session_bus_inbox.dart`)
-    // decodes them into the view models its surfaces render. A second set of
-    // models here would be two shapes to keep true against one schema.
+    // note that one of those mailboxes grew. Handed on raw because their one
+    // reader (`providers/session_bus_inbox.dart`) decodes them into the view
+    // models its surfaces render. A second set of models here would be two
+    // shapes to keep true against one schema.
     //
     // The two REQUESTS they answer (`session-bus:inbox` and
     // `session-bus:thread`) are app→bridge and never arrive, so they have no

@@ -267,6 +267,23 @@ void main() {
     // Inbound entries carry no receipt, and its absence is not a failure.
     expect(thread.entries.last.outbound, isFalse);
     expect(thread.entries.last.deliveredAt, isNull);
+    // A bridge that reports no delivery state sends neither field.
+    expect(thread.entries.first.delivery, isNull);
+    expect(thread.entries.first.refusedCode, isNull);
+  });
+
+  test('a thread entry parses delivery and refusedCode when present', () {
+    final entry = SessionBusThreadEntry.fromJson({
+      'direction': 'out',
+      'at': 1,
+      'peer': {'machineId': 'm', 'projectId': 'p', 'sessionId': 's'},
+      'summary': 'x',
+      'text': ['y'],
+      'delivery': 'refused',
+      'refusedCode': 'REMOTE_ACCESS_OFF',
+    })!;
+    expect(entry.delivery, 'refused');
+    expect(entry.refusedCode, 'REMOTE_ACCESS_OFF');
   });
 
   test('a refused thread answers as data, not a thrown error', () async {

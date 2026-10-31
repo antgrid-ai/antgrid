@@ -345,9 +345,9 @@ class _ThreadPane extends ConsumerWidget {
 /// Direction maps onto the transcript's own two treatments — what this session
 /// SENT takes the accent-bordered block a user's own message takes, and what a
 /// peer sent renders as prose. The stamp under an outbound entry is the only
-/// end-to-end receipt anywhere in the design: its absence means no receipt has
-/// come back yet, never that delivery failed, so it reads "Sent" rather than as
-/// a warning.
+/// delivery state anywhere in the design. Without a bridge-reported state, an
+/// absent receipt means none has come back yet, never that delivery failed, so
+/// it reads "Sent" rather than as a warning.
 class SessionBusThreadEntries extends StatefulWidget {
   const SessionBusThreadEntries({super.key, required this.entries});
 
@@ -393,7 +393,7 @@ class _SessionBusThreadEntriesState extends State<SessionBusThreadEntries> {
                   rowIndex: index,
                 ),
                 if (entry.outbound)
-                  _DeliveryStamp(deliveredAt: entry.deliveredAt),
+                  _DeliveryStamp(entry: entry),
               ],
             );
           },
@@ -422,23 +422,50 @@ AgentItem _itemFor(SessionBusThreadEntry entry, int index) {
 }
 
 class _DeliveryStamp extends StatelessWidget {
-  const _DeliveryStamp({required this.deliveredAt});
+  const _DeliveryStamp({required this.entry});
 
-  final int? deliveredAt;
+  final SessionBusThreadEntry entry;
+
+  String get _label {
+    final at = entry.deliveredAt;
+    switch (entry.delivery) {
+      case 'held':
+        return 'Held';
+      case 'relayed':
+        return 'Relayed';
+      case 'refused':
+        return 'Refused';
+      case 'delivered':
+        return at == null ? 'Delivered' : 'Delivered ${_stamp(at)}';
+    }
+    return at == null ? 'Sent' : 'Delivered ${_stamp(at)}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final at = deliveredAt;
+    final muted = context.antgrid.textMuted;
+    final code = entry.delivery == 'refused' ? entry.refusedCode : null;
     return Padding(
       padding: const EdgeInsets.only(
         left: AbTokens.space8,
         bottom: AbTokens.space6,
       ),
-      child: Text(
-        at == null ? 'Sent' : 'Delivered ${_stamp(at)}',
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXxs,
-          color: context.antgrid.textMuted,
+      // Inline rather than behind a tooltip: a phone has no hover, and the
+      // code is what whoever reports the refusal has to quote.
+      child: Text.rich(
+        TextSpan(
+          text: _label,
+          style: AbTokens.sansStyle(fontSize: AbTokens.fontXxs, color: muted),
+          children: [
+            if (code != null && code.isNotEmpty)
+              TextSpan(
+                text: ' $code',
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: muted,
+                ),
+              ),
+          ],
         ),
       ),
     );
