@@ -9,12 +9,14 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toast.dart';
+import '../../providers/mobile_connection.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
 import '../../providers/project_panel.dart';
 import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
 import '../machine_scope_sheet.dart';
+import '../mobile/mobile_connect.dart';
 import '../mobile/mobile_home.dart';
 import '../open_folder_button.dart';
 import '../project_panel/project_panel_view.dart';
@@ -62,6 +64,13 @@ class NewSessionContent extends ConsumerWidget {
     // below it: the fixed bar and the list's own scrolling header carry the
     // same title/chips/badges, so exactly one may mount — and re-deriving that
     // from platform+width in two places is how you end up with two or neither.
+    // A phone picks its machine before anything else here means anything.
+    if (ref.watch(mobileConnectEnabledProvider)) {
+      final status = ref.watch(mobileConnectStatusProvider);
+      if (status.phase != MobileConnectPhase.connected) {
+        return MobileConnectScreen(status: status);
+      }
+    }
     final showTopBar = onOpenDrawer != null || showSearchButton;
     final projectView = ref.watch(selectedProjectViewProvider);
     final isPhoneWidth = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
@@ -264,13 +273,13 @@ class NewSessionContent extends ConsumerWidget {
 ///
 /// Carries no breadcrumb — the composer's project chip already names the
 /// target, and the route is self-evidently New Session.
-class _TopBar extends StatelessWidget {
+class _TopBar extends ConsumerWidget {
   const _TopBar({this.onOpenDrawer});
 
   final VoidCallback? onOpenDrawer;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isPhoneWidth = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -282,9 +291,12 @@ class _TopBar extends StatelessWidget {
               const SizedBox(width: AbTokens.space8),
             ],
             if (isPhoneWidth) ...[
-              // The phone home is scoped by machine, so the scope switcher is
-              // what heads it.
-              const Expanded(child: MobileScopeButton()),
+              // The phone home is one machine's, so the machine heads it.
+              Expanded(
+                child: ref.watch(mobileConnectEnabledProvider)
+                    ? const ConnectedMachineButton()
+                    : const MobileScopeButton(),
+              ),
               const SizedBox(width: AbTokens.space8),
               const SessionSearchButton(),
             ] else ...[

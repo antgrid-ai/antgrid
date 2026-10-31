@@ -9,8 +9,11 @@ import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
 import 'package:antgrid/main.dart' show telemetryAllowed;
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/project_catalog.dart';
+import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/machine_scope.dart';
+import 'package:antgrid/providers/mobile_connection.dart';
 import 'package:antgrid/storage/machine_scope_store.dart';
+import 'package:antgrid/storage/mobile_machine_store.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -397,6 +400,30 @@ void main() {
 
     expect(store.read().excluded, {'real'});
     expect(store.read().hideOffline, isTrue);
+  });
+
+  test('the phone neither reads nor writes its chosen machine in demo mode', () async {
+    useInMemoryPrefs();
+    final store = await MobileMachineStore.open();
+    await store.write(lastMachineId: 'real', reconnect: true);
+    final container = ProviderContainer(
+      overrides: [
+        eagerControlPlanesEnabledProvider.overrideWithValue(true),
+        mobileMachineStoreProvider.overrideWithValue(store),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(demoModeProvider.notifier).set(true);
+
+    expect(container.read(mobileConnectEnabledProvider), isFalse);
+    expect(container.read(mobileConnectionProvider).machineId, isNull);
+    container.read(mobileConnectionProvider.notifier)
+      ..connect('other')
+      ..setReconnectNextTime(false);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(store.read().lastMachineId, 'real');
+    expect(store.read().reconnect, isTrue);
   });
 
   test('the preview origin owner store drops the demo', () async {

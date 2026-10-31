@@ -38,6 +38,7 @@ import 'providers/drawer_order.dart';
 import 'providers/first_run.dart';
 import 'providers/host_status.dart';
 import 'providers/machine_scope.dart';
+import 'providers/mobile_connection.dart';
 import 'providers/local_host_warmup.dart';
 import 'providers/notification_route_apply.dart';
 import 'providers/post_signin_provisioning.dart';
@@ -69,6 +70,7 @@ import 'storage/session_layout_store.dart';
 import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
 import 'storage/machine_scope_store.dart';
+import 'storage/mobile_machine_store.dart';
 import 'storage/pending_forgets_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
@@ -193,9 +195,10 @@ Future<void> main() async {
   ).wait;
   // Opened separately from the record above, which is already at the arity
   // `Future.wait` on records supports.
-  final (pendingForgetsStore, machineScopeStore) = await (
+  final (pendingForgetsStore, machineScopeStore, mobileMachineStore) = await (
     PendingForgetsStore.open(),
     MachineScopeStore.open(),
+    MobileMachineStore.open(),
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
@@ -236,6 +239,7 @@ Future<void> main() async {
       projectStoreProvider.overrideWithValue(projectStore),
       pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       machineScopeStoreProvider.overrideWithValue(machineScopeStore),
+      mobileMachineStoreProvider.overrideWithValue(mobileMachineStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),

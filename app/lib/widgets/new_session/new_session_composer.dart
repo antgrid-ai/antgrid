@@ -31,6 +31,7 @@ import '../../launcher/host_control_client.dart' show HostControlException;
 export '../../design/widgets/ab_composer_send_button.dart'
     show ComposerSendButton;
 import '../../providers/agent_catalog.dart';
+import '../../providers/mobile_connection.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
@@ -559,6 +560,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // flag would unlock the form while the start it was guarding ran on.
     final progress = ref.watch(newSessionStartProgressProvider);
     final starting = progress != null;
+    final oneMachine = ref.watch(mobileConnectEnabledProvider);
     // Reactive form of `_canStart`, built from the values already watched
     // above so the button reacts to every one of them; both go through
     // [newSessionCanStart] so the watch and read paths stay in lockstep.
@@ -671,11 +673,15 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                         ),
                       ),
                       const SizedBox(width: AbTokens.space6),
-                      ConstrainedBox(
-                        constraints: capBox,
-                        child: EnvironmentChip(enabled: !starting),
-                      ),
-                      const SizedBox(width: AbTokens.space6),
+                      // A connected phone has exactly one machine to start
+                      // on; the switcher above the list is where it changes.
+                      if (!oneMachine) ...[
+                        ConstrainedBox(
+                          constraints: capBox,
+                          child: EnvironmentChip(enabled: !starting),
+                        ),
+                        const SizedBox(width: AbTokens.space6),
+                      ],
                       Flexible(child: BranchChip(enabled: !starting)),
                       const SizedBox(width: AbTokens.space6),
                       ConstrainedBox(

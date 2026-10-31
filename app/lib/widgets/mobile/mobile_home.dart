@@ -13,6 +13,7 @@ import '../../design/widgets/ab_status_dot.dart';
 import '../../models/agent_work_status.dart';
 import '../../providers/machine_directory.dart';
 import '../../providers/machine_scope.dart';
+import '../../providers/mobile_connection.dart';
 import '../../providers/project_index.dart';
 import '../../providers/project_panel.dart';
 import '../../providers/recent_sessions.dart';
@@ -61,7 +62,9 @@ class MobileHomeList extends ConsumerWidget {
           ),
         ],
         if (views.isNotEmpty) ...[
-          const SliverToBoxAdapter(child: SidebarSectionLabel(label: 'PROJECTS')),
+          SliverToBoxAdapter(
+            child: SidebarSectionLabel(label: _projectsLabel(ref)),
+          ),
           SliverList.list(
             children: [
               for (final v in views)
@@ -71,14 +74,20 @@ class MobileHomeList extends ConsumerWidget {
         ] else
           SliverFillRemaining(
             hasScrollBody: false,
-            child: anyProjects
+            child: ref.watch(mobileConnectEnabledProvider)
+                ? const AbEmptyState(
+                    title: 'No projects on this machine',
+                    subtitle:
+                        'Open a folder in Antgrid on that machine to see it '
+                        'here.',
+                  )
+                : anyProjects
                 ? AbEmptyState(
                     title: 'No projects on the machines in scope',
                     action: AbButton(
                       label: 'Show all machines',
-                      onTap: () => ref
-                          .read(machineScopeProvider.notifier)
-                          .selectAll([
+                      onTap: () =>
+                          ref.read(machineScopeProvider.notifier).selectAll([
                             for (final m in ref.read(machineDirectoryProvider))
                               if (m.remoteAccessEnabled != false) m.id,
                           ]),
@@ -108,7 +117,9 @@ class _NeedsYouCard extends ConsumerWidget {
     final p = context.antgrid;
     final asking = item.status == AgentWorkStatus.attention;
     final kind = asking ? 'WAITING' : 'FAILED';
-    final when = DateTime.fromMillisecondsSinceEpoch(item.row.session.lastUsedAt);
+    final when = DateTime.fromMillisecondsSinceEpoch(
+      item.row.session.lastUsedAt,
+    );
     void open() {
       final container = ref.container;
       detached(
@@ -226,7 +237,11 @@ class _ProjectTile extends ConsumerWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: AbTokens.touchControlMin),
         child: AbListRow(
-          leading: AbIcon(AbIcons.folder, size: AbTokens.iconButtonGlyph, color: p.textMuted),
+          leading: AbIcon(
+            AbIcons.folder,
+            size: AbTokens.iconButtonGlyph,
+            color: p.textMuted,
+          ),
           title: Text(
             view.group.name,
             style: AbTokens.monoStyle(
@@ -251,7 +266,11 @@ class _ProjectTile extends ConsumerWidget {
                 ),
                 const SizedBox(width: AbTokens.space8),
               ],
-              AbIcon(AbIcons.chevronRight, size: AbTokens.fontSm, color: p.textMuted),
+              AbIcon(
+                AbIcons.chevronRight,
+                size: AbTokens.fontSm,
+                color: p.textMuted,
+              ),
             ],
           ),
           horizontalPadding: AbTokens.space12,
@@ -260,4 +279,14 @@ class _ProjectTile extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// "PROJECTS ON MACBOOK PRO" on a phone connected to one machine.
+String _projectsLabel(WidgetRef ref) {
+  if (!ref.watch(mobileConnectEnabledProvider)) return 'PROJECTS';
+  final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
+  for (final m in ref.watch(machineDirectoryProvider)) {
+    if (m.id == id) return 'PROJECTS ON ${m.name.toUpperCase()}';
+  }
+  return 'PROJECTS';
 }

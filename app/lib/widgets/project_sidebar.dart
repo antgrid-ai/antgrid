@@ -16,6 +16,7 @@ import '../project/project_session_registry.dart'
 import '../providers/agent_transport.dart' show selectedRegistrationIdProvider;
 import '../providers/machine_directory.dart';
 import '../providers/machine_scope.dart';
+import '../providers/mobile_connection.dart';
 import '../providers/project_index.dart';
 import '../providers/project_panel.dart';
 import '../providers/project_work_status.dart' show recentStatusKey;
@@ -74,7 +75,10 @@ class NeedsYouSection extends ConsumerWidget {
         for (final item in items)
           _NeedsYouRow(
             key: ValueKey(
-              recentStatusKey(item.row.origin.registrationId, item.row.session.id),
+              recentStatusKey(
+                item.row.origin.registrationId,
+                item.row.session.id,
+              ),
             ),
             item: item,
           ),
@@ -208,7 +212,8 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
     final key = view.group.key;
     final focusedEntry = ref.watch(selectedRegistrationIdProvider);
     final holdsFocus =
-        focusedEntry != null && view.members.any((m) => m.entryId == focusedEntry);
+        focusedEntry != null &&
+        view.members.any((m) => m.entryId == focusedEntry);
     final openByDefault =
         holdsFocus || view.liveCount > 0 || view.needsYouCount > 0;
     ref.watch(projectGroupExpansionProvider);
@@ -270,7 +275,10 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
               // menu.
               if ((hovered || _focused) &&
                   localCopy != null &&
-                  DrawerRemoveButton.offersFor(ref, LocalProjectEntry(localCopy)))
+                  DrawerRemoveButton.offersFor(
+                    ref,
+                    LocalProjectEntry(localCopy),
+                  ))
                 DrawerRemoveButton(entry: LocalProjectEntry(localCopy)),
             ];
             // Whatever ends up outermost takes the rail cell, so this row's
@@ -294,7 +302,9 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
                   view.group.name,
                   overflow: TextOverflow.ellipsis,
                   style: view.allOffline
-                      ? drawerProjectTitleStyle(context).copyWith(color: p.textMuted)
+                      ? drawerProjectTitleStyle(
+                          context,
+                        ).copyWith(color: p.textMuted)
                       : drawerProjectTitleStyle(context),
                 ),
                 trailing: AbRowTrailingCell.kit(cells),
@@ -313,7 +323,9 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
                     expansion.toggle(key, byDefault: openByDefault);
                     return;
                   }
-                  if (!expanded) expansion.toggle(key, byDefault: openByDefault);
+                  if (!expanded) {
+                    expansion.toggle(key, byDefault: openByDefault);
+                  }
                   openProjectPanel(ref.container, view);
                   closeDrawerIfOverlay(context);
                 },
@@ -324,7 +336,9 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
         if (expanded)
           for (final r in view.sessions)
             SessionRow(
-              key: ValueKey(recentStatusKey(r.origin.registrationId, r.session.id)),
+              key: ValueKey(
+                recentStatusKey(r.origin.registrationId, r.session.id),
+              ),
               entryId: r.origin.registrationId,
               session: r.session,
               machineTag: multiMachine
@@ -354,6 +368,8 @@ class ScopeHidesEverything extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // A phone holds one machine, so there is no wider scope to offer.
+    final oneMachine = ref.watch(mobileConnectEnabledProvider);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
@@ -365,22 +381,24 @@ class ScopeHidesEverything extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'No projects on the machines in scope.',
+            oneMachine
+                ? 'No projects on this machine.'
+                : 'No projects on the machines in scope.',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
               color: context.antgrid.textMuted,
             ),
           ),
-          const SizedBox(height: AbTokens.space8),
-          AbButton(
-            label: 'Show all machines',
-            compact: true,
-            onTap: () => ref
-                .read(machineScopeProvider.notifier)
-                .selectAll([
-                  for (final m in ref.read(machineDirectoryProvider)) m.id,
-                ]),
-          ),
+          if (!oneMachine) ...[
+            const SizedBox(height: AbTokens.space8),
+            AbButton(
+              label: 'Show all machines',
+              compact: true,
+              onTap: () => ref.read(machineScopeProvider.notifier).selectAll([
+                for (final m in ref.read(machineDirectoryProvider)) m.id,
+              ]),
+            ),
+          ],
         ],
       ),
     );

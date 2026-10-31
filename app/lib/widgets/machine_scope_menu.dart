@@ -170,6 +170,16 @@ String machineStatusLine(
     final seen = m.lastSeenAt;
     return seen == null ? 'Offline' : 'Offline · seen ${relativeTime(seen)}';
   }
+  return machineActivityLine(m, rows, statuses) ?? 'Online · idle';
+}
+
+/// What is running on [m] and what waits on the user there, e.g.
+/// "2 running · 1 needs you"; null when nothing is.
+String? machineActivityLine(
+  MachineInfo m,
+  List<RecentSessionRow> rows,
+  Map<String, AgentWorkStatus> statuses,
+) {
   var running = 0;
   var needs = 0;
   for (final r in rows) {
@@ -190,7 +200,7 @@ String machineStatusLine(
     if (running > 0) '$running running',
     if (needs > 0) '$needs need${needs == 1 ? 's' : ''} you',
   ];
-  return parts.isEmpty ? 'Online · idle' : parts.join(' · ');
+  return parts.isEmpty ? null : parts.join(' · ');
 }
 
 /// Where "Manage machines…" lands: the machine-level surface that owns this
@@ -295,7 +305,11 @@ class _ScopeMachineRowState extends State<_ScopeMachineRow> {
                   DrawerRemoveButton(entry: entry)
                 else if (remote != null) ...[
                   if (m.remoteAccessEnabled == false) ...[
-                    AbIcon(AbIcons.lock, size: AbTokens.fontXs, color: p.textMuted),
+                    AbIcon(
+                      AbIcons.lock,
+                      size: AbTokens.fontXs,
+                      color: p.textMuted,
+                    ),
                     const SizedBox(width: AbTokens.space4),
                   ],
                   Text(
@@ -310,7 +324,11 @@ class _ScopeMachineRowState extends State<_ScopeMachineRow> {
                 SizedBox(
                   width: AbTokens.fontSm,
                   child: widget.checked
-                      ? AbIcon(AbIcons.check, size: AbTokens.fontSm, color: p.accent)
+                      ? AbIcon(
+                          AbIcons.check,
+                          size: AbTokens.fontSm,
+                          color: p.accent,
+                        )
                       : null,
                 ),
               ],

@@ -21,6 +21,7 @@ import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
+import '../providers/mobile_connection.dart';
 import '../providers/project_index.dart';
 import '../providers/project_panel.dart';
 import '../providers/providers.dart';
@@ -30,6 +31,7 @@ import '../utils/platform_utils.dart';
 import 'account_footer.dart';
 import 'first_run_checklist.dart';
 import 'machine_scope_menu.dart';
+import 'mobile/mobile_connect.dart';
 import 'open_folder_button.dart';
 import 'project_sidebar.dart';
 import 'update_row.dart';
@@ -148,17 +150,30 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
 /// the pinned rows: on a panel too short for it the account footer is already
 /// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
-class _TopChrome extends StatelessWidget {
+class _TopChrome extends ConsumerWidget {
   const _TopChrome();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     // The scope switcher sits above everything it filters — Needs you and the
-    // project list below are both answers to "on which machines".
-    return const Column(
+    // project list below are both answers to "on which machines". A phone has
+    // one machine instead of a scope.
+    return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [_NavActions(), MachineScopeButton()],
+      children: [
+        const _NavActions(),
+        if (ref.watch(mobileConnectEnabledProvider))
+          const Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: AbTokens.drawerGutter,
+              vertical: AbTokens.space4,
+            ),
+            child: ConnectedMachineButton(),
+          )
+        else
+          const MachineScopeButton(),
+      ],
     );
   }
 }

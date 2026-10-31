@@ -16,6 +16,7 @@ import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
 import 'eager_control_planes.dart';
+import 'mobile_connection.dart';
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -372,7 +373,10 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // mobile especially, where there is no Local tab, so the default 'local'
   // selection resolves `visiblePickerSource` to the first MACHINE.
   final surface = ref.watch(workbenchSurfaceProvider);
+  // Not on a phone that holds one chosen machine: pinning every open socket
+  // here would keep the machine it just switched away from connected.
   final pickerVisible =
+      !ref.watch(mobileConnectEnabledProvider) &&
       surface != WorkbenchSurface.scheduler &&
       (ref.watch(selectedRegistrationIdProvider) == null ||
           surface == WorkbenchSurface.newSession);

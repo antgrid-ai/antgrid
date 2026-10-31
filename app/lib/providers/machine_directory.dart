@@ -11,6 +11,7 @@ import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'drawer_entries.dart';
 import 'machine_scope.dart';
+import 'mobile_connection.dart';
 import 'projects.dart';
 import 'recent_sessions.dart';
 
@@ -30,6 +31,7 @@ class MachineInfo {
     required this.online,
     this.lastSeenAt,
     this.remoteAccessEnabled,
+    this.platform,
   });
 
   /// [kLocalMachineKey] for this device, the bare device uuid otherwise.
@@ -44,6 +46,10 @@ class MachineInfo {
   /// Never read null as off.
   final bool? remoteAccessEnabled;
 
+  /// The account inventory's platform tag (`macos`, `windows`, `linux`); null
+  /// for a machine the inventory does not list.
+  final String? platform;
+
   @override
   bool operator ==(Object other) =>
       other is MachineInfo &&
@@ -52,11 +58,19 @@ class MachineInfo {
       other.isLocal == isLocal &&
       other.online == online &&
       other.lastSeenAt == lastSeenAt &&
-      other.remoteAccessEnabled == remoteAccessEnabled;
+      other.remoteAccessEnabled == remoteAccessEnabled &&
+      other.platform == platform;
 
   @override
-  int get hashCode =>
-      Object.hash(id, name, isLocal, online, lastSeenAt, remoteAccessEnabled);
+  int get hashCode => Object.hash(
+    id,
+    name,
+    isLocal,
+    online,
+    lastSeenAt,
+    remoteAccessEnabled,
+    platform,
+  );
 }
 
 /// Online when a socket to the machine is connected, else when its last
@@ -104,7 +118,8 @@ List<MachineInfo> buildMachineDirectory({
     final heartbeat = inventoryById[uuid]?.lastSeenAt;
     // Our own last connection says when this device last reached it, which
     // is worth showing as "seen" but is no evidence it is up now.
-    final lastSeen = heartbeat ??
+    final lastSeen =
+        heartbeat ??
         (entry is RemoteAgentEntry ? entry.agent.lastConnectedAt : null);
     machines.add(
       MachineInfo(
@@ -118,6 +133,7 @@ List<MachineInfo> buildMachineDirectory({
         ),
         lastSeenAt: lastSeen,
         remoteAccessEnabled: remoteAccess[uuid],
+        platform: inventoryById[uuid]?.platform,
       ),
     );
   }
@@ -168,7 +184,9 @@ final machineDirectoryProvider = Provider<List<MachineInfo>>((ref) {
   final inventory = ref.watch(accountAgentsProvider).value ?? const [];
   final localUuid = ref.watch(localDeviceUuidProvider).value;
   final localName =
-      inventory.firstWhereOrNull((a) => a.deviceUuid == localUuid)?.displayName ??
+      inventory
+          .firstWhereOrNull((a) => a.deviceUuid == localUuid)
+          ?.displayName ??
       'This machine';
   final adverts = ref.watch(machineAdvertisedProjectsProvider);
   return buildMachineDirectory(
@@ -197,6 +215,12 @@ final machineDirectoryProvider = Provider<List<MachineInfo>>((ref) {
 
 /// Ids of the machines the current [MachineScope] shows.
 final scopedMachineIdsProvider = Provider<Set<String>>((ref) {
+  // A phone shows the one machine it is connected to; the scope is the
+  // desktop's.
+  if (ref.watch(mobileConnectEnabledProvider)) {
+    final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
+    return id == null ? const {} : {id};
+  }
   final scope = ref.watch(machineScopeProvider);
   return {
     for (final m in scopeCandidates(ref.watch(machineDirectoryProvider)))
@@ -207,10 +231,7 @@ final scopedMachineIdsProvider = Provider<Set<String>>((ref) {
 /// The machines a scope can include on this device. A phone cannot drive a
 /// machine whose remote-access switch is off — its advert is empty and every
 /// verb is refused — so there such a machine is shown locked, never in scope.
-List<MachineInfo> scopeCandidates(
-  List<MachineInfo> machines, {
-  bool? mobile,
-}) {
+List<MachineInfo> scopeCandidates(List<MachineInfo> machines, {bool? mobile}) {
   if (!(mobile ?? isMobilePlatform)) return machines;
   return [
     for (final m in machines)
@@ -227,10 +248,21 @@ String machineScopeLabel(List<MachineInfo> machines, MachineScope scope) {
   ];
   if (inScope.isEmpty) return 'No machines';
   if (inScope.length == machines.length) return 'All machines';
-  final online = [for (final m in machines) if (m.online) m];
+  final online = [
+    for (final m in machines)
+      if (m.online) m,
+  ];
   final onlyOnline =
       inScope.length == online.length && inScope.every((m) => m.online);
   if (onlyOnline) return 'All online machines';
   if (inScope.length == 1) return inScope.single.name;
   return '${inScope.length} of ${machines.length} machines';
 }
+
+/// The inventory's platform tag as people write it, e.g. "macOS".
+String? platformLabel(String? platform) => switch (platform?.toLowerCase()) {
+  'macos' || 'darwin' => 'macOS',
+  'windows' || 'win32' => 'Windows',
+  'linux' => 'Linux',
+  _ => null,
+};

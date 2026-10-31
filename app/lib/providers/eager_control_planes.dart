@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../storage/recent_agents_store.dart';
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
+import 'mobile_connection.dart';
 import 'recent_agents.dart';
 
 /// Whether this platform dials known machines proactively at launch/resume.
@@ -40,6 +41,11 @@ const int kEagerControlPlaneCap = 3;
 /// justify an unprompted socket.
 final eagerControlPlaneTargetsProvider = Provider<Set<String>>((ref) {
   if (!ref.watch(eagerControlPlanesEnabledProvider)) return const {};
+  // A phone holds the one machine the user picked, not every recent one.
+  if (ref.watch(mobileConnectEnabledProvider)) {
+    final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
+    return id == null ? const {} : {id};
+  }
   // Watched through a select() on a joined key, not the Set itself: recents
   // rewrite on every successful connect (the lastConnectedAt upsert), and a
   // freshly built Set never compares == to the last one, so without a

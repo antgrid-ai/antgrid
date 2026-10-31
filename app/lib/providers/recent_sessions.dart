@@ -22,6 +22,7 @@ import 'chat_composer_drafts.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
+import 'mobile_connection.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
@@ -625,10 +626,19 @@ Future<void> pullToRefreshRecentSessions(
   // the user had cached before entering it.
   if (ref.read(demoModeProvider)) return;
   final rows = ref.read(recentSessionsProvider);
+  // A phone refreshes the machine it is connected to and nothing else: a
+  // refresh dials what it names, and the phone holds one machine.
+  final chosen = ref.read(mobileConnectEnabledProvider)
+      ? ref.read(mobileConnectionProvider).machineId
+      : null;
   final uuids = <String?>{
-    ...extraMachineUuids,
-    for (final r in rows)
-      if (!r.origin.isLocal) r.origin.machineUuid!,
+    if (chosen != null)
+      chosen
+    else ...[
+      ...extraMachineUuids,
+      for (final r in rows)
+        if (!r.origin.isLocal) r.origin.machineUuid!,
+    ],
   };
   final refreshRef = RefreshRef.of(ref);
   await refreshMachineInventoryAndControlPlanes(refreshRef, uuids);
