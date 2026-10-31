@@ -788,7 +788,8 @@ export class SessionManager {
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
   // it must never reach that path. Invalidated whenever setAgentSession writes
-  // something new. Launches let the provider validate the saved identity, save
+  // something new; a `false` from a not-yet-written transcript is never stored
+  // (see agentSessionResumable), which costs only an existsSync. Launches let the provider validate the saved identity, save
   // for the one verdict agentSessionGone acts on: a positive disown.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
   /** Sessions launched to CONTINUE their previous conversation, until the agent
@@ -3545,7 +3546,12 @@ export class SessionManager {
       agentTranscriptPath: e.agentTranscriptPath,
       adapterOptions: this.opts.adapterOptions,
     }, (this.opts.agentRuntime ?? agentRuntime).get);
-    this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
+    // A missing transcript is not yet an answer: claude names the file at
+    // SessionStart before writing it, and its per-turn re-reports carry the same
+    // id and path, so setAgentSession never clears a `false` cached that early.
+    if (resumable || !e.agentTranscriptPath) {
+      this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
+    }
     return resumable;
   }
 
