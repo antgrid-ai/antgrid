@@ -88,9 +88,7 @@ export class ProjectCore {
   private listener: LocalListener | null = null;
   /** This core's project stream with the push subscriber that rides it: the
    *  primary binding for a remote-mode core, the promoted one for a local-mode
-   *  core. {@link sendToAppSession} has no other way to reach the wire, so a
-   *  promoted core that left this unset could carry a session-bus exchange IN
-   *  and never answer it. Written only by {@link attachRelayStream}. */
+   *  core. Written only by {@link attachRelayStream}. */
   private slot: {
     handle: StreamHandle;
     /** An ADDITIVE subscriber on a bus that outlives the stream, so whoever
@@ -142,28 +140,6 @@ export class ProjectCore {
   get projectName(): string | undefined { return this.core?.projectName; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
 
-  /** Session-bus outbound for a context this machine opened. A bridge cannot
-   *  dial another bridge, so the desktop owner is the only carrier, and the
-   *  frame goes to it directly: publishing would fan the exchange out to the
-   *  human's phone as well. False means it did not leave. */
-  sendToOwner(msg: AbMessage): boolean {
-    return this.listener?.deliverToOwner(msg) ?? false;
-  }
-
-  /** Session-bus outbound on a context this machine was contacted on, addressed
-   *  at the one app session that carried it in. The phone is attached to the
-   *  same stream, so a broadcast here would leak the whole exchange to it — the
-   *  mirror image of the invariant {@link sendToOwner} keeps. */
-  sendToAppSession(peerId: string, msg: AbMessage): boolean {
-    // `sendTo` settles when the frame leaves the send queue, which is long after
-    // the caller has to decide whether to hold it. "The session is live" is the
-    // strongest fact available synchronously and is exactly what the boolean
-    // used to mean.
-    const slot = this.slot;
-    if (!slot?.handle.deliverableTo(peerId)) return false;
-    void slot.handle.sendTo(msg, "control", { kind: "peer", peerId });
-    return true;
-  }
   /** Current reduced work status (working/attention/done/error) for the
    *  control-plane advert. Defaults to "done" before any signal. */
   get workStatus(): WorkStatus { return this._work.status; }
@@ -468,7 +444,6 @@ export class ProjectCore {
       pairedPhones: this.deps.pairedPhones,
       deviceStats: this.deps.deviceStats,
       remoteAccessEnabled: this.deps.remoteAccessEnabled,
-      agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       onTurnActivity: (sessionId) => this.noteTurnActivity(sessionId),
@@ -498,17 +473,9 @@ export class ProjectCore {
       // Gates whether a lone Esc/Ctrl+C is even worth confirming against the
       // transcript — see shouldArmInterruptConfirm in agent-core.ts.
       isTurnOpenFor: (id) => turnOpenFor(this._work.activeTurns, id),
-      sendToOwner: (msg) => this.sendToOwner(msg),
-      sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
       // This machine's half of every session-bus address. The remote device id
-      // wins when there is one, but a local core falls back to the host's — the
-      // bus travels by its app carrier, not central control, so an address and a
-      // native project stream are independent.
+      // wins when there is one, but a local core falls back to the host's.
       machineId: () => this.deps.remote?.machineDeviceId() ?? this.deps.machineDeviceId?.() ?? null,
-      // Only a desktop owner that declared itself a carrier can move a frame to
-      // the machine it is addressed to; anything else is an unreachable target,
-      // not a failed send.
-      carrierPresent: () => this.listener?.ownerCarriesSessionBus ?? false,
       // Host-injected: absent only for a standalone core built with no host
       // (evals, most of this file's own test callers), which falls back to a
       // coordinator scoped to itself.
@@ -812,11 +779,9 @@ export class ProjectCore {
       },
     });
 
-    // Claimed here, not by the caller: an attach leaving the slot unset can carry
-    // a session-bus exchange IN and never answer it, the reply expiring at the
-    // TTL with the send having reported itself on its way. `promote` refuses a
-    // remote-mode core, so a takeover means a second promote without a stop —
-    // warn rather than throw, since the overwrite would fail a live path.
+    // Claimed here, not by the caller. `promote` refuses a remote-mode core, so
+    // a takeover means a second promote without a stop — warn rather than
+    // throw, since the overwrite would fail a live path.
     if (this.slot) {
       log.warn(
         "project stream slot for %s taken over by a second attach — the earlier stream can no longer be answered on",
@@ -825,8 +790,8 @@ export class ProjectCore {
     }
     this.slot = { handle, unsubscribePush };
 
-    // Push and stream go first, so `sendToAppSession` refuses rather than
-    // reporting a send onto a dead stream. The core's hooks are its single copy,
+    // Push and stream go first, so nothing answers onto a dead
+    // stream. The core's hooks are its single copy,
     // which a second attach now owns, so they are cleared only by the attach
     // that still holds the slot.
     const detachSlot = (): boolean => {
@@ -894,8 +859,8 @@ export class ProjectCore {
     try { this.deliveries?.dispose(); } catch {}
     try { await this.listener?.stop(); } catch {}
     try { this.slot?.handle.detach(); } catch {}
-    // Match promote().stop(): a detached handle left in the slot would have
-    // `sendToAppSession` still answering true onto a dead stream.
+    // Match promote().stop(): a detached handle left in the slot would
+    // outlive its stream.
     this.slot = null;
   }
 }

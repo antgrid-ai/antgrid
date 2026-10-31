@@ -5,10 +5,9 @@
 // and injects it into every `ProjectCore` it starts (`opts.sessionBus`,
 // agent-core.ts). session-bus-wire.test.ts's harness is deliberately
 // single-project (its own `projectId:` closure), so the property that widens
-// here — `self()`, a route, and `resume()` all spanning a project boundary —
+// here — `self()` and `resume()` both spanning a project boundary —
 // gets its own suite rather than living as an implicit case there.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,10 +15,7 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionMemberKey, type SessionMemberRef } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
-import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { SessionBusCoordinator, type SessionBusSelf } from "../src/session-bus/coordinator";
-import { loadBusRoutes, saveBusRoutes } from "../src/session-bus/route-store";
-import { busDbPath } from "../src/session-bus/bus-db";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
 import { removeSessionBusProject, sessionBusSessionDir } from "../src/session-bus/store-fs";
 import { loadHeld } from "../src/session-bus/held-store";
@@ -135,9 +131,8 @@ const REMOTE: SessionMemberRef = { machineId: "m-remote", projectId: "p-remote",
 // two cores' project ids before either core is built — so both sides close
 // over a forward reference assigned once, immediately below its declaration,
 // exactly as agent-core.ts's own `const sessionBus = ... ?? new
-// SessionBusCoordinator({ send: (frame, ctx) => { ... sessionBus.routeFor
-// ... } })` self-reference relies on `send` never running during
-// construction.
+// SessionBusCoordinator({ ... })` self-reference relies on `send` never running
+// during construction.
 let _sharedCoordinator: SessionBusCoordinator | null = null;
 function sharedCoordinator(): SessionBusCoordinator {
   if (!_sharedCoordinator) throw new Error("sharedCoordinator built before use");
@@ -149,7 +144,7 @@ function sharedCoordinator(): SessionBusCoordinator {
  *  creates one session in each project. Mirrors host-server.ts's own
  *  `sessionIndex`/`sessionBus` fields and `startCore`'s
  *  `sessionIndex.noteProject(core.projectId, ..., core.listSessions(true))`. */
-async function setUpMachine(sent: { frame: AbMessage; role: string; contextId: string }[]): Promise<{
+async function setUpMachine(sent: { frame: AbMessage; contextId: string }[]): Promise<{
   sessionIndex: SessionBusSessionIndex;
   coreA: AgentCore; busA: MessageBus; sentA: AbMessage[]; sessionA: string;
   coreB: AgentCore; busB: MessageBus; sentB: AbMessage[]; sessionB: string;
@@ -169,13 +164,11 @@ async function setUpMachine(sent: { frame: AbMessage; role: string; contextId: s
       };
     },
     addressable: () => true,
-    // Records every dispatch rather than deciding delivery — the per-test
-    // routing assertions (which project's stream a peer-role frame lands on)
-    // read this list back rather than a bespoke mailbox map, so what a test
+    // Records every dispatch rather than deciding delivery, so what a test
     // checks is exactly what a real `send` was handed.
     send: (frame, ctx) => {
-      sent.push({ frame, role: ctx.role, contextId: ctx.contextId });
-      return true;
+      sent.push({ frame, contextId: ctx.contextId });
+      return { sent: true };
     },
   });
 
@@ -196,7 +189,7 @@ async function setUpMachine(sent: { frame: AbMessage; role: string; contextId: s
 test(
   "self() resolves a session in each of two projects from one coordinator",
   async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const sent: { frame: AbMessage; contextId: string }[] = [];
     const { sessionA, sessionB } = await setUpMachine(sent);
     const sessionBus = sharedCoordinator();
 
@@ -223,7 +216,7 @@ test(
 test(
   "a frame naming project B's session applies on the shared machine bus",
   async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const sent: { frame: AbMessage; contextId: string }[] = [];
     const { sessionB } = await setUpMachine(sent);
     const sessionBus = sharedCoordinator();
 
@@ -251,106 +244,9 @@ test(
 );
 
 test(
-  "a route learned on project A never sends on project B's stream",
-  async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
-    const { coreA, coreB, sessionB } = await setUpMachine(sent);
-    const sessionBus = sharedCoordinator();
-
-    // Simulates what `handleAbMessage`'s session-bus case does on an applied
-    // inbound frame: note which project's stream carried context `sessionA`
-    // in (agent-core.ts's `sessionBus.noteRoute(msg.contextId, peerId,
-    // project.id)`), naming project A explicitly.
-    const contextId = "ctx-cross";
-    sessionBus.noteRoute(contextId, "app-session-x", coreA.projectId);
-    expect(sessionBus.routeFor(contextId)?.projectId).toBe(coreA.projectId);
-
-    // Session B now answers on that SAME context — a peer-role send, since
-    // `contextId !== sessionB` (roleForContext). If routing fell back to
-    // whichever project is dispatching rather than the one the route names,
-    // this would resolve to project B.
-    const res = sessionBus.message({
-      sessionId: sessionB, verb: "post", threadId: null, to: REMOTE, contextId, summary: "reply", parts: [{ kind: "text", text: "reply" }],
-    });
-    expect("ok" in res && res.ok).toBe(true);
-
-    const dispatched = sent.filter((s) => s.contextId === contextId);
-    expect(dispatched).toHaveLength(1);
-    expect(dispatched[0]!.role).toBe("peer");
-    // The route is the only thing a peer-role dispatcher may consult for
-    // WHICH project's stream to use — never the sending session's own
-    // project — and it names A.
-    expect(sessionBus.routeFor(contextId)?.projectId).toBe(coreA.projectId);
-    expect(sessionBus.routeFor(contextId)?.projectId).not.toBe(coreB.projectId);
-  },
-  30_000,
-);
-
-test(
-  "a lead's own context routes home on the PEER project's stream, not its owner's",
-  async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
-    const { coreA, coreB, sessionA, sessionB } = await setUpMachine(sent);
-    const sessionBus = sharedCoordinator();
-
-    // E9/§5.4's own case, end to end on one machine: session A leads, session B
-    // (another project — a worktree of the same repo, in the shape that
-    // motivated the move) is the peer. A lead names its context after itself,
-    // so the frame that reaches B carries A's session id as contextId while
-    // arriving on B's stream — the two projects disagree by construction, and
-    // noteRoute must record the stream that actually carried it.
-    const inbound = createMessage("session-bus:post", {
-      from: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
-      to: { machineId: "m1", projectId: coreB.projectId, sessionId: sessionB },
-      contextId: sessionA,
-      threadId: null,
-      envelope: {
-        messageId: "msg-lead-to-peer",
-        threadId: null,
-        contextId: sessionA,
-        parts: [{ kind: "text", text: "work on this" }],
-        metadata: {
-          peer: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
-          summary: "work on this",
-          timestamp: Date.now(),
-        },
-      },
-    });
-    expect(sessionBus.handleInbound(inbound)).toBe("applied");
-    sessionBus.noteRoute(sessionA, "app-session-carrier", coreB.projectId);
-
-    // Refusing this pair as a project mismatch is what strands the parent's
-    // replies: the reply below is peer-role, and a peer with no route holds
-    // its frames until they expire rather than falling back to anything.
-    expect(sessionBus.routeFor(sessionA)).toEqual(
-      expect.objectContaining({ peerId: "app-session-carrier", projectId: coreB.projectId }),
-    );
-
-    const res = sessionBus.message({
-      sessionId: sessionB,
-      verb: "post",
-      threadId: null,
-      to: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
-      contextId: sessionA,
-      summary: "done",
-      parts: [{ kind: "text", text: "done" }],
-    });
-    expect("ok" in res && res.ok).toBe(true);
-    // Two frames leave on this context, and both must take the peer route: the
-    // E6 receipt the inbound message raised, then the reply itself. A receipt
-    // that took the sender's own project instead would land on THIS machine's
-    // desktop app, which accepts it and reports it delivered.
-    const dispatched = sent.filter((s) => s.contextId === sessionA);
-    expect(dispatched.map((d) => d.frame.type)).toEqual(["session-bus:ack", "session-bus:post"]);
-    expect(dispatched.map((d) => d.role)).toEqual(["peer", "peer"]);
-  },
-  30_000,
-);
-
-test(
   "a thread is minted once per session and reused, and no two sessions share one",
   async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const sent: { frame: AbMessage; contextId: string }[] = [];
     const { sessionA, sessionB } = await setUpMachine(sent);
     const sessionBus = sharedCoordinator();
 
@@ -383,56 +279,10 @@ test(
   30_000,
 );
 
-// Slow by construction, not by accident: this walks the whole MAX_BUS_ROUTES
-// cap, and noteRoute forces a save on every binding CHANGE — a context seen
-// for the first time always is one. Each forced save re-reads and rewrites
-// the whole machine file (the merge that makes two hosts on one ANTGRID_DIR
-// safe), so the loop costs O(rows) of disk per iteration and lands just under
-// bun's 5 s default. A real bridge binds one context at a time; only a test
-// does the entire cap back to back. The explicit timeout keeps that
-// arithmetic from reading as a flake.
-test(
-  "a legitimate re-stamp of its own context still moves it to the back of the LRU",
-  () => {
-    let now = 1_000_000;
-    const coordinator = new SessionBusCoordinator({
-      abDir,
-      projectIdFor: (sessionId) => (sessionId === "session-b" ? "project-b" : null),
-      self: () => null,
-      send: () => true,
-      now: () => now,
-    });
-
-    coordinator.noteRoute("session-b", "peer-1", "project-b");
-    // Fill the table with foreign contexts so session-b's own entry — the
-    // very first one written — is the front: next in line for eviction.
-    for (let i = 0; i < MAX_BUS_ROUTES - 1; i++) {
-      now += 1;
-      coordinator.noteRoute(`ctx-${i}`, `peer-${i}`, "project-a");
-    }
-    expect(coordinator.routeFor("session-b")).not.toBeNull();
-
-    // A re-stamp must move the entry to the back: without the delete-then-set,
-    // the next insertion over the cap would evict session-b as the least
-    // recently carried instead of `ctx-0`, because a Map keeps FIRST-insertion
-    // order and a plain set() on an existing key does not disturb it.
-    now += 1;
-    coordinator.noteRoute("session-b", "peer-1", "project-b");
-    now += 1;
-    coordinator.noteRoute("ctx-overflow", "peer-overflow", "project-a");
-
-    expect(coordinator.routeFor("session-b")?.peerId).toBe("peer-1");
-    expect(coordinator.routeFor("ctx-0")).toBeNull();
-
-    coordinator.stop();
-  },
-  20_000,
-);
-
 test(
   "one resume() after a rebuild hydrates both projects' held state",
   async () => {
-    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const sent: { frame: AbMessage; contextId: string }[] = [];
     // Overridden below to fail every send, so both sessions' first message is
     // HELD (and persisted) rather than delivered.
     const sessionIndex = new SessionBusSessionIndex({
@@ -450,7 +300,7 @@ test(
         };
       },
       addressable: () => true,
-      send: () => false, // no carrier yet — everything is held to disk
+      send: () => ({ sent: false, reason: "no-transport" }), // no transport yet — everything is held to disk
     });
     const { core: coreA, bus: busA, sent: sentA } = await bootProject("a");
     const { core: coreB, bus: busB, sent: sentB } = await bootProject("b");
@@ -484,10 +334,10 @@ test(
       abDir,
       projectIdFor: (sessionId) => coldIndex.lookup(sessionId)?.projectId ?? null,
       self: () => null, // resume()/pump() only replay held frames; they never call self()
-      send: (frame) => { delivered.push(frame); return true; }, // the carrier is back
+      send: (frame) => { delivered.push(frame); return { sent: true }; }, // the transport is back
     });
     resumed.resume();
-    resumed.pump();
+    resumed.retryNow();
     resumed.stop();
 
     expect(delivered).toHaveLength(2);
@@ -498,168 +348,6 @@ test(
   },
   30_000,
 );
-
-test("forgetting a project erases its carrier routes from the machine file, not just from memory", () => {
-  // No cores: `forgetProjectRoutes` touches nothing but the route table, and
-  // the property under test is what survives on disk once a forgotten project
-  // is the last bus-relevant thing this process saw — so the harness is two
-  // learned routes, the one call `HostServer.forget` makes, and a fresh read.
-  const coordinator = new SessionBusCoordinator({
-    abDir,
-    projectIdFor: () => null,
-    self: () => null,
-    send: () => true,
-  });
-  coordinator.noteRoute("ctx-doomed", "phone#m1", "p-forgotten");
-  coordinator.noteRoute("ctx-kept", "phone#m1", "p-kept");
-  coordinator.forgetProjectRoutes("p-forgotten");
-  coordinator.stop();
-
-  // The next process start hydrates whatever is here wholesale (hydrateRoutes
-  // takes no project list), so a row still on disk is a row resurrected.
-  const onDisk = loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, Date.now());
-  expect([...onDisk.keys()]).toEqual(["ctx-kept"]);
-});
-
-test("hydrating routes does not regress a fresher one already learned live", () => {
-  // HostServer's own call site runs hydrateRoutes off a `.finally()` on an
-  // async sessionIndex.hydrate() (host-server.ts), so an inbound frame can
-  // already have called noteRoute for a context before that disk read
-  // resolves. Reproduced directly, without the async indirection: the
-  // coordinator learns a route live, the file it is about to hydrate from
-  // holds an older one, and hydrating must not overwrite what live traffic
-  // just proved.
-  const now = 2_000;
-  const coordinator = new SessionBusCoordinator({
-    abDir,
-    projectIdFor: () => null,
-    self: () => null,
-    send: () => true,
-    now: () => now,
-  });
-  coordinator.noteRoute("ctx-1", "app-fresh", "p1");
-  // Written AFTER noteRoute, and by raw SQL rather than through saveBusRoutes:
-  // noteRoute forces a save of its own, and the write path keeps the newer
-  // `at`, so any stale row seeded through it is simply refused — which is
-  // exactly what made an earlier version of this test pass with the freshness
-  // guard deleted.
-  const raw = new Database(busDbPath(abDir));
-  try {
-    raw.query("UPDATE bus_routes SET peerId = ?, at = ? WHERE contextId = ?").run("app-stale", 1_000, "ctx-1");
-  } finally {
-    raw.close();
-  }
-
-  coordinator.hydrateRoutes();
-  expect(coordinator.routeFor("ctx-1")?.peerId).toBe("app-fresh");
-  coordinator.stop();
-});
-
-test("an expired route's drop is written to disk, not just to the table", () => {
-  // routeFor forces a save precisely so the drop outlives the process. The
-  // machine file is merged into, never replaced, so a row this table simply
-  // stops mentioning reads as "unknown to me" and is copied back off disk —
-  // the drop only lands because it is NAMED in the save.
-  let now = 1_000_000;
-  saveBusRoutes(abDir, new Map([["ctx-lapsed", { peerId: "phone#m1", projectId: "p1", at: now }]]));
-  const coordinator = new SessionBusCoordinator({
-    abDir,
-    projectIdFor: () => null,
-    self: () => null,
-    send: () => true,
-    now: () => now,
-  });
-  coordinator.hydrateRoutes();
-  now += BUS_ROUTE_TTL_MS + 1;
-  expect(coordinator.routeFor("ctx-lapsed")).toBeNull();
-  coordinator.stop();
-
-  // Read back with an effectively infinite TTL: loadBusRoutes' own TTL filter
-  // would hide the row and prove nothing about whether the save erased it.
-  expect([...loadBusRoutes(abDir, Number.MAX_SAFE_INTEGER, now).keys()]).toEqual([]);
-});
-
-// Slow by construction, not by accident: this walks the whole MAX_BUS_ROUTES
-// cap, and noteRoute forces a save on every binding CHANGE — a context seen
-// for the first time always is one. Each forced save re-reads and rewrites
-// the whole machine file (the merge that makes two hosts on one ANTGRID_DIR
-// safe), so the loop costs O(rows) of disk per iteration and lands just under
-// bun's 5 s default. A real bridge binds one context at a time; only a test
-// does the entire cap back to back. The explicit timeout keeps that
-// arithmetic from reading as a flake.
-test("an evicted route does not come back on the next hydrate", () => {
-  // The cap case is the one an on-read TTL cannot cover: an evicted row can
-  // carry a live `at` (a successful send restamps it by reference without
-  // moving its LRU position), so if the eviction is not persisted the row
-  // survives the file cap AND the load filter, and the next process start
-  // hydrates the very entry this one evicted for space.
-  let now = 1_000_000;
-  const coordinator = new SessionBusCoordinator({
-    abDir,
-    projectIdFor: () => null,
-    self: () => null,
-    send: () => true,
-    now: () => now,
-  });
-  coordinator.noteRoute("ctx-victim", "peer-v", "p1");
-  for (let i = 0; i < MAX_BUS_ROUTES - 1; i++) {
-    now += 1;
-    coordinator.noteRoute(`ctx-${i}`, `peer-${i}`, "p1");
-  }
-  now += 1;
-  const live = coordinator.routeFor("ctx-victim");
-  expect(live).not.toBeNull();
-  live!.at = now; // what a send that actually got out does (routeFor's doc)
-  now += 1;
-  coordinator.noteRoute("ctx-0", "peer-0-rebound", "p1"); // forces a save carrying the restamp
-  now += 1;
-  coordinator.noteRoute("ctx-over", "peer-over", "p1"); // ctx-victim is the front: evicted
-  expect(coordinator.routeFor("ctx-victim")).toBeNull();
-  coordinator.stop();
-
-  expect(loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, now).get("ctx-victim")).toBeUndefined();
-}, 20_000);
-
-// The two eviction tests above both start from an EMPTY file, so neither can
-// see the coupling this one exists for: on disk the rows carry no LRU position
-// of their own, and the only thing that re-establishes it is the ORDER the
-// loader hands them back in (`route-store.ts`'s write sorts freshest-first and
-// then reverses, precisely so the file reads oldest-first). `noteRoute` evicts
-// from the FRONT of a Map that keeps first-insertion order, so a loader that
-// returns rows in any other order evicts a live route and keeps a dead one —
-// silently, and only after a restart.
-//
-// Seeded newest-first on purpose: what the caller hands `saveBusRoutes` must
-// not be what decides the answer.
-test("a hydrated table evicts the least recently carried, not the first row it was handed", () => {
-  const now = 1_000_000;
-  const newestFirst = new Map(
-    Array.from({ length: MAX_BUS_ROUTES }, (_, i) => MAX_BUS_ROUTES - 1 - i).map((i) => [
-      `ctx-${i}`,
-      { peerId: `peer-${i}`, projectId: "p1", at: now + i },
-    ]),
-  );
-  saveBusRoutes(abDir, newestFirst);
-
-  const coordinator = new SessionBusCoordinator({
-    abDir,
-    projectIdFor: () => null,
-    self: () => null,
-    send: () => true,
-    now: () => now + MAX_BUS_ROUTES,
-  });
-  coordinator.hydrateRoutes();
-  expect(coordinator.routeFor("ctx-0")).not.toBeNull();
-
-  coordinator.noteRoute("ctx-over", "peer-over", "p1");
-
-  expect(coordinator.routeFor("ctx-0")).toBeNull();
-  expect(coordinator.routeFor(`ctx-${MAX_BUS_ROUTES - 1}`)?.peerId).toBe(`peer-${MAX_BUS_ROUTES - 1}`);
-  expect(coordinator.routeFor("ctx-over")?.peerId).toBe("peer-over");
-
-  coordinator.stop();
-});
-
 
 test("resume()'s fallback-style resolver does not pin a foreign project's held state under its own id", () => {
   // Two sessions, two projects, persisted the normal way (a coordinator whose
@@ -679,7 +367,7 @@ test("resume()'s fallback-style resolver does not pin a foreign project's held s
     abDir,
     projectIdFor: (sessionId) => owners.get(sessionId) ?? null,
     self: selfFor,
-    send: () => false, // no carrier — both messages land in held-store on disk
+    send: () => ({ sent: false, reason: "no-transport" }), // both messages land in held-store on disk
     now: () => now,
   });
   const resOwn = setup.message({ sessionId: "session-own", verb: "post", threadId: null, to: REMOTE, summary: "own", parts: [{ kind: "text", text: "own" }] });
@@ -698,17 +386,17 @@ test("resume()'s fallback-style resolver does not pin a foreign project's held s
     abDir,
     projectIdFor: () => "p-own",
     self: () => null, // resume()/pump() only replay held frames; they never call self()
-    send: (frame) => { delivered.push(frame); return true; }, // the carrier is back
+    send: (frame) => { delivered.push(frame); return { sent: true }; }, // the transport is back
     now: () => now,
   });
   fallback.resume();
-  fallback.pump();
+  fallback.retryNow();
   fallback.stop();
 
   // Only the session this fallback actually owns gets retried. Session
   // "foreign" must be skipped outright, never loaded and pinned as "p-own" —
-  // if it were, its held message would flush straight through THIS carrier,
-  // which is a different project's bus content reaching this one's owner.
+  // if it were, its held message would flush straight through THIS transport,
+  // which is a different project's bus content reaching this one's transport.
   expect(delivered).toHaveLength(1);
   expect((delivered[0] as { from: SessionMemberKey }).from.sessionId).toBe("session-own");
 });
@@ -732,9 +420,9 @@ test("forgetting a project drops its pinned session state, so a later retry cann
       };
     },
     send: (frame, ctx) => {
-      if (!deliver) return false;
+      if (!deliver) return { sent: false, reason: "no-transport" };
       delivered.push(ctx.contextId);
-      return true;
+      return { sent: true };
     },
   });
 
@@ -759,12 +447,12 @@ test("forgetting a project drops its pinned session state, so a later retry cann
   owners.delete("session-a");
   coordinator.forgetProjectStates("p-forgotten");
 
-  // The carrier comes back and the retry timer fires. Without the drop above,
+  // The transport comes back and the retry timer fires. Without the drop above,
   // session-a's still-cached state would flush its held message straight
   // through this `send` — a project this bridge has otherwise fully forgotten
   // — and `commit()` would write its rows straight back behind the reclaim.
   deliver = true;
-  coordinator.pump();
+  coordinator.retryNow();
 
   expect(delivered).toEqual(["session-b"]);
   expect(heldFor("p-forgotten", "session-a")).toBe(0);

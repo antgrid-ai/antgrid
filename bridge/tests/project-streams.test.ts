@@ -183,27 +183,6 @@ describe("ProjectStreamRegistry", () => {
     expect(() => stream.read()).toThrow();
   });
 
-  test("deliverableTo(peer) is false before open, true after, false once mayDeliverTo mutes it, and false once the app FINs", async () => {
-    const { client } = makeClient();
-    client.establish(PEER_A);
-    let allowed = true;
-    const bus = new MessageBus();
-    const handle = client.attachStream(bus, { projectId: PROJECT, mayDeliverTo: () => allowed });
-
-    expect(handle.deliverableTo(PEER_A)).toBe(false);
-    const stream = await client.openProjectStream(PEER_A, PROJECT);
-    expect(stream.refusal()).toBeUndefined();
-    expect(handle.deliverableTo(PEER_A)).toBe(true);
-
-    allowed = false;
-    expect(handle.deliverableTo(PEER_A)).toBe(false);
-    allowed = true;
-    expect(handle.deliverableTo(PEER_A)).toBe(true);
-
-    await stream.finish();
-    expect(handle.deliverableTo(PEER_A)).toBe(false);
-  });
-
   test("two peers on one project — an addressed reply reaches only its target, a broadcast reaches both, and A's FIN unbinds only A", async () => {
     const { client } = makeClient();
     client.establish(PEER_A);

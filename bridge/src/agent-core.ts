@@ -52,10 +52,8 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
 import { augmentAgentLaunch } from "./agent-runtime";
-import { AGENT_REACH_DEFAULT } from "./agent-reach-policy";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import type { SessionDirectory } from "./session-bus/directory";
-import { isLeadContext } from "./session-bus/address";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
@@ -287,15 +285,16 @@ export interface AgentCore {
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
   /** The session bus this project's sessions read and write through: the
-   *  message log, the held store and the carrier routes for their contexts.
+   *  message log, the held store and the threads for their contexts.
    *  Host-injected, this is shared with every other project the host has
    *  open — a MACHINE-level object that happens to be reachable
    *  from here, not "this project's own" — so a caller that means to affect
    *  only this project's sessions must go through this core's own methods
    *  (`setSessionBusListener`, `injectBusLine`) rather than the coordinator's
-   *  machine-wide ones directly. Its frames leave through the carrier this
-   *  core was wired with and NEVER through the MessageBus (see {@link
-   *  BuildAgentCoreOptions.sendToOwner}). */
+   *  machine-wide ones directly. Its frames leave through the relay transport
+   *  the host wired into the coordinator and NEVER through the MessageBus,
+   *  which has no addressing and would put agent traffic on the human's
+   *  phone. */
   readonly sessionBus: SessionBusCoordinator;
   /** Wire the one consumer that turns a bus event into a line an agent reads.
    *  A core with none still records and holds — it just delivers nothing,
@@ -439,13 +438,6 @@ export interface BuildAgentCoreOptions {
    *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
    *  unwired core can never be driven by a phone. */
   remoteAccessEnabled?: () => boolean;
-  /** Whether an agent on ANOTHER of this account's machines may reach into a
-   *  session here (see agent-reach-policy.ts). Subordinate to
-   *  {@link remoteAccessEnabled}, which is checked first and independently.
-   *  Host-supplied; absent reads as the store's own default, because unlike the
-   *  switch above this one is not the authorization gate — a core with no relay
-   *  wired is already carved out of both. */
-  agentReachEnabled?: () => boolean;
   /** Live reading of this machine's device credential, for the entitlement gate
    *  on paid capabilities (see entitlement.ts). Host-supplied. Absent means a
    *  runtime that never had a token — a bare agent, a signed-out desktop, a
@@ -552,27 +544,12 @@ export interface BuildAgentCoreOptions {
    *  antgrid.yaml can learn it from config, so without this a host-spawned
    *  remote core has no relay coordinate to report. */
   relayUrl?: string;
-  /** Hand one session-bus frame to the loopback owner — this machine's own
-   *  desktop app — and to nothing else. The lead bridge can never reach the peer
-   *  bridge, so the owner is its only carrier; and the MessageBus has no
-   *  addressing, so publishing instead would put agent traffic on the human's
-   *  phone. False when there is no owner, or the owner did not
-   *  declare itself a carrier: the frame is held until one attaches. */
-  sendToOwner?: (msg: AbMessage) => boolean;
-  /** Hand one session-bus frame to ONE attached app session — the peer bridge
-   *  answering the carrier that delivered to it, which is the only route it has
-   *  back to a machine it cannot reach. */
-  sendToAppSession?: (peerId: string, msg: AbMessage) => boolean;
   /** This machine's relay device id: its half of every session-bus address.
    *  Supplied for local cores too — a lead is a desktop-opened project and still
-   *  stamps its own address on every frame it hands its carrier. Null only when
+   *  stamps its own address on every frame it sends. Null only when
    *  the host has no relay identity at all, and a session with no address is
    *  refused `AGENT_NOT_READY` rather than given a synthesized one. */
   machineId?: () => string | null;
-  /** Whether this core's carrier is attached right now. A lead reads it to say
-   *  whether a peer is reachable at all; absent means no carrier, which is the
-   *  honest answer for a core nothing has connected to. */
-  carrierPresent?: () => boolean;
   /** A host-injected, MACHINE-level session bus shared with every
    *  other project the host has open. Absent means a per-core fallback is
    *  built instead, scoped to this project alone — the same
@@ -730,7 +707,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Paired-phone identity/push registry, constructed eagerly so it exists
   // whether the agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
-  const remoteAccessEnabled = opts.remoteAccessEnabled ?? (() => false);  const agentReachEnabled = opts.agentReachEnabled ?? (() => AGENT_REACH_DEFAULT);
+  const remoteAccessEnabled = opts.remoteAccessEnabled ?? (() => false);
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -1194,50 +1171,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return remoteAccessEnabled();
   }
 
-  /** The interruption half of the agent-reach gate (`agent-reach-policy.ts`):
-   *  whether an UNSOLICITED session-bus frame from a peer machine may reach a
-   *  session here.
-   *
-   *  Same two carve-outs as {@link remoteFrameAllowed}, for the same reasons,
-   *  and layered under it rather than beside it — a machine that is not
-   *  remote-reachable at all never gets here.
-   *
-   *  Only a peer-INITIATED context is refused. A frame on a context this
-   *  machine leads is the answer to something an agent here asked for, and
-   *  refusing that would not be "nobody may interrupt me", it would be "my own
-   *  agents may not finish a sentence". */
-  function peerBusReachAllowed(msg: AbMessage, source: InboundSource): boolean {
-    switch (msg.type) {
-      case "session-bus:post":
-      case "session-bus:notify":
-      case "session-bus:fetch":
-      case "session-bus:fetch:result":
-      case "session-bus:ack":
-        break;
-      default:
-        return true;
-    }
-    if (isLeadContext(msg.to.sessionId, msg.contextId)) return true;
-    if (source === "loopback") return true;
-    if (!relayEverAttached) return true;
-    return agentReachEnabled();
-  }
-
-  /** Contexts already warned about for having no route. An unroutable frame is
-   *  held and re-tried on every coordinator tick, so a per-attempt warning would
-   *  repeat for the life of the bridge. Cleared the next time a route resolves
-   *  for the context, so a link that breaks twice is said twice — the clear
-   *  lives at the send below rather than where a route is learned, because the
-   *  route table itself is the coordinator's now and may be shared with every
-   *  other project on the machine. */
-  const busRouteMissWarned = new Set<string>();
-
-  /** The same latch for a LEAD with no carrier attached. Separate from the one
-   *  above because the two absences are different failures with different
-   *  remedies — no route home for a peer, versus no desktop app on this machine
-   *  — and a shared set would let one clear the other's warning. */
-  const busOwnerMissWarned = new Set<string>();
-
   // A session this bridge may address on the bus. Every session this bridge
   // holds is addressable — a session is the unit and there is no membership to
   // join — so the only two refusals left are
@@ -1247,7 +1180,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   //
   // This is not the consent gate. The session directory's repo-key check and
   // the machine's remote-access switch are, and they sit in front of the
-  // directory rather than here; a carrier can still only reach a session it
+  // directory rather than here; a sender can still only reach a session it
   // was told the id of.
   //
   // Used only by the per-core FALLBACK coordinator below: when `opts.sessionBus`
@@ -1289,58 +1222,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abDir,
     projectIdFor: () => project.id,
     self: sessionBusSelf,
-    addressable: () => (opts.machineId?.() ?? null) !== null,
+    // A bare core has no relay link, so an off-machine send is refused
+    // AGENT_NOT_READY instead of being held for a transport that never comes.
+    addressable: () => false,
     offMachineSendAllowed,
-    // A session that opened a context hands every frame to its own desktop app;
-    // one that was contacted answers on the session that carried the context in.
-    // Neither path is the MessageBus. The route table itself lives on the
-    // coordinator now (`noteRoute`/`routeFor`, session-bus/coordinator.ts) —
-    // shared machine-wide when host-injected — so this closure only decides
-    // WHAT a resolved route or a missing one means for a single-project core.
-    send: (frame, ctx) => {
-      if (ctx.role === "peer") {
-        // There is exactly one way home and it is the carrier that brought the
-        // context in. Falling through to the loopback owner would hand the reply
-        // to THIS machine's own desktop app, which accepts it and returns true —
-        // booking a delivery that never happened and dropping the held message
-        // that was the only thing left to retry it.
-        const origin = sessionBus.routeFor(ctx.contextId);
-        if (!origin) {
-          if (!busRouteMissWarned.has(ctx.contextId)) {
-            busRouteMissWarned.add(ctx.contextId);
-            log.warn(
-              "session bus: no carrier route for context %s — frames held until one arrives",
-              ctx.contextId,
-            );
-          }
-          return false;
-        }
-        // A route resolved, so the next context that loses one is worth saying
-        // again. Cleared here and not on a successful send: a route that exists
-        // but whose core is cold is a different silence, and latching this on it
-        // would mute the warning for the outage that follows.
-        busRouteMissWarned.delete(ctx.contextId);
-        const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
-        if (sent) origin.at = Date.now();
-        return sent;
-      }
-      // True here means the owner ACCEPTED the frame, which is the whole of what
-      // this process can observe: the app classifies and forwards afterwards, and
-      // an app that finds no leg for it drops it with no way to say so back.
-      // Nothing downstream reports the rest today — the delivery receipt is
-      // reserved and dark until it is re-keyed to a message id.
-      const sentToOwner = opts.sendToOwner?.(frame) ?? false;
-      if (sentToOwner) {
-        busOwnerMissWarned.delete(ctx.contextId);
-      } else if (!busOwnerMissWarned.has(ctx.contextId)) {
-        busOwnerMissWarned.add(ctx.contextId);
-        log.warn(
-          "session bus: no carrier attached to this machine for context %s — frames held until a desktop app attaches",
-          ctx.contextId,
-        );
-      }
-      return sentToOwner;
-    },
   });
   // Declared ahead of the listener below, unlike the hoisted functions that use
   // it: a `const` in the temporal dead zone would throw on an event that arrived
@@ -1358,12 +1243,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     busEventListener?.(event);
   });
   if (!opts.sessionBus) {
-    // Fallback path only: a standalone/test core with no host to have hydrated
-    // this on its behalf. Routes live in one machine-level table regardless of
-    // which core loads them (`bus-db.ts`), so this reads whatever this abDir
-    // holds — for a fallback core that is exactly what a per-project
-    // coordinator always loaded for itself, since nothing else shares its abDir.
-    sessionBus.hydrateRoutes();
+    // Fallback path only: a standalone/test core with no host to have resumed
+    // the coordinator on its behalf.
     // Hydrate whatever a previous process left in flight. Without it a cold
     // coordinator holds no sessions, so nothing re-arms the retries a killed
     // bridge queued and a finished task's report never goes. The host-injected
@@ -1498,7 +1379,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         ...(entry.name ? { sessionName: entry.name } : {}),
       };
     },
-    carrierPresent: () => opts.carrierPresent?.() ?? false,
     remoteAccessEnabled: offMachineSendAllowed,
   });
 
@@ -1611,28 +1491,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     switch (msg.type) {
-      // A remote bus frame is relayed by an app session between two bridges that
-      // cannot dial each other, so this bridge is an endpoint, never a hop: the
-      // coordinator applies only frames addressed to a session it holds, and a
-      // frame naming any other session is dropped rather than forwarded.
+      // Bus frames travel sealed over the relay, never on a project stream, so
+      // one arriving here is not applied.
       case "session-bus:post":
       case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
-      case "session-bus:ack":
-        // Noted only for a frame the coordinator's address check ACCEPTED —
-        // that check is what proves the sender is talking about a session this
-        // bridge actually holds, and this map is the other end's only route
-        // home, so noting ahead of it would let any app session rebind the
-        // context with one syntactically valid frame carrying someone else's
-        // contextId, and take the next answer for itself. Hence the hook rather
-        // than the outcome: folding the frame dispatches its receipt, which is a
-        // peer-role send with nowhere to go until this route exists, and an ack
-        // is never retried.
-        sessionBus.handleInbound(msg, () => sessionBus.noteRoute(msg.contextId, peerId, project.id));
+        log.warn("Dropping %s: bus frames are not accepted on a project stream (project %s)", msg.type, project.id);
         break;
-      // The app reading THIS machine's bus, as against carrying another
-      // machine's frames above. All three are answered from `sessionBusApi` —
+      // The app reading THIS machine's bus, as against another
+      // machine's frames, which never arrive here. All three are answered from `sessionBusApi` —
       // the same object the loopback MCP routes spend — rather than reaching
       // into the coordinator here: a human surface and an agent tool that each
       // decided who is reachable would eventually disagree, with nothing to say
@@ -1643,11 +1511,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // route on the same identity), and a frame naming anything else resolves
       // to no session and is REFUSED rather than answered about someone.
       //
-      // Deliberately outside `peerBusReachAllowed`'s explicit list: that gate is
-      // about a peer machine interrupting a context it did not open, and these
-      // carry no context. What bounds them is the gate every relay-origin frame
-      // already passes — `remoteFrameAllowed` — plus the api's own membership
-      // check, which admits only a session this project holds.
+      // These carry no context, so what bounds them is the gate every
+      // relay-origin frame already passes — `remoteFrameAllowed` — plus the
+      // api's own membership check, which admits only a session this project
+      // holds.
       case "session-bus:directory": {
         const { requestId, sessionId } = msg;
         // Off the switch: the directory reads a branch per project, which is a
@@ -5097,14 +4964,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     emitMachineStats();
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
-    // A carrier just arrived: anything held for want of one goes now rather than
-    // waiting out the next tick. Not `resume()` — that re-enumerates every
-    // session bus directory on disk (machine-wide, when host-injected) and
-    // runs once at process start (or once per fallback core); calling it again
-    // on every reconnect would turn a flaky carrier into a reconnect storm
-    // that re-scans the whole machine on each flap. `pump()` alone is enough:
-    // the in-memory outbox already holds what `resume()` would rediscover.
-    sessionBus.pump();
     // Seed the app's Handler defaults (judge overrides) even when
     // nothing is armed — arming is one tap and carries no payload, so it arms
     // with whatever this snapshot seeded.
@@ -5520,8 +5379,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const generation = clientGenerations.get(client) ?? 0;
       const stillAuthorized = () =>
         (clientGenerations.get(client) ?? 0) === generation &&
-        remoteFrameAllowed(source) &&
-        peerBusReachAllowed(msg, source);
+        remoteFrameAllowed(source);
       // An RPC response belongs to the one asker who sent the request, never
       // to every device attached to this project — a loopback asker gets it
       // on the loopback queue alone, and a remote asker gets it addressed to
@@ -5550,14 +5408,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!remoteFrameAllowed(source)) {
         log.warn(
           "Dropping inbound %s: mobile access is disabled (project %s)",
-          msg.type,
-          project.id,
-        );
-        return;
-      }
-      if (!peerBusReachAllowed(msg, source)) {
-        log.warn(
-          "Dropping inbound %s: agent reach is disabled on this machine (project %s)",
           msg.type,
           project.id,
         );

@@ -17,6 +17,7 @@ import {
   scheduleBody,
 } from "../src/mcp/server";
 import { ReplyBodySchema, SendBodySchema } from "../src/session-bus/api";
+import { BUS_HELD_REASON_TEXT, refusalSentence } from "../src/session-bus/errors";
 
 const saved = {
   port: process.env.ANTGRID_API_PORT,
@@ -405,30 +406,49 @@ describe("the session-bus tools", () => {
     function sendStub(onBody?: (path: string, body: any, url: URL) => void) {
       stub((path, body, url) => {
         onBody?.(path, body, url);
-        return Response.json({ ok: true, messageId: "m", threadId: "th", sent: true, held: false, opensThread: false });
+        return Response.json({ ok: true, messageId: "m", threadId: "th", sent: true, held: false, opensThread: false, rung: "relayed" });
       });
     }
 
-    test("a send reports the thread it opened and that the frame left", async () => {
-      stub(() => Response.json({ ok: true, messageId: "m-1", threadId: "th-9", sent: true, held: false, opensThread: true }));
+    const view = (extra: Record<string, unknown>) =>
+      Response.json({ ok: true, messageId: "m-1", threadId: "th-9", sent: true, held: false, opensThread: true, ...extra });
+    const tail = "Use antgrid_reply with that thread id to answer.";
+
+    test("a delivered cross-machine send says the other bridge stored it and nothing more", async () => {
+      stub(() => view({ rung: "delivered", machineLabel: "laptop", sessionName: "codec" }));
       const result = await callSessionBusTool("antgrid_post", {
         to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" },
         summary: "the codec diff broke",
       });
       expect(result.content[0]!.text).toBe(
-        "Opened thread th-9 (message m-1). It left this machine; antgrid_thread shows a receipt once the peer's bridge accepts it. Use antgrid_reply with that thread id to answer.",
+        `Opened thread th-9 (message m-1). laptop's bridge has it on disk and will show it to codec the next time that session runs. That is not a reply or an action: wait on the thread for one. ${tail}`,
       );
     });
 
-    test("a held frame is not reported as having left", async () => {
-      stub(() => Response.json({ ok: true, messageId: "m-2", threadId: "th-9", sent: false, held: true, opensThread: false }));
-      const result = await callSessionBusTool("antgrid_notify", {
-        to: { projectId: "p2", sessionId: "9c11de" },
-        summary: "the build is red",
-      });
-      expect(result.content[0]!.text).toBe(
-        "On thread th-9 (message m-2). It is held on this machine and has not left yet; it goes when the link is back. Use antgrid_reply with that thread id to answer.",
-      );
+    test("a same-machine delivery is a mailbox row", async () => {
+      stub(() => view({ rung: "delivered", local: true, sessionName: "codec" }));
+      const text = (await callSessionBusTool("antgrid_post", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain("codec has it in its mailbox.");
+    });
+
+    test("a relayed send says only that the relay has it", async () => {
+      stub(() => view({ rung: "relayed", machineLabel: "laptop" }));
+      const text = (await callSessionBusTool("antgrid_post", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain("The relay has it. It reaches laptop when that machine's bridge is online; nothing has read it yet.");
+    });
+
+    test("a held frame is not reported as having left, and says why", async () => {
+      stub(() => view({ opensThread: false, rung: "held", heldReason: "central-offline", retryUntil: Date.now() + 3_600_000 }));
+      const text = (await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "the build is red" })).content[0]!.text;
+      expect(text.startsWith("On thread th-9 (message m-1). Held on this machine (")).toBe(true);
+      expect(text).toContain(BUS_HELD_REASON_TEXT["central-offline"]);
+      expect(text).toMatch(/It is retried for \d+h more; nothing has left yet\./);
+    });
+
+    test("a refused send names its code, says why, and delivered nothing", async () => {
+      stub(() => view({ rung: "refused", refusedCode: "REMOTE_ACCESS_OFF" }));
+      const text = (await callSessionBusTool("antgrid_post", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain(`Refused (REMOTE_ACCESS_OFF): ${refusalSentence("REMOTE_ACCESS_OFF")}. Nothing was delivered.`);
     });
 
     test("each verb reaches its own route", async () => {
@@ -532,10 +552,9 @@ describe("the session-bus tools", () => {
       expect((await callSessionBusTool("antgrid_inbox", {})).content[0]!.text).toBe("No unread posts.");
     });
 
-    // The receipt is the only end-to-end witness in the design: an unacked message
-    // is never retried, so the sender's whole knowledge of it is this stamp or its
-    // absence.
-    test("a thread reads in both directions, with the receipt on what this session sent", async () => {
+    // The delivery stamp is the sender's whole knowledge of an outbound message:
+    // each rung says what witnessed it, and none claims the peer's agent read it.
+    test("a thread reads in both directions, with how far each sent message got", async () => {
       const now = Date.now();
       const peer = { machineId: "peer", projectId: "p2", sessionId: "9c11de" };
       let search = "";
@@ -545,19 +564,23 @@ describe("the session-bus tools", () => {
           threadId: "th-1",
           contextId: "c-1",
           entries: [
-            { direction: "out", at: now - 300_000, peer, summary: "asked", text: ["what broke?"], deliveredAt: now - 240_000 },
+            { direction: "out", at: now - 300_000, peer, summary: "asked", text: ["what broke?"], delivery: "delivered", deliveredAt: now - 240_000 },
             { direction: "in", at: now - 180_000, peer, summary: "answered", text: ["the codec"] },
-            { direction: "out", at: now - 30_000, peer, summary: "thanks", text: ["ok"] },
+            { direction: "out", at: now - 30_000, peer, summary: "thanks", text: ["ok"], delivery: "held" },
+            { direction: "out", at: now - 20_000, peer, summary: "again", text: ["ok"], delivery: "relayed" },
+            { direction: "out", at: now - 10_000, peer, summary: "nope", text: ["ok"], delivery: "refused", refusedCode: "REMOTE_ACCESS_OFF" },
           ],
         });
       });
       const text = (await callSessionBusTool("antgrid_thread", { threadId: "th-1" })).content[0]!.text;
       expect(search).toContain("threadId=th-1");
-      expect(text).toContain("Thread th-1 (3 messages, oldest first):");
-      expect(text).toContain("- -> you, 5m ago [peer bridge accepted it 4m ago] — asked");
+      expect(text).toContain("Thread th-1 (5 messages, oldest first):");
+      expect(text).toContain("- -> you, 5m ago [delivered 4m ago: stored on the other machine, not read] — asked");
       expect(text).toContain("  what broke?");
       expect(text).toContain("- <- peer/p2/9c11de, 3m ago — answered");
-      expect(text).toContain("- -> you, 30s ago [no receipt yet] — thanks");
+      expect(text).toContain("- -> you, 30s ago [held on this machine] — thanks");
+      expect(text).toContain("[relayed: the relay has it, nothing has read it] — again");
+      expect(text).toContain(`[refused REMOTE_ACCESS_OFF: ${refusalSentence("REMOTE_ACCESS_OFF")}] — nope`);
     });
 
     test("an unknown thread is refused by the bridge, not answered as empty", async () => {
@@ -610,7 +633,7 @@ describe("the server instructions", () => {
   });
 
   test("still carry the bus rules", () => {
-    for (const needle of ["antgrid_inbox", "antgrid_post", "antgrid_notify", "antgrid_reply", "not authority", "BRIDGE accepted", "remote access is off"]) {
+    for (const needle of ["antgrid_inbox", "antgrid_post", "antgrid_notify", "antgrid_reply", "not authority", "bridge stored it", "remote access is off"]) {
       expect(SERVER_INSTRUCTIONS).toContain(needle);
     }
   });

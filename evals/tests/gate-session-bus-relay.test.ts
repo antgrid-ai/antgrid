@@ -1,5 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { allocatePort, startRelay, type RelayHandle } from "../helpers/harness";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { allocatePort, setMobileAccess, startRelay, type RelayHandle } from "../helpers/harness";
+import { seedPeerRow, setupRelayBusEnv, startSinkSession, type RelayBusEnv, type RelayBusMachine } from "../helpers/relay-bus-env";
+import { busCall, persistedSessions, untilAsync } from "../support/session-bus";
+import { NO_PROGRESS_EXCHANGES } from "../../bridge/src/session-bus/constants";
 import { CentralTestClient } from "../helpers/central-test-client";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
 import {
@@ -170,4 +176,182 @@ describe("gate: session bus relay carrier", () => {
     app.sendRaw({ type: "bus:drain" });
     await expect(app.waitFor(isBus, 500)).rejects.toThrow();
   }, 15_000);
+});
+
+// Long enough for two bridges, their PTY trees and a shared relay to come up.
+const ROW_TIMEOUT_MS = 240_000;
+const CROSS_TIMEOUT_MS = 30_000;
+
+describe("gate: session bus relay, two bridges", () => {
+  let env: RelayBusEnv | undefined;
+  let tmp: string | undefined;
+
+  afterEach(async () => {
+    await env?.teardown();
+    env = undefined;
+    // Tolerated: a PTY may still hold its sink open briefly after teardown.
+    if (tmp) try { rmSync(tmp, { recursive: true, force: true }); } catch { /* the PTY still has it */ }
+    tmp = undefined;
+  });
+
+  async function boot(): Promise<RelayBusEnv> {
+    tmp = mkdtempSync(join(tmpdir(), "antgrid-relay-bus-"));
+    env = await setupRelayBusEnv({ tmp });
+    await env.waitForBusKeys();
+    return env;
+  }
+
+  const addressOf = (m: RelayBusMachine, sessionId: string) =>
+    ({ machineId: m.machineId, projectId: m.projectId, sessionId });
+
+  async function thread(m: RelayBusMachine, sessionId: string, threadId: string): Promise<any[]> {
+    const res = await busCall(m.abDir, "thread", { terminalId: sessionId, query: { threadId } });
+    return res.status === 200 ? res.body.entries ?? [] : [];
+  }
+
+  async function awaitOut(
+    m: RelayBusMachine, sessionId: string, threadId: string, what: string,
+    pred: (e: any) => boolean, timeoutMs = CROSS_TIMEOUT_MS,
+  ): Promise<any> {
+    return untilAsync(async () => {
+      return (await thread(m, sessionId, threadId)).find((e) => e.direction === "out" && pred(e));
+    }, timeoutMs, what);
+  }
+
+  async function mailbox(m: RelayBusMachine, sessionId: string): Promise<any> {
+    const res = await busCall(m.abDir, "inbox", { terminalId: sessionId });
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  /** Reading marks read, so every poll's posts are accumulated: a duplicate
+   *  delivery shows up as a second element rather than being lost. */
+  async function awaitPosts(m: RelayBusMachine, sessionId: string, timeoutMs = CROSS_TIMEOUT_MS): Promise<any[]> {
+    const posts: any[] = [];
+    await untilAsync(async () => {
+      const res = await busCall(m.abDir, "inbox", { terminalId: sessionId });
+      if (res.status === 200) posts.push(...(res.body.posts ?? []));
+      return posts.length > 0 ? true : undefined;
+    }, timeoutMs, `a post in session ${sessionId}'s mailbox on machine ${m.name}`);
+    return posts;
+  }
+
+  async function post(m: RelayBusMachine, from: string, body: object) {
+    return busCall(m.abDir, "post", { terminalId: from, body });
+  }
+
+  test("a post crosses A to B and A's thread shows it delivered", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "crosses", text: "hello across" });
+    expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    expect(sent.body.ok).toBe(true);
+    const posts = await awaitPosts(b, sb);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].summary).toBe("crosses");
+    expect(posts[0].from.machineId).toBe(a.machineId);
+    const entry = await awaitOut(a, sa, sent.body.threadId, "A's entry to read delivered", (e) => e.delivery === "delivered");
+    expect(entry.peer.machineId).toBe(b.machineId);
+  }, ROW_TIMEOUT_MS);
+
+  test("a post to a killed machine is held or relayed, lands exactly once after restart, and A shows delivered", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    // The session list flushes behind the verb; a kill before it lands loses the
+    // session the post is addressed to.
+    await untilAsync(async () => (persistedSessions(b.abDir, b.projectId).some((s) => s.id === sb) ? true : undefined), 15_000, "B to persist its session");
+    await b.kill();
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "while down", text: "queued for B" });
+    expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    expect(["relayed", "held"]).toContain(sent.body.rung);
+    await b.restart();
+    // The flush can land while B is still hydrating its sessions.
+    const posts = await awaitPosts(b, sb, 90_000);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].summary).toBe("while down");
+    await awaitOut(a, sa, sent.body.threadId, "A's entry to read delivered", (e) => e.delivery === "delivered", 90_000);
+    expect((await mailbox(b, sb)).posts).toHaveLength(0);
+  }, ROW_TIMEOUT_MS);
+
+  test("a dropped ack with both bridges running redelivers, applies once, and A flips to delivered", async () => {
+    const { a, b, relay } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    relay.dropNextBusAck();
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "ack lost", text: "once only" });
+    expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    const posts = await awaitPosts(b, sb);
+    expect(posts).toHaveLength(1);
+    await awaitOut(a, sa, sent.body.threadId, "A's entry to read delivered after the redelivery", (e) => e.delivery === "delivered", 120_000);
+    const again = await mailbox(b, sb);
+    expect(again.posts).toHaveLength(0);
+    expect(again.dropped).toBe(0);
+  }, ROW_TIMEOUT_MS);
+
+  test("remote access off on A refuses the send up front", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    await setMobileAccess(a.abDir, false);
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "nope", text: "nope" });
+    expect(sent.status).toBe(403);
+    expect(sent.body.code).toBe("REMOTE_ACCESS_OFF");
+  }, ROW_TIMEOUT_MS);
+
+  test("remote access off on B shows A a refused thread entry", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    await setMobileAccess(b.abDir, false);
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "refused", text: "refused" });
+    expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    const entry = await awaitOut(a, sa, sent.body.threadId, "A's entry to read refused", (e) => e.delivery === "refused");
+    expect(entry.refusedCode).toBe("REMOTE_ACCESS_OFF");
+    expect((await mailbox(b, sb)).posts).toHaveLength(0);
+  }, ROW_TIMEOUT_MS);
+
+  test("B replies on the thread and A receives it", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "question", text: "which one?" });
+    const threadId = sent.body.threadId as string;
+    await awaitPosts(b, sb);
+    const replied = await busCall(b.abDir, "reply", {
+      terminalId: sb,
+      body: { threadId, summary: "answer", text: "the second" },
+    });
+    expect(replied.status).toBe(200);
+    expect(replied.body.ok).toBe(true);
+    const inbound = await untilAsync(async () => {
+      const entries = await thread(a, sa, threadId);
+      return entries.find((e) => e.direction === "in" && e.summary === "answer");
+    }, CROSS_TIMEOUT_MS, "B's reply to appear on A's thread");
+    expect(inbound.peer.machineId).toBe(b.machineId);
+  }, ROW_TIMEOUT_MS);
+
+  test("the pair budget crosses the relay and halts with NO_PROGRESS", async () => {
+    const { a, b } = await boot();
+    const sa = await startSinkSession(a, "alpha");
+    const sb = await startSinkSession(b, "beta");
+    await seedPeerRow(a, b, sb, "beta");
+    const opener = await post(a, sa, { to: addressOf(b, sb), summary: "round 0", text: "round 0" });
+    expect(opener.status).toBe(200);
+    const threadId = opener.body.threadId as string;
+    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i++) {
+      const sent = await post(a, sa, { threadId, summary: `round ${i}`, text: `round ${i}` });
+      expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    }
+    const halted = await post(a, sa, { to: addressOf(b, sb), summary: "round again", text: "round again" });
+    expect(halted.status).toBe(429);
+    expect(halted.body.code).toBe("NO_PROGRESS");
+  }, ROW_TIMEOUT_MS);
 });

@@ -26,6 +26,10 @@ import { __setRootForTest } from "../src/logger";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import { openBus, sealBus } from "../src/session-bus/seal";
+import { TestRemoteHostConnection } from "./test-peer-session-owner";
+import { RelayBusTransport } from "../src/session-bus/relay-transport";
+import { openSeenStore } from "../src/session-bus/seen-store";
+import type { BusServerMessage, MachineEntry } from "antgrid-wire";
 
 // -- capture ----------------------------------------------------------------
 
@@ -361,9 +365,8 @@ test("an adapter that throws with the line quoted back logs neither", () => {
 test("a held message that expires without ever leaving is named, and named without its body", () => {
   // The one loss on the send path with no surface at all: the send answered
   // `{sent:false, held:true}`, which reads everywhere as on its way, and six
-  // hours later the row is gone with nothing said. Widening which sends can
-  // reach that state — a reply that resolves through a route rather than a row
-  // can — is what makes the silence worth a warn rather than a debug line.
+  // hours later the row is gone with nothing said. That is what makes the
+  // silence worth a warn rather than a debug line.
   let clock = 1_000;
   const secretSummary = sentinel("SKRTSMRY", 32);
   const secretBody = sentinel("SKRTTXTZ", 64);
@@ -377,9 +380,9 @@ test("a held message that expires without ever leaving is named, and named witho
           ref: { machineId: "m1", projectId: "p1", sessionId },
         }
         : null,
-    // Nothing carries it, ever: the state a machine with no route home and no
-    // desktop attached is in for as long as it stays that way.
-    send: () => false,
+    // Nothing carries it, ever: the state a machine with no transport is in for
+    // as long as it stays that way.
+    send: () => ({ sent: false, reason: "no-transport" }),
     now: () => clock,
   });
   try {
@@ -456,3 +459,172 @@ test("sealing and opening bus mail logs nothing of the body or the keys, on succ
   // collide with ordinary log text; a hit on these is still worth a look.
   assertNoSentinelAnywhere([seed, recipientPriv, sealed.blob.box], captured);
 });
+
+function ed25519Pair() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const seed = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
+  const pub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+  return { seed: Buffer.from(seed).toString("base64"), pub: Buffer.from(pub).toString("base64") };
+}
+
+function busPair() {
+  const k = generateEphemeralKeypair();
+  return { privateKey: k.privateKey.toString("base64"), publicKey: k.publicKey.toString("base64") };
+}
+
+test("the relay transport and the outbox log nothing of the body, the keys or the blobs, on any path", async () => {
+  const me = { id: randomUUID(), sign: ed25519Pair(), bus: busPair() };
+  const them = { id: randomUUID(), sign: ed25519Pair(), bus: busPair() };
+  const body = sentinel("RLYB", 600);
+  const summary = sentinel("RLYS", 40);
+  const sent: unknown[] = [];
+  let linkState: "ready" | "offline" = "ready";
+  let verdict: "applied" | "refused" | "defer" = "applied";
+  const entry: MachineEntry = {
+    deviceId: them.id, displayName: "them", machineName: null, ed25519Pub: them.sign.pub,
+    busPublicKey: them.bus.publicKey, orchestrator: false, busControl: false,
+  };
+  const directory = {
+    current: () => ({ machines: [entry], allowed: true }) as never,
+    machine: (id: string) => (id === them.id ? entry : null),
+    busKeyFor: (id: string) => (id === them.id ? them.bus.publicKey : null),
+    selfOrchestrator: () => false,
+    ensureFresh: async () => true,
+    kick: () => {},
+  };
+  let coordinator: SessionBusCoordinator | null = null;
+  const transport = new RelayBusTransport({
+    selfDeviceId: () => me.id,
+    signSeed: () => me.sign.seed,
+    busKey: () => me.bus,
+    directory: directory as never,
+    link: () => ({
+      sendBus: (f: unknown) => { sent.push(f); return true; },
+      busLinkState: () => linkState,
+      busNow: () => Date.now(),
+    }),
+    remoteAccessEnabled: () => true,
+    seen: openSeenStore(abDir!),
+    onInbound: async () => (verdict === "applied"
+      ? { outcome: "applied" }
+      : verdict === "defer" ? { outcome: "defer" } : { outcome: "refused", code: "UNKNOWN_PEER" }),
+    onOutcome: (id, to, o) => coordinator?.onTransportOutcome(id, to, o),
+  });
+  coordinator = new SessionBusCoordinator({
+    abDir: abDir!,
+    projectIdFor: () => "p1",
+    self: (sessionId) => sessionId === "s-sender"
+      ? {
+        key: { machineId: me.id, projectId: "p1", sessionId },
+        ref: { machineId: me.id, projectId: "p1", sessionId },
+      }
+      : null,
+    send: (frame, ctx) => transport.send({
+      to: ctx.to.machineId, id: ctx.messageId, kind: "message", body: frame,
+      sentAt: ctx.sentAt, expiresAt: ctx.sentAt + 60_000, role: "agent",
+    }),
+  });
+  try {
+    captureAtEveryLevel();
+    // Outbound: sealed and offered, then offered again while the link is down.
+    const res = coordinator.message({
+      sessionId: "s-sender", verb: "post", threadId: null,
+      to: { machineId: them.id, projectId: "p2", sessionId: "s-target" },
+      summary, parts: [{ kind: "text", text: body }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    linkState = "offline";
+    coordinator.retryNow();
+    linkState = "ready";
+    transport.handleFrame({ type: "bus:receipt", id: res.messageId, to: them.id } as BusServerMessage);
+    transport.handleFrame({ type: "bus:refused", id: res.messageId, reason: "queue-full" } as BusServerMessage);
+
+    // Inbound: one that applies, one the host defers, one it refuses, a
+    // duplicate, and blobs that cannot be opened.
+    const deliver = (over: { id?: string; sealedBody?: string; wrongKey?: boolean } = {}) => {
+      const id = over.id ?? randomUUID();
+      const sealed = sealBus({
+        header: { v: 1, from: them.id, to: me.id, id, role: "agent", kind: "message", sentAt: Date.now(), expiresAt: Date.now() + 60_000 },
+        body: over.sealedBody ?? body,
+        signSeedB64: them.sign.seed,
+        recipientBusPubB64: over.wrongKey ? busPair().publicKey : me.bus.publicKey,
+      });
+      if (!sealed.ok) throw new Error(sealed.code);
+      return { type: "bus:deliver", id, from: them.id, blob: sealed.blob } as BusServerMessage;
+    };
+    const dup = deliver();
+    transport.handleFrame(dup);
+    transport.handleFrame(dup);
+    verdict = "defer";
+    transport.handleFrame(deliver());
+    verdict = "refused";
+    transport.handleFrame(deliver());
+    transport.handleFrame(deliver({ wrongKey: true }));
+    transport.handleFrame({ ...deliver(), from: randomUUID() } as BusServerMessage);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const captured = [...lines];
+    __setRootForTest(process.stdout);
+
+    expect(captured.length).toBeGreaterThan(0);
+    const blobs = sent.map((f) => JSON.stringify(f)).filter((j) => j.includes("blob"));
+    expect(blobs.length).toBeGreaterThan(0);
+    assertNoSentinelAnywhere(
+      [body, summary, me.sign.seed, me.bus.privateKey, them.sign.seed, them.bus.privateKey, ...blobs],
+      captured,
+    );
+  } finally {
+    __setRootForTest(process.stdout);
+    transport.stop();
+    coordinator.stop();
+  }
+}, 20_000);
+
+test("handleBusInbound logs nothing of the body on any verdict", async () => {
+  const selfMachine = randomUUID();
+  const remoteMachine = randomUUID();
+  host = new HostServer({
+    remoteHostFactory: (opts) => new TestRemoteHostConnection(opts),
+  });
+  (host as any).controlPlaneRelay = new TestRemoteHostConnection({
+    identity: { deviceId: selfMachine, deviceName: "test", createdAt: "" },
+  });
+  const target = await openLocalSession(host, tempFolder("target-project"), "target");
+  const body = sentinel("INBB", 600);
+  const summary = sentinel("INBS", 40);
+  const frame = (to: string, over: Record<string, unknown> = {}) => createMessage("session-bus:post", {
+    from: { machineId: remoteMachine, projectId: "p-remote", sessionId: "s-remote" },
+    to: { machineId: selfMachine, projectId: target.projectId, sessionId: to },
+    contextId: "s-remote",
+    threadId: null,
+    envelope: {
+      messageId: randomUUID(), threadId: null, contextId: "s-remote",
+      parts: [{ kind: "text", text: body }],
+      metadata: { peer: { machineId: remoteMachine, projectId: "p-remote", sessionId: "s-remote" }, summary, timestamp: Date.now() },
+    },
+    ...over,
+  });
+  const verified = (b: unknown) => ({
+    from: remoteMachine, id: randomUUID(), role: "agent" as const, body: b,
+    header: { v: 1 as const, from: remoteMachine, to: selfMachine, id: randomUUID(), role: "agent" as const, kind: "message" as const, sentAt: Date.now(), expiresAt: Date.now() + 60_000 },
+  });
+  const handle = (b: unknown) => (host as any).handleBusInbound(verified(b));
+
+  captureAtEveryLevel();
+  const verdicts = [];
+  verdicts.push(await handle(frame(target.sessionId)));
+  (host as any).remoteAccessPolicy.setEnabled(true);
+  verdicts.push(await handle({ type: "session-bus:post", junk: body }));
+  verdicts.push(await handle(frame("s-nobody")));
+  verdicts.push(await handle(frame(target.sessionId)));
+  (host as any).agentReachPolicy.setEnabled(false);
+  verdicts.push(await handle(frame(target.sessionId)));
+  const captured = [...lines];
+  __setRootForTest(process.stdout);
+
+  expect(verdicts.map((v) => (v.outcome === "refused" ? v.code : v.outcome))).toEqual([
+    "REMOTE_ACCESS_OFF", "MALFORMED", "UNKNOWN_PEER", "applied", "NOT_ALLOWED_AGENT_REACH",
+  ]);
+  expect(captured.length).toBeGreaterThan(0);
+  assertNoSentinelAnywhere([body, summary], captured);
+}, 30_000);

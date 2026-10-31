@@ -202,8 +202,10 @@ for a future per-receiver policy. `mayAcceptFrom` is the sender-side mirror, re-
 record: a refused record is dropped and the peer is told why by a `control:result {ok:false}` on the
 session stream, rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_MS`).
 
-**Session-bus frames** (`session-bus:*`, `bridge/src/protocol.ts`) ride this stream, peer-addressed, exactly like any
-other project-scoped bus frame — there is no separate stream for them.
+**Agent-to-agent session-bus frames** (`session-bus:*` carrying a `from`/`to` pair, `bridge/src/protocol.ts`) never
+ride this stream: a bridge drops any that arrive on one. Mail between machines travels sealed through the relay's
+bus queue instead (the session-bus section of `bridge/AGENTS.md`). The app's own reads of its bridge's mailboxes
+(`session-bus:directory`, `:inbox`, `:thread`) and the `session-bus:arrived` push do ride it.
 
 **Failure isolation** matches §1b/§1c: an overflow or a lost stream resets only that one project stream
 (the app reopens and resyncs through `state.snapshot`); only `unauthorized`, or a protocol violation (a bad
@@ -286,8 +288,7 @@ Schema: `SessionHelloFrame` in `bridge/src/protocol.ts`. These are bare `{ type,
   the session bus or a stream. This is enforced independently of the transport, because nothing above the
   QUIC layer proves a connected peer has said hello.
 - A hello that still carries an unknown `capabilities` key parses — Zod strips it and it is ignored, not
-  refused. `sessionBusCarrier` is a loopback-only key (`local-listener.ts`) and must never be sent on this
-  native hello.
+  refused.
 
 The Dart driver (`ConnectionHandshake` / `AppSessionHandshaker`, `packages/antgrid_relay_client`) is
 called "handshake" in code, but it drives no cryptographic exchange: it sends one hello and waits for `established`, with the whole

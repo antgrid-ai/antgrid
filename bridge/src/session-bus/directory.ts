@@ -312,10 +312,9 @@ export class SessionDirectory {
    *  on `projectId` alone would spend the latch on the startup `no-carrier`
    *  and then stay silent on the `stale-mirror` this line exists to catch.
    *  Per-instance rather than module-level so one `SessionDirectory` cannot
-   *  silence another's first line. Bounded the way `latchBusWarn`
-   *  (host-server.ts) bounds its own: a machine does not hold enough projects
-   *  for this to grow, and clearing wholesale beats tracking an eviction order
-   *  for a log latch. */
+   *  silence another's first line. Cleared wholesale at its cap: a machine
+   *  does not hold enough projects for this to grow, and clearing beats
+   *  tracking an eviction order for a log latch. */
   private readonly unservedReadLatch = new Set<string>();
 
   /**

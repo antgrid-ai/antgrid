@@ -8,16 +8,10 @@
  *  than as news. */
 export const BUS_MESSAGE_TTL_MS = 6 * 60 * 60_000;
 
-/** How long a learned carrier route is trusted without being re-proven. Sized to
- *  outlast an ordinary exchange so a reply does not arrive to find its way home
- *  forgotten; a route that has expired costs one relearn, never a misdelivery
- *  (route-store.ts). */
-export const BUS_ROUTE_TTL_MS = 6 * 60 * 60_000;
-
-/** Outbound messages one session holds for want of a route. A message is
- *  allowed to be lost, so this bound is where that allowance is actually spent:
- *  past it the oldest held message goes, rather than a session cut off for a day
- *  growing a file that loads as empty. */
+/** Outbound messages one session keeps until the far side acknowledges them.
+ *  Past it the oldest goes and its log entry is stamped refused, so the loss is
+ *  said to the sender rather than a session cut off for a day growing a file
+ *  that loads as empty. */
 export const MAX_HELD_MESSAGES = 32;
 
 /** Unread posts one session's mailbox holds. A post interrupts nothing, so a
@@ -38,20 +32,38 @@ export const MAILBOX_TTL_MS = 3 * 24 * 60 * 60_000;
  *  loose rather than tight. */
 export const MAX_THREADS_PER_SESSION = 100;
 
-/** How stale the persisted copy of a carrier route may get while the live one is
- *  being refreshed. Every applied inbound frame restamps a route, and writing
- *  the file each time would put a disk write behind every ack; skipping the
- *  write entirely would let a busy context's persisted timestamp age past the
- *  TTL and be dropped on the next restart while it was never idle. */
-export const BUS_ROUTE_PERSIST_INTERVAL_MS = 5 * 60_000;
+/** How stale the persisted copy of a pair budget may get. Every send and every
+ *  applied inbound frame charges the budget, and writing the file each time
+ *  would put a disk write behind each of them; a halt is written at once, so
+ *  only the counters may lag. */
+export const BUS_PERSIST_INTERVAL_MS = 5 * 60_000;
 
-/** Carrier routes the machine remembers across a restart — one table shared by
- *  every project it has open, not one per project. Raised from the
- *  old per-project bound for that reason: a machine can hold several warm
- *  projects at once (`kHostWarmCap`, host-server.ts), each with several live
- *  exchanges, all sharing this cap now. Still deliberately loose, because
- *  expired contexts are pruned lazily rather than counted against it. */
-export const MAX_BUS_ROUTES = 512;
+/** How long after a relay receipt a held message waits before it is offered to
+ *  the relay again. The receipt says the relay holds it, so a faster resend is
+ *  only a duplicate for the recipient to dedupe; this one exists to re-arm a
+ *  relay that restarted and lost its queue, and the relay itself redelivers an
+ *  unacked entry sooner than this when its recipient is online. */
+export const BUS_RELAYED_RESEND_MS = 5 * 60_000;
+
+/** First and longest step of the backoff between attempts at a message the relay
+ *  has not yet acknowledged holding. */
+export const BUS_RETRY_BASE_MS = 1_000;
+export const BUS_RETRY_MAX_MS = 60_000;
+
+/** How long a send waits for the relay's receipt before reporting the rung it
+ *  has reached. Bounded because it sits inside a tool call an agent is blocked
+ *  on; a slower receipt is still recorded and shows on the thread. */
+export const BUS_RUNG_REPORT_WAIT_MS = 1_500;
+
+/** Verdicts the receive side remembers so a resend is re-acked without being
+ *  applied twice. Past it the oldest go, which re-opens a replay window only for
+ *  a message older than everything the table still holds. */
+export const MAX_BUS_SEEN = 10_000;
+
+/** How long an inbound delivery waits for a cold project to open before it is
+ *  applied anyway. The store write is durable whether or not the core is warm,
+ *  so this bounds latency, not correctness. */
+export const BUS_INBOUND_WARM_TIMEOUT_MS = 15_000;
 
 /** The largest artifact one publish may store. Content is written beside the
  *  record and fetched in slices, so this bounds a single peer's evidence, not

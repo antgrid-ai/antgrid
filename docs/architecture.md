@@ -98,16 +98,17 @@ production preference before those gates pass.
 
 ### The session bus
 
-Agent-to-agent frames (`session-bus:*`) never cross machines by themselves. The
-sending bridge hands every outbound bus frame to its loopback owner socket and
-nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
-`capabilities.sessionBusCarrier` on its hello: the initiating machine's desktop
-app is the only carrier, and it forwards the frame verbatim onto the target
-machine's own relay connection. The receiving bridge answers on the one app
-session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. There is
-no separate spec document: the host-side invariants are in `bridge/AGENTS.md`,
-and the rest is documented at its definitions under `bridge/src/session-bus/`.
+Agent-to-agent frames (`session-bus:*`) cross machines only through the relay's
+queue, sealed. The sending bridge seals each frame to the recipient machine's
+bus key (published in the account's machine directory) and sends it on its
+central control socket; the relay holds the ciphertext until the recipient's
+bridge is connected, and cannot read it. The receiving bridge opens it, verifies
+who sent it, records it so a resend is idempotent, applies its own gates, and
+answers with a signed ack. Delivery is at-least-once, and an ack means the
+recipient's store has the frame, not that its agent has read it. The app is not
+on this path, and a phone never sees the traffic. There is no separate spec
+document: the host-side invariants are in `bridge/AGENTS.md`, and the rest is
+documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
 

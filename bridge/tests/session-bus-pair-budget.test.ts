@@ -202,7 +202,7 @@ function gatedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: Ma
       sessionId === A.sessionId
         ? { key: { machineId: A.machineId, projectId: "p1", sessionId }, ref: { machineId: A.machineId, projectId: "p1", sessionId } }
         : null,
-    send: () => true,
+    send: () => ({ sent: true }),
     pairBudget: {
       recordsFor: (sessionId) => rows.get(sessionId) ?? [],
       write: (sessionId, next) => rows.set(sessionId, upsertPairBudget(rows.get(sessionId) ?? [], next)),
@@ -401,7 +401,7 @@ function pairedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: M
     // Both ends live in one coordinator, so the local hand-off IS the delivery:
     // this is what turns a `message` call into the inbound fold its peer sees.
     deliverLocal: (frame) => self.handleInbound(frame) === "applied",
-    send: () => true,
+    send: () => ({ sent: true }),
     pairBudget: {
       recordsFor: (sessionId) => rows.get(sessionId) ?? [],
       write: (sessionId, next) => rows.set(sessionId, upsertPairBudget(rows.get(sessionId) ?? [], next)),

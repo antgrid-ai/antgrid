@@ -5,6 +5,7 @@
 // code and reason without inventing either.
 
 import { logger } from "../logger";
+import type { BusHeldReason } from "./relay-transport";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -35,34 +36,19 @@ export const SESSION_BUS_ERRORS = {
    *  a thread id this session does not hold, and to a thread whose recorded
    *  peer disagrees with the address the caller also spelled. */
   UNKNOWN_PEER: 404,
-  /** A send at another MACHINE that this one cannot currently route: no
-   *  mirrored row for it, and no thread whose peer answered on it recently
-   *  enough, over a live carrier route, to fall back on. The row may exist on
-   *  the far side — a machine with remote access off publishes none at all — so
-   *  the failure is about this machine's knowledge, not the peer's existence.
+  /** A send at another MACHINE that cannot be carried: the relay link has been
+   *  down past the outbox's horizon, so there is nowhere for the message to wait,
+   *  or a send names a machine the bridge has no way to address at all.
    *
-   *  503 is the transport's answer, and neither ADDRESSING refusal under it is
-   *  an invitation to retry blindly: a refusal returns before
+   *  A message that simply could not leave yet is not this: it is held and
+   *  retried, and the send answers with the rung it reached and the reason it is
+   *  held. This code is for the case where no hold can help.
+   *
+   *  503 is the transport's answer. A refusal returns before
    *  `coordinator.message`, the only place that charges the pair budget, so a
    *  retry loop here trips no ceiling and costs the caller nothing it would
-   *  notice. What clears them is a frame from that machine or a row once it is
-   *  reachable again.
-   *
-   *  The two phrase it differently on purpose. A lapsed thread says outright
-   *  that retrying will not clear it, because the route it named is gone. The
-   *  no-row text says instead what WOULD clear it — the directory listing that
-   *  peer — because the mirror refills on its own schedule, so a send landing
-   *  between two of its pushes is refused here and the very next attempt
-   *  succeeds unchanged (observed live). Told flatly that a retry cannot help,
-   *  a caller reads a peer it can reach as gone.
-   *
-   *  The third text under this code is the carrier one — the desktop app on the
-   *  machine this session runs on does not have the project open, and it is
-   *  what carries an exchange this session is OPENING — and it deliberately
-   *  makes no such claim, because that condition does clear on its own the
-   *  moment the app attaches. It names the machine rather than saying "this
-   *  machine", because the reader is as often driving it from somewhere else as
-   *  sitting at it. */
+   *  notice. What clears it is the relay link coming back, so the text must not
+   *  tell the caller the peer is gone. */
   PEER_UNREACHABLE: 503,
   /** The caller's own project cannot be addressed at all: it has no git
    *  remote, so it has no repo key and therefore no peers.
@@ -102,6 +88,37 @@ export const SESSION_BUS_ERRORS = {
    *  acts on the answer: an artifact id it cannot resolve later is worse than a
    *  publish it knows to retry. */
   STORE_UNAVAILABLE: 503,
+  /** The recipient machine has not published a bus key, so nothing can be
+   *  sealed to it. Clears when it registers one. */
+  NO_BUS_KEY: 409,
+  /** The sender is not in this account's machine directory. */
+  UNKNOWN_SENDER: 403,
+  /** The recipient could not open the sealed message, typically because the
+   *  sender sealed to a key the recipient has since replaced. */
+  UNOPENABLE: 409,
+  BAD_SIGNATURE: 403,
+  /** The sealed header and the message body disagree about who sent it or who it
+   *  is for. */
+  HEADER_MISMATCH: 403,
+  MALFORMED: 400,
+  /** The message outlived its own expiry before it was applied. */
+  STALE: 409,
+  /** The outbox for one session is full and this message was pushed out by
+   *  newer ones before the far side acknowledged it. */
+  OUTBOX_FULL: 429,
+  /** The message reached its expiry without the far side acknowledging it. */
+  EXPIRED: 504,
+  PLAINTEXT_TOO_LARGE: 413,
+  /** A request-shaped bus frame arrived at a bridge that does not serve
+   *  requests. */
+  METHOD_NOT_ALLOWED: 403,
+  /** The recipient machine's agent reach is off. A human changes it; waiting
+   *  does not. */
+  NOT_ALLOWED_AGENT_REACH: 403,
+  /** The relay refused because the recipient is not an agent of this account. */
+  RELAY_NOT_AGENT: 403,
+  /** The relay refused because the message named its own sender. */
+  RELAY_SELF: 400,
 } as const;
 
 export type SessionBusErrorCode = keyof typeof SESSION_BUS_ERRORS;
@@ -129,3 +146,49 @@ export function refuse(code: SessionBusErrorCode, error: string): SessionBusRefu
 export function isRefusal(v: unknown): v is SessionBusRefusal {
   return typeof v === "object" && v !== null && (v as { ok?: unknown }).ok === false;
 }
+
+/** One fixed sentence per code a message can end in, for the send line and the
+ *  thread. Authored once and never interpolated: a code comes off the wire in a
+ *  signed ack, and a sentence built from anything a peer controls would put the
+ *  peer's words in front of an agent as the bridge's own. */
+export const BUS_REFUSAL_TEXT: Record<string, string> = {
+  REMOTE_ACCESS_OFF: "remote access is off on that machine, so it takes no messages from other machines",
+  NOT_ALLOWED_AGENT_REACH: "that machine does not let other machines' agents reach its sessions",
+  UNKNOWN_PEER: "that machine has no session with that address",
+  UNKNOWN_SENDER: "that machine does not recognise this machine as part of the account",
+  UNOPENABLE: "that machine could not open the message; update Antgrid on it, or wait for its key to refresh",
+  BAD_SIGNATURE: "that machine could not verify who sent the message",
+  HEADER_MISMATCH: "that machine found the message did not match its own header",
+  MALFORMED: "that machine could not read the message",
+  STALE: "the message had expired by the time that machine looked at it",
+  OUTBOX_FULL: "too many messages were waiting to be sent, so this older one was dropped",
+  EXPIRED: "the message expired before that machine acknowledged it",
+  PLAINTEXT_TOO_LARGE: "the message is too large to send between machines; publish the bulk as an artifact and reference it",
+  METHOD_NOT_ALLOWED: "that machine does not accept this kind of message",
+  RELAY_NOT_AGENT: "the relay says the target is not one of this account's machines",
+  RELAY_SELF: "a message cannot be addressed to the machine it is sent from",
+  NO_BUS_KEY: "that machine has not published a messaging key yet",
+};
+
+/** The sentence for a terminal code, with a generic one for a code this bridge
+ *  has no text for, which is a newer peer's code and not an error here. */
+export function refusalSentence(code: string): string {
+  return BUS_REFUSAL_TEXT[code] ?? "the other machine refused the message";
+}
+
+/** Why a message is still on this machine, for the held send line. Exhaustive,
+ *  so a new reason fails to compile until it has a sentence. */
+export const BUS_HELD_REASON_TEXT: Record<BusHeldReason, string> = {
+  "no-transport": "this bridge has no connection to the relay",
+  "central-offline": "this machine is not connected to the relay right now",
+  "relay-unsupported": "the relay does not carry messages between machines yet",
+  "directory-unavailable": "this machine has not yet learned which machines are on the account",
+  "no-bus-key": "the other machine has not published a messaging key yet",
+  "paced": "messages are being sent faster than the relay accepts, so this one is waiting its turn",
+  "remote-access-off": "remote access is off on this machine",
+  "relay-queue-full": "the relay's queue for that machine is full",
+  "relay-rate-limited": "the relay is rate limiting this machine",
+  "relay-recipient-outdated": "the other machine runs an older Antgrid that cannot receive this; update Antgrid on it",
+  "ack-unverified": "the other machine's acknowledgement could not be verified",
+  "recipient-key-stale": "the other machine's messaging key changed; this machine is refreshing it",
+};

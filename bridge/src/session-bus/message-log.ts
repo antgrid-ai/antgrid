@@ -1,18 +1,16 @@
 // A bounded ring of the envelopes that crossed, for a human or the app to read
 // back what a session said and was told.
 //
-// THE LOG IS NOT THE DURABLE COPY — an Artifact is. A message is allowed to be
-// lost, so nothing may be reconstructed from this file, and every part is
-// trimmed to MAX_LOGGED_PART_CHARS on the way in: anything worth keeping whole
+// THE LOG IS NOT THE DURABLE COPY — an Artifact is. Nothing may be reconstructed
+// from this file, and every part is trimmed to MAX_LOGGED_PART_CHARS on the way in: anything worth keeping whole
 // was published as an artifact, and a log that grew to hold it would outweigh
-// what it annotates. It is written on the same flush as the held store, so a
-// crash can lose the tail of the log but never a message still waiting to go.
+// what it annotates. It is written on the same flush as the outbox, so a crash
+// can lose the tail of the log but never a message still waiting to go.
 
 import { z } from "zod";
 import { BusEnvelopeSchema, trimEnvelopeForLog, type BusEnvelope } from "./envelope";
 import { MAX_LOG_ENTRIES } from "./constants";
 import { SessionMemberKeySchema, type SessionMemberKey } from "../protocol";
-import { addressesSameSession } from "./address";
 import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const LoggedEnvelopeSchema = z.object({
@@ -25,6 +23,11 @@ export const LoggedEnvelopeSchema = z.object({
   /** Outbound entries only. `SessionBusThreadEntrySchema` (protocol.ts) carries
    *  what the stamp does and does not attest to. */
   deliveredAt: z.number().optional(),
+  /** The relay's own receipt: it holds the message, nothing has read it. */
+  relayedAt: z.number().optional(),
+  /** The message will never be delivered, and `refusedCode` says why. */
+  refusedAt: z.number().optional(),
+  refusedCode: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional(),
 });
 export type LoggedEnvelope = z.infer<typeof LoggedEnvelopeSchema>;
 
@@ -63,33 +66,6 @@ export function entriesForThread(s: MessageLogState, threadId: string): LoggedEn
   return s.entries.filter((e) => e.envelope.threadId === threadId);
 }
 
-/** When [peer] last put a frame on [contextId] here, or null if nothing the ring
- *  still holds says it ever did.
- *
- *  BOTH halves of the filter are load-bearing where the send path reads this. A
- *  context is named by the session that opened it and carries every exchange
- *  that session started, and the carrier route table is keyed by that id alone —
- *  so one correspondent still answering restamps the entry all of them share,
- *  and a context-only read would let it vouch for a peer that has been dark for
- *  hours. Matching the peer too is what makes the answer about the machine being
- *  written to.
- *
- *  Inbound only, which is what makes it evidence rather than an echo: an "in"
- *  entry is written from `onMessage`, on a frame that already cleared the
- *  address check, while an "out" entry records only that this session spoke. The
- *  ring is bounded, so a peer whose last frame has been displaced reads the same
- *  as one that never wrote — wrong in the direction that refuses, which is the
- *  direction a liveness probe may be wrong in. */
-export function lastInboundAt(s: MessageLogState, contextId: string, peer: SessionMemberKey): number | null {
-  for (let i = s.entries.length - 1; i >= 0; i -= 1) {
-    const e = s.entries[i]!;
-    if (e.direction !== "in") continue;
-    if (e.envelope.contextId !== contextId) continue;
-    if (addressesSameSession(peer, e.peer)) return e.at;
-  }
-  return null;
-}
-
 /** What this session last said on [threadId], so a reply's header can place it.
  *
  *  The outbound half of its own log and nothing else: a thread row carries the
@@ -114,6 +90,36 @@ export function markDelivered(s: MessageLogState, messageId: string, at: number)
   if (i === -1 || s.entries[i]!.deliveredAt !== undefined) return s;
   const entries = [...s.entries];
   entries[i] = { ...entries[i]!, deliveredAt: at };
+  return { entries };
+}
+
+/** Stamp the relay's receipt. Never moves a settled entry backwards, so a late
+ *  receipt for a message already delivered or refused changes nothing. */
+export function markRelayed(s: MessageLogState, messageId: string, at: number): MessageLogState {
+  const i = outboundIndex(s, messageId);
+  if (i === -1) return s;
+  const e = s.entries[i]!;
+  if (e.relayedAt !== undefined || e.deliveredAt !== undefined || e.refusedAt !== undefined) return s;
+  return replaceAt(s, i, { ...e, relayedAt: at });
+}
+
+/** Stamp a terminal refusal. A delivered entry stays delivered: the stamp is the
+ *  recipient's signed word, and nothing later outranks it. */
+export function markRefused(s: MessageLogState, messageId: string, at: number, code: string): MessageLogState {
+  const i = outboundIndex(s, messageId);
+  if (i === -1) return s;
+  const e = s.entries[i]!;
+  if (e.deliveredAt !== undefined || e.refusedAt !== undefined) return s;
+  return replaceAt(s, i, { ...e, refusedAt: at, refusedCode: code });
+}
+
+function outboundIndex(s: MessageLogState, messageId: string): number {
+  return s.entries.findIndex((e) => e.direction === "out" && e.envelope.messageId === messageId);
+}
+
+function replaceAt(s: MessageLogState, i: number, next: LoggedEnvelope): MessageLogState {
+  const entries = [...s.entries];
+  entries[i] = next;
   return { entries };
 }
 

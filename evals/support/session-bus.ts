@@ -1,7 +1,14 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import type { Subprocess } from "bun";
+import { createTestProject } from "../helpers/fixtures";
+import { LocalTestClient, type LocalConnectInfo } from "../helpers/local-client";
+import { computeProjectId } from "../../bridge/src/project-id";
+import { readHostFile, type HostFile } from "../../bridge/src/host-discovery";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
-import type { AbMessage } from "../../bridge/src/protocol";
+import { createMessage, type AbMessage } from "../../bridge/src/protocol";
 import { renderNotify, renderReply } from "../../bridge/src/session-bus/delivery";
 import {
   MAX_QUEUED_LINES,
@@ -19,6 +26,7 @@ import type { RelayClient } from "../helpers/relay-client";
  * frozen shared surface.
  */
 
+const BRIDGE_ROOT = resolve(import.meta.dir, "../..");
 const RUN_HOOK_SCRIPT = resolve(import.meta.dir, "run-hook.ts");
 // This process IS the bun binary running the eval suite (`bun test`), so its
 // own execPath is a reliable absolute path to spawn a sibling `bun run` from —
@@ -336,4 +344,208 @@ export async function untilAsync<T>(
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${what}`);
     await sleep(100);
   }
+}
+
+export interface LocalBridge {
+  abDir: string;
+  projectId: string;
+  /** The checkout the bridge was booted over, for the probes that must read the
+   *  repository itself rather than what the bridge says about it. */
+  projectDir: string;
+  sinkPath: string;
+  client: LocalTestClient;
+  /** Kill this bridge and boot a fresh process over the SAME `abDir` and
+   *  project, then re-attach. Everything the bus persisted survives; only the
+   *  process does not. */
+  restart(): Promise<void>;
+  teardown(): Promise<void>;
+}
+
+/**
+ * Boot a bridge in LOCAL mode — the one mode with no relay registration at all,
+ * so `machineId()` is null and every self-address falls back to the sentinel.
+ *
+ * Not `setupTestEnv`: that env exists to give a bridge a relay identity, which
+ * is exactly the thing these scenarios must be without.
+ */
+export async function bootLocalBridge(): Promise<LocalBridge> {
+  const project = createTestProject("basic", { __RELAY_URL__: "http://127.0.0.1:1" });
+  await prepareBusProject(project.dir);
+  const abDir = mkdtempSync(join(tmpdir(), "antgrid-bus-home-"));
+  const sinkDir = mkdtempSync(join(tmpdir(), "antgrid-bus-sink-"));
+  const sinkPath = join(sinkDir, "sink.txt");
+  const projectId = computeProjectId(project.dir);
+  const portFile = join(abDir, "api.port");
+  const payload = {
+    firstProject: { projectId, projectPath: project.dir, mode: "local" as const },
+  };
+
+  let proc!: Subprocess;
+  let client!: LocalTestClient;
+
+  /**
+   * `stalePort` is the `api.port` the process being replaced was serving, given
+   * only when it could not be removed — see `restart`.
+   */
+  async function spawnBridge(stalePort?: string): Promise<void> {
+    const spawned = Bun.spawn(["bun", "run", resolve(BRIDGE_ROOT, "bridge/src/index.ts")], {
+      cwd: project.dir,
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        ...process.env,
+        LOG_LEVEL: "error",
+        ANTGRID_DIR: abDir,
+        ANTGRID_EVAL_SINK: sinkPath,
+      },
+    });
+    proc = spawned;
+    // Past this line the process reaches a caller only through the `LocalBridge`
+    // below, so a throw in the boot that follows would leave the bridge and its
+    // whole PTY tree running with nothing left holding them — and the rows after
+    // it then fight those ports for the rest of the process. Each unwind step is
+    // guarded on its own: a cleanup that threw would replace the failure the
+    // caller has to read.
+    try {
+      spawned.stdin.write(JSON.stringify(payload) + "\n");
+      await spawned.stdin.end();
+
+      const deadline = Date.now() + 20_000;
+      let host: HostFile | null = null;
+      while (Date.now() < deadline) {
+        if (spawned.exitCode !== null) throw new Error(`bridge exited early with ${spawned.exitCode}`);
+        const hf = readHostFile(join(abDir, "host.json"));
+        // Matched on pid, not merely present: a restart re-reads the file the
+        // dead process wrote until the fresh one overwrites it. `api.port` gets
+        // the same treatment by value, because the host publishes host.json
+        // before any core binds an API server — so a fresh pid is no evidence
+        // that the port beside it is the fresh one.
+        const port = existsSync(portFile) ? readFileSync(portFile, "utf8").trim() : null;
+        if (hf && hf.pid === spawned.pid && port !== null && port !== stalePort) {
+          host = hf;
+          break;
+        }
+        await sleep(100);
+      }
+      if (!host) throw new Error("bridge did not publish host.json + a fresh api.port in 20s");
+
+      const answer = await postJson(
+        `http://127.0.0.1:${host.controlPort}/control`,
+        { id: randomUUID(), type: "project:open", projectId, projectPath: project.dir, mode: "local" },
+        host.token,
+      );
+      if (!answer.ok || !answer.connect) throw new Error(`project:open returned no connect info: ${JSON.stringify(answer)}`);
+      client = new LocalTestClient();
+      await client.connect(answer.connect as LocalConnectInfo);
+    } catch (err) {
+      try { client?.close(); } catch { /* a socket that never opened */ }
+      try { await kill(); } catch { /* the process may already be gone */ }
+      throw err;
+    }
+  }
+
+  async function kill(): Promise<void> {
+    if (process.platform === "win32") {
+      const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
+      try { Bun.spawnSync([taskkill, "/PID", String(proc.pid), "/T", "/F"]); } catch { /* best-effort */ }
+    }
+    proc.kill();
+    await proc.exited;
+  }
+
+  // `spawnBridge` has already disposed of its own process; what is left is the
+  // fixture and the temp directories, which no caller can reach once this
+  // throws.
+  try {
+    await spawnBridge();
+  } catch (err) {
+    try { project.cleanup(); } catch { /* the PTYs may still hold handles */ }
+    try { rmSync(abDir, { recursive: true, force: true }); } catch { /* same */ }
+    try { rmSync(sinkDir, { recursive: true, force: true }); } catch { /* same */ }
+    throw err;
+  }
+
+  return {
+    abDir,
+    projectId,
+    projectDir: project.dir,
+    sinkPath,
+    get client() { return client; },
+    async restart() {
+      // Read BEFORE the kill, and used below: it is the only thing that tells a
+      // dead process's port file from the fresh one when the removal cannot
+      // happen — a sharing violation over a taskkill'd process's handles is the
+      // realistic case, and a swallowed one leaves every later call talking to a
+      // dead or OS-recycled port.
+      const livePort = existsSync(portFile) ? await apiPort(abDir) : undefined;
+      client.close();
+      await kill();
+      let removed = true;
+      try { rmSync(portFile, { force: true }); } catch { removed = false; }
+      await spawnBridge(removed ? undefined : livePort);
+    },
+    async teardown() {
+      client.close();
+      await kill();
+      project.cleanup();
+      try { rmSync(abDir, { recursive: true, force: true }); } catch { /* the PTYs may still hold handles */ }
+      try { rmSync(sinkDir, { recursive: true, force: true }); } catch { /* same */ }
+    },
+  };
+}
+
+/** One project verb over the loopback owner socket, answered on its own
+ *  requestId — `session:result` carries no echo of the verb it answers. */
+export async function localVerb(bridge: Pick<LocalBridge, "client">, msg: AbMessage): Promise<any> {
+  const requestId = (msg as { requestId?: string }).requestId;
+  const answer = new Promise<any>((resolveAnswer, reject) => {
+    const timer = setTimeout(() => {
+      off();
+      reject(new Error(`timed out waiting for ${msg.type}`));
+    }, 20_000);
+    const off = bridge.client.on((m: AbMessage) => {
+      if (m.type !== "session:result" || m.requestId !== requestId) return;
+      clearTimeout(timer);
+      off();
+      if (!m.ok) reject(new Error(`${msg.type} refused: ${m.error} (${m.errorCode ?? "no code"})`));
+      else resolveAnswer(m);
+    });
+  });
+  bridge.client.send(msg);
+  return answer;
+}
+
+/**
+ * A session whose guest records exactly what the bridge submits to it.
+ *
+ * A custom command rather than a `tool`, because the fixture declares no agent
+ * and these scenarios assert WHEN a line reaches a terminal — a real agent would
+ * answer the line and make the count its own.
+ */
+export async function createSession(bridge: LocalBridge, name: string): Promise<string> {
+  const created = await localVerb(bridge, createMessage("session:create", {
+    requestId: randomUUID(),
+    name,
+    command: `node ${SINK_SCRIPT_NAME}`,
+    mode: "terminal",
+  }));
+  return created.session.id as string;
+}
+
+export async function startSession(bridge: LocalBridge, sessionId: string): Promise<void> {
+  await localVerb(bridge, createMessage("session:start", { requestId: randomUUID(), sessionId }));
+}
+
+/** Flip a machine's agent-reach switch through the loopback control verb the
+ *  desktop toggle drives. */
+export async function setAgentReach(abDir: string, enabled: boolean): Promise<void> {
+  const hf = readHostFile(join(abDir, "host.json"));
+  if (!hf) throw new Error(`no host.json in ${abDir}`);
+  const res = await postJson(
+    `http://127.0.0.1:${hf.controlPort}/control`,
+    { id: `bus-reach-${randomUUID()}`, type: "agent-reach:set", enabled },
+    hf.token,
+  );
+  if (!res.ok || res.enabled !== enabled) throw new Error(`agent-reach:set ${enabled} failed: ${JSON.stringify(res)}`);
 }

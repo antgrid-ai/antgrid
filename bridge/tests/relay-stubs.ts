@@ -23,7 +23,6 @@ export function fakeStreamHandle(over: Partial<StreamHandle> = {}): StreamHandle
   return {
     detach: () => {},
     sendTo: async () => "sent" as const,
-    deliverableTo: () => true,
     ...over,
   };
 }

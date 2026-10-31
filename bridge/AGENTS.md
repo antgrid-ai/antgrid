@@ -128,22 +128,26 @@ invariant, which is why the reasoning lives beside the code rather than here.
 The agent-to-agent plane: one session on one machine reaching another. This is
 the set of invariants a future edit breaks silently.
 
-- **Which way a bus frame leaves is decided by the CONTEXT, not by the
-  address.** A session whose own id is the context id opened the exchange and
-  reaches out through the loopback owner — `ProjectCore.sendToOwner`, and
-  `local-listener.ts` hands a bus frame to an owner only if its hello declared
-  `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
-  loopback API as `carrierPresent`). Any other context is one this session was
-  contacted on, and its only way back is the route that brought the context in
-  (`routeFor` → `sendToAppSession`). No attached carrier means the frame is HELD
-  and retried by the coordinator, never dropped, so a closed desktop is an
-  indefinitely delayed exchange rather than a failed one — except on the
-  agent-initiated verbs, which refuse up front rather than report a held frame
-  to an agent that reads every answer but a refusal as delivered.
+- **Where a cross-machine frame leaves and arrives.** Leaving: the coordinator's
+  `send` hands the frame to `RelayBusTransport` (`session-bus/relay-transport.ts`),
+  which seals it to the recipient machine's bus key from the account directory
+  and sends it as `bus:send` on the central socket; the relay queues ciphertext
+  it cannot open. Arriving: `bus:deliver` is opened and its signature and header
+  verified. An id already in `bus_seen` is re-acked with the stored verdict and
+  never re-applied; otherwise `HostServer.handleBusInbound` applies the gates
+  that need local state: the remote-access switch, agent reach (the lead-context
+  exemption stays), a held session, and warming a cold project. Its verdict,
+  applied or refused, is recorded in `bus_seen` before the signed ack goes out;
+  a defer records nothing and sends no ack, so the relay redelivers on drain.
+  Project streams drop bus frames, and nothing off this machine is ever sent
+  unsealed. A send that cannot leave is HELD and retried, never dropped, and
+  the agent is told so: rung `held` with its reason. Of the transport's
+  conditions only the remote-access switch refuses up front.
 - **The machine's remote-access switch gates the bus in BOTH directions, and the
   two halves must stay in lockstep.** Outbound is `offMachineSendAllowed`, wired
-  into `session-bus/api.ts`; inbound is `remoteFrameAllowed` beside it in
-  `agent-core.ts`. Gating one and not the other ships a machine that can speak
+  into `session-bus/api.ts` and checked again by `RelayBusTransport.send`;
+  inbound is `HostServer.handleBusInbound` (`host-server.ts`), which refuses
+  relay-origin bus mail while the switch is off. Gating one and not the other ships a machine that can speak
   and cannot be answered, because the peer's reply dies at our own inbound gate.
 - **The remote half of the directory arrives by loopback push and by nothing
   else.** The app peeks at control-plane sessions it already holds, asks each
@@ -157,21 +161,17 @@ the set of invariants a future edit breaks silently.
   because a bridge cannot dial another bridge and so can never ask again — and
   the near end proves a carrier exists by having been pushed to, not by a
   capability flag Zod could strip in silence.
-- **Nothing this side of the relay may be reported as delivery.** The carrier
-  taking a frame says only that it left this machine, so a post answers `sent`
-  and never "received". The one honest answer is the other side's ack: the
-  receiving coordinator emits a `session-bus:ack` keyed to the message id for
-  every post and notify it folds, and the sender stamps it onto its own log
-  entry. An unstamped entry is not a failed one — a receipt is fire-and-forget
-  and an unacked one is never retried — so the witnesses a frame that goes
-  nowhere has still carry the weight: the RECEIVING coordinator says so when
-  a frame names a session that bridge does not hold, and the app says the other
-  half — `no leg for addressed member` when the address was good and the machine
-  was not there, and `refused bus frame` with a `because` field naming the fact
-  it did not have. The sending machine has none at all — a carrier that accepts
-  frames and delivers none is already silent there, which it was, for three
-  hours, across a restart. Take a log line out of either survivor and it is
-  silent in both processes again.
+- **What each rung is witnessed by, and `delivered` means the recipient's
+  store, not its agent.** `held` is a local fact: the frame never left. `relayed`
+  is the relay's `bus:receipt` and says only that ciphertext is queued. The one
+  honest "delivered" is the recipient bridge's signed `bus:ack`, which it sends
+  after the frame is recorded in its own store and verified here against the
+  directory key; it says nothing about whether the agent has read it. A
+  `refused` verdict (also stored, so a resend gets the same answer) names the
+  fact the recipient lacked. An unacked frame is resent by the sender's outbox
+  until its TTL, so the receiver must stay idempotent. Logs carry ids, byte
+  counts and outcome codes, never a key, blob or body; take a log line out of
+  either survivor and a frame that goes nowhere is silent again.
 - **An artifact id from the other machine is a reference, not a handle.**
   `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
   requester half of cross-machine fetch does not exist. Every surface has to say
@@ -191,45 +191,19 @@ the set of invariants a future edit breaks silently.
   project …`, and the app's `this app holds the session under a project the
   other machine does not address it by`) — routing no longer depends on it, but
   the row still renders it.
-- **One coordinator now answers for every project a host has open (E9/§5.4),
-  which is what makes the invariant above load-bearing rather than academic:**
-  a peer admitted onto ANY project's stream can apply a frame naming a session
-  in any OTHER project this machine holds, because `addressesSameSession` was
-  always machine+session and never machine+session+project. What still bounds
-  that — and what does NOT, which is the half worth writing down — is named
-  here so it is a decision rather than something discovered later.
-  `remoteFrameAllowed` (`agent-core.ts`, gate applied once per inbound frame in
-  `attachTransport`, before dispatch) refuses every relay-origin frame while the
-  machine's mobile-access switch is off; that switch is machine-wide, so it
-  bounds the widened address space exactly as it bounded the narrow one —
-  loopback is exempt, but a loopback caller is this machine's own desktop,
-  already trusted with every session on it. A session id is
+- **One coordinator answers for every project a host has open, which is what
+  makes the machine+session matching above load-bearing rather than academic:**
+  a frame from another machine may name a session in any project this machine
+  holds, because `addressesSameSession` is machine+session and never
+  machine+session+project. What bounds WHO may do that is the relay path: the
+  sender must be a machine the account directory vouches for (its signature
+  checked against the directory key), and `HostServer.handleBusInbound` refuses
+  everything while the remote-access switch is off. A session id is
   `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
-  UUID, never enumerating a small keyspace. Isolation among the projects one
-  host has open rests on the admission rules that remain: a peer must open
-  each project's own stream before it may address a session on it
-  (`mayAcceptFrom` at open, `mayDeliverTo` on every send —
-  `ProjectStreamRegistry`, `project-streams.ts`), and that stream open is
-  itself gated on `seenProjects` and `isSafeProjectId`. The carrier
-  route table is keyed by CONTEXT id alone, so the same already-admitted peer
-  can re-point another project's context at itself by stamping that context id
-  on a frame addressed to a session it may legitimately name — refusing the
-  mismatch at `noteRoute` is not the fix, because E9's own case (a worktree
-  session answering its parent) is that mismatch, and the two are
-  indistinguishable there. Net: WHO may
-  address this machine is unchanged (an account-trusted peer, mobile access on,
-  on a project in the host's catalog); what an already-admitted peer may NAME
-  once inside is every session in a project it has opened a stream for.
-- **Outbound on the machine that is answering is `sendToAppSession(peerId)`,**
-  keyed by the app session — and, since the route table moved onto the
-  coordinator itself (E9/§5.4), the PROJECT — that carried the exchange in
-  (`SessionBusCoordinator.noteRoute`/`routeFor`, `session-bus/coordinator.ts`).
-  Falling through to the loopback owner
-  would hand the answer to THIS machine's desktop, which accepts it and returns
-  true — booking a delivery that never happened and retiring the only outbox
-  entry that could retry it. A broadcast would additionally leak the whole
-  exchange to the human's phone, which is the mirror of the sending-side
-  invariant above.
+  UUID, never enumerating a small keyspace. Project streams no longer carry bus
+  frames, so there is no per-project admission step on this path and no route
+  table a peer could re-point; what an admitted machine may NAME is every
+  session on this one.
 - **Every delivery into an agent is rendered, and lands where a boundary is
   observable.** `session-bus/delivery.ts` wraps the other agent's content as
   fenced data — never raw, never a bare instruction — and `delivery-queue.ts`

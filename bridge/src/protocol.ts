@@ -2394,8 +2394,8 @@ export const BusEnvelopeSchema = z.object({
 export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
 
 /** Both endpoints on every frame. Nothing shorter is an address: a machine holds
- *  several projects and a project several sessions, and the carrier picks the
- *  relay session to forward on out of `to`. */
+ *  several projects and a project several sessions, and the relay transport
+ *  picks the recipient machine out of `to`. */
 const SessionBusBaseWire = {
   from: SessionMemberKeySchema,
   to: SessionMemberKeySchema,
@@ -2403,10 +2403,9 @@ const SessionBusBaseWire = {
 };
 
 /** The body both verbs carry, since everything after the send decision is
- *  identical for the two. No `seq`: messages are lossy on purpose, and
- *  reliable delivery behind text that changes no state would be
- *  unbounded retry buying nothing. The delivery receipt witnesses arrival without
- *  making it reliable — it is never retried either. */
+ *  identical for the two. No `seq`: ordering is not promised. Delivery between
+ *  machines is at-least-once, with the receiver deduplicating on the message id;
+ *  the contract and what each delivery rung attests to are in bridge/AGENTS.md. */
 export const SessionBusMessageWire = z.object({
   ...SessionBusBaseWire,
   threadId: z.string().min(1).max(200).nullable(),
@@ -2433,20 +2432,6 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** The delivery receipt, keyed by the id of the message it answers — the
- *  only honest witness that a frame arrived, since everything this side of the
- *  relay reports only that it left. It is fire-and-forget: an unacked ack is
- *  never retried. `ok: false` is still a receipt — "this reached me", not "I
- *  liked it" — but it stamps nothing here: the stamp renders as the peer having
- *  taken the frame, so stamping a refusal would tell the sender the opposite of
- *  what the peer said. No `seq`, because messages have none. */
-export const SessionBusAckWire = z.object({
-  ...SessionBusBaseWire,
-  messageId: z.string().min(1).max(200),
-  ok: z.boolean(),
-  error: z.string().max(500).optional(),
-});
-
 /** Two verbs rather than one verb and a flag, and the shape is
  *  identical because everything after the send decision is: a bridge that does
  *  not know a verb REFUSES it, where a bridge that does not know a flag would
@@ -2468,15 +2453,21 @@ const SessionBusFetchResultMessage = BaseMessage.extend({
   type: z.literal("session-bus:fetch:result"),
 }).extend(SessionBusFetchResultWire.shape);
 
-const SessionBusAckMessage = BaseMessage.extend({
-  type: z.literal("session-bus:ack"),
-}).extend(SessionBusAckWire.shape);
-
+/** What a sealed bus delivery may carry. Validated on the receiving bridge,
+ *  where nothing else checks a bus frame's shape: the sealed header proves who
+ *  sent it, not that the body is well formed. */
+export const BusMessageBodySchema = z.discriminatedUnion("type", [
+  SessionBusPostMessage,
+  SessionBusNotifyMessage,
+  SessionBusFetchMessage,
+  SessionBusFetchResultMessage,
+]);
+export type BusMessageBody = z.infer<typeof BusMessageBodySchema>;
 
 // ── Session bus: what the APP reads of its OWN bridge ────────────────────────
-// The five frames above are agent-to-agent traffic the app only CARRIES between
-// two bridges that cannot dial each other. These are the opposite: an app
-// asking the bridge it is attached to about its own sessions, and consuming the
+// The four frames above are agent-to-agent traffic that travels sealed between
+// two bridges over the relay queue; an app never carries them. These are the
+// opposite: an app asking the bridge it is attached to about its own sessions, and consuming the
 // answer. Same plane all the same — `SessionBusApi` is built inside the project
 // core with the machine-level directory injected into it, so machine-scoped
 // STATE never implied machine-scoped transport.
@@ -2581,12 +2572,17 @@ const SessionBusThreadEntrySchema = z.object({
   peer: SessionMemberKeySchema,
   summary: z.string().max(MAX_SUMMARY_CHARS),
   text: z.array(z.string()),
-  /** Outbound entries only: when a receipt saying the peer BRIDGE took the
-   *  frame arrived. Never that the peer's agent read it, and never that a
-   *  message from that peer can reach back here. Absent covers silence and a
-   *  refusing receipt alike — a receipt is fire-and-forget and an unacked
-   *  message is never retried. This read is the only surface it is visible on. */
+  /** Outbound entries only: when the peer BRIDGE's signed acknowledgement said
+   *  it stored the message. Never that the peer's agent read it, and never that
+   *  a message from that peer can reach back here. Absent covers every rung
+   *  below it; `delivery` says which one the message has reached. */
   deliveredAt: z.number().optional(),
+  /** Outbound entries only. `held` is on this machine, `relayed` is the relay's
+   *  own receipt, `delivered` is the recipient's signed ack, `refused` is
+   *  terminal. Optional so an app that predates it keeps parsing. */
+  delivery: z.enum(["held", "relayed", "delivered", "refused"]).optional(),
+  /** Why a `refused` message was refused. */
+  refusedCode: z.string().max(64).optional(),
 });
 
 const SessionBusDirectoryMessage = BaseMessage.extend({
@@ -2849,7 +2845,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionBusNotifyMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
-  SessionBusAckMessage,
   SessionBusDirectoryMessage,
   SessionBusDirectoryResultMessage,
   SessionBusInboxMessage,
@@ -3042,7 +3037,6 @@ export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
 export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
-export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
 export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
 export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
 export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
@@ -3251,7 +3245,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result",
   "session-bus:directory", "session-bus:directory:result",
   "session-bus:inbox", "session-bus:inbox:result",
   "session-bus:thread", "session-bus:thread:result",

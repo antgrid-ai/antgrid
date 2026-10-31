@@ -3,14 +3,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalListener } from "../src/local-listener";
 import { MessageBus } from "../src/message-bus";
 import {
   AbMessageSchema,
   CHECKOUT_VARIABLE_MESSAGE_TYPES,
   createMessage,
   parseMessageFast,
-  SessionBusAckWire,
   SessionBusFetchResultWire,
   SessionBusFetchWire,
   SessionBusMessageWire,
@@ -23,6 +21,7 @@ import {
   type SessionBusEvent,
   type SessionBusSelf,
 } from "../src/session-bus/coordinator";
+import { BUS_RETRY_BASE_MS } from "../src/session-bus/constants";
 import { HELD_MESSAGE_TTL_MS } from "../src/session-bus/held-store";
 
 const LEAD_REF: SessionMemberRef = {
@@ -80,12 +79,6 @@ const SAMPLES: { msg: AbMessage; wire: { safeParse: (v: unknown) => { success: b
     }),
     wire: SessionBusFetchResultWire,
   },
-  {
-    msg: createMessage("session-bus:ack", {
-      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", messageId: "msg-1", ok: true,
-    }),
-    wire: SessionBusAckWire,
-  },
 ];
 
 describe("session-bus protocol", () => {
@@ -125,71 +118,14 @@ describe("session-bus protocol", () => {
   });
 });
 
-describe("session-bus forwarding", () => {
-  let bus: MessageBus;
-  let listener: LocalListener;
-
-  beforeEach(async () => {
-    bus = new MessageBus();
-    listener = new LocalListener({ bus, token: "secret-token", projectId: "proj-bus" });
-    await listener.start();
-  });
-  afterEach(async () => { await listener.stop(); });
-
-  async function openOwner(carrier: boolean): Promise<WebSocket> {
-    const ws = new WebSocket(`ws://127.0.0.1:${listener.port}`);
-    await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      ws.onerror = (e) => reject(e);
-    });
-    ws.send(JSON.stringify({
-      type: "hello", token: "secret-token", appPid: 1, appVersion: "test",
-      ...(carrier ? { capabilities: { sessionBusCarrier: true } } : {}),
-    }));
-    await new Promise<void>((resolve) => {
-      ws.onmessage = (ev) => { if (JSON.parse(String(ev.data)).type === "ready") resolve(); };
-    });
-    return ws;
-  }
-
-  test("the owner socket sees a bus frame and a bus subscriber never does", async () => {
-    // The first invariant of spec 4.1: the lead's phone is a bus subscriber, and
-    // the bus has no addressing, so anything published fans out to it.
-    const subscriber: string[] = [];
-    bus.subscribe({ deliver: (msg) => { subscriber.push(msg.type); } });
-
-    const ws = await openOwner(true);
-    const owner: string[] = [];
-    ws.onmessage = (ev) => { owner.push(JSON.parse(String(ev.data)).type); };
-
-    for (const { msg } of SAMPLES) expect(listener.deliverToOwner(msg)).toBe(true);
-    await Bun.sleep(50);
-
-    expect(owner).toEqual(SAMPLES.map((s) => s.msg.type));
-    expect(subscriber).toEqual([]);
-    ws.close();
-  });
-
-  test("with no carrier the frame does not leave and nothing is published", async () => {
-    const subscriber: string[] = [];
-    bus.subscribe({ deliver: (msg) => { subscriber.push(msg.type); } });
-    const ws = await openOwner(false);
-    expect(listener.deliverToOwner(SAMPLES[0]!.msg)).toBe(false);
-    await Bun.sleep(20);
-    expect(subscriber).toEqual([]);
-    ws.close();
-  });
-});
-
-describe("session-bus coordinator across a carrier", () => {
+describe("session-bus coordinator across a transport", () => {
   let dir: string;
   let lead: SessionBusCoordinator;
   let peer: SessionBusCoordinator;
   let carried: AbMessage[];
-  let routes: { contextId: string; role: string }[];
   let leadEvents: SessionBusEvent[];
   let peerEvents: SessionBusEvent[];
-  let carrierUp: boolean;
+  let transportUp: boolean;
   let now: number;
   let ids: number;
 
@@ -201,25 +137,23 @@ describe("session-bus coordinator across a carrier", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "sb-wire-"));
     carried = [];
-    routes = [];
     leadEvents = [];
     peerEvents = [];
-    carrierUp = true;
+    transportUp = true;
     now = 1_000_000;
     ids = 0;
     const newId = () => `id-${++ids}`;
-    // One carrier for both ends, which is what a desktop app relaying between
-    // two bridges actually is. Every frame is captured before delivery so a test
-    // can hold, drop or duplicate it the way a real link does.
+    // One transport for both ends, standing in for the relay between two
+    // bridges. Every frame is captured before delivery so a test can hold, drop
+    // or duplicate it the way a real link does.
     lead = new SessionBusCoordinator({
       abDir: join(dir, "lead"),
       projectIdFor: () => "p-lead",
       self: selfFor(LEAD_REF),
-      send: (frame, ctx) => {
-        if (!carrierUp) return false;
+      send: (frame) => {
+        if (!transportUp) return { sent: false, reason: "no-transport" };
         carried.push(frame);
-        routes.push({ contextId: ctx.contextId, role: ctx.role });
-        return true;
+        return { sent: true };
       },
       onEvent: (e) => leadEvents.push(e),
       now: () => now,
@@ -229,11 +163,10 @@ describe("session-bus coordinator across a carrier", () => {
       abDir: join(dir, "peer"),
       projectIdFor: () => "p-peer",
       self: selfFor(PEER_REF),
-      send: (frame, ctx) => {
-        if (!carrierUp) return false;
+      send: (frame) => {
+        if (!transportUp) return { sent: false, reason: "no-transport" };
         carried.push(frame);
-        routes.push({ contextId: ctx.contextId, role: ctx.role });
-        return true;
+        return { sent: true };
       },
       onEvent: (e) => peerEvents.push(e),
       now: () => now,
@@ -247,13 +180,19 @@ describe("session-bus coordinator across a carrier", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Deliver everything the carrier is holding, to whichever end it addresses. */
+  /** Deliver everything the transport is holding, to whichever end it addresses,
+   *  and report an applied frame back to its sender the way the recipient's
+   *  signed acknowledgement does. */
   function drain(): AbMessage[] {
     const batch = carried;
     carried = [];
     for (const frame of batch) {
       const to = (frame as { to: SessionMemberKey }).to;
-      (to.sessionId === LEAD_REF.sessionId ? lead : peer).handleInbound(frame);
+      const toLead = to.sessionId === LEAD_REF.sessionId;
+      const outcome = (toLead ? lead : peer).handleInbound(frame);
+      if (outcome === "applied" && "envelope" in frame) {
+        (toLead ? peer : lead).onTransportOutcome(frame.envelope.messageId, to.machineId, { kind: "applied" });
+      }
     }
     return batch;
   }
@@ -272,7 +211,7 @@ describe("session-bus coordinator across a carrier", () => {
     return res.messageId;
   }
 
-  test("a post is delivered, raised as an event, and answered with a receipt", () => {
+  test("a post is delivered and raised as an event, and nothing is sent back by the coordinator", () => {
     const messageId = post();
     const sent = drain();
     expect(sent).toHaveLength(1);
@@ -280,19 +219,15 @@ describe("session-bus coordinator across a carrier", () => {
     expect((sent[0] as { to: SessionMemberKey }).to).toEqual(PEER_KEY);
     expect(peerEvents.map((e) => e.kind)).toEqual(["post"]);
 
-    // E6: the receipt is keyed by the message it answers and is the only honest
-    // witness that the frame arrived, since everything on the sending side can
-    // report only that it left.
-    expect(carried).toHaveLength(1);
-    expect(carried[0]!.type).toBe("session-bus:ack");
-    expect((carried[0] as unknown as { messageId: string }).messageId).toBe(messageId);
+    // The receipt is the transport's to send, signed by the recipient's
+    // machine; a coordinator that answered a fold itself would be a second,
+    // unsigned witness.
+    expect(carried).toEqual([]);
+    expect(messageId).toBeTruthy();
   });
 
-  test("the receipt stamps the sender's own log entry, and only the outbound one", () => {
+  test("the acknowledgement stamps the sender's own log entry, and only the outbound one", () => {
     const messageId = post();
-    drain();
-    // The second drain carries home the ack the peer raised while folding, which
-    // is what turns "it left" into "it arrived".
     drain();
 
     const out = lead.messages(LEAD_REF.sessionId).entries.filter((e) => e.direction === "out");
@@ -375,10 +310,9 @@ describe("session-bus coordinator across a carrier", () => {
     expect(peerEvents[0]!.answering).toBeUndefined();
   });
 
-  test("a frame naming a session this bridge does not hold is dropped without an ack", () => {
-    // Reported as DROPPED, not merely "a bus frame": the agent core binds the
-    // only route home on this answer, so a frame naming somebody else's session
-    // must not be able to claim it.
+  test("a frame naming a session this bridge does not hold is dropped", () => {
+    // Reported as DROPPED, not merely "a bus frame": the host refuses on this
+    // answer, so a frame naming somebody else's session is never acknowledged.
     const stray = createMessage("session-bus:post", {
       from: LEAD_KEY,
       to: { machineId: "m-peer", projectId: "p-peer", sessionId: "s-nobody" },
@@ -389,7 +323,7 @@ describe("session-bus coordinator across a carrier", () => {
     expect(peerEvents).toEqual([]);
   });
 
-  test("an accepted frame is reported applied, so a route is bound only on one", () => {
+  test("an accepted frame is reported applied", () => {
     post();
     const [frame] = carried;
     carried.length = 0;
@@ -398,33 +332,6 @@ describe("session-bus coordinator across a carrier", () => {
 
   test("a non-bus frame falls through", () => {
     expect(lead.handleInbound(createMessage("terminal:input", { terminalId: "t", data: "x" }))).toBe(false);
-  });
-
-  test("a reply is routed home, not defaulted to the machine that opened the context", () => {
-    post();
-    drain();
-    routes.length = 0;
-
-    // The route has to come from the SESSION's side of the context: a "lead"
-    // route on the answering machine posts the reply to THAT machine's own
-    // desktop app, which accepts it and reports it sent.
-    const res = peer.message({
-      sessionId: PEER_REF.sessionId,
-      verb: "post",
-      threadId: null,
-      to: LEAD_REF,
-      contextId: LEAD_REF.sessionId,
-      summary: "an aside",
-      parts: [{ kind: "text", text: "an aside" }],
-    });
-    expect("ok" in res && res.ok).toBe(true);
-    expect(routes).toHaveLength(1);
-    expect(routes[0]!.role).toBe("peer");
-
-    // And the same derivation on the machine the context belongs to.
-    routes.length = 0;
-    post();
-    expect(routes[0]!.role).toBe("lead");
   });
 
   test("a session this bridge does not hold is refused rather than given an address", () => {
@@ -440,13 +347,11 @@ describe("session-bus coordinator across a carrier", () => {
     expect((res as { code: string }).code).toBe("NOT_MEMBER");
   });
 
-  // A message can be lost and has nothing to dedup by, so one already on the
-  // wire can never be resent. One the transport REFUSED is a different frame: it
-  // never reached the relay, so putting it out later is a delivery and not a
-  // second copy — and it is the case that decides whether a machine keeps what
-  // it wrote across the seconds its carrier is away.
-  test("a refused message is held and goes once when a route returns", () => {
-    carrierUp = false;
+  // A message the transport could not take stays held and goes out once the
+  // transport is back; one it accepted stays held too, until acknowledged, but
+  // is not offered again on the next tick.
+  test("an unsent message is held and goes once when the transport returns", () => {
+    transportUp = false;
 
     const res = peer.message({
       sessionId: PEER_REF.sessionId,
@@ -457,10 +362,11 @@ describe("session-bus coordinator across a carrier", () => {
       summary: "a finding",
       parts: [{ kind: "text", text: "the suite is red" }],
     });
-    expect(res).toMatchObject({ ok: true, sent: false, held: true });
+    expect(res).toMatchObject({ ok: true, sent: false, held: true, rung: "held", heldReason: "no-transport" });
     expect(carried).toEqual([]);
 
-    carrierUp = true;
+    transportUp = true;
+    now += BUS_RETRY_BASE_MS;
     peer.pump();
     expect(carried).toHaveLength(1);
     expect(carried[0]!.type).toBe("session-bus:post");
@@ -470,8 +376,26 @@ describe("session-bus coordinator across a carrier", () => {
     expect(carried).toEqual([]);
   });
 
+  test("an acknowledged message is released and is not offered again", () => {
+    transportUp = false;
+    const res = peer.message({
+      sessionId: PEER_REF.sessionId, verb: "post", threadId: null, to: LEAD_REF,
+      contextId: LEAD_REF.sessionId, summary: "a finding", parts: [{ kind: "text", text: "red" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error("refused");
+    transportUp = true;
+    now += BUS_RETRY_BASE_MS;
+    peer.pump();
+    drain();
+    expect(peer.messages(PEER_REF.sessionId).entries.find((e) => e.direction === "out")?.deliveredAt).toBe(now);
+
+    now += 10 * BUS_RETRY_BASE_MS;
+    peer.pump();
+    expect(carried).toEqual([]);
+  });
+
   test("a held message survives a restart of the machine that could not send it", () => {
-    carrierUp = false;
+    transportUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
       verb: "post",
@@ -488,7 +412,7 @@ describe("session-bus coordinator across a carrier", () => {
       abDir: join(dir, "peer"),
       projectIdFor: () => "p-peer",
       self: selfFor(PEER_REF),
-      send: (frame) => { carried.push(frame); return true; },
+      send: (frame) => { carried.push(frame); return { sent: true }; },
       now: () => now,
       newId: () => "id-restart-msg",
     });
@@ -496,7 +420,7 @@ describe("session-bus coordinator across a carrier", () => {
     // and nothing else is going to name this one, so without the enumeration
     // what the dead process held simply never goes.
     resumed.resume();
-    resumed.pump();
+    resumed.retryNow();
     resumed.stop();
 
     expect(carried).toHaveLength(1);
@@ -504,7 +428,7 @@ describe("session-bus coordinator across a carrier", () => {
   });
 
   test("a held message stops being worth delivering once its life has lapsed", () => {
-    carrierUp = false;
+    transportUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
       verb: "post",
@@ -516,94 +440,12 @@ describe("session-bus coordinator across a carrier", () => {
     });
 
     now += HELD_MESSAGE_TTL_MS;
-    carrierUp = true;
+    transportUp = true;
     peer.pump();
     // The lossiness a message plane asks for, spent where it costs least: a note
     // about a conversation this old arrives as noise, not as news.
     expect(carried.filter((f) => f.type === "session-bus:post")).toEqual([]);
-  });
-});
-
-// The harness above sends every peer-role frame unconditionally, so it cannot
-// see what agent-core's own carrier does: there is exactly one way home for a
-// peer-role frame and it is the route the inbound frame taught. The receipt a
-// fold dispatches is such a frame, and it is fire-and-forget — so the moment the
-// route is bound, relative to the fold, is the whole of whether the first
-// message of a cross-machine exchange is ever reported delivered.
-describe("session-bus route binding around the fold", () => {
-  let dir: string;
-  let peer: SessionBusCoordinator;
-  let carried: AbMessage[];
-  let now: number;
-
-  const CONTEXT = "ctx-opened-by-lead";
-
-  const selfFor = (ref: SessionMemberRef) => (sessionId: string): SessionBusSelf | null =>
-    sessionId === ref.sessionId
-      ? { key: { machineId: ref.machineId, projectId: ref.projectId, sessionId }, ref }
-      : null;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "sb-route-"));
-    carried = [];
-    now = 2_000_000;
-    peer = new SessionBusCoordinator({
-      abDir: join(dir, "peer"),
-      projectIdFor: () => "p-peer",
-      self: selfFor(PEER_REF),
-      // agent-core.ts's `send` closure, reduced to the decision under test.
-      send: (frame, ctx) => {
-        if (ctx.role === "peer" && !peer.routeFor(ctx.contextId)) return false;
-        carried.push(frame);
-        return true;
-      },
-      now: () => now,
-      newId: () => "id-route",
-    });
-  });
-
-  afterEach(() => {
-    peer.stop();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  const inbound = (to: SessionMemberKey, contextId: string) =>
-    createMessage("session-bus:post", {
-      from: LEAD_KEY,
-      to,
-      contextId,
-      threadId: null,
-      envelope: {
-        messageId: "msg-opening",
-        threadId: null,
-        contextId,
-        parts: [{ kind: "text" as const, text: "run the suite" }],
-        metadata: { peer: LEAD_REF, summary: "run the suite", timestamp: now },
-      },
-    });
-
-  test("the receipt for the frame that OPENS a context reaches its carrier", () => {
-    // Nothing has ever routed this context: this is the first frame of the
-    // exchange, which is exactly where the sender looks for its receipt.
-    expect(peer.routeFor(CONTEXT)).toBeNull();
-
-    expect(peer.handleInbound(inbound(PEER_KEY, CONTEXT), () => peer.noteRoute(CONTEXT, "app-1", "p-peer")))
-      .toBe("applied");
-
-    // Observed at the carrier, not in the log: an ack that was never handed to
-    // a transport is not a receipt, and nothing retries one.
-    expect(carried.map((f) => f.type)).toEqual(["session-bus:ack"]);
-    expect((carried[0] as unknown as { messageId: string }).messageId).toBe("msg-opening");
-  });
-
-  test("a frame whose address check fails binds no route", () => {
-    // The rebind hole: this map is the far end's only way home, so a frame
-    // naming a session this bridge does not hold must not be able to claim a
-    // context and take the next answer for itself.
-    expect(peer.handleInbound(inbound({ machineId: "m-peer", projectId: "p-peer", sessionId: "s-nobody" }, CONTEXT), () =>
-      peer.noteRoute(CONTEXT, "app-impostor", "p-peer"),
-    )).toBe("dropped");
-    expect(peer.routeFor(CONTEXT)).toBeNull();
-    expect(carried).toEqual([]);
+    const out = peer.messages(PEER_REF.sessionId).entries.find((e) => e.direction === "out");
+    expect(out?.refusedCode).toBe("EXPIRED");
   });
 });
