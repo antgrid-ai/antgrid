@@ -39,9 +39,11 @@ async function tryRead(path: string): Promise<string | null> {
 // `<local-command-stdout>…`, neither of which carries isMeta (only the
 // `<local-command-caveat>` line does). They are CLI plumbing, not the user
 // talking, and the live/in-memory path never records them, so drop them here to
-// keep disk backfill at parity. Matching requires the content be ENTIRELY
-// wrapper elements, so a prompt that merely quotes one survives.
-const LOCAL_COMMAND_TAG = "command-name|command-message|command-args|command-contents|local-command-stdout|local-command-stderr";
+// keep disk backfill at parity. A `!` shell escape is logged the same way, as
+// `<bash-input>` and `<bash-stdout>`/`<bash-stderr>` entries. Matching requires
+// the content be ENTIRELY wrapper elements, so a prompt that merely quotes one
+// survives.
+const LOCAL_COMMAND_TAG = "command-name|command-message|command-args|command-contents|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr";
 // Strip-and-check rather than one anchored `(?:<tag>…</tag>)+$` match: repeating
 // a group around a lazy inner quantifier backtracks catastrophically on a long
 // entry that opens a wrapper but never cleanly closes it.
@@ -80,6 +82,10 @@ function parseTranscript(raw: string): any[] {
     if (entry?.isSidechain === true || entry?.isMeta === true) continue;
     if (entry?.type !== "user" && entry?.type !== "assistant") continue;
     if (isLocalCommandNoise(entry)) continue;
+    // A background task's `<task-notification>` is written as a flagless user
+    // entry; only its origin says nobody typed it. The live path never records
+    // one, so replaying it would open a turn the session never had.
+    if (isNonHumanOrigin(entry)) continue;
     out.push(entry);
   }
   // Cap AFTER filtering so the budget counts real messages, not queue-operation
