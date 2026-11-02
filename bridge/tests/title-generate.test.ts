@@ -378,6 +378,17 @@ describe("cheapNamingModel", () => {
     expect(CODEX_0_163_LISTED).toContain(argv[argv.indexOf("-m") + 1]);
   });
 
+  // opencode's openai provider, signed in with a ChatGPT account, routes
+  // through the same Codex backend and refuses the same unlisted slugs.
+  test("opencode names with an openai model a ChatGPT-account catalog lists", async () => {
+    const { spawn, calls } = fakeSpawn("t\n");
+    await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
+    const argv = calls[0]!;
+    const [provider, slug] = argv[argv.indexOf("--model") + 1]!.split("/");
+    expect(provider).toBe("openai");
+    expect(CODEX_0_163_LISTED).toContain(slug);
+  });
+
   // Each agent's `cmd` places --model at a different, independently-verified
   // spot in the argv (immediately after --allowedTools' value for claude,
   // immediately before the positional prompt for codex and opencode). The
@@ -399,7 +410,7 @@ describe("cheapNamingModel", () => {
     await generateTitleFromContext("ctx", {
       tool: "opencode", spawn: opencode.spawn, installedTools: ["opencode"],
     });
-    expect(opencode.calls[0]!.slice(-3, -1)).toEqual(["--model", "openai/gpt-5.4-mini"]);
+    expect(opencode.calls[0]!.slice(-3, -1)).toEqual(["--model", "openai/gpt-5.6-luna"]);
   });
 });
 
