@@ -620,6 +620,14 @@ export interface AgentCliSpec {
   env?: (ctx: LaunchEnvCtx) => Record<string, string>;
 }
 
+/** What `AgentSpec.resolveNamingModel` may ask of the host. Both answer
+ *  undefined on any failure rather than throwing. */
+export interface NamingModelProbe {
+  /** Stdout of the agent's binary run with these arguments, on exit 0. */
+  run(args: string[]): Promise<string | undefined>;
+  readText(path: string): Promise<string | undefined>;
+}
+
 export interface AgentSpec {
   cli?: AgentCliSpec;
   conversations?: { terminal?: readonly ("fresh" | "resume" | "fork")[]; chat?: readonly ("fresh" | "resume")[] };
@@ -862,6 +870,20 @@ export interface AgentSpec {
    * handed to codex fails the call outright.
    */
   cheapNamingModel?: string;
+  /**
+   * Asks the installed CLI which model to name with, for a vendor where no
+   * fixed `cheapNamingModel` can be right: a multi-provider front end (opencode)
+   * reaches whatever providers this user configured, so any one slug fails
+   * outright for every user without that provider. Takes precedence over
+   * `cheapNamingModel`; undefined sends no `--model`, leaving the CLI on its
+   * own default.
+   *
+   * Read off the serving agent, like `cheapNamingModel`, and subject to the
+   * same `ANTGRID_NAMING_MODEL=0` switch. The probe runs that agent's binary
+   * with the naming spawn's own env and cwd, so it resolves the same config the
+   * naming call will.
+   */
+  resolveNamingModel?: (probe: NamingModelProbe) => Promise<string | undefined>;
   /**
    * This vendor charges a whole billing unit per headless call, however small
    * the call is.
