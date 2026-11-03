@@ -2947,12 +2947,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "machine:stats:request": {
         // Read on demand rather than pushed: the figures are only shown while
-        // someone is looking, so a core nobody asks samples nothing.
+        // someone is looking, so a core nobody asks samples nothing, and only
+        // the asker is answered.
         // Caught rather than voided: an escaped rejection reaches index.ts's
         // `unhandledRejection` hook, which takes the whole host down. A read that
         // settles after shutdown must not publish into the torn-down transport.
         readMachineStats()
-          .then((stats) => { if (!isShuttingDown) sendAb(createMessage("machine:stats", stats)); })
+          .then((stats) => { if (!isShuttingDown) sendAbTo(createMessage("machine:stats", stats), client); })
           .catch((err) => log.warn("machine:stats send failed: %s", err));
         break;
       }

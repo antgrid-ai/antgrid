@@ -21,7 +21,7 @@ let lastCpuPercent: number | undefined;
 
 /** Whole-machine busy share since the last usable sample, 0-100. Primed at
  *  import, so the first report averages over the process's lifetime. */
-export function readCpuPercent(): number | undefined {
+function readCpuPercent(): number | undefined {
   const now = sampleCpuTimes();
   const total = now.total - lastCpu.total;
   if (total >= MIN_CPU_WINDOW_MS) {
@@ -49,11 +49,7 @@ async function readMachineStatsNow(): Promise<MachineStats> {
   const cpuPercent = readCpuPercent();
   const ramTotalBytes = totalmem();
   const fromVmStat = process.platform === "darwin" ? await readDarwinAvailable(ramTotalBytes) : null;
-  return {
-    ramTotalBytes,
-    ramAvailableBytes: fromVmStat ?? freemem(),
-    ...(cpuPercent === undefined ? {} : { cpuPercent }),
-  };
+  return { ramTotalBytes, ramAvailableBytes: fromVmStat ?? freemem(), cpuPercent };
 }
 
 // freemem() on macOS counts only never-used pages, so a machine with

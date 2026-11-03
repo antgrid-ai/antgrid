@@ -37,15 +37,14 @@ class DeviceStats {
 
     final model = json['model'];
     final reportedAt = json['reportedAt'];
+    final cpuPercent = json['cpuPercent'];
     return DeviceStats(
       model: model is String && model.isNotEmpty ? model : null,
       ramTotalBytes: bytes('ramTotalBytes'),
       ramAvailableBytes: bytes('ramAvailableBytes'),
       storageTotalBytes: bytes('storageTotalBytes'),
       storageFreeBytes: bytes('storageFreeBytes'),
-      cpuPercent: json['cpuPercent'] is num
-          ? (json['cpuPercent'] as num).clamp(0, 100).round()
-          : null,
+      cpuPercent: cpuPercent is num ? cpuPercent.clamp(0, 100).round() : null,
       reportedAt: reportedAt is String ? reportedAt : null,
     );
   }
