@@ -48,6 +48,27 @@ describe("owned provider startup", () => {
     expect(spawns).toBe(1);
   });
 
+  it("forwards Codex MCP overrides alongside native config without TUI hooks", async () => {
+    const ctx = context();
+    ctx.chatAugment = () => ({
+      args: ["-c", "hooks.state={}", "-c", 'mcp_servers.antgrid.command="bridge"', "-c", "notify=[]"],
+      env: { ANTGRID_TERMINAL_ID: "s", ANTGRID_API_PORT: "1234", ANTGRID_RUN_ID: "run" },
+    });
+    let captured: any;
+    const driver = createCodexDriver(ctx, (opts) => {
+      captured = opts;
+      return { endpoint: endpoint(), failureDiagnosis: Promise.resolve(null), kill: async () => {} };
+    });
+    try {
+      await driver.start();
+      expect(captured.cwd).toBe("/checkout");
+      expect(captured.args).toContain('mcp_servers.antgrid.command="bridge"');
+      expect(captured.args).not.toContain("hooks.state={}");
+      expect(captured.args.some((arg: string) => arg.startsWith("approval_policy="))).toBe(false);
+      expect(captured.env).toEqual(ctx.chatAugment().env);
+    } finally { await driver.dispose(); }
+  });
+
   it("can dispose Codex before startup without ever spawning", async () => {
     let spawns = 0;
     const driver = createCodexDriver(context(), () => {
@@ -107,7 +128,10 @@ describe("owned provider startup", () => {
       events: async function* () { requests++; },
       dispose: async () => { closes++; },
     } as unknown as OpencodeClientLike;
-    const driver = createOpencodeDriver(context(), () => { spawns++; return spawned; });
+    const ctx = context();
+    ctx.chatAugment = () => ({ args: [], env: { ANTGRID_TERMINAL_ID: "s", OPENCODE_CONFIG_CONTENT: '{"mcp":{"antgrid":{}}}' } });
+    let captured: any;
+    const driver = createOpencodeDriver(ctx, (opts) => { captured = opts; spawns++; return spawned; });
     expect(spawns).toBe(0);
     const starting = driver.start();
     const outcome = starting.then(() => null, (error: unknown) => error);
@@ -120,6 +144,8 @@ describe("owned provider startup", () => {
     expect(await outcome).toBeInstanceOf(Error);
     expect(String(await outcome)).toContain("disposed");
     expect(spawns).toBe(1);
+    expect(captured.cwd).toBe("/checkout");
+    expect(captured.env).toEqual(ctx.chatAugment().env);
     expect(closes).toBe(1);
     expect(requests).toBe(0);
   });

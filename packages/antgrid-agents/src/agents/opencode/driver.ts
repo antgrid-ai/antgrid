@@ -1,5 +1,6 @@
 import { OpencodeDriver, type OpencodeClientLike } from "./chat-backend";
 import { spawnOpencode } from "./spawn";
+import { OpencodeStartupCancelledError } from "./server";
 import type { StructuredDriver } from "../../structured/structured-driver";
 import type { DriverCtx } from "../types";
 
@@ -12,7 +13,7 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
   const ensure = () => {
     if (closed) throw new Error("OpenCode backend is disposed");
     if (!spawned) {
-      spawned = spawn({ cwd: ctx.projectPath });
+      spawned = spawn({ cwd: ctx.projectPath, env: ctx.chatAugment().env, signal: ctx.scope.signal });
       ctx.emitUpdateCheck();
     }
     return spawned;
@@ -42,7 +43,13 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     // Await the real teardown (server exit) so an in-app `opencode
     // upgrade` never runs while the SDK server still holds the binary.
     // Nothing spawned yet → nothing to wait for.
-    dispose: async () => { closed = true; await spawned?.then((s) => s.client.dispose()); },
+    dispose: async () => {
+      closed = true;
+      await spawned?.then((s) => s.client.dispose(), (error: unknown) => {
+        // Cancellation is reported only after startup has released its child.
+        if (!(error instanceof OpencodeStartupCancelledError)) throw error;
+      });
+    },
   };
   return new OpencodeDriver({
     onAgentSession: ctx.onAgentSession,

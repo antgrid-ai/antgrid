@@ -1,8 +1,14 @@
-// Best-effort flatten of one mcpServer/elicitation/request onto agent:question
+// Best-effort flatten of one MCP elicitation request onto agent:question
 // primitives. The rule from the design spec: always surface SOMETHING — never
 // silently auto-decline, never block. Shapes verified against
 // codex-rs/app-server-protocol/src/protocol/v2/mcp.rs (mode tags "form",
 // "openai/form", "url"; McpElicitationSchema is a flat object-of-primitives).
+
+import { z } from "zod";
+
+export const McpElicitationContentSchema = z.record(z.string(), z.union([
+  z.string(), z.number(), z.boolean(), z.array(z.string()),
+]));
 
 export type FlatQuestion = {
   name: string;

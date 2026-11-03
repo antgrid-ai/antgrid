@@ -1,4 +1,5 @@
-import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { startOpencodeServer, type OpencodeServerOptions } from "./server";
 import type { OpencodeClientLike, OpencodeEvent } from "./chat-backend";
 
 export interface SpawnedOpencode {
@@ -17,13 +18,8 @@ function unwrap(res: any): any {
   return res?.data;
 }
 
-// Resolve once the server URL stops accepting connections (proof its process is
-// gone), bounded so a wedged teardown can't block a caller forever. An in-app
-// `opencode upgrade` replaces the on-disk binary, which on Windows fails while
-// the server (the SAME binary — the SDK spawns PATH `opencode`) still holds it;
-// so quiesce MUST await this before the updater runs. On Windows the SDK's
-// close() already blocks on `taskkill /F /T`, so the first probe fails
-// immediately; on posix it waits out the SIGTERM.
+// A slow HTTP response is not proof the listener stopped. Only a refused
+// connection confirms closure; timeout must remain a teardown failure.
 export async function waitServerGone(
   url: string,
   timeoutMs = 5_000,
@@ -57,9 +53,9 @@ export async function waitServerGone(
  * *route* shapes (and the typed question.reply call); those routes are the part
  * that must line up with the running server. See the driver's OpencodeEvent note.
  */
-export async function spawnOpencode(opts: { cwd: string }): Promise<SpawnedOpencode> {
-  const server = await createOpencodeServer({ hostname: "127.0.0.1", port: 0 });
-  const client = createOpencodeClient({ baseUrl: server.url, directory: opts.cwd });
+export async function spawnOpencode(opts: OpencodeServerOptions): Promise<SpawnedOpencode> {
+  const server = await startOpencodeServer(opts);
+  const client = createOpencodeClient({ baseUrl: server.url, directory: opts.cwd, headers: server.headers });
   const directory = opts.cwd;
 
   const like: OpencodeClientLike = {
@@ -120,7 +116,7 @@ export async function spawnOpencode(opts: { cwd: string }): Promise<SpawnedOpenc
       const sub = await client.event.subscribe({ directory });
       for await (const evt of sub.stream as AsyncIterable<OpencodeEvent>) yield evt;
     },
-    dispose: async () => { server.close(); await waitServerGone(server.url); },
+    dispose: () => server.close(),
   };
 
   return { client: like };

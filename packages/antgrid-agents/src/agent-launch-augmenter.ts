@@ -14,9 +14,7 @@ export interface AugmentOptions {
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;
-  /** `false` skips the MCP profile. Chat spawns pass it: no chat driver
-   *  forwards an MCP channel, and the session directory lists chat sessions
-   *  as receive-only on that basis. */
+  /** `false` skips the MCP profile for launches that cannot expose tools. */
   mcp?: false;
 }
 export function injectsHookAliveProbe(tool: string): boolean {

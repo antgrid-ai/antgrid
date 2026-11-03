@@ -1,4 +1,5 @@
-import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, OnElicitation } from "@anthropic-ai/claude-agent-sdk";
+import { planElicitation, McpElicitationContentSchema } from "../../structured/mcp-elicitation";
 import { type AbMessage } from "../../protocol";
 import type { ClaudeQueryLike, PromptStreamController } from "./spawn";
 import type { ConfigPick } from "../../structured/set-config";
@@ -66,17 +67,10 @@ function mapModelInfos(models: any[]): CatalogModel[] {
       // as the top rung of the effort selector — mirror that. The SDK gates it
       // on an xhigh-capable model, so only offer it where xhigh is present.
       const efforts = base.includes("xhigh") ? [...base, "ultracode"] : base;
+      // Supported levels do not reveal the user's effective effort setting.
       return {
         id: String(m.value), name: prettyModelName(m.displayName ?? m.value, m.resolvedModel),
         ...(efforts.length ? { efforts } : {}),
-        // Claude's ModelInfo carries no default-effort marker, so seed one from
-        // the catalog order: the 2nd real rung (base[1]). The composer shows
-        // this as the effort pill's default and the driver applies it to the
-        // session (see seedDefaultEffort) so pill and session effort stay in
-        // lockstep. Derived from `base`, never `efforts`, so the appended
-        // "ultracode" pseudo-rung is never picked as a silent default — it's a
-        // heavy session flag (xhigh + standing orchestration), not a sane default.
-        ...(base.length > 1 ? { defaultEffort: base[1] } : {}),
       };
     });
 }
@@ -134,7 +128,7 @@ export interface ClaudeDriverOpts {
   sendMessage: (m: AbMessage) => void;
   model?: string;
   // Injected so tests supply a fake query; agent-core passes real spawnClaude.
-  spawn: (args: { canUseTool: CanUseTool; abort: AbortController; resume?: string }) => { query: ClaudeQueryLike; controller: PromptStreamController };
+  spawn: (args: { canUseTool: CanUseTool; onElicitation: OnElicitation; abort: AbortController; resume?: string }) => { query: ClaudeQueryLike; controller: PromptStreamController };
   // Project cwd — needed to locate Claude Code's on-disk transcript for
   // cold-resume backfill (getTranscriptSnapshot). Omitted by tests that don't
   // exercise disk backfill (then the in-memory fallback is used).
@@ -262,7 +256,7 @@ export class ClaudeDriver extends ChatSession {
     // Anchor on-disk transcript backfill to the resumed id up front (its file
     // holds the pre-resume conversation), before init reports anything.
     this.agentSessionId = resumeId;
-    const spawned = this.spawnFn({ canUseTool: this.makeCanUseTool(), abort: this.abort, resume: resumeId });
+    const spawned = this.spawnFn({ canUseTool: this.makeCanUseTool(), onElicitation: this.elicitMcp, abort: this.abort, resume: resumeId });
     this.q = spawned.query;
     this.controller = spawned.controller;
     // Stored (not fire-and-forget) so dispose() can await the loop actually
@@ -456,15 +450,8 @@ export class ClaudeDriver extends ChatSession {
       const aliasId = aliasIdForResolved(this.rawModelCatalog, c.model);
       if (aliasId && aliasId !== this.selModel) {
         this.selModel = aliasId;
-        // Model changed under us — drop the effort seeded for the eager-default
-        // model so seedDefaultEffort re-derives (and re-applies) it for the
-        // booted model. Otherwise currentEffortId stays bound to the old model
-        // and may not even be in the new model's effort list. A user-pinned
-        // effort is preserved.
-        if (!this.effortExplicit) this.selEffort = undefined;
       }
     }
-    this.seedDefaultEffort();
     this.capabilitiesReady();
     // Refreshes after the initial boot and the re-init emitted by compaction.
     // This must not hold up init processing if the control request is slow.
@@ -702,7 +689,6 @@ export class ClaudeDriver extends ChatSession {
         // and dropped (see the gate comment).
         if (this.capModels.length) {
           this.pickDefaultModelIfUnset();
-          this.seedDefaultEffort();
           gotCatalog = true;
         }
       }
@@ -751,19 +737,6 @@ export class ClaudeDriver extends ChatSession {
       resolveDefaultModelId(this.rawModelCatalog) ??
       this.capModels.find((m) => m.id !== "default")?.id ??
       this.capModels[0]?.id;
-  }
-
-  // Seed the effort selector to the current model's default (its 2nd rung) and
-  // apply it to the session, so the pill and the actual session effort agree
-  // from session create. No-op once the user has picked an effort, or when the
-  // current model has no effort levels (the pill is hidden then anyway).
-  private seedDefaultEffort(): void {
-    if (this.effortExplicit || this.selEffort) return;
-    const pick = this.capModels.find((m) => m.id === this.selModel)?.defaultEffort;
-    if (!pick) return;
-    this.selEffort = pick;
-    this.guardPick(this.q?.applyFlagSettings({ effortLevel: pick, ultracode: false }), "effort", pick,
-      () => { this.selEffort = undefined; });
   }
 
   protected applySelection(pick: ConfigPick, prev: SelectionSnapshot): void {
@@ -965,6 +938,36 @@ export class ClaudeDriver extends ChatSession {
     if (this.history.length === 0) return [];
     return claudeResumeReplay(this.sessionId, this.history);
   }
+
+  private readonly elicitMcp: OnElicitation = async (request, { signal }) => {
+    if (signal.aborted || this.disposed) return { action: "cancel" };
+    const plan = planElicitation({ ...request, mode: request.mode ?? "form" });
+    const group = this.promptGroup();
+    const abort = () => group.retract();
+    signal.addEventListener("abort", abort, { once: true });
+    const questions = plan.mode === "form" ? plan.questions : [plan.question];
+    try {
+      const answers = await Promise.all(questions.map((question) => new Promise<string | null>((resolve) => {
+        this.askQuestion({
+          kind: question.kind,
+          prompt: `${request.serverName}: ${question.prompt}`,
+          ...(question.options ? { options: question.options } : {}),
+        }, (value) => resolve(Array.isArray(value) ? value[0] ?? "" : value), { group, single: true });
+      })));
+      if (answers.some((answer) => answer === null)) return { action: "cancel" };
+      if (plan.mode === "url") return { action: answers[0] === "done" ? "accept" : "decline" };
+      let content: unknown;
+      if (plan.mode === "json-fallback") {
+        try {
+          content = JSON.parse(answers[0]!);
+        } catch { return { action: "decline" }; }
+      } else {
+        content = Object.fromEntries(questions.map((question, i) => [question.name, question.coerce(answers[i]!)]));
+      }
+      const parsed = McpElicitationContentSchema.safeParse(content);
+      return parsed.success ? { action: "accept", content: parsed.data } : { action: "decline" };
+    } finally { signal.removeEventListener("abort", abort); }
+  };
 
   private makeCanUseTool(): CanUseTool {
     return (toolName, input, options): Promise<Awaited<ReturnType<CanUseTool>>> => {
