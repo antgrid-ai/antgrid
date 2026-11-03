@@ -28,10 +28,10 @@ function makeFakeClient(
   const client: OpencodeClientLike = {
     createSession: async (o) => { calls.push({ m: "createSession", args: [o] }); return rootId; },
     messages: async (s) => { calls.push({ m: "messages", args: [s] }); return []; },
-    deleteMessage: async (s, messageId) => { calls.push({ m: "deleteMessage", args: [s, messageId] }); },
+    revertMessages: async (s, messageId) => { calls.push({ m: "revertMessages", args: [s, messageId] }); },
     prompt: async (s, t, o) => { calls.push({ m: "prompt", args: [s, t, o] }); },
     abort: async (s) => { calls.push({ m: "abort", args: [s] }); },
-    summarize: async (s, model) => { calls.push({ m: "summarize", args: [s, model] }); },
+    summarize: async (s) => { calls.push({ m: "summarize", args: [s] }); },
     replyPermission: async (s, id, r) => { calls.push({ m: "replyPermission", args: [s, id, r] }); },
     replyQuestion: async (id, a) => { calls.push({ m: "replyQuestion", args: [id, a] }); },
     listCommands: async () => { calls.push({ m: "listCommands", args: [] }); return [
@@ -85,6 +85,46 @@ async function startedDriver(rootId = "ses_root") {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("OpencodeDriver", () => {
+  it("answers native forms with typed values and option values instead of labels", async () => {
+    const { driver, sent, push, calls } = await startedDriver();
+    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "MCP input", fields: [
+      { key: "count", type: "integer" }, { key: "ok", type: "boolean" },
+      { key: "choice", type: "string", options: [{ value: "stored-value", label: "Display label" }] },
+    ] } });
+    await tick();
+    const questions = sent.filter((message) => message.type === "agent:question");
+    expect(questions).toHaveLength(3);
+    for (const [index, answer] of ["3", "true", "stored-value"].entries()) driver.resolveQuestion(questions[index]!.questionId, answer);
+    await tick();
+    expect(calls.find((call) => call.m === "replyQuestion")?.args).toEqual(["form", JSON.stringify({ count: 3, ok: true, choice: "stored-value" })]);
+    await driver.dispose();
+  });
+
+  it("cancelling an external form withdraws its other fields immediately", async () => {
+    const { driver, sent, push, calls } = await startedDriver();
+    push({ type: "form.created", properties: { id: "form", sessionID: "global", title: "Authenticate", fields: [
+      { key: "login", type: "external", url: "https://example.test/login" }, { key: "extra", type: "string" },
+    ] } });
+    await tick();
+    const questions = sent.filter((message) => message.type === "agent:question");
+    driver.resolveQuestion(questions[0]!.questionId, "cancel");
+    await tick();
+    expect(calls.find((call) => call.m === "replyQuestion")?.args).toEqual(["form", null]);
+    expect(sent.some((message) => message.type === "agent:request-retracted" && message.questionId === questions[1]!.questionId)).toBe(true);
+    await driver.dispose();
+  });
+
+  it("withdraws externally answered forms without sending a second reply", async () => {
+    const { driver, sent, push, calls } = await startedDriver();
+    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "text", type: "string" }] } });
+    await tick();
+    push({ type: "form.replied", properties: { id: "form", sessionID: "ses_root" } });
+    await tick();
+    expect(sent.some((message) => message.type === "agent:request-retracted")).toBe(true);
+    expect(calls.some((call) => call.m === "replyQuestion")).toBe(false);
+    await driver.dispose();
+  });
+
   it("creates a session on start()", async () => {
     const { calls } = await startedDriver();
     expect(calls.find((c) => c.m === "createSession")).toBeDefined();
@@ -484,9 +524,8 @@ describe("OpencodeDriver", () => {
 
     await driver.revert({ messageId: "m2" });
 
-    expect(fake.calls.filter((c) => c.m === "deleteMessage").map((c) => c.args)).toEqual([
+    expect(fake.calls.filter((c) => c.m === "revertMessages").map((c) => c.args)).toEqual([
       ["ses_root", "m2"],
-      ["ses_root", "m3"],
     ]);
     expect(sent.some((m) => m.type === "agent:session-reset")).toBe(true);
   });
@@ -511,9 +550,9 @@ describe("OpencodeDriver", () => {
         fake.calls.push({ m: "messages", args: [sid] });
         return history;
       },
-      deleteMessage: async (sid: string, messageId: string) => {
-        fake.calls.push({ m: "deleteMessage", args: [sid, messageId] });
-        history = history.filter((m) => m.info.id !== messageId);
+      revertMessages: async (sid: string, messageId: string) => {
+        fake.calls.push({ m: "revertMessages", args: [sid, messageId] });
+        history = history.slice(0, history.findIndex((m) => m.info.id === messageId));
       },
     });
     const sent: AbMessage[] = [];
@@ -546,8 +585,8 @@ describe("OpencodeDriver", () => {
     let fake!: ReturnType<typeof makeFakeClient>;
     fake = makeFakeClient({
       messages: async () => history,
-      deleteMessage: async (_sid: string, messageId: string) => {
-        history = history.filter((m) => m.info.id !== messageId);
+      revertMessages: async (_sid: string, messageId: string) => {
+        history = history.slice(0, history.findIndex((m) => m.info.id === messageId));
       },
     });
     const sent: AbMessage[] = [];

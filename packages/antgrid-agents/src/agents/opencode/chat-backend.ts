@@ -7,14 +7,13 @@ import { subtask } from "../../structured/tool-card";
 import type { ConfigPick } from "../../structured/set-config";
 import { ChatSession, type ChatSessionProfile } from "../../structured/chat-session";
 import { logger } from "../../host";
+import type { FormInfo } from "@opencode/client";
+import type { PromptGroup } from "../../structured/chat-session";
+import { McpElicitationContentSchema } from "../../structured/mcp-elicitation";
 const log = logger.child({ component: "opencode-driver" });
 
-// `type` is a bare string, not the @opencode-ai/sdk Event union. The binary
-// streams every event on one unfiltered /event bus, so the set of names is not
-// tied to the SDK generation and grows/shrinks across opencode releases (the
-// PATH-resolved binary is unpinned). Going untyped keeps such skew from silently
-// dropping events at the type layer. Route skew (the experimental v2 routes the
-// seam calls) instead surfaces loudly at call time via unwrap() in spawn.ts.
+// Transport-normalized events share the transcript renderer's message/part shape.
+// Native OpenCode 2.x events are translated in v2-events.ts.
 export interface OpencodeEvent {
   type: string;
   properties: any;
@@ -31,12 +30,12 @@ export interface OpencodeClientLike {
   createSession(opts: { title?: string; parentID?: string }): Promise<string>;
   // Read a session's full message history (each { info, parts }) for resume.
   messages(sessionId: string): Promise<any[]>;
-  deleteMessage(sessionId: string, messageId: string): Promise<void>;
+  revertMessages(sessionId: string, messageId: string): Promise<void>;
   prompt(sessionId: string, text: string, opts?: OpencodePromptOpts): Promise<void>;
   abort(sessionId: string): Promise<void>;
-  summarize(sessionId: string, model: { providerID: string; modelID: string }): Promise<void>;
+  summarize(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, permissionId: string, response: "once" | "always" | "reject"): Promise<void>;
-  replyQuestion(questionId: string, answer: string | string[]): Promise<void>;
+  replyQuestion(questionId: string, answer: string | string[] | null): Promise<void>;
   listCommands(): Promise<any[]>;
   listAgents(): Promise<any[]>;
   listProviders(): Promise<{ all: any[]; default: Record<string, string>; connected: string[] }>;
@@ -59,6 +58,7 @@ export interface OpencodeDriverOpts {
 type ModelRef = { providerID: string; modelID: string };
 
 export class OpencodeDriver extends ChatSession {
+  private forms = new Map<string, PromptGroup>();
   // opencode's mappers build whole items and the driver names its own turns.
   // Its history carries no per-turn status to filter by — a turn in flight is
   // indistinguishable from a completed one — so a mid-turn snapshot is refused
@@ -84,7 +84,7 @@ export class OpencodeDriver extends ChatSession {
   // child sessionID -> its subtask anchor itemId; and child -> parent sessionID.
   private subtaskItem = new Map<string, string>();
   private parentSession = new Map<string, string>();
-  // last assistant model, for compact -> summarize (which requires an explicit model).
+  // Native selections remain authoritative until the user picks an override.
   private model: ModelRef | null = null;
 
   // "providerID/modelID" -> context-window size, from provider.list()'s
@@ -209,8 +209,7 @@ export class OpencodeDriver extends ChatSession {
   }
 
   async compact(): Promise<void> {
-    // opencode's summarize requires an explicit model; skip until we've seen one.
-    if (this.rootSessionId && this.model) await this.client.summarize(this.rootSessionId, this.model);
+    if (this.rootSessionId) await this.client.summarize(this.rootSessionId);
   }
 
   async revert(target: { messageId?: string }): Promise<void> {
@@ -220,10 +219,7 @@ export class OpencodeDriver extends ChatSession {
     const history = await this.client.messages(this.rootSessionId);
     const idx = history.findIndex((m) => m?.info?.id === targetMessageId);
     if (idx < 0) throw new Error("revert target message not found");
-    for (const msg of history.slice(idx)) {
-      const id = msg?.info?.id;
-      if (typeof id === "string" && id) await this.client.deleteMessage(this.rootSessionId, id);
-    }
+    await this.client.revertMessages(this.rootSessionId, targetMessageId);
     const nextHistory = await this.client.messages(this.rootSessionId);
     this.endTurn();
     this.emitSessionReset();
@@ -430,6 +426,18 @@ export class OpencodeDriver extends ChatSession {
       case "session.error": return this.onSessionError(p);
       case "permission.asked": return this.onPermissionAsked(p);
       case "question.asked": return this.onQuestionAsked(p);
+      case "form.created":
+        void this.onFormCreated(p).catch((error) => this.emitError(agentError({
+          category: "unknown", message: error instanceof Error ? error.message : String(error), retryable: true,
+        })));
+        return;
+      case "form.cancelled":
+      case "form.replied": {
+        const group = this.forms.get(p.id);
+        this.forms.delete(p.id);
+        group?.retract();
+        return;
+      }
       case "todo.updated": return this.onTodoUpdated(p);
       default: return;
     }
@@ -437,6 +445,7 @@ export class OpencodeDriver extends ChatSession {
 
   private onMessageUpdated(p: any): void {
     const info = p?.info ?? {};
+    if (!this.inTree(info.sessionID ?? this.rootSessionId)) return;
     if (info.id && info.role) this.messageRole.set(info.id, info.role);
     if (info.role === "assistant") {
       if (info.providerID && info.modelID) {
@@ -605,11 +614,11 @@ export class OpencodeDriver extends ChatSession {
   private onPermissionAsked(p: any): void {
     const permissionId: string = p?.id ?? "";
     const sid: string = p?.sessionID ?? this.rootSessionId;
+    if (!this.inTree(sid)) return;
     this.askPermission({
       permissionId,
-      // PermissionRequest.permission is the permission key (a string); `tool` is
-      // {messageID, callID} with no name. Use the key as the title.
       title: String(p?.permission ?? "Allow action?"),
+      ...(Array.isArray(p.patterns) && p.patterns.length ? { reason: p.patterns.join("\n") } : {}),
       options: [
         { optionId: "once", label: "Allow once", kind: "allow_once" },
         { optionId: "always", label: "Always allow", kind: "allow_always" },
@@ -642,6 +651,66 @@ export class OpencodeDriver extends ChatSession {
       if (value === null) return;
       void this.client.replyQuestion(questionId, value).catch(() => {});
     }, opts.length > 0 ? { labels: opts.map((o) => String(o?.label ?? "")) } : undefined);
+  }
+
+  private async onFormCreated(form: FormInfo): Promise<void> {
+    if (form.sessionID !== "global" && !this.inTree(form.sessionID)) return;
+    if (this.forms.has(form.id)) return;
+    const group = this.promptGroup();
+    this.forms.set(form.id, group);
+    const ask = (kind: "text" | "single_select" | "multi_select", prompt: string,
+      options?: Array<{ id: string; label: string; description?: string }>) =>
+      new Promise<string | string[] | null>((resolve) => this.askQuestion({ kind, prompt, options }, (value) => {
+        resolve(value);
+        if (value === null) group.retract();
+      }, { group }));
+    try {
+      let answer: unknown;
+      // Conditional fields are validated by the native server; preserve their
+      // complete schema instead of answering inactive or hidden fields blindly.
+      if (form.fields.some((field) => "when" in field && field.when?.length || "hidden" in field && field.hidden)) {
+        const value = await ask("text", `${form.title}\nReply with a JSON object for the active fields:\n${JSON.stringify(form.fields)}`);
+        answer = value === null ? null : JSON.parse(String(value));
+      } else {
+        const entries = await Promise.all(form.fields.map(async (field): Promise<[string, unknown] | null> => {
+          const prompt = [form.title, field.title ?? field.key, field.description].filter(Boolean).join("\n");
+          if (field.type === "external") {
+            const value = await ask("single_select", `${prompt}\n${field.url}`, [
+              { id: "done", label: "Done — I opened the link" }, { id: "cancel", label: "Cancel" },
+            ]);
+            if (value === "done") return [field.key, true];
+            group.retract();
+            return null;
+          }
+          const options = "options" in field ? field.options?.map((option) => ({
+            id: option.value, label: option.label, description: option.description,
+          })) : undefined;
+          const value = await ask(field.type === "multiselect" ? "multi_select"
+            : field.type === "boolean" || options?.length ? "single_select" : "text", prompt,
+          field.type === "boolean" ? [{ id: "true", label: "Yes" }, { id: "false", label: "No" }] : options);
+          if (value === null) return null;
+          if (field.type === "number" || field.type === "integer") {
+            const number = Number(value);
+            if (!String(value).trim() || !Number.isFinite(number) || field.type === "integer" && !Number.isInteger(number)) {
+              throw new Error(`Invalid numeric answer for ${field.title ?? field.key}`);
+            }
+            return [field.key, number];
+          }
+          return [field.key, field.type === "boolean" ? value === "true"
+            : field.type === "multiselect" ? Array.isArray(value) ? value : [value] : String(value)];
+        }));
+        answer = entries.some((entry) => entry === null) ? null
+          : Object.fromEntries(entries.filter((entry): entry is [string, unknown] => entry !== null && entry[1] !== undefined));
+      }
+      if (!this.forms.has(form.id)) return;
+      await this.client.replyQuestion(form.id, answer === null ? null : JSON.stringify(McpElicitationContentSchema.parse(answer)));
+    } catch (error) {
+      if (this.forms.has(form.id)) await this.client.replyQuestion(form.id, null).catch(() => {});
+      throw error;
+    } finally {
+      this.forms.delete(form.id);
+      group.retract();
+    }
   }
 
   private onTodoUpdated(p: any): void {

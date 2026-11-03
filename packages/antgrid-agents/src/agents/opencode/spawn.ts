@@ -1,21 +1,11 @@
-import { createOpencodeClient } from "@opencode-ai/sdk/v2";
-import { startOpencodeServer, type OpencodeServerOptions } from "./server";
-import type { OpencodeClientLike, OpencodeEvent } from "./chat-backend";
+import { OpenCode, type ModelRef } from "@opencode/client";
+import { OpencodeStartupError, startOpencodeServer, type OpencodeServerOptions } from "./server";
+import type { OpencodeClientLike, OpencodePromptOpts } from "./chat-backend";
+import { normalizeMessage, OpencodeV2Events } from "./v2-events";
+import { McpElicitationContentSchema } from "../../structured/mcp-elicitation";
 
 export interface SpawnedOpencode {
   client: OpencodeClientLike;
-}
-
-// The v2 client returns errors as data ({ data, error, response }) instead of
-// throwing. Unwrap so a non-2xx / errored call rejects the promise instead of
-// being silently swallowed; return the success payload. A route the binary
-// doesn't serve (version skew) lands here as a non-2xx / text/html fall-through
-// and fails loudly at call time — no startup version gate needed.
-function unwrap(res: any): any {
-  if (res?.error !== undefined || (res?.response && !res.response.ok)) {
-    throw new Error(`opencode request failed (status ${res?.response?.status ?? "unknown"})`);
-  }
-  return res?.data;
 }
 
 // A slow HTTP response is not proof the listener stopped. Only a refused
@@ -39,84 +29,118 @@ export async function waitServerGone(
   throw new Error("OpenCode server did not stop accepting connections before teardown timed out");
 }
 
-/**
- * Spawn `opencode serve` (OS-assigned port) and wrap its SDK client as an
- * OpencodeClientLike. The server runs the same binary as the CLI, so provider
- * auth is read from the shared ~/.local/share/opencode/auth.json — no auth work
- * here. `directory` scopes every call to this project's root.
- *
- * Uses the SDK's `/v2` export deliberately. The events are a red herring here:
- * the binary streams ALL events on a single unfiltered `/event` bus regardless
- * of SDK generation, so the default (`.`) export would still receive
- * permission.asked / question.asked / message.part.delta at runtime — it just
- * lacks types for them. What the `/v2` surface actually buys is the matching
- * *route* shapes (and the typed question.reply call); those routes are the part
- * that must line up with the running server. See the driver's OpencodeEvent note.
- */
 export async function spawnOpencode(opts: OpencodeServerOptions): Promise<SpawnedOpencode> {
   const server = await startOpencodeServer(opts);
-  const client = createOpencodeClient({ baseUrl: server.url, directory: opts.cwd, headers: server.headers });
-  const directory = opts.cwd;
+  try { return connectOpencode(server, opts.cwd); }
+  catch (error) {
+    await server.close();
+    throw new OpencodeStartupError(error instanceof Error ? error.message : String(error), { cause: error });
+  }
+}
+
+export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeServer>>, cwd: string): SpawnedOpencode {
+  const client = OpenCode.make({ baseUrl: server.url, headers: server.headers });
+  const lifetime = new AbortController();
+  let disposed = false;
+  let exited = false;
+  const serverExited = () => {
+    exited = true;
+    if (!disposed) lifetime.abort(new Error("OpenCode server exited"));
+  };
+  // An EOF can look like a normal subscription close. Tie it to the owned
+  // process so an unexpected exit fails the active turn.
+  void server.exited?.then(serverExited, serverExited);
+  const request = { signal: lifetime.signal };
+  const location = { directory: cwd };
+  const forms = new Map<string, string>();
+  const events = new OpencodeV2Events();
+  const select = async (sessionID: string, selection?: OpencodePromptOpts) => {
+    if (selection?.agent) await client.session.switchAgent({ sessionID, agent: selection.agent }, request);
+    if (!selection?.model && !selection?.variant) return;
+    const current = selection.model
+      ? { id: selection.model.modelID, providerID: selection.model.providerID }
+      : (await client.session.get({ sessionID }, request)).model;
+    if (!current) throw new Error("Choose an OpenCode model before setting its reasoning effort");
+    const model: ModelRef = { ...current, ...(selection.variant ? { variant: selection.variant } : {}) };
+    await client.session.switchModel({ sessionID, model }, request);
+  };
 
   const like: OpencodeClientLike = {
     createSession: async ({ title, parentID }) => {
-      const data = unwrap(await client.session.create({ directory, title, parentID }));
-      return data?.id ?? "";
+      const data = await client.session.create({ location, title, parentID }, request);
+      return data.id;
     },
     messages: async (sessionId) => {
-      // v2 SDK: client.session.messages returns Array<{ info, parts }> directly
-      // (openapi operationId session.messages, route /session/{sessionID}/message).
-      const data = unwrap(await client.session.messages({ sessionID: sessionId, directory }));
-      return Array.isArray(data) ? data : [];
+      const messages: ReturnType<typeof normalizeMessage>[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await client.message.list({ sessionID: sessionId,
+          ...(cursor ? { cursor } : { order: "asc", limit: 100 }),
+        }, request);
+        messages.push(...page.data.map(normalizeMessage));
+        const next = page.cursor.next ?? undefined;
+        if (next && next === cursor) throw new Error("OpenCode returned a repeated history cursor");
+        cursor = next;
+      } while (cursor);
+      return messages;
     },
-    deleteMessage: async (sessionId, messageId) => {
-      unwrap(await client.session.deleteMessage({ sessionID: sessionId, messageID: messageId, directory }));
+    revertMessages: async (sessionID, messageID) => {
+      await client.session.revert.stage({ sessionID, messageID, files: false }, request);
+      await client.session.revert.commit({ sessionID }, request);
     },
-    prompt: async (sessionId, text, opts) => {
-      unwrap(await client.session.promptAsync({
-        sessionID: sessionId, directory,
-        parts: [{ type: "text", text }],
-        ...(opts?.model ? { model: opts.model } : {}),
-        ...(opts?.agent ? { agent: opts.agent } : {}),
-        ...(opts?.variant ? { variant: opts.variant } : {}),
-      }));
+    prompt: async (sessionID, text, selection) => {
+      await select(sessionID, selection);
+      await client.session.prompt({ sessionID, text }, request);
     },
-    listCommands: async () => {
-      const data = unwrap(await client.command.list({ directory }));
-      return Array.isArray(data) ? data : [];
-    },
-    listAgents: async () => {
-      const data = unwrap(await client.app.agents({ directory }));
-      return Array.isArray(data) ? data : [];
-    },
+    listCommands: async () => (await client.command.list({ location }, request)).data,
+    listAgents: async () => (await client.agent.list({ location }, request)).data.map((agent) => ({ ...agent, name: agent.id })),
     listProviders: async () => {
-      const data = unwrap(await client.provider.list({ directory }));
-      return { all: data?.all ?? [], default: data?.default ?? {}, connected: data?.connected ?? [] };
+      const [providers, models] = await Promise.all([
+        client.provider.list({ location }, request), client.model.list({ location }, request),
+      ]);
+      const all = providers.data.filter((provider) => provider.activation !== "disabled").map((provider) => ({
+        ...provider, models: Object.fromEntries(models.data.filter((model) => model.providerID === provider.id && model.enabled)
+          .map((model) => [model.id, { ...model, variants: Object.fromEntries(model.variants.map((v) => [v.id, v])) }])),
+      }));
+      return { all, default: {}, connected: all.map((provider) => provider.id) };
     },
-    command: async (sessionId, opts) => {
-      unwrap(await client.session.command({ sessionID: sessionId, directory, ...opts }));
+    command: async (sessionID, command) => {
+      const separator = command.model?.indexOf("/") ?? -1;
+      await select(sessionID, {
+        agent: command.agent, variant: command.variant,
+        ...(command.model && separator > 0 ? { model: {
+          providerID: command.model.slice(0, separator), modelID: command.model.slice(separator + 1),
+        } } : {}),
+      });
+      await client.session.command({ sessionID, name: command.command, text: command.arguments }, request);
     },
-    abort: async (sessionId) => {
-      unwrap(await client.session.abort({ sessionID: sessionId, directory }));
+    abort: async (sessionID) => {
+      await client.session.interrupt({ sessionID }, request);
     },
-    summarize: async (sessionId, model) => {
-      unwrap(await client.session.summarize({ sessionID: sessionId, directory, providerID: model.providerID, modelID: model.modelID }));
+    summarize: async (sessionID) => {
+      await client.session.compact({ sessionID }, request);
     },
-    replyPermission: async (_sessionId, permissionId, response) => {
-      // v2 keys the reply by requestID (the permission id) alone — sessionID isn't needed.
-      unwrap(await client.permission.reply({ requestID: permissionId, directory, reply: response }));
+    replyPermission: async (sessionID, requestID, decision) => {
+      await client.permission.reply({ sessionID, requestID, decision }, request);
     },
     replyQuestion: async (questionId, answer) => {
-      // QuestionAnswer = string[] (selected labels); v1 asks one question, so we
-      // send a single answer = the selected label(s).
-      const labels = Array.isArray(answer) ? answer : [answer];
-      unwrap(await client.question.reply({ requestID: questionId, directory, answers: [labels] }));
+      const sessionID = forms.get(questionId);
+      if (!sessionID) throw new Error("OpenCode form is no longer pending");
+      if (answer === null) await client.session.form.cancel({ sessionID, formID: questionId }, request);
+      else await client.session.form.reply({ sessionID, formID: questionId,
+        answer: McpElicitationContentSchema.parse(JSON.parse(String(answer))),
+      }, request);
+      forms.delete(questionId);
     },
     events: async function* () {
-      const sub = await client.event.subscribe({ directory });
-      for await (const evt of sub.stream as AsyncIterable<OpencodeEvent>) yield evt;
+      for await (const event of client.event.subscribe({ signal: lifetime.signal })) {
+        if (event.type === "form.created") forms.set(event.data.form.id, event.data.form.sessionID);
+        if (event.type === "form.cancelled" || event.type === "form.replied") forms.delete(event.data.id);
+        yield* events.normalize(event);
+      }
+      if (exited && !disposed) throw new Error("OpenCode server exited");
     },
-    dispose: () => server.close(),
+    dispose: () => { disposed = true; lifetime.abort(); return server.close(); },
   };
 
   return { client: like };

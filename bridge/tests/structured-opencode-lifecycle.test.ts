@@ -8,12 +8,12 @@ const logger: AgentLogger = { child: () => logger, debug() {}, info() {}, warn()
 const readyServer = `
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === "/session") return Response.json({ id: "replacement" });
-    if (path === "/provider") return Response.json({ all: [], default: {}, connected: [] });
-    if (path === "/event") return new Response("", { headers: { "Content-Type": "text/event-stream" } });
-    return Response.json([]);
+    if (path === "/api/info") return Response.json({ version: "2.2.5" });
+    if (path === "/api/session") return Response.json({ data: { id: "replacement" } });
+    if (path === "/api/event") return new Response("", { headers: { "Content-Type": "text/event-stream" } });
+    return Response.json({ data: [] });
   } });
-  console.log("opencode server listening on http://127.0.0.1:" + server.port);
+  console.log("server listening on http://127.0.0.1:" + server.port);
 `;
 
 test.each([false, true])("OpenCode startup cancellation preserves restart safety (cleanup fails: %s)", async (cleanupFails) => {

@@ -7,6 +7,7 @@ import type { AgentSpec, LaunchAugmentation } from "./agents/types";
 const log = logger.child({ component: "agent-launch" });
 export type { LaunchAugmentation };
 export interface AugmentOptions {
+  mode?: "terminal" | "chat";
   abDir?: string;
   cursorDir?: string;
   kimiHome?: string;

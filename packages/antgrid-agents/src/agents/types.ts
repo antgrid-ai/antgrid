@@ -116,6 +116,7 @@ export interface TerminalObservationAvailability {
  *  it is passed in rather than resolved per agent so one spawn cannot mix a
  *  compiled and a dev-mode command. */
 export interface HookInjectCtx {
+  mode?: "terminal" | "chat";
   abDir: string;
   cursorDir?: string;
   /** Isolates Kimi's user-level hook config in tests. */

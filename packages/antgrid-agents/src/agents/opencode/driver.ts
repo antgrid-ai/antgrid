@@ -1,6 +1,6 @@
 import { OpencodeDriver, type OpencodeClientLike } from "./chat-backend";
 import { spawnOpencode } from "./spawn";
-import { OpencodeStartupCancelledError } from "./server";
+import { OpencodeStartupError } from "./server";
 import type { StructuredDriver } from "../../structured/structured-driver";
 import type { DriverCtx } from "../types";
 
@@ -26,10 +26,10 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
   const lazy: OpencodeClientLike = {
     createSession: (o) => invoke((client) => client.createSession(o)),
     messages: (s) => invoke((client) => client.messages(s)),
-    deleteMessage: (s, m) => invoke((client) => client.deleteMessage(s, m)),
+    revertMessages: (s, m) => invoke((client) => client.revertMessages(s, m)),
     prompt: (s, t, o) => invoke((client) => client.prompt(s, t, o)),
     abort: (s) => invoke((client) => client.abort(s)),
-    summarize: (s, m) => invoke((client) => client.summarize(s, m)),
+    summarize: (s) => invoke((client) => client.summarize(s)),
     replyPermission: (s, id, r) => invoke((client) => client.replyPermission(s, id, r)),
     replyQuestion: (id, a) => invoke((client) => client.replyQuestion(id, a)),
     listCommands: () => invoke((client) => client.listCommands()),
@@ -46,8 +46,8 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     dispose: async () => {
       closed = true;
       await spawned?.then((s) => s.client.dispose(), (error: unknown) => {
-        // Cancellation is reported only after startup has released its child.
-        if (!(error instanceof OpencodeStartupCancelledError)) throw error;
+        // Failed acquisition is safe to retry only after its child was released.
+        if (!(error instanceof OpencodeStartupError)) throw error;
       });
     },
   };

@@ -1,4 +1,3 @@
-/// <reference path="../../src/opencode-plugin.d.ts" />
 // Antgrid opencode plugin: reports one opencode terminal to the bridge in the
 // vocabulary the bridge's hook routes already speak — the turn's start
 // (/turn-start, /turn-activity) and end (/notify + /handler-event turn_end), the
@@ -6,7 +5,70 @@
 // conversation title (/session-title), and the Handler's triggers. Runs inside
 // opencode's own Bun runtime, so we use fetch (no node). Correlation via the
 // ANTGRID_TERMINAL_ID env.
-import type { Plugin } from "@opencode-ai/plugin";
+import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
+
+// The V2 host loads a package's default definition and owns the subscription's
+// lifetime. Keep routing independent of that host so it can be exercised without
+// starting an agent or making model requests.
+export default {
+  id: "antgrid",
+  async setup(ctx: Pick<OpenCodeClient, "event" | "session">) {
+    const reporter = await AntgridSessionNamer();
+    const stop = new AbortController();
+    const sessions = new Map<string, string | undefined>();
+    const send = (type: string, properties: unknown) => reporter.event?.({ event: { type, properties } });
+    const identify = async (sessionID: string) => {
+      if (sessions.has(sessionID)) return;
+      const info = await ctx.session.get({ sessionID });
+      sessions.set(sessionID, info.parentID);
+      await send("session.created", { info });
+      await send("session.updated", { info });
+    };
+    const receive = async (event: OpenCodeEvent) => {
+      const p: any = "data" in event ? event.data : {};
+      if (p.sessionID && p.sessionID !== "global" && event.type !== "session.created" && event.type !== "session.deleted") {
+        await identify(p.sessionID);
+      }
+      switch (event.type) {
+        case "session.created":
+          sessions.set(p.sessionID, p.parentID);
+          await send("session.created", { info: { ...p, id: p.sessionID } });
+          return send("session.updated", { info: { ...p, id: p.sessionID } });
+        case "session.renamed": return send("session.updated", { info: { ...p, id: p.sessionID, parentID: sessions.get(p.sessionID) } });
+        case "session.deleted":
+          sessions.delete(p.sessionID);
+          return send(event.type, p);
+        case "session.execution.started":
+        case "session.step.started":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "busy" } });
+        case "session.execution.failed":
+          await send("session.error", { sessionID: p.sessionID, error: { name: p.error.type, data: p.error } });
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "session.execution.interrupted":
+        case "session.execution.succeeded":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "permission.asked": return send(event.type, { ...p, permission: p.action, patterns: p.resources });
+        case "permission.replied": return send(event.type, p);
+        case "form.created": return send("question.asked", {
+          id: p.form.id, sessionID: p.form.sessionID, questions: [{ question: p.form.title }],
+        });
+        case "form.replied":
+        case "form.cancelled": return send("question.replied", { requestID: p.id });
+      }
+    };
+    const loop = (async () => {
+      for await (const event of ctx.event.subscribe({ signal: stop.signal })) {
+        if (stop.signal.aborted) break;
+        try { await receive(event); } catch (error) { console.error("Antgrid plugin event failed", error); }
+      }
+    })().catch((error) => { if (!stop.signal.aborted) console.error("Antgrid plugin subscription failed", error); });
+    return async () => {
+      stop.abort();
+      await loop;
+      await reporter.dispose?.();
+    };
+  },
+};
 
 // Posts go out one at a time (see `send`), so a bridge that accepts the
 // connection and then hangs would hold up every post queued behind it; a dead
@@ -40,9 +102,7 @@ function handlerPosts(terminalId: string | undefined, kind: string, extra: Recor
   return terminalId ? [{ path: "/handler-event", body: { terminalId, agent: "opencode", event: kind, ...extra } }] : [];
 }
 
-// opencode's loader calls EVERY export of this module as a plugin and throws on
-// one that is not a function, so nothing but the plugin itself may be exported.
-export const AntgridSessionNamer: Plugin = async () => {
+export async function AntgridSessionNamer(_input?: unknown) {
   // Per opencode instance, and only ever touched synchronously: opencode calls
   // the event handler in publish order but never awaits it, so every decision
   // is made before the first await and only the sends are deferred.
@@ -300,4 +360,4 @@ export const AntgridSessionNamer: Plugin = async () => {
       return send(port, process.env.ANTGRID_RUN_ID, posts);
     },
   };
-};
+}

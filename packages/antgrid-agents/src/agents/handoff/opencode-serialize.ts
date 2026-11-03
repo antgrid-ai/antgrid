@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { DbSerializeFile, DbSerializeOutput, DbSerializer } from "./db-serializers";
 import { SAFE_NATIVE_ID, type HandoffReference } from "./types";
+import { hasOpencodeV2Store, readOpencodeV2Messages } from "../opencode/v2-store";
+import { normalizeMessage } from "../opencode/v2-events";
 
 // Only these session columns leave the database. An allowlist, so a column a
 // later version adds (a share URL, an account link) stays out until reviewed.
@@ -106,6 +108,28 @@ function sessionInfo(row: Record<string, unknown>, ctx: Context): Record<string,
 }
 
 function readMessages(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc["messages"] {
+  if (hasOpencodeV2Store(db)) return readOpencodeV2Messages(db, sessionId).map((message) => {
+    const normalized = normalizeMessage(message);
+    const info: Record<string, unknown> = { id: message.id, sessionID: sessionId, role: normalized.info.role, time: message.time };
+    let parts: Record<string, unknown>[] = normalized.parts;
+    if (message.type === "compaction" && message.status === "completed") {
+      Object.assign(info, { summary: true, agent: "compaction", finish: "stop" });
+      parts = [{ id: message.id, type: "text", text: message.summary }];
+    }
+    // Provider-native payloads can contain opaque reasoning and response bodies.
+    // Only normalized text, tool arguments/results and safe error fields travel.
+    const sanitize = (value: unknown): void => {
+      if (Array.isArray(value)) { value.forEach(sanitize); return; }
+      if (!isRecord(value)) return;
+      if ("native" in value) { delete value.native; ctx.redactions.add("native provider state (removed)"); }
+      if ("error" in value) { value.error = allowlistedError(value.error); ctx.redactions.add(ERROR_REDACTION); }
+      Object.values(value).forEach(sanitize);
+    };
+    sanitize(parts);
+    stripReasoningState(parts, ctx);
+    for (const part of parts) noteOutputPath(part, ctx);
+    return { info, parts };
+  });
   const messages: OpencodeSessionDoc["messages"] = [];
   const byId = new Map<string, OpencodeSessionDoc["messages"][number]>();
   for (const row of db.query("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id").all(sessionId) as { id: string; data: string }[]) {
@@ -185,7 +209,8 @@ function readTodo(db: Database, sessionId: string, ctx: Context): unknown[] {
 }
 
 function readSession(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc | undefined {
-  const row = db.query("SELECT * FROM session WHERE id = ?").get(sessionId) as Record<string, unknown> | null;
+  const table = hasOpencodeV2Store(db) ? "session_v2" : "session";
+  const row = db.query(`SELECT * FROM ${table} WHERE id = ?`).get(sessionId) as Record<string, unknown> | null;
   if (!row) return undefined;
   return { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
 }
@@ -205,12 +230,13 @@ export function serializeOpencodeSession(db: Database, sessionId: string, opts: 
   }
 
   const children: OpencodeSerialized["children"] = [];
+  const table = hasOpencodeV2Store(db) ? "session_v2" : "session";
   const seen = new Set([sessionId]);
   let frontier = [sessionId];
   for (let depth = 0; depth < MAX_CHILD_DEPTH && frontier.length; depth++) {
     const next: string[] = [];
     for (const parent of frontier) {
-      for (const { id } of db.query("SELECT id FROM session WHERE parent_id = ? ORDER BY time_created, id").all(parent) as { id: string }[]) {
+      for (const { id } of db.query(`SELECT id FROM ${table} WHERE parent_id = ? ORDER BY time_created, id`).all(parent) as { id: string }[]) {
         if (seen.has(id)) continue;
         seen.add(id);
         if (!SAFE_NATIVE_ID.test(id)) {

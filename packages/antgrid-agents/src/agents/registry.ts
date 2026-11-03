@@ -37,6 +37,7 @@ import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
+import { prepareOpencodeTerminal } from "./opencode/terminal";
 import { isInterruptRecord as isClaudeInterruptRecord, lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { isInterruptRecord as isCodexInterruptRecord, readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
@@ -273,6 +274,10 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   },
   opencode: {
     bin: "opencode",
+    augmentsDefaultSpec: true,
+    // A shared background server would inherit another terminal's MCP identity.
+    args: ["--standalone"],
+    prepareTerminal: prepareOpencodeTerminal,
     label: "opencode",
     defaultApprovalGated: false,
     approvalPolicies: {},
@@ -304,7 +309,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       // verify.
       transcript: {
         cmd: (prompt, model) =>
-          ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+          ["opencode", "run", "--standalone", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
         // opencode has no --ephemeral, so persistence is redirected instead of
         // disabled: the whole session store is one SQLite file, and OPENCODE_DB
         // takes `:memory:` verbatim (opencode's own tests and its desktop dev

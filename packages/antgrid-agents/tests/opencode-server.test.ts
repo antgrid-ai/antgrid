@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withAgentHost, type AgentHostServices, type AgentLogger } from "../src/host";
-import { OpencodeStartupCancelledError, startOpencodeServer } from "../src/agents/opencode/server";
+import { OpencodeStartupError, OpencodeStartupCancelledError, startOpencodeServer } from "../src/agents/opencode/server";
 import { spawnOpencode } from "../src/agents/opencode/spawn";
 
 const log: AgentLogger = { child: () => log, debug() {}, info() {}, warn() {}, error() {} };
@@ -26,17 +26,21 @@ beforeAll(() => {
       setInterval(() => {}, 1000);
     } else {
       const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => {
-        if (process.env.OPENCODE_SERVER_PASSWORD) {
-          const expected = "Basic " + Buffer.from((process.env.OPENCODE_SERVER_USERNAME || "opencode") + ":" + process.env.OPENCODE_SERVER_PASSWORD).toString("base64");
+        if (process.env.OPENCODE_PASSWORD) {
+          const expected = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64");
           if (request.headers.get("Authorization") !== expected) return new Response("Unauthorized", { status: 401 });
         }
-        if (new URL(request.url).pathname === "/session") return Response.json({ id: "native-session" });
+        if (new URL(request.url).pathname === "/api/info") {
+          if (process.env.TEST_SERVER_MODE === "health-hang") return new Promise(() => {});
+          return Response.json({ version: process.env.TEST_SERVER_VERSION || "2.2.5" });
+        }
+        if (new URL(request.url).pathname === "/api/session") return Response.json({ data: { id: "native-session" } });
         return Response.json({
         cwd: process.cwd(), config: process.env.OPENCODE_CONFIG_CONTENT,
         configFile: process.env.OPENCODE_CONFIG, slot: process.env.ANTGRID_TERMINAL_ID,
         run: process.env.ANTGRID_RUN_ID, args: process.argv.slice(2),
       }); } });
-      console.log("opencode server listening on http://127.0.0.1:" + server.port);
+      console.log("server listening on http://127.0.0.1:" + server.port);
     }
   `);
 });
@@ -54,7 +58,7 @@ test("OpenCode keeps native config and checkout cwd isolated across concurrent c
     start({ OPENCODE_CONFIG_CONTENT: '{"model":"second/model"}', ANTGRID_TERMINAL_ID: "b" }),
   ]);
   try {
-    const [a, b] = await Promise.all(servers.map(async (server) => (await fetch(server.url)).json() as Promise<any>));
+    const [a, b] = await Promise.all(servers.map(async (server) => (await fetch(server.url, { headers: server.headers })).json() as Promise<any>));
     expect(a.cwd.toLowerCase()).toBe(directory.toLowerCase());
     expect(a.config).toBe(config);
     expect(a.configFile).toBe("custom.json");
@@ -75,6 +79,11 @@ test("OpenCode reports native startup errors and reaps failed processes", async 
   const before = kills;
   await expect(start({ TEST_SERVER_MODE: "exit" })).rejects.toThrow("invalid native configuration");
   expect(kills).toBe(before + 1);
+});
+
+test("a missing OpenCode binary is a released acquisition failure", async () => {
+  await expect(withAgentHost(host, () => startOpencodeServer({ cwd: directory, command: join(directory, "missing-opencode") })))
+    .rejects.toBeInstanceOf(OpencodeStartupError);
 });
 
 test("OpenCode client honors native server authentication", async () => {
@@ -107,4 +116,16 @@ test("OpenCode reports an already-cancelled acquisition without allocating a pro
   await expect(start({ TEST_SERVER_MODE: "hang" }, { signal: AbortSignal.abort() }))
     .rejects.toBeInstanceOf(OpencodeStartupCancelledError);
   expect(kills).toBe(before);
+});
+
+test.each(["1.19.5", "2.0.0-beta.1", "unknown"])("OpenCode rejects an unsupported runtime (%s) and releases it", async (version) => {
+  const before = kills;
+  await expect(start({ TEST_SERVER_VERSION: version })).rejects.toThrow("OpenCode 2.0.0 or later is required");
+  expect(kills).toBe(before + 1);
+});
+
+test("OpenCode bounds version verification by the startup deadline", async () => {
+  const before = kills;
+  await expect(start({ TEST_SERVER_MODE: "health-hang" }, { timeoutMs: 600 })).rejects.toThrow("startup timed out");
+  expect(kills).toBe(before + 1);
 });

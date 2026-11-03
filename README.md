@@ -47,7 +47,7 @@ Antgrid does not replace your agent and ships no model of its own.
   how to proceed and when to ask you. Handler
   asks for evidence before moving on and brings questions to you when needed or
   instructed. It doesn't start new sessions or jobs.
-- **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,
+- **Bring your own agent.** Claude Code, Codex, OpenCode 2+, Cursor, GitHub Copilot,
   Antigravity, Kilo, Kimi and Mistral Vibe are wired for notifications and session naming
   — the current set is `AGENTS` in [`packages/antgrid-agents/src/agents/registry.ts`](packages/antgrid-agents/src/agents/registry.ts).
   Any other terminal program still runs; it just gets no integration.

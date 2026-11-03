@@ -122,8 +122,8 @@ describe("augmentAgentLaunch", () => {
     const cfgPath = a.env.OPENCODE_CONFIG;
     expect(cfgPath).toBeTruthy();
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    expect(Array.isArray(cfg.plugin)).toBe(true);
-    expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
+    expect(Array.isArray(cfg.plugins)).toBe(true);
+    expect(cfg.plugins[0]).toMatch(/^file:\/\/.*opencode$/);
   });
 
   test("opencode respects a user-set OPENCODE_CONFIG", () => {
@@ -139,6 +139,15 @@ describe("augmentAgentLaunch", () => {
     expect(launch.observation).toEqual(NO_OBSERVATION);
     expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
     expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
+  });
+
+  test("opencode chat keeps MCP without injecting the legacy terminal plugin", () => {
+    const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
+      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
+    }));
+    expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid.command).toEqual([HOOK_COMMAND.binary, "mcp"]);
+    expect(launch.observation).toEqual(NO_OBSERVATION);
   });
 
   test("unknown tool has no injection", () => {
@@ -509,6 +518,15 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       for (const bad of ["not json", "[1]", '"s"', "null", "7"]) {
         expect(augmentWith(bad).env[envVar]).toBeUndefined();
       }
+    });
+
+    if (tool === "opencode") test("opencode preserves native 2.x MCP configuration and replaces its own server", () => {
+      const a = augmentWith(JSON.stringify({ mcp: {
+        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: { type: "remote", url: "stale" } },
+      } }));
+      expect(JSON.parse(a.env[envVar])).toEqual({ mcp: {
+        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
+      } });
     });
 
     test(`${tool} treats a blank ${envVar} as unset`, () => {
