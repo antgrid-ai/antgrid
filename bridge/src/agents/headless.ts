@@ -118,6 +118,38 @@ export function headlessScratchCwd(): string {
  *  abandoned and the timeout is reported on its own. */
 const ABANDON_GRACE_MS = 2_000;
 
+/**
+ * Stdout of a non-model CLI command (a config or catalog read), on exit 0.
+ *
+ * Spawned with the same env `runHeadless` builds, so it sees the config the
+ * model call it informs will see — and never recorded to modelwatch, because
+ * it asks no model anything. Undefined on any failure or timeout.
+ */
+export async function runHeadlessProbe(argv: string[], opts: {
+  cwd: string; timeoutMs: number; env?: Record<string, string>; spawn?: typeof Bun.spawn;
+}): Promise<string | undefined> {
+  const spawn = opts.spawn ?? Bun.spawn;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const proc = spawn(argv, { cwd: opts.cwd, stdout: "pipe", stderr: "ignore", env: headlessEnv(opts.env) });
+    const timedOut = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        void killChildTree(proc);
+        resolve(undefined);
+      }, opts.timeoutMs);
+    });
+    const finished = Promise.all([new Response(proc.stdout).text(), proc.exited])
+      .then(([stdout, code]) => (code === 0 ? stdout : undefined))
+      // A read the timeout's tree kill breaks rejects after the race is over.
+      .catch(() => undefined);
+    return await Promise.race([finished, timedOut]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface HeadlessResult {
   /**
    * What the process actually wrote, verbatim — including a vendor's usage

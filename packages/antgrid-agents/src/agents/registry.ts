@@ -43,6 +43,8 @@ import { readTranscript as readOpencodeTranscript } from "./opencode/transcript"
 import { claudeFork } from "./claude-code/fork";
 import { codexFork } from "./codex/fork";
 import { opencodeFork } from "./opencode/fork";
+import { resolveOpencodeNamingModel } from "./opencode/naming-model";
+import { resolveKiloNamingModel } from "./kilo/naming-model";
 import { cursorAgentFork } from "./cursor-agent/fork";
 import { copilotFork } from "./github-copilot/fork";
 import { antigravityFork } from "./antigravity/fork";
@@ -286,19 +288,13 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hooks: opencodeHooks,
     mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
-    // `provider/model`, the form this CLI's own `--model` requires. The slug is
-    // codex's naming model for codex's reason: opencode's openai provider signed
-    // in with a ChatGPT account serves only that account's Codex catalog and
-    // answers any other slug 400 "not supported when using Codex with a ChatGPT
-    // account". It must also stay on the public API for API-key sign-ins:
-    // models.dev, opencode's own catalog, lists openai/gpt-5.6-luna with API
-    // pricing. Verify a replacement against the assistant message's `error` in
-    // opencode's DB, not its `modelID=` log line — that line shows the flag
-    // reached the request, not that the call succeeded. The account's free
-    // tiers (`opencode/*-free`) are not candidates however cheap: their
-    // availability is not something a naming call can rely on, and a throttled
-    // call produces no title at all.
-    cheapNamingModel: "openai/gpt-5.6-luna",
+    // No fixed `cheapNamingModel`: opencode serves whatever providers the user
+    // configured, so any one slug fails for every user without it — the last
+    // one, openai/gpt-5.4-mini, failed every call for a ChatGPT sign-in, whose
+    // openai provider answers outside its Codex catalog 400 "not supported when
+    // using Codex with a ChatGPT account". Ask opencode for the model it titles
+    // its own sessions with instead.
+    resolveNamingModel: resolveOpencodeNamingModel,
     headless: {
       // "transcript", not "readonly": --agent plan selects opencode's built-in
       // restricted Plan agent (edits denied by default; non-interactive `run`
@@ -519,6 +515,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     augmentsDefaultSpec: true,
     hooks: kiloHooks,
     mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
+    // Same reason as opencode's: Kilo routes to whatever providers the user
+    // configured, so it names with the model Kilo would title its own sessions with.
+    resolveNamingModel: resolveKiloNamingModel,
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
