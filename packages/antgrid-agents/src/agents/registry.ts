@@ -290,7 +290,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // codex's naming model for codex's reason: opencode's openai provider signed
     // in with a ChatGPT account serves only that account's Codex catalog and
     // answers any other slug 400 "not supported when using Codex with a ChatGPT
-    // account". Verify a replacement against the assistant message's `error` in
+    // account". It must also stay on the public API for API-key sign-ins:
+    // models.dev, opencode's own catalog, lists openai/gpt-5.6-luna with API
+    // pricing. Verify a replacement against the assistant message's `error` in
     // opencode's DB, not its `modelID=` log line — that line shows the flag
     // reached the request, not that the call succeeded. The account's free
     // tiers (`opencode/*-free`) are not candidates however cheap: their
