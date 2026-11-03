@@ -16,6 +16,40 @@ const readyServer = `
   console.log("server listening on http://127.0.0.1:" + server.port);
 `;
 
+test("OpenCode resume rejects an unsupported runtime and can retry after upgrading", async () => {
+  let spawns = 0;
+  let kills = 0;
+  const sessions: string[] = [];
+  const host: AgentHostServices = {
+    logger, stateDirectory: () => "unused", hookCommand: () => ({ binary: "unused", preargs: [] }),
+    stripInheritedCertOverrides: (env) => env,
+    killChildTree: async (child) => { kills++; child.kill(); },
+  };
+  await withAgentHost(host, async () => {
+    const manager = new StructuredAgentManager({
+      sendMessage() {}, onAgentSession: (_id, nativeId) => sessions.push(nativeId),
+      driverFactory: (sessionId, _tool, send, _resume, approvalPolicy, run) => createDriver({
+        sessionId, projectId: "project", projectPath: process.cwd(), approvalPolicy: approvalPolicy!,
+        scope: run!.scope, send, onAgentSession: run!.onAgentSession, emitUpdateCheck() {},
+        chatAugment: () => ({ args: [], env: {} }),
+      }, (opts) => spawnOpencode({ ...opts, command: process.execPath,
+        prefixArgs: ["-e", ++spawns === 1 ? readyServer.replace("2.2.5", "1.19.5") : readyServer],
+      })),
+    });
+    const options = { sessionId: "same-session", tool: "opencode", resumeId: "ses_existing" };
+    try {
+      await expect(manager.startChat(options)).rejects.toThrow("OpenCode 2.0.0 or later is required (found 1.19.5). Run opencode upgrade and retry.");
+      expect(sessions).toEqual([]);
+      expect(kills).toBe(1);
+      expect(await manager.startChat(options)).toBe("ready");
+      expect(sessions).toEqual(["ses_existing"]);
+      expect(spawns).toBe(2);
+      await manager.stopChat(options.sessionId);
+      expect(kills).toBe(2);
+    } finally { await manager.disposeAll(); }
+  });
+});
+
 test.each([false, true])("OpenCode startup cancellation preserves restart safety (cleanup fails: %s)", async (cleanupFails) => {
   let releaseCleanup!: () => void;
   const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });

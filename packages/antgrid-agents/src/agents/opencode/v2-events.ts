@@ -1,4 +1,4 @@
-import type { OpenCodeEvent, SessionMessageInfo } from "@opencode/client";
+import type { OpenCodeEvent, SessionInboxUserPayload, SessionMessageInfo } from "@opencode/client";
 import type { OpencodeEvent } from "./chat-backend";
 
 const failure = (error: any) => ({ name: error?.type, data: { ...error, statusCode: error?.status } });
@@ -29,6 +29,7 @@ export function normalizeMessage(message: SessionMessageInfo) {
 export class OpencodeV2Events {
   private tools = new Map<string, any>();
   private models = new Map<string, { id: string; providerID: string }>();
+  private pendingUsers = new Map<string, SessionInboxUserPayload>();
 
   normalize(event: OpenCodeEvent): OpencodeEvent[] {
     const p: any = "data" in event ? event.data : {};
@@ -38,6 +39,27 @@ export class OpencodeV2Events {
       part: { sessionID: p.sessionID, messageID, ...value },
     });
     switch (event.type) {
+      case "session.inbox.enqueued": {
+        const { sessionID, inboxID, item } = event.data;
+        if (item.type === "user") this.pendingUsers.set(`${sessionID}/${inboxID}`, item.payload);
+        return [];
+      }
+      case "session.inbox.cancelled":
+        this.pendingUsers.delete(`${p.sessionID}/${p.inboxID}`);
+        return [];
+      case "session.inbox.delivered": {
+        // Delivery carries only the inbox ID; the queued payload becomes a
+        // persisted user message with that ID and the delivery timestamp.
+        const key = `${p.sessionID}/${p.inboxID}`;
+        const payload = this.pendingUsers.get(key);
+        this.pendingUsers.delete(key);
+        if (!payload) return [];
+        const message = normalizeMessage({ ...payload, id: p.inboxID, type: "user", time: { created: event.created } });
+        return [
+          ...emit("message.updated", { info: { ...message.info, sessionID: p.sessionID } }),
+          ...message.parts.flatMap((part) => emit("message.part.updated", { part: { ...part, sessionID: p.sessionID } })),
+        ];
+      }
       case "session.created": return emit("session.created", { info: { ...p, id: p.sessionID } });
       case "session.step.started":
         this.models.set(messageID, p.model);

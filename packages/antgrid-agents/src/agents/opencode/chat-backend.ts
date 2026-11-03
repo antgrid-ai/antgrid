@@ -27,6 +27,8 @@ export interface OpencodePromptOpts {
 
 // The slice of the opencode SDK the driver needs (injectable for tests).
 export interface OpencodeClientLike {
+  // Lazy clients must acquire and validate their runtime before optional RPCs.
+  initialize?(): Promise<void>;
   createSession(opts: { title?: string; parentID?: string }): Promise<string>;
   // Read a session's full message history (each { info, parts }) for resume.
   messages(sessionId: string): Promise<any[]>;
@@ -104,6 +106,7 @@ export class OpencodeDriver extends ChatSession {
   }
 
   protected async startBackend(resumeId?: string): Promise<string> {
+    await this.client.initialize?.();
     // Attach the event iterator before createSession so we don't miss the
     // post-create burst. Events for the not-yet-known rootSessionId are still
     // gated out by inTree (benign — opencode emits none before create resolves).

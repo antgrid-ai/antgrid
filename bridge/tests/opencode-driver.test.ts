@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
+import { OpencodeV2Events } from "../../packages/antgrid-agents/src/agents/opencode/v2-events";
 import type { DriverLifecycleEvent } from "../../packages/antgrid-agents/src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
@@ -85,6 +86,31 @@ async function startedDriver(rootId = "ses_root") {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("OpencodeDriver", () => {
+  it("shows delivered V2 prompts live with native IDs for reverting", async () => {
+    const { driver, sent, push } = await startedDriver();
+    const stream = new OpencodeV2Events();
+    const base = { sessionID: "ses_root", inboxID: "msg_user" };
+    const publish = (type: string, data: object) => {
+      for (const normalized of stream.normalize({ type, data, id: "evt_fixture", created: 1 } as any)) push(normalized);
+    };
+    try {
+      await driver.prompt("What changed?");
+      publish("session.inbox.enqueued", { ...base, item: { type: "user", payload: { text: "What changed?" }, delivery: "queue" } });
+      publish("session.inbox.delivered", base);
+      publish("session.step.started", { sessionID: "ses_root", assistantMessageID: "msg_answer", model: { id: "model", providerID: "provider" } });
+      publish("session.text.ended", { sessionID: "ses_root", assistantMessageID: "msg_answer", ordinal: 0, text: "The fix." });
+      publish("session.execution.succeeded", { sessionID: "ses_root" });
+      await tick();
+      const items = sent.filter((message) => message.type === "agent:item-added");
+      expect(items.map((message) => message.item)).toMatchObject([
+        { itemId: "msg_user:0", kind: "message", role: "user", text: "What changed?", revertTarget: { messageId: "msg_user", partId: "msg_user:0" } },
+        { itemId: "msg_answer:0", kind: "message", role: "assistant", text: "The fix." },
+      ]);
+      expect(items[0]!.turnId).toBe(items[1]!.turnId);
+      expect(sent.some((message) => message.type === "agent:transcript-replay")).toBe(false);
+    } finally { await driver.dispose(); }
+  });
+
   it("answers native forms with typed values and option values instead of labels", async () => {
     const { driver, sent, push, calls } = await startedDriver();
     push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "MCP input", fields: [
@@ -504,6 +530,17 @@ describe("OpencodeDriver", () => {
     const replays = sent.filter((m) => m.type === "agent:transcript-replay");
     expect(replays.length).toBe(1);
     expect(replays[0].frames.some((f: any) => f.type === "agent:item-added")).toBe(true);
+  });
+
+  it("can resume a running backend when only the history read fails", async () => {
+    const { client, calls } = makeFakeClient({ messages: async () => { throw new Error("History unavailable"); } });
+    const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage() {} });
+    try {
+      await driver.start("ses_existing");
+      await driver.prompt("Continue");
+      expect(calls.find((call) => call.m === "prompt")?.args.slice(0, 2)).toEqual(["ses_existing", "Continue"]);
+      expect(calls.some((call) => call.m === "createSession")).toBe(false);
+    } finally { await driver.dispose(); }
   });
 
   it("reverts conversation by deleting the selected message and following messages, then replaying history", async () => {

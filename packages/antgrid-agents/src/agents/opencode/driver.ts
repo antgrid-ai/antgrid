@@ -6,8 +6,8 @@ import type { DriverCtx } from "../types";
 
 export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredDriver {
   // spawnOpencode is async (it awaits server startup); the driver's start()
-  // performs the await via a thunked client. Build a lazy OpencodeClientLike
-  // that resolves the spawn on first use so the factory stays synchronous.
+  // awaits the lazy client's initialization so the factory stays synchronous
+  // without treating a failed acquisition as an optional history-read failure.
   let spawned: Promise<Awaited<ReturnType<typeof spawnOpencode>>> | null = null;
   let closed = false;
   const ensure = () => {
@@ -24,6 +24,7 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     return operation(resource.client);
   };
   const lazy: OpencodeClientLike = {
+    initialize: () => invoke(async () => {}),
     createSession: (o) => invoke((client) => client.createSession(o)),
     messages: (s) => invoke((client) => client.messages(s)),
     revertMessages: (s, m) => invoke((client) => client.revertMessages(s, m)),

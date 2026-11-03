@@ -152,6 +152,12 @@ try {
       assert(requests > 0);
       const history = await client.messages(sessionID);
       assert(history.some((message) => message.parts.some((part: any) => part.text === "native-chat-ok")));
+      const user = history.find((message) => message.info.role === "user")!;
+      const liveUsers = frames.filter((frame) => frame.type === "agent:item-added" && frame.item.kind === "message" && frame.item.role === "user");
+      assert.equal(liveUsers.length, 1);
+      assert(liveUsers.some((frame) => frame.type === "agent:item-added" && frame.item.kind === "message"
+        && frame.item.text === "Return the native chat smoke marker."
+        && frame.item.itemId === user.parts[0].id && frame.item.revertTarget?.messageId === user.info.id));
       const permission = api.permission.create({ sessionID, action: "smoke", resources: ["fixture"] });
       await until(() => frames.some((frame) => frame.type === "agent:permission-request"), "permission request");
       const approval = frames.find((frame) => frame.type === "agent:permission-request")!;

@@ -16,6 +16,38 @@ import { serializeOpencodeSession } from "../src/agents/handoff/opencode-seriali
 const event = (type: string, data: object) => ({ type, data, id: "evt_fixture", created: 1 } as OpenCodeEvent);
 const model = { id: "model", providerID: "provider" };
 
+test("delivered native user messages match replay and retain their revert IDs", () => {
+  const stream = new OpencodeV2Events();
+  const base = { sessionID: "root", inboxID: "msg_question" };
+  const payload = { text: "What changed?", metadata: { source: "chat" } };
+  expect(stream.normalize(event("session.inbox.enqueued", {
+    ...base, item: { type: "user", payload, delivery: "queue" },
+  }))).toEqual([]);
+  const replay = normalizeMessage({ id: base.inboxID, type: "user", ...payload, time: { created: 2 } });
+  const delivered = { ...event("session.inbox.delivered", base), created: 2 };
+  expect(stream.normalize(delivered)).toEqual([
+    { type: "message.updated", properties: { info: { ...replay.info, sessionID: "root" } } },
+    { type: "message.part.updated", properties: { part: { ...replay.parts[0], sessionID: "root" } } },
+  ]);
+  expect(stream.normalize(delivered)).toEqual([]);
+});
+
+test("inbox delivery keeps sessions isolated and excludes cancelled or non-user inputs", () => {
+  const stream = new OpencodeV2Events();
+  const base = { sessionID: "root", inboxID: "msg_question" };
+  const enqueue = (data: object, type = "user") => stream.normalize(event("session.inbox.enqueued", {
+    ...data, item: { type, payload: { text: "question" }, delivery: "queue" },
+  }));
+  enqueue(base);
+  expect(stream.normalize(event("session.inbox.delivered", { ...base, sessionID: "other" }))).toEqual([]);
+  expect(stream.normalize(event("session.inbox.delivered", base))).toHaveLength(2);
+  enqueue(base);
+  expect(stream.normalize(event("session.inbox.cancelled", base))).toEqual([]);
+  expect(stream.normalize(event("session.inbox.delivered", base))).toEqual([]);
+  enqueue(base, "synthetic");
+  expect(stream.normalize(event("session.inbox.delivered", base))).toEqual([]);
+});
+
 test("native text, reasoning and MCP tools keep the same IDs and values on replay", () => {
   const stream = new OpencodeV2Events();
   const base = { sessionID: "root", assistantMessageID: "msg_answer" };
