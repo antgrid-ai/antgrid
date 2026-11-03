@@ -286,14 +286,17 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hooks: opencodeHooks,
     mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
-    // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
-    // requires, verified against the transcript argv below via the run's own
-    // log (`modelID=gpt-5.4-mini`, and a counter-run with no --model logging
-    // `gpt-5.6-terra-fast` for the same call, proving the flag is not ignored).
-    // The account's free tiers (`opencode/*-free`) are not candidates however
-    // cheap: their availability is not something a naming call can rely on, and
-    // a throttled call produces no title at all.
-    cheapNamingModel: "openai/gpt-5.4-mini",
+    // `provider/model`, the form this CLI's own `--model` requires. The slug is
+    // codex's naming model for codex's reason: opencode's openai provider signed
+    // in with a ChatGPT account serves only that account's Codex catalog and
+    // answers any other slug 400 "not supported when using Codex with a ChatGPT
+    // account". Verify a replacement against the assistant message's `error` in
+    // opencode's DB, not its `modelID=` log line — that line shows the flag
+    // reached the request, not that the call succeeded. The account's free
+    // tiers (`opencode/*-free`) are not candidates however cheap: their
+    // availability is not something a naming call can rely on, and a throttled
+    // call produces no title at all.
+    cheapNamingModel: "openai/gpt-5.6-luna",
     headless: {
       // "transcript", not "readonly": --agent plan selects opencode's built-in
       // restricted Plan agent (edits denied by default; non-interactive `run`

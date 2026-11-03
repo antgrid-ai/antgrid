@@ -72,6 +72,23 @@ describe("readClaudeTranscript", () => {
     expect(out.map((e) => e.uuid)).toEqual(["u1", "a1"]);
   });
 
+  it("drops shell-escape entries and background task notifications", async () => {
+    // Shapes as Claude Code writes them: a `!` escape is a string-content user
+    // entry made only of bash-* wrappers, and a background task's completion is
+    // a user entry with no isMeta whose origin names a non-human kind.
+    seed("s1", [
+      { type: "user", uuid: "u1", message: { role: "user", content: "real prompt" } },
+      { type: "user", uuid: "u2", message: { role: "user", content: "<bash-input>git status</bash-input>" } },
+      { type: "user", uuid: "u3", message: { role: "user", content: "<bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>" } },
+      { type: "user", uuid: "u4", origin: { kind: "task-notification", producer: "session-task" }, isMeta: false, message: { role: "user", content:
+        "<task-notification><task-id>b1</task-id><status>completed</status></task-notification>" } },
+      { type: "user", uuid: "u5", origin: { kind: "human" }, message: { role: "user", content: "typed by a person" } },
+      { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
+    ]);
+    const out = await readClaudeTranscript(cwd, "s1", root);
+    expect(out.map((e) => e.uuid)).toEqual(["u1", "u5", "a1"]);
+  });
+
   it("keeps a real prompt that merely mentions a command tag", async () => {
     // Only content that is ENTIRELY command wrappers is dropped — a prompt
     // quoting one is still the user talking.

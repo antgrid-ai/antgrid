@@ -150,13 +150,33 @@ describe("mapPlanStepStatus / mapTokenBreakdown", () => {
 
 describe("mapCodexError", () => {
   it("maps serverOverloaded -> server_error retryable", () => {
-    const e = mapCodexError({ type: "serverOverloaded" }, "overloaded");
+    const e = mapCodexError("serverOverloaded", "overloaded");
     expect(e.category).toBe("server_error");
     expect(e.retryable).toBe(true);
   });
-  it("maps usageLimitExceeded -> quota_exceeded and forwards httpStatusCode", () => {
-    const e = mapCodexError({ type: "httpConnectionFailed", httpStatusCode: 429 }, "rl");
-    expect(e.httpStatus).toBe(429);
+  // Wire shapes as `codex app-server generate-ts` declares CodexErrorInfo
+  // (0.164-0.167): unit variants are bare strings, variants with data are
+  // externally tagged.
+  it("forwards httpStatusCode from an externally tagged variant", () => {
+    const e = mapCodexError({ httpConnectionFailed: { httpStatusCode: 502 } }, "conn");
+    expect(e.category).toBe("network");
+    expect(e.retryable).toBe(true);
+    expect(e.httpStatus).toBe(502);
+  });
+  it("leaves httpStatus unset when the variant carries null", () => {
+    const e = mapCodexError({ responseStreamDisconnected: { httpStatusCode: null } }, "dropped");
+    expect(e.category).toBe("network");
+    expect(e.httpStatus).toBeUndefined();
+  });
+  it("maps rateLimitExceeded -> rate_limited retryable", () => {
+    const e = mapCodexError("rateLimitExceeded", "rl");
+    expect(e.category).toBe("rate_limited");
+    expect(e.retryable).toBe(true);
+  });
+  it("maps sessionBudgetExceeded -> quota_exceeded not retryable", () => {
+    const e = mapCodexError("sessionBudgetExceeded", "budget");
+    expect(e.category).toBe("quota_exceeded");
+    expect(e.retryable).toBe(false);
   });
   it("maps contextWindowExceeded -> context_overflow not retryable", () => {
     const e = mapCodexError("contextWindowExceeded", "ctx");
