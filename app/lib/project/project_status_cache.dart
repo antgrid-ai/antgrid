@@ -67,18 +67,18 @@ class ProjectStatusCache {
     }
   }
 
+  /// Never throws: `projectStatusProvider` awaits this inside an `async*`
+  /// build, where a rejection after a rebuild escapes as an uncaught fatal.
+  /// Resolving the support directory is a platform call and can fail too, so
+  /// it sits inside the try; an unreadable cache reads as no cached status.
   Future<ProjectStatus?> read(String projectId) async {
-    final f = await _fileFor(projectId);
-    if (!await f.exists()) return null;
     try {
+      final f = await _fileFor(projectId);
+      if (!await f.exists()) return null;
       final raw = await f.readAsString();
       final json = jsonDecode(raw) as Map<String, dynamic>;
       return ProjectStatus.fromJson(json);
-    } on FormatException {
-      return null;
-    } on FileSystemException {
-      return null;
-    } on TypeError {
+    } catch (_) {
       return null;
     }
   }

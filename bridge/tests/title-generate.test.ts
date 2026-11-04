@@ -224,7 +224,7 @@ describe("generateSessionTitle", () => {
       expect(await generateSessionTitle({
         tool: "opencode", cwd: tmp(), fallbackContext: "do a thing", spawn,
       })).toBe("Name the thing");
-      const env = options[0]!.env as Record<string, string>;
+      const env = options.at(-1)!.env as Record<string, string>;
       expect(env.OPENCODE_DB).toBe(":memory:");
       expect("ANTGRID_TERMINAL_ID" in env).toBe(false);
     } finally {
@@ -349,21 +349,6 @@ describe("cheapNamingModel", () => {
     expect(calls[0]).not.toContain("some-other-model");
   });
 
-  // kilo has a verified transcript entry and no cheapNamingModel — nobody has
-  // found a string its account accepts (see registry.ts) — so its argv carries
-  // no --model and nothing else about it moves either. NOT github-copilot,
-  // which also declares no model but is now refused before the spawn entirely
-  // (billsPerCall), and so can no longer show what a bare argv looks like.
-  test("an agent with no declared model spawns its bare verified argv", async () => {
-    const { spawn, calls } = fakeSpawn("Something useful\n");
-    await generateTitleFromContext("ctx", {
-      tool: "kilo", spawn, installedTools: ["kilo"],
-    });
-    expect(calls[0]).toEqual([
-      "kilo", "run", "--agent", "plan", expect.stringContaining("ctx"),
-    ]);
-  });
-
   // The `list`-visibility slugs in a ChatGPT account's ~/.codex/models_cache.json
   // under codex-cli 0.163.0. A slug outside it is refused by the API with a 400
   // ("not supported when using Codex with a ChatGPT account"), so every codex
@@ -378,10 +363,107 @@ describe("cheapNamingModel", () => {
     expect(CODEX_0_163_LISTED).toContain(argv[argv.indexOf("-m") + 1]);
   });
 
+  // opencode and its fork kilo serve whatever providers the user configured, so
+  // naming asks the installed CLI for the model it titles its own sessions with.
+  // The probes answer in opencode 1.19.5's own output shapes, which kilo 7.8.x
+  // shares; the resolution rules themselves are covered by
+  // opencode-naming-model.test.ts in antgrid-agents.
+  function opencodeSpawn(answers: { config: object; models: string; stateDir: string }) {
+    const calls: string[][] = [];
+    const options: Array<Record<string, any>> = [];
+    const spawn = ((cmd: string[], o?: Record<string, any>) => {
+      calls.push(cmd);
+      options.push(o ?? {});
+      const key = cmd.slice(1, 3).join(" ");
+      const stdout = key === "debug config" ? JSON.stringify(answers.config, null, 2)
+        : key === "debug paths" ? `home       /scratch\nstate      ${answers.stateDir}\n`
+        : key === "models --verbose" ? answers.models
+        : "Name the task\n";
+      return { stdout: new Response(stdout).body, exited: Promise.resolve(0), kill() {} };
+    }) as unknown as typeof Bun.spawn;
+    return { spawn, calls, options };
+  }
+  const verboseModel = (providerID: string, id: string, family: string, release_date: string) =>
+    `${providerID}/${id}\n${JSON.stringify({ id, providerID, family, release_date, name: id, status: "active" }, null, 2)}\n`;
+  function stateDirWithRecent(providerID: string, modelID: string): string {
+    const dir = tmp();
+    writeFileSync(join(dir, "model.json"), JSON.stringify({ recent: [{ providerID, modelID }] }));
+    return dir;
+  }
+
+  test("opencode names with the small model opencode itself would title with", async () => {
+    const { spawn, calls, options } = opencodeSpawn({
+      config: {},
+      stateDir: stateDirWithRecent("anthropic", "claude-sonnet-5"),
+      models: [
+        verboseModel("anthropic", "claude-sonnet-5", "claude-sonnet", "2026-08-01"),
+        verboseModel("anthropic", "claude-haiku-5-5", "claude-haiku", "2026-08-01"),
+        verboseModel("anthropic", "claude-haiku-4-5", "claude-haiku", "2025-10-15"),
+      ].join(""),
+    });
+    const result = await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
+    expect(result).toMatchObject({ ok: true, title: "Name the task" });
+    const run = calls.at(-1)!;
+    expect(run.slice(0, 2)).toEqual(["opencode", "run"]);
+    expect(run.slice(-3, -1)).toEqual(["--model", "anthropic/claude-haiku-5-5"]);
+    // The probes resolve the config the naming run sees: same binary, same env.
+    expect(calls.slice(0, -1).map((argv) => argv[0])).toEqual(["opencode", "opencode", "opencode"]);
+    for (const o of options) expect(o.env.OPENCODE_DB).toBe(":memory:");
+  });
+
+  // A ChatGPT sign-in's openai catalog has no small family, so opencode's own
+  // titling falls back to the session's model; so does this.
+  test("opencode with no small model for its provider names on its own default", async () => {
+    const { spawn, calls } = opencodeSpawn({
+      config: {},
+      stateDir: stateDirWithRecent("openai", "gpt-6.1-sol"),
+      models: verboseModel("openai", "gpt-6.1-sol", "gpt-sol", "2026-09-29"),
+    });
+    await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
+    expect(calls.at(-1)!.slice(0, 2)).toEqual(["opencode", "run"]);
+    expect(calls.at(-1)).not.toContain("--model");
+  });
+
+  test("ANTGRID_NAMING_MODEL=0 skips opencode's model probes entirely", async () => {
+    process.env.ANTGRID_NAMING_MODEL = "0";
+    const { spawn, calls } = opencodeSpawn({ config: { small_model: "openai/gpt-5-nano" }, stateDir: tmp(), models: "" });
+    await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
+    expect(calls.length).toBe(1);
+    expect(calls[0]).not.toContain("--model");
+  });
+
+  // kilo-auto/small is an id, not a family, so only kilo's own rule finds it —
+  // opencode's family search would take the gemini-flash beside it.
+  test("kilo names with kilo-auto/small on a kilo provider, probing the kilo binary", async () => {
+    const { spawn, calls, options } = opencodeSpawn({
+      config: {},
+      stateDir: stateDirWithRecent("kilo", "kilo-auto/balanced"),
+      models: [
+        verboseModel("kilo", "kilo-auto/balanced", "", "2026-11-03"),
+        verboseModel("kilo", "kilo-auto/small", "", "2026-11-03"),
+        verboseModel("kilo", "google/gemini-3-flash", "gemini-flash", "2026-10-01"),
+      ].join(""),
+    });
+    await generateTitleFromContext("ctx", { tool: "kilo", spawn, installedTools: ["kilo"] });
+    expect(calls.slice(0, -1).map((argv) => argv[0])).toEqual(["kilo", "kilo", "kilo"]);
+    for (const o of options) expect(o.env.KILO_DB).toBe(":memory:");
+    expect(calls.at(-1)!.slice(-3, -1)).toEqual(["--model", "kilo/kilo-auto/small"]);
+  });
+
+  // The fallback is the argv exactly as verified, with nothing but --model left out.
+  test("an agent whose resolver finds no model spawns its bare verified argv", async () => {
+    const { spawn, calls } = opencodeSpawn({ config: {}, stateDir: tmp(), models: "" });
+    await generateTitleFromContext("ctx", { tool: "kilo", spawn, installedTools: ["kilo"] });
+    expect(calls.at(-1)).toEqual([
+      "kilo", "run", "--agent", "plan", expect.stringContaining("ctx"),
+    ]);
+  });
+
   // Each agent's `cmd` places --model at a different, independently-verified
   // spot in the argv (immediately after --allowedTools' value for claude,
-  // immediately before the positional prompt for codex and opencode). The
-  // default must reach that exact spot, not merely appear somewhere in the argv.
+  // immediately before the positional prompt for codex, and for opencode's
+  // resolved model above). The default must reach that exact spot, not merely
+  // appear somewhere in the argv.
   test("the default model lands where that agent's cmd places --model", async () => {
     const claude = fakeSpawn("t\n");
     await generateTitleFromContext("ctx", {
@@ -394,12 +476,6 @@ describe("cheapNamingModel", () => {
       tool: "codex", spawn: codex.spawn, installedTools: ["codex"],
     });
     expect(codex.calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.6-luna"]);
-
-    const opencode = fakeSpawn("t\n");
-    await generateTitleFromContext("ctx", {
-      tool: "opencode", spawn: opencode.spawn, installedTools: ["opencode"],
-    });
-    expect(opencode.calls[0]!.slice(-3, -1)).toEqual(["--model", "openai/gpt-5.4-mini"]);
   });
 });
 

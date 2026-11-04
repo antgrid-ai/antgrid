@@ -1,6 +1,9 @@
+import { readFile } from "node:fs/promises";
+
+import type { AgentSpec, HeadlessImplementation as HeadlessCommand } from "antgrid-agents/contracts";
 import { logger } from "../logger";
 import { capturePrompt } from "../modelwatch";
-import { headlessScratchCwd, logBorrow, resolveHeadless, executeHeadless } from "./headless";
+import { headlessScratchCwd, logBorrow, resolveHeadless, executeHeadless, runHeadlessProbe } from "./headless";
 import { detectAvailableTools } from "../tool-detector";
 import { authoredText } from "antgrid-agents/handoff";
 import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
@@ -183,10 +186,49 @@ function namingModelEnabled(): boolean {
  * can only have been chosen for the tool the caller named, so a borrow drops it
  * and takes the serving agent's own verified entry instead.
  */
-function namingModel(requested: string, serving: string, callerModel?: string): string | undefined {
+async function namingModel(
+  requested: string, serving: string, command: HeadlessCommand, spawn: typeof Bun.spawn | undefined, callerModel?: string,
+): Promise<string | undefined> {
   if (!namingModelEnabled()) return undefined;
   if (callerModel && requested === serving) return callerModel;
-  return agentSpec(serving)?.cheapNamingModel;
+  const spec = agentSpec(serving);
+  if (spec?.resolveNamingModel && "cmd" in command) {
+    return resolvedNamingModel(serving, command, spawn ?? Bun.spawn, spec.resolveNamingModel);
+  }
+  return spec?.cheapNamingModel;
+}
+
+/** Long enough that a burst of sessions resolves once, short enough that a
+ *  config edit reaches naming without a host restart. */
+const RESOLVED_MODEL_TTL_MS = 10 * 60_000;
+const PROBE_TIMEOUT_MS = 15_000;
+/** Keyed by the spawn first so a test's fake never shares an answer with the
+ *  real CLI, or with another test's fake. */
+const resolvedModels = new WeakMap<typeof Bun.spawn, Map<string, { at: number; model: Promise<string | undefined> }>>();
+
+function resolvedNamingModel(
+  serving: string,
+  command: Extract<HeadlessCommand, { cmd: unknown }>,
+  spawn: typeof Bun.spawn,
+  resolve: NonNullable<AgentSpec["resolveNamingModel"]>,
+): Promise<string | undefined> {
+  const byTool = resolvedModels.get(spawn) ?? new Map();
+  resolvedModels.set(spawn, byTool);
+  const cached = byTool.get(serving);
+  if (cached && Date.now() - cached.at < RESOLVED_MODEL_TTL_MS) return cached.model;
+  // The binary the naming argv runs, probed with that argv's own env and cwd so
+  // both resolve the same config.
+  const [binary] = command.cmd("", undefined);
+  const cwd = headlessScratchCwd();
+  const model = resolve({
+    run: (args) => runHeadlessProbe([binary!, ...args], { cwd, env: command.env, timeoutMs: PROBE_TIMEOUT_MS, spawn }),
+    readText: (path) => readFile(path, "utf8").catch(() => undefined),
+  }).catch((error) => {
+    log.warn({ error, tool: serving }, "naming model resolution failed; naming with the CLI's default");
+    return undefined;
+  });
+  byTool.set(serving, { at: Date.now(), model });
+  return model;
 }
 
 /**
@@ -238,7 +280,7 @@ export async function generateTitleFromContext(context: string, opts: {
       actualTool: picked.tool, reach: picked.reach,
     };
   }
-  const model = namingModel(opts.tool, picked.tool, opts.model);
+  const model = await namingModel(opts.tool, picked.tool, picked.command, opts.spawn, opts.model);
   // Sliced once and then both sent and digested: a digest taken over the whole
   // transcript would identify text the model was never shown.
   const excerpt = context.slice(0, MAX_CONTEXT_CHARS);

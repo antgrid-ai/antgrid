@@ -43,6 +43,8 @@ import { readTranscript as readOpencodeTranscript } from "./opencode/transcript"
 import { claudeFork } from "./claude-code/fork";
 import { codexFork } from "./codex/fork";
 import { opencodeFork } from "./opencode/fork";
+import { resolveOpencodeNamingModel } from "./opencode/naming-model";
+import { resolveKiloNamingModel } from "./kilo/naming-model";
 import { cursorAgentFork } from "./cursor-agent/fork";
 import { copilotFork } from "./github-copilot/fork";
 import { antigravityFork } from "./antigravity/fork";
@@ -286,14 +288,13 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hooks: opencodeHooks,
     mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
     driver: createOpencodeDriver,
-    // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
-    // requires, verified against the transcript argv below via the run's own
-    // log (`modelID=gpt-5.4-mini`, and a counter-run with no --model logging
-    // `gpt-5.6-terra-fast` for the same call, proving the flag is not ignored).
-    // The account's free tiers (`opencode/*-free`) are not candidates however
-    // cheap: their availability is not something a naming call can rely on, and
-    // a throttled call produces no title at all.
-    cheapNamingModel: "openai/gpt-5.4-mini",
+    // No fixed `cheapNamingModel`: opencode serves whatever providers the user
+    // configured, so any one slug fails for every user without it — the last
+    // one, openai/gpt-5.4-mini, failed every call for a ChatGPT sign-in, whose
+    // openai provider answers outside its Codex catalog 400 "not supported when
+    // using Codex with a ChatGPT account". Ask opencode for the model it titles
+    // its own sessions with instead.
+    resolveNamingModel: resolveOpencodeNamingModel,
     headless: {
       // "transcript", not "readonly": --agent plan selects opencode's built-in
       // restricted Plan agent (edits denied by default; non-interactive `run`
@@ -514,6 +515,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     augmentsDefaultSpec: true,
     hooks: kiloHooks,
     mcp: opencodeFamilyMcp("KILO_CONFIG_CONTENT"),
+    // Same reason as opencode's: Kilo routes to whatever providers the user
+    // configured, so it names with the model Kilo would title its own sessions with.
+    resolveNamingModel: resolveKiloNamingModel,
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },

@@ -19,13 +19,13 @@ import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
 import '../providers/auth.dart';
-import '../providers/sign_out.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../util/detached.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
+import '../widgets/sign_out_action.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
 
@@ -129,7 +129,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       case DeleteAccountResult.ok:
         // Full local teardown + provider invalidation; the root re-renders in
         // its signed-out state (sign-in screen on mobile).
-        await performHardSignOut(ref.container);
+        await hardSignOutFromUi(ref.container, AbToaster.maybeOf(context));
       case DeleteAccountResult.blockedBySubscription:
         final go = await AbConfirmDialog.show(
           context: context,
