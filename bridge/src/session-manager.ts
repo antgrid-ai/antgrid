@@ -530,34 +530,11 @@ const RESUME_RESTART_WAIT_MS = 2_000;
 const NO_CONVERSATION_FOUND = /no conversation found/i;
 
 /** Plain text from raw PTY output: control sequences removed and every run of
- *  whitespace (including a wrap's line break) collapsed, so a message the
- *  terminal coloured or wrapped still reads as the phrase it was. */
+ *  whitespace or control characters (a wrap's line break included) collapsed,
+ *  so a message the terminal coloured or wrapped still reads as the phrase it
+ *  was. */
 function flattenTerminalText(raw: string): string {
-  const ESC = 27;
-  const BEL = 7;
-  let out = "";
-  for (let i = 0; i < raw.length; i++) {
-    const code = raw.charCodeAt(i);
-    if (code === ESC) {
-      const next = raw[i + 1];
-      if (next === "[") {
-        // CSI: parameter and intermediate bytes, then one final byte.
-        i += 2;
-        while (i < raw.length && raw.charCodeAt(i) < 0x40) i++;
-      } else if (next === "]") {
-        // OSC: up to BEL or ST (ESC followed by a backslash).
-        i += 2;
-        while (i < raw.length && raw.charCodeAt(i) !== BEL && raw.charCodeAt(i) !== ESC) i++;
-        if (raw.charCodeAt(i) === ESC) i++;
-      } else {
-        i++;
-      }
-      continue;
-    }
-    // Any whitespace or control character, so a wrap's line break reads as a space.
-    out += code <= 32 ? " " : raw[i];
-  }
-  return out.split(" ").filter(Boolean).join(" ");
+  return stripAnsi(raw).replace(/[\x00-\x20]+/g, " ").trim();
 }
 /** close()'s wait for handoff placements, kept inside the seconds a supervisor
  *  gives a shutting-down host. A placement is one rename, or a copy across

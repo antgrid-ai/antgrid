@@ -11,7 +11,7 @@ import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
 import '../../providers/new_session_picker.dart';
-import '../../providers/project_panel.dart';
+import '../../providers/project_composer.dart';
 import 'picker_sources.dart';
 import 'project_first_menus.dart';
 

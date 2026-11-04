@@ -15,7 +15,7 @@ import '../../providers/machine_directory.dart';
 import '../../providers/machine_scope.dart';
 import '../../providers/mobile_connection.dart';
 import '../../providers/project_index.dart';
-import '../../providers/project_panel.dart';
+import '../../providers/project_composer.dart';
 import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
@@ -23,19 +23,15 @@ import '../project_sidebar.dart' show SidebarSectionLabel;
 import '../recent_sessions/starting_session_row.dart';
 
 /// The phone's home: what waits on the user across the machines in scope, then
-/// every project in scope, merged across machines. A project opens its own
-/// screen ([ProjectPanelView] at phone width); a needs-you card opens the
-/// session itself.
+/// every project in scope, merged across machines. Tapping a project points
+/// the composer below at it; a needs-you card opens the session itself.
 class MobileHomeList extends ConsumerWidget {
   const MobileHomeList({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final needs = ref.watch(needsYouProvider);
-    final views = [
-      for (final v in ref.watch(projectViewsProvider))
-        if (v.inScope) v,
-    ];
+    final views = ref.watch(inScopeProjectViewsProvider);
     final anyProjects = ref.watch(projectViewsProvider).isNotEmpty;
     return CustomScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
@@ -252,11 +248,10 @@ class _ProjectTile extends ConsumerWidget {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (view.needsYouCount > 0) ...[
-                const AbStatusDot(tone: AbStatusTone.warning),
+              if (view.needsYouCount > 0) const AbStatusDot(tone: AbStatusTone.warning),
+              if (view.needsYouCount > 0 && parts.isNotEmpty)
                 const SizedBox(width: AbTokens.space8),
-              ],
-              if (parts.isNotEmpty) ...[
+              if (parts.isNotEmpty)
                 Text(
                   parts.join(' · '),
                   style: AbTokens.sansStyle(
@@ -264,17 +259,17 @@ class _ProjectTile extends ConsumerWidget {
                     color: p.textSecondary,
                   ),
                 ),
-                const SizedBox(width: AbTokens.space8),
-              ],
-              AbIcon(
-                AbIcons.chevronRight,
-                size: AbTokens.fontSm,
-                color: p.textMuted,
-              ),
             ],
           ),
           horizontalPadding: AbTokens.space12,
-          onTap: () => openProjectPanel(ref.container, view),
+          // Lit while it is what the composer below will start a session in.
+          selected: ref.watch(
+            composerProjectViewProvider.select(
+              (v) => v?.group.key == view.group.key,
+            ),
+          ),
+          selectionStyle: AbRowSelection.surface,
+          onTap: () => pointComposerAtProject(ref.container, view),
         ),
       ),
     );

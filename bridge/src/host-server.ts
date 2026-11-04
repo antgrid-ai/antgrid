@@ -964,7 +964,7 @@ export class HostServer {
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        const gitRemote = this.repoKeys.probed(id) ? this.repoKeys.keyFor(id) : undefined;
+        const gitRemote = this.repoKeys.advertised(id);
         return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, gitRemote };
       });
   }
@@ -2854,7 +2854,7 @@ export class HostServer {
       projectId, path: e.path, running: true, mode: e.mode,
       workStatus: e.core.workStatus,
       sessionStatuses: e.core.sessionWorkStatuses,
-      gitRemote: this.repoKeys.probed(projectId) ? this.repoKeys.keyFor(projectId) : undefined,
+      gitRemote: this.repoKeys.advertised(projectId),
     }));
   }
 

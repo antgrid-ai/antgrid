@@ -9,6 +9,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/agent_work_status.dart';
 import '../models/drawer_entry.dart';
@@ -85,6 +86,8 @@ class MachineScopeButton extends ConsumerWidget {
                 await showAbPanel<void>(
                   context: anchorContext,
                   anchorRect: anchor,
+                  // Pinned at the sidebar's foot, so there is no room below.
+                  preferred: AbMenuPlacement.above,
                   width: 300,
                   builder: (_) => const MachineScopePanel(),
                 );
@@ -126,7 +129,10 @@ class MachineScopePanel extends ConsumerWidget {
             entry: entries.firstWhereOrNull((e) => e.machineUuid == m.id),
             onToggle: () => notifier.toggle(m.id, online: m.online),
           ),
-        const _PanelDivider(),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: AbTokens.space4),
+          child: AbSeparator.horizontal(weight: AbSeparatorWeight.strong),
+        ),
         PanelRow(
           icon: AbIcons.check,
           label: 'Select all',
@@ -344,14 +350,4 @@ class _ScopeMachineRowState extends State<_ScopeMachineRow> {
       ),
     );
   }
-}
-
-class _PanelDivider extends StatelessWidget {
-  const _PanelDivider();
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: AbTokens.space4),
-    child: Container(height: 1, color: context.antgrid.borderStrong),
-  );
 }

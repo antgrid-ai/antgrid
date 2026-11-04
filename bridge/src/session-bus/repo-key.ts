@@ -47,7 +47,8 @@ export class SessionBusRepoKeys {
     if (!projectPath) return false;
     try {
       const key = await readRepoKey(projectPath);
-      const changed = !this.keys.has(projectId) || this.keys.get(projectId) !== key;
+      // An unprobed project reads undefined, never a key, so it always counts.
+      const changed = this.keys.get(projectId) !== key;
       this.keys.set(projectId, key);
       return changed;
     } catch (err) {
@@ -79,12 +80,19 @@ export class SessionBusRepoKeys {
     return this.keys.get(projectId) ?? null;
   }
 
-  /** Whether this project has ever answered the probe. Only refusal TEXT reads
-   *  this — the directory's, and a send's when the caller's own project has no
-   *  key: "no git remote" and "not read yet" are the same empty list and very
+  /** Whether this project has ever answered the probe. Refusal text reads this —
+   *  the directory's, and a send's when the caller's own project has no key:
+   *  "no git remote" and "not read yet" are the same empty list and very
    *  different bug reports, and one of them clears on its own. */
   probed(projectId: string): boolean {
     return this.keys.has(projectId);
+  }
+
+  /** The key as a project advert carries it: undefined while unprobed, null for
+   *  no remote, else the key. The app tells "not read yet" from "has none" by
+   *  this, so every advert spells it through here. */
+  advertised(projectId: string): string | null | undefined {
+    return this.keys.get(projectId);
   }
 
   /** Every project sharing `key`. Empty for a null key — a project with no

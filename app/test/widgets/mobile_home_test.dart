@@ -9,12 +9,11 @@ import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/machine_capability_card.dart';
 import 'package:antgrid/providers/machine_directory.dart';
 import 'package:antgrid/providers/project_index.dart';
-import 'package:antgrid/providers/project_panel.dart';
+import 'package:antgrid/providers/project_composer.dart';
 import 'package:antgrid/providers/project_work_status.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/widgets/machine_scope_sheet.dart';
 import 'package:antgrid/widgets/mobile/mobile_home.dart';
-import 'package:antgrid/widgets/project_panel/project_panel_view.dart';
 
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/test_store_overrides.dart';
@@ -155,7 +154,7 @@ void main() {
     expect(button.height, greaterThanOrEqualTo(44));
   });
 
-  testWidgets('a project opens its screen', (tester) async {
+  testWidgets('a project points the composer at it', (tester) async {
     await tester.pumpWidget(host(const MobileHomeList()));
     // The needs-you dot pulses for as long as it is shown, so this never
     // settles; one frame past the first build is all it needs.
@@ -167,7 +166,7 @@ void main() {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(MobileHomeList)),
     );
-    expect(container.read(selectedProjectGroupProvider), 'git:r/antgrid');
+    expect(container.read(composerProjectViewProvider)?.group.key, 'git:r/antgrid');
   });
 
   testWidgets('the scope sheet locks a machine whose remote access is off', (
@@ -183,25 +182,5 @@ void main() {
 
     expect(find.text('Remote access is off on this machine'), findsOneWidget);
     expect(find.bySemanticsLabel(RegExp('win, locked')), findsOneWidget);
-  });
-
-  testWidgets('the phone project screen filters with machine chips', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      host(ProjectPanelView(view: _view(), compact: true)),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('All'), findsOneWidget);
-    await tester.tap(find.text('stu').first);
-    await tester.pumpAndSettle();
-
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(ProjectPanelView)),
-    );
-    expect(container.read(projectMachineFilterProvider), 'stu');
-    expect(find.text('Session ask'), findsNothing);
-    expect(find.text('Session run'), findsOneWidget);
   });
 }

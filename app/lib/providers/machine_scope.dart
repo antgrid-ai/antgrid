@@ -6,8 +6,8 @@ import '../util/detached.dart';
 import 'demo_mode.dart';
 
 /// Which machines the project-first views show. The ONE source of truth for
-/// that question: the sidebar, Needs you, the project panel, the composer's
-/// machine picker and the mobile home all filter through [includes], so no two
+/// that question: the sidebar, Needs you, the composer's project and
+/// machine pickers and the mobile home all filter through [includes], so no two
 /// of them can disagree about what is in scope.
 ///
 /// Stores explicit choices only. A machine absent from both sets follows the

@@ -14,7 +14,6 @@ import 'demo_mode.dart';
 import 'eager_control_planes.dart';
 import 'machine_directory.dart';
 import 'new_session_picker.dart';
-import 'project_panel.dart';
 import 'recent_sessions.dart';
 import 'relay_connection.dart';
 
@@ -311,7 +310,6 @@ void chooseMobileMachine(ProviderContainer c, String machineId) {
   final previous = c.read(mobileConnectionProvider).machineId;
   if (previous != null && previous != machineId) _releaseMachine(c, previous);
   c.read(mobileConnectionProvider.notifier).connect(machineId);
-  closeProjectPanel(c);
   c.read(selectedSourceIdProvider.notifier).set('machine:$machineId');
   final target = c.read(selectedTargetProjectProvider);
   if (target != null && target.machineUuid != machineId) {
@@ -328,7 +326,6 @@ void disconnectMobileMachine(ProviderContainer c) {
   final previous = c.read(mobileConnectionProvider).machineId;
   if (previous != null) _releaseMachine(c, previous);
   c.read(mobileConnectionProvider.notifier).disconnect();
-  closeProjectPanel(c);
 }
 
 /// A fresh attempt at the current machine: a stuck ladder is restarted and the

@@ -40,6 +40,7 @@ import '../launcher/project_resolve.dart';
 import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import '../util/device_id.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../widgets/agent_notification_surfacer.dart';
 import '../widgets/operational_error_toaster.dart';
@@ -444,6 +445,13 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // the same project. See _peekProjectSessions.
   final Set<String> _seedingSessions = {};
 
+  // entryIds whose session list has been peeked since their machine's socket
+  // opened. The Recent cache outlives the app, so "has a cached list" is no
+  // proof the list is current: the advert deltas below can only see changes
+  // made WHILE connected, and a session deleted or created while this device
+  // was away leaves no delta behind. Dropped per machine on disconnect.
+  final Set<String> _sessionsPeekedThisConnection = {};
+
   // Last-seen per-project advert `running`, keyed by entryId. A project-level
   // run-state transition re-peeks that project's session list so cached Recent /
   // sidebar rows track the agent's live work without a manual pull-to-refresh.
@@ -590,6 +598,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         _lastAdvertStatus.removeWhere((k, _) => k.startsWith(prefix));
         _lastAdvertRunningCount.removeWhere((k, _) => k.startsWith(prefix));
         _lastAdvertLastActiveAt.removeWhere((k, _) => k.startsWith(prefix));
+        _sessionsPeekedThisConnection.removeWhere((k) => k.startsWith(prefix));
       }
     }
     for (final uuid in openIds) {
@@ -635,6 +644,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     _lastAdvertLastActiveAt.clear();
     _lastLocalStatus.clear();
     _seedingSessions.clear();
+    _sessionsPeekedThisConnection.clear();
     for (final sub in _labelSubs.values) {
       sub.close();
     }
@@ -736,16 +746,16 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       final prevLastActiveAt = _lastAdvertLastActiveAt[entryId];
       _lastAdvertLastActiveAt[entryId] = ap.lastActiveAt;
       if (cp == null) continue;
-      // Seed a never-synced project's sessions, OR re-peek when its advertised
-      // run-state or work status flips — the bridge peek reports true per-session
-      // `running`, so a cached Recent/sidebar row tracks the agent's live work
-      // without a manual pull-to-refresh. A status flip (working↔done↔attention)
-      // is the signal an already-registered agent started/finished a turn, which
-      // never moves `running`. Without the seed, Recent would stay empty for an
-      // allowed, actively-running project until the user pulls to refresh AND it
-      // already has a cached row (pull-to-refresh only re-syncs known rows, see
-      // refreshRecentSessions), or opens it manually.
-      final neverSynced = !store.has(entryId);
+      // Seed a project not yet synced on this connection, OR re-peek when its
+      // advertised run-state or work status flips — the bridge peek reports true
+      // per-session `running`, so a cached Recent/sidebar row tracks the agent's
+      // live work without a manual pull-to-refresh. A status flip
+      // (working↔done↔attention) is the signal an already-registered agent
+      // started/finished a turn, which never moves `running`. Without the seed,
+      // Recent would show whatever the cache held when this device last
+      // connected — empty, or sessions since deleted — until the user pulls to
+      // refresh or opens the project.
+      final neverSynced = !_sessionsPeekedThisConnection.contains(entryId);
       final runStateFlipped = prevRunning != null && prevRunning != ap.running;
       // Re-peek on status flip only when transitioning TO a call-to-action state
       // (attention/error). Regular working↔done cycling on a cached project never
@@ -794,7 +804,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     unawaited(
       cp
           .listSessions(projectId)
-          .then((sessions) => store.put(entryId, sessions))
+          .then((sessions) async {
+            await store.put(entryId, sessions);
+            // A reply outliving its socket must not vouch for the next one.
+            final uuid = baseDeviceUuid(entryId);
+            if (_labelSubs.containsKey(uuid)) {
+              _sessionsPeekedThisConnection.add(entryId);
+            }
+          })
           .catchError(
             (_) {},
           ) // offline/NOT_ALLOWED — retried on the next advert

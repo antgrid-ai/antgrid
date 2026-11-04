@@ -752,15 +752,17 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
   ];
 }
 
-/// The focused project's host RAM as the chip shows it. A cold project reads
-/// the status cache, which never holds these figures, so it shows none.
-String? _focusedHostRam(WidgetRef ref) {
+/// The focused project's host figures. A cold project reads the status cache,
+/// which never holds them, so it has none.
+DeviceStats? _focusedHostStats(WidgetRef ref) {
   final selectedId = ref.watch(selectedRegistrationIdProvider);
   if (selectedId == null) return null;
-  final stats = ref
-      .watch(projectStatusProvider(selectedId))
-      .value
-      ?.machineStats;
+  return ref.watch(projectStatusProvider(selectedId)).value?.machineStats;
+}
+
+/// The focused project's host RAM as the chip shows it.
+String? _focusedHostRam(WidgetRef ref) {
+  final stats = _focusedHostStats(ref);
   if (stats == null) return null;
   return ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes);
 }
@@ -782,16 +784,8 @@ VoidCallback? _requestHostStats(WidgetRef ref) {
   });
 }
 
-/// The focused project's host CPU load, read like [_focusedHostRam].
-int? _focusedHostCpu(WidgetRef ref) {
-  final selectedId = ref.watch(selectedRegistrationIdProvider);
-  if (selectedId == null) return null;
-  return ref
-      .watch(projectStatusProvider(selectedId))
-      .value
-      ?.machineStats
-      ?.cpuPercent;
-}
+/// The focused project's host CPU load.
+int? _focusedHostCpu(WidgetRef ref) => _focusedHostStats(ref)?.cpuPercent;
 
 /// The machine hosting the focused project, or null when it is this one (or
 /// undecidable yet).

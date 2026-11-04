@@ -3,6 +3,7 @@
 //
 // Seeding writes straight into the real stores (buildTestStoreOverrides) so the
 // providers see real data without provider-level mocking.
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,6 +18,7 @@ import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/drawer_entry_row.dart' show DrawerRemoveButton;
 import 'package:antgrid/widgets/machine_scope_menu.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/session_row.dart';
@@ -168,6 +170,36 @@ void main() {
     expect(find.byType(SessionRow), findsNothing);
   });
 
+  Future<void> hoverProject(WidgetTester tester) async {
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(gesture.removePointer);
+    await gesture.addPointer(location: tester.getCenter(find.text('antgrid')));
+    await tester.pump();
+  }
+
+  testWidgets('a project with no sessions anywhere offers delete', (
+    tester,
+  ) async {
+    await seedLocal(const []);
+    await tester.pumpWidget(buildDrawer());
+    await tester.pumpAndSettle();
+
+    await hoverProject(tester);
+    expect(find.byType(DrawerRemoveButton), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('an empty local copy of a repo with sessions elsewhere does not', (
+    tester,
+  ) async {
+    await seedLocal(const []);
+    await seedRemoteCopy([_session('remote')]);
+    await tester.pumpWidget(buildDrawer());
+    await tester.pumpAndSettle();
+
+    await hoverProject(tester);
+    expect(find.byType(DrawerRemoveButton), findsNothing);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
   testWidgets('one repo on two machines is one row, its sessions tagged by machine', (
     tester,
   ) async {
@@ -183,7 +215,8 @@ void main() {
     expect(find.byType(SessionRow), findsNWidgets(2));
     // The tag sits where a pointer reveals the kebab — on touch the kebab is
     // always there, so this is a desktop assertion.
-    expect(find.text(_machineName), findsOneWidget);
+    // Short, so it fits the cell the kebab takes: "MacBook Pro" is MB.
+    expect(find.text('MB'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('an offline machine is out of scope until picked in the menu', (
@@ -236,6 +269,30 @@ void main() {
 
     expect(find.text('NEEDS YOU'), findsOneWidget);
     expect(find.text('This machine · antgrid'), findsOneWidget);
+  });
+
+  testWidgets('every waiting session is listed under Needs you', (
+    tester,
+  ) async {
+    const waiting = 4;
+    await seedLocal([
+      for (var i = 1; i <= waiting; i++)
+        _session('$i', running: true, lastUsedAt: i),
+    ]);
+    await tester.pumpWidget(buildDrawer());
+    await tester.pumpAndSettle();
+
+    containerOf(tester)
+        .read(remoteSessionStatusProvider.notifier)
+        .setLocalSessionStatuses({
+          _projectId: {
+            for (var i = 1; i <= waiting; i++) '$i': AgentWorkStatus.attention,
+          },
+        });
+    await tester.pump();
+
+    expect(find.text('NEEDS YOU'), findsOneWidget);
+    expect(find.text('This machine · antgrid'), findsNWidgets(waiting));
   });
 
   testWidgets('the scope menu says when a machine has remote access off', (

@@ -94,8 +94,8 @@ void main() {
       machine('old', online: false),
     ];
 
-    test('default scope over a mix of online and offline reads all online', () {
-      expect(machineScopeLabel(machines, const MachineScope()), 'All online machines');
+    test('default scope over a mix of online and offline reads all machines', () {
+      expect(machineScopeLabel(machines, const MachineScope()), 'All machines');
     });
 
     test('everything in scope reads all machines', () {

@@ -8,13 +8,14 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_status_dot.dart';
+import '../../models/project_catalog.dart';
 import '../../providers/demo_mode.dart';
+import '../../providers/machine_capability_card.dart';
 import '../../providers/machine_directory.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/project_index.dart';
-import '../../providers/project_panel.dart';
+import '../../providers/project_composer.dart';
 import '../../utils/platform_utils.dart';
-import '../project_panel/project_panel_view.dart' show watchMachineBranch;
 import 'environment_menu.dart';
 
 /// The composer's project picker: every project in scope, merged across
@@ -27,10 +28,7 @@ class ProjectFirstPanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final views = [
-      for (final v in ref.watch(projectViewsProvider))
-        if (v.inScope) v,
-    ];
+    final views = ref.watch(inScopeProjectViewsProvider);
     final current = ref.watch(composerProjectViewProvider)?.group.key;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -71,13 +69,7 @@ class ProjectFirstPanel extends ConsumerWidget {
               onTap: v.allOffline
                   ? null
                   : () {
-                      final machineId = defaultComposerMachine(v);
-                      for (final m in v.members) {
-                        if (m.machineId == machineId) {
-                          selectComposerMember(ref.container, m);
-                          break;
-                        }
-                      }
+                      pointComposerAtProject(ref.container, v);
                       Navigator.of(context).pop();
                     },
             ),
@@ -160,7 +152,7 @@ class _MachineChoice extends ConsumerWidget {
     final projectId = this.projectId;
     final branch = projectId == null
         ? null
-        : watchMachineBranch(ref, m, projectId);
+        : _watchMachineBranch(ref, m, projectId);
     final status = [
       if (!m.online) 'Offline' else 'Online',
       ?branch,
@@ -200,4 +192,19 @@ class _MachineChoice extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// The branch [machine]'s copy of [projectId] is on, from its Capability Card.
+/// Asked only of a machine that is up: the card is an RPC, and for a remote
+/// machine it rides that machine's control plane.
+String? _watchMachineBranch(
+  WidgetRef ref,
+  MachineInfo machine,
+  String projectId,
+) {
+  if (!machine.online) return null;
+  final card = machine.id == kLocalMachineKey
+      ? ref.watch(localCapabilityCardProvider(projectId)).value
+      : ref.watch(machineCapabilityCardProvider(machine.id)).value;
+  return card?.projects[projectId]?.branch;
 }

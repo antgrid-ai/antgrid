@@ -239,8 +239,12 @@ List<MachineInfo> scopeCandidates(List<MachineInfo> machines, {bool? mobile}) {
   ];
 }
 
-/// What the scope button says, e.g. "All online machines" / "MacBook Pro" /
+/// What the scope button says, e.g. "All machines" / "MacBook Pro" /
 /// "3 of 5 machines".
+///
+/// Every online machine in scope reads as "All machines" too, offline ones
+/// left out: the default scope hides what is offline, and the button's own
+/// subline already counts what is online.
 String machineScopeLabel(List<MachineInfo> machines, MachineScope scope) {
   final inScope = [
     for (final m in machines)
@@ -254,7 +258,7 @@ String machineScopeLabel(List<MachineInfo> machines, MachineScope scope) {
   ];
   final onlyOnline =
       inScope.length == online.length && inScope.every((m) => m.online);
-  if (onlyOnline) return 'All online machines';
+  if (onlyOnline) return 'All machines';
   if (inScope.length == 1) return inScope.single.name;
   return '${inScope.length} of ${machines.length} machines';
 }

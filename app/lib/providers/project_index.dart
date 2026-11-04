@@ -197,7 +197,7 @@ List<ProjectGroup> groupProjects(List<ProjectMember> members) {
   ];
 }
 
-/// Where a session sits in the project panel's default grouping.
+/// Where a session sits for Needs you and a project's running count.
 enum SessionBucket { needsYou, running, done }
 
 /// `error` is a call to action like `attention`: nothing resolves it without
@@ -216,7 +216,7 @@ class ProjectView {
     required this.group,
     required this.members,
     required this.machines,
-    required this.hiddenMachines,
+    required this.hasSessionsAnywhere,
     required this.sessions,
     required this.liveCount,
     required this.needsYouCount,
@@ -230,8 +230,9 @@ class ProjectView {
   /// Those machines, in directory order.
   final List<MachineInfo> machines;
 
-  /// Machines holding the project that the scope hides.
-  final List<MachineInfo> hiddenMachines;
+  /// Whether any copy has sessions, the scope notwithstanding: a project in
+  /// use on a hidden machine is still in use.
+  final bool hasSessionsAnywhere;
 
   /// Sessions on in-scope copies, most recent first.
   final List<RecentSessionRow> sessions;
@@ -295,14 +296,13 @@ List<ProjectView> buildProjectViews({
           break;
       }
     }
-    final scopedIds = {for (final m in members) m.machineId};
     views.add((
       view: ProjectView(
         group: g,
         members: List.unmodifiable(members),
         machines: List.unmodifiable(machinesOf(members)),
-        hiddenMachines: List.unmodifiable(
-          machinesOf(g.members.where((m) => !scopedIds.contains(m.machineId))),
+        hasSessionsAnywhere: g.members.any(
+          (m) => sessionsByEntry[m.entryId]?.isNotEmpty ?? false,
         ),
         sessions: List.unmodifiable(rows),
         liveCount: live,
@@ -415,6 +415,14 @@ final projectViewsProvider = Provider<List<ProjectView>>((ref) {
     sessions: ref.watch(recentSessionsProvider),
     statusOf: _statusLookup(ref.watch(recentSessionStatusesProvider)),
   );
+});
+
+/// The [projectViewsProvider] entries the machine scope shows.
+final inScopeProjectViewsProvider = Provider<List<ProjectView>>((ref) {
+  return List.unmodifiable([
+    for (final v in ref.watch(projectViewsProvider))
+      if (v.inScope) v,
+  ]);
 });
 
 final needsYouProvider = Provider<List<NeedsYouItem>>((ref) {

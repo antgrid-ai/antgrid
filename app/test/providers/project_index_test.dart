@@ -193,7 +193,7 @@ void main() {
     final groups = groupProjects([mbp, stu, site]);
     final machines = [machine('mbp'), machine('stu')];
 
-    test('filters copies and sessions to machines in scope, naming the hidden ones', () {
+    test('filters copies and sessions to machines in scope', () {
       final views = buildProjectViews(
         groups: groups,
         machines: machines,
@@ -207,10 +207,25 @@ void main() {
       final antgrid = views.firstWhere((v) => v.group.key == 'git:r/antgrid');
       expect(antgrid.members.map((m) => m.machineId), ['mbp']);
       expect(antgrid.sessions.map((r) => r.session.id), ['a']);
-      expect(antgrid.hiddenMachines.map((m) => m.id), ['stu']);
+      // Sessions on hidden copies still count as the project being in use.
+      expect(antgrid.hasSessionsAnywhere, isTrue);
 
       final siteView = views.firstWhere((v) => v.group.key == 'git:r/site');
       expect(siteView.inScope, isFalse);
+      expect(siteView.hasSessionsAnywhere, isFalse);
+    });
+
+    test('a project whose only sessions are on a hidden machine is in use', () {
+      final views = buildProjectViews(
+        groups: groups,
+        machines: machines,
+        scopedMachineIds: {'mbp'},
+        sessions: [row(stu, 'b', lastUsedAt: 20)],
+        statusOf: statuses(const {}),
+      );
+      final antgrid = views.firstWhere((v) => v.group.key == 'git:r/antgrid');
+      expect(antgrid.sessions, isEmpty);
+      expect(antgrid.hasSessionsAnywhere, isTrue);
     });
 
     test('counts live and needs-you sessions, and orders projects by recency', () {

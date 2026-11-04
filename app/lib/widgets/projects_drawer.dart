@@ -23,7 +23,6 @@ import '../providers/demo_mode.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/mobile_connection.dart';
 import '../providers/project_index.dart';
-import '../providers/project_panel.dart';
 import '../providers/providers.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -133,9 +132,11 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           // Neither belongs to a machine-less demo: the footer's account row
           // fetches the user, the subscription and the pricing catalogue, and
           // the update row's only action leaves for the store.
-          pinned: ref.watch(demoModeProvider)
-              ? const []
-              : const [UpdateRow(), _Footer()],
+          pinned: [
+            if (!ref.watch(mobileConnectEnabledProvider))
+              const MachineScopeButton(),
+            if (!ref.watch(demoModeProvider)) ...const [UpdateRow(), _Footer()],
+          ],
         ),
       ),
     );
@@ -155,9 +156,9 @@ class _TopChrome extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // The scope switcher sits above everything it filters — Needs you and the
-    // project list below are both answers to "on which machines". A phone has
-    // one machine instead of a scope.
+    // A phone holds one machine, and the choice of it leads the drawer. The
+    // desktop's machine scope is pinned at the bottom instead: it is set once
+    // and rarely touched, so it yields the top to the list it filters.
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -170,9 +171,7 @@ class _TopChrome extends ConsumerWidget {
               vertical: AbTokens.space4,
             ),
             child: ConnectedMachineButton(),
-          )
-        else
-          const MachineScopeButton(),
+          ),
       ],
     );
   }
@@ -282,15 +281,8 @@ class _NavActions extends ConsumerWidget {
             navigationRow(
               label: 'New Session',
               icon: AbIcons.add,
-              // A project panel is the New Session surface too, but the row
-              // that is lit then is the project's.
-              selected:
-                  surface == WorkbenchSurface.newSession &&
-                  ref.watch(selectedProjectGroupProvider) == null,
-              onTap: () {
-                closeProjectPanel(ref.container);
-                enterNewSession(ref.container);
-              },
+              selected: surface == WorkbenchSurface.newSession,
+              onTap: () => enterNewSession(ref.container),
             ),
             const SizedBox(height: AbTokens.space4),
             navigationRow(
@@ -336,30 +328,14 @@ class _GroupLabel extends ConsumerWidget {
     final refreshing = demo
         ? false
         : ref.watch(accountAgentsProvider).isLoading;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerGutter,
-        AbTokens.space10,
-        AbTokens.drawerGutter,
-        AbTokens.space6,
-      ),
-      // A section header's height is its type + padding; the refresh button is
-      // inline chrome inside it, not a standalone touch affordance.
-      child: AbCompactTapTargets(
-        child: Row(
-          children: [
-            Text(
-              label,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
-                letterSpacing: 1.4,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const Spacer(),
-            if (!demo)
-              AbIconButton(
+    // A section header's height is its type + padding; the refresh button is
+    // inline chrome inside it, not a standalone touch affordance.
+    return AbCompactTapTargets(
+      child: SidebarSectionLabel(
+        label: label,
+        trailing: demo
+            ? null
+            : AbIconButton(
                 icon: AbIcons.refresh,
                 tone: AbIconButtonTone.muted,
                 tooltip: 'Refresh',
@@ -379,8 +355,6 @@ class _GroupLabel extends ConsumerWidget {
                         onRefresh!,
                       ),
               ),
-          ],
-        ),
       ),
     );
   }
@@ -471,10 +445,7 @@ class _Body extends ConsumerWidget {
         ],
       );
     }
-    final inScope = [
-      for (final v in views)
-        if (v.inScope) v,
-    ];
+    final inScope = ref.watch(inScopeProjectViewsProvider);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AbTokens.space4),
