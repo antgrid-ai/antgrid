@@ -34,7 +34,7 @@ function makeFakeClient(
     abort: async (s) => { calls.push({ m: "abort", args: [s] }); },
     summarize: async (s) => { calls.push({ m: "summarize", args: [s] }); },
     replyPermission: async (s, id, r) => { calls.push({ m: "replyPermission", args: [s, id, r] }); },
-    replyQuestion: async (id, a) => { calls.push({ m: "replyQuestion", args: [id, a] }); },
+    replyForm: async (s, id, a) => { calls.push({ m: "replyForm", args: [s, id, a] }); },
     listCommands: async () => { calls.push({ m: "listCommands", args: [] }); return [
       { name: "review", description: "Review changes", hints: ["$ARGUMENTS"], source: "command", template: "..." },
       { name: "hello-skill", source: "skill", hints: [], template: "..." },
@@ -45,16 +45,11 @@ function makeFakeClient(
       { name: "general", mode: "subagent" },
       { name: "compaction", mode: "primary", hidden: true },
     ]; },
-    listProviders: async () => { calls.push({ m: "listProviders", args: [] }); return {
-      all: [
-        { id: "anthropic", name: "Anthropic", models: {
-          "claude-sonnet-5": { id: "claude-sonnet-5", name: "Claude Sonnet 5", variants: { thinking: {} }, limit: { context: 195000, output: 8192 } },
-        } },
-        { id: "openai", name: "OpenAI", models: { "gpt-5.2": { id: "gpt-5.2", name: "GPT-5.2" } } },
-      ],
-      default: { anthropic: "claude-sonnet-5" },
-      connected: ["anthropic"],
-    }; },
+    listProviders: async () => { calls.push({ m: "listProviders", args: [] }); return [
+      { id: "anthropic", name: "Anthropic", models: {
+        "claude-sonnet-5": { id: "claude-sonnet-5", name: "Claude Sonnet 5", variants: { thinking: {} }, limit: { context: 195000, output: 8192 } },
+      } },
+    ]; },
     command: async (s: string, o: any) => { calls.push({ m: "command", args: [s, o] }); },
     events: () => ({
       [Symbol.asyncIterator]() {
@@ -122,7 +117,7 @@ describe("OpencodeDriver", () => {
     expect(questions).toHaveLength(3);
     for (const [index, answer] of ["3", "true", "stored-value"].entries()) driver.resolveQuestion(questions[index]!.questionId, answer);
     await tick();
-    expect(calls.find((call) => call.m === "replyQuestion")?.args).toEqual(["form", JSON.stringify({ count: 3, ok: true, choice: "stored-value" })]);
+    expect(calls.find((call) => call.m === "replyForm")?.args).toEqual(["ses_root", "form", { count: 3, ok: true, choice: "stored-value" }]);
     await driver.dispose();
   });
 
@@ -135,7 +130,7 @@ describe("OpencodeDriver", () => {
     const questions = sent.filter((message) => message.type === "agent:question");
     driver.resolveQuestion(questions[0]!.questionId, "cancel");
     await tick();
-    expect(calls.find((call) => call.m === "replyQuestion")?.args).toEqual(["form", null]);
+    expect(calls.find((call) => call.m === "replyForm")?.args).toEqual(["global", "form", null]);
     expect(sent.some((message) => message.type === "agent:request-retracted" && message.questionId === questions[1]!.questionId)).toBe(true);
     await driver.dispose();
   });
@@ -147,7 +142,7 @@ describe("OpencodeDriver", () => {
     push({ type: "form.replied", properties: { id: "form", sessionID: "ses_root" } });
     await tick();
     expect(sent.some((message) => message.type === "agent:request-retracted")).toBe(true);
-    expect(calls.some((call) => call.m === "replyQuestion")).toBe(false);
+    expect(calls.some((call) => call.m === "replyForm")).toBe(false);
     await driver.dispose();
   });
 
@@ -217,14 +212,25 @@ describe("OpencodeDriver", () => {
     expect(added.length).toBe(2);
   });
 
-  it("todo.updated emits a plan item keyed plan:<turnId>", async () => {
+  it("a completed V2 todowrite call emits a plan item keyed plan:<turnId>", async () => {
     const { driver, sent, push } = await startedDriver();
-    await driver.prompt("x");
-    push({ type: "todo.updated", properties: { sessionID: "ses_root", todos: [{ content: "a", status: "in_progress" }] } });
-    await tick();
-    const plan = sent.find((m) => m.type === "agent:item-updated" && m.item.kind === "plan");
-    expect(plan).toBeDefined();
-    if (plan?.type === "agent:item-updated") expect(plan.item.entries?.[0]).toEqual({ text: "a", status: "running" });
+    const stream = new OpencodeV2Events();
+    const publish = (type: string, data: object) => {
+      for (const normalized of stream.normalize({ type, data, id: "evt_fixture", created: 1 } as any)) push(normalized);
+    };
+    try {
+      await driver.prompt("x");
+      const base = { sessionID: "ses_root", assistantMessageID: "msg_a", id: "call_1" };
+      publish("session.tool.input.started", { ...base, name: "todowrite" });
+      publish("session.tool.called", { ...base, input: { todos: [{ content: "a", status: "in_progress" }] } });
+      await tick();
+      expect(sent.some((m) => m.type === "agent:item-updated" && m.item.kind === "plan")).toBe(false);
+      publish("session.tool.success", { ...base, content: [{ type: "text", text: "Todos updated" }] });
+      await tick();
+      const plan = sent.find((m) => m.type === "agent:item-updated" && m.item.kind === "plan");
+      expect(plan).toBeDefined();
+      if (plan?.type === "agent:item-updated") expect(plan.item.entries?.[0]).toEqual({ text: "a", status: "running" });
+    } finally { await driver.dispose(); }
   });
 
   it("child session.created becomes a subtask anchor; child items carry parentItemId", async () => {
@@ -258,62 +264,6 @@ describe("OpencodeDriver", () => {
     expect(perm?.type).toBe("agent:permission-request");
     driver.resolvePermission("perm1", "once");
     expect(calls.find((c) => c.m === "replyPermission")?.args).toEqual(["ses_root", "perm1", "once"]);
-  });
-
-  it("question.asked emits agent:question with prompt+options; resolveQuestion replies", async () => {
-    const { driver, sent, push, calls } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "Which file?", header: "pick", options: [{ label: "a.ts", description: "first" }, { label: "b.ts", description: "second" }], multiple: false }] } });
-    await tick();
-    const q = sent.find((m) => m.type === "agent:question");
-    expect(q?.type).toBe("agent:question");
-    if (q?.type === "agent:question") {
-      expect(q.prompt).toBe("Which file?");
-      expect(q.kind).toBe("single_select");
-      expect(q.options?.map((o) => o.label)).toEqual(["a.ts", "b.ts"]);
-    }
-    driver.resolveQuestion("q1", "a.ts");
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "a.ts"]);
-  });
-
-  it("resolveQuestion translates a single option id to its label", async () => {
-    const { driver, push, calls } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
-    await tick();
-    driver.resolveQuestion("q1", "1");
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "No"]);
-  });
-
-  it("resolveQuestion translates multi-select option ids to labels element-wise", async () => {
-    const { driver, push, calls } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "files", options: [{ label: "a.ts" }, { label: "b.ts" }], multiple: true }] } });
-    await tick();
-    driver.resolveQuestion("q1", ["0", "1"]);
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", ["a.ts", "b.ts"]]);
-  });
-
-  it("resolveQuestion passes a free-form text answer through unchanged (no options)", async () => {
-    const { driver, push, calls } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "name?" }] } });
-    await tick();
-    driver.resolveQuestion("q1", "free text");
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "free text"]);
-  });
-
-  it("resolveQuestion passes a non-index value through unchanged (already a label)", async () => {
-    const { driver, push, calls } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
-    await tick();
-    driver.resolveQuestion("q1", "Yes");
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "Yes"]);
-  });
-
-  it("a question with multiple:true maps to kind multi_select", async () => {
-    const { driver, sent, push } = await startedDriver();
-    push({ type: "question.asked", properties: { id: "q2", sessionID: "ses_root", questions: [{ question: "Pick many", header: "multi", options: [{ label: "x", description: "" }], multiple: true }] } });
-    await tick();
-    const q = sent.find((m) => m.type === "agent:question");
-    expect(q).toBeDefined();
-    if (q?.type === "agent:question") expect(q.kind).toBe("multi_select");
   });
 
   // See the claude-driver equivalent. opencode aborts the whole session rather
@@ -395,32 +345,20 @@ describe("OpencodeDriver", () => {
     expect(calls.find((c) => c.m === "replyPermission")).toBeUndefined();
   });
 
-  it("ending a turn drops a still-pending question's option mapping (answer passes through)", async () => {
-    const { driver, push, calls } = await startedDriver();
-    await driver.prompt("x");
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
-    push({ type: "session.idle", properties: { sessionID: "ses_root" } }); // turn ends -> option labels cleared
-    await tick();
-    driver.resolveQuestion("q1", "1");
-    // With the mapping cleared, the index is no longer translated to "No".
-    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "1"]);
-  });
-
   it("retracts pending permissions and questions when the turn ends", async () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
-    // Free-text question (no options) — retractable on the same terms as one
-    // carrying options; nothing about the withdrawal depends on the option list.
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "name?" }] } });
+    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "name", type: "string" }] } });
+    await tick();
+    const question = sent.find((m) => m.type === "agent:question");
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();
     const retracted = sent.filter((m) => m.type === "agent:request-retracted");
-    expect(retracted).toHaveLength(2);
     const ids = retracted.map((m) =>
       m.type === "agent:request-retracted" ? (m.permissionId ?? m.questionId) : "");
     expect(ids).toContain("perm1");
-    expect(ids).toContain("q1");
+    expect(ids).toContain(question?.type === "agent:question" ? question.questionId : "missing");
   });
 
   it("retracts a still-pending permission on dispose (torn down mid-turn)", async () => {
@@ -438,10 +376,12 @@ describe("OpencodeDriver", () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
-    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
+    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "ok", type: "boolean" }] } });
     await tick();
+    const question = sent.find((m) => m.type === "agent:question");
     driver.resolvePermission("perm1", "once");
-    driver.resolveQuestion("q1", "0");
+    if (question?.type === "agent:question") driver.resolveQuestion(question.questionId, "true");
+    await tick();
     const before = sent.filter((m) => m.type === "agent:request-retracted").length;
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();
@@ -698,7 +638,7 @@ describe("capabilities discovery", () => {
     expect(last.models.length).toBeGreaterThan(0);
   });
 
-  it("emits normalized commands, modes, and connected-provider models", async () => {
+  it("emits normalized commands, modes, and provider models", async () => {
     const { sent } = await startedDriver();
     await tick();
     const caps = capsOf(sent);
@@ -707,7 +647,7 @@ describe("capabilities discovery", () => {
     expect(caps.modes.map((m: any) => m.id)).toEqual(["build", "plan"]); // subagent + hidden filtered
     expect(caps.models).toEqual([
       { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", provider: "Anthropic", efforts: ["thinking"] },
-    ]); // openai not connected
+    ]);
   });
 
   it("is fail-soft when a discovery call rejects", async () => {
@@ -780,7 +720,7 @@ describe("capabilities discovery", () => {
     expect(cmd?.args[1]).toEqual({
       command: "review",
       arguments: "src/main.ts",
-      model: "anthropic/claude-sonnet-5",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
     });
   });
 

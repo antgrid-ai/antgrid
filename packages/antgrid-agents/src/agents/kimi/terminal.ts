@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { agentHost, processGroupSpawn, withAgentHost } from "../../host";
-import { resolveToolLaunchPath } from "../launch-path";
 import { prepareCliTerminalLaunch, type PreparedTerminalLaunch, type TerminalLaunchRequest } from "../terminal-launch";
-import { cmdProgramToken, escapeCmdArg, WINDOWS_CMD_CARRIER_ARGS, WINDOWS_CMDLINE_ENV } from "../windows-argv";
+import { toolSpawnArgs } from "../windows-argv";
 
 const SessionList = z.array(z.object({ id: z.string().min(1) }));
 const NativeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
@@ -56,17 +55,10 @@ async function runKimiCli(args: string[], request: TerminalLaunchRequest): Promi
   request.signal.throwIfAborted();
   const host = agentHost();
   const command = request.tool ? "kimi" : request.configured.command;
-  const program = resolveToolLaunchPath(command);
-  // An npm-installed Kimi is a .cmd shim, which only cmd.exe can start, and
-  // cmd would parse the joined argv as its own syntax: a workspace path's
-  // spaces, `&` or `%` would break the call or run a command. The carrier
-  // hands cmd a line with every argument escaped instead.
-  const viaCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(program);
-  const proc = Bun.spawn(viaCmd ? [process.env.ComSpec ?? "cmd.exe", ...WINDOWS_CMD_CARRIER_ARGS] : [program, ...args], {
+  const launch = toolSpawnArgs(command, args, process.env);
+  const proc = Bun.spawn(launch.cmd, {
     cwd: request.cwd,
-    env: viaCmd
-      ? { ...process.env, [WINDOWS_CMDLINE_ENV]: [cmdProgramToken(program), ...args.map((arg) => escapeCmdArg(arg, true))].join(" ") }
-      : process.env,
+    env: launch.env,
     ...processGroupSpawn(),
     stdin: "ignore", stdout: "pipe", stderr: "ignore",
   });

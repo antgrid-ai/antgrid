@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { DbSerializeFile, DbSerializeOutput, DbSerializer } from "./db-serializers";
 import { SAFE_NATIVE_ID, type HandoffReference } from "./types";
-import { hasOpencodeV2Store, readOpencodeV2Messages } from "../opencode/v2-store";
+import { hasOpencodeV2Store, hasTable, readOpencodeV2Messages } from "../opencode/v2-store";
 import { normalizeMessage } from "../opencode/v2-events";
 
 // Only these session columns leave the database. An allowlist, so a column a
@@ -42,6 +42,8 @@ export interface OpencodeSerialized {
 }
 
 interface Context {
+  /** The database holds OpenCode 2's session_v2 store rather than the legacy one. */
+  v2: boolean;
   redactions: Set<string>;
   warnings: string[];
   references: HandoffReference[];
@@ -72,10 +74,12 @@ function allowlistedError(error: unknown): Record<string, unknown> {
 }
 
 /** Opaque provider reasoning state: large, unreadable to a target agent and not
- * the user's content. */
-function stripReasoningState(value: unknown, ctx: Context): void {
+ * the user's content. A V2 part can also hold provider-native payloads (opaque
+ * reasoning and response bodies) and raw errors, so for those only normalized
+ * text, tool arguments/results and safe error fields travel. */
+function redactPartState(value: unknown, ctx: Context): void {
   if (Array.isArray(value)) {
-    for (const item of value) stripReasoningState(item, ctx);
+    for (const item of value) redactPartState(item, ctx);
     return;
   }
   if (!isRecord(value)) return;
@@ -83,7 +87,15 @@ function stripReasoningState(value: unknown, ctx: Context): void {
     delete value.reasoningEncryptedContent;
     ctx.redactions.add(REASONING_REDACTION);
   }
-  for (const child of Object.values(value)) stripReasoningState(child, ctx);
+  if (ctx.v2 && "native" in value) {
+    delete value.native;
+    ctx.redactions.add("native provider state (removed)");
+  }
+  if (ctx.v2 && "error" in value) {
+    value.error = allowlistedError(value.error);
+    ctx.redactions.add(ERROR_REDACTION);
+  }
+  for (const child of Object.values(value)) redactPartState(child, ctx);
 }
 
 function noteOutputPath(part: Record<string, unknown>, ctx: Context): void {
@@ -108,7 +120,7 @@ function sessionInfo(row: Record<string, unknown>, ctx: Context): Record<string,
 }
 
 function readMessages(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc["messages"] {
-  if (hasOpencodeV2Store(db)) return readOpencodeV2Messages(db, sessionId).map((message) => {
+  if (ctx.v2) return readOpencodeV2Messages(db, sessionId).map((message) => {
     const normalized = normalizeMessage(message);
     const info: Record<string, unknown> = { id: message.id, sessionID: sessionId, role: normalized.info.role, time: message.time };
     let parts: Record<string, unknown>[] = normalized.parts;
@@ -116,17 +128,7 @@ function readMessages(db: Database, sessionId: string, ctx: Context): OpencodeSe
       Object.assign(info, { summary: true, agent: "compaction", finish: "stop" });
       parts = [{ id: message.id, type: "text", text: message.summary }];
     }
-    // Provider-native payloads can contain opaque reasoning and response bodies.
-    // Only normalized text, tool arguments/results and safe error fields travel.
-    const sanitize = (value: unknown): void => {
-      if (Array.isArray(value)) { value.forEach(sanitize); return; }
-      if (!isRecord(value)) return;
-      if ("native" in value) { delete value.native; ctx.redactions.add("native provider state (removed)"); }
-      if ("error" in value) { value.error = allowlistedError(value.error); ctx.redactions.add(ERROR_REDACTION); }
-      Object.values(value).forEach(sanitize);
-    };
-    sanitize(parts);
-    stripReasoningState(parts, ctx);
+    redactPartState(parts, ctx);
     for (const part of parts) noteOutputPath(part, ctx);
     return { info, parts };
   });
@@ -156,15 +158,11 @@ function readMessages(db: Database, sessionId: string, ctx: Context): OpencodeSe
       if (owner) ctx.warnings.push(`Skipped part ${row.id}: its row was not valid JSON.`);
       continue;
     }
-    stripReasoningState(data, ctx);
+    redactPartState(data, ctx);
     noteOutputPath(data, ctx);
     owner.parts.push({ id: row.id, sessionID: sessionId, messageID: row.message_id, ...data });
   }
   return messages;
-}
-
-function hasTable(db: Database, name: string): boolean {
-  return db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) != null;
 }
 
 function readBoard(db: Database, sessionId: string, ctx: Context): Record<string, unknown[]> | undefined {
@@ -209,7 +207,7 @@ function readTodo(db: Database, sessionId: string, ctx: Context): unknown[] {
 }
 
 function readSession(db: Database, sessionId: string, ctx: Context): OpencodeSessionDoc | undefined {
-  const table = hasOpencodeV2Store(db) ? "session_v2" : "session";
+  const table = ctx.v2 ? "session_v2" : "session";
   const row = db.query(`SELECT * FROM ${table} WHERE id = ?`).get(sessionId) as Record<string, unknown> | null;
   if (!row) return undefined;
   return { info: sessionInfo(row, ctx), messages: readMessages(db, sessionId, ctx) };
@@ -220,7 +218,7 @@ function readSession(db: Database, sessionId: string, ctx: Context): OpencodeSes
  * Reads only session, message, part, todo and the Kilo board tables: the same
  * database holds account and credential tables that must never be selected. */
 export function serializeOpencodeSession(db: Database, sessionId: string, opts: OpencodeSerializeOptions): OpencodeSerialized | undefined {
-  const ctx: Context = { redactions: new Set(), warnings: [], references: [] };
+  const ctx: Context = { v2: hasOpencodeV2Store(db), redactions: new Set(), warnings: [], references: [] };
   const doc = readSession(db, sessionId, ctx);
   if (!doc) return undefined;
   // The board hangs off the root session only, so a child never has one.
@@ -230,7 +228,7 @@ export function serializeOpencodeSession(db: Database, sessionId: string, opts: 
   }
 
   const children: OpencodeSerialized["children"] = [];
-  const table = hasOpencodeV2Store(db) ? "session_v2" : "session";
+  const table = ctx.v2 ? "session_v2" : "session";
   const seen = new Set([sessionId]);
   let frontier = [sessionId];
   for (let depth = 0; depth < MAX_CHILD_DEPTH && frontier.length; depth++) {

@@ -1,9 +1,14 @@
 import { OpenCode } from "@opencode/client";
 import { agentHost, processGroupSpawn, withAgentHost } from "../../host";
 import { prepareCliTerminalLaunch, type TerminalLaunchRequest } from "../terminal-launch";
-import { opencodeSpawnArgs } from "./cli";
+import { toolSpawnArgs } from "../windows-argv";
+import { raceTimeout } from "../race-timeout";
 import { requireOpencodeV2 } from "./version";
 import { startOpencodeServer } from "./server";
+
+// Every OpenCode process Antgrid starts owns its own MCP identity: a shared
+// background server would inherit another terminal's.
+export const OPENCODE_STANDALONE = "--standalone";
 
 export async function prepareOpencodeTerminal(
   request: TerminalLaunchRequest,
@@ -12,7 +17,7 @@ export async function prepareOpencodeTerminal(
   const command = request.tool ? "opencode" : request.configured.command;
   requireOpencodeV2(await readVersion(command, request));
   request.signal.throwIfAborted();
-  const configured = request.tool ? request.configured : { ...request.configured, args: ["--standalone", ...request.configured.args ?? []] };
+  const configured = request.tool ? request.configured : { ...request.configured, args: [OPENCODE_STANDALONE, ...request.configured.args ?? []] };
   const source = request.conversation.kind === "fork" ? request.conversation.sourceSessionId : undefined;
   if (source && request.initialPrompt?.trim()) throw new Error("Send a prompt after the OpenCode fork opens.");
   const resume = (sessionId: string) => prepareCliTerminalLaunch({ ...request, configured, conversation: { kind: "resume", sessionId } });
@@ -34,7 +39,7 @@ export async function prepareOpencodeTerminal(
 async function probeVersion(command: string, request: TerminalLaunchRequest): Promise<string | undefined> {
   request.signal.throwIfAborted();
   const host = agentHost();
-  const launch = opencodeSpawnArgs(command, ["--version"], process.env);
+  const launch = toolSpawnArgs(command, ["--version"], process.env);
   const proc = Bun.spawn(launch.cmd, {
     cwd: request.cwd, ...processGroupSpawn(), stdin: "ignore", stdout: "pipe", stderr: "ignore",
     env: launch.env,
@@ -43,12 +48,7 @@ async function probeVersion(command: string, request: TerminalLaunchRequest): Pr
   let termination: Promise<void> | undefined;
   const cleanup = () => exited ? Promise.resolve() : termination ??= (async () => {
     await host.killChildTree(proc);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([proc.exited, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("OpenCode version probe did not exit after termination")), 5_000);
-      })]);
-    } finally { clearTimeout(timer); }
+    if (!await raceTimeout(proc.exited, 5_000)) throw new Error("OpenCode version probe did not exit after termination");
   })();
   request.scope.registerCleanup(cleanup);
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]);

@@ -124,20 +124,22 @@ export function spawnClaude(opts: SpawnClaudeOpts, sdkQuery: typeof query = quer
       cwd: opts.cwd,
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code" },
-      permissionMode: opts.approvalPolicy === "bypass" ? "bypassPermissions" : "default",
+      ...(opts.approvalPolicy === "bypass"
+        ? { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true }
+        : {}),
+      // Owning the spawn is the only way to drop the SDK's forced default mode
+      // (see nativeClaudeArgs). It also turns the SDK's `stderr` option inert,
+      // so stderr is read here.
       spawnClaudeCodeProcess: (options) => {
-        const child = spawn(options.command,
-          opts.approvalPolicy === "bypass" ? options.args : nativeClaudeArgs(options.args),
+        const child = spawn(options.command, nativeClaudeArgs(options.args),
           { cwd: options.cwd, env: options.env, signal: options.signal, stdio: "pipe", windowsHide: true });
         child.stderr.on("data", (chunk: Buffer) => opts.onStderr(chunk.toString()));
         return child;
       },
-      ...(opts.approvalPolicy === "bypass" ? { allowDangerouslySkipPermissions: true } : {}),
       canUseTool: opts.canUseTool,
       onElicitation: opts.onElicitation,
       env: { ...buildClaudeEnv(), ...(opts.extraEnv ?? {}) },
       abortController: opts.abortController,
-      stderr: opts.onStderr,
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.extraArgs ? { extraArgs: opts.extraArgs } : {}),

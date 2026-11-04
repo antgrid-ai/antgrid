@@ -9,7 +9,7 @@ import { ChatSession, type ChatSessionProfile } from "../../structured/chat-sess
 import { logger } from "../../host";
 import type { FormInfo } from "@opencode/client";
 import type { PromptGroup } from "../../structured/chat-session";
-import { McpElicitationContentSchema } from "../../structured/mcp-elicitation";
+import { McpElicitationContentSchema, type McpElicitationContent } from "../../structured/mcp-elicitation";
 const log = logger.child({ component: "opencode-driver" });
 
 // Transport-normalized events share the transcript renderer's message/part shape.
@@ -37,11 +37,13 @@ export interface OpencodeClientLike {
   abort(sessionId: string): Promise<void>;
   summarize(sessionId: string): Promise<void>;
   replyPermission(sessionId: string, permissionId: string, response: "once" | "always" | "reject"): Promise<void>;
-  replyQuestion(questionId: string, answer: string | string[] | null): Promise<void>;
+  // null cancels the form.
+  replyForm(sessionId: string, formId: string, content: McpElicitationContent | null): Promise<void>;
   listCommands(): Promise<any[]>;
   listAgents(): Promise<any[]>;
-  listProviders(): Promise<{ all: any[]; default: Record<string, string>; connected: string[] }>;
-  command(sessionId: string, opts: { command: string; arguments: string; agent?: string; model?: string; variant?: string }): Promise<void>;
+  // The providers the user can run, each with its enabled models keyed by id.
+  listProviders(): Promise<any[]>;
+  command(sessionId: string, opts: { command: string; arguments: string; agent?: string; model?: ModelRef; variant?: string }): Promise<void>;
   events(): AsyncIterable<OpencodeEvent>;
   // May be async: an in-app `opencode upgrade` replaces the on-disk binary that
   // the SDK server (the same binary) is still running, so teardown must resolve
@@ -86,7 +88,7 @@ export class OpencodeDriver extends ChatSession {
   // child sessionID -> its subtask anchor itemId; and child -> parent sessionID.
   private subtaskItem = new Map<string, string>();
   private parentSession = new Map<string, string>();
-  // Native selections remain authoritative until the user picks an override.
+  // The model the newest assistant message ran on, live or replayed.
   private model: ModelRef | null = null;
 
   // "providerID/modelID" -> context-window size, from provider.list()'s
@@ -165,8 +167,8 @@ export class OpencodeDriver extends ChatSession {
     return this.model ? `${this.model.providerID}/${this.model.modelID}` : undefined;
   }
 
-  /** The explicit pick as opencode's prompt API wants it (a pair, not a ref
-   *  string). validateSelection guarantees the separator is present. */
+  /** The explicit pick as opencode's API wants it (a pair, not a ref string).
+   *  validateSelection guarantees the separator is present. */
   private get selModelRef(): ModelRef | null {
     if (!this.selModel) return null;
     const cut = this.selModel.indexOf("/");
@@ -178,6 +180,7 @@ export class OpencodeDriver extends ChatSession {
   }
 
   protected async sendPrompt(text: string, commandId?: string): Promise<void> {
+    const model = this.selModelRef;
     if (commandId?.startsWith("cmd:")) {
       await this.client.command(this.rootSessionId, {
         command: commandId.slice("cmd:".length),
@@ -185,8 +188,7 @@ export class OpencodeDriver extends ChatSession {
         // argument-less command is a 400, while "" validates.
         arguments: text,
         ...(this.selMode ? { agent: this.selMode } : {}),
-        // session.command takes the "provider/model" ref string, not the pair.
-        ...(this.selModel ? { model: this.selModel } : {}),
+        ...(model ? { model } : {}),
         ...(this.selEffort ? { variant: this.selEffort } : {}),
       });
       return;
@@ -195,7 +197,6 @@ export class OpencodeDriver extends ChatSession {
     // Reachable when the app holds capabilities from another driver/session
     // (stale replay); log it so the dropped routing is diagnosable.
     if (commandId) log.warn("opencode: unrecognized commandId %s; sending as plain prompt", commandId);
-    const model = this.selModelRef;
     await this.client.prompt(this.rootSessionId, text, {
       ...(model ? { model } : {}),
       ...(this.selMode ? { agent: this.selMode } : {}),
@@ -238,14 +239,6 @@ export class OpencodeDriver extends ChatSession {
   // clears the item and prompt state alongside it.
   protected clearTurnState(): void {
     this.messageRole.clear();
-  }
-
-  // opencode is the only backend whose question ids are the PROVIDER's, so an
-  // answer for a prompt the session has already withdrawn is still routable —
-  // and worth routing, because opencode is still waiting on it. Untranslated:
-  // the option labels went with the retraction.
-  protected resolveUnknownQuestion(questionId: string, answer: string | string[]): void {
-    void this.client.replyQuestion(questionId, answer).catch(() => {});
   }
 
   protected disposeBackend(): void | Promise<void> {
@@ -334,13 +327,9 @@ export class OpencodeDriver extends ChatSession {
         }));
     }
     if (providers.status === "fulfilled") {
-      const { all, connected } = providers.value;
-      // Only providers the user has auth for; an empty `connected` (older
-      // binary) falls back to everything rather than an empty picker.
-      const usable = connected.length ? all.filter((p: any) => connected.includes(p?.id)) : all;
       const models: typeof this.capModels = [];
       const contextWindows = new Map<string, number>();
-      for (const p of usable) {
+      for (const p of providers.value) {
         for (const m of Object.values(p?.models ?? {}) as any[]) {
           if (!m?.id) continue;
           const variants = m?.variants && typeof m.variants === "object" ? Object.keys(m.variants) : [];
@@ -428,7 +417,6 @@ export class OpencodeDriver extends ChatSession {
       case "session.status": return this.onSessionStatus(p);
       case "session.error": return this.onSessionError(p);
       case "permission.asked": return this.onPermissionAsked(p);
-      case "question.asked": return this.onQuestionAsked(p);
       case "form.created":
         void this.onFormCreated(p).catch((error) => this.emitError(agentError({
           category: "unknown", message: error instanceof Error ? error.message : String(error), retryable: true,
@@ -441,7 +429,6 @@ export class OpencodeDriver extends ChatSession {
         group?.retract();
         return;
       }
-      case "todo.updated": return this.onTodoUpdated(p);
       default: return;
     }
   }
@@ -477,6 +464,12 @@ export class OpencodeDriver extends ChatSession {
     const part = p?.part ?? {};
     const owner: string = part.sessionID ?? p?.sessionID ?? this.rootSessionId;
     if (!this.inTree(owner)) return;
+    // OpenCode 2 keeps no todo state and sends no todo event: the plan is the
+    // input of the root session's latest completed `todowrite` call.
+    if (owner === this.rootSessionId && part.type === "tool" && part.tool === "todowrite"
+      && part.state?.status === "completed") {
+      this.emitPlan(this.activeTurnId ?? "", mapPlanEntries(part.state.input?.todos));
+    }
     const role = this.messageRole.get(part.messageID) ?? "assistant";
     const mapped = mapPart(part, role);
     if (!mapped) return;
@@ -634,28 +627,6 @@ export class OpencodeDriver extends ChatSession {
     });
   }
 
-  private onQuestionAsked(p: any): void {
-    const questionId: string = p?.id ?? "";
-    const questions: any[] = Array.isArray(p?.questions) ? p.questions : [];
-    const q = questions[0] ?? {};
-    const opts: any[] = Array.isArray(q.options) ? q.options : [];
-    // opencode Question.Info: { question, header, options:{label,description}[], multiple? }
-    // — no id/text/prompt fields. Options are answered by label, so synthesize an
-    // id from the index purely for the app's option list.
-    const kind = opts.length === 0 ? "text" : q.multiple ? "multi_select" : "single_select";
-    this.askQuestion({
-      questionId,
-      kind,
-      prompt: String(q.question ?? q.header ?? "?"),
-      ...(opts.length > 0
-        ? { options: opts.map((o, i) => ({ id: String(i), label: String(o?.label ?? ""), description: o?.description })) }
-        : {}),
-    }, (value) => {
-      if (value === null) return;
-      void this.client.replyQuestion(questionId, value).catch(() => {});
-    }, opts.length > 0 ? { labels: opts.map((o) => String(o?.label ?? "")) } : undefined);
-  }
-
   private async onFormCreated(form: FormInfo): Promise<void> {
     if (form.sessionID !== "global" && !this.inTree(form.sessionID)) return;
     if (this.forms.has(form.id)) return;
@@ -706,19 +677,13 @@ export class OpencodeDriver extends ChatSession {
           : Object.fromEntries(entries.filter((entry): entry is [string, unknown] => entry !== null && entry[1] !== undefined));
       }
       if (!this.forms.has(form.id)) return;
-      await this.client.replyQuestion(form.id, answer === null ? null : JSON.stringify(McpElicitationContentSchema.parse(answer)));
+      await this.client.replyForm(form.sessionID, form.id, answer === null ? null : McpElicitationContentSchema.parse(answer));
     } catch (error) {
-      if (this.forms.has(form.id)) await this.client.replyQuestion(form.id, null).catch(() => {});
+      if (this.forms.has(form.id)) await this.client.replyForm(form.sessionID, form.id, null).catch(() => {});
       throw error;
     } finally {
       this.forms.delete(form.id);
       group.retract();
     }
-  }
-
-  private onTodoUpdated(p: any): void {
-    const sid: string = p?.sessionID ?? "";
-    if (sid !== this.rootSessionId) return; // v1: only the root session's plan
-    this.emitPlan(this.activeTurnId ?? "", mapPlanEntries(p?.todos));
   }
 }

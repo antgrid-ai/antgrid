@@ -49,7 +49,7 @@ export function prettyModelName(displayName: unknown, resolvedModel: unknown): s
 // event. Kept local so the driver layer does not import the supervisor.
 const UNDATED_LIMIT_TTL_MS = 30 * 60_000;
 
-type CatalogModel = { id: string; name: string; efforts?: string[]; defaultEffort?: string };
+type CatalogModel = { id: string; name: string; efforts?: string[] };
 
 // ModelInfo = { value, displayName, resolvedModel, supportsEffort, supportedEffortLevels, ... }
 // — `value` is the id setModel takes; shared by initializationResult().models

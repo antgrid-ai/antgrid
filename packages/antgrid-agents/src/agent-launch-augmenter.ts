@@ -15,8 +15,6 @@ export interface AugmentOptions {
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;
-  /** `false` skips the MCP profile for launches that cannot expose tools. */
-  mcp?: false;
 }
 export function injectsHookAliveProbe(tool: string): boolean {
   return agentSpec(tool)?.hooks?.observation.hookAlive === true;
@@ -40,7 +38,7 @@ export function augmentAgentLaunch(
     }
   }
   let mcp = NO_INJECTION;
-  if (spec.mcp && options.mcp !== false) {
+  if (spec.mcp) {
     try {
       const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
       if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand });

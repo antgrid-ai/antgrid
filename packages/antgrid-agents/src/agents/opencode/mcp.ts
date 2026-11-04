@@ -13,11 +13,12 @@ const log = logger.child({ component: "agent-launch" });
  * agent's environment, so no `environment` block is declared.
  *
  * A user who already sets the variable keeps every key of theirs; only
- * the `antgrid` server is added (under `mcp.servers` for native V2 configs).
+ * the `antgrid` server is added (under `mcp.servers` when `serversLayout` is
+ * set and their config already uses OpenCode 2's native layout).
  * A value that is not a JSON object cannot be merged
  * into, and replacing it would discard what they wrote, so nothing is injected.
  */
-export function opencodeFamilyMcp(envVar: string): McpProfile {
+export function opencodeFamilyMcp(envVar: string, { serversLayout = false } = {}): McpProfile {
   return {
     inject({ mcpCommand }: McpInjectCtx): LaunchAugmentation {
       const base = ownConfig(process.env[envVar]);
@@ -27,7 +28,7 @@ export function opencodeFamilyMcp(envVar: string): McpProfile {
       }
       const existing = isRecord(base.mcp) ? base.mcp : {};
       const antgrid = { type: "local", command: [mcpCommand.binary, ...mcpCommand.preargs] };
-      const mcp = envVar === "OPENCODE_CONFIG_CONTENT" && ("servers" in existing || "timeout" in existing)
+      const mcp = serversLayout && ("servers" in existing || "timeout" in existing)
         ? { ...existing, servers: { ...(isRecord(existing.servers) ? existing.servers : {}), antgrid } }
         : { ...existing, antgrid };
       return { args: [], env: { [envVar]: JSON.stringify({ ...base, mcp }) } };

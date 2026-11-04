@@ -32,7 +32,7 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     abort: (s) => invoke((client) => client.abort(s)),
     summarize: (s) => invoke((client) => client.summarize(s)),
     replyPermission: (s, id, r) => invoke((client) => client.replyPermission(s, id, r)),
-    replyQuestion: (id, a) => invoke((client) => client.replyQuestion(id, a)),
+    replyForm: (s, id, a) => invoke((client) => client.replyForm(s, id, a)),
     listCommands: () => invoke((client) => client.listCommands()),
     listAgents: () => invoke((client) => client.listAgents()),
     listProviders: () => invoke((client) => client.listProviders()),

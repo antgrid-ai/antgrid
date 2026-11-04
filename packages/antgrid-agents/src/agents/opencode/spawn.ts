@@ -2,31 +2,9 @@ import { OpenCode, type ModelRef } from "@opencode/client";
 import { OpencodeStartupError, startOpencodeServer, type OpencodeServerOptions } from "./server";
 import type { OpencodeClientLike, OpencodePromptOpts } from "./chat-backend";
 import { normalizeMessage, OpencodeV2Events } from "./v2-events";
-import { McpElicitationContentSchema } from "../../structured/mcp-elicitation";
 
 export interface SpawnedOpencode {
   client: OpencodeClientLike;
-}
-
-// A slow HTTP response is not proof the listener stopped. Only a refused
-// connection confirms closure; timeout must remain a teardown failure.
-export async function waitServerGone(
-  url: string,
-  timeoutMs = 5_000,
-  probe: (url: string, init: RequestInit) => Promise<Response> = fetch,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await probe(url, { signal: AbortSignal.timeout(400) });
-    } catch (error) {
-      const failure = error as { code?: string; cause?: { code?: string } };
-      const code = failure.code ?? failure.cause?.code;
-      if (code === "ECONNREFUSED" || code === "ConnectionRefused") return;
-    }
-    await Bun.sleep(100);
-  }
-  throw new Error("OpenCode server did not stop accepting connections before teardown timed out");
 }
 
 export async function spawnOpencode(opts: OpencodeServerOptions): Promise<SpawnedOpencode> {
@@ -52,7 +30,6 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
   void server.exited?.then(serverExited, serverExited);
   const request = { signal: lifetime.signal };
   const location = { directory: cwd };
-  const forms = new Map<string, string>();
   const events = new OpencodeV2Events();
   const select = async (sessionID: string, selection?: OpencodePromptOpts) => {
     if (selection?.agent) await client.session.switchAgent({ sessionID, agent: selection.agent }, request);
@@ -75,7 +52,7 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
       let cursor: string | undefined;
       do {
         const page = await client.message.list({ sessionID: sessionId,
-          ...(cursor ? { cursor } : { order: "asc", limit: 100 }),
+          ...(cursor ? { cursor } : { order: "asc", limit: 200 }),
         }, request);
         messages.push(...page.data.map(normalizeMessage));
         const next = page.cursor.next ?? undefined;
@@ -98,20 +75,14 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
       const [providers, models] = await Promise.all([
         client.provider.list({ location }, request), client.model.list({ location }, request),
       ]);
-      const all = providers.data.filter((provider) => provider.activation !== "disabled").map((provider) => ({
-        ...provider, models: Object.fromEntries(models.data.filter((model) => model.providerID === provider.id && model.enabled)
+      const byProvider = Map.groupBy(models.data.filter((model) => model.enabled), (model) => model.providerID);
+      return providers.data.filter((provider) => provider.activation !== "disabled").map((provider) => ({
+        ...provider, models: Object.fromEntries((byProvider.get(provider.id) ?? [])
           .map((model) => [model.id, { ...model, variants: Object.fromEntries(model.variants.map((v) => [v.id, v])) }])),
       }));
-      return { all, default: {}, connected: all.map((provider) => provider.id) };
     },
     command: async (sessionID, command) => {
-      const separator = command.model?.indexOf("/") ?? -1;
-      await select(sessionID, {
-        agent: command.agent, variant: command.variant,
-        ...(command.model && separator > 0 ? { model: {
-          providerID: command.model.slice(0, separator), modelID: command.model.slice(separator + 1),
-        } } : {}),
-      });
+      await select(sessionID, { agent: command.agent, model: command.model, variant: command.variant });
       await client.session.command({ sessionID, name: command.command, text: command.arguments }, request);
     },
     abort: async (sessionID) => {
@@ -123,21 +94,12 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
     replyPermission: async (sessionID, requestID, decision) => {
       await client.permission.reply({ sessionID, requestID, decision }, request);
     },
-    replyQuestion: async (questionId, answer) => {
-      const sessionID = forms.get(questionId);
-      if (!sessionID) throw new Error("OpenCode form is no longer pending");
-      if (answer === null) await client.session.form.cancel({ sessionID, formID: questionId }, request);
-      else await client.session.form.reply({ sessionID, formID: questionId,
-        answer: McpElicitationContentSchema.parse(JSON.parse(String(answer))),
-      }, request);
-      forms.delete(questionId);
+    replyForm: async (sessionID, formID, answer) => {
+      if (answer === null) await client.session.form.cancel({ sessionID, formID }, request);
+      else await client.session.form.reply({ sessionID, formID, answer }, request);
     },
     events: async function* () {
-      for await (const event of client.event.subscribe({ signal: lifetime.signal })) {
-        if (event.type === "form.created") forms.set(event.data.form.id, event.data.form.sessionID);
-        if (event.type === "form.cancelled" || event.type === "form.replied") forms.delete(event.data.id);
-        yield* events.normalize(event);
-      }
+      for await (const event of client.event.subscribe({ signal: lifetime.signal })) yield* events.normalize(event);
       if (exited && !disposed) throw new Error("OpenCode server exited");
     },
     dispose: () => { disposed = true; lifetime.abort(); return server.close(); },

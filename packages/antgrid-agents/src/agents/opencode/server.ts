@@ -1,6 +1,7 @@
 import { killChildTree, processGroupSpawn, stripInheritedCertOverrides } from "../../host";
 import { stripParentClaudeSession } from "../claude-code/parent-session";
-import { opencodeSpawnArgs } from "./cli";
+import { toolSpawnArgs } from "../windows-argv";
+import { raceTimeout } from "../race-timeout";
 import { z } from "zod";
 import { requireOpencodeV2 } from "./version";
 
@@ -42,7 +43,7 @@ export async function startOpencodeServer(opts: OpencodeServerOptions): Promise<
   const headers = {
     Authorization: `Basic ${Buffer.from(`opencode:${env.OPENCODE_PASSWORD}`).toString("base64")}`,
   };
-  const launch = opencodeSpawnArgs(opts.command ?? "opencode", [
+  const launch = toolSpawnArgs(opts.command ?? "opencode", [
     ...(opts.prefixArgs ?? []), "serve", "--hostname", "127.0.0.1", "--port", "0",
   ], env);
   const proc = (() => {
@@ -58,22 +59,14 @@ export async function startOpencodeServer(opts: OpencodeServerOptions): Promise<
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     await killChildTree(proc);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        proc.exited,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("OpenCode process did not exit after termination")), 5_000);
-        }),
-      ]);
-    } finally { clearTimeout(timer); }
+    if (!await raceTimeout(proc.exited, 5_000)) throw new Error("OpenCode process did not exit after termination");
   })();
 
   let ready!: (url: string) => void;
   let fail!: (error: Error) => void;
   const started = new Promise<string>((resolve, reject) => { ready = resolve; fail = reject; });
   let stderr = "";
-  let stdout = "";
+  let stdout: string | null = "";
   const drain = async (stream: ReadableStream<Uint8Array>, receive: (chunk: string) => void) => {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -89,19 +82,21 @@ export async function startOpencodeServer(opts: OpencodeServerOptions): Promise<
   };
   const stderrDone = drain(proc.stderr, (chunk) => { stderr = (stderr + chunk).slice(-8_192); });
   void drain(proc.stdout, (chunk) => {
+    if (stdout === null) return;
     stdout = (stdout + chunk).slice(-8_192);
     const match = /(?:opencode )?server listening on (http:\/\/127\.0\.0\.1:\d+)(?=\s)/.exec(stdout);
-    if (match) ready(match[1]!);
+    if (!match) return;
+    stdout = null;
+    ready(match[1]!);
   });
   void proc.exited.then(async (code) => {
     await stderrDone;
     fail(new Error(`OpenCode server exited (${code})${stderr ? `: ${stderr.trim()}` : ""}`));
-  }, (error) => fail(error));
+  }, fail);
   const startup = new AbortController();
   const rejectStartup = (error: Error) => { startup.abort(error); fail(error); };
   const abort = () => rejectStartup(new OpencodeStartupCancelledError());
   opts.signal?.addEventListener("abort", abort, { once: true });
-  if (opts.signal?.aborted) abort();
   const timeout = setTimeout(() => rejectStartup(new Error("OpenCode server startup timed out")), opts.timeoutMs ?? 15_000);
   try {
     const url = await started;

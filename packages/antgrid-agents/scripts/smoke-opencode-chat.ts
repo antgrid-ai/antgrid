@@ -106,21 +106,23 @@ const until = async (check: () => boolean | Promise<boolean>, label: string) => 
     await Bun.sleep(20);
   }
 };
+// Terminal preparation reads the launch environment from process.env.
+const withEnv = async <T>(run: () => Promise<T>): Promise<T> => {
+  const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  try { return await run(); } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+};
 try {
   await withAgentHost(host, async () => {
     const scope = createAgentRunScope({ runId: "smoke", isCurrent: () => true, emit() {} });
-    const savedEnv = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     const terminalRequest = { configured: { name: "opencode", command: binary }, cwd, storeDir: root,
       approvalPolicy: "default" as const, scope, signal: scope.signal };
-    Object.assign(process.env, env);
-    try {
-      const terminal = await prepareOpencodeTerminal({ ...terminalRequest, conversation: { kind: "fresh" } });
-      assert(terminal.args.includes("--standalone"));
-    } finally {
-      for (const [key, value] of Object.entries(savedEnv)) {
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
-      }
-    }
+    const terminal = await withEnv(() => prepareOpencodeTerminal({ ...terminalRequest, conversation: { kind: "fresh" } }));
+    assert(terminal.args.includes("--standalone"));
     const server = await startOpencodeServer({ cwd, command: binary, env, timeoutMs: 30_000 });
     const api = OpenCode.make({ baseUrl: server.url, headers: server.headers });
     const { client } = connectOpencode(server, cwd);
@@ -170,12 +172,12 @@ try {
       for (const question of frames.filter((frame) => frame.type === "agent:question")) {
         driver.resolveQuestion(question.questionId, question.prompt.includes("count") ? "3" : "true");
       }
-      let state = (await api.session.form.get({ sessionID, formID: form.id })).state;
+      let state: Awaited<ReturnType<typeof api.session.form.get>>["state"] | undefined;
       await until(async () => {
         state = (await api.session.form.get({ sessionID, formID: form.id })).state;
         return state.status !== "pending";
       }, "form reply");
-      assert.equal(state.status, "answered");
+      assert.equal(state?.status, "answered");
       await until(() => posts.some((post) => post.path === "/handler-event" && post.body.event === "prompt_answered" && post.body.promptId === form.id), "terminal form resolution");
       console.log("Permissions and forms passed");
     } finally { await driver.dispose(); }
@@ -185,18 +187,16 @@ try {
     try { assert(serializeOpencodeSession(db, sessionID, { includeKiloBoard: false })?.doc.messages.some((message) => message.parts.some((part) => part.text === "native-chat-ok"))); }
     finally { db.close(); }
     let forkID: string;
-    Object.assign(process.env, env);
     try {
-      const fork = await prepareOpencodeTerminal({ ...terminalRequest, conversation: { kind: "fork", sourceSessionId: sessionID } });
-      const created = await fork.createNativeFork!();
+      const created = await withEnv(async () => {
+        const fork = await prepareOpencodeTerminal({ ...terminalRequest, conversation: { kind: "fork", sourceSessionId: sessionID } });
+        return fork.createNativeFork!();
+      });
       forkID = created.nativeId;
       assert.notEqual(forkID, sessionID);
       assert(created.launch.args.includes(forkID));
       assert(!created.launch.args.includes("--fork"));
     } finally {
-      for (const [key, value] of Object.entries(savedEnv)) {
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
-      }
       await scope.dispose();
     }
     const restarted = await startOpencodeServer({ cwd, command: binary, env, timeoutMs: 30_000 });

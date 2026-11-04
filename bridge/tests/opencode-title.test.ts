@@ -19,10 +19,10 @@ function makeClient(rootId = "sess-1") {
     abort: async () => {},
     summarize: async () => {},
     replyPermission: async () => {},
-    replyQuestion: async () => {},
+    replyForm: async () => {},
     listCommands: async () => [],
     listAgents: async () => [],
-    listProviders: async () => ({ all: [], default: {}, connected: [] }),
+    listProviders: async () => [],
     command: async () => {},
     events: () => ({
       [Symbol.asyncIterator]() {

@@ -9,6 +9,7 @@ import { z } from "zod";
 export const McpElicitationContentSchema = z.record(z.string(), z.union([
   z.string(), z.number(), z.boolean(), z.array(z.string()),
 ]));
+export type McpElicitationContent = z.infer<typeof McpElicitationContentSchema>;
 
 export type FlatQuestion = {
   name: string;

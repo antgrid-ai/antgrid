@@ -124,7 +124,7 @@ describe("owned provider startup", () => {
       createSession: async () => { requests++; return "native"; },
       listCommands: async () => { requests++; return []; },
       listAgents: async () => { requests++; return []; },
-      listProviders: async () => { requests++; return { all: [], default: {}, connected: [] }; },
+      listProviders: async () => { requests++; return []; },
       events: async function* () { requests++; },
       dispose: async () => { closes++; },
     } as unknown as OpencodeClientLike;
