@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { AntgridSessionNamer } from "../assets/opencode/plugin";
+import plugin from "../assets/opencode/plugin";
 import { MEMORY_AGENT_GUIDANCE } from "../assets/memory-guidance";
 
 const keys = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID", "ANTGRID_MEMORY_MCP"] as const;
 let saved: Record<string, string | undefined>;
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+const disposers: Array<() => Promise<void>> = [];
 beforeEach(() => {
   saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
 });
-afterEach(() => {
+afterEach(async () => {
+  for (const dispose of disposers.splice(0)) await dispose();
   for (const server of servers.splice(0)) server.stop(true);
   for (const key of keys) {
     if (saved[key] === undefined) delete process.env[key];
@@ -18,10 +20,17 @@ afterEach(() => {
 });
 
 const enabled = { available: true, enabled: true, paused: false, project_paused: false };
-async function fixture(respond: () => Response | Promise<Response> = () => Response.json(enabled)) {
+type Context = { sessionID: string; system: Array<{ type: "text"; text: string }> };
+async function fixture(
+  respond: () => Response | Promise<Response> = () => Response.json(enabled),
+  parents: Record<string, string> = {},
+) {
   const requests: Array<{ url: URL; body: unknown }> = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-    requests.push({ url: new URL(request.url), body: await request.json() });
+    const url = new URL(request.url);
+    // The plugin reports session identity to the same port; only bootstrap is under test.
+    if (url.pathname !== "/memory/bootstrap") return new Response(null, { status: 204 });
+    requests.push({ url, body: await request.json() });
     return respond();
   } });
   servers.push(server);
@@ -29,20 +38,30 @@ async function fixture(respond: () => Response | Promise<Response> = () => Respo
   process.env.ANTGRID_TERMINAL_ID = "durable-antgrid-session";
   process.env.ANTGRID_RUN_ID = "verified-live-run";
   process.env.ANTGRID_MEMORY_MCP = "1";
-  const plugin = await AntgridSessionNamer();
-  const transform = plugin["experimental.chat.system.transform"];
-  expect(typeof transform).toBe("function");
+  let context: ((input: Context) => Promise<void>) | undefined;
+  disposers.push(await plugin.setup({
+    event: { subscribe: async function* () {} },
+    session: {
+      get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: parents[sessionID] }),
+      hook: async (name: string, callback: (input: Context) => Promise<void>) => {
+        expect(name).toBe("context");
+        context = callback;
+        return { dispose: async () => {} };
+      },
+    },
+  } as unknown as Parameters<typeof plugin.setup>[0]));
+  expect(typeof context).toBe("function");
   return {
     requests,
-    plugin,
-    transform: async (system = ["Existing system guidance"], sessionID: string | undefined = "untrusted-native-session") => {
-      await transform!({ sessionID, model: {} }, { system });
-      return system;
+    transform: async (system = ["Existing system guidance"], sessionID = "untrusted-native-session") => {
+      const input: Context = { sessionID, system: system.map((text) => ({ type: "text", text })) };
+      await context!(input);
+      return input.system.map((part) => part.text);
     },
   };
 }
 
-test("enabled terminal memory adds static guidance through the system transform", async () => {
+test("enabled terminal memory adds static guidance through the context hook", async () => {
   const { requests, transform } = await fixture();
   const system = await transform();
   expect(system).toHaveLength(2);
@@ -159,8 +178,7 @@ test("without the registered-server flag no request is made and no guidance is a
 });
 
 test("subagents and model calls without a native session receive no memory guidance", async () => {
-  const { plugin, requests, transform } = await fixture();
-  await plugin.event!({ event: { type: "session.created", properties: { info: { id: "child", parentID: "root" } } } });
+  const { requests, transform } = await fixture(undefined, { child: "root" });
   expect(await transform(undefined, "child")).toEqual(["Existing system guidance"]);
   expect(await transform(undefined, "")).toEqual(["Existing system guidance"]);
   expect(requests).toHaveLength(0);

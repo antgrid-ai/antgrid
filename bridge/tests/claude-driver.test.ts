@@ -1,8 +1,9 @@
 import { describe, it, expect, setSystemTime } from "bun:test";
-import { ClaudeDriver, prettyModelName } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
+import { ClaudeDriver, prettyModelName, type ClaudeDriverOpts } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
 import type { ClaudeQueryLike, PromptStreamController } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
 import type { AbMessage } from "../src/protocol";
 import { agentSpec } from "antgrid-agents/builtins";
+type OnElicitation = Parameters<ClaudeDriverOpts["spawn"]>[0]["onElicitation"];
 
 describe("prettyModelName", () => {
   it("folds the resolvedModel version into a bare display name", () => {
@@ -97,18 +98,72 @@ function makeDriver(opts?: {
   const pushed: any[] = [];
   const sessionIds: string[] = [];
   const ended: string[] = [];
+  let onElicitation!: OnElicitation;
   controller = { push: (m) => pushed.push(m), end: (reason) => ended.push(reason), isEnded: () => false };
   const driver = new ClaudeDriver({
     sessionId: "s1",
     sendMessage: (m) => sent.push(m),
-    spawn: (_args) => ({ query: fake.q, controller }),
+    spawn: (args) => { onElicitation = args.onElicitation; return { query: fake.q, controller }; },
     onSessionId: (id) => sessionIds.push(id),
     ...(opts?.stderrTail ? { stderrTail: opts.stderrTail } : {}),
     ...(opts?.cwd ? { cwd: opts.cwd } : {}),
     ...(opts?.readTranscript ? { readTranscript: opts.readTranscript } : {}),
   });
-  return { driver, sent, fake, pushed, sessionIds, ended };
+  return { driver, sent, fake, pushed, sessionIds, ended, elicit: (...args: Parameters<OnElicitation>) => onElicitation(...args) };
 }
+
+describe("Claude MCP input", () => {
+  it("surfaces native MCP form requests and returns the user's typed answers", async () => {
+    const { driver, sent, elicit } = makeDriver();
+    await driver.start();
+    try {
+      const result = elicit({ serverName: "existing-server", message: "Choose a workspace", requestedSchema: {
+        type: "object", properties: { workspace: { type: "string" }, approved: { type: "boolean" } },
+      } }, { signal: new AbortController().signal });
+      const questions = sent.filter((m) => m.type === "agent:question");
+      expect(questions).toHaveLength(2);
+      expect(questions[0]!.prompt).toContain("existing-server");
+      driver.resolveQuestion(questions[0]!.questionId, "demo");
+      driver.resolveQuestion(questions[1]!.questionId, "yes");
+      expect(await result).toEqual({ action: "accept", content: { workspace: "demo", approved: true } });
+    } finally { await driver.dispose(); }
+  });
+
+  it("surfaces URL authentication and leaves confirmation to the user", async () => {
+    const { driver, sent, elicit } = makeDriver();
+    await driver.start();
+    try {
+      const result = elicit({ serverName: "existing", message: "Authenticate", mode: "url", url: "https://example.com/auth" }, { signal: new AbortController().signal });
+      const question = sent.find((m) => m.type === "agent:question")!;
+      expect(question.prompt).toContain("https://example.com/auth");
+      driver.resolveQuestion(question.questionId, "done");
+      expect(await result).toEqual({ action: "accept" });
+    } finally { await driver.dispose(); }
+  });
+
+  it("retracts MCP questions when the native request is cancelled", async () => {
+    const { driver, sent, elicit } = makeDriver();
+    await driver.start();
+    const abort = new AbortController();
+    try {
+      const result = elicit({ serverName: "existing", message: "Input", mode: "form" }, { signal: abort.signal });
+      abort.abort();
+      expect(await result).toEqual({ action: "cancel" });
+      expect(sent.some((m) => m.type === "agent:request-retracted")).toBe(true);
+    } finally { await driver.dispose(); }
+  });
+
+  it("declines malformed JSON answers", async () => {
+    const { driver, sent, elicit } = makeDriver();
+    await driver.start();
+    try {
+      const result = elicit({ serverName: "existing", message: "Input", mode: "form" }, { signal: new AbortController().signal });
+      const question = sent.find((m) => m.type === "agent:question")!;
+      driver.resolveQuestion(question.questionId, "not json");
+      expect(await result).toEqual({ action: "decline" });
+    } finally { await driver.dispose(); }
+  });
+});
 
 // fake.emit() feeds the driver's manually-driven async generator; the
 // consumeLoop's `for await` only resumes on a later tick (JS generator
@@ -602,10 +657,8 @@ describe("ClaudeDriver effort", () => {
 
   it("resolves the synthetic \"default\" row to its concrete model at session create, populating the model + effort pills before the first prompt", async () => {
     // Option B: don't surface a bare "Default" — follow the default row's
-    // resolvedModel to the concrete alias ("opus") and seed that model's default
-    // effort (its 2nd rung). Both must resolve from session create: without a
-    // currentModelId the app hides the effort pill and resolveConfigPick rejects
-    // effort picks.
+    // resolvedModel to the concrete alias ("opus"): without a currentModelId
+    // the app hides the effort pill and resolveConfigPick rejects effort picks.
     const models = [
       { value: "default", displayName: "Default", resolvedModel: "claude-opus-4-8", supportsEffort: true, supportedEffortLevels: ["low", "high", "max"] },
       { value: "opus", displayName: "Opus", resolvedModel: "claude-opus-4-8", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
@@ -618,10 +671,9 @@ describe("ClaudeDriver effort", () => {
     expect(caps?.type).toBe("agent:capabilities");
     if (caps?.type === "agent:capabilities") {
       expect(caps.currentModelId).toBe("opus"); // concrete alias, not "default"
-      expect(caps.currentEffortId).toBe("high"); // opus's 2nd effort rung
+      expect(caps.currentEffortId).toBeUndefined();
     }
-    // The seeded effort was applied to the session up front.
-    expect(fake.control.applyFlagSettings).toEqual([{ effortLevel: "high", ultracode: false }]);
+    expect(fake.control.applyFlagSettings).toEqual([]);
   });
 
   it("maps system:init.model (a resolved wire id) back to the catalog alias for currentModelId", async () => {
@@ -639,7 +691,7 @@ describe("ClaudeDriver effort", () => {
     if (caps?.type === "agent:capabilities") expect(caps.currentModelId).toBe("opus");
   });
 
-  it("surfaces the 2nd effort rung as the model's defaultEffort in the catalog", async () => {
+  it("does not infer a native effort default from the catalog order", async () => {
     const models = [{ value: "opus", displayName: "Opus", supportsEffort: true, supportedEffortLevels: ["low", "high", "xhigh", "max"] }];
     const fake = makeFakeQuery({ initializationResult: async () => ({ models }) });
     const { driver, sent } = makeDriver({ fake });
@@ -648,15 +700,12 @@ describe("ClaudeDriver effort", () => {
     const caps = sent.filter((m) => m.type === "agent:capabilities")
       .find((m) => m.type === "agent:capabilities" && m.models?.some((mo: any) => mo.id === "opus"));
     if (caps?.type === "agent:capabilities") {
-      expect(caps.models?.find((mo: any) => mo.id === "opus")?.defaultEffort).toBe("high");
+      expect(caps.models?.find((mo: any) => mo.id === "opus")?.defaultEffort).toBeUndefined();
     }
   });
 
   it("never seeds the appended \"ultracode\" pseudo-rung as a default effort (single-rung xhigh model)", async () => {
-    // A model whose only base rung is "xhigh" gains an appended "ultracode"
-    // rung, so efforts=["xhigh","ultracode"]. defaultEffort must come from the
-    // base levels (base[1] is undefined here) — never "ultracode", which would
-    // be applied as a bogus effortLevel that also disables the ultracode flag.
+    // The synthetic option must never activate ultracode during discovery.
     const models = [{ value: "opus", displayName: "Opus", supportsEffort: true, supportedEffortLevels: ["xhigh"] }];
     const fake = makeFakeQuery({ initializationResult: async () => ({ models }), supportedModels: async () => models });
     const { driver, sent } = makeDriver({ fake });
@@ -672,11 +721,7 @@ describe("ClaudeDriver effort", () => {
     expect(fake.control.applyFlagSettings).toEqual([]);
   });
 
-  it("re-seeds the default effort for the booted model when system:init reconciles to a different model", async () => {
-    // Eager discovery resolves the account default to sonnet (2nd rung
-    // "medium") and applies it; the first prompt then boots opus (2nd rung
-    // "high"). The seeded effort must re-derive for opus, not stay pinned to
-    // sonnet's "medium" (which isn't even in opus's effort list).
+  it("preserves native effort when system:init reconciles to a different model", async () => {
     const models = [
       { value: "default", displayName: "Default", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high"] },
       { value: "sonnet", displayName: "Sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high"] },
@@ -691,13 +736,9 @@ describe("ClaudeDriver effort", () => {
     const caps = sent.filter((m) => m.type === "agent:capabilities").at(-1);
     if (caps?.type === "agent:capabilities") {
       expect(caps.currentModelId).toBe("opus");
-      expect(caps.currentEffortId).toBe("high"); // opus's default, not sonnet's "medium"
+      expect(caps.currentEffortId).toBeUndefined();
     }
-    // Seeded sonnet's "medium" eagerly, then re-applied opus's "high" on reconcile.
-    expect(fake.control.applyFlagSettings).toEqual([
-      { effortLevel: "medium", ultracode: false },
-      { effortLevel: "high", ultracode: false },
-    ]);
+    expect(fake.control.applyFlagSettings).toEqual([]);
   });
 
   it("falls back to the first concrete model so currentModelId is never blank when the default row can't resolve", async () => {
@@ -760,10 +801,7 @@ describe("ClaudeDriver effort", () => {
     fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "opus", slash_commands: [], skills: [] });
     await flush();
     driver.setConfig("effort", "high");
-    // Leading entry is the seeded default (opus's 2nd rung == "high"); the pick
-    // re-applies the same level.
     expect(fake.control.applyFlagSettings).toEqual([
-      { effortLevel: "high", ultracode: false },
       { effortLevel: "high", ultracode: false },
     ]);
     const caps = sent.filter((m) => m.type === "agent:capabilities").at(-1);
@@ -785,10 +823,7 @@ describe("ClaudeDriver effort", () => {
     await flush();
     driver.setConfig("effort", "high");
     driver.setConfig("model", "haiku");
-    // Leading entry is the seeded default for opus; then the explicit high pick;
-    // then the clear when switching to effort-less haiku.
     expect(fake.control.applyFlagSettings).toEqual([
-      { effortLevel: "high", ultracode: false },
       { effortLevel: "high", ultracode: false },
       { effortLevel: null, ultracode: false },
     ]);
@@ -815,10 +850,7 @@ describe("ClaudeDriver effort", () => {
       expect(caps.models?.find((mo: any) => mo.id === "haiku")?.efforts).toBeUndefined();
     }
     driver.setConfig("effort", "ultracode");
-    // Leading entry is the seeded default (opus's 2nd rung == "high"); then the
-    // ultracode flag (NOT effortLevel: "ultracode").
     expect(fake.control.applyFlagSettings).toEqual([
-      { effortLevel: "high", ultracode: false },
       { ultracode: true },
     ]);
     // Dropping back to a concrete level lifts the sticky flag.

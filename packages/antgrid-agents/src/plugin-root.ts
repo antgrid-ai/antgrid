@@ -22,7 +22,8 @@ const assets: Record<string, string> = {
   "hooks/on-stop": onStop,
   "hooks/on-notification": onNotification,
   "hooks/_resolve-api-port.sh": resolvePort,
-  "opencode/plugin.ts": opencode,
+  "opencode/plugin.ts": opencode as unknown as string,
+  "opencode/package.json": '{"name":"@antgrid/opencode-plugin","type":"module","exports":{"./server":"./plugin.ts"}}\n',
   // Bun cannot bundle one file with both the text and TypeScript loaders.
   "memory-guidance.ts": `// SPDX-License-Identifier: MPL-2.0\nexport const MEMORY_AGENT_GUIDANCE = ${JSON.stringify(MEMORY_AGENT_GUIDANCE)};\n`,
   "kilo/plugin.ts": kilo,

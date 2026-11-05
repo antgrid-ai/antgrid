@@ -146,6 +146,25 @@ describe("claudeResumeReplay turn segmentation", () => {
     expect(out.some((m: any) => m.item?.text === "file body")).toBe(false);
   });
 
+  it("renders a compaction summary as a marker in its turn, not as a prompt", () => {
+    // After compaction Claude Code writes the summary as a type:"user" entry
+    // flagged isCompactSummary (and not isMeta), right before the next prompt.
+    const out = claudeResumeReplay("s1", [
+      { type: "user", uuid: "u1", message: { role: "user", content: "first" } },
+      { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "ans one" }] } },
+      { type: "user", uuid: "c1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content:
+        "This session is being continued from a previous conversation that ran out of context. Summary: synthetic." } },
+      { type: "user", uuid: "u2", message: { role: "user", content: "second" } },
+      { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "ans two" }] } },
+    ]);
+    const starts = out.filter((m) => m.type === "agent:turn-start");
+    expect(starts.length).toBe(2);
+    expect(out.some((m: any) => m.item?.role === "user" && m.item?.text?.startsWith("This session is being continued"))).toBe(false);
+    const marker: any = out.find((m: any) => m.item?.kind === "compaction");
+    expect(marker?.itemId).toBe("compaction:c1");
+    expect(marker?.turnId).toBe((starts[0] as any).turnId);
+  });
+
   it("segments on a text-less prompt without emitting a blank message row", () => {
     // An image-only prompt still starts an exchange; it just has nothing to render.
     const out = claudeResumeReplay("s1", [

@@ -134,6 +134,9 @@ test("canReply follows the vendor's mcp profile, and an unknown tool is receive-
       sessions: [
         session({ id: "claude", tool: "claude-code" }),
         session({ id: "codex", tool: "codex" }),
+        session({ id: "claude-chat", tool: "claude-code", mode: "chat" }),
+        session({ id: "codex-chat", tool: "codex", mode: "chat" }),
+        session({ id: "opencode-chat", tool: "opencode", mode: "chat" }),
         session({ id: "gemini", tool: "gemini" }),
         session({ id: "nameless", tool: undefined }),
         session({ id: "caller" }),
@@ -144,6 +147,9 @@ test("canReply follows the vendor's mcp profile, and an unknown tool is receive-
   const byId = new Map(answer.rows.map((r) => [r.sessionId, r.canReply]));
   expect(byId.get("claude")).toBe(true);
   expect(byId.get("codex")).toBe(true);
+  expect(byId.get("claude-chat")).toBe(true);
+  expect(byId.get("codex-chat")).toBe(true);
+  expect(byId.get("opencode-chat")).toBe(true);
   expect(byId.get("gemini")).toBe(false);
   expect(byId.get("nameless")).toBe(false);
 });

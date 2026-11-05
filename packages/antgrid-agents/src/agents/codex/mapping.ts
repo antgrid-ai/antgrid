@@ -176,12 +176,14 @@ export function mapThreadItem(raw: any): AgentItem | null {
   }
 }
 
-/** Map codex CodexErrorInfo (string enum or tagged object with a `type` key) to a normalized AgentError. */
+/** Map codex CodexErrorInfo to a normalized AgentError. The app-server sends a
+ * unit variant as a bare string ("serverOverloaded") and a variant with data
+ * externally tagged ({ httpConnectionFailed: { httpStatusCode: 429 } }), per
+ * the schema `codex app-server generate-ts` emits. */
 export function mapCodexError(info: any, message: string): AgentError {
-  // codex uses both plain string enums and tagged objects like { type: "serverOverloaded", httpStatusCode?: number }
   const tag: string = typeof info === "string" ? info : (info?.type ?? Object.keys(info ?? {})[0] ?? "other");
-  const httpStatus: number | undefined =
-    info && typeof info === "object" ? info.httpStatusCode : undefined;
+  const variant = info && typeof info === "object" ? info[tag] : undefined;
+  const httpStatus: unknown = variant?.httpStatusCode ?? (info && typeof info === "object" ? info.httpStatusCode : undefined);
   const mapped = byName(BY_TAG, tag);
   return agentError({
     category: mapped.category,
@@ -196,11 +198,15 @@ export function mapCodexError(info: any, message: string): AgentError {
 const BY_TAG: Record<string, ErrorClass> = {
   contextWindowExceeded: { category: "context_overflow", retryable: false },
   usageLimitExceeded: { category: "quota_exceeded", retryable: false },
+  sessionBudgetExceeded: { category: "quota_exceeded", retryable: false },
+  rateLimitExceeded: { category: "rate_limited", retryable: true },
   serverOverloaded: { category: "server_error", retryable: true },
   internalServerError: { category: "server_error", retryable: true },
   unauthorized: { category: "auth", retryable: false },
   badRequest: { category: "unknown", retryable: false },
   httpConnectionFailed: { category: "network", retryable: true },
+  responseStreamConnectionFailed: { category: "network", retryable: true },
+  responseStreamDisconnected: { category: "network", retryable: true },
   sandboxError: { category: "unknown", retryable: false },
 };
 

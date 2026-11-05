@@ -244,6 +244,61 @@ describe("start() resume wiring", () => {
     expect(raw.sessions.find((r: any) => r.id === s.id).agentSessionId).toBe("sess-dead");
   });
 
+  /** A claude session launched to resume [agentSessionId], with its run id. */
+  function startResumed(agentSessionId: string) {
+    const tm = makeTm();
+    const sm = mk(newStore(), tm);
+    const s = sm.create("Slot", { tool: "claude-code" });
+    sm.setAgentSession(s.id, agentSessionId, "/no/such/file.jsonl");
+    sm.start(s.id);
+    return { tm, sm, id: s.id, runId: tm.__spawns.at(-1).env.ANTGRID_RUN_ID as string };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+
+  test("a resume the agent refuses starts a fresh conversation once", async () => {
+    const { tm, sm, id, runId } = startResumed("sess-empty");
+    expect(tm.__spawns.at(-1).args).toContain("--resume");
+    tm.kill(id); // the refused PTY has exited
+    sm.noteResumeOutcome(id, runId, () => "No conversation found with session ID: sess-empty");
+    await tick();
+    const second = tm.__spawns.at(-1);
+    expect(tm.__spawns.length).toBe(2);
+    expect(second.args).not.toContain("--resume");
+    expect(second.args).not.toContain("sess-empty");
+    // A second report for the same run changes nothing: no retry loop.
+    sm.noteResumeOutcome(id, runId, () => "No conversation found");
+    await tick();
+    expect(tm.__spawns.length).toBe(2);
+  });
+
+  test("a refusal the terminal coloured and wrapped is still recognised", async () => {
+    const { tm, sm, id, runId } = startResumed("sess-styled");
+    const esc = String.fromCharCode(27);
+    const styled = esc + "[31mNo conversation" + String.fromCharCode(13, 10) + "  found" + esc + "[0m with session ID";
+    tm.kill(id);
+    sm.noteResumeOutcome(id, runId, () => styled);
+    await tick();
+    expect(tm.__spawns.length).toBe(2);
+    expect(tm.__spawns.at(-1).args).not.toContain("--resume");
+  });
+
+  test("a session deleted before its resume exit is not restarted", async () => {
+    const { tm, sm, id, runId } = startResumed("sess-gone");
+    tm.kill(id);
+    await sm.delete(id);
+    sm.noteResumeOutcome(id, runId, () => "No conversation found");
+    await tick();
+    expect(tm.__spawns.length).toBe(1);
+  });
+
+  test("an unrelated early exit keeps the saved conversation", async () => {
+    const { tm, sm, id, runId } = startResumed("sess-keep");
+    sm.noteResumeOutcome(id, runId, () => "Error: network unreachable");
+    await tick();
+    expect(tm.__spawns.length).toBe(1);
+    expect(sm.get(id)?.agentSessionId).toBe("sess-keep");
+  });
+
   test("resume args fold into the command line when per-session args are set", () => {
     const store = newStore();
     const tm = makeTm();

@@ -207,12 +207,12 @@ void main() {
       );
       await tester.pump();
 
-      expect(container.read(recentGroupByProvider), RecentGroupBy.machine);
+      expect(container.read(recentGroupByProvider), RecentGroupBy.project);
 
-      await tester.tap(find.text('PROJECT'));
+      await tester.tap(find.text('MACHINE'));
       await tester.pump();
 
-      expect(container.read(recentGroupByProvider), RecentGroupBy.project);
+      expect(container.read(recentGroupByProvider), RecentGroupBy.machine);
     });
   });
 }

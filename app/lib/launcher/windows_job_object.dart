@@ -143,8 +143,8 @@ int _job = -1;
 ///
 /// Best-effort by design — a failure here costs us the hard backstop, not the
 /// soft one, so it is logged and swallowed. No-op off Windows: Linux and macOS
-/// have no equivalent that survives SIGKILL of the parent, and the watchdog
-/// remains the only backstop there.
+/// have no equivalent that survives SIGKILL of the parent, and the host's own
+/// owner watchdogs (bridge/src/owner-watchdog.ts) are the backstop there.
 ///
 /// Returns whether [pid] is now a job member — false off Windows and on every
 /// failure. Callers ignore it; it is what makes the enclosure assertable.

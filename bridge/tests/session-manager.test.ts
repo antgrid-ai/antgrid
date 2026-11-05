@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import { SessionManager, isDefaultSessionName } from "../src/session-manager";
 import { buildSpawnEnv } from "../src/terminal-session";
+import { opencodeTestRuntime } from "./support/opencode-runtime";
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), "antgrid-sess-"));
@@ -1623,15 +1624,16 @@ describe("SessionManager initial prompt", () => {
     }
   });
 
-  it("opencode gets --prompt <text>", () => {
+  it("opencode gets --prompt <text>", async () => {
     const term = makeFakeTerm();
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
+      agentRuntime: opencodeTestRuntime,
       sendMessage: () => {},
     });
     const s = sm.create(undefined, { tool: "opencode" });
-    sm.start(s.id, "do the thing");
+    await sm.start(s.id, "do the thing");
     const args = term.spawns[0].args!;
     const i = args.indexOf("--prompt");
     expect(i).toBeGreaterThanOrEqual(0);

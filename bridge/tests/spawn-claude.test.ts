@@ -1,26 +1,32 @@
 import { describe, it, expect } from "bun:test";
-import { buildClaudeEnv as buildEnv, createPersistentPromptStream, resolveClaudeBinary, spawnClaude } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
+import { buildClaudeEnv as buildEnv, createPersistentPromptStream, resolveClaudeBinary, spawnClaude, nativeClaudeArgs } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
 import { withAgentHost } from "antgrid-agents/host";
 import { agentHostServices } from "../src/agent-host";
 const buildClaudeEnv: typeof buildEnv = (base) => withAgentHost(agentHostServices, () => buildEnv(base));
 
 describe("buildClaudeEnv", () => {
-  it("strips API keys and sets the required env", () => {
+  it("preserves native provider credentials and sets missing defaults", () => {
     const env = buildClaudeEnv({
       ANTHROPIC_API_KEY: "sk-secret", OPENAI_API_KEY: "sk-other",
       USERPROFILE: "C:\\Users\\x", PATH: "/usr/bin",
     });
-    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-secret");
+    expect(env.OPENAI_API_KEY).toBe("sk-other");
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
-    expect(env.ENABLE_TOOL_SEARCH).toBe("auto:2");
-    expect(env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe("0");
+    expect(env.ENABLE_TOOL_SEARCH).toBeUndefined();
+    expect(env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBeUndefined();
     expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe("1");
   });
 
   it("does not clobber a user-set ENABLE_TOOL_SEARCH", () => {
     const env = buildClaudeEnv({ ENABLE_TOOL_SEARCH: "false", PATH: "/usr/bin" });
     expect(env.ENABLE_TOOL_SEARCH).toBe("false");
+  });
+
+  it("keeps the user's native home and MCP timeout", () => {
+    const env = buildClaudeEnv({ HOME: "/custom-home", USERPROFILE: "C:\\Users\\x", CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "900" });
+    expect(env.HOME).toBe("/custom-home");
+    expect(env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe("900");
   });
 
   // The gate is a bare truthiness check on the string, so "0" disables agent
@@ -73,6 +79,12 @@ describe("createPersistentPromptStream", () => {
 });
 
 describe("spawnClaude forwarding", () => {
+  it("lets native settings resolve permission defaults without dropping other options", () => {
+    expect(nativeClaudeArgs(["--print", "--permission-mode", "default", "--mcp-config", "cfg.json"]))
+      .toEqual(["--print", "--mcp-config", "cfg.json"]);
+    expect(nativeClaudeArgs(["--permission-mode", "plan"]))
+      .toEqual(["--permission-mode", "plan"]);
+  });
   it("forwards extraArgs and merges extraEnv over buildClaudeEnv", async () => {
     let captured: any;
     const stub: any = {
@@ -94,7 +106,7 @@ describe("spawnClaude forwarding", () => {
     expect(captured.extraArgs).toEqual({ "plugin-dir": "/plugins/claude" });
     expect(captured.env.ANTGRID_TERMINAL_ID).toBe("slot-1");
     expect(captured.env.ANTGRID_API_PORT).toBe("8790");
-    // buildClaudeEnv still applied — it deletes ANTHROPIC_API_KEY.
-    expect(captured.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(captured.settingSources).toEqual(["user", "project", "local"]);
+    expect(captured.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   });
 });

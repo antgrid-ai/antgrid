@@ -99,6 +99,41 @@ test("tail events: assistant text, tool calls and results, never thinking or boo
   expect(events[5]).toMatchObject({ kind: "tool_result", output: "" });
 });
 
+// The shape Kimi 2.x's legacy migration (packages/migration-legacy
+// wire-writer.ts + translator.ts) writes for a session carried over from the
+// Python kimi-cli: the history is context messages, with no loop events at all.
+test("a session migrated from kimi-cli keeps its assistant turns and tool calls", async () => {
+  const message = (body: Record<string, unknown>) => ({ type: "context.append_message", message: { toolCalls: [], ...body } });
+  const userParts = [{ type: "text", text: "fix the parser" }];
+  const events = await parse([
+    { type: "metadata", protocol_version: "1.0", created_at: 1 },
+    { type: "turn.prompt", agentId: "main", input: userParts, origin: { kind: "user" }, time: 1 },
+    message({ role: "user", content: userParts }),
+    message({
+      role: "assistant",
+      content: [{ type: "think", think: "hidden" }, { type: "text", text: "Reading it first." }],
+      toolCalls: [{ type: "function", id: "call_1", function: { name: "ReadFile", arguments: '{"path":"a.ts"}' } }],
+    }),
+    message({ role: "tool", toolCallId: "call_1", content: [{ type: "text", text: "file body" }] }),
+    message({ role: "assistant", content: [{ type: "text", text: "Fixed." }] }),
+    { type: "turn.ended", agentId: "main", turnId: 0, reason: "completed", time: 1 },
+  ]);
+  expect(events.map((event) => event.kind)).toEqual(["user", "assistant", "tool_call", "tool_result", "assistant"]);
+  expect(events[1]).toMatchObject({ text: "Reading it first." });
+  expect(events[2]).toMatchObject({ name: "ReadFile", input: '{"path":"a.ts"}' });
+  expect(events[3]).toMatchObject({ name: "ReadFile", output: "file body" });
+  expect(events[4]).toMatchObject({ text: "Fixed." });
+});
+
+test("a live turn's user-role context messages add nothing beside its prompt", async () => {
+  const events = await parse([
+    prompt("task", { kind: "user" }),
+    { type: "context.append_message", message: { role: "user", content: [{ type: "text", text: "task" }], toolCalls: [], origin: { kind: "user" } } },
+    { type: "context.append_message", message: { role: "user", content: [{ type: "text", text: "<system-reminder>synthetic</system-reminder>" }], toolCalls: [] } },
+  ]);
+  expect(events.map((event) => event.kind)).toEqual(["user"]);
+});
+
 test("unknown shapes and torn lines never throw", async () => {
   const events = await parse([], [
     "null", "7", '"x"', "[]",

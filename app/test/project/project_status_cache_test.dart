@@ -68,5 +68,11 @@ void main() {
       await cache.clear('p4');
       expect(await cache.read('p4'), isNull);
     });
+
+    test('read never throws, even with no support directory', () async {
+      // The default factory asks the platform for its support directory, and
+      // no plugin answers here.
+      expect(await ProjectStatusCache().read('p'), isNull);
+    });
   });
 }

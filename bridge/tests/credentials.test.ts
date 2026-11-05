@@ -44,6 +44,17 @@ test("accepts an optional ownerPid and surfaces it", () => {
   if (r.success) expect(r.data.ownerPid).toBe(4242);
 });
 
+test("ownerHoldsStdin is optional and surfaced when set", () => {
+  const base = { firstProject: { projectId: "p", projectPath: "/tmp/p", mode: "local" } };
+  const absent = BootstrapPayloadSchema.safeParse(base);
+  expect(absent.success).toBe(true);
+  if (absent.success) expect(absent.data.ownerHoldsStdin).toBeUndefined();
+  const set = BootstrapPayloadSchema.safeParse({ ...base, ownerHoldsStdin: true });
+  expect(set.success).toBe(true);
+  if (set.success) expect(set.data.ownerHoldsStdin).toBe(true);
+  expect(BootstrapPayloadSchema.safeParse({ ...base, ownerHoldsStdin: "yes" }).success).toBe(false);
+});
+
 test("accepts an optional ownerBuild and surfaces it verbatim", () => {
   const r = BootstrapPayloadSchema.safeParse({
     firstProject: { projectId: "p", projectPath: "/tmp/p", mode: "local" },

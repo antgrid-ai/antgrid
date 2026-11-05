@@ -16,7 +16,7 @@ import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
@@ -616,7 +616,7 @@ describe("materialized files", () => {
     // that resolves it relative to a moved source dir writes a config opencode
     // silently never loads.
     const abDir = tmp("ab-spec-");
-    const expectedUrl = pathToFileURL(bundledPluginPath(abDir, "opencode", "plugin.ts")).href;
+    const expectedUrl = pathToFileURL(dirname(bundledPluginPath(abDir, "opencode", "plugin.ts"))).href;
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
     try {
@@ -626,7 +626,7 @@ describe("materialized files", () => {
     }
     // No trailing newline here — this writer stringifies without one.
     expect(readFileSync(join(abDir, "agents", "opencode-session-namer.json"), "utf8")).toBe(
-      JSON.stringify({ plugin: [expectedUrl] }, null, 2),
+      JSON.stringify({ plugins: [expectedUrl] }, null, 2),
     );
   });
 

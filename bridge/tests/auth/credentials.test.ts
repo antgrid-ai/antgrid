@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { readBootstrapPayload } from "../../src/auth/credentials";
 
 const local = JSON.stringify({
@@ -22,7 +22,7 @@ const remote = JSON.stringify({
   firstProject: { projectId: "proj1", projectPath: "/tmp/proj1", mode: "remote" },
 });
 
-function streamOf(s: string): NodeJS.ReadableStream {
+function streamOf(s: string): Readable {
   return Readable.from([Buffer.from(s + "\n")]);
 }
 
@@ -108,6 +108,36 @@ describe("readBootstrapPayload", () => {
     ).rejects.toThrow(/bootstrap payload/i);
     expect(lines.join("\n")).toContain("Antgrid desktop app");
     expect(lines.join("\n")).toContain("Ctrl+C");
+  });
+
+  it("resolves at the newline while the owner keeps the pipe open, then lets go of it", async () => {
+    const pipe = new PassThrough();
+    pipe.write(local + "\n");
+    const p = await readBootstrapPayload({ stdin: pipe, timeoutMs: 1000 });
+    expect(p.firstProject?.projectId).toBe("proj1");
+    expect(pipe.readableEnded).toBe(false);
+    expect(pipe.listenerCount("data")).toBe(0);
+    expect(pipe.listenerCount("end")).toBe(0);
+  });
+
+  it("leaves a later stdin error harmless rather than uncaught", async () => {
+    const pipe = new PassThrough();
+    pipe.write(local + "\n");
+    await readBootstrapPayload({ stdin: pipe, timeoutMs: 1000 });
+    expect(() => pipe.emit("error", new Error("EIO"))).not.toThrow();
+  });
+
+  it("assembles a line split across chunks", async () => {
+    const pipe = new PassThrough();
+    pipe.write(local.slice(0, 10));
+    pipe.write(local.slice(10) + "\n");
+    const p = await readBootstrapPayload({ stdin: pipe, timeoutMs: 1000 });
+    expect(p.firstProject?.projectId).toBe("proj1");
+  });
+
+  it("accepts a payload with no trailing newline once stdin ends", async () => {
+    const p = await readBootstrapPayload({ stdin: Readable.from([Buffer.from(local)]) });
+    expect(p.firstProject?.projectId).toBe("proj1");
   });
 
   it("stays silent on a piped (non-TTY) stdin", async () => {

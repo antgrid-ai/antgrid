@@ -73,7 +73,7 @@ import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSour
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
-import { MACHINE_STATS_INTERVAL_MS, readMachineStats, type DeviceStatsStore } from "./device-stats";
+import { readMachineStats, type DeviceStatsStore } from "./device-stats";
 import { ConfigController } from "./config-controller";
 import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
@@ -245,9 +245,8 @@ export function buildAgentHello(cfg: AbConfig, version: string): AbMessage {
   });
 }
 
-// Reuse the terminal-mode title injection for chat spawns: same plugin/config
-// args, but correlated to the chat slot id (not a PTY) and pointed at this
-// core's api server. ANTGRID_API_PORT is mandatory for the Claude hook runner.
+// Integrations must address the chat slot and this core's API. Profiles can
+// omit terminal hooks when their structured driver owns the same observations.
 export function buildChatSpawnAugment(
   tool: string,
   slotId: string,
@@ -255,7 +254,7 @@ export function buildChatSpawnAugment(
   abDir?: string,
   runId?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, { abDir, mcp: false });
+  const aug = augmentAgentLaunch(tool, { abDir, mode: "chat" });
   return {
     args: aug.args,
     env: {
@@ -2983,6 +2982,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         log.info("Registered push token for phone %s", phone.phoneDeviceId);
         break;
       }
+      case "machine:stats:request": {
+        // Read on demand rather than pushed: the figures are only shown while
+        // someone is looking, so a core nobody asks samples nothing, and only
+        // the asker is answered.
+        // Caught rather than voided: an escaped rejection reaches index.ts's
+        // `unhandledRejection` hook, which takes the whole host down. A read that
+        // settles after shutdown must not publish into the torn-down transport.
+        readMachineStats()
+          .then((stats) => { if (!isShuttingDown) sendAbTo(createMessage("machine:stats", stats), client); })
+          .catch((err) => log.warn("machine:stats send failed: %s", err));
+        break;
+      }
       case "device:stats": {
         // Keyed to the ASKING device's row for the same reason as
         // push:register: with two apps attached, anything else lets one
@@ -4431,7 +4442,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
       },
       onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
-      onTerminalExited: (id, runId) => {
+      onTerminalExited: (id, runId, readOutputTail) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
         // A setup transcript belongs to no session, so its exit settles the run
         // and takes none of the session-scoped cleanup below. Its owner row
@@ -4449,6 +4460,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // run's every block.
         openAgentPrompts.clear(id);
         sessions?.noteExited(id, runId);
+        sessions?.noteResumeOutcome(id, runId, readOutputTail);
         // A pending confirmation's timer is unref'd, so a leaked one costs
         // nothing at process exit — but a same-id restart must not inherit a
         // dead run's watch on a transcript the new run may never touch.
@@ -5090,49 +5102,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  // Armed by a handshake and disarmed once no remote app is left (the client
-  // sweep and the tick both check), so a core nobody watches from another
-  // device reads no OS memory. Loopback does not count: a local desktop shares
-  // this machine and shows no remote-host figure.
-  let machineStatsTimer: ReturnType<typeof setInterval> | null = null;
-  function hasRemoteClient(): boolean {
-    for (const c of attachedClients) if (c !== "loopback") return true;
-    return false;
-  }
-  function stopMachineStats() {
-    if (machineStatsTimer) clearInterval(machineStatsTimer);
-    machineStatsTimer = null;
-  }
-  function sendMachineStats() {
-    // Caught rather than voided: an escaped rejection reaches index.ts's
-    // `unhandledRejection` hook, which takes the whole host down. A read that
-    // settles after shutdown must not publish into the torn-down transport.
-    readMachineStats()
-      .then((stats) => { if (!isShuttingDown) sendAb(createMessage("machine:stats", stats)); })
-      .catch((err) => log.warn("machine:stats send failed: %s", err));
-  }
-  /** `onAttach` is a remote client's first frame rather than a handshake, so
-   *  it is held to the tick's rule: nothing for a backgrounded app. The timer
-   *  is armed either way, so that app is told once it is foregrounded. It is
-   *  NOT deduped against the handshake's report: a remote stream subscribes
-   *  after that report went out, so this is the only one it receives. */
-  function emitMachineStats(onAttach = false) {
-    if (!onAttach || !connState.suppressed) sendMachineStats();
-    machineStatsTimer ??= setInterval(() => {
-      if (!hasRemoteClient()) { stopMachineStats(); return; }
-      // A backgrounded app renders nothing; its next handshake re-sends.
-      if (connState.suppressed) return;
-      sendMachineStats();
-    }, MACHINE_STATS_INTERVAL_MS);
-  }
-
   function onHandshakeComplete() {
     log.info("app:ready / owner-connect — emitting hello and (re)syncing state");
     // Re-emit hello on every handshake; app-side notifiers are
     // latest-wins, so this is a no-op when unchanged and self-healing
     // otherwise.
     sendAb(buildAgentHello(config, VERSION));
-    emitMachineStats();
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
     // A carrier just arrived: anything held for want of one goes now rather than
@@ -5632,14 +5607,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // `tree:update`, and the delta filter's roster must account for it (see
       // [attachedClients]).
       const clientKey = clientKeyOf(source, peerId);
-      const newRemoteClient = clientKey !== "loopback" && !attachedClients.has(clientKey);
       attachedClients.add(clientKey);
-      // A remote stream gets no handshake of its own: a remote-mode core primes
-      // its one handshake before the stream subscribes, and a stream re-attaching
-      // to a warm core fires none. machine:stats is not replayed, so a new
-      // remote viewer is told here, which also re-arms a timer that stopped
-      // when the last one left.
-      if (newRemoteClient) emitMachineStats(true);
       if (msg.type === "request") {
         if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only
@@ -5747,7 +5715,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // has already removed. Mirrors the construction guard: whoever built it
       // stops it.
       sessionBus.setListener(project.id, null);
-      stopMachineStats();
       // A coalescing window that outlived the core would fire into a torn-down
       // transport, and on a host-injected coordinator it would also read a
       // mailbox for a project nothing is serving any more.
@@ -5895,7 +5862,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.dropSubscription(key);
         for (const fw of fileWatchers.values()) fw.dropSubscription(key);
       }
-      if (!hasRemoteClient()) stopMachineStats();
       focusedSessionByClient.delete(client);
       // A departed device declares nothing. Leaving its "paused" behind would
       // hold the core paused for good once the last unpaused sibling leaves,

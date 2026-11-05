@@ -1,19 +1,21 @@
 import { describe, expect, it } from "bun:test";
 import { buildChatSpawnAugment } from "../src/agent-core";
-import { codexNotifyOnlyArgs, codexUnifiedExecArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
+import { codexChatAugmentArgs, codexUnifiedExecArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
 
 describe("codex chat-mode augment", () => {
-  it("slices out only the notify=[...] -c pair", () => {
-    const sliced = codexNotifyOnlyArgs(
+  it("forwards the notify and MCP settings", () => {
+    const sliced = codexChatAugmentArgs(
       buildChatSpawnAugment("codex", "slot-7", 8790).args,
     );
-    expect(sliced.length).toBe(2);
+    expect(sliced.length).toBeGreaterThan(2);
     expect(sliced[0]).toBe("-c");
     expect(sliced[1]?.startsWith("notify=")).toBe(true);
+    expect(sliced.some((a) => a.startsWith("mcp_servers.antgrid.command="))).toBe(true);
+    expect(sliced.some((a) => a.startsWith("mcp_servers.antgrid.env_vars="))).toBe(true);
   });
 
   it("drops every hooks.* arg (app-server's -c parser rejects them)", () => {
-    const sliced = codexNotifyOnlyArgs(
+    const sliced = codexChatAugmentArgs(
       buildChatSpawnAugment("codex", "slot-7", 8790).args,
     );
     expect(sliced.some((a) => a.includes("hooks."))).toBe(false);

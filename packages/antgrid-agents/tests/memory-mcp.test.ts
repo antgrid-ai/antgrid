@@ -75,10 +75,11 @@ test("OpenCode family preserves user MCP and other config while adding memory", 
   }
 });
 
-test("chat launch explicitly suppresses both MCP servers", () => {
-  const ctx = context();
-  const launch = augmentAgentLaunch("codex", { ...ctx, mcp: false, hookCommand: { binary: "bridge", preargs: ["hook"] } });
-  expect(launch.args.some(arg => arg.startsWith("mcp_servers."))).toBe(false);
+test("a chat launch registers antgrid but not the memory server", () => {
+  const launch = augmentAgentLaunch("codex", { ...context(), mode: "chat", hookCommand: { binary: "bridge", preargs: ["hook"] } });
+  expect(launch.args.some(arg => arg.startsWith("mcp_servers.antgrid."))).toBe(true);
+  expect(launch.args.some(arg => arg.includes("memory-mcp"))).toBe(false);
+  expect(launch.memoryWithheld).toBeUndefined();
 });
 
 const hookCommand = { binary: "bridge", preargs: ["hook"] };
@@ -88,7 +89,7 @@ test("the guidance flag is set only for a launch that registered the memory serv
   const { memoryMcpCommand, ...withoutMemory } = ctx;
   expect(augmentAgentLaunch("codex", { ...ctx, hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
   expect(augmentAgentLaunch("codex", { ...withoutMemory, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
-  expect(augmentAgentLaunch("codex", { ...ctx, mcp: false, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+  expect(augmentAgentLaunch("codex", { ...ctx, mode: "chat", hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
 });
 
 test("a profile that injects nothing leaves no guidance flag", () => {

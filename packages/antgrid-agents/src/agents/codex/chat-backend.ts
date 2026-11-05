@@ -7,7 +7,7 @@ import {
   mapTokenBreakdown,
 } from "./mapping";
 import { codexResumeReplay } from "./resume-replay";
-import { planElicitation, type FlatQuestion } from "./elicitation";
+import { planElicitation, type FlatQuestion } from "../../structured/mcp-elicitation";
 import { agentError } from "../../structured/agent-error";
 import {
   ChatSession,

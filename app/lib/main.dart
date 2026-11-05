@@ -355,6 +355,16 @@ Future<void> main() async {
         }),
       );
     });
+    // (e) A handshake whose keypair read failed (a locked iPhone) waits for the
+    // next one; the foreground is when the keychain is readable again. Held
+    // for the app's lifetime, like the stats listener above.
+    AppLifecycleListener(
+      onResume: () => detached(
+        'Main',
+        'push retry on resume failed',
+        () => pushService.retryUnregistered(warmSessions()),
+      ),
+    );
     unawaited(
       pushService.init(sessions: warmSessions).catchError((Object e) {
         AbLog.error(
@@ -395,7 +405,15 @@ Future<void> main() async {
   }
 
   // Subscribe for in-flight links while the app is running.
-  appLinks.uriLinkStream.listen((uri) => unawaited(handleLink(uri)));
+  appLinks.uriLinkStream.listen(
+    (uri) => detached('Main', 'deep link failed', () => handleLink(uri)),
+    // An EventChannel error event; without a handler it lands as a crash.
+    onError: (Object error) => AbLog.warn(
+      'Main',
+      'deep link stream error',
+      fields: {'error': '$error'},
+    ),
+  );
 
   // The one place a tapped notification is turned into a navigation, whichever
   // surface delivered it. No context: an OS-level tap has no widget behind it,
@@ -456,7 +474,11 @@ Future<void> main() async {
   // redemption), so awaiting it before runApp would stall launch on a slow or
   // half-open connection. It's best-effort and invalidates currentUserProvider
   // when it completes, so the UI updates as soon as the session lands.
-  unawaited(appLinks.getInitialLink().then(handleLink));
+  detached(
+    'Main',
+    'cold-start deep link failed',
+    () async => handleLink(await appLinks.getInitialLink()),
+  );
 
   // The notification that launched a terminated app. Each source is read
   // EXACTLY once, because none of them is drained by the read: push's

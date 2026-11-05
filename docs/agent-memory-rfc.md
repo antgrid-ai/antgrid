@@ -325,11 +325,11 @@ the exact 30-day inactivity expiry for `task_state`.
 `antgrid-bridge memory-mcp` is a separate stdio server named `antgrid-memory`.
 Its four tools call the originating core's loopback `/memory/*` routes; it never
 opens a second canonical database. Existing terminal MCP profiles add it beside
-`antgrid`. Chat launches still skip MCP. Static save guidance lives in this
+`antgrid`. Chat launches register `antgrid` alone. Static save guidance lives in this
 server's instructions and tool descriptions. Codex also receives the fixed
 usage guidance through its existing `SessionStart` hook, including startup,
 resume, clear, compact and fork events. OpenCode receives the same fixed text
-through its terminal plugin's `experimental.chat.system.transform`. Both are
+through its terminal plugin's `context` session hook (OpenCode 2). Both are
 gated on the launch having registered the memory server. OpenCode decides per
 session: the first request awaits the bootstrap answer, and later requests use
 the last definitive answer while refreshing it in the background, so a settings

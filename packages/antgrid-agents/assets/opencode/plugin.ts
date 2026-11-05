@@ -1,4 +1,3 @@
-/// <reference path="../../src/opencode-plugin.d.ts" />
 // Antgrid opencode plugin: reports one opencode terminal to the bridge in the
 // vocabulary the bridge's hook routes already speak — the turn's start
 // (/turn-start, /turn-activity) and end (/notify + /handler-event turn_end), the
@@ -6,8 +5,88 @@
 // conversation title (/session-title), and the Handler's triggers. Runs inside
 // opencode's own Bun runtime, so we use fetch (no node). Correlation via the
 // ANTGRID_TERMINAL_ID env.
-import type { Plugin } from "@opencode-ai/plugin";
+import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
 import { MEMORY_AGENT_GUIDANCE } from "../memory-guidance";
+
+// The slice of the V2 plugin host's `session.hook` used here; `@opencode/client`
+// does not declare it, and this installed asset carries no runtime dependency.
+type ContextHook = (
+  name: "context",
+  callback: (input: { readonly sessionID: string; system: Array<{ type: "text"; text: string }> }) => Promise<void>,
+) => Promise<{ dispose(): Promise<void> }>;
+
+// The V2 host loads a package's default definition and owns the subscription's
+// lifetime. Keep routing independent of that host so it can be exercised without
+// starting an agent or making model requests.
+export default {
+  id: "antgrid",
+  async setup(ctx: Pick<OpenCodeClient, "event"> & { session: Pick<OpenCodeClient["session"], "get"> & { hook: ContextHook } }) {
+    const reporter = await AntgridSessionNamer();
+    const stop = new AbortController();
+    const sessions = new Map<string, string | undefined>();
+    const send = (type: string, properties: unknown) => reporter.event?.({ event: { type, properties } });
+    const identify = async (sessionID: string) => {
+      if (sessions.has(sessionID)) return;
+      const info = await ctx.session.get({ sessionID });
+      sessions.set(sessionID, info.parentID);
+      await send("session.created", { info });
+      await send("session.updated", { info });
+    };
+    const receive = async (event: OpenCodeEvent) => {
+      const p: any = "data" in event ? event.data : {};
+      if (p.sessionID && p.sessionID !== "global" && event.type !== "session.created" && event.type !== "session.deleted") {
+        await identify(p.sessionID);
+      }
+      switch (event.type) {
+        case "session.created":
+          sessions.set(p.sessionID, p.parentID);
+          await send("session.created", { info: { ...p, id: p.sessionID } });
+          return send("session.updated", { info: { ...p, id: p.sessionID } });
+        case "session.renamed": return send("session.updated", { info: { ...p, id: p.sessionID, parentID: sessions.get(p.sessionID) } });
+        case "session.deleted":
+          sessions.delete(p.sessionID);
+          return send(event.type, p);
+        case "session.execution.started":
+        case "session.step.started":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "busy" } });
+        case "session.execution.failed":
+          await send("session.error", { sessionID: p.sessionID, error: { name: p.error.type, data: p.error } });
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "session.execution.interrupted":
+        case "session.execution.succeeded":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "permission.asked": return send(event.type, { ...p, permission: p.action, patterns: p.resources });
+        case "permission.replied": return send(event.type, p);
+        case "form.created": return send("question.asked", {
+          id: p.form.id, sessionID: p.form.sessionID, questions: [{ question: p.form.title }],
+        });
+        case "form.replied":
+        case "form.cancelled": return send("question.replied", { requestID: p.id });
+      }
+    };
+    // Runs before each primary model request, on its critical path. A session
+    // the subscription has not classified yet is looked up first so a subagent
+    // is never mistaken for a root; a failed lookup only costs that request its
+    // guidance.
+    const guidance = await ctx.session.hook("context", async (input) => {
+      input.system = input.system.filter((part) => part.text !== MEMORY_AGENT_GUIDANCE);
+      try { await identify(input.sessionID); } catch { return; }
+      if (await reporter.memoryGuidance(input.sessionID)) input.system.push({ type: "text", text: MEMORY_AGENT_GUIDANCE });
+    });
+    const loop = (async () => {
+      for await (const event of ctx.event.subscribe({ signal: stop.signal })) {
+        if (stop.signal.aborted) break;
+        try { await receive(event); } catch (error) { console.error("Antgrid plugin event failed", error); }
+      }
+    })().catch((error) => { if (!stop.signal.aborted) console.error("Antgrid plugin subscription failed", error); });
+    return async () => {
+      stop.abort();
+      await guidance.dispose();
+      await loop;
+      await reporter.dispose?.();
+    };
+  },
+};
 
 // Posts go out one at a time (see `send`), so a bridge that accepts the
 // connection and then hangs would hold up every post queued behind it; a dead
@@ -101,9 +180,7 @@ function handlerPosts(terminalId: string | undefined, kind: string, extra: Recor
   return terminalId ? [{ path: "/handler-event", body: { terminalId, agent: "opencode", event: kind, ...extra } }] : [];
 }
 
-// opencode's loader calls EVERY export of this module as a plugin and throws on
-// one that is not a function, so nothing but the plugin itself may be exported.
-export const AntgridSessionNamer: Plugin = async () => {
+export async function AntgridSessionNamer(_input?: unknown) {
   // Per opencode instance, and only ever touched synchronously: opencode calls
   // the event handler in publish order but never awaits it, so every decision
   // is made before the first await and only the sends are deferred.
@@ -115,7 +192,7 @@ export const AntgridSessionNamer: Plugin = async () => {
   // session, publishing session.updated, before every prompt into it, so a child
   // is always classified before its first `busy`.
   const children = new Set<string>();
-  // The system transform runs on every model request and sits on its critical
+  // The context hook runs on every model request and sits on its critical
   // path. Only the first request waits for the bridge; later ones use the last
   // definitive answer and refresh it behind the request, so a slow or failing
   // bridge never delays or flickers the guidance. The answer is the user's
@@ -364,13 +441,8 @@ export const AntgridSessionNamer: Plugin = async () => {
   }
 
   return {
-    "experimental.chat.system.transform": async (input, output) => {
-      for (let index = output.system.length - 1; index >= 0; index--) {
-        if (output.system[index] === MEMORY_AGENT_GUIDANCE) output.system.splice(index, 1);
-      }
-      if (!input.sessionID || children.has(input.sessionID)) return;
-      if (await guidanceFor()) output.system.push(MEMORY_AGENT_GUIDANCE);
-    },
+    memoryGuidance: async (sessionID: string): Promise<boolean> =>
+      !!sessionID && !children.has(sessionID) && await guidanceFor(),
     event: async ({ event }: { event: any }) => {
       const port = process.env.ANTGRID_API_PORT;
       if (!port) return;
@@ -392,4 +464,4 @@ export const AntgridSessionNamer: Plugin = async () => {
       return send(port, process.env.ANTGRID_RUN_ID, posts);
     },
   };
-};
+}

@@ -14,12 +14,12 @@ test("chat spawn augment stamps slot id and api port for claude", () => {
   expect(aug.args).toContain("--plugin-dir");
 });
 
-// The session directory lists chat sessions as receive-only on this basis.
-test("chat spawn augment skips the MCP profile", () => {
+test("chat spawn augment adds MCP without replacing native settings", () => {
   const abDir = mkdtempSync(join(tmpdir(), "ab-chat-augment-"));
   const aug = buildChatSpawnAugment("claude-code", "slot-123", 8790, abDir);
-  expect(aug.args.some((arg) => arg.startsWith("--mcp-config"))).toBe(false);
-  expect(existsSync(join(abDir, "mcp"))).toBe(false);
+  expect(aug.args.some((arg) => arg.startsWith("--mcp-config="))).toBe(true);
+  expect(aug.args).not.toContain("--strict-mcp-config");
+  expect(existsSync(join(abDir, "mcp"))).toBe(true);
 });
 
 test("omits api port when server not yet up", () => {

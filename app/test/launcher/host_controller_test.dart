@@ -673,6 +673,7 @@ void main() {
       );
       expect(cmd.binary, r'C:\bun.exe');
       expect(cmd.preargs, isEmpty);
+      expect(cmd.sameBuild, isTrue);
     });
 
     test('falls through a stale ANTGRID_AGENT_BIN to the bundled sibling', () {
@@ -685,6 +686,7 @@ void main() {
       );
       expect(cmd.binary, bundled);
       expect(cmd.preargs, isEmpty);
+      expect(cmd.sameBuild, isTrue);
     });
 
     test('debug build runs the repo bridge entry via bun', () {
@@ -692,6 +694,7 @@ void main() {
       final cmd = resolve(bridgeEntry: entry, isRelease: false);
       expect(cmd.binary, r'C:\Users\me\.bun\bin\bun.exe');
       expect(cmd.preargs, [entry]);
+      expect(cmd.sameBuild, isTrue);
     });
 
     test('REGRESSION: Windows refuses the bare "antgrid" fallback (would '
@@ -704,10 +707,14 @@ void main() {
       );
     });
 
-    test('non-Windows keeps the bare "antgrid" PATH fallback', () {
+    // Any installed version can answer on PATH, and an older bridge would wait
+    // forever for the stdin close a held pipe never delivers.
+    test('non-Windows keeps the bare "antgrid" PATH fallback, as a foreign '
+        'build', () {
       final cmd = resolve(bridgeEntry: null, isRelease: true, isWindows: false);
       expect(cmd.binary, 'antgrid');
       expect(cmd.preargs, isEmpty);
+      expect(cmd.sameBuild, isFalse);
     });
   });
 

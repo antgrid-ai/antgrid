@@ -20,6 +20,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../models/ab_message.dart' show createAbMessage;
 import '../models/device_stats.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
@@ -740,26 +741,41 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
     // already withholds the chip until the uuid resolves.
     if (localUuid != null && remoteHost != null)
       const SizedBox(width: AbTokens.space8),
-    if (remoteHost != null)
-      RemoteHostChip(
-        hostMachineName: remoteHost.name,
-        platform: remoteHost.platform,
-        ram: _focusedHostRam(ref),
-      ),
+    if (remoteHost != null) _remoteHostChip(ref, remoteHost),
   ];
 }
 
-/// The focused project's host RAM as the chip shows it. A cold project reads
-/// the status cache, which never holds these figures, so it shows none.
-String? _focusedHostRam(WidgetRef ref) {
+/// A cold project reads the status cache, which never holds the host figures,
+/// so its chip shows none.
+Widget _remoteHostChip(WidgetRef ref, ({String name, String? platform}) host) {
   final selectedId = ref.watch(selectedRegistrationIdProvider);
-  if (selectedId == null) return null;
-  final stats = ref
-      .watch(projectStatusProvider(selectedId))
-      .value
-      ?.machineStats;
-  if (stats == null) return null;
-  return ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes);
+  final stats = selectedId == null
+      ? null
+      : ref.watch(
+          projectStatusProvider(
+            selectedId,
+          ).select((s) => s.value?.machineStats),
+        );
+  // Captured now: the hover fires long after this build, and a WidgetRef read
+  // on a disposed row throws.
+  final container = ref.container;
+  return RemoteHostChip(
+    hostMachineName: host.name,
+    platform: host.platform,
+    ram: stats == null
+        ? null
+        : ramLine(total: stats.ramTotalBytes, free: stats.ramAvailableBytes),
+    cpuPercent: stats?.cpuPercent,
+    // The host samples nothing until asked; the answer lands in machineStats.
+    // A passive hover, so a project with no live session is not warmed for it.
+    onRequestStats: () =>
+        detached('AgentPanel', 'machine:stats request failed', () async {
+          await focusedServiceOrNull(
+            container,
+            (s) => s.send(createAbMessage('machine:stats:request', const {})),
+          );
+        }),
+  );
 }
 
 /// The machine hosting the focused project, or null when it is this one (or

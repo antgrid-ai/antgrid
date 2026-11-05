@@ -10,6 +10,7 @@ import { resolveSchedulerCaller, type SchedulerCallerDeps } from "../src/schedul
 import { SchedulerRefusal } from "../src/scheduler/agent";
 import { agentSpec } from "antgrid-agents/builtins";
 import type { SessionEntry } from "../src/protocol";
+import { opencodeTestRuntime } from "./support/opencode-runtime";
 
 function row(over: Partial<SessionEntry> = {}): SessionEntry {
   return {
@@ -140,6 +141,7 @@ describe("SessionManager scheduler markers", () => {
     return new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeTerm() as any,
       agentSpec: { command: "claude", name: "claude-code" }, sendMessage: () => {},
+      agentRuntime: opencodeTestRuntime,
       onStartChat: () => {},
     });
   }
@@ -195,10 +197,10 @@ describe("SessionManager scheduler markers", () => {
   });
 
   describe("liveRunAgent", () => {
-    it("is the tool a session overrode the project with", () => {
+    it("is the tool a session overrode the project with", async () => {
       const sm = manager();
       const s = sm.create("work", { tool: "opencode" });
-      sm.start(s.id);
+      await sm.start(s.id);
       expect(sm.liveRunAgent(s.id, sm.hookRunId(s.id)!)).toBe("opencode");
     });
 
@@ -221,7 +223,7 @@ describe("SessionManager scheduler markers", () => {
 
       await sm.stop(s.id);
       expect(sm.liveRunAgent(s.id, runId)).toBeUndefined();
-      sm.start(s.id);
+      await sm.start(s.id);
       expect(sm.liveRunAgent(s.id, sm.hookRunId(s.id)!)).toBe("opencode");
     });
 

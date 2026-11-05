@@ -74,6 +74,17 @@ export function claudeResumeReplay(sessionId: string, history: any[]): AbMessage
   const usageEmitted = new Set<string>();
   for (const h of Array.isArray(history) ? history : []) {
     const at = parseTs(h?.timestamp);
+    // The summary a compacted session restarts from is a user entry with no
+    // isMeta, but nobody typed it. Live, compaction is a marker inside the turn
+    // that ran it (chat-backend's onCompactBoundary), so the replay renders the
+    // same marker there instead of opening a turn whose prompt is the summary.
+    if (h?.type === "user" && h?.isCompactSummary === true) {
+      const t = turnFor(at);
+      const itemId = `compaction:${h.uuid ?? t.items.length}`;
+      t.items.push(stamped(createMessage("agent:item-added", { sessionId, turnId: t.turnId, itemId,
+        item: { itemId, kind: "compaction", summary: "Context compacted" } }), at));
+      continue;
+    }
     const prompt = userPrompt(h);
     if (prompt) {
       current = null; // close the open turn; this prompt starts the next

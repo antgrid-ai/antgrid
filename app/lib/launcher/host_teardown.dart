@@ -14,10 +14,9 @@ import 'local_agent_launcher.dart';
 ///
 /// This is the FAST, graceful path only. It does NOT fire on a force-kill,
 /// crash, power loss, or (observed) a window close under `flutter run --machine`
-/// — for all of those the host's own owner-watchdog (it polls the `ownerPid`
-/// we pass in the bootstrap and self-exits when we die; see
-/// bridge/src/owner-watchdog.ts) is the backstop, plus the host's
-/// prune-on-load self-heal on the next launch.
+/// — for all of those the host exits on its own when we die (its owner
+/// watchdogs, bridge/src/owner-watchdog.ts), plus the host's prune-on-load
+/// self-heal on the next launch.
 class HostTeardownObserver with WidgetsBindingObserver {
   /// [host] and [budget] are test seams; production uses the shared host and
   /// the real ceiling.

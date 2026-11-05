@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import { z } from "zod";
 
 const Base64 = z.string().min(1).regex(/^[A-Za-z0-9+/=_-]+$/, "base64-ish");
@@ -55,6 +56,10 @@ export const BootstrapPayloadSchema = z
     // toggle takes effect on the next spawn. Optional, and absence must resolve
     // to OFF: a host started outside the app has nobody to have consented.
     telemetryEnabled: z.boolean().optional(),
+    // The spawner holds our stdin open for its life, so EOF means it is gone
+    // (`watchOwnerStdin`, owner-watchdog.ts). Absence must mean "do not watch":
+    // the CLI, evals and tests close stdin right after this line.
+    ownerHoldsStdin: z.boolean().optional(),
   })
   .refine((p) => p.firstProject === undefined || p.firstProject.mode !== "remote" || p.machine !== undefined, {
     message: "firstProject.mode 'remote' requires a machine block",
@@ -63,8 +68,8 @@ export const BootstrapPayloadSchema = z
 export type BootstrapPayload = z.infer<typeof BootstrapPayloadSchema>;
 
 export interface ReadBootstrapOptions {
-  stdin?: NodeJS.ReadableStream;
-  /** Max time to wait for stdin to close. Defaults to 10 seconds. */
+  stdin?: Readable;
+  /** Max time to wait for the payload line. Defaults to 10 seconds. */
   timeoutMs?: number;
   /** Sink for the human-launch notice (test seam). Defaults to stderr. */
   writeNotice?: (line: string) => void;
@@ -73,11 +78,16 @@ export interface ReadBootstrapOptions {
 /**
  * Read exactly one JSON line from stdin, validate it as a BootstrapPayload, return it.
  * Held in memory by the caller; never written to disk.
+ *
+ * Resolves at the first newline OR at EOF, whichever comes first, because an
+ * `ownerHoldsStdin` spawner never closes the pipe. Listens for `data` rather
+ * than using `for await`, whose early exit would destroy the stream that
+ * `watchOwnerStdin` goes on to watch.
  */
 export async function readBootstrapPayload(
   opts: ReadBootstrapOptions = {},
 ): Promise<BootstrapPayload> {
-  const stdin = opts.stdin ?? process.stdin;
+  const stdin: Readable = opts.stdin ?? process.stdin;
   const timeoutMs = opts.timeoutMs ?? 10_000;
 
   // A human running the binary in a terminal gets a TTY on stdin; the desktop
@@ -89,18 +99,38 @@ export async function readBootstrapPayload(
     write(`Waiting up to ${Math.round(timeoutMs / 1000)}s for that payload, then exiting with an error. Press Ctrl+C to quit now; to use Antgrid, launch the desktop app.`);
   }
 
-  const readAll = (async () => {
-    const chunks: Buffer[] = [];
-    for await (const c of stdin) {
-      chunks.push(typeof c === "string" ? Buffer.from(c) : (c as Buffer));
-    }
-    return Buffer.concat(chunks).toString("utf8").trim();
-  })();
+  // stdin outlives this read: the owner may hold it open, or a TTY may stay
+  // attached. With no listener left, a later read error (EIO on a detached
+  // TTY) would surface as an uncaught exception and shut a live host down.
+  stdin.on("error", () => {});
 
-  const raw = await Promise.race<string | null>([
-    readAll,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-  ]);
+  const raw = await new Promise<string | null>((resolve) => {
+    const chunks: Buffer[] = [];
+    // Detaching everything is also what lets the chunks — secrets included —
+    // be collected once the payload is parsed.
+    const settle = (line: string | null) => {
+      clearTimeout(timer);
+      stdin.off("data", onData);
+      stdin.off("end", onEnd);
+      stdin.off("error", onEnd);
+      resolve(line);
+    };
+    const onData = (c: string | Buffer) => {
+      const buf = typeof c === "string" ? Buffer.from(c) : c;
+      const nl = buf.indexOf(0x0a);
+      if (nl < 0) {
+        chunks.push(buf);
+        return;
+      }
+      chunks.push(buf.subarray(0, nl));
+      settle(Buffer.concat(chunks).toString("utf8").trim());
+    };
+    const onEnd = () => settle(Buffer.concat(chunks).toString("utf8").trim());
+    const timer = setTimeout(() => settle(null), timeoutMs);
+    stdin.on("data", onData);
+    stdin.once("end", onEnd);
+    stdin.once("error", onEnd);
+  });
 
   if (!raw) {
     throw new Error("bootstrap payload: no stdin data received within timeout");

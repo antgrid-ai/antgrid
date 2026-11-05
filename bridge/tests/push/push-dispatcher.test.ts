@@ -28,7 +28,7 @@ test("composePush mirrors the app strings", () => {
   // surfaces one notification twice and leaves the push tap undeduped.
   const agent = createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" });
   expect(composePush(agent))
-    .toEqual({ title: "Task complete", body: "built", kind: "agent", sourceMessageId: agent.id });
+    .toEqual({ title: "Task complete", body: "✅ built", kind: "agent", sourceMessageId: agent.id });
   expect(composePush(createMessage("handler:escalation", {
     projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "high", at: 1,
   }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
@@ -67,42 +67,48 @@ test("composePush: urgent outranks the ask wording", () => {
   expect(composePush(escalation({ urgency: "high", nonBlocking: true }))!.title).toBe("Handler — urgent");
 });
 
-test("composePush: sessionTitle becomes the title, message the body", () => {
+test("composePush: sessionTitle becomes the title, the symbol and message the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", message: "Added a regression test", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Added a regression test", kind: "agent", sourceMessageId: expect.any(String) });
+  }))).toEqual({ title: "Fix auth bug", body: "✅ Added a regression test", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
-test("composePush: sessionTitle without a message keeps the label as the body", () => {
+test("composePush: sessionTitle without a message leaves the symbol and label as the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Task complete", kind: "agent", sourceMessageId: expect.any(String) });
+  }))).toEqual({ title: "Fix auth bug", body: "✅ Task complete", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
-test("composePush: neither field degrades to today's exact strings", () => {
+test("composePush: neither field titles it by the label", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", projectId: "p1",
-  }))).toEqual({ title: "Task complete", body: "Task complete", kind: "agent", sourceMessageId: expect.any(String) });
+  }))).toEqual({ title: "Task complete", body: "✅ Task complete", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("composePush: body never falls back to sessionTitle", () => {
   const composed = composePush(createMessage("notification:push", {
     notificationType: "idle", sessionTitle: "Fix auth bug", projectId: "p1",
   }));
-  expect(composed!.body).toBe("Waiting for you");
+  expect(composed!.body).toBe("\u23F8\uFE0F Waiting for you");
   expect(composed!.body).not.toBe("Fix auth bug");
 });
 
 test("composePush: empty strings are treated as absent", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "error", message: "", sessionTitle: "", projectId: "p1",
-  }))).toEqual({ title: "Agent error", body: "Agent error", kind: "agent", sourceMessageId: expect.any(String) });
+  }))).toEqual({ title: "Agent error", body: "\u26A0\uFE0F Agent error", kind: "agent", sourceMessageId: expect.any(String) });
+});
+
+test("composePush: a blank sessionTitle falls back to the label", () => {
+  expect(composePush(createMessage("notification:push", {
+    notificationType: "task_complete", sessionTitle: "   ", projectId: "p1",
+  }))!.title).toBe("Task complete");
 });
 
 test("composePush: sessionTitle titles a permission request too", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "permission_request", message: "Run rm -rf build?", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Run rm -rf build?", kind: "agent", sourceMessageId: expect.any(String) });
+  }))).toEqual({ title: "Fix auth bug", body: "🔐 Run rm -rf build?", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("suppressed peer → seals payload and delivers", () => {

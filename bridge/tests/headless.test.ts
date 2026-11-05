@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 
-import { pickHeadless, resolveHeadless, runHeadless } from "../src/agents/headless";
+import { pickHeadless, resolveHeadless, runHeadless, runHeadlessProbe } from "../src/agents/headless";
 import { AGENTS, judgeCapable } from "../../packages/antgrid-agents/src/agents/registry";
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "../../packages/antgrid-agents/src/agents/types";
 
@@ -185,5 +185,30 @@ describe("scratchEnv", () => {
       if (prior === undefined) delete process.env.COPILOT_HOME;
       else process.env.COPILOT_HOME = prior;
     }
+  });
+});
+
+// A naming-model probe informs a model call; it must never stall or fail one.
+describe("runHeadlessProbe", () => {
+  const probeSpawn = (stdout: string, exited: Promise<number>) =>
+    (() => ({ stdout: new Response(stdout).body, exited, kill() {} })) as unknown as typeof Bun.spawn;
+
+  test("answers stdout on exit 0 and nothing on any other exit", async () => {
+    const opts = { cwd: ".", timeoutMs: 1_000 };
+    expect(await runHeadlessProbe(["x"], { ...opts, spawn: probeSpawn("{}\n", Promise.resolve(0)) })).toBe("{}\n");
+    expect(await runHeadlessProbe(["x"], { ...opts, spawn: probeSpawn("{}\n", Promise.resolve(1)) })).toBeUndefined();
+  });
+
+  test("a probe that never exits answers nothing at its deadline", async () => {
+    const started = Date.now();
+    expect(await runHeadlessProbe(["x"], {
+      cwd: ".", timeoutMs: 20, spawn: probeSpawn("", new Promise<number>(() => {})),
+    })).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("a spawn that throws answers nothing", async () => {
+    const spawn = (() => { throw new Error("ENOENT"); }) as unknown as typeof Bun.spawn;
+    expect(await runHeadlessProbe(["missing"], { cwd: ".", timeoutMs: 1_000, spawn })).toBeUndefined();
   });
 });
