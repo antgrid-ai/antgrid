@@ -15,6 +15,7 @@ import { readLastOpencodeMessages } from "../src/agents/opencode/db-read";
 import { serializeOpencodeSession } from "../src/agents/handoff/opencode-serialize";
 import { prepareOpencodeTerminal } from "../src/agents/opencode/terminal";
 import { createAgentRunScope } from "../src/run-scope";
+import { MEMORY_AGENT_GUIDANCE } from "../src/memory-guidance";
 
 const binary = process.env.OPENCODE_SMOKE_BINARY;
 if (!binary) throw new Error("Set OPENCODE_SMOKE_BINARY to the OpenCode executable to verify");
@@ -25,9 +26,11 @@ const nativePlugin = join(cwd, "native-plugin");
 mkdirSync(nativePlugin);
 const pluginMarker = join(root, "native-plugin-loaded");
 writeFileSync(join(nativePlugin, "server.ts"), `export default { id: "native-smoke", async setup() { await Bun.write(${JSON.stringify(pluginMarker)}, "loaded"); } };`);
-const posts: Array<{ path: string; body: any }> = [];
+const posts: Array<{ path: string; body: any; terminalId: string | null }> = [];
 const bridge = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-  posts.push({ path: new URL(request.url).pathname, body: await request.json() });
+  const url = new URL(request.url);
+  posts.push({ path: url.pathname, body: await request.json(), terminalId: url.searchParams.get("terminalId") });
+  if (url.pathname === "/memory/bootstrap") return Response.json({ available: true, enabled: true, paused: false, project_paused: false });
   return Response.json({ ok: true });
 } });
 const logger: AgentLogger = { child: () => logger, debug() {}, info() {}, warn() {}, error() {} };
@@ -59,9 +62,12 @@ writeFileSync(mcpFile, `
   }
 `);
 let requests = 0;
+let guidedRequests = 0;
 const model = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   const body = await request.json() as any;
   requests++;
+  const system = (body.messages ?? []).filter((message: any) => message.role === "system").map((message: any) => JSON.stringify(message.content)).join("\n");
+  if (system.includes(JSON.stringify(MEMORY_AGENT_GUIDANCE).slice(1, -1))) guidedRequests++;
   const completion = { id: "smoke", object: "chat.completion", created: 1, model: body.model,
     choices: [{ index: 0, message: { role: "assistant", content: "native-chat-ok" }, finish_reason: "stop" }],
     usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
@@ -91,13 +97,15 @@ const augmentation = withAgentHost(host, () => augmentAgentLaunch("opencode", {
   mode: "terminal",
   abDir: root,
   mcpCommand: { binary: process.execPath, preargs: [mcpFile] },
+  memoryMcpCommand: { binary: process.execPath, preargs: [mcpFile] },
 }));
+assert.equal(augmentation.env.ANTGRID_MEMORY_MCP, "1");
 const env = { ...augmentation.env,
   XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
   XDG_STATE_HOME: join(root, "state"), XDG_CACHE_HOME: join(root, "cache"),
   OPENCODE_CONFIG_DIR: join(root, "config"),
   OPENCODE_DISABLE_MODELS_FETCH: "1", OPENCODE_DISABLE_FILEWATCHER: "1", OPENCODE_DISABLE_FFF: "1",
-  OPENCODE_DISABLE_CLAUDE_CODE: "1", ANTGRID_TERMINAL_ID: "smoke-slot", ANTGRID_API_PORT: String(bridge.port),
+  OPENCODE_DISABLE_CLAUDE_CODE: "1", ANTGRID_TERMINAL_ID: "smoke-slot", ANTGRID_RUN_ID: "smoke-run", ANTGRID_API_PORT: String(bridge.port),
 };
 const until = async (check: () => boolean | Promise<boolean>, label: string) => {
   const deadline = Date.now() + 20_000;
@@ -141,9 +149,9 @@ try {
       await until(async () => (await api.plugin.list({ location: { directory: cwd } })).data.some((plugin) => plugin.id === "antgrid"), "Antgrid terminal plugin");
       await until(async () => {
         const servers = await api.mcp.list({ location: { directory: cwd } });
-        return ["existing_native", "antgrid"].every((name) => servers.data.some((server) => server.name === name && server.status.status === "connected"));
+        return ["existing_native", "antgrid", "antgrid-memory"].every((name) => servers.data.some((server) => server.name === name && server.status.status === "connected"));
       }, "both MCP connections");
-      console.log("Native and Antgrid MCP connected");
+      console.log("Native, Antgrid and Antgrid Memory MCP connected");
       await driver.prompt("Return the native chat smoke marker.");
       try { await until(() => frames.some((frame) => frame.type === "agent:turn-end"), "chat completion"); }
       catch (error) { console.error("Chat frames", JSON.stringify(frames), "Model requests", requests); throw error; }
@@ -152,6 +160,9 @@ try {
       assert(posts.some((post) => post.path === "/session-title" && post.body.sessionId === sessionID));
       assert(frames.some((frame) => frame.type === "agent:item-delta"));
       assert(requests > 0);
+      assert(posts.some((post) => post.path === "/memory/bootstrap" && post.terminalId === "smoke-slot" && post.body.runId === "smoke-run"));
+      assert(guidedRequests > 0, `Memory guidance reached ${guidedRequests} of ${requests} model requests`);
+      console.log(`Memory guidance reached ${guidedRequests} of ${requests} model requests`);
       const history = await client.messages(sessionID);
       assert(history.some((message) => message.parts.some((part: any) => part.text === "native-chat-ok")));
       const user = history.find((message) => message.info.role === "user")!;
