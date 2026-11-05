@@ -18,6 +18,10 @@ import { atomicWriteFile } from "./discovery";
  * gates both halves of that together, because an agent allowed to message a
  * session it may not see would be a stranger shape than either.
  *
+ * It is also the only local gate on being driven: with the requesting machine
+ * an orchestrator, on admits starting and stopping sessions here as well, and
+ * off refuses that control along with everything else.
+ *
  * Defaults ON. The objection to a second switch was discovery — a second thing
  * off by default that a user must find before the feature works at all — and
  * the default is what answers it: turning remote access on still works end to

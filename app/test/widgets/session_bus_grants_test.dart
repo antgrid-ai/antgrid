@@ -32,17 +32,15 @@ class _Reach extends AgentReachPolicyNotifier {
       AgentReachPolicy(enabled: true);
 }
 
-final _busControl = find.byKey(const Key('bus-control-switch'));
 final _orchestrator = find.byKey(const Key('orchestrator-switch'));
 
-DeviceSummary _self({bool? orchestrator, bool? busControl}) => DeviceSummary(
+DeviceSummary _self({bool? orchestrator}) => DeviceSummary(
   id: 'row-1',
   deviceId: 'me-uuid',
   kind: 'agent',
   platform: 'windows',
   displayName: 'Desk',
   orchestrator: orchestrator,
-  busControl: busControl,
 );
 
 const _failedToast = 'Could not update agent control. Try again.';
@@ -61,7 +59,7 @@ Future<List<http.Request>> _pump(
     httpClient: MockClient((req) async {
       calls.add(req);
       return http.Response(
-        responseBody ?? jsonEncode({'orchestrator': false, 'busControl': true}),
+        responseBody ?? jsonEncode({'orchestrator': false}),
         status,
       );
     }),
@@ -93,88 +91,72 @@ Future<List<http.Request>> _pump(
 }
 
 void main() {
-  testWidgets('renders both grants from the account row', (tester) async {
-    await _pump(tester, self: _self(orchestrator: true, busControl: false));
+  testWidgets('renders the orchestrator grant from the account row', (
+    tester,
+  ) async {
+    await _pump(tester, self: _self(orchestrator: true));
 
-    expect(find.text('Accept control from orchestrators'), findsOneWidget);
     expect(
       find.text('Orchestrator: may drive other machines'),
       findsOneWidget,
     );
-    expect(tester.widget<AbSwitch>(_busControl).value, isFalse);
+    expect(find.text('Accept control from orchestrators'), findsNothing);
     expect(tester.widget<AbSwitch>(_orchestrator).value, isTrue);
   });
 
-  testWidgets('toggling accept-control PATCHes only busControl', (
-    tester,
-  ) async {
+  testWidgets('toggling orchestrator PATCHes only orchestrator', (tester) async {
     final calls = await _pump(
       tester,
-      self: _self(orchestrator: false, busControl: false),
+      self: _self(orchestrator: false),
+      responseBody: jsonEncode({'orchestrator': true}),
     );
 
-    await tester.tap(_busControl);
+    await tester.tap(_orchestrator);
     await tester.pumpAndSettle();
 
     expect(calls, hasLength(1));
     expect(calls.single.method, 'PATCH');
     expect(calls.single.url.path, '/account/devices/row-1/session-bus');
     expect(calls.single.headers['cookie'], 'session=abc');
-    expect(jsonDecode(calls.single.body), {'busControl': true});
-    // The switch shows what the server answered, not what was tapped.
-    expect(tester.widget<AbSwitch>(_busControl).value, isTrue);
-  });
-
-  testWidgets('toggling orchestrator PATCHes only orchestrator', (tester) async {
-    final calls = await _pump(
-      tester,
-      self: _self(orchestrator: false, busControl: true),
-      responseBody: jsonEncode({'orchestrator': true, 'busControl': true}),
-    );
-
-    await tester.tap(_orchestrator);
-    await tester.pumpAndSettle();
-
     expect(jsonDecode(calls.single.body), {'orchestrator': true});
+    // The switch shows what the server answered, not what was tapped.
     expect(tester.widget<AbSwitch>(_orchestrator).value, isTrue);
   });
 
   testWidgets('a refused PATCH leaves the switch where it was', (tester) async {
     final calls = await _pump(
       tester,
-      self: _self(orchestrator: false, busControl: false),
+      self: _self(orchestrator: false),
       status: 403,
       responseBody: '{}',
     );
 
-    await tester.tap(_busControl);
+    await tester.tap(_orchestrator);
     await tester.pumpAndSettle();
 
     expect(calls, hasLength(1));
-    expect(tester.widget<AbSwitch>(_busControl).value, isFalse);
+    expect(tester.widget<AbSwitch>(_orchestrator).value, isFalse);
     expect(find.text(_failedToast), findsOneWidget);
   });
 
-  testWidgets('a failed read of the account row shows no switches and no toast', (
+  testWidgets('a failed read of the account row shows no switch and no toast', (
     tester,
   ) async {
     final calls = await _pump(
       tester,
-      self: _self(orchestrator: false, busControl: false),
+      self: _self(orchestrator: false),
       devicesFail: true,
     );
     await tester.pumpAndSettle();
 
-    expect(_busControl, findsNothing);
     expect(_orchestrator, findsNothing);
     expect(find.text(_failedToast), findsNothing);
     expect(calls, isEmpty);
   });
 
-  testWidgets('no switches when the row carries no grants', (tester) async {
+  testWidgets('no switch when the row carries no grant', (tester) async {
     await _pump(tester, self: _self());
 
-    expect(_busControl, findsNothing);
     expect(_orchestrator, findsNothing);
   });
 }

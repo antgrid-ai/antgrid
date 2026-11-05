@@ -75,12 +75,12 @@ test("eval authority serves the machine directory and captures bus keys, agents 
   expect((await post(other, { busPublicKey: "short" })).status).toBe(400);
   expect(authority.busKeyOf(other.deviceUuid)).toBe(key);
   authority.setOrchestrator(self.deviceUuid, true);
-  authority.setBusControl(other.deviceUuid, true);
+  authority.setOrchestrator(other.deviceUuid, false);
   authority.revoke(gone.deviceUuid);
   const dir = await (await get(self)).json() as any;
-  expect(dir.self).toEqual({ busPublicKey: null, orchestrator: true, busControl: false });
+  expect(dir.self).toEqual({ busPublicKey: null, orchestrator: true });
   expect(dir.machines).toHaveLength(1);
-  expect(dir.machines[0]).toMatchObject({ deviceId: other.deviceUuid, busPublicKey: key, orchestrator: false, busControl: true, machineName: null });
+  expect(dir.machines[0]).toMatchObject({ deviceId: other.deviceUuid, busPublicKey: key, orchestrator: false, machineName: null });
   expect((await get(app)).status).toBe(403);
   expect((await post(app, { busPublicKey: key })).status).toBe(403);
   expect((await get(gone)).status).toBe(401);
@@ -98,8 +98,7 @@ test("eval authority serves session-bus grants lower-only and refuses a raise", 
     "https://f.invalid/account/devices/me/session-bus",
     { method, headers: bearer(c), body: body === undefined ? undefined : JSON.stringify(body) })))!;
   authority.setOrchestrator(agent.deviceUuid, true);
-  authority.setBusControl(agent.deviceUuid, true);
-  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: true, busControl: true });
+  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: true });
   const raise = await call(agent, "POST", { orchestrator: true });
   expect(raise.status).toBe(403);
   expect(await raise.json()).toEqual({ error: "OWNER_SESSION_REQUIRED" });
@@ -108,8 +107,8 @@ test("eval authority serves session-bus grants lower-only and refuses a raise", 
     expect(refused.status).toBe(400);
     expect(await refused.json()).toEqual({ error: "BAD_REQUEST" });
   }
-  expect(await (await call(agent, "POST", { orchestrator: false })).json()).toEqual({ orchestrator: false, busControl: true });
-  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: false, busControl: true });
+  expect(await (await call(agent, "POST", { orchestrator: false })).json()).toEqual({ orchestrator: false });
+  expect(await (await call(agent, "GET")).json()).toEqual({ orchestrator: false });
   expect((await call(app, "GET")).status).toBe(403);
-  expect((await call(app, "POST", { busControl: false })).status).toBe(403);
+  expect((await call(app, "POST", { orchestrator: false })).status).toBe(403);
 });

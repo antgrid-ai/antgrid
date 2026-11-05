@@ -43,4 +43,4 @@ export function webRefused(code: string) {
   return { ok: false, error: { code, message: `the account service refused the request (${code})` } };
 }
 
-export const GRANTS_OK = { ok: true, grants: { orchestrator: true, busControl: false }, reachEnabled: true, level: "messages" };
+export const GRANTS_OK = { ok: true, grants: { orchestrator: true }, reachEnabled: true, level: "on" };

@@ -267,7 +267,7 @@ export function deviceRoutes(deps: {
         display_name: d.displayName,
         activated_at: d.activatedAt,
         last_seen_at: d.lastSeenAt,
-        ...(d.kind === "agent" ? { orchestrator: d.orchestrator, busControl: d.busControl } : {}),
+        ...(d.kind === "agent" ? { orchestrator: d.orchestrator } : {}),
       })),
     });
   });

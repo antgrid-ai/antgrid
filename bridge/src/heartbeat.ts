@@ -1,4 +1,4 @@
-import { SessionBusGrantsSchema, type SessionBusGrants, type SessionBusGrantsPatch } from "antgrid-wire";
+import { SessionBusGrantsSchema, type SessionBusGrants } from "antgrid-wire";
 
 export interface SendHeartbeatArgs {
   licenseApiUrl: string;
@@ -90,16 +90,16 @@ async function sessionBusGrantsCall(
   }
 }
 
-/** This machine's own orchestrator and bus-control grants, as web holds them. */
+/** This machine's own orchestrator grant, as web holds it. */
 export function getSessionBusGrants(args: SessionBusGrantsArgs): Promise<SessionBusGrantsResult> {
   return sessionBusGrantsCall(args, { method: "GET" });
 }
 
-/** Lowers grants. Only `false` is expressible: raising needs the owner's
+/** Lowers the grant. Only `false` is expressible: raising needs the owner's
  *  account session, which web enforces too, so a credential that lives on this
  *  machine cannot elevate it. */
 export function lowerSessionBusGrants(
-  args: SessionBusGrantsArgs & { patch: { [K in keyof SessionBusGrantsPatch]?: false } },
+  args: SessionBusGrantsArgs & { patch: { orchestrator: false } },
 ): Promise<SessionBusGrantsResult> {
   return sessionBusGrantsCall(args, { method: "POST", body: JSON.stringify(args.patch) });
 }

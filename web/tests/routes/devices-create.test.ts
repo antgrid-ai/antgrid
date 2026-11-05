@@ -480,11 +480,11 @@ describe("POST /account/devices - bus identity on re-provision", () => {
     expect((await register(app, cookie, body)).status).toBe(201);
     const row = await pg.db.device.findFirstOrThrow({ where: { deviceId: body.deviceUuid as string } });
     await pg.db.device.update({ where: { id: row.id }, data: {
-      busPublicKey: Buffer.alloc(32, 4), orchestrator: true, busControl: true } });
+      busPublicKey: Buffer.alloc(32, 4), orchestrator: false } });
     return { body, id: row.id };
   }
 
-  test("a new public key resets the bus key, orchestrator and busControl", async () => {
+  test("a new public key resets the bus key and returns orchestrator to its default", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "bus-reset@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
@@ -495,8 +495,7 @@ describe("POST /account/devices - bus identity on re-provision", () => {
     expect(res.status).toBe(200);
     const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
     expect(row.busPublicKey).toBeNull();
-    expect(row.orchestrator).toBe(false);
-    expect(row.busControl).toBe(false);
+    expect(row.orchestrator).toBe(true);
   });
 
   test("re-registering the same key keeps them", async () => {
@@ -509,8 +508,7 @@ describe("POST /account/devices - bus identity on re-provision", () => {
     expect((await register(app, cookie, body)).status).toBe(200);
     const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
     expect(Buffer.from(row.busPublicKey!).equals(Buffer.alloc(32, 4))).toBe(true);
-    expect(row.orchestrator).toBe(true);
-    expect(row.busControl).toBe(true);
+    expect(row.orchestrator).toBe(false);
   });
 
   test("reviving a revoked row resets them even with the same key", async () => {
@@ -524,7 +522,6 @@ describe("POST /account/devices - bus identity on re-provision", () => {
     expect((await register(app, cookie, body)).status).toBe(200);
     const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
     expect(row.busPublicKey).toBeNull();
-    expect(row.orchestrator).toBe(false);
-    expect(row.busControl).toBe(false);
+    expect(row.orchestrator).toBe(true);
   });
 });

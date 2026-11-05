@@ -11,22 +11,19 @@ import {
 } from "../src/session-bus/request-policy";
 import type { SessionEntry } from "../src/protocol";
 
-const LEVELS: AgentReachLevel[] = ["off", "messages", "control"];
+const LEVELS: AgentReachLevel[] = ["off", "on"];
 const ROLES = ["agent", "orchestrator"] as const;
 
-test("effectiveReachLevel: local off wins over a busControl grant", () => {
-  expect(effectiveReachLevel(false, true)).toBe("off");
-  expect(effectiveReachLevel(false, false)).toBe("off");
-  expect(effectiveReachLevel(true, false)).toBe("messages");
-  expect(effectiveReachLevel(true, true)).toBe("control");
+test("effectiveReachLevel is the local switch and nothing else", () => {
+  expect(effectiveReachLevel(false)).toBe("off");
+  expect(effectiveReachLevel(true)).toBe("on");
 });
 
-test("every read method needs reach above off and no role", () => {
+test("every read method needs reach on and no role", () => {
   for (const method of BUS_READ_METHODS) {
     for (const role of ROLES) {
       expect(busRequestVerdict({ method, role, level: "off" })).toEqual({ code: "NOT_ALLOWED_AGENT_REACH" });
-      expect(busRequestVerdict({ method, role, level: "messages" })).toBe("allow");
-      expect(busRequestVerdict({ method, role, level: "control" })).toBe("allow");
+      expect(busRequestVerdict({ method, role, level: "on" })).toBe("allow");
     }
   }
 });
@@ -37,14 +34,13 @@ test("machine.capability-card is reach-gated as a whole", () => {
   });
 });
 
-test("every control method needs control reach, then the orchestrator role", () => {
+test("every control method needs reach on, then the orchestrator role", () => {
   for (const method of BUS_CONTROL_METHODS) {
     for (const role of ROLES) {
       expect(busRequestVerdict({ method, role, level: "off" })).toEqual({ code: "NOT_ALLOWED_AGENT_REACH" });
-      expect(busRequestVerdict({ method, role, level: "messages" })).toEqual({ code: "NOT_ALLOWED_AGENT_REACH" });
     }
-    expect(busRequestVerdict({ method, role: "agent", level: "control" })).toEqual({ code: "NOT_ORCHESTRATOR" });
-    expect(busRequestVerdict({ method, role: "orchestrator", level: "control" })).toBe("allow");
+    expect(busRequestVerdict({ method, role: "agent", level: "on" })).toEqual({ code: "NOT_ORCHESTRATOR" });
+    expect(busRequestVerdict({ method, role: "orchestrator", level: "on" })).toBe("allow");
   }
 });
 

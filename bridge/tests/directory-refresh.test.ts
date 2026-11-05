@@ -11,7 +11,7 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 function machine(n: number, over: Partial<MachineEntry> = {}): MachineEntry {
   return {
     deviceId: id(n), displayName: `display-${n}`, machineName: `name-${n}`,
-    ed25519Pub: "k", busPublicKey: "b", orchestrator: false, busControl: false, ...over,
+    ed25519Pub: "k", busPublicKey: "b", orchestrator: false, ...over,
   };
 }
 

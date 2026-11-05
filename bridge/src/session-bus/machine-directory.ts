@@ -178,10 +178,6 @@ export class MachineDirectory {
     return this.current()?.self.orchestrator ?? false;
   }
 
-  selfBusControl(): boolean {
-    return this.current()?.self.busControl ?? false;
-  }
-
   selfBusKey(): string | null {
     return this.current()?.self.busPublicKey ?? null;
   }

@@ -397,8 +397,9 @@ program
     process.exit(await runLogLevelCli({ ...(level === undefined ? {} : { level }), ...(ttlMs === undefined ? {} : { ttlMs }), ...(opts.dir === undefined ? {} : { dir: opts.dir }) }));
   });
 
-// antgrid orchestrator / agent-reach: read or lower this machine's session-bus
-// grants on the running host. Raising is app-only; see cli/agent-reach.ts.
+// antgrid orchestrator / agent-reach: the orchestrator grant is read or lowered
+// on the running host (raising is app-only); agent reach is this machine's own
+// switch. See cli/agent-reach.ts.
 program
   .command("orchestrator")
   .description("Show or lower this machine's orchestrator grant (raise it in the app)")
@@ -411,8 +412,8 @@ program
 
 program
   .command("agent-reach")
-  .description("Show or lower how far other machines' agents may reach this one (raise it in the app)")
-  .argument("[action]", "off | messages | status (default status)")
+  .description("Show or set whether agents on your other machines may reach this one")
+  .argument("[action]", "on | off | status (default status)")
   .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
   .action(async (action: string | undefined, opts: { dir?: string }) => {
     const { runAgentReachCli } = await import("./cli/agent-reach");

@@ -321,7 +321,6 @@ export interface FakeLicenseApi {
   busKeyOf(deviceUuid: string): string | null;
   /** Owner-set directory flags, served on the next machine-directory read. */
   setOrchestrator(deviceUuid: string, on: boolean): void;
-  setBusControl(deviceUuid: string, on: boolean): void;
 }
 
 /**
@@ -375,7 +374,6 @@ export function startFakeLicenseApi(
     provision(auth) { authority.provision({ ...auth, kind: "app" }); },
     busKeyOf(deviceUuid) { return authority.busKeyOf(deviceUuid); },
     setOrchestrator(deviceUuid, on) { authority.setOrchestrator(deviceUuid, on); },
-    setBusControl(deviceUuid, on) { authority.setBusControl(deviceUuid, on); },
     stop() {
       fixtureAuthorities.delete(apiUrl);
       server.stop(true);

@@ -1,6 +1,6 @@
-// The loopback grant verbs read and lower this machine's orchestrator and
-// bus-control grants on web. There is no verb that raises one: that needs the
-// owner's account session, from the app.
+// The loopback grant verbs read and lower this machine's orchestrator grant on
+// web. There is no raise verb: raising needs the owner's account session, from
+// the app.
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,55 +55,52 @@ function rig(web: (c: Call) => Response) {
   const kick = mock(() => {});
   const h = createHostPolicyFixture({ remote, remoteRuntimeFactory: () => Promise.resolve(runtime()), fetchFn });
   host = h;
-  (h as any).machineDirectory = { kick, selfBusControl: () => false, selfOrchestrator: () => false, current: () => null, onChange: () => () => {}, stop: () => {} };
+  (h as any).machineDirectory = { kick, selfOrchestrator: () => false, current: () => null, onChange: () => () => {}, stop: () => {} };
   return { h, calls, kick };
 }
 
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
 
 test("bus-grants:lower posts the lowered grant with the maintenance bearer and kicks the directory once", async () => {
-  const { h, calls, kick } = rig(() => json({ orchestrator: false, busControl: true }));
+  const { h, calls, kick } = rig(() => json({ orchestrator: false }));
   const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:lower", orchestrator: false });
   expect(calls).toEqual([
     { url: "http://web.test/account/devices/me/session-bus", method: "POST", auth: "Bearer maint-token", body: JSON.stringify({ orchestrator: false }) },
   ]);
   expect(kick).toHaveBeenCalledTimes(1);
-  expect(res).toMatchObject({ ok: true, type: "bus-grants:lower", grants: { orchestrator: false, busControl: true }, reachEnabled: true, level: "messages" });
+  expect(res).toMatchObject({ ok: true, type: "bus-grants:lower", grants: { orchestrator: false }, reachEnabled: true, level: "on" });
 });
 
-test("the level is what the dispatcher enforces from the directory, not web's newer grant", async () => {
-  const { h } = rig(() => json({ orchestrator: false, busControl: true }));
-  const fromWebOnly = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:get" });
-  expect(fromWebOnly).toMatchObject({ ok: true, grants: { busControl: true }, level: "messages" });
-  (h as any).machineDirectory.selfBusControl = () => true;
-  const agreed = await h.handleBusGrantsVerb({ id: "2", type: "bus-grants:get" });
-  expect(agreed).toMatchObject({ level: "control" });
-  expect((await h.handleAgentReachVerb({ id: "3", type: "agent-reach:get" })) as object).toMatchObject({ level: "control" });
+test("the level follows the local switch, not the account", async () => {
+  const { h } = rig(() => json({ orchestrator: true }));
+  expect(await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:get" })).toMatchObject({ ok: true, grants: { orchestrator: true }, level: "on" });
+  await h.handleAgentReachVerb({ id: "2", type: "agent-reach:set", enabled: false });
+  expect(await h.handleBusGrantsVerb({ id: "3", type: "bus-grants:get" })).toMatchObject({ ok: true, level: "off" });
 });
 
 test("a web refusal fails the verb and does not kick", async () => {
   const { h, kick } = rig(() => json({ error: "OWNER_SESSION_REQUIRED" }, 403));
-  const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:lower", busControl: false });
+  const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:lower", orchestrator: false });
   expect(res).toMatchObject({ ok: false, error: { code: "WEB_403", message: "the account service refused the request (WEB_403)" } });
   expect(kick).not.toHaveBeenCalled();
 });
 
 test("an unreachable web fails the verb and does not kick", async () => {
   const { h, kick } = rig(() => { throw new Error("offline"); });
-  const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:lower", busControl: false });
+  const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:lower", orchestrator: false });
   expect(res).toMatchObject({ ok: false, error: { code: "WEB_UNREACHABLE", message: "could not reach the account service (WEB_UNREACHABLE)" } });
   expect(kick).not.toHaveBeenCalled();
 });
 
 test("bus-grants:get reads web, reports the local switch, and does not kick", async () => {
-  const { h, calls, kick } = rig(() => json({ orchestrator: true, busControl: true }));
+  const { h, calls, kick } = rig(() => json({ orchestrator: true }));
   await h.handleAgentReachVerb({ id: "s", type: "agent-reach:set", enabled: false });
   const res = await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:get" });
   expect(calls).toEqual([
     { url: "http://web.test/account/devices/me/session-bus", method: "GET", auth: "Bearer maint-token", body: null },
   ]);
-  // Local off wins over a busControl grant.
-  expect(res).toMatchObject({ ok: true, grants: { orchestrator: true, busControl: true }, reachEnabled: false, level: "off" });
+  // Local off wins over the orchestrator grant.
+  expect(res).toMatchObject({ ok: true, grants: { orchestrator: true }, reachEnabled: false, level: "off" });
   expect(kick).not.toHaveBeenCalled();
 });
 
@@ -112,12 +109,11 @@ test("a malformed web answer is a failed verb", async () => {
   expect(await h.handleBusGrantsVerb({ id: "1", type: "bus-grants:get" })).toMatchObject({ ok: false });
 });
 
-test("agent-reach verbs report the effective level from the directory", async () => {
+test("agent-reach verbs report the level from the local switch", async () => {
   const { h } = rig(() => json({}));
-  (h as any).machineDirectory.selfBusControl = () => true;
-  expect(await h.handleAgentReachVerb({ id: "g", type: "agent-reach:get" })).toMatchObject({ enabled: true, level: "control" });
+  expect(await h.handleAgentReachVerb({ id: "g", type: "agent-reach:get" })).toMatchObject({ enabled: true, level: "on" });
   expect(await h.handleAgentReachVerb({ id: "s", type: "agent-reach:set", enabled: false })).toMatchObject({ enabled: false, level: "off" });
-  expect(await h.handleAgentReachVerb({ id: "s", type: "agent-reach:set", enabled: true })).toMatchObject({ enabled: true, level: "control" });
+  expect(await h.handleAgentReachVerb({ id: "s", type: "agent-reach:set", enabled: true })).toMatchObject({ enabled: true, level: "on" });
 });
 
 test("there is no raise verb and the lower verb takes only false", () => {
@@ -125,16 +121,17 @@ test("there is no raise verb and the lower verb takes only false", () => {
   expect(types.filter((t) => t.startsWith("bus-grants:")).sort()).toEqual(["bus-grants:get", "bus-grants:lower"]);
   expect(types.some((t) => t.startsWith("orchestrator:"))).toBe(false);
   const lower = (b: object) => ControlRequestSchema.safeParse({ id: "1", type: "bus-grants:lower", ...b }).success;
-  expect(lower({ busControl: false })).toBe(true);
-  expect(lower({ orchestrator: false, busControl: false })).toBe(true);
-  expect(lower({ busControl: true })).toBe(false);
-  expect(lower({ orchestrator: true })).toBe(false);
+  expect(lower({ orchestrator: false })).toBe(true);
+  // Web refuses an empty patch, so the loopback refuses it before the round trip.
   expect(lower({})).toBe(false);
+  expect(lower({ busControl: false })).toBe(false);
+  expect(lower({ orchestrator: false, busControl: false })).toBe(false);
+  expect(lower({ orchestrator: true })).toBe(false);
 });
 
-test("a directory refresh that raises a grant logs one warn naming only the transition", () => {
+test("a directory refresh that raises the grant logs one warn", () => {
   const { h } = rig(() => json({}));
-  let self = { orchestrator: false, busControl: false };
+  let self = { orchestrator: false };
   (h as any).machineDirectory.current = () => ({ self });
   const lines: string[] = [];
   __setRootForTest({ write: (m: string) => { lines.push(m); } }, "warn");
@@ -142,14 +139,13 @@ test("a directory refresh that raises a grant logs one warn naming only the tran
     const note = () => (h as any).noteGrantTransitions();
     note();
     expect(lines).toEqual([]);
-    self = { orchestrator: false, busControl: true };
+    self = { orchestrator: true };
     note();
     note();
-    self = { orchestrator: false, busControl: false };
+    self = { orchestrator: false };
     note();
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("busControl");
-    expect(lines[0]).not.toContain("orchestrator");
+    expect(lines[0]).toContain("orchestrator");
   } finally {
     __setRootForTest(process.stdout, "info");
     setLogLevel("error");

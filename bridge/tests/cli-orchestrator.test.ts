@@ -24,7 +24,6 @@ describe("antgrid orchestrator", () => {
     expect(await runOrchestratorCli("off")).toBe(0);
     expect(host.verbs).toHaveLength(1);
     expect(host.verbs[0]).toMatchObject({ type: "bus-grants:lower", orchestrator: false });
-    expect(host.verbs[0]).not.toHaveProperty("busControl");
   });
 
   test("off exits non-zero when the lowering fails", async () => {

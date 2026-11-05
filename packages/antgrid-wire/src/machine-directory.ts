@@ -14,7 +14,6 @@ export const MachineEntrySchema = z.object({
   ed25519Pub: RawKey32Schema,
   busPublicKey: RawKey32Schema.nullable(),
   orchestrator: z.boolean(),
-  busControl: z.boolean(),
 });
 export type MachineEntry = z.infer<typeof MachineEntrySchema>;
 
@@ -25,7 +24,6 @@ export const MachineDirectorySchema = z.object({
   self: z.object({
     busPublicKey: RawKey32Schema.nullable(),
     orchestrator: z.boolean(),
-    busControl: z.boolean(),
   }),
   machines: z.array(MachineEntrySchema).max(MAX_ACCOUNT_MACHINES),
 });
@@ -34,12 +32,10 @@ export type MachineDirectory = z.infer<typeof MachineDirectorySchema>;
 export const BusKeyRegistrationSchema = z.strictObject({ busPublicKey: RawKey32Schema });
 export type BusKeyRegistration = z.infer<typeof BusKeyRegistrationSchema>;
 
-export const SessionBusGrantsSchema = z.strictObject({ orchestrator: z.boolean(), busControl: z.boolean() });
+export const SessionBusGrantsSchema = z.strictObject({ orchestrator: z.boolean() });
 export type SessionBusGrants = z.infer<typeof SessionBusGrantsSchema>;
 
 export const SessionBusGrantsPatchSchema = z.strictObject({
   orchestrator: z.boolean().optional(),
-  busControl: z.boolean().optional(),
-}).refine((patch) => patch.orchestrator !== undefined || patch.busControl !== undefined,
-  { message: "at least one grant is required" });
+}).refine((patch) => patch.orchestrator !== undefined, { message: "orchestrator is required" });
 export type SessionBusGrantsPatch = z.infer<typeof SessionBusGrantsPatchSchema>;

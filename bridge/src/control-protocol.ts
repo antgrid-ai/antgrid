@@ -44,18 +44,15 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // remote access off this bit grants nothing. See `agent-reach-policy.ts`.
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:get") }),
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:set"), enabled: z.boolean() }),
-  // Read and LOWER only. The orchestrator and bus-control grants are raised by
-  // the owner's account session from the app; nothing on this machine, this
-  // loopback included, may raise them, so there is deliberately no raise verb.
+  // Read and LOWER only. The orchestrator grant is raised by the owner's
+  // account session from the app; nothing on this machine, this loopback
+  // included, may raise it, so there is deliberately no raise verb.
   z.object({ id: z.string().min(1), type: z.literal("bus-grants:get") }),
-  z
-    .object({
-      id: z.string().min(1),
-      type: z.literal("bus-grants:lower"),
-      orchestrator: z.literal(false).optional(),
-      busControl: z.literal(false).optional(),
-    })
-    .refine((b) => b.orchestrator !== undefined || b.busControl !== undefined, { message: "name at least one grant to lower" }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal("bus-grants:lower"),
+    orchestrator: z.literal(false),
+  }),
   // The machine half of the Capability Card over the LOOPBACK plane. The relay
   // plane already answers `machine.capability-card`, so without this the app
   // cannot read the NORMALISED remote of a project on its own machine — the key

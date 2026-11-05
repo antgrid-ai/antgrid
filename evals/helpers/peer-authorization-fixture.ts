@@ -27,18 +27,18 @@ export class PeerAuthorizationFixture {
   private generation = 0n;
   private busKeys = new Map<string, string>();
   private orchestrators = new Set<string>();
-  private busControls = new Set<string>();
 
   constructor(private peers: () => Array<{ deviceId: string; ed25519Pub: string }>) {}
 
-  provision(auth: FixtureCredential): void { this.credentials.set(auth.clientId, auth); }
+  // A new agent device starts as an orchestrator, as a freshly enrolled row does on the web authority.
+  provision(auth: FixtureCredential): void {
+    this.credentials.set(auth.clientId, auth);
+    if (auth.kind === "agent") this.orchestrators.add(auth.deviceUuid);
+  }
   revoke(deviceId: string): void { this.revoked.add(deviceId); this.generation++; }
   busKeyOf(deviceUuid: string): string | null { return this.busKeys.get(deviceUuid) ?? null; }
   setOrchestrator(deviceUuid: string, on: boolean): void {
     if (on) this.orchestrators.add(deviceUuid); else this.orchestrators.delete(deviceUuid);
-  }
-  setBusControl(deviceUuid: string, on: boolean): void {
-    if (on) this.busControls.add(deviceUuid); else this.busControls.delete(deviceUuid);
   }
 
   token(authorization: string | null): string | null {
@@ -64,18 +64,17 @@ export class PeerAuthorizationFixture {
     if (auth.kind !== "agent") return Response.json({ error: "NOT_AGENT" }, { status: 403 });
     if (route === "session-bus") {
       const grants = () => SessionBusGrantsSchema.parse({
-        orchestrator: this.orchestrators.has(auth.deviceUuid), busControl: this.busControls.has(auth.deviceUuid) });
+        orchestrator: this.orchestrators.has(auth.deviceUuid) });
       if (req.method === "GET") return Response.json(grants(), { headers: { "cache-control": "no-store" } });
       if (req.method !== "POST") return new Response(null, { status: 405 });
       const input = SessionBusGrantsPatchSchema.safeParse(await req.json().catch(() => null));
       if (!input.success) return Response.json({ error: "BAD_REQUEST" }, { status: 400 });
       const patch = input.data;
       // Lower-only, like the real route: a credential on the agent's machine must not elevate it.
-      if (patch.orchestrator === true || patch.busControl === true) {
+      if (patch.orchestrator === true) {
         return Response.json({ error: "OWNER_SESSION_REQUIRED" }, { status: 403 });
       }
       if (patch.orchestrator === false) this.orchestrators.delete(auth.deviceUuid);
-      if (patch.busControl === false) this.busControls.delete(auth.deviceUuid);
       return Response.json(grants());
     }
     if (route === "machines") {
@@ -83,13 +82,13 @@ export class PeerAuthorizationFixture {
       return Response.json(MachineDirectorySchema.parse({
         accountId: auth.userId, deviceId: auth.deviceUuid, allowed,
         self: { busPublicKey: this.busKeys.get(auth.deviceUuid) ?? null,
-          orchestrator: this.orchestrators.has(auth.deviceUuid), busControl: this.busControls.has(auth.deviceUuid) },
+          orchestrator: this.orchestrators.has(auth.deviceUuid) },
         machines: [...this.credentials.values()]
           .filter((c) => c.userId === auth.userId && c.kind === "agent"
             && c.deviceUuid !== auth.deviceUuid && !this.revoked.has(c.deviceUuid))
           .map((c) => ({ deviceId: c.deviceUuid, displayName: c.deviceUuid, machineName: null,
             ed25519Pub: c.ed25519Pub, busPublicKey: this.busKeys.get(c.deviceUuid) ?? null,
-            orchestrator: this.orchestrators.has(c.deviceUuid), busControl: this.busControls.has(c.deviceUuid) })),
+            orchestrator: this.orchestrators.has(c.deviceUuid) })),
       }), { headers: { "cache-control": "no-store" } });
     }
     if (req.method !== "POST") return new Response(null, { status: 405 });

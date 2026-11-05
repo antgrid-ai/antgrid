@@ -19,7 +19,6 @@ function entry(i: number, busPublicKey: string | null = KEY) {
     ed25519Pub: KEY,
     busPublicKey,
     orchestrator: false,
-    busControl: false,
   };
 }
 
@@ -28,7 +27,7 @@ function directory(machines: unknown[] = [entry(1)]) {
     accountId: "acct",
     deviceId: UUID,
     allowed: true,
-    self: { busPublicKey: KEY, orchestrator: false, busControl: false },
+    self: { busPublicKey: KEY, orchestrator: false },
     machines,
   };
 }
@@ -59,11 +58,11 @@ describe("MachineDirectorySchema", () => {
     expect(MachineDirectorySchema.safeParse(directory(many.slice(0, MAX_ACCOUNT_MACHINES))).success).toBe(true);
   });
 
-  test("requires busControl on entries and self", () => {
-    const { busControl: _b, ...noControl } = entry(1);
-    expect(MachineDirectorySchema.safeParse(directory([noControl])).success).toBe(false);
+  test("requires orchestrator on entries and self", () => {
+    const { orchestrator: _o, ...noRole } = entry(1);
+    expect(MachineDirectorySchema.safeParse(directory([noRole])).success).toBe(false);
     const d = directory();
-    d.self = { busPublicKey: KEY, orchestrator: false } as typeof d.self;
+    d.self = { busPublicKey: KEY } as typeof d.self;
     expect(MachineDirectorySchema.safeParse(d).success).toBe(false);
   });
 
@@ -83,17 +82,16 @@ describe("BusKeyRegistrationSchema", () => {
 });
 
 describe("session-bus grants schemas", () => {
-  test("grants require both booleans and refuse extra keys", () => {
-    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true, busControl: false }).success).toBe(true);
-    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true }).success).toBe(false);
-    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true, busControl: false, x: 1 }).success).toBe(false);
+  test("grants require the boolean and refuse extra keys", () => {
+    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true }).success).toBe(true);
+    expect(SessionBusGrantsSchema.safeParse({}).success).toBe(false);
+    expect(SessionBusGrantsSchema.safeParse({ orchestrator: true, x: 1 }).success).toBe(false);
   });
 
-  test("a patch needs at least one key and refuses extras", () => {
+  test("a patch needs orchestrator and refuses extras", () => {
     expect(SessionBusGrantsPatchSchema.safeParse({}).success).toBe(false);
-    expect(SessionBusGrantsPatchSchema.safeParse({ busControl: false }).success).toBe(true);
-    expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: true, busControl: true }).success).toBe(true);
+    expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: false }).success).toBe(true);
     expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: "yes" }).success).toBe(false);
-    expect(SessionBusGrantsPatchSchema.safeParse({ busControl: true, x: 1 }).success).toBe(false);
+    expect(SessionBusGrantsPatchSchema.safeParse({ orchestrator: true, x: 1 }).success).toBe(false);
   });
 });

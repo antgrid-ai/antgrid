@@ -864,10 +864,10 @@ export class HostServer {
     }
   }
 
-  /** What an agent reaching this machine is allowed to do: the local switch,
-   *  raised to `control` only by the owner's grant in the directory. */
+  /** Whether agents on the account's other machines may reach this one: the
+   *  local switch alone. */
   private effectiveReachLevel(): AgentReachLevel {
-    return effectiveReachLevel(this.agentReachPolicy.isEnabled(), this.machineDirectory?.selfBusControl() ?? false);
+    return effectiveReachLevel(this.agentReachPolicy.isEnabled());
   }
 
   /** The responder side of a replayed request: the transport found it already
@@ -899,7 +899,7 @@ export class HostServer {
   private busKey: BusKeyPair | null = null;
   private machineDirectory: MachineDirectory | null = null;
   private stopBusKeyWatch: (() => void) | null = null;
-  private lastGrants: { orchestrator: boolean; busControl: boolean } | null = null;
+  private lastGrants: { orchestrator: boolean } | null = null;
   private lastBusKeyRegisterAt = Number.NEGATIVE_INFINITY;
   private busKeyRegistering = false;
   private scheduler: SchedulerService | null = null;
@@ -1906,7 +1906,7 @@ export class HostServer {
     }
   }
 
-  /** Reads and lowers this machine's orchestrator and bus-control grants on web.
+  /** Reads and lowers this machine's orchestrator grant on web.
    *  There is no raise: that needs the owner's account session, and a credential
    *  that lives on this machine must not be able to elevate it. A lower asks the
    *  directory to refresh so the change takes effect without waiting out the
@@ -1928,13 +1928,7 @@ export class HostServer {
     if (req.type === "bus-grants:get") {
       result = await getSessionBusGrants(base);
     } else {
-      result = await lowerSessionBusGrants({
-        ...base,
-        patch: {
-          ...(req.orchestrator === false ? { orchestrator: false as const } : {}),
-          ...(req.busControl === false ? { busControl: false as const } : {}),
-        },
-      });
+      result = await lowerSessionBusGrants({ ...base, patch: { orchestrator: false } });
     }
     if (!result.ok) {
       // The code rides in the message too: the CLI prints only the message, and
@@ -1946,15 +1940,13 @@ export class HostServer {
       return { id: req.id, ok: false, error: { code, message: `the account service refused the request (${code})` } };
     }
     if (req.type === "bus-grants:lower") this.machineDirectory?.kick();
-    // `grants` is what the account says now; `level` is what the dispatcher
-    // enforces, which follows the directory and so catches up at its next refresh.
     return {
       id: req.id, ok: true, type: req.type, grants: result.grants,
       reachEnabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel(),
     };
   }
 
-  /** One warn when a grant goes from off to on, naming only which one. Raising
+  /** One warn when the grant goes from off to on. Raising
    *  happens in the app under the owner's account session, so this is the trace
    *  that a machine was elevated. */
   private noteGrantTransitions(): void {
@@ -1962,9 +1954,8 @@ export class HostServer {
     if (!self) return;
     if (this.lastGrants) {
       if (!this.lastGrants.orchestrator && self.orchestrator) log.warn({ grant: "orchestrator" }, "session bus grant raised");
-      if (!this.lastGrants.busControl && self.busControl) log.warn({ grant: "busControl" }, "session bus grant raised");
     }
-    this.lastGrants = { orchestrator: self.orchestrator, busControl: self.busControl };
+    this.lastGrants = { orchestrator: self.orchestrator };
   }
 
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free

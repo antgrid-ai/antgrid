@@ -158,15 +158,16 @@ the set of invariants a future edit breaks silently.
   loopback or app-fed way to write rows. Rows carry `asOf` and expire on
   `REMOTE_ROWS_TTL_MS` (`session-bus/constants.ts`), a refresh interval and
   not a lease.
-- **Agent reach has three effective levels, and the top one is not set here.**
-  `off` and `messages` are the machine's local switch (`agent-reach-policy.ts`,
-  a boolean). `control` is `effectiveReachLevel` (`session-bus/request-policy.ts`):
-  local on AND the account directory's `self.busControl`, which only the
-  owner's account session can raise (from the app, on web). Local off always
-  wins. Nothing on this machine raises an elevated grant: the loopback verbs
-  `bus-grants:get` and `bus-grants:lower` read and lower them, and there is
+- **Agent reach is one local switch plus the requester's orchestrator role.**
+  The switch is `agent-reach-policy.ts` (a boolean, default on); `effectiveReachLevel`
+  (`session-bus/request-policy.ts`) maps it to `off` | `on`. On allows reads and
+  posts; control methods additionally need the REQUESTING machine to be an
+  orchestrator in this machine's directory. Local off always wins. The
+  orchestrator grant is the one account-held bit: only the owner's account
+  session can raise it (from the app, on web); the loopback verbs
+  `bus-grants:get` and `bus-grants:lower` read and lower it, and there is
   deliberately no raise verb, because a credential that lives on this machine
-  must not elevate it. A directory refresh that raises one logs a warn.
+  must not elevate it. A directory refresh that raises it logs a warn.
 - **Bus requests are answered by `HostServer.dispatchBusRequest`, never by
   `dispatchControlPlaneInbound`.** Order: body parse, method allowlist, the
   per-machine rate (charged before any refusal, so refusals are bounded too),
