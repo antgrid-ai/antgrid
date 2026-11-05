@@ -42,14 +42,13 @@ beforeEach(async () => {
 });
 
 async function makeDevice(kind: "agent" | "app", extra: { busFill?: number; orchestrator?: boolean;
-  busControl?: boolean; machineName?: string; bindCredential?: boolean } = {}) {
+  machineName?: string; bindCredential?: boolean } = {}) {
   const publicKey = await getPublicKeyAsync(randomBytes(32));
   const deviceId = randomUUID(), enrollmentId = randomUUID();
   const device = await pg.db.device.create({ data: { userId, deviceId, publicKey: Buffer.from(publicKey),
     oauthClientId: enrollmentId, kind, platform: kind === "agent" ? "windows" : "android",
     displayName: `${kind}-${deviceId.slice(0, 4)}`, machineName: extra.machineName,
-    busPublicKey: extra.busFill === undefined ? undefined : new Uint8Array(32).fill(extra.busFill), orchestrator: extra.orchestrator ?? false,
-    busControl: extra.busControl ?? false } });
+    busPublicKey: extra.busFill === undefined ? undefined : new Uint8Array(32).fill(extra.busFill), orchestrator: extra.orchestrator } });
   await pg.db.oauthClient.create({ data: { id: enrollmentId, clientId: enrollmentId,
     scopes: ["agent"], grantTypes: ["client_credentials"], redirectUris: [], responseTypes: [],
     postLogoutRedirectUris: [], contacts: [], metadata: { userId, deviceUuid: deviceId,
@@ -64,8 +63,8 @@ async function makeDevice(kind: "agent" | "app", extra: { busFill?: number; orch
 
 describe("GET /account/devices/me/machines", () => {
   test("an agent sees the other credential-bound agents, never itself or phones", async () => {
-    const self = await makeDevice("agent", { busFill: 7, busControl: true });
-    const other = await makeDevice("agent", { orchestrator: true, machineName: "box" });
+    const self = await makeDevice("agent", { busFill: 7 });
+    const other = await makeDevice("agent", { orchestrator: false, machineName: "box" });
     const keyed = await makeDevice("agent", { busFill: 3 });
     await makeDevice("app");
     await makeDevice("agent", { bindCredential: false });
@@ -78,10 +77,10 @@ describe("GET /account/devices/me/machines", () => {
     const dir = MachineDirectorySchema.parse(await res.json());
     expect(dir.allowed).toBe(true);
     expect(dir.deviceId).toBe(self.device.deviceId);
-    expect(dir.self).toEqual({ busPublicKey: busKey(7), orchestrator: false, busControl: true });
+    expect(dir.self).toEqual({ busPublicKey: busKey(7), orchestrator: true });
     expect(dir.machines.map((m) => m.deviceId).sort()).toEqual([other.device.deviceId, keyed.device.deviceId].sort());
     const o = dir.machines.find((m) => m.deviceId === other.device.deviceId)!;
-    expect(o).toMatchObject({ busPublicKey: null, orchestrator: true, busControl: false, machineName: "box",
+    expect(o).toMatchObject({ busPublicKey: null, orchestrator: false, machineName: "box",
       ed25519Pub: other.publicKey });
     expect(dir.machines.find((m) => m.deviceId === keyed.device.deviceId)!.busPublicKey).toBe(busKey(3));
   });
@@ -173,35 +172,33 @@ describe("device-bearer /account/devices/me/session-bus", () => {
   const rowOf = (id: string) => pg.db.device.findUniqueOrThrow({ where: { id } });
 
   test("GET returns the caller's own row", async () => {
-    const self = await makeDevice("agent", { orchestrator: true });
-    await makeDevice("agent", { busControl: true });
+    const self = await makeDevice("agent");
+    await makeDevice("agent", { orchestrator: false });
     const res = await app.request(`${prefix}/session-bus`, { headers: self.headers });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ orchestrator: true, busControl: false });
+    expect(await res.json()).toEqual({ orchestrator: true });
   });
 
-  test("POST false lowers only the named grant", async () => {
-    const self = await makeDevice("agent", { orchestrator: true, busControl: true });
-    const res = await post(self.headers, { busControl: false });
+  test("POST false lowers orchestrator", async () => {
+    const self = await makeDevice("agent");
+    const res = await post(self.headers, { orchestrator: false });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ orchestrator: true, busControl: false });
-    expect(await rowOf(self.device.id)).toMatchObject({ orchestrator: true, busControl: false });
+    expect(await res.json()).toEqual({ orchestrator: false });
+    expect(await rowOf(self.device.id)).toMatchObject({ orchestrator: false });
   });
 
-  test("any true is refused OWNER_SESSION_REQUIRED and changes nothing", async () => {
-    const self = await makeDevice("agent", { busControl: true });
-    for (const body of [{ orchestrator: true }, { busControl: true }, { orchestrator: true, busControl: false }]) {
-      const res = await post(self.headers, body);
-      expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: "OWNER_SESSION_REQUIRED" });
-    }
-    expect(await rowOf(self.device.id)).toMatchObject({ orchestrator: false, busControl: true });
+  test("a true is refused OWNER_SESSION_REQUIRED and changes nothing", async () => {
+    const self = await makeDevice("agent", { orchestrator: false });
+    const res = await post(self.headers, { orchestrator: true });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "OWNER_SESSION_REQUIRED" });
+    expect(await rowOf(self.device.id)).toMatchObject({ orchestrator: false });
   });
 
   test("an empty or unknown-key body is 400", async () => {
     const self = await makeDevice("agent");
     expect((await post(self.headers, {})).status).toBe(400);
-    expect((await post(self.headers, { busControl: false, extra: 1 })).status).toBe(400);
+    expect((await post(self.headers, { orchestrator: false, extra: 1 })).status).toBe(400);
   });
 
   test("an app credential gets NOT_AGENT on both verbs", async () => {
@@ -209,7 +206,7 @@ describe("device-bearer /account/devices/me/session-bus", () => {
     const get = await app.request(`${prefix}/session-bus`, { headers: phone.headers });
     expect(get.status).toBe(403);
     expect(await get.json()).toEqual({ error: "NOT_AGENT" });
-    const res = await post(phone.headers, { busControl: false });
+    const res = await post(phone.headers, { orchestrator: false });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "NOT_AGENT" });
   });
@@ -225,17 +222,17 @@ describe("device-bearer /account/devices/me/session-bus", () => {
 
   test("an owner raise reaches a sibling's machines[] and the target's own self.*, with no policy bump", async () => {
     const self = await makeDevice("agent");
-    const target = await makeDevice("agent");
+    const target = await makeDevice("agent", { orchestrator: false });
     const lease = async () => (await (await app.request(`${prefix}/authorization`, { headers: self.headers })).json() as
       { policyGeneration: string }).policyGeneration;
     const before = await lease();
     const outbox = await pg.db.peerAuthorizationOutbox.count({ where: { userId } });
-    expect(await setOwnedSessionBusGrants(pg.db, userId, target.device.id, { orchestrator: true, busControl: true }))
-      .toEqual({ orchestrator: true, busControl: true });
+    expect(await setOwnedSessionBusGrants(pg.db, userId, target.device.id, { orchestrator: true }))
+      .toEqual({ orchestrator: true });
     const dir = MachineDirectorySchema.parse(await (await app.request(`${prefix}/machines`, { headers: self.headers })).json());
-    expect(dir.machines.find((m) => m.deviceId === target.device.deviceId)).toMatchObject({ orchestrator: true, busControl: true });
+    expect(dir.machines.find((m) => m.deviceId === target.device.deviceId)).toMatchObject({ orchestrator: true });
     expect(await (await app.request(`${prefix}/session-bus`, { headers: target.headers })).json())
-      .toEqual({ orchestrator: true, busControl: true });
+      .toEqual({ orchestrator: true });
     expect(await lease()).toBe(before);
     expect(await pg.db.peerAuthorizationOutbox.count({ where: { userId } })).toBe(outbox);
   });

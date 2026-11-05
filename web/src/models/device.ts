@@ -156,10 +156,10 @@ export async function checkCapAndUpsert(
 
 /**
  * A re-provision that revives a revoked row or brings a different key is a new
- * machine identity: the old bus key and the owner-raised bus settings must not
- * carry over to it.
+ * machine identity, so it starts from the defaults a new row gets (no bus key,
+ * orchestrator on): neither the old key nor an earlier lowering carries over.
  */
-export const BUS_IDENTITY_RESET = { busPublicKey: null, orchestrator: false, busControl: false } as const;
+export const BUS_IDENTITY_RESET = { busPublicKey: null, orchestrator: true } as const;
 
 export function isNewBusIdentity(
   prior: { revokedAt: Date | null; publicKey: Uint8Array } | null,

@@ -11,8 +11,8 @@ function body(over: Record<string, unknown> = {}, peerKey: string | null = KEY_B
     accountId: "acct",
     deviceId: SELF,
     allowed: true,
-    self: { busPublicKey: KEY_A, orchestrator: false, busControl: false },
-    machines: [{ deviceId: PEER, displayName: "peer", machineName: null, ed25519Pub: KEY_A, busPublicKey: peerKey, orchestrator: true, busControl: false }],
+    self: { busPublicKey: KEY_A, orchestrator: false },
+    machines: [{ deviceId: PEER, displayName: "peer", machineName: null, ed25519Pub: KEY_A, busPublicKey: peerKey, orchestrator: true }],
     ...over,
   };
 }
@@ -61,7 +61,6 @@ describe("MachineDirectory", () => {
     expect(r.dir.machine(PEER)?.orchestrator).toBe(true);
     expect(r.dir.selfBusKey()).toBe(KEY_A);
     expect(r.dir.selfOrchestrator()).toBe(false);
-    expect(r.dir.selfBusControl()).toBe(false);
     const next = r.timers.filter((x) => x.live);
     expect(next.length).toBe(1);
     expect(next[0].ms).toBe(20_000);
@@ -71,11 +70,10 @@ describe("MachineDirectory", () => {
     r.dir.stop();
   });
 
-  it("serves selfBusControl and selfOrchestrator from the view", async () => {
-    const r = rig(() => body({ self: { busPublicKey: null, orchestrator: true, busControl: true } }));
+  it("serves selfOrchestrator from the view", async () => {
+    const r = rig(() => body({ self: { busPublicKey: null, orchestrator: true } }));
     await r.dir.refresh();
     expect(r.dir.selfOrchestrator()).toBe(true);
-    expect(r.dir.selfBusControl()).toBe(true);
     expect(r.dir.selfBusKey()).toBeNull();
   });
 

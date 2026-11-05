@@ -39,7 +39,7 @@ const POST = { type: "session-bus:post", data: { hello: "world" } } as never;
 function entry(m: typeof peer, over: Partial<MachineEntry> = {}): MachineEntry {
   return {
     deviceId: m.id, displayName: "peer", machineName: null, ed25519Pub: m.sign.pub,
-    busPublicKey: m.bus.publicKey, orchestrator: false, busControl: false, ...over,
+    busPublicKey: m.bus.publicKey, orchestrator: false, ...over,
   };
 }
 

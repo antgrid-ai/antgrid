@@ -577,9 +577,9 @@ describe("the session-bus tools", () => {
       expect(result.content[0]!.text).toContain("remote code: E2BIG_42");
     });
 
-    test("states the control and orchestrator conditions", () => {
+    test("states the agent-reach and orchestrator conditions", () => {
       const tool = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_request")!;
-      for (const needle of ["accepts control", "orchestrator", "not delivered yet", "does not mean its agent acted"]) {
+      for (const needle of ["reachable by agents", "orchestrator", "on by default", "not delivered yet", "does not mean its agent acted"]) {
         expect(tool.description).toContain(needle);
       }
     });

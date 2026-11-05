@@ -84,17 +84,15 @@ antgrid log-level                      # back to the configured level, now
 antgrid log-level debug --dir ~/.antgrid-dev
 ```
 
-**Session-bus grants:** `antgrid orchestrator [off|status]` and
-`antgrid agent-reach [off|messages|status]`
-(`bridge/src/cli/orchestrator.ts`, `bridge/src/cli/agent-reach.ts`) read or
-lower this machine's grants on the running host. They cannot raise: a credential
-that lives on this machine must not elevate it, so `orchestrator on` and
-`agent-reach control` print where to do it (the app's settings for this
-machine, signed in as the account owner) and exit non-zero without contacting
-the host. `agent-reach off|messages` sets the local switch, then lowers bus
-control on the account; if only the lowering fails, `off` still exits 0 because
-the local switch already wins, while `messages` exits non-zero. `status` prints
-the effective level and both grants. `--dir` targets a dev host.
+**Session-bus reach:** `antgrid agent-reach [on|off|status]`
+(`bridge/src/cli/agent-reach.ts`) sets or shows this machine's local agent-reach
+switch on the running host, through `agent-reach:set`. `antgrid orchestrator
+[off|status]` (`bridge/src/cli/orchestrator.ts`) reads or lowers this machine's
+orchestrator grant on the account. It cannot raise it: a credential that lives
+on this machine must not elevate it, so `orchestrator on` prints where to do it
+(the app's settings for this machine, signed in as the account owner) and exits
+non-zero without contacting the host. Either `status` prints an agent reach
+line and an orchestrator line. `--dir` targets a dev host.
 
 Following one session-bus delivery: every stage prints the same 12-hex `sha`
 (`bridge/src/line-key.ts`), so `grep` it in `host.log`. In order:

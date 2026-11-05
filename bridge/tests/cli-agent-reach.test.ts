@@ -1,72 +1,43 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { runAgentReachCli } from "../src/cli/agent-reach";
-import { GRANTS_OK, fakeHost, webRefused } from "./cli-reach-support";
+import { GRANTS_OK, fakeHost } from "./cli-reach-support";
 
 let host: ReturnType<typeof fakeHost> | undefined;
 afterEach(() => host?.restore());
 
-const lowerFails = webRefused("WEB_503");
-
 describe("antgrid agent-reach", () => {
-  test("control is refused without contacting the host", async () => {
+  test("messages and control are no longer actions", async () => {
     host = fakeHost({});
-    expect(await runAgentReachCli("control")).toBe(1);
+    for (const action of ["messages", "control", "loud"]) {
+      expect(await runAgentReachCli(action)).toBe(1);
+    }
     expect(host.verbs).toEqual([]);
-    expect(host.err.join("\n")).toContain("app");
+    expect(host.err.join("\n")).toContain("use on, off or status");
   });
 
-  test("an unknown action exits non-zero without contacting the host", async () => {
-    host = fakeHost({});
-    expect(await runAgentReachCli("loud")).toBe(1);
-    expect(host.verbs).toEqual([]);
-  });
-
-  test("off sets reach off then lowers bus control", async () => {
-    host = fakeHost({ "agent-reach:set": { ok: true }, "bus-grants:lower": GRANTS_OK });
+  test("off sets reach off and touches no grant", async () => {
+    host = fakeHost({ "agent-reach:set": { ok: true } });
     expect(await runAgentReachCli("off")).toBe(0);
-    expect(host.verbs.map((v) => v.type)).toEqual(["agent-reach:set", "bus-grants:lower"]);
+    expect(host.verbs.map((v) => v.type)).toEqual(["agent-reach:set"]);
     expect(host.verbs[0]?.enabled).toBe(false);
-    expect(host.verbs[1]?.busControl).toBe(false);
-    expect(host.verbs[1]).not.toHaveProperty("orchestrator");
   });
 
-  test("messages sets reach on then lowers bus control", async () => {
-    host = fakeHost({ "agent-reach:set": { ok: true }, "bus-grants:lower": GRANTS_OK });
-    expect(await runAgentReachCli("messages")).toBe(0);
-    expect(host.verbs.map((v) => v.type)).toEqual(["agent-reach:set", "bus-grants:lower"]);
+  test("on sets reach on and touches no grant", async () => {
+    host = fakeHost({ "agent-reach:set": { ok: true } });
+    expect(await runAgentReachCli("on")).toBe(0);
+    expect(host.verbs.map((v) => v.type)).toEqual(["agent-reach:set"]);
     expect(host.verbs[0]?.enabled).toBe(true);
   });
 
-  test("off still succeeds when only the lowering fails", async () => {
-    host = fakeHost({ "agent-reach:set": { ok: true }, "bus-grants:lower": lowerFails });
-    expect(await runAgentReachCli("off")).toBe(0);
-    expect(host.err.join("\n")).toContain("local off already wins");
-    expect(host.err.join("\n")).toContain("WEB_503");
-  });
-
-  test("messages fails when the lowering fails", async () => {
-    host = fakeHost({ "agent-reach:set": { ok: true }, "bus-grants:lower": lowerFails });
-    expect(await runAgentReachCli("messages")).toBe(1);
-    expect(host.err.join("\n")).toContain("WEB_503");
-  });
-
-  test("a failed set does not attempt the lowering", async () => {
+  test("a failed set exits non-zero", async () => {
     host = fakeHost({ "agent-reach:set": { ok: false, error: { message: "refused" } } });
     expect(await runAgentReachCli("off")).toBe(1);
-    expect(host.verbs).toHaveLength(1);
   });
 
-  test("status is the default and prints the effective level and both grants", async () => {
+  test("status is the default and prints agent reach and the orchestrator grant", async () => {
     host = fakeHost({ "bus-grants:get": GRANTS_OK });
     expect(await runAgentReachCli(undefined)).toBe(0);
-    expect(host.out).toEqual(["effective reach: messages", "orchestrator: on", "bus control: off"]);
-  });
-
-  test("status says when the account's grant has not reached the enforced level yet", async () => {
-    host = fakeHost({ "bus-grants:get": { ...GRANTS_OK, grants: { orchestrator: false, busControl: true } } });
-    expect(await runAgentReachCli("status")).toBe(0);
-    expect(host.out[0]).toBe("effective reach: messages");
-    expect(host.out.at(-1)).toContain("next directory refresh");
+    expect(host.out).toEqual(["agent reach: on", "orchestrator: on"]);
   });
 
   test("an unreachable host says it must be running", async () => {

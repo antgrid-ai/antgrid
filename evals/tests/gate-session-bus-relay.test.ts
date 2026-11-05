@@ -443,13 +443,13 @@ describe("gate: session bus relay, orchestration", () => {
   const ok = (res: { body: any }) => res.body?.ok === true;
   const refusedWith = (code: string) => (res: { status: number; body: any }) => res.status === 403 && res.body?.code === code;
 
+  // Nothing raises A's orchestrator grant first: a new agent device holds it by
+  // default, so every control test here also proves that default end to end.
   async function reachControl(e: RelayBusEnv, sa: string): Promise<void> {
-    e.license.setOrchestrator(e.a.machineId, true);
-    e.license.setBusControl(e.b.machineId, true);
     await requestUntil(e.a, sa, e.b, "project.start", { projectId: e.b.projectId }, ok, "A's project.start to be allowed on B");
   }
 
-  test("a granted orchestrator creates and starts a session on a control machine", async () => {
+  test("a granted orchestrator creates and starts a session on a reachable machine", async () => {
     const e = await boot();
     await reachControl(e, e.sa);
     const created = await request(e.a, e.sa, e.b, "session.create", { projectId: e.b.projectId, name: "driven" });
@@ -465,19 +465,20 @@ describe("gate: session bus relay, orchestration", () => {
     expect(listed.body.result.sessions.find((r: any) => r.id === sessionId).name).toBe("driven");
   }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS * 2);
 
-  test("a machine without the busControl grant refuses control requests", async () => {
+  test("a new agent device drives a reachable machine without any grant being raised", async () => {
     const e = await boot();
-    e.license.setOrchestrator(e.a.machineId, true);
-    await requestUntil(e.a, e.sa, e.b, "sessions.list", { projectId: e.b.projectId }, ok, "A's read request to be allowed on B");
-    const res = await request(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("NOT_ALLOWED_AGENT_REACH");
+    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: true });
+    const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId }, ok,
+      "A's default orchestrator grant to be allowed project.start on B");
+    expect(res.body.ok).toBe(true);
   }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS);
 
-  test("local reach off wins over a busControl grant", async () => {
+  test("local reach off refuses reads and control", async () => {
     const e = await boot();
     await reachControl(e, e.sa);
     await setAgentReach(e.b.abDir, false);
+    await requestUntil(e.a, e.sa, e.b, "sessions.list", { projectId: e.b.projectId },
+      refusedWith("NOT_ALLOWED_AGENT_REACH"), "B's local off to refuse a read");
     const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
       refusedWith("NOT_ALLOWED_AGENT_REACH"), "B's local off to refuse control");
     expect(res.body.code).toBe("NOT_ALLOWED_AGENT_REACH");
@@ -485,7 +486,7 @@ describe("gate: session bus relay, orchestration", () => {
 
   test("a machine that is not an orchestrator is refused NOT_ORCHESTRATOR", async () => {
     const e = await boot();
-    e.license.setBusControl(e.b.machineId, true);
+    e.license.setOrchestrator(e.a.machineId, false);
     const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
       refusedWith("NOT_ORCHESTRATOR"), "B to answer NOT_ORCHESTRATOR");
     expect(res.body.code).toBe("NOT_ORCHESTRATOR");
@@ -494,10 +495,10 @@ describe("gate: session bus relay, orchestration", () => {
   test("lowering through the bridge reaches the authority and the next refresh refuses", async () => {
     const e = await boot();
     await reachControl(e, e.sa);
-    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: true, busControl: false });
+    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: true });
     const lowered = await lowerGrants(e.a.abDir, { orchestrator: false });
     expect(lowered.grants.orchestrator).toBe(false);
-    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: false, busControl: false });
+    expect(await authorityGrants(e.license.url, e.a.auth)).toEqual({ orchestrator: false });
     const res = await requestUntil(e.a, e.sa, e.b, "project.start", { projectId: e.b.projectId },
       refusedWith("NOT_ORCHESTRATOR"), "B to refuse the lowered orchestrator");
     expect(res.body.code).toBe("NOT_ORCHESTRATOR");

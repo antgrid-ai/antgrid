@@ -73,7 +73,7 @@ interface Rig {
   frames: BusSendInput[];
   projectId: string;
   inbound: (v: VerifiedInbound) => Promise<InboundVerdict>;
-  setDirectory: (d: { orchestrators?: string[]; busControl?: boolean }) => void;
+  setDirectory: (d: { orchestrators?: string[] }) => void;
 }
 
 function rig(opts: { reach?: boolean; warm?: boolean } = {}): Rig {
@@ -90,10 +90,9 @@ function rig(opts: { reach?: boolean; warm?: boolean } = {}): Rig {
   (h as any).seenProjects.set(projectId, { path: dir, label: "p", lastActiveAt: Date.now() });
   const core = fakeCore();
   if (opts.warm ?? true) (h as any).cores.set(projectId, { core, path: dir, mode: "local", lastFocusedMs: 0 });
-  const setDirectory = (d: { orchestrators?: string[]; busControl?: boolean }) => {
+  const setDirectory = (d: { orchestrators?: string[] }) => {
     (h as any).machineDirectory = {
       machine: (id: string) => ({ deviceId: id, orchestrator: d.orchestrators?.includes(id) ?? false }),
-      selfBusControl: () => d.busControl ?? false,
       selfOrchestrator: () => false,
       current: () => null,
       kick: () => {},
@@ -118,7 +117,7 @@ const answerOf = (v: InboundVerdict): { ok: boolean; result?: any; error?: { cod
 
 test("methods outside the allowlist are refused METHOD_NOT_ALLOWED and nothing is sent", async () => {
   const { frames, core, inbound, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   for (const method of ["state.snapshot", "git.checkout", "sessions.delete", "scheduler.list", "scheduler.run", "session.delete"]) {
     expect(await inbound(request(method, {}, "orchestrator"))).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
   }
@@ -133,9 +132,9 @@ test("remote access off is refused before anything else", async () => {
   expect(frames).toEqual([]);
 });
 
-test("at messages level a mutating request is NOT_ALLOWED_AGENT_REACH even from an orchestrator", async () => {
-  const { core, inbound, projectId, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: false });
+test("with reach off a mutating request is NOT_ALLOWED_AGENT_REACH even from an orchestrator", async () => {
+  const { core, inbound, projectId, setDirectory } = rig({ reach: false });
+  setDirectory({ orchestrators: [PEER] });
   const v = await inbound(request("session.create", { projectId }, "orchestrator"));
   expect(answerOf(v)).toMatchObject({ ok: false, error: { code: "NOT_ALLOWED_AGENT_REACH" } });
   expect(core.calls).toEqual([]);
@@ -143,7 +142,7 @@ test("at messages level a mutating request is NOT_ALLOWED_AGENT_REACH even from 
 
 test("a role the request claims is ignored: the directory says agent, so NOT_ORCHESTRATOR", async () => {
   const { core, inbound, projectId, setDirectory } = rig();
-  setDirectory({ orchestrators: [], busControl: true });
+  setDirectory({ orchestrators: [] });
   const v = await inbound(request("session.create", { projectId }, "orchestrator"));
   expect(answerOf(v)).toMatchObject({ ok: false, error: { code: "NOT_ORCHESTRATOR" } });
   expect(core.calls).toEqual([]);
@@ -151,7 +150,7 @@ test("a role the request claims is ignored: the directory says agent, so NOT_ORC
 
 test("with reach off a read is refused too, the capability card included", async () => {
   const { inbound, projectId, setDirectory } = rig({ reach: false });
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   for (const [method, params] of [["sessions.list", { projectId }], ["machine.capability-card", {}]] as const) {
     expect(answerOf(await inbound(request(method, params, "orchestrator")))).toMatchObject({
       ok: false, error: { code: "NOT_ALLOWED_AGENT_REACH" },
@@ -159,9 +158,9 @@ test("with reach off a read is refused too, the capability card included", async
   }
 });
 
-test("a verified orchestrator at control level creates, starts with a prompt, and stops", async () => {
+test("a verified orchestrator with reach on creates, starts with a prompt, and stops", async () => {
   const { core, inbound, frames, projectId, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
 
   const created = answerOf(await inbound(request("session.create", { projectId, name: "n", tool: "claude-code", mode: "chat" })));
   expect(created.ok).toBe(true);
@@ -182,7 +181,7 @@ test("a verified orchestrator at control level creates, starts with a prompt, an
 
 test("the request schema rejects command, args and approvalPolicy on session.create", async () => {
   const { core, inbound, projectId, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   for (const extra of [{ command: "sh" }, { args: "-c x" }, { approvalPolicy: "bypass" }]) {
     expect(answerOf(await inbound(request("session.create", { projectId, ...extra })))).toMatchObject({
       ok: false, error: { code: "BAD_PARAMS" },
@@ -193,7 +192,7 @@ test("the request schema rejects command, args and approvalPolicy on session.cre
 
 test("a seam refusal reaches the asker as its own code", async () => {
   const { core, inbound, projectId, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   core.startSessionForBus.mockImplementationOnce(async () => ({ ok: false, code: "SESSION_NOT_BUS_ELIGIBLE" }));
   expect(answerOf(await inbound(request("session.start", { projectId, sessionId: "s1" })))).toMatchObject({
     ok: false, error: { code: "SESSION_NOT_BUS_ELIGIBLE" },
@@ -216,7 +215,7 @@ test("sessions.list rows carry exactly the allowlist", async () => {
 
 test("a project outside the catalog, or with an unsafe id, is UNKNOWN_PROJECT", async () => {
   const { inbound, core, setDirectory } = rig();
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   for (const projectId of ["not-a-project", "../x", ".hidden", "a/b"]) {
     expect(answerOf(await inbound(request("session.create", { projectId })))).toMatchObject({
       ok: false, error: { code: "UNKNOWN_PROJECT" },
@@ -227,7 +226,7 @@ test("a project outside the catalog, or with an unsafe id, is UNKNOWN_PROJECT", 
 
 test("a cold project is warmed with open(projectId, path, local) before the seam runs", async () => {
   const { h, core, inbound, projectId, setDirectory } = rig({ warm: false });
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   const open = spyOn(h, "open").mockImplementation(async () => {
     (h as any).cores.set(projectId, { core, path: dir, mode: "local", lastFocusedMs: 0 });
     return {} as any;
@@ -240,7 +239,7 @@ test("a cold project is warmed with open(projectId, path, local) before the seam
 
 test("a project that will not open answers REQUEST_FAILED", async () => {
   const { h, inbound, projectId, setDirectory } = rig({ warm: false });
-  setDirectory({ orchestrators: [PEER], busControl: true });
+  setDirectory({ orchestrators: [PEER] });
   spyOn(h, "open").mockRejectedValue(new Error("boom"));
   expect(answerOf(await inbound(request("session.stop", { projectId, sessionId: "s1" })))).toMatchObject({
     ok: false, error: { code: "REQUEST_FAILED" },
@@ -248,7 +247,7 @@ test("a project that will not open answers REQUEST_FAILED", async () => {
 });
 
 test("the per-machine rate is charged before reach and role refusals", async () => {
-  const { inbound, projectId } = rig();
+  const { inbound, projectId } = rig({ reach: false });
   for (let i = 0; i < 60; i++) {
     expect(answerOf(await inbound(request("session.create", { projectId }))).error?.code).toBe("NOT_ALLOWED_AGENT_REACH");
   }

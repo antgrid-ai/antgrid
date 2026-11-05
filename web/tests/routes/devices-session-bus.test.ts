@@ -27,14 +27,14 @@ async function setup() {
 }
 
 describe("PATCH /account/devices/:id/session-bus", () => {
-  test("the owner raises grants and the response carries both values", async () => {
+  test("a new agent device is an orchestrator and the owner can lower and raise it", async () => {
     const { device, user, patch } = await setup();
     const agent = await device(user.id, "agent");
-    const res = await patch(agent.id, { orchestrator: true });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ orchestrator: true, busControl: false });
-    expect(await (await patch(agent.id, { busControl: true })).json()).toEqual({ orchestrator: true, busControl: true });
-    expect(await (await patch(agent.id, { orchestrator: false })).json()).toEqual({ orchestrator: false, busControl: true });
+    expect(agent.orchestrator).toBe(true);
+    const lowered = await patch(agent.id, { orchestrator: false });
+    expect(lowered.status).toBe(200);
+    expect(await lowered.json()).toEqual({ orchestrator: false });
+    expect(await (await patch(agent.id, { orchestrator: true })).json()).toEqual({ orchestrator: true });
   });
 
   test("another user's device, an app device, a revoked device and a bad id are 404 and unchanged", async () => {
@@ -44,11 +44,11 @@ describe("PATCH /account/devices/:id/session-bus", () => {
     const phone = await device(user.id, "app");
     const revoked = await device(user.id, "agent", { revokedAt: new Date() });
     for (const id of [foreign.id, phone.id, revoked.id, randomUUID(), "not-a-uuid"]) {
-      expect((await patch(id, { orchestrator: true })).status).toBe(404);
+      expect((await patch(id, { orchestrator: false })).status).toBe(404);
     }
     for (const row of [foreign, phone, revoked]) {
       expect(await pg.db.device.findUniqueOrThrow({ where: { id: row.id } }))
-        .toMatchObject({ orchestrator: false, busControl: false });
+        .toMatchObject({ orchestrator: true });
     }
   });
 
@@ -66,19 +66,19 @@ describe("PATCH /account/devices/:id/session-bus", () => {
     const policy = () => pg.db.peerAuthorizationPolicy.findUnique({ where: { userId: user.id } });
     const before = await policy();
     const outbox = await pg.db.peerAuthorizationOutbox.count({ where: { userId: user.id } });
-    expect((await patch(agent.id, { orchestrator: true, busControl: true })).status).toBe(200);
+    expect((await patch(agent.id, { orchestrator: false })).status).toBe(200);
     expect((await policy())?.generation).toEqual(before?.generation);
     expect(await pg.db.peerAuthorizationOutbox.count({ where: { userId: user.id } })).toBe(outbox);
   });
 
-  test("GET /account/devices carries both flags for agent devices only", async () => {
+  test("GET /account/devices carries the orchestrator flag for agent devices only", async () => {
     const { app, cookie, device, user, patch } = await setup();
     const agent = await device(user.id, "agent");
     await device(user.id, "app");
-    await patch(agent.id, { busControl: true });
+    await patch(agent.id, { orchestrator: false });
     const body = await (await app.request("/account/devices", { headers: { cookie } })).json() as
-      { devices: Array<{ kind: string; orchestrator?: boolean; busControl?: boolean }> };
-    expect(body.devices.find((d) => d.kind === "agent")).toMatchObject({ orchestrator: false, busControl: true });
+      { devices: Array<{ kind: string; orchestrator?: boolean }> };
+    expect(body.devices.find((d) => d.kind === "agent")).toMatchObject({ orchestrator: false });
     expect("orchestrator" in body.devices.find((d) => d.kind === "app")!).toBe(false);
   });
 });

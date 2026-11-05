@@ -190,7 +190,8 @@ class _AccessSection extends ConsumerWidget {
 }
 
 /// The second, subordinate bit: whether an AGENT on another of your machines
-/// may read what runs here and post into a session, with nobody watching.
+/// may read what runs here, post into a session and, from an orchestrator,
+/// start and drive sessions, with nobody watching.
 ///
 /// It sits under the switch above rather than beside it because it grants
 /// nothing on its own — the bridge reads it only after remote access has said
@@ -274,9 +275,9 @@ class _AgentReachRow extends ConsumerWidget {
   }
 }
 
-/// The two bus grants for THIS machine. Raised only here, with the owner's
+/// The orchestrator grant for THIS machine. Raised only here, with the owner's
 /// account session: a credential that lives on the machine must not be able to
-/// elevate it. Hidden when the machine has no readable grants.
+/// elevate it. Hidden when the machine has no readable grant.
 class _BusGrantsSection extends ConsumerWidget {
   const _BusGrantsSection();
 
@@ -302,23 +303,11 @@ class _BusGrantsSection extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _GrantRow(
-            switchKey: const Key('bus-control-switch'),
-            label: 'Accept control from orchestrators',
-            copy:
-                'An orchestrator on another of your machines can start and '
-                'drive sessions here.',
-            value: grants.busControl,
-            onChanged: live
-                ? (v) => _set(context, notifier.setGrants(busControl: v))
-                : null,
-          ),
-          const SizedBox(height: AbTokens.space8),
-          _GrantRow(
             switchKey: const Key('orchestrator-switch'),
             label: 'Orchestrator: may drive other machines',
             copy:
                 'Agents here can start and drive sessions on your other '
-                'machines that accept control.',
+                'machines that are reachable by agents.',
             value: grants.orchestrator,
             onChanged: live
                 ? (v) => _set(context, notifier.setGrants(orchestrator: v))
@@ -397,8 +386,8 @@ String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
   // one an agent here opened is admitted by design, and the sentence promising
   // outbound still works is exactly what invites those replies.
   final effect = policy.enabled
-      ? 'An agent on another of your machines can see the sessions running '
-            'here and post into one, with nobody watching.'
+      ? 'Agents on your other machines can see the sessions running here, '
+            'post into them and, from an orchestrator, start and drive them.'
       : 'Agents on your other machines can neither see what runs here nor '
             'start anything in it. Your own agents can still reach out, and '
             'the answers they get still land.';

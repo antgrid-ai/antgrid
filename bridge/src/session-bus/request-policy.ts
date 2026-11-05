@@ -1,6 +1,6 @@
 // What another machine may ask this one to do over the bus, decided from three
 // facts the requester cannot author: the method, the requester's role as the
-// account's directory reports it, and this machine's effective reach level.
+// account's directory reports it, and this machine's local agent-reach switch.
 //
 // Kept apart from the dispatcher so the whole matrix is one table that a test
 // can walk, and so a method added to the host cannot become reachable without
@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { SessionEntry } from "../protocol";
 import type { SessionBusErrorCode } from "./errors";
 
-export type AgentReachLevel = "off" | "messages" | "control";
+export type AgentReachLevel = "off" | "on";
 export type BusRole = "agent" | "orchestrator";
 
 export const BUS_READ_METHODS = ["machine.capability-card", "sessions.list"] as const;
@@ -22,11 +22,10 @@ export type BusControlMethod = (typeof BUS_CONTROL_METHODS)[number];
 const READ = new Set<string>(BUS_READ_METHODS);
 const CONTROL = new Set<string>(BUS_CONTROL_METHODS);
 
-/** Local off always wins. `control` needs the owner-set grant on top of a local
- *  `on`, so nothing on this machine can raise it past what the owner set. */
-export function effectiveReachLevel(localEnabled: boolean, selfBusControl: boolean): AgentReachLevel {
-  if (!localEnabled) return "off";
-  return selfBusControl ? "control" : "messages";
+/** The local switch is the whole reach decision; the requester's orchestrator
+ *  role is checked separately, per method. */
+export function effectiveReachLevel(localEnabled: boolean): AgentReachLevel {
+  return localEnabled ? "on" : "off";
 }
 
 export function isBusMethod(method: string): boolean {
@@ -40,7 +39,7 @@ export function busRequestVerdict(i: {
 }): "allow" | { code: Extract<SessionBusErrorCode, "METHOD_NOT_ALLOWED" | "NOT_ALLOWED_AGENT_REACH" | "NOT_ORCHESTRATOR"> } {
   if (READ.has(i.method)) return i.level === "off" ? { code: "NOT_ALLOWED_AGENT_REACH" } : "allow";
   if (!CONTROL.has(i.method)) return { code: "METHOD_NOT_ALLOWED" };
-  if (i.level !== "control") return { code: "NOT_ALLOWED_AGENT_REACH" };
+  if (i.level === "off") return { code: "NOT_ALLOWED_AGENT_REACH" };
   return i.role === "orchestrator" ? "allow" : { code: "NOT_ORCHESTRATOR" };
 }
 

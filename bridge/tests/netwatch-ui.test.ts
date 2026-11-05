@@ -259,7 +259,7 @@ describe("viewer routes", () => {
       "agent-reach:get": { id: "a", type: "agent-reach:get" },
       "agent-reach:set": { id: "a", type: "agent-reach:set", enabled: true },
       "bus-grants:get": { id: "a", type: "bus-grants:get" },
-      "bus-grants:lower": { id: "a", type: "bus-grants:lower", busControl: false },
+      "bus-grants:lower": { id: "a", type: "bus-grants:lower", orchestrator: false },
       "git:branches": { id: "a", type: "git:branches", projectId: "p", projectPath: "/x" },
       "git:remote-state": { id: "a", type: "git:remote-state", projectId: "p", projectPath: "/x", branch: "main" },
       "git:checkout": { id: "a", type: "git:checkout", projectId: "p", projectPath: "/x", branch: "main" },

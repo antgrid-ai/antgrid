@@ -1171,7 +1171,7 @@ test("a duplicate bus request returns the cached response without re-execution, 
   const them = { sign: ed25519Pair(), bus: busPair() };
   const entry: MachineEntry = {
     deviceId: BUS_PEER, displayName: "them", machineName: null, ed25519Pub: them.sign.pub,
-    busPublicKey: them.bus.publicKey, orchestrator: false, busControl: false,
+    busPublicKey: them.bus.publicKey, orchestrator: false,
   };
   const directory = {
     current: () => ({ machines: [entry], allowed: true }) as never,

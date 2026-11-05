@@ -210,11 +210,11 @@ export async function machineDirectory(db: DB, identity: Identity) {
     return MachineDirectorySchema.parse({
       accountId: identity.userId, deviceId: identity.deviceId, allowed,
       self: { busPublicKey: device.busPublicKey ? b64(device.busPublicKey) : null,
-        orchestrator: device.orchestrator, busControl: device.busControl },
+        orchestrator: device.orchestrator },
       machines: rows.slice(0, MAX_ACCOUNT_MACHINES).map((peer) => ({
         deviceId: peer.deviceId, displayName: peer.displayName, machineName: peer.machineName || null,
         ed25519Pub: b64(peer.publicKey), busPublicKey: peer.busPublicKey ? b64(peer.busPublicKey) : null,
-        orchestrator: peer.orchestrator, busControl: peer.busControl })),
+        orchestrator: peer.orchestrator })),
     });
   });
 }
@@ -237,7 +237,7 @@ export async function ownSessionBusGrants(db: DB, identity: Identity): Promise<S
   return serializable(db, async (tx) => {
     const device = await currentIdentity(tx, identity);
     if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
-    return { orchestrator: device.orchestrator, busControl: device.busControl };
+    return { orchestrator: device.orchestrator };
   });
 }
 
@@ -248,7 +248,7 @@ export async function ownSessionBusGrants(db: DB, identity: Identity): Promise<S
  */
 export async function lowerOwnSessionBusGrants(db: DB, identity: Identity,
   patch: SessionBusGrantsPatch): Promise<SessionBusGrants> {
-  if (patch.orchestrator === true || patch.busControl === true) {
+  if (patch.orchestrator === true) {
     throw new PeerAuthorizationError("OWNER_SESSION_REQUIRED");
   }
   return serializable(db, async (tx) => {
@@ -256,9 +256,8 @@ export async function lowerOwnSessionBusGrants(db: DB, identity: Identity,
     if (device.kind !== "agent") throw new PeerAuthorizationError("NOT_AGENT");
     const updated = await tx.device.update({ where: { id: device.id }, data: {
       ...(patch.orchestrator === false ? { orchestrator: false } : {}),
-      ...(patch.busControl === false ? { busControl: false } : {}),
     } });
-    return { orchestrator: updated.orchestrator, busControl: updated.busControl };
+    return { orchestrator: updated.orchestrator };
   });
 }
 
@@ -267,11 +266,10 @@ export async function setOwnedSessionBusGrants(db: DB, userId: string, id: strin
   patch: SessionBusGrantsPatch): Promise<SessionBusGrants | null> {
   const result = await db.device.updateMany({ where: { id, userId, kind: "agent", revokedAt: null }, data: {
     ...(patch.orchestrator !== undefined ? { orchestrator: patch.orchestrator } : {}),
-    ...(patch.busControl !== undefined ? { busControl: patch.busControl } : {}),
   } });
   if (result.count === 0) return null;
   const row = await db.device.findUniqueOrThrow({ where: { id } });
-  return { orchestrator: row.orchestrator, busControl: row.busControl };
+  return { orchestrator: row.orchestrator };
 }
 
 /**

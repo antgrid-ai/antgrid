@@ -286,7 +286,7 @@ test("a duplicate delivery is applied once and charges the pair budget once", as
   });
   const entry: MachineEntry = {
     deviceId: them.id, displayName: "them", machineName: null, ed25519Pub: them.sign.pub,
-    busPublicKey: them.bus.publicKey, orchestrator: false, busControl: false,
+    busPublicKey: them.bus.publicKey, orchestrator: false,
   };
   const directory = {
     current: () => ({ machines: [entry], allowed: true }) as never,

@@ -12,7 +12,6 @@ class DeviceSummary {
     required this.platform,
     required this.displayName,
     this.orchestrator,
-    this.busControl,
   });
 
   final String id;
@@ -21,22 +20,17 @@ class DeviceSummary {
   final String platform;
   final String displayName;
 
-  /// Session-bus grants. Null for a device the server sends none for (an app
-  /// device, or a server that predates the fields), never read as false.
+  /// Session-bus grant. Null for a device the server sends none for (an app
+  /// device, or a server that predates the field), never read as false.
   final bool? orchestrator;
-  final bool? busControl;
 }
 
-/// The two grants an agent machine holds on the session bus: whether it may
-/// drive the account's other machines, and whether it accepts being driven.
+/// The grant an agent machine holds on the session bus: whether it may drive
+/// the account's other machines.
 class SessionBusGrants {
-  const SessionBusGrants({
-    required this.orchestrator,
-    required this.busControl,
-  });
+  const SessionBusGrants({required this.orchestrator});
 
   final bool orchestrator;
-  final bool busControl;
 }
 
 class DevicesApi extends CookieApiClient implements DevicesApiCreator {
@@ -73,7 +67,6 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
             platform: d['platform'] as String,
             displayName: d['display_name'] as String,
             orchestrator: d['orchestrator'] as bool?,
-            busControl: d['busControl'] as bool?,
           ),
         )
         .toList();
@@ -96,8 +89,7 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
   /// Throws on any failure so a switch never claims a grant that did not land.
   Future<SessionBusGrants> setSessionBusGrants(
     String id, {
-    bool? orchestrator,
-    bool? busControl,
+    required bool orchestrator,
   }) async {
     final cookie = await cookieProvider();
     if (cookie == null) throw Exception('Not signed in');
@@ -106,19 +98,13 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
       'PATCH',
       Uri.parse('$licenseApiUrl/account/devices/$id/session-bus'),
       headers: {'content-type': 'application/json', 'cookie': cookie},
-      body: jsonEncode({
-        'orchestrator': ?orchestrator,
-        'busControl': ?busControl,
-      }),
+      body: jsonEncode({'orchestrator': orchestrator}),
     );
     if (res.statusCode != 200) {
       throw Exception('Session bus grant update failed: ${res.statusCode}');
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    return SessionBusGrants(
-      orchestrator: body['orchestrator'] as bool,
-      busControl: body['busControl'] as bool,
-    );
+    return SessionBusGrants(orchestrator: body['orchestrator'] as bool);
   }
 
   @override
