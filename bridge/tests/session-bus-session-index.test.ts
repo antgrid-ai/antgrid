@@ -207,3 +207,18 @@ test("sessionsIn omits the label for a project recorded without one", () => {
   const [only] = [...index.sessionsIn("unlabelled")];
   expect("projectLabel" in only!).toBe(false);
 });
+
+test("hydrated is false until hydrate finishes, and stays true after", async () => {
+  const abDir = tmpAbDir();
+  try {
+    seedPersisted(abDir, "proj-a", [{ id: "sess-a", name: "A", createdAt: 1, lastUsedAt: 1, archived: false }]);
+    const index = coldIndex();
+    expect(index.hydrated).toBe(false);
+    const pending = index.hydrate(abDir, [{ id: "proj-a", label: "Project A" }]);
+    await pending;
+    expect(index.hydrated).toBe(true);
+    expect(index.lookup("sess-a")?.projectId).toBe("proj-a");
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});

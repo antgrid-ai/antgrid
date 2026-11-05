@@ -473,3 +473,58 @@ describe("POST /account/devices — membership", () => {
     expect(body.devices.map((d) => d.display_name).sort()).toEqual(["Member box", "Member laptop"]);
   });
 });
+
+describe("POST /account/devices - bus identity on re-provision", () => {
+  async function seeded(app: TestApp, cookie: string) {
+    const body = registerBody({ platform: "linux" });
+    expect((await register(app, cookie, body)).status).toBe(201);
+    const row = await pg.db.device.findFirstOrThrow({ where: { deviceId: body.deviceUuid as string } });
+    await pg.db.device.update({ where: { id: row.id }, data: {
+      busPublicKey: Buffer.alloc(32, 4), orchestrator: true, busControl: true } });
+    return { body, id: row.id };
+  }
+
+  test("a new public key resets the bus key, orchestrator and busControl", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "bus-reset@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { body, id } = await seeded(app, cookie);
+
+    const res = await register(app, cookie, { ...body, ed25519Pub: Buffer.alloc(32, 99).toString("base64") });
+    expect(res.status).toBe(200);
+    const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
+    expect(row.busPublicKey).toBeNull();
+    expect(row.orchestrator).toBe(false);
+    expect(row.busControl).toBe(false);
+  });
+
+  test("re-registering the same key keeps them", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "bus-keep@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { body, id } = await seeded(app, cookie);
+
+    expect((await register(app, cookie, body)).status).toBe(200);
+    const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
+    expect(Buffer.from(row.busPublicKey!).equals(Buffer.alloc(32, 4))).toBe(true);
+    expect(row.orchestrator).toBe(true);
+    expect(row.busControl).toBe(true);
+  });
+
+  test("reviving a revoked row resets them even with the same key", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "bus-revive@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { body, id } = await seeded(app, cookie);
+    await pg.db.device.update({ where: { id }, data: { revokedAt: new Date() } });
+
+    expect((await register(app, cookie, body)).status).toBe(200);
+    const row = await pg.db.device.findUniqueOrThrow({ where: { id } });
+    expect(row.busPublicKey).toBeNull();
+    expect(row.orchestrator).toBe(false);
+    expect(row.busControl).toBe(false);
+  });
+});

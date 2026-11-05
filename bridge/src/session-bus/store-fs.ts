@@ -98,7 +98,7 @@ export function removeSessionBusSession(abDir: string, projectId: string, sessio
 
 /**
  * Remove every bus record a project owns — its sessions' logs, held messages
- * and artifact handles, its delivery queue, and its carrier routes.
+ * and artifact handles, and its delivery queue.
  *
  * The bytes are NOT this function's business: `HostServer.forget` deletes
  * `agents/<projectId>/` wholesale, which takes them with it. What that delete

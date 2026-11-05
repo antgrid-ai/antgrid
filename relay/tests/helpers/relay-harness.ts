@@ -78,6 +78,13 @@ export const defaultConfig: RelayConfig = {
   replayTtlMs: 300000,
   pingIntervalMs: 0, // disabled in tests
   pongTimeoutMs: 10000,
+  busQueueMessagesPerDevice: 256,
+  busQueueBytesPerDevice: 8 * 1024 * 1024,
+  busQueueMessagesPerSender: 512,
+  busQueueBytesPerSender: 16 * 1024 * 1024,
+  busQueueBytesTotal: 256 * 1024 * 1024,
+  busMaxTtlMs: 6 * 60 * 60_000,
+  busSendBytesPerMin: 16 * 1024 * 1024,
   trustedProxyIps: [],
   logLevel: "error" as const,
   licenseApiUrl: "http://localhost:8787",
@@ -183,6 +190,8 @@ export interface HelloOptions {
   /** Reuse an identity (e.g. a reconnect / epoch test) instead of a fresh key. */
   publicKeyBase64?: string;
   privateSeed?: Uint8Array;
+  /** Opt in to bus frames (agents only); outside the signed body, like the real client. */
+  bus?: 1;
 }
 
 /**
@@ -236,6 +245,7 @@ export async function makeHello(
     nonce,
     sig,
   };
+  if (opts.bus) hello.bus = opts.bus;
   return { hello, publicKeyBase64, privateSeed };
 }
 

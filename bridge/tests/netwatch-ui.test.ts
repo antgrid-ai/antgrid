@@ -259,20 +259,18 @@ describe("viewer routes", () => {
       "mobile-access:set": { id: "a", type: "mobile-access:set", enabled: true },
       "agent-reach:get": { id: "a", type: "agent-reach:get" },
       "agent-reach:set": { id: "a", type: "agent-reach:set", enabled: true },
+      "bus-grants:get": { id: "a", type: "bus-grants:get" },
+      "bus-grants:lower": { id: "a", type: "bus-grants:lower", busControl: false },
       "git:branches": { id: "a", type: "git:branches", projectId: "p", projectPath: "/x" },
       "git:remote-state": { id: "a", type: "git:remote-state", projectId: "p", projectPath: "/x", branch: "main" },
       "git:checkout": { id: "a", type: "git:checkout", projectId: "p", projectPath: "/x", branch: "main" },
       "netwatch:ui": { id: "a", type: "netwatch:ui" },
       "modelwatch:ui": { id: "a", type: "modelwatch:ui" },
       "checkout:path": { id: "a", type: "checkout:path", projectId: "p", checkoutId: "c" },
-      // Reads, but not viewer reads: the card and the directory name every
-      // project and session this machine holds, which is the inventory a viewer
-      // session exists to be narrowed away from.
+      // Reads, but not viewer reads: the card names every project this machine
+      // holds, which is the inventory a viewer session exists to be narrowed
+      // away from.
       "machine:capability-card": { id: "a", type: "machine:capability-card", projects: [] },
-      "session-bus:remote-directory": { id: "a", type: "session-bus:remote-directory", machines: [] },
-      // Reads nothing but counters — except `wantedRepoKeys`, which names the
-      // repos this machine's agents asked about. Same inventory, same answer.
-      "session-bus:directory-status": { id: "a", type: "session-bus:directory-status" },
       // An arm, but not this viewer's: what it turns up is the HOST's own log
       // file, which the page cannot read and which is not the capture ring a
       // viewer session is scoped to. Its ticket travels in a URL fragment, so

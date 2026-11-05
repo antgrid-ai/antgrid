@@ -1,0 +1,4 @@
+ALTER TABLE "devices"
+  ADD COLUMN "bus_public_key" BYTEA,
+  ADD COLUMN "orchestrator" BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN "bus_control" BOOLEAN NOT NULL DEFAULT FALSE;

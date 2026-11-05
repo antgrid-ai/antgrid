@@ -6,11 +6,13 @@
 // built inside the project core with the machine-level directory injected into
 // it: machine-scoped state never implied machine-scoped transport.
 //
-// Every case here is driven through `bus.dispatchInbound` rather than by calling
+// Every read here is driven through `bus.dispatchInbound` rather than by calling
 // the api directly, because the wiring is what fails silently: `handleAbMessage`
 // has no exhaustiveness check and a `void` return, so a type that reached
 // `KNOWN_TYPES` and never reached the switch is green in `bun test`, green in
-// `tsc`, and answers nothing until the app's own 15s timeout fires.
+// `tsc`, and answers nothing until the app's own 15s timeout fires. Inbound mail
+// is seeded straight into the coordinator instead: a project stream drops bus
+// frames, and the relay path that delivers them has its own suites.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -122,8 +124,8 @@ async function setUp(): Promise<Fixture> {
     },
     addressable: () => true,
     // Delivery is not what this file is about: every send is accepted so an
-    // outbound entry exists to be acked and read back on a thread.
-    send: () => true,
+    // outbound entry exists to be acknowledged and read back on a thread.
+    send: () => ({ sent: true }),
   });
   const directory = new SessionDirectory({
     repoKeys: {
@@ -171,7 +173,6 @@ async function setUp(): Promise<Fixture> {
     // an api that takes a terminal id.
     membership: (terminalId) =>
       terminalId === sessionA || terminalId === sessionB ? { sessionId: terminalId } : null,
-    carrierPresent: () => true,
     remoteAccessEnabled: () => true,
   });
 
@@ -195,7 +196,8 @@ async function ask(
   ) as unknown as Record<string, unknown>;
 }
 
-/** One inbound post, as the carrier hands it to this bridge. */
+/** One inbound post, as the host hands it to the coordinator once the relay
+ *  delivery has been opened and gated. */
 function inboundPost(sessionId: string, messageId: string, text: string): AbMessage {
   return createMessage("session-bus:post", {
     from: REMOTE,
@@ -240,7 +242,7 @@ test(
   "the inbox read answers a member session with its unread posts",
   async () => {
     const fx = await setUp();
-    fx.bus.dispatchInbound(inboundPost(fx.sessionA, "msg-inbox-1", "look at this"), "control", "loopback");
+    expect(coordinator!.handleInbound(inboundPost(fx.sessionA, "msg-inbox-1", "look at this"))).toBe("applied");
     await waitFor(() => coordinator!.mailbox(fx.sessionA).posts.length === 1, "the post to land in the mailbox");
 
     const requestId = crypto.randomUUID();
@@ -265,7 +267,7 @@ test(
   "the inbox read does not spend the agent's unread flag",
   async () => {
     const fx = await setUp();
-    fx.bus.dispatchInbound(inboundPost(fx.sessionA, "msg-peek-1", "the agent must still see this"), "control", "loopback");
+    expect(coordinator!.handleInbound(inboundPost(fx.sessionA, "msg-peek-1", "the agent must still see this"))).toBe("applied");
     await waitFor(() => coordinator!.mailbox(fx.sessionA).posts.length === 1, "the post to land in the mailbox");
 
     // The human looks — twice, because a badge is read on every rebuild and one
@@ -311,19 +313,10 @@ test(
     });
     if (!("ok" in sendResult) || !sendResult.ok) throw new Error(`send refused: ${JSON.stringify(sendResult)}`);
 
-    // The far side's receipt, which is the only honest witness that the message
-    // arrived — everything this side of the relay reports only that it left.
-    fx.bus.dispatchInbound(
-      createMessage("session-bus:ack", {
-        from: REMOTE,
-        to: { machineId: MACHINE_ID, projectId: cores[0]!.projectId, sessionId: fx.sessionA },
-        contextId: fx.sessionA,
-        messageId: sendResult.messageId,
-        ok: true,
-      }),
-      "control",
-      "loopback",
-    );
+    // The far side's acknowledgement, which is the only honest witness that the
+    // message arrived — everything this side of the relay reports only that it
+    // left.
+    coordinator!.onTransportOutcome(sendResult.messageId, REMOTE.machineId, { kind: "applied" });
     await waitFor(
       () => coordinator!.messages(fx.sessionA).entries.some((e) => e.deliveredAt !== undefined),
       "the receipt to be stamped",
@@ -340,10 +333,11 @@ test(
     expect(result.error).toBeUndefined();
     expect(result.threadId).toBe(sendResult.threadId);
     expect(result.contextId).toBe(fx.sessionA);
-    const entries = result.entries as { direction: string; deliveredAt?: number }[];
+    const entries = result.entries as { direction: string; deliveredAt?: number; delivery?: string }[];
     const outbound = entries.filter((e) => e.direction === "out");
     expect(outbound).toHaveLength(1);
     expect(typeof outbound[0]!.deliveredAt).toBe("number");
+    expect(outbound[0]!.delivery).toBe("delivered");
   },
   30_000,
 );
@@ -396,7 +390,7 @@ test(
   async () => {
     const fx = await setUp();
     for (let i = 0; i < 4; i += 1) {
-      fx.bus.dispatchInbound(inboundPost(fx.sessionA, `msg-burst-${i}`, `burst ${i}`), "control", "loopback");
+      expect(coordinator!.handleInbound(inboundPost(fx.sessionA, `msg-burst-${i}`, `burst ${i}`))).toBe("applied");
     }
 
     await waitFor(() => fx.sent.some((m) => m.type === "session-bus:arrived"), "the arrival push");

@@ -14,12 +14,14 @@ import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 import {
   PublishArtifactBodySchema,
+  BusRequestBodySchema,
   SendBodySchema,
   ReplyBodySchema,
+  type SendResultView,
   type SessionBusApi,
 } from "./session-bus/api";
-import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
-import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
+import { ARTIFACT_CHUNK_BYTES, BUS_RUNG_REPORT_WAIT_MS } from "./session-bus/constants";
+import { SESSION_BUS_ERRORS, isRefusal, type SessionBusRefusal } from "./session-bus/errors";
 import {
   SCHEDULER_AGENT_ERRORS,
   SchedulerRefusal,
@@ -269,7 +271,12 @@ function textResponse(data: string, status = 200) {
  *  a route and the tool calling it can never disagree about what a code means. */
 function sessionBusJson(result: unknown): Response {
   if (isRefusal(result)) {
-    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
+    return json({
+      error: result.error,
+      code: result.code,
+      ...(result.remoteCode ? { remoteCode: result.remoteCode } : {}),
+      ...(result.held ? { held: result.held } : {}),
+    }, SESSION_BUS_ERRORS[result.code]);
   }
   return json(result);
 }
@@ -278,6 +285,33 @@ function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => u
   const parsed = schema.safeParse(body);
   if (!parsed.success) return json({ error: "Invalid body" }, 400);
   return sessionBusJson(run(parsed.data));
+}
+
+/** A send, answered with the rung it reached once the relay had a moment to
+ *  receipt it. The receipt arrives asynchronously and the send itself is
+ *  synchronous, so this is where the two meet: the wait is bounded by
+ *  `BUS_RUNG_REPORT_WAIT_MS`, and a slower receipt still shows on the thread. */
+async function sessionBusSend<T>(
+  bus: SessionBusApi,
+  schema: z.ZodType<T>,
+  body: unknown,
+  run: (b: T) => SendResultView | SessionBusRefusal,
+): Promise<Response> {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return json({ error: "Invalid body" }, 400);
+  const result = run(parsed.data);
+  if (isRefusal(result)) return sessionBusJson(result);
+  const reached = await bus.awaitRung(result.messageId, BUS_RUNG_REPORT_WAIT_MS);
+  const { heldReason: _held, refusedCode: _refused, retryUntil, ...rest } = result;
+  return json({
+    ...rest,
+    rung: reached.rung,
+    ...(reached.rung === "held" && retryUntil !== undefined ? { retryUntil } : {}),
+    ...(reached.heldReason === undefined ? {} : { heldReason: reached.heldReason }),
+    ...(reached.refusedCode === undefined ? {} : { refusedCode: reached.refusedCode }),
+    sent: reached.rung !== "held",
+    held: reached.rung === "held",
+  });
 }
 
 function schedulerRefusal(code: keyof typeof SCHEDULER_AGENT_ERRORS, message: string): Response {
@@ -780,13 +814,18 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
         }
         if (rest === "post") {
-          return sessionBusPost(SendBodySchema, body, (b) => bus.post(terminalId, b));
+          return sessionBusSend(bus, SendBodySchema, body, (b) => bus.post(terminalId, b));
         }
         if (rest === "notify") {
-          return sessionBusPost(SendBodySchema, body, (b) => bus.notify(terminalId, b));
+          return sessionBusSend(bus, SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "request") {
+          const parsed = BusRequestBodySchema.safeParse(body);
+          if (!parsed.success) return json({ error: "Invalid body" }, 400);
+          return sessionBusJson(await bus.request(terminalId, parsed.data));
         }
         if (rest === "reply") {
-          return sessionBusPost(ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
+          return sessionBusSend(bus, ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
         }
         return json({ error: "Not found" }, 404);
       }

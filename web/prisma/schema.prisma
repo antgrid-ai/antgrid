@@ -226,6 +226,11 @@ model Device {
   mobileAccessEnabled Boolean   @default(false) @map("mobile_access_enabled")
   relayUrl            String?   @map("relay_url")
   machineName         String?   @map("machine_name")
+  // Session-bus attributes. Deliberately outside the peer-policy triggers: they
+  // never change who may connect, so writing them must not bump policyGeneration.
+  busPublicKey        Bytes?    @map("bus_public_key")
+  orchestrator        Boolean   @default(false) @map("orchestrator")
+  busControl          Boolean   @default(false) @map("bus_control")
 
   @@unique([userId, deviceId], map: "devices_user_id_device_id_key")
   // `devices_user_active_idx` is a PARTIAL index (WHERE revoked_at IS NULL),

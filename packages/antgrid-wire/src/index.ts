@@ -1,10 +1,12 @@
 export * from "./client-ip";
 export * from "./relay-protocol";
+export * from "./bus-protocol";
 export * from "./relay-auth";
 export * from "./relay-slot";
 export * from "./push-protocol";
 export * from "./peer-authorization";
 export * from "./peer-protocol";
+export * from "./machine-directory";
 
 export {
   SessionStreamOpen,

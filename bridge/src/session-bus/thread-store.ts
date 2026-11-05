@@ -5,16 +5,15 @@
 // and never validated — so this store exists for exactly one question: given a
 // thread id an agent wants to answer on, what `contextId` did that exchange
 // arrive under? Nothing else on the machine can answer it. A session that was
-// NOTIFIED holds no mailbox row at all, and without a row here a reply falls
-// back to the replier's own session id, which `roleForContext` reads as "lead"
-// and sends to THIS machine's desktop app — which accepts it and reports it
-// sent. The misroute is silent on both ends.
+// NOTIFIED holds no mailbox row at all, and without a row here a reply would
+// carry the replier's own session id as its context and land as a new exchange
+// rather than as the answer on the one it was asked on.
 //
 // A ROW HERE IS PART OF A SECURITY BOUND, not only a routing hint. The send
 // path lets a session answer an off-machine peer whose directory row this
-// machine cannot resolve, and a thread row is one of the three things it
-// requires (the others are a live carrier route for the context and a frame
-// from that peer on it inside the route TTL). What makes that safe is that a row
+// machine cannot resolve, and a thread row is the whole of what it requires:
+// nothing bounds it in time beyond the row's own expiry, and the peer's half of
+// the repo-key scope is not checked. What makes that safe is that a row
 // is unforgeable by the agent that benefits from it: both mint sites run
 // post-admission — one on an outbound send this session itself made, one on an
 // inbound frame that already cleared `handleInbound`'s address check — and

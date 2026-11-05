@@ -96,11 +96,12 @@ function seedSession(projectId: string, sessionId: string): void {
     holdMessage(emptyHeld(), {
       messageId: "m-1",
       contextId: "ctx-1",
-      role: "lead",
       to: PEER,
       frame: { type: "session-bus:post" },
       heldAt: 1,
-    }),
+      attempts: 1,
+      nextAttemptAt: 0,
+    }).state,
   );
   saveArtifacts(abDir, projectId, sessionId, addArtifact({ artifacts: [] }, artifact(`art-${sessionId}`)));
   writeArtifactContent(abDir, projectId, sessionId, `art-${sessionId}`, new Uint8Array([1, 2, 3]));

@@ -402,7 +402,6 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
       const handle: StreamHandle = {
         detach: () => {},
         sendTo: async () => "sent" as const,
-        deliverableTo: () => true,
         terminalHooks: hooks,
       };
       return handle;
@@ -467,56 +466,6 @@ test("attachRelayStream wires handle.terminalHooks into the core, and every tear
   );
   await new Promise((resolve) => setTimeout(resolve, 150));
   expect(settled.some((s) => s.requestId === secondRequestId)).toBe(false);
-});
-
-test("sendToAppSession returns false and sends nothing when deliverableTo(peer) is false", async () => {
-  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-deliverable-"));
-  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
-  writeFileSync(join(folder, "antgrid.yaml"), "");
-
-  const sendCalls: Array<{ peerId: string }> = [];
-  let deliverable = false;
-  const deps: ProjectCoreRemoteDeps = {
-    attachStream: (_bus, _opts) => ({
-      detach: () => {},
-      sendTo: async (_msg, _channel, target) => {
-        sendCalls.push({ peerId: (target as { peerId: string }).peerId });
-        return "sent" as const;
-      },
-      deliverableTo: () => deliverable,
-    }),
-    establishedPeers: () => [],
-    peerSession: () => null,
-    machineDeviceId: () => "machine-uuid",
-    sendPushDeliver: () => {},
-    accountDisowns: () => false,
-  };
-
-  const core = new ProjectCore({
-    folder,
-    mode: "remote",
-    identity: {
-      deviceId: randomUUID(), deviceName: "d", createdAt: new Date().toISOString(),
-      ed25519PublicKey: "AAAA", ed25519PrivateKey: "AAAA",
-    },
-    remote: deps,
-  });
-  cleanup.push(() => core.shutdown());
-  await core.start();
-
-  const msg = createMessage("terminal:display:status", {
-    terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
-  }) as AbMessage;
-
-  // Not deliverable: the strongest fact available synchronously says the
-  // session isn't live, so no queue is spent on a frame the writer would drop.
-  expect(core.sendToAppSession("peer-x", msg)).toBe(false);
-  expect(sendCalls).toEqual([]);
-
-  // Deliverable: the same call now reaches the stream's sendTo.
-  deliverable = true;
-  expect(core.sendToAppSession("peer-x", msg)).toBe(true);
-  expect(sendCalls).toEqual([{ peerId: "peer-x" }]);
 });
 
 test("onPeerStreamClosed(peer) clears that peer's focus claim", async () => {

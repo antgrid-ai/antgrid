@@ -318,6 +318,8 @@ class SessionBusThreadEntry {
     required this.summary,
     required this.text,
     this.deliveredAt,
+    this.delivery,
+    this.refusedCode,
   });
 
   /// True for a message this session sent, false for one it received.
@@ -330,10 +332,19 @@ class SessionBusThreadEntry {
   final String summary;
   final List<String> text;
 
-  /// Outbound entries only, and its absence means "no receipt yet" rather than
-  /// a failure: a receipt is fire-and-forget and an unacked message is never
-  /// retried. This read is the only surface it is visible on.
+  /// Outbound entries only: when the recipient's bridge acked the message.
+  /// Absent means only that the ack has not arrived yet, not a failure; the
+  /// sender keeps resending until it does, and [delivery] names the rung the
+  /// message has reached meanwhile.
   final int? deliveredAt;
+
+  /// Outbound entries only: `held`, `relayed`, `delivered` or `refused`. Absent
+  /// when the bridge did not say, in which case [deliveredAt] alone decides how
+  /// the entry reads.
+  final String? delivery;
+
+  /// Why a `refused` send was refused; meaningful only with that state.
+  final String? refusedCode;
 
   static SessionBusThreadEntry? fromJson(Object? json) {
     if (json is! Map) return null;
@@ -342,6 +353,8 @@ class SessionBusThreadEntry {
     if (direction is! String || peer == null) return null;
     final at = json['at'];
     final deliveredAt = json['deliveredAt'];
+    final delivery = json['delivery'];
+    final refusedCode = json['refusedCode'];
     return SessionBusThreadEntry(
       outbound: direction == 'out',
       at: at is num ? at.toInt() : 0,
@@ -349,6 +362,8 @@ class SessionBusThreadEntry {
       summary: json['summary'] is String ? json['summary'] as String : '',
       text: _stringList(json['text']),
       deliveredAt: deliveredAt is num ? deliveredAt.toInt() : null,
+      delivery: delivery is String ? delivery : null,
+      refusedCode: refusedCode is String ? refusedCode : null,
     );
   }
 
@@ -360,7 +375,9 @@ class SessionBusThreadEntry {
       other.peer == peer &&
       other.summary == summary &&
       listEquals(other.text, text) &&
-      other.deliveredAt == deliveredAt;
+      other.deliveredAt == deliveredAt &&
+      other.delivery == delivery &&
+      other.refusedCode == refusedCode;
 
   @override
   int get hashCode => Object.hash(
@@ -370,6 +387,8 @@ class SessionBusThreadEntry {
     summary,
     Object.hashAll(text),
     deliveredAt,
+    delivery,
+    refusedCode,
   );
 }
 

@@ -1,9 +1,9 @@
-import { sign, createPrivateKey, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { logger } from "./logger";
 
-import { rawSeedToPkcs8 } from "./ed25519-pkcs8";
+import { signEd25519 } from "./ed25519-pkcs8";
 
-import { ServerMessage, buildHelloSigBody, normalizeRelayHost, type HelloMessage } from "antgrid-wire";
+import { ServerMessage, buildHelloSigBody, normalizeRelayHost, type BusClientMessage, type BusServerMessage, type HelloMessage } from "antgrid-wire";
 
 import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
@@ -20,7 +20,9 @@ const log = logger.child({ component: "central-control-client" });
 /**
  * The fields of a relay control verb worth keeping in a capture: the ones that
  * say WHY a socket stalled. Nothing here can leak app content — the relay is
- * zero-knowledge and these verbs carry none. Absent fields stay absent rather
+ * zero-knowledge and these verbs carry none. Bus frames contribute only their
+ * outcome, code and state: never the id, the peer or the sealed blob. Absent
+ * fields stay absent rather
  * than becoming `undefined` keys, so a capture line stays short.
  */
 function netwatchControlDetail(
@@ -28,7 +30,7 @@ function netwatchControlDetail(
 ): Record<string, string | number | boolean> | undefined {
   const m = msg as {
     code?: string; retryable?: boolean; peerId?: string;
-    epoch?: number; ok?: boolean; reason?: string;
+    epoch?: number; ok?: boolean; reason?: string; outcome?: string; state?: string;
   };
   const detail: Record<string, string | number | boolean> = {};
   if (m.code !== undefined) detail.code = m.code;
@@ -37,19 +39,11 @@ function netwatchControlDetail(
   if (m.epoch !== undefined) detail.epoch = m.epoch;
   if (m.ok !== undefined) detail.ok = m.ok;
   if (m.reason !== undefined) detail.reason = m.reason;
+  if (m.outcome !== undefined) detail.outcome = m.outcome;
+  if (m.state !== undefined) detail.state = m.state;
   return Object.keys(detail).length > 0 ? detail : undefined;
 }
 
-/** Ed25519 sign `data` with a raw 32-byte seed (base64). Shared by the hello
- *  proof and any signed frame. */
-function signEd25519(seedB64: string, data: Uint8Array): string {
-  const key = createPrivateKey({
-    key: rawSeedToPkcs8(Buffer.from(seedB64, "base64")),
-    format: "der",
-    type: "pkcs8",
-  });
-  return sign(null, data, key).toString("base64");
-}
 export interface CentralControlOptions {
   identity: DeviceIdentity;
   pairedPhones?: PairedPhonesStore;
@@ -57,6 +51,9 @@ export interface CentralControlOptions {
   onDisconnected?: () => void;
   onConnecting?: () => void;
   onControl?: (message: ServerMessage) => void;
+  /** Opaque session-bus frames from the relay. The client carries them but
+   *  holds no bus keys and cannot read a blob. */
+  onBus?: (message: BusServerMessage) => void;
   onPeerPolicyChanged?: (generation: string) => void;
   url: string;
   /** Machine dir for the persistent connection-epoch counter. */
@@ -102,6 +99,10 @@ export class CentralControlClient {
   reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   authenticated = false;
+
+  /** The relay advertised `bus: 1` on this connection's welcome; reset on every
+   *  disconnect so a redial to a relay that dropped support is not trusted. */
+  private busSupported = false;
 
   readonly epoch: number;
 
@@ -152,6 +153,7 @@ export class CentralControlClient {
     this.cleanup();
     this.ws?.close();
     this.authenticated = false;
+    this.busSupported = false;
     this.lastError = null;
     this.opts.onConnecting?.();
 
@@ -181,6 +183,7 @@ export class CentralControlClient {
     ws.addEventListener("close", () => {
       if (generation !== this.generation || this.intentionalClose) return;
       this.authenticated = false;
+      this.busSupported = false;
       this.ws = null;
       this.cleanup();
       this.opts.onDisconnected?.();
@@ -261,6 +264,9 @@ export class CentralControlClient {
       ts,
       nonce,
       sig,
+      // Outside the signed hello body: it only asks the relay to start sending
+      // bus frames, which the relay never does to a client that did not ask.
+      bus: 1,
     };
     this.sendJson(hello);
   }
@@ -307,6 +313,7 @@ export class CentralControlClient {
     switch (msg.type) {
       case "welcome":
         this.authenticated = true;
+        this.busSupported = msg.bus === 1;
         this.backoff = INITIAL_BACKOFF; // reset ONLY here (PR#49 carry-over)
         this.clockOffsetApplied = false;
         this.startHeartbeat();
@@ -320,6 +327,12 @@ export class CentralControlClient {
         break;
       case "peer-policy-changed":
         this.opts.onPeerPolicyChanged?.(msg.generation);
+        break;
+      case "bus:receipt":
+      case "bus:deliver":
+      case "bus:acked":
+      case "bus:refused":
+        this.opts.onBus?.(msg);
         break;
       case "push:result":
         if (!msg.ok && msg.reason === "unregistered" && this.opts.pairedPhones) {
@@ -381,6 +394,25 @@ export class CentralControlClient {
     this.clockOffsetMs = offset;
     this.clockOffsetApplied = true;
     log.warn("Relay clock skew detected; applying %dms offset to the next hello", offset);
+  }
+
+  /** The relay-corrected wall clock. Bus stamps and expiry checks use this so a
+   *  skewed machine that the hello already tolerates does not refuse all mail. */
+  busNow(): number {
+    return Date.now() + this.clockOffsetMs;
+  }
+
+  busLinkState(): "ready" | "offline" | "unsupported" {
+    if (this.ws?.readyState !== WebSocket.OPEN || !this.authenticated) return "offline";
+    return this.busSupported ? "ready" : "unsupported";
+  }
+
+  /** Carry one bus frame. False means it was not written, so the caller keeps
+   *  its copy; true means only that it went onto the socket. */
+  sendBus(frame: BusClientMessage): boolean {
+    if (this.busLinkState() !== "ready") return false;
+    this.sendJson(frame);
+    return true;
   }
 
   /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A

@@ -19,6 +19,7 @@ function makeConn(overrides: Partial<Connection> = {}): Connection {
     epoch: overrides.epoch ?? 1,
     helloNonce: overrides.helloNonce ?? `nonce-${seq}`,
     helloTs: overrides.helloTs ?? Date.now(),
+    busCapable: overrides.busCapable ?? false,
     ws: overrides.ws ?? ws,
     connectedAt: overrides.connectedAt ?? Date.now(),
     lastSeen: overrides.lastSeen ?? Date.now(),
@@ -26,6 +27,14 @@ function makeConn(overrides: Partial<Connection> = {}): Connection {
 }
 
 describe("Connections indexing", () => {
+  it("carries busCapable on the stored entry", () => {
+    const c = new Connections();
+    c.insert(makeConn({ connectionId: "bc1", deviceId: "bd1", busCapable: true }));
+    c.insert(makeConn({ connectionId: "bc2", deviceId: "bd2" }));
+    expect(c.getByDeviceId("bd1")?.busCapable).toBe(true);
+    expect(c.getByConnectionId("bc2")?.busCapable).toBe(false);
+  });
+
   it("insert makes a connection reachable by both connectionId and deviceId", () => {
     const c = new Connections();
     const conn = makeConn({ connectionId: "c1", deviceId: "d1" });

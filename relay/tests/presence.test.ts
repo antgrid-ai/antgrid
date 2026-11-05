@@ -132,3 +132,41 @@ test("cross-type only: a second same-account app gets no presence about the firs
   expect(app1Messages.some((m) => m.type === "peer-online" || m.type === "peer-offline")).toBe(false);
   expect(app2Messages.some((m) => m.type === "peer-online" || m.type === "peer-offline")).toBe(false);
 });
+
+const AGENT_ACCOUNT = "presence-agents";
+const AGENT_UID = `user-app-${AGENT_ACCOUNT}`;
+
+async function joinAgent(r: RelayServer, deviceId: string): Promise<{ ws: WebSocket; presence: Record<string, unknown>[] }> {
+  const { hello } = await makeHello(r, { deviceId, deviceType: "agent", licenseToken: AGENT_ACCOUNT });
+  const ws = await connect(r);
+  const presence: Record<string, unknown>[] = [];
+  ws.addEventListener("message", (e) => {
+    const message = decodeMessage((e as MessageEvent).data);
+    if (message.type === "peer-online" || message.type === "peer-offline") presence.push(message);
+  });
+  const welcome = waitForType(ws, "welcome");
+  ws.send(JSON.stringify(hello));
+  await welcome;
+  return { ws, presence };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+test("agents see same-account agents come and go, and a new agent is told who is online", async () => {
+  const gate = makeFakeLicenseGate({ agentUid: (d) => (d.startsWith("other-") ? "user-other" : AGENT_UID) });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+
+  const first = await joinAgent(relay, "presence-agent-one");
+  const second = await joinAgent(relay, "presence-agent-two");
+  const stranger = await joinAgent(relay, "other-presence-agent");
+  await settle();
+
+  expect(first.presence).toEqual([{ type: "peer-online", peerId: "presence-agent-two" }]);
+  expect(second.presence).toEqual([{ type: "peer-online", peerId: "presence-agent-one" }]);
+  expect(stranger.presence).toEqual([]);
+
+  second.ws.close();
+  await settle();
+  expect(first.presence.at(-1)).toEqual({ type: "peer-offline", peerId: "presence-agent-two" });
+  expect(stranger.presence).toEqual([]);
+});
