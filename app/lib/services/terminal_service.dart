@@ -2014,16 +2014,67 @@ class TerminalService {
   /// queued, and the pane says so instead. Callers that report success to the
   /// user must honour this.
   bool sendInput(String terminalId, String data) {
+    _settleMouseMotion(
+      terminalId,
+      sending:
+          !_disposed &&
+          session.transport.isEstablished &&
+          canSendInput(terminalId),
+    );
+    return _sendTerminalInput(terminalId, data, requireFreshDisplay: true);
+  }
+
+  /// A coalesced mouse report must not trail the text about to go — and must
+  /// not survive a refusal to go off later against a screen that moved on.
+  void _settleMouseMotion(String terminalId, {required bool sending}) {
     final ghostty = _state.tabs[terminalId]?.ghostty;
-    if (!_disposed &&
-        session.transport.isEstablished &&
-        canSendInput(terminalId)) {
+    if (sending) {
       ghostty?.flushPendingMouseMotion();
     } else {
       ghostty?.cancelPendingMouseMotion();
     }
-    return _sendTerminalInput(terminalId, data, requireFreshDisplay: true);
   }
+
+  /// Types app-generated text that carries no Enter and was never aimed at a
+  /// screen the user saw — an uploaded file's path, which lands whenever the
+  /// upload does. Like [sendToAgentTerminal] it needs no freshly painted
+  /// screen, and for the same reason waiting does not break [sendInput]'s
+  /// no-replay rule, which protects keystrokes aimed at a prompt.
+  ///
+  /// The wait covers a session a redial rebuilt (a phone's file picker
+  /// backgrounds the app) whose terminals are not yet known again; it ends
+  /// early once this terminal is known to be gone. It polls rather than
+  /// listening to [stateStream], whose first listener is display demand and
+  /// would attach every cold terminal of a checkout nobody is viewing.
+  Future<bool> insertGeneratedText(
+    String terminalId,
+    String text, {
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final waited = Stopwatch()..start();
+    while (true) {
+      _settleMouseMotion(
+        terminalId,
+        sending: !_disposed && session.transport.isEstablished,
+      );
+      if (_sendTerminalInput(terminalId, text, requireFreshDisplay: false)) {
+        return true;
+      }
+      if (_disposed ||
+          _insertTargetGone(terminalId) ||
+          waited.elapsed >= timeout) {
+        return false;
+      }
+      await Future<void>.delayed(_kGeneratedInsertPoll);
+    }
+  }
+
+  static const Duration _kGeneratedInsertPoll = Duration(milliseconds: 100);
+
+  bool _insertTargetGone(String terminalId) =>
+      _missingTerminalIds.contains(terminalId) ||
+      _pendingExitCodes.containsKey(terminalId) ||
+      _state.tabs[terminalId]?.sessionState == TerminalSessionState.exited;
 
   bool _sendTerminalInput(
     String terminalId,
