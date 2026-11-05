@@ -11,6 +11,13 @@ const TOUCHED_KEYS = [
   "RELAY_INTERNAL_SECRET",
   "LICENSE_CACHE_MAX_ENTRIES",
   "TRUSTED_PROXY_IPS",
+  "BUS_RELAY_QUEUE_MESSAGES",
+  "BUS_RELAY_QUEUE_BYTES",
+  "BUS_RELAY_QUEUE_MESSAGES_PER_SENDER",
+  "BUS_RELAY_QUEUE_BYTES_PER_SENDER",
+  "BUS_RELAY_QUEUE_BYTES_TOTAL",
+  "BUS_RELAY_MAX_TTL_MS",
+  "BUS_SEND_BYTES_PER_MIN",
 ] as const;
 
 describe("loadConfig", () => {
@@ -185,7 +192,10 @@ describe("loadConfig", () => {
   });
 
   // R1 deletes the v2 offline-queue and stale-pair-timeout knobs outright —
-  // pin their absence so a reintroduction doesn't slip back in unnoticed.
+  // pin their absence so a reintroduction doesn't slip back in unnoticed. The
+  // sealed bus queue is a different thing and uses `bus*` names: it holds only
+  // ciphertext and is bounded per recipient, per sender and in total, where the
+  // v2 queue held readable payloads.
   test("v2 offline-queue / stale-pair knobs are gone", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
@@ -193,6 +203,41 @@ describe("loadConfig", () => {
     for (const removed of ["maxQueueMessages", "maxQueueSizeBytes", "stalePairTimeoutHours"]) {
       expect(cfg).not.toHaveProperty(removed);
     }
+  });
+
+  test("bus queue defaults", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig();
+    expect(cfg.busQueueMessagesPerDevice).toBe(256);
+    expect(cfg.busQueueBytesPerDevice).toBe(8 * 1024 * 1024);
+    expect(cfg.busQueueMessagesPerSender).toBe(512);
+    expect(cfg.busQueueBytesPerSender).toBe(16 * 1024 * 1024);
+    expect(cfg.busQueueBytesTotal).toBe(256 * 1024 * 1024);
+    expect(cfg.busMaxTtlMs).toBe(21_600_000);
+    expect(cfg.busSendBytesPerMin).toBe(16 * 1024 * 1024);
+  });
+
+  test("bus queue env overrides", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.BUS_RELAY_QUEUE_MESSAGES = "3";
+    process.env.BUS_RELAY_QUEUE_BYTES = "4";
+    process.env.BUS_RELAY_QUEUE_MESSAGES_PER_SENDER = "5";
+    process.env.BUS_RELAY_QUEUE_BYTES_PER_SENDER = "6";
+    process.env.BUS_RELAY_QUEUE_BYTES_TOTAL = "7";
+    process.env.BUS_RELAY_MAX_TTL_MS = "8";
+    process.env.BUS_SEND_BYTES_PER_MIN = "9";
+    const cfg = loadConfig();
+    expect([
+      cfg.busQueueMessagesPerDevice,
+      cfg.busQueueBytesPerDevice,
+      cfg.busQueueMessagesPerSender,
+      cfg.busQueueBytesPerSender,
+      cfg.busQueueBytesTotal,
+      cfg.busMaxTtlMs,
+      cfg.busSendBytesPerMin,
+    ]).toEqual([3, 4, 5, 6, 7, 8, 9]);
   });
 
   // R1 deletes the pairing rendezvous outright — pin absence so a

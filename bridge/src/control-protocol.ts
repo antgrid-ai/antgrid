@@ -3,8 +3,9 @@ import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus } from "./git-branches";
 import type { DeviceStats } from "./device-stats";
+import type { SessionBusGrants } from "antgrid-wire";
+import type { AgentReachLevel } from "./session-bus/request-policy";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
-import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("scheduler:request"), method: z.string().startsWith("scheduler."), params: z.unknown().optional() }),
@@ -43,6 +44,18 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // remote access off this bit grants nothing. See `agent-reach-policy.ts`.
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:get") }),
   z.object({ id: z.string().min(1), type: z.literal("agent-reach:set"), enabled: z.boolean() }),
+  // Read and LOWER only. The orchestrator and bus-control grants are raised by
+  // the owner's account session from the app; nothing on this machine, this
+  // loopback included, may raise them, so there is deliberately no raise verb.
+  z.object({ id: z.string().min(1), type: z.literal("bus-grants:get") }),
+  z
+    .object({
+      id: z.string().min(1),
+      type: z.literal("bus-grants:lower"),
+      orchestrator: z.literal(false).optional(),
+      busControl: z.literal(false).optional(),
+    })
+    .refine((b) => b.orchestrator !== undefined || b.busControl !== undefined, { message: "name at least one grant to lower" }),
   // The machine half of the Capability Card over the LOOPBACK plane. The relay
   // plane already answers `machine.capability-card`, so without this the app
   // cannot read the NORMALISED remote of a project on its own machine — the key
@@ -184,48 +197,6 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     projectId: z.string().min(1),
     checkoutId: z.string().min(1),
   }),
-  // The asking half of the remote session directory: the app's pump hands
-  // over what it learned peeking peer capability cards this cycle. Exempt from
-  // the remote-access switch like every other verb on this plane: the
-  // switch governs what may be done TO this machine, and every row here was
-  // offered by the peer that owns it, under that peer's own switch and its own
-  // agent-reach bit. What a machine may be TOLD about willing peers is not
-  // what the switch authorizes — only the handler's relay-identity check
-  // (host-server.ts) applies.
-  //
-  // `rows` is deliberately `z.unknown()`, not `RemoteDirectoryRowSchema` — a
-  // strict per-row schema here would 400 the WHOLE push over one hostile or
-  // merely-too-long field (a renamed session title is enough), and the app
-  // reads a BAD_REQUEST from this verb as "the local bridge predates it" and
-  // latches the pump off. `RemoteDirectoryCache.replace()` is the real row
-  // gate: it validates and sanitises each row itself and drops only the rows
-  // that fail, never the push. The bounds below are a wire-layer DoS ceiling,
-  // looser than the product caps `replace()` enforces — see
-  // `MAX_REMOTE_DIRECTORY_WIRE_MACHINES`/`_ROWS` in session-bus/constants.ts.
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session-bus:remote-directory"),
-    machines: z
-      .array(
-        z.object({
-          machineId: z.string().min(1).max(200),
-          machineLabel: z.string().max(120).optional(),
-          observedAt: z.number().int().nonnegative(),
-          outcome: z.enum(["rows", "no-card", "refused", "reach-refused", "unreachable"]),
-          rows: z.array(z.unknown()).max(MAX_REMOTE_DIRECTORY_WIRE_ROWS).default([]),
-          truncated: z.number().int().min(0).default(0),
-        }),
-      )
-      .max(MAX_REMOTE_DIRECTORY_WIRE_MACHINES),
-    notConnected: z.number().int().min(0).default(0),
-  }),
-  // The pump's read half, polled on the tick it already runs. It exists because
-  // the bridge has no way to SAY a read missed: `unservedReads` otherwise
-  // reaches the app only on the ack of its next push, up to a heartbeat away,
-  // and the dial of the peers that read missed waits on that ack. Carries no
-  // payload for the same reason it is cheap to call — every field it answers is
-  // a counter the mirror already keeps.
-  z.object({ id: z.string().min(1), type: z.literal("session-bus:directory-status") }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -307,25 +278,15 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
-  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean }
-  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "bus-grants:get"; grants: SessionBusGrants; reachEnabled: boolean; level: AgentReachLevel }
+  | { id: string; ok: true; type: "bus-grants:lower"; grants: SessionBusGrants; reachEnabled: boolean; level: AgentReachLevel }
   | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string }
   | { id: string; ok: true; type: "checkout:path"; path: string }
-  | {
-      id: string; ok: true; type: "session-bus:remote-directory";
-      accepted: number; dropped: number;
-      wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
-    }
-  /** The same three counters the push's ack carries, read WITHOUT draining
-   *  them: the drain belongs to `replace()`, and a poll that consumed the
-   *  count would take the signal `_warmMissedPeers` dials on. */
-  | {
-      id: string; ok: true; type: "session-bus:directory-status";
-      wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
-    }
   /** `ttlMs` is the window actually armed, which is not always the one asked
    *  for (the host clamps), and `0`/absent while disarmed. A watcher heartbeats
    *  inside it, so echoing the request instead would let a clamped capture lapse

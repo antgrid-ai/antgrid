@@ -1,8 +1,7 @@
-// The asking half of the remote directory: an expiring mirror of what the
-// app's pump last learned by peeking peer capability cards. This machine
-// cannot dial another bridge, so the mirror is only ever as fresh as the
-// app's last push — nothing here refreshes itself, and a repository nobody
-// has read through `view()` simply never gets asked for again.
+// The asking half of the remote directory: an expiring mirror of the capability
+// cards this machine last asked the account's other machines for over the bus
+// (`directory-refresh.ts`). Nothing here asks by itself, and a repository nobody
+// has read through `view()` is never named in what the refresher asks for.
 //
 // `directory.ts` imports from here, never the reverse — this module owns the
 // reach vocabulary (`ReachMachine`, `ReachMachineStatus`) and its own row
@@ -18,14 +17,14 @@
 import { z } from "zod";
 import { isSafeProjectId } from "../project-id";
 import { WorkStatusSchema } from "../protocol";
-import { MAX_DIRECTORY_REPO_KEYS, MAX_MACHINE_CARD_ROWS, MAX_REMOTE_DIRECTORY_MACHINES, REMOTE_ROWS_TTL_MS } from "./constants";
+import { MAX_DIRECTORY_REPO_KEYS, MAX_MACHINE_CARD_ROWS, REMOTE_ROWS_TTL_MS } from "./constants";
 
 /** One session on a peer's capability card, as it travels the wire. Mirrors
  *  `MachineDirectoryRow` (`directory.ts`) field for field; the caps here are
  *  what keep a peer's free-text fields from becoming an unbounded prompt on
- *  this machine's agents. The wire schema does NOT apply this — see
- *  {@link RemoteDirectoryMachinePush.rows} — so this is the only place a
- *  pushed row is actually checked. */
+ *  this machine's agents. The sealed response body is not validated against
+ *  this, so {@link RemoteDirectoryReport.rows} is the only place a row is
+ *  actually checked. */
 export const RemoteDirectoryRowSchema = z.object({
   repoKey: z.string().min(1).max(512),
   projectId: z.string().min(1).max(200),
@@ -53,7 +52,7 @@ function stripHostile(s: string): string {
 }
 
 /**
- * The one gate every pushed row passes through before it can be shown to an
+ * The one gate every ingested row passes through before it can be shown to an
  * agent. Rejects outright on an unsafe `projectId` — the same allowlist that
  * guards every phone-supplied id that becomes a filesystem path, because
  * nothing downstream of this cache re-checks it — and on a `sessionId`
@@ -61,7 +60,7 @@ function stripHostile(s: string): string {
  * `machineId` + `sessionId` alone, so an address is not a field it is safe to
  * clean, only to accept or refuse. Every other human-readable field is
  * cleaned rather than rejected: a scrubbed title is still a usable row, and
- * failing the whole push over one hostile field would cost the peer's honest
+ * failing the whole card over one hostile field would cost the peer's honest
  * sessions too.
  */
 export function sanitizeRow(row: RemoteDirectoryRow): RemoteDirectoryRow | null {
@@ -75,8 +74,8 @@ export function sanitizeRow(row: RemoteDirectoryRow): RemoteDirectoryRow | null 
   };
 }
 
-/** What the pushing app classified one machine as, this cycle. `"rows"` means a
- *  card came back (however many sessions it held, including zero) — {@link
+/** What asking one machine came to, this cycle. `"rows"` means a card came back
+ *  (however many sessions it held, including zero) — {@link
  *  RemoteDirectoryCache.view} renders it as `"answered"`; the other four travel
  *  unchanged into {@link ReachMachineStatus}.
  *
@@ -85,46 +84,42 @@ export function sanitizeRow(row: RemoteDirectoryRow): RemoteDirectoryRow | null 
  *  names the wrong one sends the user to a setting that is already on. */
 export type RemoteMachineOutcome = "rows" | "no-card" | "refused" | "reach-refused" | "unreachable";
 
-/** One machine's report, as the loopback ingest verb
- *  (`session-bus:remote-directory`) hands it to {@link
- *  RemoteDirectoryCache.replace}. `rows` is `unknown[]`, not {@link
- *  RemoteDirectoryRow}`[]`, ON PURPOSE: the wire schema (`control-protocol.ts`)
- *  deliberately does not validate row shape, because a caller whose schema
- *  gate rejects the whole request over one hostile field turns a single long
- *  session title anywhere in the account into a push that always 400s — this
- *  is the only place a row is checked, and it drops that row alone. */
-export interface RemoteDirectoryMachinePush {
+/** One machine's answer, as the refresher hands it to {@link
+ *  RemoteDirectoryCache.ingest}. `rows` is `unknown[]`, not {@link
+ *  RemoteDirectoryRow}`[]`, ON PURPOSE: it came out of another machine's
+ *  response, so this cache is where it is checked, and a row that fails drops
+ *  alone rather than costing the machine's honest rows. */
+export interface RemoteDirectoryReport {
   machineId: string;
   machineLabel?: string;
-  /** When the APP captured this machine's card — not when this bridge ingested
-   *  it. A machine under backoff can ride several pushes on one old card, and
-   *  this is the clock {@link REMOTE_ROWS_TTL_MS} reads. */
+  /** When this machine's card was received; the clock {@link
+   *  REMOTE_ROWS_TTL_MS} reads and what each row reports as `asOf`. */
   observedAt: number;
   outcome: RemoteMachineOutcome;
   rows: readonly unknown[];
+  /** The repositories the card was asked about. The far side narrows its card
+   *  to them, so a card says nothing about any other repository: zero rows for
+   *  a key outside this list is not "nobody is on it". Absent means the card
+   *  was not narrowed. */
+  repoKeys?: readonly string[];
   /** What the FAR bridge's own `MAX_MACHINE_CARD_ROWS` cap dropped, so
    *  `view()` can sum it into an honest `truncated` rather than the mirror
    *  quietly narrowing a card that was already narrowed once. */
   truncated: number;
 }
 
-export interface RemoteDirectoryReplaceResult {
-  /** Rows now held in the mirror, across every machine this push named. */
+export interface RemoteDirectoryIngestResult {
+  /** Rows now held for this machine. */
   accepted: number;
-  /** Rows this push named but the mirror refused — a self-machine's whole
-   *  count, a machine sliced off past {@link MAX_REMOTE_DIRECTORY_MACHINES},
-   *  any row past {@link MAX_MACHINE_CARD_ROWS}, and any row that failed the
-   *  schema or {@link sanitizeRow}. */
+  /** Rows the mirror refused — any row past {@link MAX_MACHINE_CARD_ROWS}, and
+   *  any row that failed the schema or {@link sanitizeRow}; or the whole
+   *  report's count when the machine id itself was refused. */
   dropped: number;
-  /** Reads this cache could not serve since the LAST push (or since
-   *  construction/`clear()`), drained by this call — the ack's signal that
-   *  the pump should stop waiting for the heartbeat and push sooner. A
-   *  monotonic counter here would latch the pump into its fast tick forever,
-   *  since the very first read on a cold cache is always unserved. */
-  unservedReads: number;
 }
 
-export type ReachMachineStatus = "answered" | "no-card" | "refused" | "reach-refused" | "unreachable";
+/** `"not-asked"`: the machine answered, but about other repositories, so it
+ *  has not said anything about this one yet. */
+export type ReachMachineStatus = "answered" | "no-card" | "refused" | "reach-refused" | "unreachable" | "not-asked";
 
 /** One line of the reach report `directory.ts` renders beside the merged rows
  *  — never the rows themselves, which is why `rows` here is a COUNT. */
@@ -137,7 +132,7 @@ export interface ReachMachine {
    *  `0` while the entry's rows have expired past {@link REMOTE_ROWS_TTL_MS},
    *  even though the machine itself is still named below. */
   rows: number;
-  /** Rows this push named for this machine that the mirror refused (schema
+  /** Rows this card named that the mirror refused (schema
    *  failure, `sanitizeRow`, or the per-machine row cap) — so a machine whose
    *  card failed to ingest reads as "12 rows refused", never as a peer with
    *  nothing running. */
@@ -155,7 +150,8 @@ export interface ReachMachine {
  *  same shape as `directory.ts`'s `SessionDirectoryRow` (see the module
  *  comment for why that is a structural match and not an import) — `machineId`
  *  is never null here, because a row that reached the mirror at all came off
- *  a real peer's card. */
+ *  a real peer's card. `asOf` is when that card was received: a row is never
+ *  more current than this. */
 export interface RemoteDirectoryViewRow {
   machineId: string;
   machineLabel?: string;
@@ -168,6 +164,7 @@ export interface RemoteDirectoryViewRow {
   workStatus?: RemoteDirectoryRow["workStatus"];
   lastActiveAt: number;
   canReply: boolean;
+  asOf: number;
 }
 
 export interface RemoteDirectoryView {
@@ -179,11 +176,14 @@ export interface RemoteDirectoryView {
   truncated: number;
   machines: ReachMachine[];
   /** Machines this cache still holds a row for, but too old to serve — counted
-   *  rather than silently excluded, so "nothing pushed lately" and "nothing on
-   *  that repo" stay two different answers. */
+   *  rather than silently excluded, so "nothing refreshed lately" and "nothing
+   *  on that repo" stay two different answers. */
   staleMachines: number;
+  /** Account machines the refresher cannot ask (no messaging key yet). */
   notConnected: number;
-  lastPushAt: number | null;
+  /** When the newest answer in the mirror was received; null until a machine
+   *  has answered. A machine asked and never heard from does not move it. */
+  asOf: number | null;
   /** Whether this read was one the mirror could answer — the same verdict
    *  {@link RemoteDirectoryCache.unservedReads} counts, surfaced so a caller
    *  can report it without re-deriving the predicate and drifting from it. */
@@ -195,6 +195,12 @@ interface StoredMachine {
   machineLabel?: string;
   observedAt: number;
   outcome: RemoteMachineOutcome;
+  /** False while every ask has gone unanswered: then `observedAt` is when it
+   *  was asked, which is no evidence of anything on the far side. */
+  answered: boolean;
+  /** The repositories the held card speaks for; null for every repository,
+   *  which a refusal does, since it is about the machine. */
+  covers: ReadonlySet<string> | null;
   rows: RemoteDirectoryRow[];
   truncated: number;
   droppedRows: number;
@@ -202,7 +208,7 @@ interface StoredMachine {
 
 /**
  * The mirror itself: one machine-level, in-memory, no-persistence cache of
- * what the app's pump last reported about the account's other machines.
+ * what this machine last learned asking the account's other machines.
  *
  * Nothing here dials anything. A machine this cache has never heard of, or has
  * not heard from in {@link REMOTE_ROWS_TTL_MS}, simply contributes no rows —
@@ -211,114 +217,103 @@ interface StoredMachine {
 export class RemoteDirectoryCache {
   private machines = new Map<string, StoredMachine>();
   private notConnectedCount = 0;
-  private lastPush: number | null = null;
   /** Repo keys a local read has asked about, most-recently-asked last, capped
-   *  to {@link MAX_DIRECTORY_REPO_KEYS} — the same bound the ingest verb's
-   *  `repoKeys` param carries, because this is what feeds it on the next push. */
+   *  to {@link MAX_DIRECTORY_REPO_KEYS} — the same bound a capability-card
+   *  request's `repoKeys` param carries, because this is what feeds it on the
+   *  next refresh. */
   private wanted = new Map<string, number>();
   private unservedCount = 0;
   private lastReadTime: number | null = null;
+  private onUnserved: (() => void) | null = null;
 
-  /**
-   * Replace the whole mirror with one push. A REPLACE, not a merge: the app's
-   * pump always sends its complete current candidate set, so a machine
-   * missing from this call is a machine the pump no longer has open — it is
-   * gone from the mirror on THIS call, not left to expire on its own.
-   *
-   * `selfMachineId` is this bridge's own relay identity. An entry naming it is
-   * dropped whole, every one of its rows counted against `dropped`: a machine
-   * must not discover itself through its own app.
-   */
-  replace(
-    machines: readonly RemoteDirectoryMachinePush[],
-    notConnected: number,
-    selfMachineId: string | null,
-    now: number,
-  ): RemoteDirectoryReplaceResult {
-    const next = new Map<string, StoredMachine>();
-    let accepted = 0;
-    let dropped = 0;
-
-    const capped = machines.slice(0, MAX_REMOTE_DIRECTORY_MACHINES);
-    // A push naming more machines than the product bound is the far side's
-    // own account growing, not a malformed request — the wire cap
-    // (control-protocol.ts) is a DoS ceiling far above this, so an
-    // over-count reaches here to be BOUNDED rather than reject the whole push.
-    for (const overflow of machines.slice(MAX_REMOTE_DIRECTORY_MACHINES)) {
-      dropped += overflow.rows.length;
-    }
-
-    for (const push of capped) {
-      const machineId = push.machineId;
-      // Refused, never cleaned, for the reason `sanitizeRow` refuses a session
-      // id: the two together are the address `addressesSameSession` matches on,
-      // so a machine id that survived a strip is either unreachable or now
-      // names a DIFFERENT machine, whose entry this push would then replace.
-      if (stripHostile(machineId) !== machineId || (selfMachineId !== null && machineId === selfMachineId)) {
-        dropped += push.rows.length;
-        continue;
-      }
-
-      const rows: RemoteDirectoryRow[] = [];
-      let entryDropped = 0;
-      for (const raw of push.rows.slice(0, MAX_MACHINE_CARD_ROWS)) {
-        const parsed = RemoteDirectoryRowSchema.safeParse(raw);
-        if (!parsed.success) {
-          dropped++;
-          entryDropped++;
-          continue;
-        }
-        const sanitized = sanitizeRow(parsed.data);
-        if (sanitized === null) {
-          dropped++;
-          entryDropped++;
-          continue;
-        }
-        rows.push(sanitized);
-        accepted++;
-      }
-      // Rows past the per-machine cap are the far side's own oversend — count
-      // them the same as a rejected row so the ack does not under-report what
-      // the mirror actually dropped.
-      const overRows = Math.max(0, push.rows.length - MAX_MACHINE_CARD_ROWS);
-      dropped += overRows;
-      entryDropped += overRows;
-
-      next.set(machineId, {
-        machineId,
-        ...(push.machineLabel === undefined ? {} : { machineLabel: stripHostile(push.machineLabel) }),
-        observedAt: push.observedAt,
-        outcome: push.outcome,
-        rows,
-        truncated: Math.max(0, push.truncated),
-        droppedRows: entryDropped,
-      });
-    }
-
-    this.machines = next;
-    this.notConnectedCount = Math.max(0, notConnected);
-    this.lastPush = now;
-    const unservedReads = this.unservedCount;
-    this.unservedCount = 0;
-    return { accepted, dropped, unservedReads };
+  /** Called when a read finds no live machine, so the refresher can ask now
+   *  instead of waiting out its interval. */
+  setUnservedListener(fn: (() => void) | null): void {
+    this.onUnserved = fn;
   }
 
-  /** Empty the mirror. Called on the one refusal this plane still makes — this
-   *  machine has no relay identity, so nothing mirrored could be messaged
-   *  anyway. The remote-access switch does NOT gate this mirror: a peer's
-   *  row discloses nothing about this machine, the mirror is filled over
-   *  loopback by our own app, and keeping it warm is what lets reach
-   *  return the instant the switch does. The SEND is gated instead, at
-   *  `api.ts` — so do not read this as the switch being inbound-only, which
-   *  would ship a one-way channel. Immediate rather than riding out the TTL —
-   *  `lastPushAt` goes to null with it, so a read right after reports
-   *  `no-carrier` rather than a stale "just pushed, nothing in it". The
+  /**
+   * Record one machine's answer, replacing whatever the mirror held for it.
+   *
+   * `selfMachineId` is this bridge's own relay identity. A report naming it is
+   * dropped whole, every one of its rows counted against `dropped`: a machine
+   * must not discover itself.
+   */
+  ingest(report: RemoteDirectoryReport, selfMachineId: string | null = null): RemoteDirectoryIngestResult {
+    const machineId = report.machineId;
+    // Refused, never cleaned, for the reason `sanitizeRow` refuses a session
+    // id: the two together are the address `addressesSameSession` matches on,
+    // so a machine id that survived a strip is either unreachable or now
+    // names a DIFFERENT machine, whose entry this report would then replace.
+    if (stripHostile(machineId) !== machineId || (selfMachineId !== null && machineId === selfMachineId)) {
+      return { accepted: 0, dropped: report.rows.length };
+    }
+
+    // An ask that went unanswered says nothing about the card already held, so
+    // the old rows stay (under their own receive time, and out of the mirror
+    // when the TTL says so) and only the status changes. This is what lets rows
+    // outlive one missed refresh.
+    const held = this.machines.get(machineId);
+    if (report.outcome === "unreachable" && held !== undefined) {
+      this.machines.set(machineId, {
+        ...held,
+        ...(report.machineLabel === undefined ? {} : { machineLabel: stripHostile(report.machineLabel) }),
+        outcome: "unreachable",
+      });
+      return { accepted: held.rows.length, dropped: 0 };
+    }
+
+    const rows: RemoteDirectoryRow[] = [];
+    let dropped = 0;
+    for (const raw of report.rows.slice(0, MAX_MACHINE_CARD_ROWS)) {
+      const parsed = RemoteDirectoryRowSchema.safeParse(raw);
+      const sanitized = parsed.success ? sanitizeRow(parsed.data) : null;
+      if (sanitized === null) {
+        dropped++;
+        continue;
+      }
+      rows.push(sanitized);
+    }
+    // Rows past the per-machine cap are the far side's own oversend — count
+    // them the same as a rejected row so the result does not under-report what
+    // the mirror actually dropped.
+    dropped += Math.max(0, report.rows.length - MAX_MACHINE_CARD_ROWS);
+
+    this.machines.set(machineId, {
+      machineId,
+      ...(report.machineLabel === undefined ? {} : { machineLabel: stripHostile(report.machineLabel) }),
+      observedAt: report.observedAt,
+      outcome: report.outcome,
+      answered: report.outcome !== "unreachable",
+      covers: report.outcome === "rows" && report.repoKeys !== undefined ? new Set(report.repoKeys) : null,
+      rows,
+      truncated: Math.max(0, report.truncated),
+      droppedRows: dropped,
+    });
+    return { accepted: rows.length, dropped };
+  }
+
+  /** Forget machines the account no longer lists, and note how many it lists
+   *  that cannot be asked. Rows of a revoked machine must not outlive the
+   *  revocation by the length of the TTL. */
+  syncAccount(askable: ReadonlySet<string>, notConnected: number): void {
+    for (const id of [...this.machines.keys()]) {
+      if (!askable.has(id)) this.machines.delete(id);
+    }
+    this.notConnectedCount = Math.max(0, notConnected);
+  }
+
+  /** Empty the mirror. Called when this machine has no relay identity, so
+   *  nothing mirrored could be messaged anyway. The remote-access switch does
+   *  NOT gate this mirror: a peer's row discloses nothing about this machine
+   *  and keeping it warm is what lets reach return the instant the switch
+   *  does. The SEND is gated instead, at `api.ts` — so do not read this as the
+   *  switch being inbound-only, which would ship a one-way channel. The
    *  unserved-read counter and the wanted-repo-key list are cleared too: both
-   *  exist to steer the NEXT push, and there is no next push to steer while
-   *  this machine is refusing ingest. */
+   *  exist to steer the NEXT refresh. */
   clear(_reason: string): void {
     this.machines = new Map();
-    this.lastPush = null;
+    this.notConnectedCount = 0;
     this.unservedCount = 0;
     this.wanted = new Map();
   }
@@ -327,11 +322,10 @@ export class RemoteDirectoryCache {
    * Every row this mirror currently holds for `repoKey`, plus the reach report
    * that explains what is and is not in it.
    *
-   * `selfMachineId` is re-checked here even though {@link replace} already
-   * refuses a self-entry at ingest — the same two-independent-points
-   * discipline the machine-level switch gets: a caller must not be able to
-   * see itself as a peer just because its own id changed between a push and
-   * a read.
+   * `selfMachineId` is re-checked here even though {@link ingest} already
+   * refuses a self-entry — the same two-independent-points discipline the
+   * machine-level switch gets: a caller must not be able to see itself as a
+   * peer just because its own id changed between an ingest and a read.
    *
    * Every row is stamped with the MACHINE ENTRY's own `machineId`/`machineLabel`
    * — never `selfMachineId`, which exists only to exclude, not to label.
@@ -342,27 +336,45 @@ export class RemoteDirectoryCache {
     let staleMachines = 0;
     let truncated = 0;
     let liveMachines = 0;
+    let asOf: number | null = null;
 
     for (const entry of this.machines.values()) {
       if (selfMachineId !== null && entry.machineId === selfMachineId) continue;
 
       const ageMs = now - entry.observedAt;
-      // A negative age is a card from the future — a clock skew, or a unit
-      // slip on the app side (micros where millis were meant) — and trusting
-      // it as maximally fresh would make a peer's rows immortal, since ageMs
-      // then never crosses the TTL. Treat it the same as too old: a stamp
-      // that cannot be trusted is not evidence of anything, least of all
-      // liveness.
+      // Named, so the agent learns it was asked, but it is neither fresh nor
+      // live: an ask nobody answered says nothing about who is working there.
+      if (!entry.answered) {
+        machines.push({
+          machineId: entry.machineId,
+          ...(entry.machineLabel === undefined ? {} : { machineLabel: entry.machineLabel }),
+          status: "unreachable",
+          rows: 0,
+          droppedRows: entry.droppedRows,
+          truncatedCard: 0,
+          ageMs,
+        });
+        continue;
+      }
+
+      if (asOf === null || entry.observedAt > asOf) asOf = entry.observedAt;
+      // A negative age is a card from the future — a clock stepped backwards
+      // since it was received — and trusting it as maximally fresh would make
+      // a peer's rows immortal, since ageMs then never crosses the TTL. Treat
+      // it the same as too old: a stamp that cannot be trusted is not
+      // evidence of anything, least of all liveness.
       const stale = ageMs > REMOTE_ROWS_TTL_MS || ageMs < 0;
+      // A card narrowed to other repositories has no rows for this one because
+      // nobody asked, not because nobody is on it.
+      const asked = entry.covers === null || entry.covers.has(repoKey);
       if (stale) staleMachines++;
-      else liveMachines++;
+      else if (asked) liveMachines++;
 
       // The machine stays NAMED even when stale — only its rows expire. A
-      // refused or unreachable peer's backoff (minutes) outlasts this row TTL
-      // (seconds) by design, so dropping the whole entry here would render a
-      // permanent, human-actionable refusal as transient staleness on every
-      // read between backed-off pushes.
-      const matching = stale ? [] : entry.rows.filter((r) => r.repoKey === repoKey);
+      // refusal is a standing fact about the peer, not a card that ages out, so
+      // dropping the whole entry here would render a human-actionable refusal
+      // as transient staleness.
+      const matching = stale || !asked ? [] : entry.rows.filter((r) => r.repoKey === repoKey);
       for (const r of matching) {
         rows.push({
           machineId: entry.machineId,
@@ -376,27 +388,29 @@ export class RemoteDirectoryCache {
           ...(r.workStatus === undefined ? {} : { workStatus: r.workStatus }),
           lastActiveAt: r.lastActiveAt,
           canReply: r.canReply,
+          asOf: entry.observedAt,
         });
       }
 
       machines.push({
         machineId: entry.machineId,
         ...(entry.machineLabel === undefined ? {} : { machineLabel: entry.machineLabel }),
-        status: entry.outcome === "rows" ? "answered" : entry.outcome,
+        status: !asked ? "not-asked" : entry.outcome === "rows" ? "answered" : entry.outcome,
         rows: matching.length,
         droppedRows: entry.droppedRows,
         truncatedCard: entry.truncated,
         ageMs,
       });
-      if (!stale) truncated += entry.truncated;
+      if (!stale && asked) truncated += entry.truncated;
     }
 
-    // A repo with no matching rows but at least one LIVE machine is an honest
-    // empty answer ("nobody else is on it") and counts as served; a read where
-    // every known machine is stale (or none is known at all) is one the pump
-    // has not caught up on yet — a stale entry stays NAMED above for the
-    // agent's sake, but it must not stop this signal from asking the pump to
-    // push sooner.
+    // A repo with no matching rows but at least one LIVE machine that was asked
+    // about it is an honest empty answer ("nobody else is on it") and counts
+    // as served; a read where every known machine is stale, unanswered, or
+    // answered about other repositories (or none is known at all) is one the
+    // refresher has not caught up on yet — such an entry stays NAMED above for
+    // the agent's sake, but it must not stop this signal from asking the
+    // refresher to ask sooner.
     const served = rows.length > 0 || liveMachines > 0;
     this.noteRead(served, repoKey, now);
 
@@ -406,24 +420,20 @@ export class RemoteDirectoryCache {
       machines,
       staleMachines,
       notConnected: this.notConnectedCount,
-      lastPushAt: this.lastPush,
+      asOf,
       served,
     };
   }
 
-  /** Repo keys worth asking a peer about on the next push — every key a local
-   *  read has named recently, oldest first. This is the whole mechanism
-   *  behind the ack telling the app what to fetch: the pump never guesses,
-   *  it echoes back what `view()` was actually asked for. */
+  /** Repo keys worth asking a peer about on the next refresh — every key a
+   *  local read has named recently, oldest first. The refresher never guesses,
+   *  it asks for what `view()` was actually asked for. */
   wantedRepoKeys(): string[] {
     return [...this.wanted.keys()];
   }
 
-  /** Reads since the last `replace()` or `clear()` that came back with no live
-   *  machine at all. This is a LIVE, non-destructive read of the same counter
-   *  {@link replace} drains and reports on its own return value — use the
-   *  replace() result for the ack; this accessor is for introspection between
-   *  pushes (tests, mainly). */
+  /** Reads that came back with no live machine at all, since construction or
+   *  the last `clear()`. */
   unservedReads(): number {
     return this.unservedCount;
   }
@@ -432,19 +442,21 @@ export class RemoteDirectoryCache {
     return this.lastReadTime;
   }
 
-  lastPushAt(): number | null {
-    return this.lastPush;
-  }
-
   private noteRead(served: boolean, repoKey: string, now: number): void {
     this.lastReadTime = now;
-    if (!served) this.unservedCount++;
-
+    // Wanted first: the listener's refresh reads `wantedRepoKeys()` before its
+    // first await, and an ask that leaves out the repo just missed answers
+    // nothing for it.
     this.wanted.delete(repoKey);
     this.wanted.set(repoKey, now);
     if (this.wanted.size > MAX_DIRECTORY_REPO_KEYS) {
       const oldest = this.wanted.keys().next().value;
       if (oldest !== undefined) this.wanted.delete(oldest);
+    }
+
+    if (!served) {
+      this.unservedCount++;
+      this.onUnserved?.();
     }
   }
 }

@@ -298,11 +298,11 @@ String? _bounded(String? value, int max) {
 /// resolve another machine's names at all; the bridge bounds their length for
 /// the same reason.
 ///
-/// [card] rides along for the harder version of that reason: no bridge can read
-/// another machine, so what the peer answered about itself when it was last
-/// peeked is the only description of it this side will ever hold. Wherever it
-/// is rendered into an agent's prompt it is fenced as data, because a hostname
-/// or a repo path in a WRAPPER would read as a grant.
+/// [card] rides along for the harder version of that reason: what the peer's
+/// bridge last answered about itself over the bus is the only description of
+/// that machine this side holds. Wherever it is rendered into an agent's prompt
+/// it is fenced as data, because a hostname or a repo path in a WRAPPER would
+/// read as a grant.
 ///
 /// Nothing in the app parses one yet — the bus inbox reads the bare key as
 /// `SessionBusAddress`, and the `session-bus:directory` read the bridge offers
@@ -318,9 +318,9 @@ class SessionMemberRef {
   final String? projectLabel;
   final String? sessionName;
 
-  /// What the machine answered about itself when it was last peeked. Null
-  /// against a machine that could not answer and against a carrier predating
-  /// the field; both are the same "no card" a reader must render.
+  /// What the machine's bridge last answered about itself over the bus. Null
+  /// against a machine that has not answered, which a reader renders as "no
+  /// card".
   final SessionMemberCard? card;
 
   const SessionMemberRef({

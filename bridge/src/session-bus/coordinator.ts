@@ -1,17 +1,17 @@
-// The bus's transport half: it owns the stores for the sessions its owner hands
-// it — one project's, when a core builds its own fallback instance, or every
-// project's on the machine, when the host builds the one shared instance — and
+// The bus's machine-local half: it owns the stores for the sessions its owner
+// hands it — one project's, when a core builds its own fallback instance, or
+// every project's on the machine, when the host builds the one shared instance —
 // turns an agent's message into an addressed frame, and folds an inbound frame
-// back into a store. It knows nothing about how a frame travels — a `send` that
-// returns false is all it needs to hold the frame and try again — which is what
-// lets ONE module serve both ends of a link neither can open (a bridge cannot
-// dial another bridge; the initiating machine's desktop app carries).
+// back into a store. It knows nothing about how a frame travels: a send to
+// another machine goes through `deps.send` (the relay transport) and is kept in
+// the outbox until that machine's signed acknowledgement comes back, which is
+// what lets this module reason about delivery without owning a socket.
 //
 // TWO INVARIANTS LIVE HERE AND NOWHERE ELSE.
 // Every frame leaves through `deps.send`, never through the MessageBus: a
 // published frame reaches every established app session, and the human's phone
 // is one of them. And an inbound frame is applied only when its `to` names a
-// session THIS bridge holds, so a carrier is trusted to deliver and never to say
+// session THIS bridge holds, so a sender is trusted to deliver and never to say
 // which of this bridge's sessions a message belongs to.
 
 import { randomUUID } from "node:crypto";
@@ -25,14 +25,14 @@ import {
   type SessionMemberKey,
   type SessionMemberRef,
 } from "../protocol";
-import { addressesSameSession, isLeadContext, namesMachine } from "./address";
+import { addressesSameSession, namesMachine } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
 import {
   ARTIFACT_CHUNK_BYTES,
-  BUS_ROUTE_PERSIST_INTERVAL_MS,
-  BUS_ROUTE_TTL_MS,
-  MAX_BUS_ROUTES,
+  BUS_RELAYED_RESEND_MS,
+  BUS_RETRY_BASE_MS,
+  BUS_RETRY_MAX_MS,
 } from "./constants";
 import {
   budgetFor,
@@ -46,15 +46,16 @@ import {
 } from "./pair-budget";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
-import { loadBusRoutes, saveBusRoutes, type BusRouteDrops, type BusRouteMap } from "./route-store";
+import type { BusHeldReason, BusSendResult, TransportOutcome } from "./relay-transport";
 import {
   emptyHeld,
   expireHeld,
-  hasHeld,
+  HELD_MESSAGE_TTL_MS,
   holdMessage,
   loadHeld,
   releaseHeld,
   saveHeld,
+  type HeldMessage,
   type HeldState,
 } from "./held-store";
 import {
@@ -63,6 +64,8 @@ import {
   lastOutboundSummary,
   loadMessageLog,
   markDelivered,
+  markRefused,
+  markRelayed,
   saveMessageLog,
   type MessageLogState,
 } from "./message-log";
@@ -87,8 +90,6 @@ import {
 
 const log = logger.child({ component: "session-bus" });
 
-export type BusRole = "lead" | "peer";
-
 /** This bridge's own half of an address, plus the labels it stamps onto what it
  *  sends. Labels travel because the other machine can never look them up: it
  *  cannot reach this one. */
@@ -97,13 +98,6 @@ export interface SessionBusSelf {
   ref: SessionMemberRef;
 }
 
-/**
- * Hand one frame to whatever carries this context.
- *
- * False means it did not leave — no carrier, or a carrier that cannot forward —
- * and the frame is held rather than dropped. Never a throw and never a failure:
- * an absent carrier is not a failed exchange.
- */
 /**
  * What {@link SessionBusCoordinator.handleInbound} did with a frame.
  *
@@ -114,10 +108,18 @@ export interface SessionBusSelf {
  */
 export type InboundOutcome = false | "applied" | "dropped";
 
+/**
+ * Hand one frame bound for another machine to the transport.
+ *
+ * `{sent:false}` means it did not leave this machine yet and the outbox will
+ * offer it again; `{sent:true}` means the transport sealed and queued it, not
+ * that anything has arrived. Never a throw: an absent link is not a failed
+ * exchange.
+ */
 export type SessionBusSend = (
-  frame: AbMessage,
-  ctx: { contextId: string; role: BusRole; to: SessionMemberKey },
-) => boolean;
+  frame: BusFrame,
+  ctx: { contextId: string; to: SessionMemberKey; messageId: string; sentAt: number },
+) => BusSendResult;
 
 /** What the coordinator learned from an inbound frame, for the layer that turns
  *  it into a line an agent reads. Emitted AFTER the store is written, so a
@@ -153,7 +155,9 @@ export interface CoordinatorDeps {
    *  closure over its own project id, which is what makes it behave exactly
    *  as a single-project coordinator did before this widened. */
   projectIdFor: (sessionId: string) => string | null;
-  send: SessionBusSend;
+  /** Absent for a core with no relay transport, which holds an off-machine frame
+   *  with reason `no-transport` instead of dropping it. */
+  send?: SessionBusSend;
   /** This bridge's address for one of its own sessions, or null when the machine
    *  has no identity to be addressed by. */
   self: (sessionId: string) => SessionBusSelf | null;
@@ -166,24 +170,23 @@ export interface CoordinatorDeps {
    *  keeps today's answer. */
   addressable?: () => boolean;
   /** Hand a frame straight to the session it names on THIS machine, bypassing
-   *  the relay, the carrier and the route table entirely. False means it
-   *  could not be delivered in process — the target's project is not loaded, or
-   *  a store write failed — and the frame is HELD, never offered to the carrier
-   *  instead: see {@link SessionBusCoordinator.dispatch} for what that costs.
-   *  Absent means this coordinator has no local path at all, which is every
-   *  caller until the host wires one, and those keep the ordinary send path for
-   *  a same-machine target. */
+   *  the relay entirely. False means it could not be delivered in process — the
+   *  target's project is not loaded, or a store write failed — and the frame is
+   *  HELD and retried, never offered to the transport instead: a same-machine
+   *  target is not reachable through a relay that addresses other machines.
+   *  Absent means this coordinator has no local path at all, so a same-machine
+   *  target is held until one exists. */
   deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
   /** Whether this machine may exchange frames with ANOTHER machine at all: its
-   *  remote-access switch, carve-outs and all.
+   *  remote-access switch.
    *
    *  Read in {@link SessionBusCoordinator.dispatch} rather than at the verbs,
-   *  because the verbs are not the only way out. A frame held while no carrier
-   *  was attached leaves through `flushHeld`, a slice request through `fetch`
-   *  and its answer through `fetch:result`, none of which pass the send path—s
-   *  own refusal. Gating the one chokepoint they share is what makes "the
-   *  switch governs both directions" true of the machine rather than of one
-   *  verb. Absent means allowed, so a bare coordinator answers to no switch.
+   *  because the verbs are not the only way out. A frame held in the outbox
+   *  leaves through `flushHeld`, a slice request through `fetch` and its answer
+   *  through `fetch:result`, none of which pass the send path's own refusal.
+   *  Gating the one chokepoint they share is what makes "the switch governs both
+   *  directions" true of the machine rather than of one verb. Absent means
+   *  allowed, so a bare coordinator answers to no switch.
    *
    *  A same-machine frame never reaches it. */
   offMachineSendAllowed?: () => boolean;
@@ -212,9 +215,9 @@ export interface CoordinatorDeps {
 
 interface SessionState {
   log: MessageLogState;
-  /** Messages the transport refused, awaiting a route. Held rather than dropped
-   *  because a `send` that returned false never reached the relay, so putting
-   *  the frame out later is a delivery and not a second copy. */
+  /** The outbox: messages sent to another machine and not yet acknowledged, or
+   *  held for a local target whose project is not loaded. Offered again until
+   *  settled; the receiver's dedup is what makes that safe. */
   held: HeldState;
   /** Posts parked for this session to read when it chooses. Loaded with
    *  the log rather than lazily like artifacts: an inbound post writes it, and a
@@ -256,11 +259,32 @@ export interface MessageInput {
   contextId?: string;
 }
 
+/** How far a message has got, lowest first. Each rung is witnessed by someone
+ *  different: `held` by this bridge alone, `relayed` by the relay's receipt,
+ *  `delivered` by the recipient bridge's signed ack (or, for a session on this
+ *  machine, by the local store write), `refused` by whichever end refused it. */
+export type Rung = "held" | "relayed" | "delivered" | "refused";
+
 export interface MessageResult {
   ok: true;
-  /** That the frame LEFT, never that it arrived: everything this side of the
-   *  relay can only report departure, and the other end's receipt is the one
-   *  honest witness. */
+  /** The highest rung reached at the time of the send. Rungs above `held` can
+   *  still arrive later; `awaitRung` and the thread read them. */
+  rung: Rung;
+  /** Why the message is still on this machine, when `rung` is `held` and the
+   *  transport said so. */
+  heldReason?: BusHeldReason;
+  /** Why it was refused, when `rung` is `refused`. */
+  refusedCode?: string;
+  /** The target is a session on this machine, so `delivered` is its own
+   *  mailbox taking it rather than another machine's store. */
+  local?: true;
+  /** The target's labels as the caller addressed it, when it carried them. */
+  machineLabel?: string;
+  sessionName?: string;
+  /** When a message still held is given up as expired. */
+  retryUntil?: number;
+  /** `rung !== "held"`: it is no longer only on this machine. Kept for callers
+   *  that predate `rung`; never evidence of arrival. */
   sent: boolean;
   held: boolean;
   messageId: string;
@@ -280,10 +304,13 @@ export interface MessageResult {
  *  Matched on those endpoints and not on the type name alone: the `session-bus:`
  *  prefix also covers the reads an app makes of its OWN bridge, which are
  *  addressed by session id and carry no `from`/`to` at all. */
-type BusFrame = Extract<
+export type BusFrame = Extract<
   AbMessage,
   { type: `session-bus:${string}`; from: SessionMemberKey; to: SessionMemberKey }
 >;
+
+/** Message ids `awaitRung` can still answer for after the send returned. */
+const RECENT_SENT_CAP = 1_024;
 
 /** How often held messages are retried. One second is the shortest step worth
  *  taking, so a slower tick would round every retry up to itself. */
@@ -294,16 +321,15 @@ export class SessionBusCoordinator {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
   private readonly newId: () => string;
-  // Which app session — and which project's stream — carried a context in,
-  // machine-wide. Moved here (from a per-core closure) so a route learned while
-  // handling project A's inbound frame is the SAME table project B's outbound
-  // send for that context consults; see noteRoute/routeFor. This table does not
-  // decide anything on its own: every frame leaves through `dispatch`, which
-  // consults `deliverLocal` first and this table not at all — the
-  // lookup-then-send decision belongs to whoever wired `send`, because only it
-  // knows what a `sendToAppSession`/`sendToOwner` call means.
-  private routes: BusRouteMap = new Map();
-  private routesSavedAt = 0;
+  // Which session each held message belongs to, so a transport outcome that
+  // names only a message id finds its entry without scanning every session.
+  // Rebuilt from the loaded stores (`stateFor`) and kept current by `commit`.
+  private readonly heldIndex = new Map<string, string>();
+  // Recently sent messages by id, held or not, so `awaitRung` can read the rung
+  // of one that has already been settled. Bounded: it answers a question asked
+  // moments after a send.
+  private readonly recentSent = new Map<string, string>();
+  private readonly rungWaiters = new Map<string, Set<{ resolve: () => void; timer: ReturnType<typeof setTimeout> }>>();
   // Per-project bus-event consumers, registered via `setListener` (the seam
   // `AgentCore.setSessionBusListener` feeds). One coordinator now fires one
   // `onEvent` for every project's sessions, so a single hard-wired consumer
@@ -314,176 +340,6 @@ export class SessionBusCoordinator {
   constructor(private deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
     this.newId = deps.newId ?? (() => randomUUID());
-  }
-
-  /**
-   * Seed the route table from the machine-level store.
-   *
-   * Unlike a session's message log or held store — loaded lazily, the first
-   * time THAT session is addressed, because each belongs to exactly one
-   * project — a route is looked up by CONTEXT id, which may name a session in
-   * any project on the machine, so there is no single project whose warm-up
-   * can defer this. Synchronous, because `loadBusRoutes` is: meant to run once,
-   * before the first inbound frame this process folds, so a restart does not
-   * relearn every route a live link would otherwise still have.
-   */
-  hydrateRoutes(): void {
-    for (const [contextId, route] of loadBusRoutes(this.deps.abDir, BUS_ROUTE_TTL_MS, this.now())) {
-      // The host's own call site runs this off a `.finally()` on an async
-      // hydrate, so live inbound traffic can already have called `noteRoute`
-      // for [contextId] before this resolves — newest `at` wins, same rule as
-      // the write-side merge in route-store.ts, or a route learned live is
-      // silently overwritten by whatever a slower disk read turns up.
-      const existing = this.routes.get(contextId);
-      if (!existing || route.at > existing.at) this.routes.set(contextId, route);
-    }
-  }
-
-  /**
-   * Record which app session — and which project's stream — carried
-   * [contextId] in, so a later peer-role send on this context knows where home
-   * is. Called only for a frame that cleared `handleInbound`'s address check —
-   * from its `onAccepted` hook, which fires at exactly that point: the check is
-   * what proves the sender is talking about a session this bridge actually
-   * holds, and this table is the other end's only route back, so noting ahead
-   * of it would let any app session rebind the context with one syntactically
-   * valid frame carrying someone else's contextId, and take the next answer for
-   * itself.
-   *
-   * The project named here is the one whose stream the frame ARRIVED on, and
-   * it is deliberately not compared against whichever project owns
-   * [contextId]: a lead context's id IS a local session id
-   * (`roleForContext`'s own rule below), so on the same machine the case a
-   * shared machine-wide coordinator exists to handle — a worktree session in
-   * project W answering its parent's context in project P — always arrives
-   * with the two disagreeing. Refusing that mismatch reinstates exactly the
-   * unreachability the move exists to remove, and buys nothing: a forged
-   * frame stamping another project's session id as its contextId presents
-   * identically here (applied frame, addressed to a session in the arriving
-   * project, contextId owned elsewhere), and the genuinely remote context the
-   * check would have to let through — its lead living on the OTHER machine,
-   * so attributable to no local project at all — is the common shape anyway.
-   * What a peer may name once admitted is bounded at the gate that admits it,
-   * not at this table; see bridge/AGENTS.md's bullet on one coordinator
-   * serving every project a host has open for what does and does not bound it
-   * today.
-   *
-   * No peerId means the loopback owner — this machine's own desktop app,
-   * already reachable without a route.
-   */
-  noteRoute(contextId: string, peerId: string | undefined, projectId: string): void {
-    if (!peerId) return;
-    const now = this.now();
-    // Named, not counted: the save below has to say which rows it means gone,
-    // or the merge reads their absence from this table as "unknown" and copies
-    // them straight back off disk.
-    const dropped: string[] = [];
-    for (const [key, origin] of this.routes) {
-      if (now - origin.at >= BUS_ROUTE_TTL_MS) {
-        this.routes.delete(key);
-        dropped.push(key);
-      }
-    }
-    const previous = this.routes.get(contextId)?.peerId;
-    // Deleted before it is set so a restamp moves the entry to the back: a Map
-    // keeps first-insertion order, and the eviction below reads the front as
-    // the least recently carried.
-    this.routes.delete(contextId);
-    this.routes.set(contextId, { peerId, projectId, at: now });
-    while (this.routes.size > MAX_BUS_ROUTES) {
-      const oldest = this.routes.keys().next();
-      if (oldest.done) break;
-      this.routes.delete(oldest.value);
-      dropped.push(oldest.value);
-    }
-    this.saveRoutesIfDue(now, dropped.length > 0 || previous !== peerId, { contextIds: dropped });
-    // Logged because a carrier attach is otherwise invisible: nothing else
-    // records which app session a bus context routes through, which makes a
-    // peer that cannot answer indistinguishable from one that was never
-    // carried.
-    if (previous !== peerId) {
-      log.info("session bus: context %s routes home via app session %s (project %s)", contextId, peerId, projectId);
-    }
-  }
-
-  /**
-   * The live route entry, or null. Returned by reference so a caller that
-   * actually gets a frame out can stamp `.at` — see each `send` implementation
-   * (agent-core.ts's per-core fallback, host-server.ts's machine dispatcher).
-   *
-   * A route is sized to outlast a conversation rather than a round trip: a
-   * reply may be the first frame the other side sends after a long stretch of
-   * silence, and one that lapsed in between would strand it. A successful send
-   * refreshes it too (the `.at` restamp above), so a route in continuous use
-   * never ages out at all. An expired entry costs nothing but a held frame,
-   * which the next inbound frame on the context releases — and a miss here is
-   * NEVER a fallback to broadcast: that would put another session's words on
-   * the human's phone.
-   */
-  routeFor(contextId: string): { peerId: string; projectId: string; at: number } | null {
-    const origin = this.routes.get(contextId);
-    if (!origin) return null;
-    const now = this.now();
-    if (now - origin.at >= BUS_ROUTE_TTL_MS) {
-      this.routes.delete(contextId);
-      this.saveRoutesIfDue(now, true, { contextIds: [contextId] });
-      return null;
-    }
-    return origin;
-  }
-
-  /** Persist the map, throttled: a binding change or a drop is written at
-   *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
-   *  One machine-level file, so this table's own rows are only
-   *  ONE process's view of it — two hosts pointed at one ANTGRID_DIR is a
-   *  documented setup (dev stack beside an installed bridge), not a
-   *  once-per-abDir guarantee this coordinator can lean on. `saveBusRoutes`
-   *  merges into whatever the other one last wrote rather than replacing it,
-   *  which is what makes that sharing safe — and is why every DELETION has to
-   *  be named in [drops]: a merge cannot read a row's absence from this table
-   *  as anything but "unknown to me", so a forced write of a pruned map would
-   *  otherwise persist nothing at all. */
-  private saveRoutesIfDue(now: number, force: boolean, drops?: BusRouteDrops): void {
-    if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
-    this.routesSavedAt = now;
-    try {
-      saveBusRoutes(this.deps.abDir, this.routes, drops);
-    } catch (err) {
-      // A route that outlives this process is an optimisation over relearning
-      // one; a bridge must not fail to carry a frame because it could not
-      // write that down.
-      log.warn("session bus: could not persist carrier routes: %s", err);
-    }
-  }
-
-  /**
-   * Drop every route naming [projectId], from the table AND from disk. Called
-   * only when the project itself is forgotten (`HostServer.forget`): the
-   * machine-level route table (`bus-db.ts`) lives outside
-   * `agents/<projectId>/`, so the tree delete that reclaims everything else the
-   * project owned cannot reach these rows — this is their only reclaim. The
-   * write is FORCED rather than throttled, and names [projectId] as a
-   * `BusRouteDrops` — a plain merge-on-write would read this project's absence
-   * from the in-memory table as "unknown", not "gone", and write the very rows
-   * this call means to erase straight back from disk. The drop must be durable
-   * on its own: `forget` may be the last bus-relevant thing this process ever
-   * does, and an in-memory drop nothing persisted is undone by the next process
-   * start, since `hydrateRoutes` reads the file without asking whether the
-   * machine still holds the projects it names.
-   *
-   * Never called on an eviction: a merely-cold project is still real, and its
-   * routes must survive for the coordinator to keep dispatching against once it
-   * warms again, the same way its sessions survive in the session index.
-   */
-  forgetProjectRoutes(projectId: string): void {
-    let dropped = false;
-    for (const [contextId, route] of this.routes) {
-      if (route.projectId === projectId) {
-        this.routes.delete(contextId);
-        dropped = true;
-      }
-    }
-    if (dropped) this.saveRoutesIfDue(this.now(), true, { projectId });
   }
 
   /** Register (or, with null, clear) the per-project consumer that turns a bus
@@ -514,11 +370,12 @@ export class SessionBusCoordinator {
    * a fresh process holds none, so a message the dead process could not send
    * would simply never go. Called once, at process start — machine-wide when
    * host-injected, or once per fallback core with no host — never again on a
-   * later carrier attach: it re-enumerates every session bus directory this
-   * coordinator can see, and a flaky carrier reconnecting would otherwise turn
+   * later relay reconnect: it re-enumerates every session bus directory this
+   * coordinator can see, and a flaky link reconnecting would otherwise turn
    * into a reconnect storm that re-scans the whole machine on every flap.
-   * `pump()` alone is what a carrier attach needs — the in-memory outbox this
-   * call seeded already holds what `resume()` would only rediscover.
+   * `retryNow()` alone is what a reconnect needs — the in-memory outbox this
+   * call seeded already holds what `resume()` would only rediscover. It also
+   * rebuilds the message-id index transport outcomes are routed by.
    */
   resume(): void {
     for (const { projectId, sessionId } of listSessionBusSessions(this.deps.abDir)) {
@@ -548,8 +405,7 @@ export class SessionBusCoordinator {
   /**
    * Drop every session state this coordinator holds for [projectId], from
    * memory only — nothing here touches disk. Called only when the project
-   * itself is forgotten (`HostServer.forget`), symmetric with
-   * `forgetProjectRoutes` above and for the same reason: `deleteProjectStores`
+   * itself is forgotten (`HostServer.forget`): `deleteProjectStores`
    * has already removed `agents/<projectId>/session-bus/` by the time this
    * runs, and a `SessionState` left in `this.sessions` is exactly what
    * recreates it — a held-message retry commits under whatever
@@ -564,21 +420,31 @@ export class SessionBusCoordinator {
    * longer resolves any of this project's sessions at all — a live re-query
    * would find nothing to drop.
    *
-   * Never called on an eviction, mirroring `forgetProjectRoutes`: a merely-cold
-   * project is still real, and its held state must survive for the coordinator
-   * to keep retrying once it warms again.
+   * Never called on an eviction: a merely-cold project is still real, and its
+   * held state must survive for the coordinator to keep retrying once it warms
+   * again.
    */
   forgetProjectStates(projectId: string): void {
     for (const [sessionId, state] of this.sessions) {
-      if (state.projectId === projectId) this.sessions.delete(sessionId);
+      if (state.projectId === projectId) this.forget(sessionId);
     }
   }
 
   forget(sessionId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (s) {
+      for (const m of s.held.held) {
+        this.heldIndex.delete(m.messageId);
+        this.settleWaiters(m.messageId);
+      }
+    }
     this.sessions.delete(sessionId);
   }
 
   stop(): void {
+    // Waiters hold a promise an HTTP handler is blocked on; leaving them to
+    // their timers would keep a stopped coordinator's callers waiting.
+    for (const id of [...this.rungWaiters.keys()]) this.settleWaiters(id);
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
@@ -647,9 +513,14 @@ export class SessionBusCoordinator {
   /**
    * Send one message to another session.
    *
-   * Lossy on purpose: a send that does not leave is HELD, not queued for
-   * unbounded retry, and a message carries no seq and expects no reliable
-   * delivery. Anything that must survive is an Artifact.
+   * Delivery to another machine is at-least-once: the message is kept in the
+   * outbox from the moment it is logged and offered again until the recipient's
+   * signed ack settles it or it expires, and the receiving bridge deduplicates
+   * on the message id. What each rung reported here attests to is in
+   * bridge/AGENTS.md. Anything that must outlive the exchange is an Artifact.
+   *
+   * Logged before it is dispatched, so a receipt that comes back inside this
+   * very call finds an entry to stamp.
    */
   message(input: MessageInput): MessageResult | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
@@ -665,8 +536,8 @@ export class SessionBusCoordinator {
     }
     // A bridge with no relay identity names itself by the local sentinel so the
     // sessions it spawned can reach each other. It can reach nothing else,
-    // and a frame stamped with the sentinel and held for a carrier that
-    // attaches later would arrive carrying a `from` no reply can route back to.
+    // and a frame stamped with the sentinel and held until the relay identity
+    // arrives would land carrying a `from` no reply can route back to.
     if (!namesMachine(to.machineId, self.key.machineId) && this.deps.addressable?.() === false) {
       return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it can only reach sessions on itself");
     }
@@ -702,13 +573,12 @@ export class SessionBusCoordinator {
       threadId,
       envelope,
     });
-    const role = this.roleForContext(input.sessionId, contextId);
-
     // Written BEFORE the send, which is not the order it reads in: `dispatch`
-    // may deliver in process and bring the receipt back inside this very call,
-    // and a receipt that arrives before its message was logged finds no entry to
-    // stamp. The thread row rides the same commit — it is what a reply on this
-    // thread later routes on, and it must not depend on the send succeeding.
+    // may deliver in process and a transport outcome may arrive inside this very
+    // call, and an outcome that arrives before its message was logged finds no
+    // entry to stamp. The thread row rides the same commit — it is what a reply
+    // on this thread later routes on, and it must not depend on the send
+    // succeeding.
     this.commit(input.sessionId, {
       log: appendLog(s.log, { at: now, direction: "out", peer: to, envelope }),
       // Advanced on every send rather than only on the one that opened the
@@ -716,22 +586,68 @@ export class SessionBusCoordinator {
       // expire underneath itself.
       threads: upsertThread(s.threads, { threadId, contextId, peer: to, lastAt: now, openedByPeer: false }),
     });
+    this.noteSent(envelope.messageId, input.sessionId);
 
-    const sent = this.dispatch(frame, { contextId, role, to });
-
-    // A false return is this bridge refusing before the frame reached the relay,
-    // so keeping it is redelivery rather than a duplicate — the one retry an
-    // unacked message can safely have (held-store). Re-read rather than taken
-    // from `s`: the dispatch above may have folded this session's own state.
-    const after = this.stateFor(input.sessionId);
-    const held = sent
-      ? after.held
-      : holdMessage(after.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
-    if (held !== after.held) this.commit(input.sessionId, { held });
+    const ctx = { contextId, to, messageId: envelope.messageId, sentAt: now };
+    let heldReason: BusHeldReason | undefined;
+    let rung: Rung;
+    let refusedCode: string | undefined;
+    const local = this.isLocalTarget(frame.from, to);
+    if (local) {
+      const applied = this.deliverToLocal(frame, to);
+      if (applied) {
+        // The local store write IS the delivery witness here: there is no relay
+        // and no peer to acknowledge, so the stamp is made on the spot.
+        const after = this.stateFor(input.sessionId);
+        this.commit(input.sessionId, { log: markDelivered(after.log, envelope.messageId, now) });
+        rung = "delivered";
+      } else {
+        this.hold(input.sessionId, frame, ctx, now, now + BUS_RETRY_BASE_MS);
+        rung = "held";
+      }
+    } else {
+      // Held BEFORE the offer, always: a `sent` from the transport means it was
+      // queued, not that anything arrived, so the entry stays until an ack.
+      this.hold(input.sessionId, frame, ctx, now, now + BUS_RETRY_BASE_MS);
+      const sent = this.dispatchRemote(frame, ctx);
+      if ("refused" in sent) {
+        this.settleHeld(input.sessionId, envelope.messageId, (log) => markRefused(log, envelope.messageId, now, sent.refused));
+        rung = "refused";
+        refusedCode = sent.refused;
+      } else {
+        rung = "held";
+        if (!sent.sent) {
+          heldReason = sent.reason;
+          this.setHeldReason(input.sessionId, envelope.messageId, sent.reason);
+        }
+        // A receipt can land inside the dispatch above; report what the entry
+        // reached rather than what it was before the call.
+        const reached = this.rungOf(envelope.messageId);
+        if (reached.rung !== "held") {
+          rung = reached.rung;
+          refusedCode = reached.refusedCode;
+          heldReason = undefined;
+        }
+      }
+    }
     // Charged whether or not it left: a held frame is retried, so a pair with no
     // route would otherwise talk to itself forever outside every ceiling.
     if (budget) this.spendBudget(input.sessionId, budget, input.verb, opensThread || carriesArtifact(input.parts), now);
-    return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId, threadId, opensThread };
+    return {
+      ok: true,
+      rung,
+      ...(heldReason === undefined ? {} : { heldReason }),
+      ...(refusedCode === undefined ? {} : { refusedCode }),
+      ...(local ? { local: true as const } : {}),
+      ...(input.to.machineLabel ? { machineLabel: input.to.machineLabel } : {}),
+      ...(input.to.sessionName ? { sessionName: input.to.sessionName } : {}),
+      ...(rung === "held" ? { retryUntil: now + HELD_MESSAGE_TTL_MS } : {}),
+      sent: rung !== "held",
+      held: rung === "held",
+      messageId: envelope.messageId,
+      threadId,
+      opensThread,
+    };
   }
 
   /**
@@ -791,56 +707,51 @@ export class SessionBusCoordinator {
     this.deps.pairBudget?.write(sessionId, next);
   }
 
+  /** Whether [to] is a session on the machine [from] speaks for. `namesMachine`
+   *  and not plain equality, for the reason its own doc gives: a peer that
+   *  stamps the local sentinel itself reaches nothing by it, because the
+   *  deliverer resolves the target through this bridge's own session index and
+   *  declines when it cannot. */
+  private isLocalTarget(from: SessionMemberKey, to: SessionMemberKey): boolean {
+    return namesMachine(to.machineId, from.machineId);
+  }
+
+  /** Hand a frame to a session on this machine. False holds it for a retry:
+   *  the target's project is not loaded or a store write failed.
+   *
+   *  It must not fall through to the transport, however inviting that reads. A
+   *  local decline means the target's project is not loaded here, and the relay
+   *  only addresses OTHER machines. A coordinator with no `deliverLocal` has no
+   *  local arm at all and holds the frame the same way. */
+  private deliverToLocal(frame: BusFrame, to: SessionMemberKey): boolean {
+    return this.deps.deliverLocal?.(frame, to) ?? false;
+  }
+
   /**
-   * The one send decision, taken by everything that leaves this coordinator —
-   * a message and the receipt that answers one alike.
+   * The one off-machine send decision, taken by everything that leaves for
+   * another machine: a message, a held retry, and a slice request or answer
+   * alike.
    *
-   * A target on this machine is handed straight to it: no relay, no
-   * carrier, no route table, and nothing that can fail for transport reasons.
-   * Local delivery that DECLINES is the whole answer — the frame is held and
-   * retried, so a target whose project is cold gets it once that project is
-   * warm again.
-   *
-   * It must not fall through to the carrier, however inviting that reads. A
-   * local decline means the target's project is not loaded here; the carrier
-   * below is this machine's own desktop app, which takes a lead-role frame,
-   * returns true, and reports the send as having left — and the app then
-   * classifies it inbound-but-uncarried and drops it in silence. That is
-   * `{sent:true, held:false}` for a message nothing delivered, with no mailbox
-   * row, no held row and no retry.
-   *
-   * A caller with NO `deliverLocal` wired at all is a different case and keeps
-   * falling through: a bare bus, or a single-project core with no host above
-   * it, has no local arm to decline in the first place.
+   * The remote-access switch is re-read here rather than at the verbs because
+   * the verbs are not the only way out. Held rather than dropped when it is off,
+   * and for the same reason a missing transport holds: nothing here is a verdict
+   * about the exchange, only about this machine right now, and the switch coming
+   * back on is an event the outbox already retries against. The interactive
+   * verbs never get this far — `api.ts` refuses them up front, where the answer
+   * can carry a reason.
    */
-  private dispatch(frame: BusFrame, ctx: { contextId: string; role: BusRole; to: SessionMemberKey }): boolean {
-    // `namesMachine`, not plain equality, for the reason its own doc gives; a
-    // peer that stamps the sentinel itself reaches nothing by it, because
-    // `deliverLocal` resolves the target through this bridge's own session
-    // index and declines when it cannot.
-    if (this.deps.deliverLocal && namesMachine(ctx.to.machineId, frame.from.machineId)) {
-      return this.deps.deliverLocal(frame, ctx.to);
-    }
-    // The machine boundary is re-tested rather than inferred from having fallen
-    // past the local arm: a coordinator with no `deliverLocal` wired reaches
-    // here for a same-machine target too, and that target is not what the
-    // switch is about.
-    if (
-      !namesMachine(ctx.to.machineId, frame.from.machineId) &&
-      this.deps.offMachineSendAllowed?.() === false
-    ) {
-      // Held, not dropped, and for the same reason a missing carrier holds:
-      // nothing here is a verdict about the exchange, only about this machine
-      // right now, and the switch coming back on is an event the outbox already
-      // retries against. The interactive verbs never get this far — `api.ts`
-      // refuses them up front, where the answer can carry a reason.
+  private dispatchRemote(
+    frame: BusFrame,
+    ctx: { contextId: string; to: SessionMemberKey; messageId: string; sentAt: number },
+  ): BusSendResult {
+    if (this.deps.offMachineSendAllowed?.() === false) {
       log.debug(
         { type: frame.type, contextId: ctx.contextId, to: ctx.to.machineId },
         "session bus: not sent, this machine's remote access is off",
       );
-      return false;
+      return { sent: false, reason: "remote-access-off" };
     }
-    return this.deps.send(frame, ctx);
+    return this.deps.send?.(frame, ctx) ?? { sent: false, reason: "no-transport" };
   }
 
   /** Ask the machine that published an artifact for one slice of it. Unheld and
@@ -866,22 +777,16 @@ export class SessionBusCoordinator {
       offset: input.offset,
       length: Math.min(Math.max(1, input.length), ARTIFACT_CHUNK_BYTES),
     });
-    const role = this.roleForContext(input.sessionId, input.contextId);
-    const sent = this.dispatch(frame, { contextId: input.contextId, role, to: keyOf(input.to) });
+    const to = keyOf(input.to);
+    const ctx = { contextId: input.contextId, to, messageId: this.newId(), sentAt: this.now() };
+    const sent = this.isLocalTarget(self.key, to)
+      ? this.deliverToLocal(frame, to)
+      : this.dispatchRemote(frame, ctx).sent === true;
     return { ok: true, requestId, sent };
   }
 
   // -- inbound --------------------------------------------------------------
 
-  /**
-   * Fold one frame the carrier delivered. True when it was a bus frame this
-   * bridge owns, so an inbound switch can fall through on anything else.
-   *
-   * The session is resolved from the frame's `to`, never from the connection it
-   * arrived on. A frame naming a session this bridge does not hold is dropped
-   * WITHOUT an ack: acking it would tell the sender its message landed somewhere
-   * that will never read it.
-   */
   /** Sessions already reported as addressed by a project id other than this
    *  bridge's own. A stored address does not change its mind, so without the
    *  latch this is a line per retry for the life of the session. */
@@ -904,23 +809,24 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * [onAccepted] runs the instant the address check below passes and before any
-   * verb is folded, because folding a message DISPATCHES its receipt — and that
-   * receipt is itself a peer-role send, which reaches nobody until the caller
-   * has recorded the route this very frame arrived on. Running it on the
-   * outcome instead loses the receipt for the first frame of every context,
-   * permanently: an ack is fire-and-forget and nothing retries it.
+   * Fold one frame delivered from the relay transport or from a local sender.
+   * False when it was not a bus frame this bridge owns, so an inbound switch can
+   * fall through on anything else.
    *
-   * Optional because a caller with no carrier to record — local delivery on
-   * this machine (host-server.ts's `deliverLocal`) — has no route to bind.
+   * The session is resolved from the frame's `to`, never from where the frame
+   * came from. A frame naming a session this bridge does not hold is `dropped`,
+   * and the host refuses it rather than acknowledging it: acking it would tell
+   * the sender its message landed somewhere that will never read it.
+   *
+   * Not idempotent: deduplication happens upstream, in the transport's seen
+   * store, which is also what keeps the pair budget charged once per message.
    */
-  handleInbound(msg: AbMessage, onAccepted?: () => void): InboundOutcome {
+  handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
       case "session-bus:post":
       case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
-      case "session-bus:ack":
         break;
       default:
         return false;
@@ -937,13 +843,11 @@ export class SessionBusCoordinator {
     // The head of the walk. The message id is the join key here and at `emit`
     // because it is what `lineForEvent` uses as the QueuedLine's own id, so a
     // frame can be followed from admission to the queue row it becomes, and the
-    // queue row's sha takes it from there. `boundRoute` is the other half of
-    // this line's value: whether a receipt and a reply have a way home at all.
+    // queue row's sha takes it from there.
     log.debug(
-      { type: msg.type, sessionId, msgId: "envelope" in msg ? msg.envelope.messageId : undefined, boundRoute: onAccepted !== undefined },
+      { type: msg.type, sessionId, msgId: "envelope" in msg ? msg.envelope.messageId : undefined },
       "bus inbound: accepted",
     );
-    onAccepted?.();
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
       case "session-bus:post":
@@ -958,9 +862,6 @@ export class SessionBusCoordinator {
           msg.envelope,
         );
         return "applied";
-      case "session-bus:ack":
-        this.onAck(sessionId, msg);
-        return "applied";
       case "session-bus:fetch":
         this.onFetch(sessionId, self, msg);
         return "applied";
@@ -974,11 +875,11 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Retry every held message across every loaded session.
+   * Offer every due held message again, across every loaded session.
    *
-   * Called on the timer, and directly whenever a carrier appears: a retry
-   * schedule is the fallback for a silent link, not what decides how fast a live
-   * one moves.
+   * Called on the timer, and by `retryNow` whenever the relay link or a peer
+   * comes up: the backoff is the fallback for a silent link, not what decides
+   * how fast a live one moves.
    */
   pump(): void {
     const now = this.now();
@@ -986,6 +887,99 @@ export class SessionBusCoordinator {
       this.flushHeld(sessionId, now);
     }
     if (this.timer && !this.anyPending()) this.stop();
+  }
+
+  /**
+   * Apply what the transport learned about one message this machine sent.
+   *
+   * Looked up by message id and checked against the machine the entry was
+   * addressed to, so an outcome for an id this machine never sent, or one that
+   * names a different recipient than the entry holds, is ignored rather than
+   * trusted. The transport has already verified any ack's signature; this is
+   * the only place an ack becomes a `delivered` or `refused` stamp.
+   */
+  onTransportOutcome(messageId: string, toMachine: string, o: TransportOutcome): void {
+    const sessionId = this.heldIndex.get(messageId);
+    if (sessionId === undefined) return;
+    const s = this.stateFor(sessionId);
+    const m = s.held.held.find((h) => h.messageId === messageId);
+    if (!m || m.to.machineId !== toMachine) return;
+    const now = this.now();
+    switch (o.kind) {
+      case "relayed": {
+        if (m.relayedAt !== undefined) return;
+        // The receipt means the relay holds it, so the next offer is the slow
+        // safety net, not the next tick.
+        const held = {
+          held: s.held.held.map((h) =>
+            h.messageId === messageId ? { ...h, relayedAt: now, nextAttemptAt: now + BUS_RELAYED_RESEND_MS } : h,
+          ),
+        };
+        this.commit(sessionId, { held, log: markRelayed(s.log, messageId, now) });
+        break;
+      }
+      case "applied":
+        this.commit(sessionId, { held: releaseHeld(s.held, [messageId]), log: markDelivered(s.log, messageId, now) });
+        break;
+      case "refused":
+        this.commit(sessionId, { held: releaseHeld(s.held, [messageId]), log: markRefused(s.log, messageId, now, o.code) });
+        break;
+      case "retry": {
+        const held = { held: s.held.held.map((h) => (h.messageId === messageId ? { ...h, lastReason: o.reason } : h)) };
+        this.commit(sessionId, { held });
+        return;
+      }
+    }
+    this.settleWaiters(messageId);
+  }
+
+  /**
+   * Make held messages due now, then offer them. For the moments the link is
+   * known to have improved: the relay socket authenticated, or a peer machine
+   * came online. A relayed entry is offered too, because the relay may have
+   * restarted and lost its queue; the duplicate is cheap and the receiver
+   * dedupes it.
+   */
+  retryNow(filter?: { machineId?: string }): void {
+    for (const [sessionId, s] of this.sessions) {
+      let changed = false;
+      const held = s.held.held.map((m) => {
+        if (filter?.machineId !== undefined && m.to.machineId !== filter.machineId) return m;
+        if (m.nextAttemptAt === 0) return m;
+        changed = true;
+        return { ...m, nextAttemptAt: 0 };
+      });
+      if (changed) this.commit(sessionId, { held: { held } });
+    }
+    this.pump();
+  }
+
+  /**
+   * Resolve with the first rung above `held` a message reaches, or with the
+   * rung it is on when [timeoutMs] runs out. For a caller that is blocked on
+   * the answer, so the bound is theirs and not this class's.
+   */
+  awaitRung(
+    messageId: string,
+    timeoutMs: number,
+  ): Promise<{ rung: Rung; heldReason?: BusHeldReason; refusedCode?: string }> {
+    const current = this.rungOf(messageId);
+    if (current.rung !== "held") return Promise.resolve(current);
+    return new Promise((resolve) => {
+      const waiter = {
+        timer: setTimeout(() => finish(), timeoutMs),
+        resolve: () => finish(),
+      };
+      const finish = (): void => {
+        clearTimeout(waiter.timer);
+        this.rungWaiters.get(messageId)?.delete(waiter);
+        if (this.rungWaiters.get(messageId)?.size === 0) this.rungWaiters.delete(messageId);
+        resolve(this.rungOf(messageId));
+      };
+      let set = this.rungWaiters.get(messageId);
+      if (!set) this.rungWaiters.set(messageId, (set = new Set()));
+      set.add(waiter);
+    });
   }
 
   // -- internals ------------------------------------------------------------
@@ -1012,6 +1006,7 @@ export class SessionBusCoordinator {
         };
       }
       this.sessions.set(sessionId, s);
+      for (const m of s.held.held) this.heldIndex.set(m.messageId, sessionId);
       // Hydrating IS how a held message comes back off disk, so the timer has to
       // be considered here and not only at a commit: nothing else re-arms the
       // retries a previous process left.
@@ -1020,10 +1015,90 @@ export class SessionBusCoordinator {
     return s;
   }
 
+  /** The rung a message has reached, read from its log entry: the log is where
+   *  every witness stamps, so it is the one place that cannot disagree with
+   *  itself. A message this coordinator knows nothing about reads as `held`. */
+  private rungOf(messageId: string): { rung: Rung; heldReason?: BusHeldReason; refusedCode?: string } {
+    const sessionId = this.heldIndex.get(messageId) ?? this.recentSent.get(messageId);
+    if (sessionId === undefined) return { rung: "held" };
+    const s = this.stateFor(sessionId);
+    const e = s.log.entries.find((x) => x.direction === "out" && x.envelope.messageId === messageId);
+    if (e?.refusedAt !== undefined) {
+      return { rung: "refused", ...(e.refusedCode === undefined ? {} : { refusedCode: e.refusedCode }) };
+    }
+    if (e?.deliveredAt !== undefined) return { rung: "delivered" };
+    if (e?.relayedAt !== undefined) return { rung: "relayed" };
+    const reason = s.held.held.find((h) => h.messageId === messageId)?.lastReason;
+    return { rung: "held", ...(reason === undefined ? {} : { heldReason: reason as BusHeldReason }) };
+  }
+
+  private noteSent(messageId: string, sessionId: string): void {
+    this.recentSent.set(messageId, sessionId);
+    if (this.recentSent.size > RECENT_SENT_CAP) {
+      const oldest = this.recentSent.keys().next();
+      if (!oldest.done) this.recentSent.delete(oldest.value);
+    }
+  }
+
+  private settleWaiters(messageId: string): void {
+    for (const w of [...(this.rungWaiters.get(messageId) ?? [])]) w.resolve();
+  }
+
+  /** Keep one message in the outbox. Anything pushed out by the cap is stamped
+   *  refused on its log entry and said at warn (ids only), so an eviction is
+   *  something the sender can read rather than a message that vanishes. */
+  private hold(
+    sessionId: string,
+    frame: BusFrame,
+    ctx: { contextId: string; to: SessionMemberKey; messageId: string; sentAt: number },
+    now: number,
+    nextAttemptAt: number,
+  ): void {
+    const s = this.stateFor(sessionId);
+    const { state, evicted } = holdMessage(s.held, {
+      messageId: ctx.messageId,
+      contextId: ctx.contextId,
+      to: ctx.to,
+      frame,
+      heldAt: now,
+      attempts: 1,
+      nextAttemptAt,
+    });
+    let logState = s.log;
+    for (const e of evicted) {
+      logState = markRefused(logState, e.messageId, now, "OUTBOX_FULL");
+      log.warn(
+        "session bus: outbox of session %s is full; message %s was dropped before it was acknowledged",
+        sessionId, e.messageId,
+      );
+    }
+    this.commit(sessionId, { held: state, ...(logState === s.log ? {} : { log: logState }) });
+    for (const e of evicted) this.settleWaiters(e.messageId);
+  }
+
+  /** Release one message from the outbox and stamp the log, in one commit. */
+  private settleHeld(sessionId: string, messageId: string, stamp: (l: MessageLogState) => MessageLogState): void {
+    const s = this.stateFor(sessionId);
+    this.commit(sessionId, { held: releaseHeld(s.held, [messageId]), log: stamp(s.log) });
+    this.settleWaiters(messageId);
+  }
+
+  private setHeldReason(sessionId: string, messageId: string, reason: BusHeldReason): void {
+    const s = this.stateFor(sessionId);
+    if (!s.held.held.some((h) => h.messageId === messageId && h.lastReason !== reason)) return;
+    this.commit(sessionId, {
+      held: { held: s.held.held.map((h) => (h.messageId === messageId ? { ...h, lastReason: reason } : h)) },
+    });
+  }
+
   private commit(sessionId: string, patch: Partial<SessionState>): void {
     const s = this.stateFor(sessionId);
     const next: SessionState = { ...s, ...patch };
     this.sessions.set(sessionId, next);
+    if (next.held !== s.held) {
+      for (const m of s.held.held) this.heldIndex.delete(m.messageId);
+      for (const m of next.held.held) this.heldIndex.set(m.messageId, sessionId);
+    }
     if (next.projectId !== null) {
       if (next.log !== s.log) saveMessageLog(this.deps.abDir, next.projectId, sessionId, next.log);
       if (next.held !== s.held) saveHeld(this.deps.abDir, next.projectId, sessionId, next.held);
@@ -1062,64 +1137,81 @@ export class SessionBusCoordinator {
     return stampEnvelope(draft, { messageId: this.newId(), peer: self.ref, now: this.now() });
   }
 
-  /** Which way a frame on this context leaves: to this machine's own carrier, or
-   *  back down the carrier that brought the context in.
-   *
-   *  The CONTEXT ID decides. A context is named by the session that opened it,
-   *  so a session whose own id is the context id opened it and reaches the other
-   *  end through its own desktop app; any other context id is one this session
-   *  was contacted on, and its only way home is the carrier that delivered.
-   *
-   *  Defaulting to "lead" instead is the misroute this exists to prevent: it
-   *  posts the answer to THIS machine's own desktop app, which accepts it and
-   *  reports it sent. */
-  private roleForContext(sessionId: string, contextId: string): BusRole {
-    return isLeadContext(sessionId, contextId) ? "lead" : "peer";
-  }
-
   /**
-   * Retry what a missing route refused.
+   * Offer again every held message whose time has come.
    *
-   * Only frames that never left are held (held-store), so redelivery here cannot
-   * duplicate at the receiver. A route belongs to a context and fails whole, so
-   * stopping that context at its first refusal is what keeps a sender's messages
-   * arriving in the order it wrote them.
+   * What stays here is exactly what the far side has not settled, so a retry may
+   * reach a recipient that already applied the message; its seen store re-acks
+   * instead of re-applying (held-store.ts states the contract). A machine whose
+   * offer was refused stops being offered to for the rest of this pass, which is
+   * what keeps a sender's messages to one machine arriving in the order it wrote
+   * them.
    *
-   * Through `dispatch`, never `deps.send`: a frame held because its target's
-   * project was cold is delivered by the LOCAL arm once that project is warm
-   * again, and a retry that went straight to `send` would keep offering it to a
-   * carrier that has no route for it until the hold aged out.
+   * Through the dispatch helpers, never `deps.send` directly: a frame held
+   * because its target's project was cold is delivered by the LOCAL arm once
+   * that project is warm again, and a retry that went straight to `send` would
+   * offer a same-machine target to a relay that cannot address it.
    */
   private flushHeld(sessionId: string, now: number): void {
     const s = this.stateFor(sessionId);
-    const live = expireHeld(s.held, now);
-    // A hold is a delay the sender was never told about: the send answered
-    // `{sent:false, held:true}`, which every surface renders as on its way, and
-    // six hours later the row simply vanishes. Said once per message, at warn,
-    // because it is the only moment anything can name what was lost — and ids
-    // only, never the envelope: `host.log` is a file users are asked to send.
-    if (live !== s.held) {
-      const survived = new Set(live.held.map((h) => h.messageId));
-      for (const m of s.held.held) {
-        if (survived.has(m.messageId)) continue;
-        log.warn(
-          "session bus: held message %s from session %s to %s on context %s expired without ever leaving; it will not be delivered",
-          m.messageId, sessionId, m.to.sessionId, m.contextId,
-        );
-      }
+    const { state: live, expired } = expireHeld(s.held, now);
+    const logOps: ((l: MessageLogState) => MessageLogState)[] = [];
+    // A hold is a delay the sender was never told about unless the log says so,
+    // so every expiry is stamped on the entry and said once at warn — ids only,
+    // never the envelope: `host.log` is a file users are asked to send.
+    for (const m of expired) {
+      logOps.push((l) => markRefused(l, m.messageId, now, "EXPIRED"));
+      log.warn(
+        "session bus: held message %s from session %s to %s on context %s expired without being acknowledged; it will not be delivered",
+        m.messageId, sessionId, m.to.sessionId, m.contextId,
+      );
     }
-    const sent: string[] = [];
-    const refused = new Set<string>();
+    const gone = new Set<string>(expired.map((m) => m.messageId));
+    const updates = new Map<string, Partial<HeldMessage>>();
+    const blocked = new Set<string>();
     for (const m of live.held) {
-      if (refused.has(m.contextId)) continue;
-      if (this.dispatch(m.frame as BusFrame, { contextId: m.contextId, role: m.role, to: m.to })) {
-        sent.push(m.messageId);
+      if (now < m.nextAttemptAt || blocked.has(m.to.machineId)) continue;
+      const attempts = m.attempts + 1;
+      const frame = m.frame as BusFrame;
+      if (this.isLocalTarget(frame.from, m.to)) {
+        if (this.deliverToLocal(frame, m.to)) {
+          logOps.push((l) => markDelivered(l, m.messageId, now));
+          gone.add(m.messageId);
+        } else {
+          updates.set(m.messageId, { attempts, nextAttemptAt: now + BUS_RETRY_BASE_MS });
+        }
+        continue;
+      }
+      const result = this.dispatchRemote(frame, { contextId: m.contextId, to: m.to, messageId: m.messageId, sentAt: m.heldAt });
+      const nextAttemptAt = now + (m.relayedAt === undefined
+        ? Math.min(BUS_RETRY_BASE_MS * 2 ** (attempts - 1), BUS_RETRY_MAX_MS)
+        : BUS_RELAYED_RESEND_MS);
+      if ("refused" in result) {
+        logOps.push((l) => markRefused(l, m.messageId, now, result.refused));
+        gone.add(m.messageId);
+      } else if (result.sent) {
+        // lastReason is left as it was: the entry is still unacknowledged, and
+        // clearing it would hide why an earlier offer failed.
+        updates.set(m.messageId, { attempts, nextAttemptAt });
       } else {
-        refused.add(m.contextId);
+        blocked.add(m.to.machineId);
+        updates.set(m.messageId, { attempts, nextAttemptAt, lastReason: result.reason });
       }
     }
-    const next = releaseHeld(live, sent);
-    if (next !== s.held) this.commit(sessionId, { held: next });
+    // Applied to the freshest state, not to the copy this pass started from: a
+    // dispatch above can bring an outcome back inside the call, and that
+    // outcome has already edited the stored entry.
+    const fresh = this.stateFor(sessionId);
+    const held = fresh.held.held.filter((m) => !gone.has(m.messageId)).map((m) => {
+      const u = updates.get(m.messageId);
+      return u ? { ...m, ...u } : m;
+    });
+    const patch: Partial<SessionState> = {};
+    if (held.length !== fresh.held.held.length || updates.size > 0) patch.held = { held };
+    const logState = logOps.reduce((l, op) => op(l), fresh.log);
+    if (logState !== fresh.log) patch.log = logState;
+    if (patch.held || patch.log) this.commit(sessionId, patch);
+    for (const id of gone) this.settleWaiters(id);
   }
 
   private onMessage(
@@ -1164,8 +1256,8 @@ export class SessionBusCoordinator {
         : {}),
       // BOTH verbs, because a notify leaves no mailbox row and this is then the
       // only record of the context a reply on that thread has to go back out on.
-      // Without it the reply falls back to this session's own id, which
-      // `roleForContext` reads as "lead" and posts to this machine's own desktop.
+      // Without it the reply falls back to this session's own id and answers on
+      // a context the peer never opened.
       ...(threadId === null
         ? {}
         : { threads: upsertThread(s.threads, { threadId, contextId, peer: from, lastAt: now, openedByPeer: true }) }),
@@ -1179,22 +1271,6 @@ export class SessionBusCoordinator {
     // recorded when the line reaches the session.
     const budget = this.pairBudgetFor(sessionId, self, from);
     if (budget) this.spendBudget(sessionId, budget, verb, opensThread || carriesArtifact(envelope.parts), now);
-    // The receipt takes the same send decision a message does, so it must go
-    // through `dispatch` and never `deps.send`: two sessions on ONE machine
-    // exchange on a peer-role context nothing ever taught a route for, and the
-    // ordinary send finds nowhere to put it and drops it with a warning.
-    // Fire-and-forget — an unacked ack is not retried, and `ok: false` would
-    // still be a receipt.
-    this.dispatch(
-      createMessage("session-bus:ack", {
-        from: self.key,
-        to: from,
-        contextId,
-        messageId: envelope.messageId,
-        ok: true,
-      }),
-      { contextId, role: this.roleForContext(sessionId, contextId), to: from },
-    );
     this.emit({
       kind: verb,
       sessionId,
@@ -1209,35 +1285,6 @@ export class SessionBusCoordinator {
         ? { answering: lastOutboundSummary(s.log, threadId) }
         : {}),
     });
-  }
-
-  /** Stamp the outbound entry a receipt answers.
-   *
-   *  Nothing to stamp is not a failure: a message already trimmed out of the
-   *  ring, or a second receipt for one already stamped, both leave the log where
-   *  it was. The stamp says the peer bridge took the frame; the log is a
-   *  rendering aid and is allowed to have moved on.
-   *
-   *  A refusing receipt is still a receipt, but it is not that, so it leaves the
-   *  entry unstamped and says so in the log where a human can read the reason.
-   *  Strictly `false`: nothing Zod-validates an inbound bus frame — it is
-   *  admitted on its type tag alone — so a peer whose body omits the field must
-   *  still have its receipt believed. */
-  private onAck(sessionId: string, msg: Extract<AbMessage, { type: "session-bus:ack" }>): void {
-    if (msg.ok === false) {
-      // Clipped here, not trusted from the wire: nothing Zod-validates an
-      // inbound bus frame, so `SessionBusAckWire`'s bound on this field never
-      // runs and a peer decides what lands in a file users are asked to send.
-      const reason = typeof msg.error === "string" ? msg.error.slice(0, 200) : undefined;
-      log.warn(
-        { sessionId, messageId: msg.messageId, error: reason },
-        "bus ack: the peer would not take the frame; the entry stays unacknowledged",
-      );
-      return;
-    }
-    const s = this.stateFor(sessionId);
-    const logState = markDelivered(s.log, msg.messageId, this.now());
-    if (logState !== s.log) this.commit(sessionId, { log: logState });
   }
 
   private onFetch(sessionId: string, self: SessionBusSelf, msg: Extract<AbMessage, { type: "session-bus:fetch" }>): void {
@@ -1281,14 +1328,12 @@ export class SessionBusCoordinator {
             error: "no artifact with that id on this session",
           }),
     });
-    // Through `dispatch` for the same reason the ack is: a slice answered
-    // between two sessions on ONE machine travels a peer-role context nothing
-    // taught a route for, and the ordinary send would drop it with a warning.
-    this.dispatch(frame, {
-      contextId: msg.contextId,
-      role: this.roleForContext(sessionId, msg.contextId),
-      to: msg.from,
-    });
+    // Not held and not retried: the fetcher retries by asking again, and a
+    // slice nobody is waiting for any more must not keep travelling. A requester
+    // on this machine is handed the answer in process.
+    const ctx = { contextId: msg.contextId, to: msg.from, messageId: this.newId(), sentAt: this.now() };
+    if (this.isLocalTarget(self.key, msg.from)) this.deliverToLocal(frame, msg.from);
+    else this.dispatchRemote(frame, ctx);
   }
 
   private emit(event: SessionBusEvent): void {

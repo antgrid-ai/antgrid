@@ -5,10 +5,8 @@ import { createHostPolicyFixture } from "./host-policy-fixture";
 // together, and gates neither when remote access has already said no.
 //
 // The disclosure half is exercised against `handleCapabilityCardRpc` directly;
-// the interruption half through the core's own bus inbound handler, because the
-// carve-outs that matter (a loopback frame, a core with no relay wired, an
-// answer on a context this machine leads) live in that handler and not in the
-// coordinator underneath it.
+// the interruption half at the host (relay inbound), with the core's own bus
+// inbound handler pinned to refuse a bus frame it is handed on a project stream.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -198,7 +196,7 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs = 20_00
  *  it -- the smallest thing that can receive a bus frame addressed somewhere
  *  real. `setPeerSessionProvider` is what makes the core relay-wired, which is
  *  the carve-out both gates skip when it is absent. */
-async function bootReachable(reach: () => boolean, remote: () => boolean = () => true): Promise<{
+async function bootReachable(remote: () => boolean = () => true): Promise<{
   bus: MessageBus;
   sessionId: string;
   sessionBus: SessionBusCoordinator;
@@ -222,7 +220,6 @@ async function bootReachable(reach: () => boolean, remote: () => boolean = () =>
       };
     },
     addressable: () => true,
-    send: () => true,
   });
   coordinator = sessionBus;
 
@@ -232,7 +229,6 @@ async function bootReachable(reach: () => boolean, remote: () => boolean = () =>
     identity: { deviceId: "agent-reach", deviceName: "agent-reach", createdAt: new Date().toISOString() },
     machineId: () => "m1",
     sessionBus,
-    agentReachEnabled: reach,
     remoteAccessEnabled: remote,
   });
   cores.push(core);
@@ -276,87 +272,16 @@ function inbound(sessionId: string, contextId: string, text: string, verb: "post
   });
 }
 
-test("a peer opening an exchange is dropped while agent reach is off, and lands once on", async () => {
-  let reach = false;
-  const { bus, sessionId, sessionBus } = await bootReachable(() => reach);
+test("a bus frame on a project stream is not applied, whatever the source or the reach bit", async () => {
+  // Bus frames travel sealed through the relay and are admitted at the host,
+  // which is where the reach gate sits; a core never applies one it is handed.
+  const { bus, sessionId, sessionBus } = await bootReachable();
 
-  // contextId is the SENDER's session, so this is a context nobody here opened.
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "while-off"), "control", "relay", "app-1");
-  await new Promise((r) => setTimeout(r, 100));
+  for (const verb of ["post", "notify"] as const) {
+    bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, `relay-${verb}`, verb), "control", "relay", "app-1");
+    bus.dispatchInbound(inbound(sessionId, sessionId, `lead-${verb}`, verb), "control", "relay", "app-1");
+    bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, `loopback-${verb}`, verb), "control", "loopback");
+  }
+  await new Promise((r) => setTimeout(r, 150));
   expect(sessionBus.messages(sessionId).entries).toHaveLength(0);
-
-  reach = true;
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "while-on"), "control", "relay", "app-1");
-  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the frame sent once reach was on");
-}, 30_000);
-
-test("the gate covers both verbs, so a notify cannot walk past what a post is refused", async () => {
-  // The gate switches on the frame TYPE, and this wave split one type into two.
-  // A verb left out of that switch falls to `return true` and reaches the
-  // session with reach off — the interruption half of E12 open on one verb and
-  // shut on the other, with nothing to say so.
-  let reach = false;
-  const { bus, sessionId, sessionBus } = await bootReachable(() => reach);
-
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "notify-while-off", "notify"), "control", "relay", "app-1");
-  await new Promise((r) => setTimeout(r, 100));
-  expect(sessionBus.messages(sessionId).entries).toHaveLength(0);
-
-  reach = true;
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "notify-while-on", "notify"), "control", "relay", "app-1");
-  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the notify sent once reach was on");
-}, 30_000);
-
-test("an answer on a context this machine LEADS still lands while agent reach is off", async () => {
-  const { bus, sessionId, sessionBus } = await bootReachable(() => false);
-
-  // contextId === this machine's own session: something here opened the
-  // exchange, so this is the reply to it. Refusing it would not be "nobody may
-  // interrupt me", it would be "my own agents may not finish a sentence".
-  bus.dispatchInbound(inbound(sessionId, sessionId, "reply"), "control", "relay", "app-1");
-
-  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the reply on our own context");
-}, 30_000);
-
-test("remote access off still drops a peer opening an exchange, agent reach notwithstanding (E15)", async () => {
-  // `remoteFrameAllowed` runs first and is unconditional, so the subordinate
-  // agent-reach bit being ON buys a peer nothing here. This half is what E15
-  // left alone and what the switch has always done; the outbound half now
-  // matches it (`REMOTE_ACCESS_OFF` in api.ts) rather than diverging from it.
-  const { bus, sessionId, sessionBus } = await bootReachable(() => true, () => false);
-
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "while-off"), "control", "relay", "app-1");
-  await new Promise((r) => setTimeout(r, 100));
-  expect(sessionBus.messages(sessionId).entries).toHaveLength(0);
-}, 30_000);
-
-test("with remote access off a lead context is answered over loopback, not over the relay (E15)", async () => {
-  // `remoteFrameAllowed` has deliberately NOT grown E12's lead carve-out: a
-  // relay-origin frame is refused whatever context it names, while the answer
-  // on this machine's OWN carrier comes home down the loopback socket, which no
-  // gate on this plane reads.
-  //
-  // This asymmetry was once read as "so sending out with the switch off is safe
-  // rather than one-way". It is not, and that reading is what E15 shipped: the
-  // loopback answer it describes is the bridge's own ACK, which rides the route
-  // the frame arrived on, while the peer AGENT's reply resolves a directory a
-  // switched-off machine publishes no row into. One leg came home and the one
-  // that mattered did not. The send is gated now, so this test pins the inbound
-  // fact alone.
-  const { bus, sessionId, sessionBus } = await bootReachable(() => true, () => false);
-
-  bus.dispatchInbound(inbound(sessionId, sessionId, "relay-reply"), "control", "relay", "app-1");
-  await new Promise((r) => setTimeout(r, 100));
-  expect(sessionBus.messages(sessionId).entries).toHaveLength(0);
-
-  bus.dispatchInbound(inbound(sessionId, sessionId, "carrier-reply"), "control", "loopback");
-  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the answer down our own carrier");
-}, 30_000);
-
-test("the desktop's own loopback frames are never gated", async () => {
-  const { bus, sessionId, sessionBus } = await bootReachable(() => false);
-
-  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "local"), "control", "loopback");
-
-  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the loopback frame");
 }, 30_000);

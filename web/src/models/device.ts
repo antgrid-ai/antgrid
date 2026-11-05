@@ -129,6 +129,9 @@ export async function checkCapAndUpsert(
   }
 
   const pkBuf = Buffer.from(args.publicKey);
+  const prior = await tx.device.findUnique({
+    where: { userId_deviceId: { userId: args.userId, deviceId: args.deviceId } },
+  });
   const upserted = await tx.device.upsert({
     where: { userId_deviceId: { userId: args.userId, deviceId: args.deviceId } },
     create: {
@@ -145,9 +148,25 @@ export async function checkCapAndUpsert(
       displayName: args.displayName,
       kind: args.kind,
       platform: args.platform,
+      ...(isNewBusIdentity(prior, pkBuf) ? BUS_IDENTITY_RESET : {}),
     },
   });
   return { kind: "ok", device: upserted };
+}
+
+/**
+ * A re-provision that revives a revoked row or brings a different key is a new
+ * machine identity: the old bus key and the owner-raised bus settings must not
+ * carry over to it.
+ */
+export const BUS_IDENTITY_RESET = { busPublicKey: null, orchestrator: false, busControl: false } as const;
+
+export function isNewBusIdentity(
+  prior: { revokedAt: Date | null; publicKey: Uint8Array } | null,
+  publicKey: Uint8Array,
+): boolean {
+  return prior === null || prior.revokedAt !== null ||
+    !Buffer.from(prior.publicKey).equals(Buffer.from(publicKey));
 }
 
 export async function markDeviceRevoked(db: DB, deviceUuid: string): Promise<void> {

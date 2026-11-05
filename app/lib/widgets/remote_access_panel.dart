@@ -182,6 +182,7 @@ class _AccessSection extends ConsumerWidget {
           // says what the bit does RIGHT NOW, and "remote access is off" is a
           // claim about the machine that an unread policy cannot support.
           _AgentReachRow(remoteAccessOn: policy?.enabled),
+          const _BusGrantsSection(),
         ],
       ),
     );
@@ -269,6 +270,116 @@ class _AgentReachRow extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The two bus grants for THIS machine. Raised only here, with the owner's
+/// account session: a credential that lives on the machine must not be able to
+/// elevate it. Hidden when the machine has no readable grants.
+class _BusGrantsSection extends ConsumerWidget {
+  const _BusGrantsSection();
+
+  Future<void> _set(BuildContext context, Future<bool> change) async {
+    if (!await change && context.mounted) {
+      showAbToast(context, 'Could not update agent control. Try again.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(sessionBusGrantsProvider);
+    final grants = async.value;
+    if (grants == null) return const SizedBox.shrink();
+    final live = !async.isLoading;
+    final notifier = ref.read(sessionBusGrantsProvider.notifier);
+    return Padding(
+      padding: const EdgeInsets.only(
+        left: AbTokens.space12,
+        top: AbTokens.space10,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _GrantRow(
+            switchKey: const Key('bus-control-switch'),
+            label: 'Accept control from orchestrators',
+            copy:
+                'An orchestrator on another of your machines can start and '
+                'drive sessions here.',
+            value: grants.busControl,
+            onChanged: live
+                ? (v) => _set(context, notifier.setGrants(busControl: v))
+                : null,
+          ),
+          const SizedBox(height: AbTokens.space8),
+          _GrantRow(
+            switchKey: const Key('orchestrator-switch'),
+            label: 'Orchestrator: may drive other machines',
+            copy:
+                'Agents here can start and drive sessions on your other '
+                'machines that accept control.',
+            value: grants.orchestrator,
+            onChanged: live
+                ? (v) => _set(context, notifier.setGrants(orchestrator: v))
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GrantRow extends StatelessWidget {
+  const _GrantRow({
+    required this.switchKey,
+    required this.label,
+    required this.copy,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final Key switchKey;
+  final String label;
+  final String copy;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final control = AbSwitch(
+      key: switchKey,
+      value: value,
+      semanticLabel: label,
+      onChanged: onChanged,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: p.textPrimary,
+                ),
+              ),
+            ),
+            onChanged == null ? PulsingOpacity(child: control) : control,
+          ],
+        ),
+        const SizedBox(height: AbTokens.space4),
+        Text(
+          copy,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXxs,
+            color: p.textMuted,
+          ),
+        ),
+      ],
     );
   }
 }

@@ -155,62 +155,12 @@ describe("LocalListener routing", () => {
   });
 });
 
-describe("LocalListener.deliverToOwner", () => {
-  const frame = () => createMessage("session-bus:ack", {
-    from: { machineId: "m1", projectId: "p1", sessionId: "s1" },
-    to: { machineId: "m2", projectId: "p2", sessionId: "s2" },
-    contextId: "ctx-1",
-    messageId: "msg-1",
-    ok: true,
-  });
-
-  test("reaches the owner socket without touching the bus", async () => {
-    // The whole point of the method: a bus subscriber sitting beside the owner
-    // must never see bus traffic (spec 4.1). The human's phone is such a
-    // subscriber on the very same bus.
-    const seen: string[] = [];
-    bus.subscribe({ deliver: (msg) => { seen.push(msg.type); } });
-
+describe("LocalListener hello capabilities", () => {
+  test("a hello still declaring the retired sessionBusCarrier capability connects", async () => {
+    // A shipped app keeps sending the key; the lenient parse must not turn it
+    // into a refused hello.
     const ws = await openWs("secret-token", 1, { sessionBusCarrier: true });
     expect((await nextMessage(ws)).type).toBe("ready");
-    // An owner that declared the key is the carrier.
-    expect(listener.ownerCarriesSessionBus).toBe(true);
-
-    expect(listener.deliverToOwner(frame())).toBe(true);
-    const got = await nextMessage(ws);
-    expect(got.type).toBe("session-bus:ack");
-    // The receipt is keyed by the message it answers and by nothing else, so a
-    // carrier that dropped that key would hand the far side an ack it cannot
-    // match to anything it sent.
-    expect(got.messageId).toBe("msg-1");
-    expect(got.channel).toBe("control");
-    expect(seen).toEqual([]);
     ws.close();
-  });
-
-  test("false with no owner at all", () => {
-    expect(listener.deliverToOwner(frame())).toBe(false);
-  });
-
-  test("false when the owner did not declare itself a carrier", async () => {
-    // An older desktop is not broken, it just cannot forward. The frame stays
-    // in the coordinator's outbox rather than being dropped into a client that
-    // would ignore it.
-    const ws = await openWs("secret-token", 1);
-    expect((await nextMessage(ws)).type).toBe("ready");
-    expect(listener.ownerCarriesSessionBus).toBe(false);
-    expect(listener.deliverToOwner(frame())).toBe(false);
-    ws.close();
-  });
-
-  test("a takeover carries the new owner's capability, not the old one's", async () => {
-    const ws1 = await openWs("secret-token", 1, { sessionBusCarrier: true });
-    expect((await nextMessage(ws1)).type).toBe("ready");
-    const gone = nextClose(ws1);
-    const ws2 = await openWs("secret-token", 2);
-    expect((await nextMessage(ws2)).type).toBe("ready");
-    await gone;
-    expect(listener.deliverToOwner(frame())).toBe(false);
-    ws2.close();
   });
 });

@@ -115,7 +115,7 @@ reporting policy if you find something wrong with them.
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript / Bun | Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| **Relay** | `relay/` | TypeScript / Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
+| **Relay** | `relay/` | TypeScript / Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery; never accepts a readable application payload and queues sealed agent-to-agent bus messages. |
 | **App** | `app/` | Flutter / Dart + Riverpod | Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | **Web** | `web/` | TypeScript / Bun + Hono + Postgres | Accounts and sign-in, subscriptions, OAuth device flow, Ed25519 JWT minting for the relay's gate. |
 

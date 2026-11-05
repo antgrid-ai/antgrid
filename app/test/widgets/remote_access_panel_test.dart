@@ -5,6 +5,7 @@ import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/device_stats.dart';
+import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
@@ -167,6 +168,7 @@ Future<void> _pumpPanel(
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        localDeviceUuidProvider.overrideWith((ref) async => null),
         remoteDevicesProvider.overrideWith(devices),
         remoteAccessPolicyProvider.overrideWith(
           policy ?? () => _FakePolicyNotifier(false),

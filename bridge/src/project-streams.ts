@@ -68,10 +68,6 @@ export interface StreamHandle {
    *  past MAX_TRANSFER_BYTES; else the writer's outcome. `channel` is ignored
    *  natively. */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
-  /** True iff `peerId` holds an open project stream for this project AND
-   *  mayDeliver() AND mayDeliverTo(peerSession(peerId)). Synchronous — what
-   *  `ProjectCore.sendToAppSession` returns. */
-  deliverableTo(peerId: string): boolean;
   readonly terminalHooks?: TerminalStreamHooks;
 }
 
@@ -355,20 +351,8 @@ export class ProjectStreamRegistry {
     return {
       detach: () => this.detach(entry),
       sendTo: (msg, channel, target) => sendTo(msg, channel, target),
-      deliverableTo: (peerId) => this.deliverableTo(entry, peerId),
       terminalHooks: this.opts.terminalHooks,
     };
-  }
-
-  private deliverableTo(entry: Entry, peerId: string): boolean {
-    if (!(entry.opts.mayDeliver?.() ?? true)) return false;
-    for (const binding of entry.bindings) {
-      if (binding.peerId !== peerId || binding.unbound) continue;
-      if (!entry.opts.mayDeliverTo) return true;
-      const peer = this.opts.peerSession(peerId);
-      return peer !== null && entry.opts.mayDeliverTo(peer);
-    }
-    return false;
   }
 
   private detach(entry: Entry): void {

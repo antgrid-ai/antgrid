@@ -8,6 +8,7 @@
 // is that it reads the session it was GIVEN, not the session in focus.
 import 'dart:async';
 
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/session_bus_inbox.dart';
 import 'package:antgrid/providers/sessions.dart';
@@ -115,7 +116,108 @@ Future<void> _answerRead(
   await tester.pumpAndSettle();
 }
 
+SessionBusThreadEntry _outEntry({
+  String? delivery,
+  String? refusedCode,
+  int? deliveredAt,
+}) => SessionBusThreadEntry(
+  outbound: true,
+  at: 1700000000000,
+  peer: const SessionBusAddress(
+    machineId: 'm-other',
+    projectId: 'p-other',
+    sessionId: 's-other',
+  ),
+  summary: 'asked',
+  text: const ['same 401?'],
+  deliveredAt: deliveredAt,
+  delivery: delivery,
+  refusedCode: refusedCode,
+);
+
 void main() {
+  group('the thread delivery stamp', () {
+    Future<void> pumpEntry(WidgetTester tester, SessionBusThreadEntry e) =>
+        tester.pumpWidget(
+          ProviderScope(
+            child: MaterialApp(
+              theme: ThemeData.dark().copyWith(
+                extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+              ),
+              home: SizedBox(
+                height: 600,
+                child: SessionBusThreadEntries(entries: [e]),
+              ),
+            ),
+          ),
+        );
+
+    testWidgets('each state renders its text', (tester) async {
+      for (final c in const [
+        ('held', 'Held'),
+        ('relayed', 'Relayed'),
+        ('refused', 'Refused'),
+        ('delivered', 'Delivered'),
+      ]) {
+        await pumpEntry(tester, _outEntry(delivery: c.$1));
+        expect(find.text(c.$2), findsOneWidget, reason: c.$1);
+      }
+    });
+
+    testWidgets('delivered with a receipt time shows the time', (
+      tester,
+    ) async {
+      await pumpEntry(
+        tester,
+        _outEntry(delivery: 'delivered', deliveredAt: 1700000000500),
+      );
+      expect(find.textContaining('Delivered '), findsOneWidget);
+    });
+
+    testWidgets('absent delivery falls back to the receipt', (tester) async {
+      await pumpEntry(tester, _outEntry());
+      expect(find.text('Sent'), findsOneWidget);
+      await pumpEntry(tester, _outEntry(deliveredAt: 1700000000500));
+      expect(find.textContaining('Delivered '), findsOneWidget);
+    });
+
+    testWidgets('a refusal shows its code beside the label, in mono', (
+      tester,
+    ) async {
+      await pumpEntry(
+        tester,
+        _outEntry(delivery: 'refused', refusedCode: 'REMOTE_ACCESS_OFF'),
+      );
+      final stamp = find.text('Refused REMOTE_ACCESS_OFF');
+      expect(stamp, findsOneWidget);
+
+      final paragraph = tester.widget<RichText>(
+        find.descendant(of: stamp, matching: find.byType(RichText)),
+      );
+      final families = <String, String?>{};
+      paragraph.text.visitChildren((span) {
+        if (span is TextSpan && span.text != null) {
+          families[span.text!.trim()] = span.style?.fontFamily;
+        }
+        return true;
+      });
+      expect(families['Refused'], AbTokens.fontSans);
+      expect(families['REMOTE_ACCESS_OFF'], AbTokens.fontMono);
+    });
+
+    testWidgets('a code shows only on a refusal', (tester) async {
+      await pumpEntry(tester, _outEntry(delivery: 'refused'));
+      expect(find.text('Refused'), findsOneWidget);
+
+      await pumpEntry(
+        tester,
+        _outEntry(delivery: 'held', refusedCode: 'REMOTE_ACCESS_OFF'),
+      );
+      expect(find.text('Held'), findsOneWidget);
+      expect(find.textContaining('REMOTE_ACCESS_OFF'), findsNothing);
+    });
+  });
+
   group('the mailbox', () {
     testWidgets('lists an unread post with its sender', (tester) async {
       final channel = await _pump(

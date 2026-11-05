@@ -84,6 +84,18 @@ antgrid log-level                      # back to the configured level, now
 antgrid log-level debug --dir ~/.antgrid-dev
 ```
 
+**Session-bus grants:** `antgrid orchestrator [off|status]` and
+`antgrid agent-reach [off|messages|status]`
+(`bridge/src/cli/orchestrator.ts`, `bridge/src/cli/agent-reach.ts`) read or
+lower this machine's grants on the running host. They cannot raise: a credential
+that lives on this machine must not elevate it, so `orchestrator on` and
+`agent-reach control` print where to do it (the app's settings for this
+machine, signed in as the account owner) and exit non-zero without contacting
+the host. `agent-reach off|messages` sets the local switch, then lowers bus
+control on the account; if only the lowering fails, `off` still exits 0 because
+the local switch already wins, while `messages` exits non-zero. `status` prints
+the effective level and both grants. `--dir` targets a dev host.
+
 Following one session-bus delivery: every stage prints the same 12-hex `sha`
 (`bridge/src/line-key.ts`), so `grep` it in `host.log`. In order:
 `bus queue: held` → `bus inject: …` → `submit gate: wait ended` (only when the
