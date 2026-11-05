@@ -9,7 +9,7 @@ import { augmentAgentLaunch } from "../src/agent-runtime";
 import { augmentAgentLaunch as augmentWithRegistry } from "antgrid-agents/agent-launch-augmenter";
 import { type HookCommand } from "../src/hook-command";
 import { cursorHookCommand } from "../../packages/antgrid-agents/src/agents/cursor-agent/global-hooks";
-import { codexNotifyOnlyArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
+import { codexChatAugmentArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
 import { pluginDirArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
 import { AGENTS } from "../src/agent-runtime";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
@@ -122,8 +122,8 @@ describe("augmentAgentLaunch", () => {
     const cfgPath = a.env.OPENCODE_CONFIG;
     expect(cfgPath).toBeTruthy();
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    expect(Array.isArray(cfg.plugin)).toBe(true);
-    expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
+    expect(Array.isArray(cfg.plugins)).toBe(true);
+    expect(cfg.plugins[0]).toMatch(/^file:\/\/.*opencode$/);
   });
 
   test("opencode respects a user-set OPENCODE_CONFIG", () => {
@@ -139,6 +139,15 @@ describe("augmentAgentLaunch", () => {
     expect(launch.observation).toEqual(NO_OBSERVATION);
     expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
     expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
+  });
+
+  test("opencode chat keeps MCP without injecting the legacy terminal plugin", () => {
+    const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
+      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
+    }));
+    expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid.command).toEqual([HOOK_COMMAND.binary, "mcp"]);
+    expect(launch.observation).toEqual(NO_OBSERVATION);
   });
 
   test("unknown tool has no injection", () => {
@@ -361,10 +370,13 @@ describe("augmentAgentLaunch MCP injection", () => {
     expect(a.args.join(" ")).not.toMatch(/\bnode(?:\.exe)?\b/i);
   });
 
-  test("codex chat mode drops the mcp overrides rather than choking on them", () => {
+  test("codex chat mode keeps MCP overrides and drops unsupported TUI hooks", () => {
     const a = augmentAgentLaunch("codex", { abDir: abdir(), self: BRIDGE_SELF });
     const notify = a.args[1];
-    expect(codexNotifyOnlyArgs(a.args)).toEqual(["-c", notify]);
+    const args = codexChatAugmentArgs(a.args);
+    expect(args.slice(0, 2)).toEqual(["-c", notify]);
+    expect(args).toContain('mcp_servers.antgrid.command="C:/Program Files/Antgrid/antgrid-bridge.exe"');
+    expect(args.some((arg) => arg.startsWith("hooks."))).toBe(false);
   });
 
   test("one `self` decides both commands, so a spawn cannot mix compiled and dev", () => {
@@ -506,6 +518,15 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       for (const bad of ["not json", "[1]", '"s"', "null", "7"]) {
         expect(augmentWith(bad).env[envVar]).toBeUndefined();
       }
+    });
+
+    if (tool === "opencode") test("opencode preserves native 2.x MCP configuration and replaces its own server", () => {
+      const a = augmentWith(JSON.stringify({ mcp: {
+        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: { type: "remote", url: "stale" } },
+      } }));
+      expect(JSON.parse(a.env[envVar])).toEqual({ mcp: {
+        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
+      } });
     });
 
     test(`${tool} treats a blank ${envVar} as unset`, () => {

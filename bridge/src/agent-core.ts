@@ -242,9 +242,8 @@ export function buildAgentHello(cfg: AbConfig, version: string): AbMessage {
   });
 }
 
-// Reuse the terminal-mode title injection for chat spawns: same plugin/config
-// args, but correlated to the chat slot id (not a PTY) and pointed at this
-// core's api server. ANTGRID_API_PORT is mandatory for the Claude hook runner.
+// Integrations must address the chat slot and this core's API. Profiles can
+// omit terminal hooks when their structured driver owns the same observations.
 export function buildChatSpawnAugment(
   tool: string,
   slotId: string,
@@ -252,7 +251,7 @@ export function buildChatSpawnAugment(
   abDir?: string,
   runId?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, { abDir, mcp: false });
+  const aug = augmentAgentLaunch(tool, { abDir, mode: "chat" });
   return {
     args: aug.args,
     env: {

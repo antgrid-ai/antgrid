@@ -67,3 +67,16 @@ bun run --filter antgrid-bridge typecheck
 
 `scripts/smoke-assets.ts` can be compiled with Bun and run from a temporary
 directory outside the checkout to verify external Bun and Node asset loading.
+
+OpenCode requires **2.0.0 or later** in both terminal and chat mode. Unsupported
+versions fail before the session starts with an `opencode upgrade` instruction.
+Chat uses the native V2 client and API; terminals use `--standalone` so each
+process retains its own Antgrid MCP identity. Native config, plugins, instructions,
+permissions, providers and credentials remain owned by OpenCode.
+
+To verify against a real binary, set `OPENCODE_SMOKE_BINARY` to its absolute path
+and run `bun run --filter antgrid-agents smoke:opencode`. The opt-in smoke test
+uses isolated configuration and storage, a local model fixture and local MCP
+fixtures. It verifies native user plugins, Antgrid's V2 terminal plugin, streaming
+chat, permissions, forms, forks, revert and transcript storage across restarts
+without paid model calls. The native smoke has been verified with OpenCode 2.2.5.
