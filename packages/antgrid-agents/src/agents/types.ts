@@ -924,6 +924,12 @@ export interface AgentSpec {
    *  a stale index rather than a refusal, and acting on one would throw away a
    *  resume the CLI would have honored. Absent = a miss is never acted on. */
   sessionStoreIsAuthoritative?: true;
+  /** Is this de-styled startup output the CLI refusing its resume id? Allow for
+   *  a narrow terminal wrapping the phrase. The CLI's own words are a positive
+   *  verdict where a store miss is not, so a match releases the id and the
+   *  session starts fresh in place. Absent = a refused resume is never
+   *  recovered. */
+  isResumeRefusal?: (output: string) => boolean;
   /** Reads the name for this agent's session that is NOT one the agent chose
    *  for itself, tagged `manual` vs `first-message` (see ResolvedTitle — the tag
    *  drives whether we spend a model call). Absent = the agent has neither on

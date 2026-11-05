@@ -167,6 +167,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // gate never reaches the REPL keymap (measured on the 2.1.247 binary).
     env: () => ({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" }),
     resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
+    // claude reports its id at SessionStart, before it writes the transcript, so
+    // a session closed before its first message leaves an id `--resume` refuses.
+    isResumeRefusal: (output) => /no\s+conversation\s+found/i.test(output),
     resolveTitle: async ({ transcriptPath }) =>
       transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,
     update: {

@@ -1007,13 +1007,20 @@ const DeviceStatsMessage = BaseMessage.extend({
   storageFreeBytes: DeviceStatsBytes,
 });
 
-/** The machine describing its own RAM to attached apps, on each handshake and
- *  then on a timer, so a remote view can show what the host has to spare.
- *  Display only, like device:stats. */
+/** An app asking the machine for its current RAM and CPU load. Answered with
+ *  machine:stats; nothing is sampled until someone asks. */
+const MachineStatsRequestMessage = BaseMessage.extend({
+  type: z.literal("machine:stats:request"),
+});
+
+/** The machine describing its own RAM and CPU load, in answer to
+ *  machine:stats:request, so a remote view can show what the host has to spare
+ *  and that it is still alive. Display only, like device:stats. */
 const MachineStatsMessage = BaseMessage.extend({
   type: z.literal("machine:stats"),
   ramTotalBytes: DeviceStatsBytes,
   ramAvailableBytes: DeviceStatsBytes,
+  cpuPercent: z.number().min(0).max(100).optional(),
 });
 
 // Wire mirror of InstructionItem (handler/backlog.ts) — the live instruction
@@ -2739,6 +2746,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   NotificationPushMessage,
   PushRegisterMessage,
   DeviceStatsMessage,
+  MachineStatsRequestMessage,
   MachineStatsMessage,
   HandlerConfigureMessage,
   HandlerInstructMessage,
@@ -2901,6 +2909,7 @@ export type CommandDone = z.infer<typeof CommandDoneMessage>;
 export type NotificationPush = z.infer<typeof NotificationPushMessage>;
 export type PushRegister = z.infer<typeof PushRegisterMessage>;
 export type DeviceStatsMsg = z.infer<typeof DeviceStatsMessage>;
+export type MachineStatsRequestMsg = z.infer<typeof MachineStatsRequestMessage>;
 export type MachineStatsMsg = z.infer<typeof MachineStatsMessage>;
 export type HandlerInstructionItem = z.infer<typeof InstructionItemWire>;
 export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
@@ -3211,7 +3220,7 @@ const KNOWN_TYPES = new Set<string>([
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
   "agent:projects", "agent:tools", "stream-ready", "control:result",
-  "command:run", "command:output", "command:done", "notification:push", "push:register", "device:stats", "machine:stats",
+  "command:run", "command:output", "command:done", "notification:push", "push:register", "device:stats", "machine:stats:request", "machine:stats",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:history:request", "handler:history:page",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
