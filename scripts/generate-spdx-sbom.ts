@@ -19,6 +19,7 @@ const componentDefinitions = [
   ["antgrid-app", "SPDXRef-Package-App", "app/", "MPL-2.0"],
   ["antgrid-evals", "SPDXRef-Package-Evals", "evals/", "MPL-2.0"],
   ["antgrid-agents", "SPDXRef-Package-Agents", "packages/antgrid-agents/", "MPL-2.0"],
+  ["antgrid-memory", "SPDXRef-Package-Memory", "packages/antgrid-memory/", "MPL-2.0"],
   ["antgrid-eval-client", "SPDXRef-Package-EvalClient", "packages/antgrid_eval_client/", "MPL-2.0"],
   ["antgrid-relay-client", "SPDXRef-Package-RelayClient", "packages/antgrid_relay_client/", "MPL-2.0"],
   ["antgrid-wire", "SPDXRef-Package-Wire", "packages/antgrid-wire/", "MPL-2.0"],

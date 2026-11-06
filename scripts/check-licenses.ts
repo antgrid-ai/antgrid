@@ -55,6 +55,7 @@ if (collapse(canonicalMpl) !== collapse(await Bun.file("LICENSES/MPL-2.0.txt").t
 for (const path of [
   "bridge/LICENSE",
   "packages/antgrid-agents/LICENSE",
+  "packages/antgrid-memory/LICENSE",
   "packages/antgrid-wire/LICENSE",
   "packages/antgrid_relay_client/LICENSE",
   "packages/antgrid_eval_client/LICENSE",
@@ -101,6 +102,20 @@ const packageLicenses: Record<string, string> = {
 for (const [path, license] of Object.entries(packageLicenses)) {
   const json = await Bun.file(path).json() as { license?: string };
   if (json.license !== license) errors.push(`${path}: expected package licence ${license}`);
+}
+
+// The service images run `bun install --frozen-lockfile`, which fails unless
+// every root workspace manifest is in the build context. The images build only
+// on push (publish-images.yml), so without this PR-time check a new workspace
+// ships a broken image to :staging before anything notices.
+const rootWorkspaces = (await Bun.file("package.json").json() as { workspaces: string[] }).workspaces;
+for (const dockerfile of ["relay/Dockerfile", "web/Dockerfile"]) {
+  const text = await Bun.file(dockerfile).text();
+  for (const workspace of rootWorkspaces) {
+    if (!text.includes(`COPY ${workspace}/package.json ./${workspace}/`)) {
+      errors.push(`${dockerfile}: missing COPY ${workspace}/package.json ./${workspace}/`);
+    }
+  }
 }
 
 const reuse = await Bun.file("REUSE.toml").text();
