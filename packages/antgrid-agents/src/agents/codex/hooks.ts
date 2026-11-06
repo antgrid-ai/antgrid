@@ -1,6 +1,6 @@
 import { resolveHookCommand } from "../../host";
 import { z } from "zod";
-import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema } from "../../memory-guidance";
+import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema, memoryGuidanceFor } from "../../memory-guidance";
 import type { HookStdoutProfile } from "../hook-posts";
 import {
   computeCommandHookHash,
@@ -147,8 +147,8 @@ export const stdout: HookStdoutProfile = {
   }),
   formatResponse(response) {
     const parsed = MemoryBootstrapSchema.safeParse(response);
-    if (!parsed.success || !parsed.data.enabled || parsed.data.paused || parsed.data.project_paused) return null;
-    return { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: MEMORY_AGENT_GUIDANCE } };
+    const additionalContext = memoryGuidanceFor(parsed.success ? parsed.data : undefined);
+    return additionalContext ? { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } } : null;
   },
   outputSchema: z.strictObject({
     hookSpecificOutput: z.strictObject({

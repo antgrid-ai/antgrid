@@ -27,10 +27,10 @@ export interface MemoryCallerDeps extends Pick<SchedulerCallerDeps, "session" | 
 }
 
 export function resolveMemoryCaller(deps: MemoryCallerDeps, terminalId?: string, runId?: string): MemoryCaller {
-  const refuse = () => new MemoryError("NOT_A_SESSION", "Memory requires a verified live Antgrid terminal session.");
+  const refuse = () => new MemoryError("NOT_A_SESSION", "Memory requires a verified live Antgrid session.");
   if (!terminalId || !runId) throw refuse();
   const session = deps.session(terminalId);
-  if (!session || session.archived || session.mode !== "terminal" || session.command
+  if (!session || session.archived || session.command
     || !deps.isLiveRun(terminalId, runId)) throw refuse();
   const agentId = deps.runAgent(terminalId, runId);
   // A missing or unloaded checkout must not inherit main's access. The session

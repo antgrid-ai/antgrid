@@ -498,6 +498,121 @@ describe("restartForMemory", () => {
     c.sessions.flushNow();
   });
 
+  describe("chat runs", () => {
+    async function chatSession(opts: CoreOpts = {}) {
+      const c = makeCore(dir, opts);
+      c.setMemory(true);
+      const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
+      await c.sessions.start(s.id);
+      const runId = (c.sessions as any).terminalRunIds.get(s.id) as string;
+      return { c, s, runId };
+    }
+
+    it("marks a live chat run and notifies observers on set and on clear", async () => {
+      const { c, s, runId } = await chatSession();
+      let notified = 0;
+      c.sessions.onChange(() => { notified++; });
+
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+      expect(notified).toBe(1);
+      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBe(true);
+      expect(c.sessions.listStartedWithoutMemory().map((e) => e.id)).toEqual([s.id]);
+
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+      expect(notified).toBe(1);
+
+      c.sessions.noteChatRunMemory(s.id, runId, false);
+      expect(notified).toBe(2);
+      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
+
+      c.sessions.noteChatRunMemory(s.id, runId, false);
+      expect(notified).toBe(2);
+      c.sessions.flushNow();
+    });
+
+    it("ignores a stale run id", async () => {
+      const { c, s } = await chatSession();
+      let notified = 0;
+      c.sessions.onChange(() => { notified++; });
+
+      c.sessions.noteChatRunMemory(s.id, "old-run", true);
+
+      expect(notified).toBe(0);
+      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
+      c.sessions.flushNow();
+    });
+
+    it("never marks a terminal run", async () => {
+      const c = makeCore(dir);
+      c.setMemory(true);
+      const s = c.sessions.create("t", { tool: "codex" });
+      await c.sessions.start(s.id);
+      const runId = (c.sessions as any).terminalRunIds.get(s.id) as string;
+
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+
+      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
+      c.sessions.flushNow();
+    });
+
+    it("restarts a flagged chat run through stop and start", async () => {
+      const { c, s, runId } = await chatSession();
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+      c.order.length = 0;
+
+      expect(await c.sessions.restartForMemory(s.id)).toBe(true);
+
+      expect(c.order).toEqual(["handler-exit", "chat-stop", "chat-start"]);
+      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
+      c.sessions.flushNow();
+    });
+
+    it("returns false for an unflagged chat run", async () => {
+      const { c, s } = await chatSession();
+      c.order.length = 0;
+
+      expect(await c.sessions.restartForMemory(s.id)).toBe(false);
+      expect(c.order).toEqual([]);
+      c.sessions.flushNow();
+    });
+
+    it("refuses MEMORY_OFF and SCHEDULED_RUN for a flagged chat run", async () => {
+      const { c, s, runId } = await chatSession();
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+
+      c.setMemory(false);
+      const off = await c.sessions.restartForMemory(s.id).catch((e) => e);
+      expect(off.code).toBe("MEMORY_OFF");
+
+      c.setMemory(true);
+      (c.sessions as any).scheduledLaunches.set(s.id, { runtimeGeneration: runId, launched: true, cancelled: false, terminal: false });
+      const scheduled = await c.sessions.restartForMemory(s.id).catch((e) => e);
+      expect(scheduled.code).toBe("SCHEDULED_RUN");
+      c.sessions.flushNow();
+    });
+
+    it("fails with TEARDOWN_TIMEOUT when the chat teardown never settles", async () => {
+      const { c, s, runId } = await chatSession({ chatTeardown: () => deferred().promise, teardownTimeoutMs: 10 });
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+
+      const failure = await c.sessions.restartForMemory(s.id).catch((e) => e);
+      expect(failure).toBeInstanceOf(SessionVerbError);
+      expect(failure.code).toBe("TEARDOWN_TIMEOUT");
+      c.sessions.flushNow();
+    });
+
+    it("clears the mark when the chat run stops", async () => {
+      const { c, s, runId } = await chatSession();
+      c.sessions.noteChatRunMemory(s.id, runId, true);
+
+      await (c.sessions as any).stopAndAwait(s.id);
+
+      expect(c.sessions.listStartedWithoutMemory()).toEqual([]);
+      expect((c.sessions as any).terminalRunsWithoutMemory.has(s.id)).toBe(false);
+      c.sessions.flushNow();
+    });
+  });
+
   it("codes a set-mode relaunch failure RESTART_FAILED and keeps its marker text", async () => {
     const c = makeCore(dir);
     const s = c.sessions.create("c", { tool: "codex", mode: "chat" });

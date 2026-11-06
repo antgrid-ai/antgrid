@@ -82,11 +82,12 @@ test("bootstrap returns only validated settings through the existing memory call
   expect(calls).toHaveLength(6);
 });
 
-test("bootstrap never permits missing, stale, foreign or chat caller identity", async () => {
+test("bootstrap never permits missing, stale, foreign or archived caller identity, and serves chat", async () => {
   let mode = "terminal";
+  let archived = false;
   const port = serve(async (call) => {
     resolveMemoryCaller({
-      session: (id) => id === "session" ? { id, mode, checkoutId: "checkout" } as SessionEntry : undefined,
+      session: (id) => id === "session" ? { id, mode, archived, checkoutId: "checkout" } as SessionEntry : undefined,
       isLiveRun: (id, run) => id === "session" && run === "run",
       runAgent: () => "codex", checkoutExists: (id) => id === "checkout",
     }, call.terminalId, call.runId);
@@ -96,7 +97,10 @@ test("bootstrap never permits missing, stale, foreign or chat caller identity", 
     expect((await post(port, "bootstrap", { runId }, {}, query)).status).toBe(403);
   }
   mode = "chat";
+  expect((await post(port, "bootstrap", { runId: "run" })).status).toBe(200);
+  archived = true;
   expect((await post(port, "bootstrap", { runId: "run" })).status).toBe(403);
+  archived = false;
   mode = "terminal";
   expect((await post(port, "bootstrap", { runId: "run" })).status).toBe(200);
 });

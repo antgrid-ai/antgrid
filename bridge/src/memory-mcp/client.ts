@@ -38,7 +38,7 @@ export function memoryApiIdentity(env: NodeJS.ProcessEnv = process.env) {
 
 export async function memoryApi(op: string, body: Record<string, unknown>, timeoutMs: number): Promise<ApiReply> {
   const identity = memoryApiIdentity();
-  if (!identity) return refusal("NOT_A_SESSION", "Memory tools require a live terminal session started by Antgrid.");
+  if (!identity) return refusal("NOT_A_SESSION", "Memory tools require a live session started by Antgrid.");
   const url = new URL(`/memory/${op}`, identity.base);
   url.searchParams.set("terminalId", identity.terminalId);
   const response = await fetch(url, {

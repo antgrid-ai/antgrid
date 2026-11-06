@@ -9,6 +9,7 @@ import { inject as cursor } from "../src/agents/cursor-agent/mcp";
 import { overrideCursorHelp } from "../src/agents/cursor-agent/help";
 import { opencodeFamilyMcp } from "../src/agents/opencode/mcp";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { memoryBootstrapFrom } from "../src/memory-guidance";
 import type { McpInjectCtx } from "../src/agents/types";
 
 const directories: string[] = [];
@@ -75,11 +76,34 @@ test("OpenCode family preserves user MCP and other config while adding memory", 
   }
 });
 
-test("a chat launch registers antgrid but not the memory server", () => {
+test("a chat launch registers antgrid and the memory server", () => {
   const launch = augmentAgentLaunch("codex", { ...context(), mode: "chat", hookCommand: { binary: "bridge", preargs: ["hook"] } });
   expect(launch.args.some(arg => arg.startsWith("mcp_servers.antgrid."))).toBe(true);
-  expect(launch.args.some(arg => arg.includes("memory-mcp"))).toBe(false);
+  expect(launch.args.some(arg => arg.includes("memory-mcp"))).toBe(true);
+  expect(launch.env.ANTGRID_MEMORY_MCP).toBe("1");
   expect(launch.memoryWithheld).toBeUndefined();
+});
+
+test("a launch without the memory server carries no antgrid-memory argument or pre-approval", () => {
+  const { memoryMcpCommand, ...withoutMemory } = context();
+  for (const mode of ["terminal", "chat"] as const) {
+    const codex = augmentAgentLaunch("codex", { ...withoutMemory, mode, hookCommand });
+    expect(codex.args.some(arg => arg.includes("antgrid-memory"))).toBe(false);
+    expect(codex.memoryWithheld).toBe(true);
+    const claude = augmentAgentLaunch("claude-code", { ...withoutMemory, mode, hookCommand });
+    expect(claude.args.some(arg => arg.startsWith("--allowedTools"))).toBe(false);
+  }
+});
+
+test("a registered memory server pre-approves search, get and save but never forget", () => {
+  const codex = augmentAgentLaunch("codex", { ...context(), hookCommand }).args;
+  for (const tool of ["memory_search", "memory_get", "memory_save"]) {
+    expect(codex).toContain(`mcp_servers.antgrid-memory.tools.${tool}.approval_mode="approve"`);
+  }
+  expect(codex.some(arg => arg.includes("memory_forget"))).toBe(false);
+  expect(codex.some(arg => arg.includes("default_tools_approval_mode"))).toBe(false);
+  const claude = augmentAgentLaunch("claude-code", { ...context(), hookCommand }).args;
+  expect(claude).toContain("--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save");
 });
 
 const hookCommand = { binary: "bridge", preargs: ["hook"] };
@@ -89,7 +113,8 @@ test("the guidance flag is set only for a launch that registered the memory serv
   const { memoryMcpCommand, ...withoutMemory } = ctx;
   expect(augmentAgentLaunch("codex", { ...ctx, hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
   expect(augmentAgentLaunch("codex", { ...withoutMemory, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
-  expect(augmentAgentLaunch("codex", { ...ctx, mode: "chat", hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
+  expect(augmentAgentLaunch("codex", { ...ctx, mode: "chat", hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
+  expect(augmentAgentLaunch("codex", { ...withoutMemory, mode: "chat", hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
 });
 
 test("a profile that injects nothing leaves no guidance flag", () => {
@@ -111,4 +136,11 @@ test("a Claude config that cannot be written leaves no guidance flag", () => {
   writeFileSync(blocked, "");
   expect(augmentAgentLaunch("claude-code", { ...ctx, abDir: blocked, hookCommand }).env.ANTGRID_MEMORY_MCP).toBeUndefined();
   expect(augmentAgentLaunch("claude-code", { ...ctx, hookCommand }).env.ANTGRID_MEMORY_MCP).toBe("1");
+});
+
+test("memoryBootstrapFrom passes exactly the four flags and nothing else", () => {
+  const status: Record<string, unknown> = { available: true, enabled: true, paused: false, project_paused: true, content: "secret", extra: 1 };
+  expect(memoryBootstrapFrom(status)).toEqual({ available: true, enabled: true, paused: false, project_paused: true });
+  expect(memoryBootstrapFrom({ available: false, enabled: true })).toBeUndefined();
+  expect(memoryBootstrapFrom({})).toBeUndefined();
 });

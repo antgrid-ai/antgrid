@@ -639,7 +639,9 @@ export class SessionManager {
    *  not evidence of what is running. Set and cleared with `terminalRunIds`. */
   private terminalRunAgents = new Map<string, string>();
   /** Live runs whose launch left the Memory server out because Memory was off.
-   *  Set at spawn and cleared with the run, never persisted. */
+   *  A terminal run is marked at spawn, a chat run when its driver computes the
+   *  augmentation (`noteChatRunMemory`). Cleared with the run (`unbindRun`),
+   *  never persisted. */
   private terminalRunsWithoutMemory = new Set<string>();
   private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
   private readonly scheduleOwnedCheckouts = new Set<string>();
@@ -677,6 +679,21 @@ export class SessionManager {
   private bindRun(id: string, runId: string, agent: string): void {
     this.terminalRunIds.set(id, runId);
     this.terminalRunAgents.set(id, agent);
+  }
+
+  /**
+   * Records whether a chat run's augmentation withheld Memory. Chat computes it
+   * inside the driver, after `start` has already notified, so this notifies
+   * itself when the mark moves. A run that was unbound or replaced while its
+   * driver was starting is ignored rather than marking its successor.
+   */
+  noteChatRunMemory(id: string, runId: string, withheld: boolean): void {
+    if (!this.isLiveRun(id, runId) || this.entries.get(id)?.mode !== "chat") return;
+    const had = this.terminalRunsWithoutMemory.has(id);
+    if (withheld === had) return;
+    if (withheld) this.terminalRunsWithoutMemory.add(id);
+    else this.terminalRunsWithoutMemory.delete(id);
+    this.notifyObservers();
   }
 
   private unbindRun(id: string): void {
@@ -3183,7 +3200,7 @@ export class SessionManager {
   }
 
   /**
-   * Restart a running terminal session so its agent is launched with the Memory
+   * Restart a running session so its agent is launched with the Memory
    * server it was started without. Returns whether it restarted: a session that
    * no longer needs it (stopped, preparing, already has Memory, not eligible) is
    * a no-op rather than an interruption, since the caller's list can be stale.
@@ -3197,7 +3214,7 @@ export class SessionManager {
     if (this.awaitingNativeForkIdentity(entry) || entry.forkNativeMigrationError) {
       throw new Error("Complete or recover this native fork before restarting it.");
     }
-    if (entry.mode !== "terminal" || !this.launchedWithoutMemory(entry)) return false;
+    if (!this.launchedWithoutMemory(entry)) return false;
     if (!memoryLaunchEnabled()) {
       throw new SessionVerbError("MEMORY_OFF", "Memory is off, so restarting would not add it.");
     }

@@ -43,8 +43,13 @@ describe("memory caller binding", () => {
       deps(session({ checkoutId: undefined })),
       deps(session(), { checkoutExists: () => false }),
       deps(session(), { runAgent: () => undefined }),
-      deps(session({ mode: "chat" })),
       deps(session({ command: "custom" })),
     ]) expect(() => resolveMemoryCaller(d, "session", "live-run")).toThrow();
+  });
+
+  test("resolves a live chat session like a terminal one", () => {
+    expect(resolveMemoryCaller(deps(session({ mode: "chat" })), "session", "live-run"))
+      .toMatchObject({ session_id: "session", run_id: "live-run" });
+    expect(() => resolveMemoryCaller(deps(session({ mode: "chat", archived: true })), "session", "live-run")).toThrow();
   });
 });

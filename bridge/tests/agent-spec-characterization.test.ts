@@ -381,6 +381,12 @@ const CODEX_MCP_INJECTION: string[] = [
   `mcp_servers.antgrid-memory.args=["memory-mcp"]`,
   "-c",
   `mcp_servers.antgrid-memory.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_search.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_get.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_save.approval_mode="approve"`,
 ];
 
 describe("codex hook trust", () => {
@@ -424,6 +430,7 @@ describe("launch augmentation", () => {
       // One token because the flag is variadic — the separated form eats the
       // session's own args, which are folded in right after it.
       `--mcp-config=${join(abDir, "mcp", "claude.json")}`,
+      "--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save",
     ]);
     expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
