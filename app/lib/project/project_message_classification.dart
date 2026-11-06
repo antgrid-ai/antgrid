@@ -180,6 +180,7 @@ const Set<String> kConfigValidityTypes = <String>{
 };
 
 const Set<String> _statusTypes = <String>{
+  'memory:result',
   'terminal:clipboard:claimed',
   'terminal:clipboard:revoked',
   'terminal:clipboard:write',

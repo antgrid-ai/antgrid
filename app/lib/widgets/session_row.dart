@@ -43,6 +43,7 @@ import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
 import 'session_deleting_badge.dart';
+import 'session_memory_restart_badge.dart';
 import 'session_handler_badge.dart';
 import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
@@ -365,6 +366,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     SessionHandlerBadge(
                       entryId: widget.entryId,
                       sessionId: session.id,
+                    ),
+                    SessionMemoryRestartBadge(
+                      entryId: widget.entryId,
+                      session: session,
                     ),
                     SessionDeletingBadge(deleting: deleting),
                   ],

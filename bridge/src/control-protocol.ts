@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MemoryRequestRecordSchema } from "antgrid-memory";
 import { LOG_LEVELS } from "./logger";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -8,6 +9,7 @@ import type { AgentReachLevel } from "./session-bus/request-policy";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
+  z.object({ id: z.string().min(1), type: z.literal("memory:request"), request: MemoryRequestRecordSchema }),
   z.object({ id: z.string().min(1), type: z.literal("scheduler:request"), method: z.string().startsWith("scheduler."), params: z.unknown().optional() }),
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
   z.object({ id: z.string().min(1), type: z.literal("project:resolve"), folder: z.string().min(1) }),
@@ -258,6 +260,7 @@ export interface ConnectInfo {
 
 export type ControlResponse =
   | { id: string; ok: true; type: "scheduler:request"; result: unknown }
+  | { id: string; ok: true; type: "memory:request"; result: unknown }
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
   | {
       id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string;

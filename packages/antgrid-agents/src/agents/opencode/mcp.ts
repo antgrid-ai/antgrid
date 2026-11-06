@@ -1,5 +1,6 @@
 import { logger } from "../../host";
 import { NO_INJECTION } from "../launch-inject";
+import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx, McpProfile } from "../types";
 
 const log = logger.child({ component: "agent-launch" });
@@ -13,24 +14,26 @@ const log = logger.child({ component: "agent-launch" });
  * agent's environment, so no `environment` block is declared.
  *
  * A user who already sets the variable keeps every key of theirs; only
- * the `antgrid` server is added (under `mcp.servers` when `serversLayout` is
+ * the managed servers are added (under `mcp.servers` when `serversLayout` is
  * set and their config already uses OpenCode 2's native layout).
  * A value that is not a JSON object cannot be merged
  * into, and replacing it would discard what they wrote, so nothing is injected.
  */
 export function opencodeFamilyMcp(envVar: string, { serversLayout = false } = {}): McpProfile {
   return {
-    inject({ mcpCommand }: McpInjectCtx): LaunchAugmentation {
+    inject(ctx: McpInjectCtx): LaunchAugmentation {
       const base = ownConfig(process.env[envVar]);
       if (!base) {
         log.warn("%s is set but is not a JSON object; not adding the antgrid MCP server", envVar);
         return NO_INJECTION;
       }
       const existing = isRecord(base.mcp) ? base.mcp : {};
-      const antgrid = { type: "local", command: [mcpCommand.binary, ...mcpCommand.preargs] };
+      const managed = Object.fromEntries(mcpCommands(ctx).map(([name, command]) => [name,
+        { type: "local", command: [command.binary, ...command.preargs] },
+      ]));
       const mcp = serversLayout && ("servers" in existing || "timeout" in existing)
-        ? { ...existing, servers: { ...(isRecord(existing.servers) ? existing.servers : {}), antgrid } }
-        : { ...existing, antgrid };
+        ? { ...existing, servers: { ...(isRecord(existing.servers) ? existing.servers : {}), ...managed } }
+        : { ...existing, ...managed };
       return { args: [], env: { [envVar]: JSON.stringify({ ...base, mcp }) } };
     },
   };

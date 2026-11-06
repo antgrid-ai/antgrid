@@ -1,4 +1,5 @@
 import 'terminal_clipboard_message.dart';
+import 'memory.dart';
 import 'package:uuid/uuid.dart';
 
 import 'agent_event.dart' show parseAgentEvent;
@@ -2527,6 +2528,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'session-bus:thread:result':
     case 'session-bus:arrived':
       return json;
+
+    case 'memory:result':
+      return MemoryResponse.fromJson(json);
 
     default:
       return null;
