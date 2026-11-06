@@ -17,7 +17,6 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
-import '../../design/widgets/ab_switch.dart';
 import '../../providers/account_agents.dart';
 import '../../providers/control_plane.dart';
 import '../../providers/machine_directory.dart';
@@ -227,7 +226,9 @@ class MobileMachinePicker extends ConsumerWidget {
                     const SizedBox(height: AbTokens.space4),
                     Text(
                       'Your phone connects to one machine at a time. Pick '
-                      'the one to work on.',
+                      'the one to work on. The app reopens on it until '
+                      '${kMobileMachineStickyWindow.inHours} hours pass '
+                      'without connecting.',
                       style: AbTokens.sansStyle(
                         fontSize: AbTokens.fontMd,
                         color: p.textMuted,
@@ -253,33 +254,6 @@ class MobileMachinePicker extends ConsumerWidget {
             color: p.accent,
             backgroundColor: p.bgElevated,
             child: list,
-          ),
-        ),
-        const AbSeparator.horizontal(),
-        MergeSemantics(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(
-              minHeight: AbTokens.touchControlMin,
-            ),
-            child: AbListRow(
-              title: Text(
-                'Connect to the same machine next time',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: p.textPrimary,
-                ),
-              ),
-              trailing: AbSwitch(
-                value: connection.reconnectNextTime,
-                onChanged: (v) => ref
-                    .read(mobileConnectionProvider.notifier)
-                    .setReconnectNextTime(v),
-              ),
-              horizontalPadding: AbTokens.space16,
-              onTap: () => ref
-                  .read(mobileConnectionProvider.notifier)
-                  .setReconnectNextTime(!connection.reconnectNextTime),
-            ),
           ),
         ),
       ],

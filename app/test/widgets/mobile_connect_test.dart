@@ -107,7 +107,7 @@ void main() {
   testWidgets(
     'the picker groups machines by whether the phone can reach them',
     (tester) async {
-      await machineStore.write(lastMachineId: 'Studio', reconnect: false);
+      await machineStore.write(lastMachineId: 'Studio', connectedAt: null);
       await pump(tester);
 
       expect(find.text('Choose a machine'), findsOneWidget);
@@ -227,13 +227,5 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.textContaining('Remote access is off'), findsOneWidget);
-  });
-
-  testWidgets('the reconnect switch is remembered', (tester) async {
-    final c = await pump(tester);
-    await tester.tap(find.text('Connect to the same machine next time'));
-    await tester.pump();
-    expect(c.read(mobileConnectionProvider).reconnectNextTime, isFalse);
-    expect(machineStore.read().reconnect, isFalse);
   });
 }

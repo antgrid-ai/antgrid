@@ -25,6 +25,7 @@ import 'auth.dart';
 import 'cached_sessions.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
+import 'mobile_connection.dart';
 import 'agent_coordinates.dart';
 import 'agent_transport.dart';
 import 'provider_retry.dart';
@@ -1141,6 +1142,8 @@ class MachineConnectionNotifier extends Notifier<void> {
     for (final id in forgottenIds) {
       await recentStore.remove(id);
     }
+    if (!ref.mounted) return;
+    ref.read(mobileConnectionProvider.notifier).forget(machineUuid);
   }
 
   /// User-initiated escape from the workspace boot screen — clears the

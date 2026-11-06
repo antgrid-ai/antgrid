@@ -25,6 +25,7 @@ import '../providers/device_provisioning.dart';
 import '../providers/demo_mode.dart';
 import '../providers/machine_catalog.dart';
 import '../providers/machine_directory.dart';
+import '../providers/mobile_connection.dart';
 import '../providers/projects.dart';
 import '../providers/scope_control_planes.dart';
 import '../providers/supervisor_status.dart';
@@ -95,6 +96,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             state == AppLifecycleState.paused ||
             state == AppLifecycleState.detached) {
           _wasBackgrounded = true;
+          ref.read(mobileConnectionProvider.notifier).stampIfConnected();
         }
         _mobileLifecycle?.handleState(state);
       },

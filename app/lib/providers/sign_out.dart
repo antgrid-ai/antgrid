@@ -14,6 +14,7 @@ import 'scheduler_drafts.dart';
 import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
+import 'mobile_connection.dart';
 import 'providers.dart';
 import 'push.dart';
 import 'recent_agents.dart';
@@ -159,6 +160,9 @@ Future<void> _performHardSignOut(ProviderContainer ref) async {
   ref.invalidate(hasStoredSessionProvider);
   ref.invalidate(subscriptionProvider);
   ref.invalidate(pricingCatalogProvider);
+  // Its store was just cleared, but the notifier holds the signed-out
+  // account's machine in memory and would keep the phone on it.
+  ref.invalidate(mobileConnectionProvider);
   ref.read(deviceCapProvider.notifier).set(null);
   // The caches are gone from disk, but the always-mounted ControlPlaneReaper
   // holds its own in-memory copy (paired-machine list, account inventory,

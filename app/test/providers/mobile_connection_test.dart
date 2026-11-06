@@ -11,14 +11,6 @@ import 'package:antgrid/storage/mobile_machine_store.dart';
 
 import '../helpers/prefs_test_mock.dart';
 
-InventoryAgent _agent(String id, {Duration? seenAgo}) => InventoryAgent(
-  deviceUuid: id,
-  displayName: id,
-  platform: 'macos',
-  ed25519Pub: 'pub',
-  lastSeenAt: seenAgo == null ? null : DateTime.now().subtract(seenAgo),
-);
-
 void main() {
   group('mobileConnectStatus', () {
     MobileConnectStatus status({
@@ -77,20 +69,21 @@ void main() {
 
   group('mobileConnectionProvider', () {
     late MobileMachineStore store;
+    late DateTime now;
     setUp(() async {
       useInMemoryPrefs();
       store = await MobileMachineStore.open();
+      now = DateTime.utc(2026, 11, 6, 12);
     });
 
-    ProviderContainer container({
-      Future<List<InventoryAgent>> Function()? inventory,
-    }) {
+    ProviderContainer container() {
       final c = ProviderContainer(
         overrides: [
           eagerControlPlanesEnabledProvider.overrideWithValue(true),
           mobileMachineStoreProvider.overrideWithValue(store),
+          mobileConnectionClockProvider.overrideWithValue(() => now),
           accountAgentsProvider.overrideWith(
-            (_) => (inventory ?? () async => <InventoryAgent>[])(),
+            (_) async => const <InventoryAgent>[],
           ),
         ],
       );
@@ -98,56 +91,119 @@ void main() {
       return c;
     }
 
+    /// The phone last had a connection up to `mbp` [ago] before now.
+    Future<void> lastConnected(Duration ago) =>
+        store.write(lastMachineId: 'mbp', connectedAt: now.subtract(ago));
+
+    void goLive(ProviderContainer c, String id) {
+      c.read(machineLiveConnectionProvider.notifier).set(id, true);
+      c.read(machineAdvertisedProjectsProvider.notifier).setAdvert(id, (
+        projectCount: 1,
+        remoteAccessEnabled: true,
+      ));
+    }
+
+    Future<void> flush() => Future<void>.delayed(Duration.zero);
+
     test('starts at the picker with nothing saved', () {
       final c = container();
       expect(c.read(mobileConnectionProvider).machineId, isNull);
-      expect(c.read(mobileConnectionProvider).reconnectNextTime, isTrue);
-    });
-
-    test('connecting remembers the machine for next time', () async {
-      final c = container();
-      c.read(mobileConnectionProvider.notifier).connect('mbp');
-      await Future<void>.delayed(Duration.zero);
-      expect(store.read().lastMachineId, 'mbp');
-    });
-
-    test('reconnects to the last machine when it is up', () async {
-      await store.write(lastMachineId: 'mbp', reconnect: true);
-      final c = container(
-        inventory: () async => [_agent('mbp', seenAgo: Duration.zero)],
-      );
-      expect(c.read(mobileConnectionProvider).machineId, 'mbp');
-      await c.read(accountAgentsProvider.future);
-      await Future<void>.delayed(Duration.zero);
-      final s = c.read(mobileConnectionProvider);
-      expect(s.machineId, 'mbp');
-      expect(s.restored, isFalse);
     });
 
     test(
-      'drops to the picker when the last machine turns out offline',
+      'a tap remembers the machine; reaching it starts the window',
       () async {
-        await store.write(lastMachineId: 'mbp', reconnect: true);
-        final c = container(
-          inventory: () async => [
-            _agent('mbp', seenAgo: const Duration(hours: 1)),
-          ],
-        );
-        c.read(mobileConnectionProvider);
-        await c.read(accountAgentsProvider.future);
-        await Future<void>.delayed(Duration.zero);
-        expect(c.read(mobileConnectionProvider).machineId, isNull);
-        expect(c.read(mobileConnectionProvider).lastMachineId, 'mbp');
+        final c = container();
+        c.read(mobileConnectionProvider.notifier).connect('mbp');
+        await flush();
+        expect(store.read().lastMachineId, 'mbp');
+        expect(store.read().connectedAt, isNull);
+
+        goLive(c, 'mbp');
+        await flush();
+        expect(store.read().connectedAt, now);
       },
     );
 
-    test('always asks when reconnecting is off', () async {
-      await store.write(lastMachineId: 'mbp', reconnect: false);
-      final c = container();
-      final s = c.read(mobileConnectionProvider);
+    test('a machine never reached does not hold the next launch', () async {
+      await lastConnected(const Duration(hours: 1));
+      container().read(mobileConnectionProvider.notifier).connect('stu');
+      await flush();
+      expect(store.read().lastMachineId, 'stu');
+      expect(store.read().connectedAt, isNull);
+    });
+
+    test('reopens on the last machine within the window', () async {
+      await lastConnected(const Duration(hours: 23));
+      expect(container().read(mobileConnectionProvider).machineId, 'mbp');
+    });
+
+    test('asks again once the window has passed', () async {
+      await lastConnected(kMobileMachineStickyWindow);
+      final s = container().read(mobileConnectionProvider);
       expect(s.machineId, isNull);
       expect(s.lastMachineId, 'mbp');
-      expect(s.reconnectNextTime, isFalse);
+    });
+
+    test('a window stamped in the future counts as passed', () async {
+      await lastConnected(const Duration(days: -30));
+      expect(container().read(mobileConnectionProvider).machineId, isNull);
+    });
+
+    test('a machine that left the account is let go', () async {
+      await lastConnected(const Duration(hours: 1));
+      final c = container();
+      final n = c.read(mobileConnectionProvider.notifier);
+      n.forget('stu');
+      expect(c.read(mobileConnectionProvider).machineId, 'mbp');
+      n.forget('mbp');
+      await flush();
+      expect(c.read(mobileConnectionProvider).machineId, isNull);
+      expect(store.read().connectedAt, isNull);
+    });
+
+    test('each connection restarts the window', () async {
+      final c = container();
+      c.read(mobileConnectionProvider.notifier).connect('mbp');
+      now = now.add(const Duration(hours: 20));
+      goLive(c, 'mbp');
+      await flush();
+      expect(store.read().connectedAt, now);
+    });
+
+    test('backgrounding while connected restarts the window', () async {
+      final c = container();
+      c.read(mobileConnectionProvider.notifier).connect('mbp');
+      goLive(c, 'mbp');
+      now = now.add(const Duration(minutes: 5));
+      c.read(mobileConnectionProvider.notifier).stampIfConnected();
+      await flush();
+      expect(store.read().connectedAt, now);
+    });
+
+    test('backgrounding while not connected leaves the window', () async {
+      final c = container();
+      c.read(mobileConnectionProvider.notifier).connect('mbp');
+      goLive(c, 'mbp');
+      final reached = now;
+      c.read(machineLiveConnectionProvider.notifier).set('mbp', false);
+      now = now.add(const Duration(hours: 2));
+      c.read(mobileConnectionProvider.notifier).stampIfConnected();
+      await flush();
+      expect(store.read().connectedAt, reached);
+    });
+
+    test('disconnecting ends the window but keeps the last machine', () async {
+      final c = container();
+      c.read(mobileConnectionProvider.notifier).connect('mbp');
+      goLive(c, 'mbp');
+      c.read(mobileConnectionProvider.notifier).disconnect();
+      await flush();
+      expect(store.read().lastMachineId, 'mbp');
+      expect(store.read().connectedAt, isNull);
+      final next = container();
+      expect(next.read(mobileConnectionProvider).machineId, isNull);
+      expect(next.read(mobileConnectionProvider).lastMachineId, 'mbp');
     });
 
     test('a timeout for a machine the user has left is ignored', () {
@@ -169,10 +225,7 @@ void main() {
       n.connect('mbp');
       n.markTimedOut('mbp');
       expect(c.read(mobileConnectionProvider).timedOut, isTrue);
-      c.read(machineLiveConnectionProvider.notifier).set('mbp', true);
-      c
-          .read(machineAdvertisedProjectsProvider.notifier)
-          .setAdvert('mbp', (projectCount: 1, remoteAccessEnabled: true));
+      goLive(c, 'mbp');
       expect(c.read(mobileConnectionProvider).timedOut, isFalse);
       // A later blip is a reconnect in progress, not a failure.
       c.read(machineLiveConnectionProvider.notifier).set('mbp', false);

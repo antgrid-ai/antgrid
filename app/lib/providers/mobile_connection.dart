@@ -3,11 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/supervisor_state.dart';
 import '../project/project_session_registry.dart';
-import '../services/account_agents_api.dart';
 import '../storage/mobile_machine_store.dart';
 import '../util/detached.dart';
 import '../util/device_id.dart';
-import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
@@ -39,62 +37,59 @@ const Duration kMobileConnectTimeout = Duration(seconds: 20);
 /// Null — in memory only — wherever `main()` did not open one.
 final mobileMachineStoreProvider = Provider<MobileMachineStore?>((_) => null);
 
+/// How long the phone stays bound to the machine it last connected to. Inside
+/// it a launch goes straight back to that machine, even one that looks
+/// offline — the user sees it connecting, or failing, rather than a picker
+/// that hides which machine they were on. Each connection restarts it.
+const Duration kMobileMachineStickyWindow = Duration(hours: 24);
+
+/// Overridden by tests that move time past [kMobileMachineStickyWindow].
+final mobileConnectionClockProvider = Provider<DateTime Function()>(
+  (_) => DateTime.now,
+);
+
+/// A connection that stays up keeps restarting the window as its socket and
+/// project list change, and leaving the foreground reports several lifecycle
+/// states in a row; writing each of those to disk would buy nothing.
+const Duration _kStampInterval = Duration(minutes: 1);
+
 @immutable
 class MobileConnection {
   const MobileConnection({
     this.machineId,
-    this.restored = false,
     this.timedOut = false,
     this.lastMachineId,
-    this.reconnectNextTime = true,
   });
 
   /// The machine the phone is connected or connecting to; null shows the
   /// picker.
   final String? machineId;
 
-  /// [machineId] came from last launch rather than a tap, and the inventory
-  /// has not yet said whether it is up.
-  final bool restored;
-
   /// The current attempt outlasted [kMobileConnectTimeout].
   final bool timedOut;
 
   final String? lastMachineId;
-  final bool reconnectNextTime;
 
   MobileConnection copyWith({
     String? machineId,
     bool clearMachine = false,
-    bool? restored,
     bool? timedOut,
     String? lastMachineId,
-    bool? reconnectNextTime,
   }) => MobileConnection(
     machineId: clearMachine ? null : (machineId ?? this.machineId),
-    restored: restored ?? this.restored,
     timedOut: timedOut ?? this.timedOut,
     lastMachineId: lastMachineId ?? this.lastMachineId,
-    reconnectNextTime: reconnectNextTime ?? this.reconnectNextTime,
   );
 
   @override
   bool operator ==(Object other) =>
       other is MobileConnection &&
       other.machineId == machineId &&
-      other.restored == restored &&
       other.timedOut == timedOut &&
-      other.lastMachineId == lastMachineId &&
-      other.reconnectNextTime == reconnectNextTime;
+      other.lastMachineId == lastMachineId;
 
   @override
-  int get hashCode => Object.hash(
-    machineId,
-    restored,
-    timedOut,
-    lastMachineId,
-    reconnectNextTime,
-  );
+  int get hashCode => Object.hash(machineId, timedOut, lastMachineId);
 }
 
 final mobileConnectionProvider =
@@ -105,75 +100,55 @@ final mobileConnectionProvider =
 class MobileConnectionNotifier extends Notifier<MobileConnection> {
   MobileMachineStore? _store;
 
+  /// When the phone last had a connection up to
+  /// [MobileConnection.lastMachineId]; null until a picked machine first
+  /// connects, and once the user disconnects, so a launch then asks.
+  DateTime? _connectedAt;
+
   @override
   MobileConnection build() {
     // Cleared first: build() re-runs on this instance when the demo switch
     // flips, and the demo must not write the real choice.
     _store = null;
+    _connectedAt = null;
     if (!ref.watch(mobileConnectEnabledProvider)) {
       return const MobileConnection();
     }
     _store = ref.watch(mobileMachineStoreProvider);
     final saved = _store?.read();
     final last = saved?.lastMachineId;
-    final reconnect = saved?.reconnect ?? true;
-    var restore = reconnect ? last : null;
-    var restored = restore != null;
-    // Reconnecting is only worth it to a machine that is up; the inventory's
-    // heartbeat says so. Decided once: after that a dropped connection is the
-    // supervisor's to recover, not a reason to bounce the user to the picker.
-    final inventory = ref.read(accountAgentsProvider).value;
-    if (restored && inventory != null) {
-      if (!_heartbeatFresh(inventory, restore)) restore = null;
-      restored = false;
-    }
-    ref.listen<AsyncValue<List<InventoryAgent>>>(accountAgentsProvider, (
-      _,
-      next,
-    ) {
-      final id = state.machineId;
-      final inv = next.value;
-      if (!state.restored || id == null || inv == null) return;
-      final live = ref.read(machineLiveConnectionProvider)[id] ?? false;
-      state = live || _heartbeatFresh(inv, id)
-          ? state.copyWith(restored: false)
-          : state.copyWith(clearMachine: true, restored: false);
-    });
-    // A timeout is a verdict on one attempt. Once the supervisor gets through
-    // anyway it is spent, or the next momentary drop would land straight on
-    // Couldn't connect instead of Connecting.
-    ref.listen(machineLiveConnectionProvider, (_, _) => _clearSpentTimeout());
-    ref.listen(machineAdvertisedProjectsProvider, (_, _) {
-      _clearSpentTimeout();
-    });
-    return MobileConnection(
-      machineId: restore,
-      restored: restored,
-      lastMachineId: last,
-      reconnectNextTime: reconnect,
-    );
+    _connectedAt = saved?.connectedAt;
+    // No heartbeat check: inside the window a machine that looks down is the
+    // supervisor's to reach, not a reason to send the user to the picker. A
+    // machine that left the account is dropped by [forget], and sign-out
+    // clears the store.
+    final restore = _within(_connectedAt, kMobileMachineStickyWindow)
+        ? last
+        : null;
+    ref.listen(machineLiveConnectionProvider, (_, _) => _onLinkChanged());
+    ref.listen(machineAdvertisedProjectsProvider, (_, _) => _onLinkChanged());
+    return MobileConnection(machineId: restore, lastMachineId: last);
   }
 
-  static bool _heartbeatFresh(List<InventoryAgent> inventory, String id) {
-    for (final a in inventory) {
-      if (a.deviceUuid == id) {
-        return machineOnline(
-          connected: false,
-          lastHeartbeatAt: a.lastSeenAt,
-          now: DateTime.now(),
-        );
-      }
-    }
-    return false;
+  /// A time ahead of now is a clock that has since moved back; trusting it
+  /// would hold [at] fresh for as long as the clock was off.
+  bool _within(DateTime? at, Duration window) {
+    if (at == null) return false;
+    final age = ref.read(mobileConnectionClockProvider)().difference(at);
+    return !age.isNegative && age < window;
   }
 
+  /// The window starts only once [machineId] is reached: a tap on a machine
+  /// the phone never gets through to must not pin the next launch to it.
   void connect(String machineId) {
     state = state.copyWith(
       machineId: machineId,
-      restored: false,
       timedOut: false,
       lastMachineId: machineId,
     );
+    _connectedAt = _isConnected
+        ? ref.read(mobileConnectionClockProvider)()
+        : null;
     _persist();
   }
 
@@ -182,43 +157,60 @@ class MobileConnectionNotifier extends Notifier<MobileConnection> {
   /// Ignored when [machineId] is no longer the attempt in progress — a timer
   /// started for a machine the user has since left.
   void markTimedOut(String machineId) {
-    if (state.machineId != machineId || _connectedTo(machineId)) return;
+    if (state.machineId != machineId || _isConnected) return;
     state = state.copyWith(timedOut: true);
   }
 
-  bool _connectedTo(String machineId) =>
-      ref.read(machineLiveConnectionProvider)[machineId] == true &&
-      ref.read(machineAdvertisedProjectsProvider)[machineId] != null;
-
-  void _clearSpentTimeout() {
-    final id = state.machineId;
-    if (!state.timedOut || id == null || !_connectedTo(id)) return;
-    state = state.copyWith(timedOut: false);
+  /// Restarts the window while connected. Called as the app leaves the
+  /// foreground: a steady connection only restarts it as often as its socket
+  /// or project list changes, so a phone connected for longer than the window
+  /// would otherwise come back to the picker.
+  void stampIfConnected() {
+    if (_isConnected) _stamp();
   }
 
-  void disconnect() => state = state.copyWith(
-    clearMachine: true,
-    restored: false,
-    timedOut: false,
-  );
+  bool get _isConnected {
+    final id = state.machineId;
+    return id != null &&
+        ref.read(machineLiveConnectionProvider)[id] == true &&
+        ref.read(machineAdvertisedProjectsProvider)[id] != null;
+  }
 
-  void setReconnectNextTime(bool value) {
-    if (value == state.reconnectNextTime) return;
-    state = state.copyWith(reconnectNextTime: value);
+  void _onLinkChanged() {
+    if (!_isConnected) return;
+    // A timeout is a verdict on one attempt. Once the supervisor gets through
+    // anyway it is spent, or the next momentary drop would land straight on
+    // Couldn't connect instead of Connecting.
+    if (state.timedOut) state = state.copyWith(timedOut: false);
+    _stamp();
+  }
+
+  void _stamp() {
+    if (_within(_connectedAt, _kStampInterval)) return;
+    _connectedAt = ref.read(mobileConnectionClockProvider)();
     _persist();
+  }
+
+  void disconnect() {
+    state = state.copyWith(clearMachine: true, timedOut: false);
+    _connectedAt = null;
+    _persist();
+  }
+
+  /// [machineId] has left the account, so the phone must not stay on it.
+  void forget(String machineId) {
+    if (state.machineId == machineId) disconnect();
   }
 
   void _persist() {
     final store = _store;
     if (store == null) return;
-    final s = state;
+    final last = state.lastMachineId;
+    final at = _connectedAt;
     detached(
       'MobileConnection',
       'persist failed',
-      () => store.write(
-        lastMachineId: s.lastMachineId,
-        reconnect: s.reconnectNextTime,
-      ),
+      () => store.write(lastMachineId: last, connectedAt: at),
     );
   }
 }

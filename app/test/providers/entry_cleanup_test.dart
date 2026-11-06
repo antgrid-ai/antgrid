@@ -10,6 +10,8 @@ import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/entry_cleanup.dart';
+import 'package:antgrid/providers/mobile_connection.dart'
+    show mobileMachineStoreProvider;
 import 'package:antgrid/providers/preview_site_data.dart';
 import 'package:antgrid/providers/projects.dart'
     show projectStoreProvider, pendingForgetsStoreProvider;
@@ -19,6 +21,7 @@ import 'package:antgrid/services/preferences_service.dart';
 import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/agent_catalog_store.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/mobile_machine_store.dart';
 import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
@@ -164,9 +167,15 @@ void main() {
       // has to evict it.
       secureBacking[scopedStorageKey('paired_agents')] = '[]';
       await prefsService.load(entryId);
+      final mobileMachine = await MobileMachineStore.open();
+      await mobileMachine.write(
+        lastMachineId: 'machine-1',
+        connectedAt: DateTime.now(),
+      );
 
       final container = ProviderContainer(
         overrides: [
+          mobileMachineStoreProvider.overrideWithValue(mobileMachine),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
           projectStatusCacheProvider.overrideWithValue(cache),
           agentCatalogStoreProvider.overrideWithValue(catalog),
@@ -195,6 +204,7 @@ void main() {
       // The prefs file lives behind path_provider, which isn't mocked here —
       // the in-memory reset is what stops the stale entry being served.
       expect(prefsService.projectId, isNull);
+      expect(mobileMachine.read().lastMachineId, isNull);
 
       // Reopening from disk is the real assertion: a store that only cleared
       // its in-memory copy would still hand the next sign-in the old rows.

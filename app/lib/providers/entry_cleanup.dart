@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../project/project_session_registry.dart';
 import 'agent_catalog.dart';
 import 'cached_sessions.dart';
+import 'mobile_connection.dart' show mobileMachineStoreProvider;
 import 'preview_site_data.dart';
 import 'projects.dart' show projectsProvider;
 import 'providers.dart' show preferencesServiceProvider, storageServiceProvider;
@@ -176,6 +177,10 @@ Future<void> purgeAccountCaches(
             .read(preferencesServiceProvider)
             .clearAccountScoped(localProjectIds.contains);
       },
+    ),
+    (
+      store: 'mobileMachine',
+      clear: () async => ref.read(mobileMachineStoreProvider)?.clear(),
     ),
     (
       store: 'previewSiteData',

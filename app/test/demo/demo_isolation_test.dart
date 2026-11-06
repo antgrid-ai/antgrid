@@ -391,7 +391,8 @@ void main() {
   test('the phone neither reads nor writes its chosen machine in demo mode', () async {
     useInMemoryPrefs();
     final store = await MobileMachineStore.open();
-    await store.write(lastMachineId: 'real', reconnect: true);
+    final connectedAt = DateTime.utc(2026, 11, 6);
+    await store.write(lastMachineId: 'real', connectedAt: connectedAt);
     final container = ProviderContainer(
       overrides: [
         eagerControlPlanesEnabledProvider.overrideWithValue(true),
@@ -405,11 +406,11 @@ void main() {
     expect(container.read(mobileConnectionProvider).machineId, isNull);
     container.read(mobileConnectionProvider.notifier)
       ..connect('other')
-      ..setReconnectNextTime(false);
+      ..disconnect();
     await Future<void>.delayed(Duration.zero);
 
     expect(store.read().lastMachineId, 'real');
-    expect(store.read().reconnect, isTrue);
+    expect(store.read().connectedAt, connectedAt);
   });
 
   test('the preview origin owner store drops the demo', () async {
