@@ -61,7 +61,9 @@ void main() {
   testWidgets('bar icon brightness flips on a live preset change', (
     tester,
   ) async {
-    useInMemoryPrefs();
+    // Following off: this harness renders the chosen preset alone. The
+    // follow-aware bar style is covered in follow_system_brightness_test.dart.
+    useInMemoryPrefs({'antgrid.follow_system_brightness.v1': false});
     final prefs = await openAppSettingsPrefs();
     final service = AppSettingsService(prefs, AppSettings.fromPrefs(prefs));
 
@@ -78,7 +80,7 @@ void main() {
         )
         .value;
 
-    // Default preset (zinc) is dark -> light icons.
+    // Zinc, the default preset, is dark -> light icons.
     expect(regionStyle().statusBarIconBrightness, Brightness.light);
 
     await service.setPreset(AbThemePreset.light);

@@ -55,7 +55,7 @@ class AppSettings {
     this.uiScale = 1.0,
     this.terminalZoom = 1.0,
     this.reduceMotion = false,
-    this.followSystemBrightness = false,
+    this.followSystemBrightness = true,
     this.telemetryEnabled = true,
     this.terminalProgramCopies = true,
     this.sidebarHidden = false,
@@ -133,10 +133,11 @@ class AppSettings {
   }
 
   static AppSettings fromPrefs(SharedPreferencesWithCache prefs) {
+    const d = defaults;
     final presetName = prefs.getString(_kThemePreset);
     final preset = AbThemePreset.values.firstWhere(
       (p) => p.name == presetName,
-      orElse: () => AbThemePreset.zinc,
+      orElse: () => d.preset,
     );
     Color? readColor(String key) {
       final v = prefs.getInt(key);
@@ -149,23 +150,33 @@ class AppSettings {
       customBg: readColor(_kCustomBg),
       customPrimary: readColor(_kCustomPrimary),
       customAccent: readColor(_kCustomAccent),
-      uiScale: prefs.getDouble(_kUiScale) ?? 1.0,
-      terminalZoom: prefs.getDouble(_kTerminalZoom) ?? 1.0,
-      reduceMotion: prefs.getBool(_kReduceMotion) ?? false,
-      followSystemBrightness: prefs.getBool(_kFollowSystemBrightness) ?? false,
-      telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
-      terminalProgramCopies: prefs.getBool(_kTerminalProgramCopies) ?? true,
-      sidebarHidden: prefs.getBool(_kSidebarHidden) ?? false,
-      hideGitIgnoredFiles: prefs.getBool(_kHideGitIgnoredFiles) ?? false,
+      uiScale: prefs.getDouble(_kUiScale) ?? d.uiScale,
+      terminalZoom: prefs.getDouble(_kTerminalZoom) ?? d.terminalZoom,
+      reduceMotion: prefs.getBool(_kReduceMotion) ?? d.reduceMotion,
+      followSystemBrightness:
+          prefs.getBool(_kFollowSystemBrightness) ?? d.followSystemBrightness,
+      telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? d.telemetryEnabled,
+      terminalProgramCopies:
+          prefs.getBool(_kTerminalProgramCopies) ?? d.terminalProgramCopies,
+      sidebarHidden: prefs.getBool(_kSidebarHidden) ?? d.sidebarHidden,
+      hideGitIgnoredFiles:
+          prefs.getBool(_kHideGitIgnoredFiles) ?? d.hideGitIgnoredFiles,
     );
   }
 }
 
 class AppSettingsService extends Notifier<AppSettings> {
-  AppSettingsService(this._prefs, this._seed);
+  AppSettingsService(
+    this._prefs,
+    this._seed, {
+    Brightness Function()? platformBrightness,
+  }) : _platformBrightness =
+           platformBrightness ??
+           (() => WidgetsBinding.instance.platformDispatcher.platformBrightness);
 
   final SharedPreferencesWithCache _prefs;
   final AppSettings _seed;
+  final Brightness Function() _platformBrightness;
 
   @override
   AppSettings build() {
@@ -216,8 +227,9 @@ class AppSettingsService extends Notifier<AppSettings> {
   }
 
   Future<void> setPreset(AbThemePreset preset) async {
-    state = state.copyWith(preset: preset);
-    await _prefs.setString(_kThemePreset, preset.name);
+    await _pick(state.copyWith(preset: preset), [
+      _prefs.setString(_kThemePreset, preset.name),
+    ]);
   }
 
   Future<void> setCustomColors({
@@ -225,16 +237,33 @@ class AppSettingsService extends Notifier<AppSettings> {
     Color? primary,
     Color? accent,
   }) async {
-    state = state.copyWith(
-      preset: AbThemePreset.custom,
-      customBg: bg ?? state.customBg,
-      customPrimary: primary ?? state.customPrimary,
-      customAccent: accent ?? state.customAccent,
+    await _pick(
+      state.copyWith(
+        preset: AbThemePreset.custom,
+        customBg: bg ?? state.customBg,
+        customPrimary: primary ?? state.customPrimary,
+        customAccent: accent ?? state.customAccent,
+      ),
+      [
+        _prefs.setString(_kThemePreset, AbThemePreset.custom.name),
+        if (bg != null) _prefs.setInt(_kCustomBg, _argb(bg)),
+        if (primary != null) _prefs.setInt(_kCustomPrimary, _argb(primary)),
+        if (accent != null) _prefs.setInt(_kCustomAccent, _argb(accent)),
+      ],
     );
-    await _prefs.setString(_kThemePreset, AbThemePreset.custom.name);
-    if (bg != null) await _prefs.setInt(_kCustomBg, _argb(bg));
-    if (primary != null) await _prefs.setInt(_kCustomPrimary, _argb(primary));
-    if (accent != null) await _prefs.setInt(_kCustomAccent, _argb(accent));
+  }
+
+  /// A theme pick is an explicit choice: if follow-system would render
+  /// something else right now, following is switched off in the same update so
+  /// the pick shows instead of being saved invisibly.
+  Future<void> _pick(AppSettings next, List<Future<void>> writes) async {
+    final hidden =
+        renderedPreset(next, _platformBrightness()) != next.preset;
+    state = hidden ? next.copyWith(followSystemBrightness: false) : next;
+    await Future.wait([
+      ...writes,
+      if (hidden) _prefs.setBool(_kFollowSystemBrightness, false),
+    ]);
   }
 
   Future<void> setUiScale(double scale) async {
@@ -290,7 +319,13 @@ class AppSettingsService extends Notifier<AppSettings> {
       _prefs.remove(_kUiScale),
       _prefs.remove(_kTerminalZoom),
       _prefs.remove(_kReduceMotion),
-      _prefs.remove(_kFollowSystemBrightness),
+      // Written, not removed: an absent key is what
+      // [settleFollowSystemDefault] reads as "never decided", and on a
+      // used install it would settle that as off at the next launch.
+      _prefs.setBool(
+        _kFollowSystemBrightness,
+        AppSettings.defaults.followSystemBrightness,
+      ),
       _prefs.remove(_kTelemetryEnabled),
       _prefs.remove(_kTerminalProgramCopies),
       _prefs.remove(_kSidebarHidden),
@@ -309,6 +344,33 @@ int _argb(Color c) =>
 /// `main.dart` and test setup so the allowList lives in one place.
 Future<SharedPreferencesWithCache> openAppSettingsPrefs() =>
     openScopedPrefs(appSettingsPrefsKeys);
+
+/// The preset actually rendered under [platformBrightness]. With follow-system
+/// on, OS-light shows only the light preset, and OS-dark shows any preset but
+/// light — which would glare in a dark room — falling back to the default.
+AbThemePreset renderedPreset(
+  AppSettings settings,
+  Brightness platformBrightness,
+) {
+  final preset = settings.preset;
+  if (!settings.followSystemBrightness) return preset;
+  if (platformBrightness == Brightness.light) return AbThemePreset.light;
+  return preset == AbThemePreset.light ? AbThemePreset.zinc : preset;
+}
+
+/// Writes the follow-system key once, if absent: on for a fresh install, off
+/// for one with prior use, so an upgrade keeps the theme it had. Settled once,
+/// so a first project added later cannot flip it.
+Future<void> settleFollowSystemDefault(
+  SharedPreferencesWithCache prefs, {
+  required bool Function() hasPriorUse,
+}) async {
+  if (prefs.containsKey(_kFollowSystemBrightness)) return;
+  await prefs.setBool(
+    _kFollowSystemBrightness,
+    !hasPriorUse() && AppSettings.defaults.followSystemBrightness,
+  );
+}
 
 /// Overridden in `main.dart` with a prefs-seeded instance — calling the
 /// default impl is a programmer error.
