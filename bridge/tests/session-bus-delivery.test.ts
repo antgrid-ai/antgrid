@@ -54,11 +54,26 @@ const KINDS: ReadonlyArray<readonly [string, (d: BusDelivery) => string]> = [
 // fire together across the fixed prose — is asserted on the assembled wrapper
 // further down, which is the only place it can be seen.
 test("provenance labels cannot smuggle a lift", () => {
-  expect(sanitizeProvenanceLabel("evil.example.com")).toBe("evil example com");
-  expect(sanitizeProvenanceLabel("C:/Users/dev/.ssh")).toBe("C Users dev ssh");
+  expect(sanitizeProvenanceLabel("evil.example.com")).toBe("evil[.]example[.]com");
+  expect(sanitizeProvenanceLabel("https://evil.example.com/x")).toBe("https: evil[.]example[.]com x");
+  expect(sanitizeProvenanceLabel("10.0.0.1")).toBe("10[.]0[.]0[.]1");
+  expect(sanitizeProvenanceLabel("C:/Users/dev/.ssh")).toBe("C: Users dev ssh");
+  expect(sanitizeProvenanceLabel("../../etc/passwd")).toBe("etc passwd");
   expect(sanitizeProvenanceLabel("rm -rf /")).toBe("rm rf");
+  expect(sanitizeProvenanceLabel("a; rm -rf ~ | sh")).toBe("a rm rf sh");
+  expect(sanitizeProvenanceLabel('say "hi"')).toBe("say hi");
   expect(sanitizeProvenanceLabel("force push origin")).toBeNull();
   expect(sanitizeProvenanceLabel("build-server-01")).toBe("build-server-01");
+});
+
+// A label is reduced only as far as a tier reads it: a machine name and a
+// summary keep their dots and sentence punctuation in a form a reader recognises.
+test("provenance labels keep the punctuation no tier reads", () => {
+  expect(sanitizeProvenanceLabel("Mac.lan")).toBe("Mac[.]lan");
+  expect(sanitizeProvenanceLabel("Cross-machine test from the PC: reply on this thread"))
+    .toBe("Cross-machine test from the PC: reply on this thread");
+  expect(sanitizeProvenanceLabel("Bharath's Mac (work), again?")).toBe("Bharath's Mac (work), again?");
+  expect(sanitizeProvenanceLabel("It ran at 12:02.")).toBe("It ran at 12:02.");
 });
 
 test("renders the notify wrapper in its documented shape", () => {

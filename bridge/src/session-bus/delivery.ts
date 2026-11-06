@@ -111,23 +111,37 @@ function grantsAnything(label: string): boolean {
   return g.patterns.length > 0 || g.paths.length > 0 || g.hosts.length > 0;
 }
 
+/** Everything a label may keep verbatim. Sentence punctuation stays so a summary
+ *  or a machine name reads as written; what is left out is what a tier reads or
+ *  what would break the wrapper: path separators and `~`, shell operators, and
+ *  the double quote every label is delimited by. */
+const LABEL_DISALLOWED = /[^A-Za-z0-9 _.,:'()!?-]+/g;
+
+/** A dot between two name characters, which is what `BARE_HOST` and `IPV4`
+ *  (`handler/authorization.ts`) are made of. Rewritten to `[.]`, the usual way to
+ *  print a host that must not resolve, so `Mac.lan` still reads as that machine
+ *  rather than as `Mac lan`. A sentence's closing dot is left alone. */
+const INNER_DOT = /(?<=[A-Za-z0-9])\.(?=[A-Za-z0-9])/g;
+
 /**
  * Reduce a label to something that can be interpolated into an instruction
  * without authorizing anything, or null when nothing safe survives.
  *
- * Three steps, each closing a different hole: the character allowlist makes
- * `evil.example.com` and an absolute path inert by removing the dots and
- * separators the host and path tiers read; dropping a token-leading `-` makes
- * `rm -rf` inert while leaving an ordinary `build-server-01` intact; and the
- * final check refuses outright the labels no character rule can reach, because
- * the alias table fires on plain English — a machine named "force push origin"
- * is a lift wearing a name.
+ * Four steps, each closing a different hole: the character allowlist removes the
+ * separators the path tier reads; defanging inner dots makes `evil.example.com`
+ * inert to the host tier while keeping it legible; dropping a token-leading `-`
+ * or `.` makes `rm -rf` and `.ssh` inert while leaving an ordinary
+ * `build-server-01` intact; and
+ * the final check refuses outright the labels no character rule can reach,
+ * because the alias table fires on plain English — a machine named "force push
+ * origin" is a lift wearing a name.
  */
 export function sanitizeProvenanceLabel(raw: string | undefined): string | null {
   if (!raw) return null;
   const cleaned = raw
-    .replace(/[^A-Za-z0-9 _-]+/g, " ")
-    .replace(/(^|\s)-+/g, "$1")
+    .replace(LABEL_DISALLOWED, " ")
+    .replace(INNER_DOT, "[.]")
+    .replace(/(^|\s)[-.]+/g, "$1")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_LABEL_CHARS)
