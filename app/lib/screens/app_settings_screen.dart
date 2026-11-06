@@ -428,13 +428,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                           alignment: Alignment.centerLeft,
                           child: AbButton(
                             label: 'Manage machine memory',
-                            onTap: () => detached(
-                              'Memory',
-                              'open failed',
-                              () => openMemoryScreen(
-                                context,
-                                const MemoryTarget.machine(),
-                              ),
+                            onTap: () => openMemoryScreen(
+                              context,
+                              const MemoryTarget.machine(),
                             ),
                           ),
                         ),

@@ -19,7 +19,6 @@ const _saveChannel = MethodChannel('ai.radhaai.antgrid/save_file');
 Future<void> _mountExport(
   WidgetTester tester,
   MemoryRequest exportRequest, {
-  GlobalKey<NavigatorState>? navigatorKey,
   String? projectId,
   List<Map<String, dynamic>>? seen,
 }) async {
@@ -49,25 +48,7 @@ Future<void> _mountExport(
       child: MaterialApp(
         theme: buildAbTheme(),
         builder: abToastHostBuilder,
-        navigatorKey: navigatorKey,
-        onGenerateInitialRoutes: navigatorKey == null
-            ? null
-            : (_) => [
-                MaterialPageRoute<void>(
-                  builder: (_) => const SizedBox.shrink(),
-                ),
-                PageRouteBuilder<void>(
-                  pageBuilder: (_, _, _) =>
-                      MemoryScreen(target: _target, initialProjectId: projectId),
-                  reverseTransitionDuration: const Duration(seconds: 1),
-                ),
-              ],
-        home: navigatorKey == null
-            ? MemoryScreen(target: _target, initialProjectId: projectId)
-            : null,
-        routes: navigatorKey == null
-            ? const {}
-            : {'/': (_) => const SizedBox.shrink()},
+        home: MemoryScreen(target: _target, initialProjectId: projectId),
       ),
     ),
   );
@@ -187,44 +168,4 @@ void main() {
     expect(savedFiles, isEmpty);
     expect(tester.takeException(), isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
-
-  for (final continuation in [null, 'third-page']) {
-    testWidgets(
-      'popping during a page stops export before dismissal ends ($continuation)',
-      (tester) async {
-        final navigator = GlobalKey<NavigatorState>();
-        final second = Completer<Map<String, dynamic>>();
-        final calls = <Map<String, dynamic>>[];
-        await _mountExport(tester, (request) async {
-          calls.add(request);
-          if (request['cursor'] == null) {
-            return memoryExportPage(
-              records: [memoryExportRecord('one')],
-              cursor: 'second',
-            );
-          }
-          return second.future;
-        }, navigatorKey: navigator);
-        expect(calls, hasLength(2));
-        final screen = tester.state(find.byType(MemoryScreen));
-        navigator.currentState!.pop();
-        await tester.pump(const Duration(milliseconds: 1));
-        expect(screen.mounted, isTrue);
-        second.complete(
-          memoryExportPage(
-            records: [memoryExportRecord('two')],
-            cursor: continuation,
-          ),
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(screen.mounted, isTrue);
-        expect(calls, hasLength(2));
-        expect(savedFiles, isEmpty);
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.android),
-    );
-  }
 }

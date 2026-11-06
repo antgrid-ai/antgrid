@@ -88,7 +88,7 @@ class _DemoHomeState extends ConsumerState<DemoHome> {
     final Widget body;
     if (id == null ||
         surface == WorkbenchSurface.newSession ||
-        surface == WorkbenchSurface.scheduler) {
+        surface.machineWide) {
       body = const NewSessionScreen();
       // Landing trap, identical to AppShell's: with no focused project the New
       // Session screen renders while the surface may still read `workspace`, and

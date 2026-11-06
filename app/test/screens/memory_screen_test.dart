@@ -7,6 +7,7 @@ import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/memory.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/screens/memory_screen.dart';
 import 'package:antgrid/widgets/memory/memory_edit_form.dart';
 import 'package:flutter/material.dart';
@@ -163,19 +164,14 @@ Future<void> mount(
   String? projectId,
   bool viaOpen = false,
 }) async {
-  Widget home = MemoryScreen(target: _machine, initialProjectId: projectId);
-  if (viaOpen) {
-    home = Builder(
-      builder: (context) {
-        // openMemoryScreen is what a project entry calls.
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!context.mounted) return;
-          unawaited(openMemoryScreen(context, _machine, projectId: projectId));
-        });
-        return const SizedBox.shrink();
-      },
-    );
-  }
+  final home = viaOpen
+      ? Consumer(
+          builder: (context, ref, _) =>
+              ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.memory
+              ? const MemorySurface()
+              : const SizedBox.shrink(),
+        )
+      : MemoryScreen(target: _machine, initialProjectId: projectId);
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -189,6 +185,14 @@ Future<void> mount(
       ),
     ),
   );
+  // openMemoryScreen is what a project entry calls.
+  if (viaOpen) {
+    openMemoryScreen(
+      tester.element(find.byType(Consumer)),
+      _machine,
+      projectId: projectId,
+    );
+  }
   await tester.pumpAndSettle();
 }
 
@@ -269,8 +273,19 @@ void main() {
     await mount(tester, Fake(status: statusJson(enabled: false)));
     expect(find.text('Turn on Memory'), findsOneWidget);
     expect(find.byTooltip('Memory settings'), findsNothing);
-    expect(find.byTooltip('Back'), findsOneWidget);
   });
+
+  // Memory is a surface beside the drawer; leaving it is a drawer choice.
+  for (final (name, useLayout) in [('wide', useWide), ('compact', useNarrow)]) {
+    testWidgets('the $name header offers no close or back', (tester) async {
+      useLayout(tester);
+      await mount(tester, Fake());
+      expect(find.byTooltip('Memory settings'), findsOneWidget);
+      expect(find.byTooltip('Close'), findsNothing);
+      expect(find.byTooltip('Back'), findsNothing);
+      tester.takeException();
+    });
+  }
 
   group('wide list', () {
     testWidgets('shows the count, meta line and an auto-selected detail', (

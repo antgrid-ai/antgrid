@@ -14,7 +14,7 @@ import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
 import 'eager_control_planes.dart';
-import 'memory_route_targets.dart';
+import 'memory_surface.dart' show memoryViewProvider;
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -349,7 +349,7 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
 
 /// Bare deviceUuids whose control-plane socket should stay open right now: the
 /// picker's viewed machine (if any), the focused remote target, every machine
-/// backing >=1 open project or Memory route, and every expanded remote MACHINE
+/// backing >=1 open project, the Scheduler's or Memory's machine, and every expanded remote MACHINE
 /// row. The reaper releases any open control-plane socket NOT in this set.
 /// Computed centrally (not per-tab/per-row) so de-selecting a machine — or
 /// collapsing its drawer row — is observed even though its picker tab / sessions
@@ -360,17 +360,23 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   final alive = ref
       .read(projectSessionRegistryProvider.notifier)
       .machinesWithOpenProjects();
-  alive.addAll(ref.watch(memoryRouteTargetsProvider));
   // Selection changes before ProjectSession finishes opening and touching the
   // registry. Pin the selected remote's machine during that gap; otherwise the
   // reaper closes the control plane immediately after project selection, before
   // promotion/data-plane setup can settle. This also keeps a focused remote's
   // control plane available for retry and status operations after an open error.
   final focusedTarget = ref.watch(selectedTargetProvider);
-  if (ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.scheduler) {
-    final machine = ref.watch(schedulerTargetProvider);
-    if (machine != null) alive.add(machine);
-  }
+  final surface = ref.watch(workbenchSurfaceProvider);
+  // A machine-wide surface reads its machine over the control plane, which
+  // nothing else pins once that machine's drawer row is collapsed.
+  final surfaceMachine = switch (surface) {
+    WorkbenchSurface.scheduler => ref.watch(schedulerTargetProvider),
+    WorkbenchSurface.memory => ref.watch(
+      memoryViewProvider.select((v) => v.target.machineId),
+    ),
+    _ => null,
+  };
+  if (surfaceMachine != null) alive.add(surfaceMachine);
   if (focusedTarget != null && !focusedTarget.isLocal) {
     alive.add(baseDeviceUuid(focusedTarget.registrationId));
   }
@@ -381,9 +387,8 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // source would otherwise hold a socket open forever. That fallback bites on
   // mobile especially, where there is no Local tab, so the default 'local'
   // selection resolves `visiblePickerSource` to the first MACHINE.
-  final surface = ref.watch(workbenchSurfaceProvider);
   final pickerVisible =
-      surface != WorkbenchSurface.scheduler &&
+      !surface.machineWide &&
       (ref.watch(selectedRegistrationIdProvider) == null ||
           surface == WorkbenchSurface.newSession);
   if (pickerVisible) {
