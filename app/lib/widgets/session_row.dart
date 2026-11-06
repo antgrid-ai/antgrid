@@ -387,6 +387,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                   child: _SessionMenu(
                     entryId: widget.entryId,
                     session: session,
+                    rowContext: context,
                     onMenuOpened: () {
                       if (mounted) setState(() => _menuOpen = true);
                     },
@@ -631,12 +632,20 @@ final class _CopyPath extends _SessionMenuChoice {
 class _SessionMenu extends ConsumerWidget {
   final String entryId;
   final SessionEntry session;
+
+  /// The row's own context, which outlives this menu. Delete hosts its dialogs
+  /// and toasts here rather than on the kebab: arming the in-flight mark hides
+  /// the kebab, so a refusal arriving afterwards (uncommitted changes, unpushed
+  /// commits, a held directory) would find the kebab's context unmounted and
+  /// end with nothing on screen.
+  final BuildContext rowContext;
   final VoidCallback? onMenuOpened;
   final VoidCallback? onMenuClosed;
 
   const _SessionMenu({
     required this.entryId,
     required this.session,
+    required this.rowContext,
     this.onMenuOpened,
     this.onMenuClosed,
   });
@@ -952,7 +961,7 @@ class _SessionMenu extends ConsumerWidget {
           }
           _disconnectIfEmpty(ref);
         case _SessionAction.delete:
-          await _deleteSession(anchor, ref, svc);
+          if (rowContext.mounted) await _deleteSession(rowContext, ref, svc);
       }
     } on TimeoutException {
       toaster?.showMessage(
