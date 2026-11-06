@@ -93,6 +93,7 @@ const packageLicenses: Record<string, string> = {
   "bridge/integrations/package.json": "MPL-2.0",
   "evals/package.json": "MPL-2.0",
   "packages/antgrid-agents/package.json": "MPL-2.0",
+  "packages/antgrid-memory/package.json": "MPL-2.0",
   "packages/antgrid-wire/package.json": "MPL-2.0",
   "relay/package.json": "LicenseRef-Elastic-2.0",
   "web/package.json": "LicenseRef-Elastic-2.0",
