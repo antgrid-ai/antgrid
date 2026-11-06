@@ -377,9 +377,9 @@ class AuthService {
     _oauthAttempt = null;
     _magicResendGuard = null;
     _magicResendFlowId = null;
-    return _serializeStorage(() async {
-      if (generation == _generation) await storage.clearPendingSignIn();
-    });
+    // Never throws: the sign-in screen drops this future, and so does the
+    // deep-link callback that runs it when the user cancels at the provider.
+    return _discardQuietly(generation);
   }
 
   Map<String, String> get _clientHeaders => {

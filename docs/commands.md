@@ -84,6 +84,16 @@ antgrid log-level                      # back to the configured level, now
 antgrid log-level debug --dir ~/.antgrid-dev
 ```
 
+**Session-bus reach:** `antgrid agent-reach [on|off|status]`
+(`bridge/src/cli/agent-reach.ts`) sets or shows this machine's local agent-reach
+switch on the running host, through `agent-reach:set`. `antgrid orchestrator
+[off|status]` (`bridge/src/cli/orchestrator.ts`) reads or lowers this machine's
+orchestrator grant on the account. It cannot raise it: a credential that lives
+on this machine must not elevate it, so `orchestrator on` prints where to do it
+(the app's settings for this machine, signed in as the account owner) and exits
+non-zero without contacting the host. Either `status` prints an agent reach
+line and an orchestrator line. `--dir` targets a dev host.
+
 Following one session-bus delivery: every stage prints the same 12-hex `sha`
 (`bridge/src/line-key.ts`), so `grep` it in `host.log`. In order:
 `bus queue: held` → `bus inject: …` → `submit gate: wait ended` (only when the

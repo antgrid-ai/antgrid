@@ -134,6 +134,13 @@ class _ScreenshotCapture {
   int dataChars = 0;
 }
 
+/// Starts a WebView call nothing waits on. A controller rejects every call once
+/// its native view failed to start (WebView2 missing on Windows), and WKWebView
+/// rethrows a script that throws in the page; the dropped future would land as
+/// a crash.
+void _webViewDetached(String what, Future<void>? Function() call) =>
+    detached('PreviewScreen', '$what failed', () async => call());
+
 class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   static const _screenshotChunkChars = 200000;
   static const _maxScreenshotBytes = 20 * 1024 * 1024;
@@ -333,7 +340,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             // navigation rather than only while some tool is active — see
             // kContextMenuScript's doc. Touch platforms have no right-click.
             if (!isMobilePlatform) {
-              unawaited(controller.runJavaScript(kContextMenuScript));
+              _webViewDetached(
+                'context menu script',
+                () => controller.runJavaScript(kContextMenuScript),
+              );
             }
             final shouldClearRefresh = _refreshingPort == port;
             final shouldClearLoading = tabState.loading;
@@ -441,7 +451,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final tabState = _tabStates[port];
     final ctrl = tabState?.controller;
     if (tabState == null || ctrl == null) return;
-    final results = await Future.wait([ctrl.canGoBack(), ctrl.canGoForward()]);
+    // Every caller is a page callback that drops this future; a controller
+    // whose native view failed rejects both reads, and stale flags are the
+    // whole cost of skipping them.
+    final List<bool> results;
+    try {
+      results = await Future.wait([ctrl.canGoBack(), ctrl.canGoForward()]);
+    } catch (e) {
+      AbLog.debug('PreviewScreen', 'history flags unavailable: $e');
+      return;
+    }
     // The controller may have been retired meanwhile; its history must not
     // land on its successor.
     if (!mounted || !identical(_stateOf(port, ctrl), tabState)) return;
@@ -452,6 +471,24 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       tabState.canGoBack = back;
       tabState.canGoForward = fwd;
     });
+  }
+
+  /// Best-effort teardown of the armed tab's picker listeners, for a caller
+  /// that sets [_pickerActiveForPort] itself; [_disarmPicker] clears it too.
+  void _stopPickerOnArmedTab() {
+    final armed = _pickerActiveForPort;
+    if (armed == null) return;
+    _webViewDetached(
+      'picker stop',
+      () => _tabStates[armed]?.controller?.runJavaScript(
+        kElementPickerStopScript,
+      ),
+    );
+  }
+
+  void _disarmPicker() {
+    _stopPickerOnArmedTab();
+    setState(() => _pickerActiveForPort = null);
   }
 
   /// A real navigation tears down the page's whole JS world, taking any
@@ -1085,7 +1122,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final id = ref.read(previewStateProvider).value?.activeTabId;
     final tabState = id != null ? _tabStates[id] : null;
     if ((tabState?.canGoBack ?? false) && tabState?.controller != null) {
-      unawaited(tabState!.controller!.goBack());
+      _webViewDetached('back', tabState!.controller!.goBack);
       // _refreshHistoryFlags re-syncs from onUrlChange.
       return true;
     }
@@ -1113,23 +1150,25 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// is what disarms the picker automatically; see [_clearPickerIfArmedOn]).
   void _togglePicker(PreviewTab activeTab, _TabWebViewState? activeState) {
     if (_pickerActiveForPort == activeTab.port) {
-      unawaited(
-        activeState?.controller?.runJavaScript(kElementPickerStopScript),
-      );
-      setState(() => _pickerActiveForPort = null);
+      _disarmPicker();
       return;
     }
     // Arming on a different tab than any previous armed one — best-effort
     // tear down the old tab's listeners so a lingering hover overlay doesn't
     // resurface if the user switches back to it later without reloading.
-    if (_pickerActiveForPort != null) {
-      unawaited(
-        _tabStates[_pickerActiveForPort]?.controller?.runJavaScript(
-          kElementPickerStopScript,
-        ),
-      );
-    }
-    unawaited(activeState?.controller?.runJavaScript(kElementPickerScript));
+    _stopPickerOnArmedTab();
+    _webViewDetached('picker start', () async {
+      try {
+        await activeState?.controller?.runJavaScript(kElementPickerScript);
+      } catch (_) {
+        // A picker shown armed over a page with no listeners ignores every
+        // click; disarm so the toolbar tells the truth.
+        if (mounted && _pickerActiveForPort == activeTab.port) {
+          setState(() => _pickerActiveForPort = null);
+        }
+        rethrow;
+      }
+    });
     // The draw overlay swallows every pointer over the page, so an armed
     // picker underneath it could never be clicked — see [_toggleDraw], which
     // disarms in the other direction.
@@ -1330,14 +1369,23 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       onError?.call('another screenshot capture is already in progress');
       return null;
     }
-    if (_pickerActiveForPort == port) {
-      unawaited(controller.runJavaScript(kElementPickerStopScript));
-      setState(() => _pickerActiveForPort = null);
-    }
+    if (_pickerActiveForPort == port) _disarmPicker();
     final capture = _ScreenshotCapture(port);
     setState(() => _screenshotCapture = capture);
     try {
-      unawaited(controller.runJavaScript(kScreenshotCaptureScript));
+      // Routed into the capture's own completer: a script that never ran
+      // fails the capture now, instead of waiting out the 20s timeout, and
+      // the try below sees it rather than the zone.
+      unawaited(
+        controller.runJavaScript(kScreenshotCaptureScript).catchError((
+          Object e,
+          StackTrace stack,
+        ) {
+          if (!capture.completer.isCompleted) {
+            capture.completer.completeError(e, stack);
+          }
+        }),
+      );
       return await capture.completer.future.timeout(
         const Duration(seconds: 20),
       );
@@ -1371,13 +1419,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       setState(() => _drawActiveForPort = null);
       return;
     }
-    if (_pickerActiveForPort != null) {
-      unawaited(
-        _tabStates[_pickerActiveForPort]?.controller?.runJavaScript(
-          kElementPickerStopScript,
-        ),
-      );
-    }
+    _stopPickerOnArmedTab();
     setState(() {
       _pickerActiveForPort = null;
       _drawActiveForPort = port;
@@ -1457,7 +1499,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               icon: AbIcons.chevronLeft,
               tooltip: 'Back',
               onTap: (activeState?.canGoBack ?? false)
-                  ? () => activeState?.controller?.goBack()
+                  ? () => _webViewDetached(
+                      'back',
+                      () => activeState?.controller?.goBack(),
+                    )
                   : null,
             ),
             AbIconButton(
@@ -1527,7 +1572,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     tooltip: 'Refresh',
                     onTap: activeState == null
                         ? null
-                        : () => activeState.controller?.reload(),
+                        : () => _webViewDetached(
+                            'reload',
+                            () => activeState.controller?.reload(),
+                          ),
                   ),
                   PreviewTabsButton(
                     onSelected: (port) => _selectTab(port, preview),
@@ -1567,12 +1615,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// could fire a stale flow on an unrelated tab later.
   void _selectTab(int port, PreviewService? preview) {
     if (_pickerActiveForPort != null && _pickerActiveForPort != port) {
-      unawaited(
-        _tabStates[_pickerActiveForPort]?.controller?.runJavaScript(
-          kElementPickerStopScript,
-        ),
-      );
-      setState(() => _pickerActiveForPort = null);
+      _disarmPicker();
     }
     // Same reasoning for the draw overlay, plus one of its own: its marks are
     // in the OUTGOING page's coordinates, so carrying them to another tab
@@ -1615,7 +1658,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         hasActiveTab: activeTab != null,
         hasPreviewService: preview != null,
         onNewPort: _startComposingNewTab,
-        onRefresh: () => activeState?.controller?.reload(),
+        onRefresh: () => _webViewDetached(
+          'reload',
+          () => activeState?.controller?.reload(),
+        ),
         onDraw: activeTab == null || _screenshotCapture != null
             ? null
             : () => _toggleDraw(activeTab, activeState),
@@ -1693,7 +1739,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       _pullArmed = false;
       if (shouldRefresh) _refreshingPort = port;
     });
-    if (shouldRefresh) unawaited(controller.reload());
+    if (shouldRefresh) _webViewDetached('reload', controller.reload);
   }
 
   void _cancelPull() {
@@ -1886,7 +1932,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       AbMenuItem(
         label: 'Select all',
         enabled: controller != null,
-        onTap: () => controller?.runJavaScript(kContextMenuSelectAllScript),
+        onTap: () => _webViewDetached(
+          'select all',
+          () => controller?.runJavaScript(kContextMenuSelectAllScript),
+        ),
       ),
     );
     entries.add(

@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/license_token_minter.dart';
+import '../services/sign_out_service.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
@@ -48,6 +49,15 @@ Future<void> handleDeviceRevoked(ProviderContainer ref) async {
   AbLog.warn('Revocation', 'device revoked by the account — signing out');
   try {
     await performHardSignOut(ref);
+  } on SignOutCleanupIncomplete catch (e) {
+    // Every caller is fire-and-forget (a relay signal, a resume probe), so a
+    // rethrow would land as an uncaught crash. The service already reported
+    // the failure; the notice below still has to go up.
+    AbLog.error(
+      'Revocation',
+      'sign-out cleanup incomplete',
+      fields: {'error': '${e.cause}'},
+    );
   } finally {
     // Set last: the notice is what flips the root to the sign-in screen, and
     // the screen must not appear while credentials are still being wiped.
@@ -98,9 +108,16 @@ Future<void> checkDeviceRevoked(
   } on DeviceRevokedException {
     // A sign-out that finished while the mint was out has already retired
     // these credentials, and its own revoke is what the mint just heard.
-    if (!identical(await ref.read(licenseTokenMinterProvider.future), minter)) {
+    // The sibling `catch` below does not cover a throw from in here, and
+    // every caller drops this future.
+    final LicenseTokenMinter? current;
+    try {
+      current = await ref.read(licenseTokenMinterProvider.future);
+    } catch (error) {
+      AbLog.debug('Revocation', 'minter re-read failed: $error');
       return;
     }
+    if (!identical(current, minter)) return;
     await handleDeviceRevoked(ref);
   } catch (error) {
     AbLog.debug('Revocation', 'probe inconclusive: $error');

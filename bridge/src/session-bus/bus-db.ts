@@ -18,8 +18,8 @@
 // Nothing here throws. A caller that cannot reach the database gets the EMPTY
 // store, which is the answer every one of them already folds from, and the
 // failure is SAID once per process with the error that caused it. A store that
-// empties itself in silence is the trap: for the machine-level routes that is
-// every project's carrier bindings gone with no line anywhere to name why.
+// empties itself in silence is the trap: for the machine-level dedup table that is
+// every verdict forgotten, so a resend applies twice, with no line to name why.
 
 import { Database } from "bun:sqlite";
 import type { z } from "zod";
@@ -33,15 +33,18 @@ const log = logger.child({ component: "session-bus" });
  *  one before v1: a mismatch DROPS every table and starts clean. Stated as a
  *  version rather than left implicit because the trap is the other behaviour —
  *  a schema check that quietly reads rows written under a shape this code no
- *  longer holds. Losing bus state costs a relearned route and a redelivered
- *  message, both of which the protocol already tolerates. */
-export const BUS_DB_VERSION = 2;
+ *  longer holds. Losing bus state costs the outbox and the log, which is what a
+ *  pre-release schema change is allowed to cost. */
+export const BUS_DB_VERSION = 3;
 
 /** See `prepare`: this is an event-loop stall, not a background wait. */
 const BUSY_TIMEOUT_MS = 250;
 
+// `bus_routes` is no longer created but stays listed: dropping every table on a
+// version mismatch is what removes the one an older bridge left behind.
 const TABLES = [
   "bus_routes",
+  "bus_seen",
   "bus_messages",
   "bus_held",
   "bus_artifacts",
@@ -52,8 +55,8 @@ const TABLES = [
 ] as const;
 
 // Columns for what is QUERIED, one JSON blob for what is only ever read back
-// whole. `bus_routes` is filtered and ordered by `at`, so its fields are
-// columns; every scoped store is always read for one session (or one project)
+// whole. `bus_seen` is looked up by (from_machine, id) and pruned by expiry, so
+// its fields are columns; every scoped store is always read for one session (or one project)
 // at a time and folded in memory, so their rows carry the record as
 // written and the Zod schema that already defines it stays the only definition
 // of shape — a field added there needs no DDL here.
@@ -66,18 +69,24 @@ const TABLES = [
 // EVERY SESSION-SCOPED TABLE CARRIES BOTH projectId AND sessionId, which is a
 // requirement and not a convention: `deleteScope` runs one
 // `WHERE projectId = ? AND sessionId = ?` across TABLES with hand-written skips
-// for the two that are not session-scoped, so a table missing either column
+// for the ones that are not session-scoped, so a table missing either column
 // raises "no such column", throws the transaction, and makes every session
 // delete on the machine fail.
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS bus_routes (
-  contextId TEXT PRIMARY KEY,
-  peerId    TEXT NOT NULL,
-  projectId TEXT NOT NULL,
-  at        INTEGER NOT NULL
+-- Machine-scoped, not session-scoped: a verdict belongs to the (sender, message
+-- id) pair, and deleting a session must not make a resend of its mail apply
+-- again.
+CREATE TABLE IF NOT EXISTS bus_seen (
+  from_machine TEXT NOT NULL,
+  id           TEXT NOT NULL,
+  at           INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  outcome      TEXT NOT NULL,
+  code         TEXT,
+  response     TEXT,
+  PRIMARY KEY (from_machine, id)
 );
-CREATE INDEX IF NOT EXISTS bus_routes_project ON bus_routes (projectId);
-CREATE INDEX IF NOT EXISTS bus_routes_at ON bus_routes (at);
+CREATE INDEX IF NOT EXISTS bus_seen_at ON bus_seen (at);
 
 CREATE TABLE IF NOT EXISTS bus_messages (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,9 +154,9 @@ const announced = new Set<string>();
 
 /** The machine-level session-bus root. Every bus record on this machine lives
  *  in one file here, keyed by project — never in a directory named after one.
- *  A carrier route is looked up by context id, which may name a session in any
- *  project the machine has open, so no project's directory could hold it; the
- *  rest followed when a reclaim narrower than an `rm -rf` was needed. */
+ *  The dedup table is keyed by sending machine and message id, which belongs to
+ *  no project's directory; the rest followed when a reclaim narrower than an
+ *  `rm -rf` was needed. */
 export function sessionBusMachineDir(abDir: string): string {
   return join(abDir, "session-bus");
 }
@@ -165,7 +174,7 @@ function prepare(db: Database): void {
   // row. But bun:sqlite is synchronous, so this wait is the event loop's: every
   // terminal on the machine stops for the duration. The bound is therefore set
   // by what a user could feel, not by how long a lock could plausibly be held,
-  // and losing the write costs a relearned route or a redelivered message.
+  // and losing the write costs a redelivered message.
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   const found = (db.query("PRAGMA user_version").get() as { user_version?: number } | null)?.user_version ?? 0;
   if (found !== 0 && found !== BUS_DB_VERSION) {
@@ -269,7 +278,7 @@ function announceOnce(abDir: string, err: unknown): void {
  * Only for CORRUPTION, never for a lock we lost or a permission we lack: those
  * heal on their own and moving the file would throw away good rows. A corrupt
  * one heals never — every store on the machine is in it, so one truncated write
- * from a power cut would otherwise cost this abDir its routes, its held
+ * from a power cut would otherwise cost this abDir its dedup verdicts, its held
  * messages, its logs, its artifact handles and its delivery queue for the life
  * of the install. The JSON stores this replaced recovered on their next write
  * without anyone deciding they should; taking that away silently is the part
@@ -443,15 +452,12 @@ export function deleteScope(db: Database, scope: BusScope): void {
   const { clause, params } = scopeWhere(scope);
   db.transaction(() => {
     for (const table of TABLES) {
-      // The delivery queue is per project and has no sessionId to narrow by, so
-      // a session-scoped delete must not reach it: its lines belong to every
-      // other session in the project too.
-      if (table === "bus_routes") continue;
+      // Neither of these is owned by a session: the delivery queue is per
+      // project, and its lines belong to every other session in the project
+      // too; `bus_seen` is per sending machine and carries no project at all.
+      if (table === "bus_routes" || table === "bus_seen") continue;
       if (table === "bus_deliveries" && scope.sessionId !== undefined) continue;
       db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
-    }
-    if (scope.sessionId === undefined) {
-      db.query("DELETE FROM bus_routes WHERE projectId = ?").run(scope.projectId);
     }
   })();
 }

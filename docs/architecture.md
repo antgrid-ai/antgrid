@@ -98,16 +98,17 @@ production preference before those gates pass.
 
 ### The session bus
 
-Agent-to-agent frames (`session-bus:*`) never cross machines by themselves. The
-sending bridge hands every outbound bus frame to its loopback owner socket and
-nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
-`capabilities.sessionBusCarrier` on its hello: the initiating machine's desktop
-app is the only carrier, and it forwards the frame verbatim onto the target
-machine's own relay connection. The receiving bridge answers on the one app
-session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. There is
-no separate spec document: the host-side invariants are in `bridge/AGENTS.md`,
-and the rest is documented at its definitions under `bridge/src/session-bus/`.
+Agent-to-agent frames (`session-bus:*`) cross machines only through the relay's
+queue, sealed. The sending bridge seals each frame to the recipient machine's
+bus key (published in the account's machine directory) and sends it on its
+central control socket; the relay holds the ciphertext until the recipient's
+bridge is connected, and cannot read it. The receiving bridge opens it, verifies
+who sent it, records it so a resend is idempotent, applies its own gates, and
+answers with a signed ack. Delivery is at-least-once, and an ack means the
+recipient's store has the frame, not that its agent has read it. The app is not
+on this path, and a phone never sees the traffic. There is no separate spec
+document: the host-side invariants are in `bridge/AGENTS.md`, and the rest is
+documented at its definitions under `bridge/src/session-bus/`.
 
 ## Checkout-scoped routing
 
@@ -269,6 +270,16 @@ listener uses a local bearer token.
 Terminal qualification commands live in `bridge/package.json` and `evals/package.json`.
 
 ## Shared packages (`packages/`)
+
+- **`antgrid-memory`** — MPL-2.0 Bun workspace for local memory contracts,
+  SQLite/FTS5 storage, access policy, lifecycle, bounded retrieval, and export.
+  `bridge/src/memory.ts` supplies verified local-profile/session/checkout context;
+  the package never imports bridge. Its database lives under the local profile's
+  `memory/`, outside projects and disposable checkouts. The separate
+  `memory-mcp` entry point forwards tools to the host service; app inspection
+  uses the authenticated machine payload transport (native `memory.request` RPC
+  or the local control listener). See
+  [agent-memory-rfc.md](agent-memory-rfc.md) for the contract and release gates.
 
 - **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,
   shared chat runtime, and integration assets. Bridge consumes public exports;

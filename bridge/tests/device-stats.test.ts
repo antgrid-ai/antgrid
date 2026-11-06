@@ -57,6 +57,7 @@ async function boot(): Promise<{
   stats: DeviceStatsStore;
   sent: AbMessage[];
   send: (peerId: string, fields: Record<string, unknown>) => void;
+  ask: (peerId: string) => void;
 }> {
   const phones = loadPairedPhones(join(root, "phones"));
   phones.upsert({
@@ -80,9 +81,6 @@ async function boot(): Promise<{
   core.attachTransport(bus);
   core.onHandshakeComplete();
   await waitFor(() => sent.some((m) => m.type === "agent:status"), "agent:status");
-  // The read is async; a late handshake report would otherwise satisfy a test
-  // that cleared `sent` to watch for a later one.
-  await waitFor(() => sent.some((m) => m.type === "machine:stats"), "handshake machine:stats");
   core.setPeerSessionProvider((peerId) => {
     if (peerId === PEER_ID) return { peerId, peerPubkey: PHONE_PK };
     if (peerId === STRANGER_PEER_ID) return { peerId, peerPubkey: "PK_STRANGER" };
@@ -90,31 +88,33 @@ async function boot(): Promise<{
   });
   const send = (peerId: string, fields: Record<string, unknown>) =>
     bus.dispatchInbound(createMessage("device:stats", fields), "control", "relay", peerId);
-  return { stats, sent, send };
+  const ask = (peerId: string) =>
+    bus.dispatchInbound(createMessage("machine:stats:request", {}), "control", "relay", peerId);
+  return { stats, sent, send, ask };
 }
 
-test("a handshake tells the app this machine's RAM", async () => {
+test("nothing about the machine is pushed until an app asks", async () => {
   const { sent } = await boot();
+  await new Promise((resolve) => setTimeout(resolve, 100));
 
-  const msg = sent.find((m) => m.type === "machine:stats");
-  expect(msg).toBeDefined();
-  const { ramTotalBytes, ramAvailableBytes } = msg as { ramTotalBytes?: number; ramAvailableBytes?: number };
-  expect(ramTotalBytes).toBeGreaterThan(0);
-  expect(ramAvailableBytes).toBeLessThanOrEqual(ramTotalBytes!);
+  expect(sent.some((m) => m.type === "machine:stats")).toBe(false);
 });
 
-test("a remote app that attaches after the handshake is told this machine's RAM", async () => {
-  const { sent, send } = await boot();
-  sent.length = 0;
+test("a remote app that asks is told this machine's RAM and CPU load", async () => {
+  const { sent, ask } = await boot();
 
-  send(PEER_ID, {});
-  await waitFor(() => sent.some((m) => m.type === "machine:stats"), "machine:stats for the new remote client");
+  ask(PEER_ID);
+  await waitFor(() => sent.some((m) => m.type === "machine:stats"), "machine:stats for the request");
 
-  // Only a NEW remote client triggers it; its later frames do not.
-  sent.length = 0;
-  send(PEER_ID, {});
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(sent.some((m) => m.type === "machine:stats")).toBe(false);
+  const msg = sent.find((m) => m.type === "machine:stats") as {
+    ramTotalBytes?: number;
+    ramAvailableBytes?: number;
+    cpuPercent?: number;
+  };
+  expect(msg.ramTotalBytes).toBeGreaterThan(0);
+  expect(msg.ramAvailableBytes).toBeLessThanOrEqual(msg.ramTotalBytes!);
+  expect(msg.cpuPercent).toBeGreaterThanOrEqual(0);
+  expect(msg.cpuPercent).toBeLessThanOrEqual(100);
 });
 
 test("device:stats from a known device is recorded on its row", async () => {

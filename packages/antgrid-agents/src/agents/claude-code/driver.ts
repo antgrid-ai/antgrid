@@ -34,13 +34,9 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
       stderrBytes -= stderrLines.shift()?.length ?? 0;
     }
   };
-  // Reuse the terminal-mode title plugin in chat mode so /session-title
-  // auto-names the session from the conversation. Only the plugin dir is
-  // lifted out of the augmentation and mapped to the SDK's extraArgs shape.
-  // The chat augmentation carries no MCP profile (`buildChatSpawnAugment`
-  // skips it), so chat sessions get no Antgrid tools.
   const chatAug = ctx.chatAugment();
   const pluginDir = pluginDirArg(chatAug.args);
+  const mcpConfig = chatAug.args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
   // `claude update` is install-method-sensitive, but this is detection
   // only; the run itself is fail-soft (see the agent:update handler).
   ctx.emitUpdateCheck();
@@ -48,11 +44,14 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
     sessionId: ctx.sessionId,
     sendMessage: ctx.send,
     cwd: ctx.projectPath,
-    spawn: ({ canUseTool, abort, resume }) =>
-      spawnClaude({ cwd: ctx.projectPath, canUseTool, resume,
+    spawn: ({ canUseTool, onElicitation, abort, resume }) =>
+      spawnClaude({ cwd: ctx.projectPath, canUseTool, onElicitation, resume,
         approvalPolicy: ctx.approvalPolicy,
         onStderr: pushStderr, abortController: abort,
-        ...(pluginDir ? { extraArgs: { "plugin-dir": pluginDir } } : {}),
+        extraArgs: {
+          ...(pluginDir ? { "plugin-dir": pluginDir } : {}),
+          ...(mcpConfig ? { "mcp-config": mcpConfig } : {}),
+        },
         extraEnv: chatAug.env }),
     onSessionId: ctx.onAgentSession,
     stderrTail: () => stderrLines.join("\n"),

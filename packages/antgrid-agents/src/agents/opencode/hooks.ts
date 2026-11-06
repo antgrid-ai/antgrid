@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { atomicWriteFile } from "../../atomic-file";
 import { logger } from "../../host";
@@ -15,7 +15,7 @@ function writeOpencodeConfig(abDir: string): string | null {
     // Resolved AND existence-checked before the write. A config naming a plugin
     // file that is not there writes fine, spawns fine, and simply never loads;
     // there is no later signal, so the missing asset has to be caught here.
-    pluginUrl = pathToFileURL(bundledPluginPath(abDir, "opencode", "plugin.ts")).href;
+    pluginUrl = pathToFileURL(dirname(bundledPluginPath(abDir, "opencode", "plugin.ts"))).href;
   } catch (err) {
     // Distinct from the write failure below, and at error level: this one is a
     // packaging bug in our own build, not a condition on the user's machine.
@@ -24,7 +24,7 @@ function writeOpencodeConfig(abDir: string): string | null {
   }
   try {
     const path = join(abDir, "agents", "opencode-session-namer.json");
-    atomicWriteFile(path, JSON.stringify({ plugin: [pluginUrl] }, null, 2));
+    atomicWriteFile(path, JSON.stringify({ plugins: [pluginUrl] }, null, 2));
     return path;
   } catch (err) {
     log.warn("failed to write opencode session-namer config: %s", err);
@@ -32,7 +32,10 @@ function writeOpencodeConfig(abDir: string): string | null {
   }
 }
 
-export function inject({ abDir }: HookInjectCtx): LaunchAugmentation {
+export function inject({ abDir, mode }: HookInjectCtx): LaunchAugmentation {
+  // Chat observes the native stream directly; duplicate plugin posts would
+  // race its structured lifecycle events.
+  if (mode === "chat") return NO_INJECTION;
   if (process.env.OPENCODE_CONFIG) return NO_INJECTION;
   const cfgPath = writeOpencodeConfig(abDir);
   return cfgPath ? { args: [], env: { OPENCODE_CONFIG: cfgPath } } : NO_INJECTION;
@@ -56,7 +59,7 @@ export const turnBoundaryEvents = {
 // Posted by assets/opencode/plugin.ts from inside opencode's own Bun
 // runtime, not by `toPosts` — which is why this list is not derivable from
 // `events`.
-export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event", "/memory/bootstrap"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // Unreachable while `events` is empty — hook-runner drops every invocation at

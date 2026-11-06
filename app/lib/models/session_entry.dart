@@ -298,11 +298,11 @@ String? _bounded(String? value, int max) {
 /// resolve another machine's names at all; the bridge bounds their length for
 /// the same reason.
 ///
-/// [card] rides along for the harder version of that reason: no bridge can read
-/// another machine, so what the peer answered about itself when it was last
-/// peeked is the only description of it this side will ever hold. Wherever it
-/// is rendered into an agent's prompt it is fenced as data, because a hostname
-/// or a repo path in a WRAPPER would read as a grant.
+/// [card] rides along for the harder version of that reason: what the peer's
+/// bridge last answered about itself over the bus is the only description of
+/// that machine this side holds. Wherever it is rendered into an agent's prompt
+/// it is fenced as data, because a hostname or a repo path in a WRAPPER would
+/// read as a grant.
 ///
 /// Nothing in the app parses one yet — the bus inbox reads the bare key as
 /// `SessionBusAddress`, and the `session-bus:directory` read the bridge offers
@@ -318,9 +318,9 @@ class SessionMemberRef {
   final String? projectLabel;
   final String? sessionName;
 
-  /// What the machine answered about itself when it was last peeked. Null
-  /// against a machine that could not answer and against a carrier predating
-  /// the field; both are the same "no card" a reader must render.
+  /// What the machine's bridge last answered about itself over the bus. Null
+  /// against a machine that has not answered, which a reader renders as "no
+  /// card".
   final SessionMemberCard? card;
 
   const SessionMemberRef({
@@ -412,6 +412,16 @@ class SessionEntry {
   /// way to disk. Only the live session list carries it. A restored `true`
   /// would be a row stuck pending with nothing left alive to clear it.
   final bool deleting;
+
+  /// True while this session is a running terminal that was launched before
+  /// Memory was turned on, so its agent was never offered the Memory server and
+  /// a restart is the only way to give it one. The bridge decides it at launch
+  /// and omits it otherwise; absence reads as false.
+  ///
+  /// Transient live state like [deleting]: never persisted, and
+  /// [CachedSessionsStore] strips it on the way to disk and resets it on load,
+  /// since a restored `true` would name a process that no longer exists.
+  final bool startedWithoutMemory;
   final String? tool;
   final String? command;
   final bool forkSupported;
@@ -472,6 +482,7 @@ class SessionEntry {
     required this.archived,
     required this.running,
     this.deleting = false,
+    this.startedWithoutMemory = false,
     this.tool,
     this.command,
     this.forkSupported = false,
@@ -503,6 +514,7 @@ class SessionEntry {
     // Emitted only when true, matching the other optional fields: it is
     // transient, so an explicit `false` would be noise on every row.
     if (deleting) 'deleting': true,
+    if (startedWithoutMemory) 'startedWithoutMemory': true,
     if (tool != null) 'tool': tool,
     if (command != null) 'command': command,
     if (forkSupported) 'forkSupported': true,
@@ -538,6 +550,7 @@ class SessionEntry {
     // source (the cache, the control-plane peek) and any bridge predating the
     // flag say nothing, while a wrong `true` strands the row inert forever.
     deleting: j['deleting'] as bool? ?? false,
+    startedWithoutMemory: j['startedWithoutMemory'] == true,
     tool: j['tool'] as String?,
     command: j['command'] as String?,
     forkSupported: j['forkSupported'] as bool? ?? false,
@@ -581,6 +594,7 @@ class SessionEntry {
     bool? archived,
     bool? running,
     bool? deleting,
+    bool? startedWithoutMemory,
     SessionSetup? setup,
 
     /// Drop the provisioning state instead of carrying it over. Never pass this
@@ -595,6 +609,7 @@ class SessionEntry {
     archived: archived ?? this.archived,
     running: running ?? this.running,
     deleting: deleting ?? this.deleting,
+    startedWithoutMemory: startedWithoutMemory ?? this.startedWithoutMemory,
     tool: tool,
     command: command,
     forkSupported: forkSupported,
@@ -627,6 +642,7 @@ class SessionEntry {
           other.archived == archived &&
           other.running == running &&
           other.deleting == deleting &&
+          other.startedWithoutMemory == startedWithoutMemory &&
           other.tool == tool &&
           other.command == command &&
           other.forkSupported == forkSupported &&
@@ -657,6 +673,7 @@ class SessionEntry {
     archived,
     running,
     deleting,
+    startedWithoutMemory,
     tool,
     command,
     forkSupported,

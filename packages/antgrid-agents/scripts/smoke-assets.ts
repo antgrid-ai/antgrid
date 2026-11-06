@@ -1,14 +1,22 @@
 import { materializeAgentAssets } from "../src/plugin-root";
+import { MEMORY_AGENT_GUIDANCE } from "../src/memory-guidance";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const directory = process.argv[2];
 if (!directory) throw new Error("Pass an isolated asset directory");
 const root = materializeAgentAssets(directory);
+const guidance = await import(pathToFileURL(join(root, "memory-guidance.ts")).href);
+if (guidance.MEMORY_AGENT_GUIDANCE !== MEMORY_AGENT_GUIDANCE) throw new Error("Materialized memory guidance differs from compiled hooks");
 const plugin = await import(pathToFileURL(join(root, "opencode/plugin.ts")).href);
-if (typeof plugin.AntgridSessionNamer !== "function") throw new Error("Plugin export missing");
-const runtime = await plugin.AntgridSessionNamer();
-if (typeof runtime.event !== "function") throw new Error("Plugin event handler missing");
+if (plugin.default?.id !== "antgrid" || typeof plugin.default.setup !== "function") throw new Error("V2 plugin definition missing");
+const hooks: string[] = [];
+const dispose = await plugin.default.setup({
+  event: { subscribe: async function* () {} },
+  session: { get: async () => ({}), hook: async (name: string) => { hooks.push(name); return { dispose: async () => {} }; } },
+});
+if (hooks.join() !== "context") throw new Error(`V2 plugin registered ${hooks.join() || "no"} session hooks`);
+await dispose();
 const kilo = await import(pathToFileURL(join(root, "kilo/plugin.ts")).href);
 if (typeof (await kilo.AntgridSessionIdentity()).event !== "function") throw new Error("Kilo identity handler missing");
 const env = { ...process.env };

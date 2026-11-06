@@ -1,8 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKMessage, SDKUserMessage, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage, SDKUserMessage, CanUseTool, OnElicitation } from "@anthropic-ai/claude-agent-sdk";
+import { spawn } from "node:child_process";
 import { stripInheritedCertOverrides } from "../../host";
 import { stripParentClaudeSession } from "./parent-session";
-import { resolveAgent } from "../../known-agents";
 import type { ApprovalPolicy } from "../types";
 
 // The slice of the SDK Query object the driver needs (injectable for tests —
@@ -48,6 +48,7 @@ export interface SpawnClaudeOpts {
   resume?: string;
   model?: string;
   canUseTool: CanUseTool;
+  onElicitation?: OnElicitation;
   onStderr: (line: string) => void;
   abortController: AbortController;
   extraArgs?: Record<string, string | null>;
@@ -60,22 +61,18 @@ export interface SpawnedClaude {
   controller: PromptStreamController;
 }
 
-// A user-set value in any source must win over our default (mirrors
-// sdkOptionsBuilder's ENABLE_TOOL_SEARCH guard). Base defaults to process.env.
+// Keep native provider/configuration variables while removing parent-session
+// identity. A chat child must own its session without losing the user's setup.
 export function buildClaudeEnv(base?: Record<string, string | undefined>): Record<string, string> {
   const src = base ?? (process.env as Record<string, string | undefined>);
   const env = stripInheritedCertOverrides(stripParentClaudeSession({ ...src }) as Record<string, string>);
-  delete (env as any).ANTHROPIC_API_KEY; // never silently bill an API key
-  delete (env as any).OPENAI_API_KEY;
   env.CLAUDE_CODE_ENTRYPOINT ??= "cli";                 // first-party rate-limit lane
-  env.ENABLE_TOOL_SEARCH ??= "auto:2";                  // trim upfront MCP token load
-  env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT ??= "0";        // don't 300s-kill interactive tools
   // Antgrid owns the session lifecycle; a conversation that hands itself to
   // Claude Code's own background supervisor leaves the slot pointing at a job
   // this bridge does not manage. Chat mode surfaces claude's slash commands
   // (chat-backend's ingestCommands), so `/background` is reachable here too.
   env.CLAUDE_CODE_DISABLE_AGENT_VIEW ??= "1";
-  if (process.platform === "win32" && env.USERPROFILE) env.HOME = env.USERPROFILE; // stable ~/.claude for resume
+  if (process.platform === "win32" && env.USERPROFILE) env.HOME ??= env.USERPROFILE;
   return env;
 }
 
@@ -125,16 +122,38 @@ export function spawnClaude(opts: SpawnClaudeOpts, sdkQuery: typeof query = quer
     options: {
       pathToClaudeCodeExecutable: resolveClaudeBinary(opts.binPath),
       cwd: opts.cwd,
-      permissionMode: opts.approvalPolicy === "bypass" ? "bypassPermissions" : "default",
-      ...(opts.approvalPolicy === "bypass" ? { allowDangerouslySkipPermissions: true } : {}),
+      settingSources: ["user", "project", "local"],
+      systemPrompt: { type: "preset", preset: "claude_code" },
+      ...(opts.approvalPolicy === "bypass"
+        ? { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true }
+        : {}),
+      // Owning the spawn is the only way to drop the SDK's forced default mode
+      // (see nativeClaudeArgs). It also turns the SDK's `stderr` option inert,
+      // so stderr is read here.
+      spawnClaudeCodeProcess: (options) => {
+        const child = spawn(options.command, nativeClaudeArgs(options.args),
+          { cwd: options.cwd, env: options.env, signal: options.signal, stdio: "pipe", windowsHide: true });
+        child.stderr.on("data", (chunk: Buffer) => opts.onStderr(chunk.toString()));
+        return child;
+      },
       canUseTool: opts.canUseTool,
+      onElicitation: opts.onElicitation,
       env: { ...buildClaudeEnv(), ...(opts.extraEnv ?? {}) },
       abortController: opts.abortController,
-      stderr: opts.onStderr,
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.extraArgs ? { extraArgs: opts.extraArgs } : {}),
     },
   }) as unknown as ClaudeQueryLike;
   return { query: q, controller };
+}
+
+// The pinned SDK emits --permission-mode default even when no mode is selected.
+// Leave that choice to the CLI so permissions.defaultMode in native settings
+// remains effective; explicit Antgrid bypass and live mode picks still win.
+export function nativeClaudeArgs(args: string[]): string[] {
+  const result = [...args];
+  const at = result.indexOf("--permission-mode");
+  if (at >= 0 && result[at + 1] === "default") result.splice(at, 2);
+  return result;
 }

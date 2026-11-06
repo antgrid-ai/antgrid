@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/capability_catalog.dart';
+import '../util/ab_log.dart';
 
 /// Disk-persisted cache of [CapabilityCatalog] keyed by a caller-built composite
 /// `<sourceKey>__<toolKey>`. Mirrors ProjectStatusCache: best-effort,
@@ -35,7 +36,22 @@ class CapabilityCatalogCache {
     );
   }
 
+  /// Never throws, like [read]: the one caller persists fire-and-forget, so a
+  /// full disk or an unresolvable support directory would otherwise land in
+  /// the zone as a crash. A lost write only costs the next launch its seed.
   Future<void> write(String key, CapabilityCatalog catalog) async {
+    try {
+      await _write(key, catalog);
+    } catch (e) {
+      AbLog.warn(
+        'CapabilityCatalogCache',
+        'write failed',
+        fields: {'error': '$e'},
+      );
+    }
+  }
+
+  Future<void> _write(String key, CapabilityCatalog catalog) async {
     final f = await _fileFor(key);
     await f.parent.create(recursive: true);
     // Unique tmp per write so concurrent writers don't collide; Windows rename

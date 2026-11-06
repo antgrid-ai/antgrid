@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node
 import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
-import { sendHeartbeat } from "./heartbeat";
+import { sendHeartbeat, registerBusKey, getSessionBusGrants, lowerSessionBusGrants, type SessionBusGrantsResult } from "./heartbeat";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
@@ -26,14 +26,15 @@ import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { joinRelayWsPath } from "./relay-url";
-import { createMessage } from "./protocol";
+import { AbMessageSchema, BusMessageBodySchema, createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
 import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCaptureArmed } from "./modelwatch";
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectAvailableTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./agent-runtime";
+import { setMemoryLaunchGate } from "./agent-host";
 import { buildAgentCatalog } from "./agent-catalog";
-import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
+import type { AbMessage, ProjectAdvertEntry, RpcRequest, SessionEntry } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { removeHandoff } from "./handoff/handoff-dir";
@@ -41,13 +42,33 @@ import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
 import { RemoteDirectoryCache } from "./session-bus/remote-directory";
+import { BusRequests, tooLargeResponse } from "./session-bus/bus-requests";
+import { CAPABILITY_CARD_METHOD, DirectoryRefresher } from "./session-bus/directory-refresh";
+import {
+  BUS_PARAMS,
+  busRequestVerdict,
+  busSessionRow,
+  effectiveReachLevel,
+  isBusMethod,
+  type AgentReachLevel,
+  type BusParamsMethod,
+} from "./session-bus/request-policy";
+import { BUS_MAX_PLAINTEXT_BYTES } from "antgrid-wire";
+import { RequestRateLimiter } from "./session-bus/request-rate";
+import { refusalSentence, type SessionBusErrorCode } from "./session-bus/errors";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
+import { RelayBusTransport, type InboundVerdict, type VerifiedInbound } from "./session-bus/relay-transport";
+import { openSeenStore } from "./session-bus/seen-store";
+import { isLeadContext } from "./session-bus/address";
+import { loadBusKey, type BusKeyPair } from "./session-bus/bus-key";
+import { MachineDirectory } from "./session-bus/machine-directory";
 import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
 import {
-  MAX_BUS_ROUTES,
+  BUS_INBOUND_WARM_TIMEOUT_MS,
+  BUS_MESSAGE_TTL_MS,
+  BUS_PERSIST_INTERVAL_MS,
   MAX_DIRECTORY_REPO_KEYS,
   MAX_MACHINE_CARD_ROWS,
-  BUS_ROUTE_PERSIST_INTERVAL_MS,
   LOCAL_MACHINE_ID,
 } from "./session-bus/constants";
 import {
@@ -80,6 +101,8 @@ import { agentSpec, schedulingModesForAgent } from "antgrid-agents/builtins";
 import { baseSlotDeviceId } from "./relay-slot";
 import { SchedulerRequestSchemas } from "./scheduler/requests";
 import { SchedulerInvalidCronError, nextOccurrences, resolveRunAt, schedulerErrorCode } from "./scheduler/cron";
+import { MemoryError } from "antgrid-memory";
+import { HostMemory, memoryFailure, type SessionWithoutMemory } from "./memory";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -154,6 +177,8 @@ export interface HostServerOptions {
    *  real `new NativeHostConnection(opts)` — overridden in tests to observe native stream
    *  binding without live central or native endpoints. */
   remoteHostFactory?: (opts: NativeHostOptions) => RemoteHostConnection;
+  /** Test seam: the fetch the session-bus grant verbs call web with. */
+  fetchFn?: typeof fetch;
   /** Test seam: override the pushHeartbeat() cadence. Defaults to
    *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
   heartbeatIntervalMs?: number;
@@ -222,6 +247,7 @@ export interface OpenResult {
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
+const BUS_KEY_REGISTER_MIN_MS = 60_000;
 
 /**
  * Ceiling on a capture window armed over this plane.
@@ -284,8 +310,7 @@ function assertDryRunFlag(dryRun: unknown): void {
  * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
  * store: one row array per session, hydrated from disk on first touch
  * and kept in memory after that, written back throttled like
- * `SessionBusCoordinator`'s own route table beside it
- * (`BUS_ROUTE_PERSIST_INTERVAL_MS`), because every send charges the budget and
+ * the other bus stores (`BUS_PERSIST_INTERVAL_MS`), because every send charges the budget and
  * a disk write per send would put the ceiling in the path of typing. Held at
  * the host level, beside `sessionIndex`/`repoKeys`/`sessionBus`, because the
  * ceiling it backs is per (sender, target) PAIR, machine-wide, not per project
@@ -380,7 +405,7 @@ export class PairBudgetStore {
 
   private flush(sessionId: string, records: PairBudgetState[], force: boolean): void {
     const now = this.now();
-    if (!force && now - (this.savedAtMs.get(sessionId) ?? 0) < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
+    if (!force && now - (this.savedAtMs.get(sessionId) ?? 0) < BUS_PERSIST_INTERVAL_MS) return;
     const projectId = this.projectIdFor(sessionId);
     if (!projectId) return;
     this.savedAtMs.set(sessionId, now);
@@ -450,11 +475,11 @@ export class HostServer {
   // repository. Refreshed on the same three edges as the index, for the
   // reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
-  // The asking half of the remote directory: an in-memory mirror of what the
-  // app's pump last learned peeking peer capability cards.
-  // Machine-level like `sessionIndex`/`repoKeys` above, filled by the
-  // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
-  // below — declared first so that construction can hand it over.
+  // The asking half of the remote directory: an in-memory mirror of the
+  // capability cards this machine last asked the account's other machines for.
+  // Machine-level like `sessionIndex`/`repoKeys` above, filled by
+  // `directoryRefresher` over the bus and read by `sessionDirectory` below —
+  // declared first so that construction can hand it over.
   private readonly remoteDirectory = new RemoteDirectoryCache();
   // The session directory, assembled from the two machine-level halves above.
   // The machine id is read live rather than captured: a core can be built before the
@@ -465,14 +490,29 @@ export class HostServer {
     projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
     machineId: () => this.controlPlaneRegistrationId ?? null,
     remoteDirectory: this.remoteDirectory,
+    centralOnline: () => this.controlPlaneRelay?.busLinkState?.() !== "offline",
     now: () => Date.now(),
   });
-  // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
-  // because the machine-level `send` below is this host's own copy of that
-  // fallback's dispatcher — see its doc for why the two absences (no route
-  // home for a peer, no desktop attached to this machine) get separate sets.
-  private readonly busRouteMissWarned = new Set<string>();
-  private readonly busOwnerMissWarned = new Set<string>();
+  /** Projects being opened right now to receive a bus delivery — see
+   *  {@link warmProjectForBus}. Bounded by the number of projects on the
+   *  machine and emptied as each open settles. */
+  private readonly busWarming = new Map<string, Promise<boolean>>();
+  // The verdicts this machine has given other machines' messages, so a resend is
+  // re-acknowledged and never applied twice. Durable (bus.db) because the sender
+  // resends across this machine's restarts too.
+  private readonly busSeen = openSeenStore(resolveAbDir());
+  private busTransport: RelayBusTransport | null = null;
+  private busRequests: BusRequests | null = null;
+  private directoryRefresher: DirectoryRefresher | null = null;
+  // Machines the relay reports present right now, so a refresh asks those first.
+  private readonly onlinePeers = new Set<string>();
+  // Charged per sending machine before any request is answered, so one machine
+  // cannot make this one spend git spawns faster than the bound.
+  private readonly requestRate = new RequestRateLimiter();
+  // Resolves when the session index hydrate attempt has finished, whether or not
+  // it succeeded. A bus delivery that lands first must wait on it: a lookup miss
+  // before then is timing, not an unknown session.
+  private sessionIndexSettled: Promise<void> = Promise.resolve();
   // The host-side no-progress-halt store, machine-wide like
   // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
   // `sessionIndex.lookup` is what lets it answer for a session whose project
@@ -483,8 +523,7 @@ export class HostServer {
   );
   // The ONE session bus for this machine: every project core built
   // by `startCore` below is handed this exact instance rather than building
-  // its own, so a route learned while handling project A's inbound frame is
-  // visible to project B's outbound send for the same context, and a
+  // its own, so one outbox and one transport serve every project, and a
   // session created in project B is addressable the moment `self()` is asked
   // about it from project A's stream. `projectIdFor`/`self` both resolve
   // through `sessionIndex` rather than a captured project id, which is what
@@ -541,37 +580,44 @@ export class HostServer {
     // anything.
     offMachineSendAllowed: () => this.remoteAccessPolicy.isEnabled(),
     // A target on THIS host is handed straight into the SAME fold the
-    // remote path folds through (`handleInbound`) — no relay, no carrier, no
-    // route table — so wrapping, queueing and turn-boundary injection are
-    // byte-identical for both paths. `dispatch()` (coordinator.ts) already
-    // confines this to a same-machine context (`ctx.to.machineId ===
-    // frame.from.machineId`); this only adds "and a core for it is actually
-    // loaded here right now" — a session this host merely KNOWS about (a cold
-    // project in the catalog) cannot be folded into in process, and a false
-    // return here HOLDS the frame rather than offering it to the carrier, so
-    // `flushHeld` delivers it through this same decision once that project is
-    // warm again.
+    // remote path folds through (`handleInbound`) — no relay — so wrapping,
+    // queueing and turn-boundary injection are byte-identical for both paths.
+    // The coordinator confines this to a same-machine target; this only adds
+    // "and a core for it is actually loaded here right now" — a session this
+    // host merely KNOWS about (a cold project in the catalog) cannot be folded
+    // into in process, and a false return here HOLDS the frame, so `flushHeld`
+    // delivers it through this same decision once that project is warm again.
     //
-    // `handleInbound` can throw on a session-store write failure, and it is
-    // called RE-ENTRANTLY — the receipt `onMessage` dispatches back out
-    // through this very function, for a DIFFERENT session, from inside this
-    // call — so an uncaught throw here would unwind through a fold that
-    // already committed and report ITS delivery as failed too. Caught and
-    // turned into `false`, which is what makes the failure cost one retry
-    // rather than a wrongly-failed, already-applied send.
+    // Only the same-machine case reaches here. A frame from another machine
+    // arrives through `handleBusInbound`, which awaits its own warm of the
+    // target's project and does not depend on a project stream having admitted
+    // anything.
     //
-    // `"applied"` is the whole answer for every verb `dispatch()` ever hands
-    // this (post, notify, ack): the store commit it implies (mailbox for a
-    // post, the log/thread row for a notify or ack) has already landed by the
-    // time `handleInbound` returns it, and what happens to a notify's
-    // rendered line downstream (`deliverBusEvent`/`lineForEvent`) is a
-    // separate, deliberately swallowed best-effort concern — `lineForEvent`
-    // returns null for every post ON PURPOSE, so answering "true iff a line
-    // was queued" here would read every local post as failed and retry it
-    // forever.
+    // `handleInbound` can throw on a session-store write failure, so an uncaught
+    // throw here would unwind through a fold that already committed and report
+    // its delivery as failed. Caught and turned into `false`, which is what
+    // makes the failure cost one retry rather than a wrongly-failed,
+    // already-applied send.
+    //
+    // `"applied"` is the whole answer for every verb the coordinator ever hands
+    // this: the store commit it implies (mailbox for a post, the log/thread row
+    // for a notify) has already landed by the time `handleInbound` returns it,
+    // and what happens to a notify's rendered line downstream
+    // (`deliverBusEvent`/`lineForEvent`) is a separate, deliberately swallowed
+    // best-effort concern — `lineForEvent` returns null for every post ON
+    // PURPOSE, so answering "true iff a line was queued" here would read every
+    // local post as failed and retry it forever.
     deliverLocal: (frame, to) => {
       const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
-      if (projectId === null || !this.cores.has(projectId)) return false;
+      if (projectId === null) return false;
+      if (!this.cores.has(projectId)) {
+        // The index answers for a COLD project from its snapshot, so the target
+        // resolves before the core exists — and a false return holds the frame
+        // rather than dropping it, which is what makes warming and letting the
+        // coordinator retry sound.
+        this.warmForInboundBus(projectId);
+        return false;
+      }
       try {
         return this.sessionBus.handleInbound(frame) === "applied";
       } catch (err) {
@@ -592,64 +638,17 @@ export class HostServer {
     // per core would let the same two sessions spend a fresh ceiling by
     // exchanging on a different project's stream.
     pairBudget: this.pairBudgetStore,
-    send: (frame, ctx) => {
-      if (ctx.role === "peer") {
-        // There is exactly one way home and it is the carrier — on WHICHEVER
-        // project's stream — that brought the context in. `routeFor` names
-        // that project explicitly (`origin.projectId`), so this dispatch
-        // never assumes the sending core's own project is the right stream —
-        // the whole point of moving the route table off a single core.
-        const origin = this.sessionBus.routeFor(ctx.contextId);
-        if (!origin) {
-          if (this.latchBusWarn(this.busRouteMissWarned, ctx.contextId)) {
-            log.warn("session bus: no carrier route for context %s — frames held until one arrives", ctx.contextId);
-          }
-          return false;
-        }
-        // A route resolved, so the next context that loses one is worth saying
-        // again. Cleared here and not on a successful send: a route that exists
-        // but whose core is cold is a different silence, and latching this on it
-        // would mute the warning for the outage that follows.
-        this.busRouteMissWarned.delete(ctx.contextId);
-        const sent = this.cores.get(origin.projectId)?.core.sendToAppSession(origin.peerId, frame) ?? false;
-        if (sent) origin.at = Date.now();
-        return sent;
-      }
-      // Lead role: `ctx.to` names the REMOTE peer this frame is addressed
-      // to, not the local project sending it — so the project whose desktop
-      // owner should carry it out has to come from the SESSION that opened
-      // the exchange instead. `roleForContext` answers "lead" exactly when
-      // `contextId === sessionId` (coordinator.ts), which is what makes
-      // resolving the owning project off `ctx.contextId` through the same
-      // index the coordinator itself uses for `projectIdFor` correct here.
-      const projectId = this.sessionIndex.lookup(ctx.contextId)?.projectId ?? null;
-      const sentToOwner = projectId ? this.cores.get(projectId)?.core.sendToOwner(frame) ?? false : false;
-      if (sentToOwner) {
-        this.busOwnerMissWarned.delete(ctx.contextId);
-      } else if (this.latchBusWarn(this.busOwnerMissWarned, ctx.contextId)) {
-        log.warn(
-          "session bus: no carrier attached to project %s for context %s — frames held until a desktop app attaches",
-          projectId,
-          ctx.contextId,
-        );
-      }
-      return sentToOwner;
-    },
+    send: (frame, ctx) =>
+      this.busTransport?.send({
+        to: ctx.to.machineId,
+        id: ctx.messageId,
+        kind: "message",
+        body: frame,
+        sentAt: ctx.sentAt,
+        expiresAt: ctx.sentAt + BUS_MESSAGE_TTL_MS,
+        role: "agent",
+      }) ?? { sent: false, reason: "no-transport" },
   });
-
-  /** Latch [contextId] into a warn set, answering whether this is the first
-   *  time — so a frame retried once a second says its absence once, not once a
-   *  tick. Unlike the per-core sets this replaced, these live as long as the
-   *  MACHINE, so the size check is what keeps a de-duplicator from becoming a
-   *  leak: a latch bigger than the route table it shadows is tracking more
-   *  contexts than this host can route, and the whole cost of dropping it is
-   *  that some of those absences get said a second time. */
-  private latchBusWarn(latch: Set<string>, contextId: string): boolean {
-    if (latch.has(contextId)) return false;
-    if (latch.size >= MAX_BUS_ROUTES) latch.clear();
-    latch.add(contextId);
-    return true;
-  }
 
   /** The same-machine wake: start a session this host holds, resolved the
    *  same way `deliverLocal` resolves a delivery target — `sessionIndex` names
@@ -666,6 +665,226 @@ export class HostServer {
     return true;
   }
 
+  /**
+   * Bring up a cold project a bus frame was addressed into, so the frame has
+   * somewhere to land.
+   *
+   * Bounded the way the scheduler's launch is (`prepare`, above): the id must
+   * be well-formed, the path must come from this host's OWN catalog rather than
+   * from anything on the wire, and the folder must still exist. Opened `local`
+   * for the same reason the scheduler does — nothing is driving it, and a core
+   * that later needs a native binding is promoted rather than reopened.
+   *
+   * Deliberately NOT the rule {@link startLocalSession} follows. Waking a
+   * session is a wake of something already running; this delivers a message the
+   * target's own machine accepted, and holding it against a project the user
+   * has merely closed is how an exchange goes quiet with nothing to say why.
+   *
+   * One open in flight per project, because the coordinator retries on a timer
+   * and would otherwise start a second before the first finishes. Null when
+   * there is nothing to open.
+   */
+  private warmProjectForBus(projectId: string): Promise<boolean> | null {
+    const inFlight = this.busWarming.get(projectId);
+    if (inFlight) return inFlight;
+    if (!isSafeProjectId(projectId)) return null;
+    const seen = this.seenProjects.get(projectId);
+    if (!seen || !existsSync(seen.path)) return null;
+    const opening = this.open(projectId, seen.path, "local")
+      .then(() => true)
+      .catch((err) => {
+        log.warn(
+          "session bus: could not open project %s for a bus delivery: %s",
+          projectId,
+          err instanceof Error ? err.message : String(err),
+        );
+        return false;
+      })
+      .finally(() => this.busWarming.delete(projectId));
+    this.busWarming.set(projectId, opening);
+    return opening;
+  }
+
+  /** Fire-and-forget warm for a synchronous caller that has already answered
+   *  "held". */
+  private warmForInboundBus(projectId: string): void {
+    void this.warmProjectForBus(projectId);
+  }
+
+  /** Warm a project and wait for it, but never longer than
+   *  `BUS_INBOUND_WARM_TIMEOUT_MS`. The answer is advisory: the store write that
+   *  follows is durable whether or not the core came up. */
+  private async warmForBusInbound(projectId: string): Promise<boolean> {
+    if (this.cores.has(projectId)) return true;
+    const opening = this.warmProjectForBus(projectId);
+    if (!opening) return false;
+    return await withTimeout(opening, BUS_INBOUND_WARM_TIMEOUT_MS, false);
+  }
+
+  /**
+   * Gate and apply one verified message from another machine's bridge.
+   *
+   * The transport has already proved who sent it and that it is fresh and not a
+   * duplicate; this is everything that needs this machine's own state. A
+   * refusal here is terminal and is stored and acknowledged as such, so the
+   * order matters: nothing that can be a matter of timing may refuse. A miss in
+   * the session index before startup hydrate has finished reads exactly like an
+   * unknown session, so it defers (no ack, the sender keeps retrying) instead of
+   * ending the exchange for mail addressed to a session this machine has.
+   */
+  private async handleBusInbound(v: VerifiedInbound): Promise<InboundVerdict> {
+    const refused = (code: string): InboundVerdict => ({ outcome: "refused", code });
+    if (!this.remoteAccessPolicy.isEnabled()) return refused("REMOTE_ACCESS_OFF");
+    // A response that matches no waiter (a late one, or one for a request that
+    // timed out) is still acknowledged so the sender stops resending it.
+    if (v.header.kind === "response") {
+      const correlationId = v.header.correlationId;
+      if (correlationId) this.busRequests?.onResponse(v.from, correlationId, v.body);
+      return { outcome: "applied" };
+    }
+    if (v.header.kind === "request") return this.dispatchBusRequest(v);
+    const parsed = BusMessageBodySchema.safeParse(v.body);
+    if (!parsed.success) return refused("MALFORMED");
+    const body = parsed.data;
+    const selfId = this.controlPlaneRegistrationId;
+    if (selfId === null) return { outcome: "defer" };
+    // The sealed header is what the sender signed; the body names the same two
+    // machines or one of them is lying about who this is for.
+    if (body.from.machineId !== v.from || body.to.machineId !== selfId) return refused("HEADER_MISMATCH");
+    // A lead context is one this machine's own session opened, so what arrives on
+    // it is an answer to that session and not an agent reaching in.
+    if (!this.agentReachPolicy.isEnabled() && !isLeadContext(body.to.sessionId, body.contextId)) {
+      return refused("NOT_ALLOWED_AGENT_REACH");
+    }
+    if (!this.sessionIndex.hydrated) {
+      await withTimeout(this.sessionIndexSettled, BUS_INBOUND_WARM_TIMEOUT_MS, undefined);
+      if (!this.sessionIndex.hydrated) return { outcome: "defer" };
+    }
+    const projectId = this.sessionIndex.lookup(body.to.sessionId)?.projectId ?? null;
+    if (projectId === null) return refused("UNKNOWN_PEER");
+    if (!this.cores.has(projectId)) await this.warmForBusInbound(projectId);
+    try {
+      return this.sessionBus.handleInbound(body) === "applied" ? { outcome: "applied" } : refused("UNKNOWN_PEER");
+    } catch (err) {
+      log.warn("session bus: applying a delivery to %s failed: %s", body.to.sessionId, err instanceof Error ? err.message : String(err));
+      return { outcome: "defer" };
+    }
+  }
+
+  /**
+   * A bus request from another machine. The only methods served are those in
+   * `request-policy.ts`, and the answer goes back to the asker as a
+   * sealed response and nowhere else — this never reaches
+   * `dispatchControlPlaneInbound`, whose replies are addressed to a phone's
+   * peer session, not to a machine.
+   *
+   * The answer, error or not, is returned for the transport to store beside the
+   * verdict, so a resend of the same request is answered from that record and
+   * the method does not run twice.
+   */
+  private async dispatchBusRequest(v: VerifiedInbound): Promise<InboundVerdict> {
+    const parsed = AbMessageSchema.safeParse(v.body);
+    const req = parsed.success && parsed.data.type === "request" ? parsed.data : null;
+    if (req === null || !isBusMethod(req.method)) return { outcome: "refused", code: "METHOD_NOT_ALLOWED" };
+    // Keyed on the signed header's id, which is what the transport records the
+    // verdict under; the body's own requestId is the sender's claim.
+    const answer = (res: AbMessage): InboundVerdict => {
+      // Stored beside the verdict for replay, so an oversized answer is replaced
+      // here as well: a stored copy cut to fit would not parse.
+      let json = JSON.stringify(res);
+      if (Buffer.byteLength(json) > BUS_MAX_PLAINTEXT_BYTES) {
+        res = tooLargeResponse(res);
+        json = JSON.stringify(res);
+      }
+      this.busRequests?.respond(v.from, v.id, res, v.header.expiresAt);
+      return { outcome: "applied", response: json };
+    };
+    const failure = (code: SessionBusErrorCode): InboundVerdict =>
+      answer(createMessage("response", { requestId: req.requestId, ok: false, error: { code, message: refusalSentence(code) } }));
+    // Charged before anything else: even a refusal costs a sealed response.
+    if (!this.requestRate.take(v.from)) return failure("REQUEST_RATE");
+    // The requester's role is what the account's directory says about the
+    // machine the transport authenticated, never anything the request claims.
+    const role = this.machineDirectory?.machine(v.from)?.orchestrator === true ? "orchestrator" : "agent";
+    // Every request, the session-less card included: asked over the bus, the
+    // asker is another machine's agent, and the card names this machine's
+    // projects, remotes and branches at the price of git spawns.
+    const verdict = busRequestVerdict({ method: req.method, role, level: this.effectiveReachLevel() });
+    if (verdict !== "allow") return failure(verdict.code);
+    if (req.method === CAPABILITY_CARD_METHOD) return answer(await this.handleCapabilityCardRpc(req));
+
+    const method = req.method as BusParamsMethod;
+    const params = BUS_PARAMS[method].safeParse(req.params ?? {});
+    if (!params.success) return failure("BAD_PARAMS");
+    const { projectId } = params.data;
+    const succeed = (result: unknown): InboundVerdict =>
+      answer(createMessage("response", { requestId: req.requestId, ok: true, result }));
+
+    // The catalog and the id's shape are all that bound which project a request
+    // may name; the path always comes from this host's own catalog.
+    const seen = isSafeProjectId(projectId) ? this.seenProjects.get(projectId) : undefined;
+    if (!seen || !existsSync(seen.path)) return failure("UNKNOWN_PROJECT");
+
+    if (method === "sessions.list") {
+      const listed = await this.handleSessionsListRpc({ ...req, params: { projectId } });
+      const rows = listed.type === "response" && listed.ok ? (listed.result as { sessions: SessionEntry[] }).sessions : null;
+      return rows ? succeed({ sessions: rows.map(busSessionRow) }) : failure("REQUEST_FAILED");
+    }
+
+    // Opened `local`, never remote or promoted: nothing is driving the core, and
+    // the phone-facing project start must not be reused for another machine.
+    if (!this.cores.has(projectId)) {
+      try {
+        await this.open(projectId, seen.path, "local");
+      } catch (err) {
+        log.warn("session bus: could not open project %s for a request: %s", projectId, err instanceof Error ? err.message : String(err));
+        return failure("REQUEST_FAILED");
+      }
+    }
+    const core = this.cores.get(projectId)?.core;
+    if (!core) return failure("REQUEST_FAILED");
+
+    switch (method) {
+      case "project.start":
+        return succeed({ projectId, started: true });
+      case "session.create": {
+        const { projectId: _p, ...spec } = BUS_PARAMS["session.create"].parse(params.data);
+        const created = await core.createSessionForBus(spec);
+        return created.ok ? succeed({ session: busSessionRow(created.session) }) : failure(created.code);
+      }
+      case "session.start": {
+        const p = BUS_PARAMS["session.start"].parse(params.data);
+        const started = await core.startSessionForBus(p.sessionId, p.initialPrompt);
+        return started.ok ? succeed({ sessionId: p.sessionId }) : failure(started.code);
+      }
+      case "session.stop": {
+        const p = BUS_PARAMS["session.stop"].parse(params.data);
+        const stopped = await core.stopSessionForBus(p.sessionId);
+        return stopped.ok ? succeed({ sessionId: p.sessionId }) : failure(stopped.code);
+      }
+      default:
+        return failure("METHOD_NOT_ALLOWED");
+    }
+  }
+
+  /** Whether agents on the account's other machines may reach this one: the
+   *  local switch alone. */
+  private effectiveReachLevel(): AgentReachLevel {
+    return effectiveReachLevel(this.agentReachPolicy.isEnabled());
+  }
+
+  /** The responder side of a replayed request: the transport found it already
+   *  answered, so the stored response is sent again rather than re-run. */
+  private replayBusResponse(from: string, requestId: string, response: string, expiresAt: number): void {
+    let body: AbMessage;
+    try {
+      body = JSON.parse(response) as AbMessage;
+    } catch {
+      return;
+    }
+    this.busRequests?.respond(from, requestId, body, expiresAt);
+  }
+
   // The host-owned NativeHostConnection uses the BARE deviceUuid for its central
   // control identity (no projectId), advertises the project catalog there, and accepts
   // mobile-access-gated project verbs over its native control stream. Opened when remote
@@ -678,14 +897,51 @@ export class HostServer {
   // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
   // the process alive on its own — mirrors owner-watchdog.ts's idiom.
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  // Null when the keychain pair is missing or inconsistent; the machine then
+  // never registers a bus key and no peer can seal to it.
+  private busKey: BusKeyPair | null = null;
+  private machineDirectory: MachineDirectory | null = null;
+  private stopBusKeyWatch: (() => void) | null = null;
+  private lastGrants: { orchestrator: boolean } | null = null;
+  private lastBusKeyRegisterAt = Number.NEGATIVE_INFINITY;
+  private busKeyRegistering = false;
   private scheduler: SchedulerService | null = null;
   private schedulerError: string | undefined;
   private readonly schedulerObservers = new Map<string, () => void>();
+  private readonly memory = new HostMemory(
+    resolveAbDir,
+    () => [...this.seenProjects].map(([id, seen]) => ({ project_id: id, label: projectLabel(seen) })),
+    (projectId) => this.seenProjects.has(projectId),
+    () => this.sessionsWithoutMemory(),
+  );
+  private releaseMemoryGate: (() => void) | undefined;
+
+  private sessionsWithoutMemory(): SessionWithoutMemory[] {
+    const rows: SessionWithoutMemory[] = [];
+    // A cold project has no core, so nothing is running there and walking `cores` is complete.
+    for (const [projectId, entry] of this.cores) {
+      const seen = this.seenProjects.get(projectId);
+      // The remote RPC must not disclose a project outside the catalog.
+      if (!seen) continue;
+      for (const s of entry.core.listStartedWithoutMemory()) {
+        rows.push({
+          project_id: projectId,
+          project_label: projectLabel(seen),
+          session_id: s.id,
+          name: s.name,
+          ...(s.workStatus ? { work_status: s.workStatus } : {}),
+          agent_session_resumable: s.agentSessionResumable,
+        });
+      }
+    }
+    return rows;
+  }
   // Whether an `invalid_client` verdict may kill the process. Disarmed for the
   // duration of the boot-time control-plane start only — see start().
   private fatalRevokeArmed = true;
 
   constructor(private readonly opts: HostServerOptions) {
+    this.releaseMemoryGate = setMemoryLaunchGate(() => this.memory.launchEnabled());
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
     // reloads the shared store before the callback runs — push targeting and
     // `phones:list` read the refreshed in-memory `phones` array live. On top of
@@ -699,24 +955,21 @@ export class HostServer {
     // Fire-and-forget: nothing on this host blocks on the session index being
     // ready, and a lookup that lands before this resolves gets its own
     // distinguishable log line (SessionBusSessionIndex.lookup) rather than
-    // reading as a real addressing miss.
+    // reading as a real addressing miss. A relay delivery that lands first waits
+    // on `sessionIndexSettled` instead of reading the miss as final.
     //
     // The one machine-wide `resume()` waits for it: `resume()` resolves
     // `projectIdFor` through this same index, and a `resume()` that ran first
     // would read every cold project's on-disk session as unaddressable (a
     // warned miss, per the index's own doc) instead of re-arming its held
-    // retries. Route-table hydration reads the one machine-level route table
-    // and needs no project list to do it, so it has nothing to
-    // wait for — it is only kept alongside `resume()` here so both land before
-    // the same first inbound frame this process folds. `.finally` rather than
-    // chaining off the resolved promise: a hydrate that fails for one project
-    // must not also cost every other project its resume, so route hydration
-    // and resume run once the attempt SETTLES, not only once it succeeds.
-    void this.sessionIndex
+    // retries. `.finally` rather than chaining off the resolved promise: a
+    // hydrate that fails for one project must not also cost every other project
+    // its resume, so resume runs once the attempt SETTLES, not only once it
+    // succeeds.
+    this.sessionIndexSettled = this.sessionIndex
       .hydrate(resolveAbDir(), [...this.seenProjects].map(([id, seen]) => ({ id, label: seen.label })))
       .catch((err) => log.warn({ err }, "host: session index hydrate failed"))
       .finally(() => {
-        this.sessionBus.hydrateRoutes();
         this.sessionBus.resume();
       });
     // Separately, and deliberately not in that chain: this one spawns git per
@@ -822,6 +1075,7 @@ export class HostServer {
       this.fatalRevokeArmed = true;
     }
     this.startScheduler();
+    this.memory.warm();
     return { port: listener.port, token };
   }
 
@@ -925,6 +1179,82 @@ export class HostServer {
     this.controlPlaneBus = bus;
     client.connect();
     log.info("host: native remote connection opened (device=%s)", client.deviceId);
+
+    if (!this.machineDirectory) {
+      this.busKey = loadBusKey(identity.busX25519PublicKey, identity.busX25519PrivateKey);
+      if (!this.busKey) {
+        log.warn("no usable bus key; this machine cannot receive cross-machine bus messages");
+      }
+      const directory = new MachineDirectory({
+        licenseApiUrl: r.licenseApiUrl,
+        getToken: getLicenseToken,
+        selfDeviceId: r.auth.deviceUuid,
+      });
+      this.machineDirectory = directory;
+      this.stopBusKeyWatch = directory.onChange(() => {
+        this.registerBusKeyIfStale();
+        this.noteGrantTransitions();
+      });
+      directory.start();
+    }
+
+    // A fresh transport per control plane start: it holds the pacing state and
+    // the pending inbound chain of one socket's lifetime, and the handler below
+    // is registered on this client only.
+    this.busTransport?.stop();
+    this.busRequests?.stop();
+    this.directoryRefresher?.stop();
+    this.remoteDirectory.setUnservedListener(null);
+    this.onlinePeers.clear();
+    const transport = new RelayBusTransport({
+      selfDeviceId: () => r.auth.deviceUuid,
+      signSeed: () => identity.ed25519PrivateKey ?? null,
+      busKey: () => this.busKey,
+      directory: this.machineDirectory!,
+      link: () => this.controlPlaneRelay,
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      seen: this.busSeen,
+      onInbound: (v) => this.handleBusInbound(v),
+      onOutcome: (id, to, outcome) => {
+        this.sessionBus.onTransportOutcome(id, to, outcome);
+        this.busRequests?.onTransportOutcome(id, to, outcome);
+      },
+      onReplayResponse: (from, requestId, response, expiresAt) => this.replayBusResponse(from, requestId, response, expiresAt),
+    });
+    this.busTransport = transport;
+    const directory = this.machineDirectory!;
+    this.busRequests = new BusRequests({
+      transport,
+      selfRole: () => (directory.selfOrchestrator() ? "orchestrator" : "agent"),
+    });
+    const refresher = new DirectoryRefresher({
+      directory,
+      requests: this.busRequests,
+      cache: this.remoteDirectory,
+      online: () => this.onlinePeers,
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+    });
+    this.directoryRefresher = refresher;
+    this.remoteDirectory.setUnservedListener(() => void refresher.kick());
+    refresher.start();
+    client.setBusHandler?.({
+      onFrame: (frame) => transport.handleFrame(frame),
+      onPresence: (peerId, online) => {
+        if (!online) {
+          this.onlinePeers.delete(peerId);
+          return;
+        }
+        this.onlinePeers.add(peerId);
+        this.sessionBus.retryNow({ machineId: peerId });
+        this.busRequests?.retryNow(peerId);
+        this.machineDirectory?.kick();
+        void refresher.kick(peerId);
+      },
+      onAuthenticated: () => {
+        transport.onAuthenticated();
+        this.sessionBus.retryNow();
+      },
+    });
 
     // pushHeartbeat() was previously event-triggered only (onAuthenticated +
     // mobile-access mutations), so a long-lived, stably-connected bridge never
@@ -1084,7 +1414,7 @@ export class HostServer {
     for (const [projectId, seen] of this.seenProjects) {
       if (!isSafeProjectId(projectId) || !existsSync(seen.path)) continue;
       const resolved = await resolveProject(seen.path);
-      projects.push({ projectId, label: seen.label ?? basename(seen.path), isGitRepository: resolved.isGitRepository });
+      projects.push({ projectId, label: projectLabel(seen), isGitRepository: resolved.isGitRepository });
     }
     return projects;
   }
@@ -1389,6 +1719,24 @@ export class HostServer {
     }
   }
 
+  async handleMemoryRpc(req: RpcRequest, peerId?: string): Promise<AbMessage> {
+    try {
+      const validate = () => {
+        if (!peerId || !this.controlPlaneRelay?.isPeerAuthorized?.(peerId) || !this.remoteAccessPolicy.isEnabled()) {
+          throw new MemoryError("FORBIDDEN", "An authorized native machine connection with remote access enabled is required.");
+        }
+      };
+      validate();
+      if (!await this.controlPlaneRelay!.authorizeDevice?.(baseSlotDeviceId(peerId!))) {
+        throw new MemoryError("FORBIDDEN", "Device account authorization is unavailable.");
+      }
+      const result = await this.memory.execute(() => { validate(); return { actor: "app" }; }, req.params);
+      return createMessage("response", { requestId: req.requestId, ok: true, result });
+    } catch (error) {
+      return createMessage("response", { requestId: req.requestId, ok: false, error: memoryFailure(error) });
+    }
+  }
+
   /** Answer one control-plane RPC to the app session that ASKED, rather than to
    *  every established session on this machine.
    *
@@ -1435,6 +1783,11 @@ export class HostServer {
     // tools/projects until an unrelated re-advertise. It exposes no authority
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
+      if (msg.method === "memory.request") {
+        void this.handleMemoryRpc(msg, peerId)
+          .then((res) => this.answerAsker(res, channel, bus, peerId));
+        return;
+      }
       if (msg.method.startsWith("scheduler.")) {
         void this.handleSchedulerRpc(msg, peerId)
           .then((res) => this.answerAsker(res, channel, bus, peerId));
@@ -1564,7 +1917,7 @@ export class HostServer {
           // offered about themselves, and turning this machine's own door
           // shut is not a reason to forget who is out there — a session here
           // may still open an exchange, and OPENING one is the half no thread
-          // and no carrier route can stand in for (`session-bus/api.ts`), so
+          // row can stand in for (`session-bus/api.ts`), so
           // dropping the rows would leave it refused `PEER_UNREACHABLE` for
           // peers that are answering perfectly.
           this.demoteAllPromoted();
@@ -1599,14 +1952,66 @@ export class HostServer {
   async handleAgentReachVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "agent-reach:get":
-        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel() };
       case "agent-reach:set": {
         this.agentReachPolicy.setEnabled(req.enabled);
-        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel() };
       }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not an agent-reach verb: ${(req as ControlRequest).type}` } };
     }
+  }
+
+  /** Reads and lowers this machine's orchestrator grant on web.
+   *  There is no raise: that needs the owner's account session, and a credential
+   *  that lives on this machine must not be able to elevate it. A lower asks the
+   *  directory to refresh so the change takes effect without waiting out the
+   *  cadence. */
+  async handleBusGrantsVerb(req: ControlRequest): Promise<ControlResponse> {
+    if (req.type !== "bus-grants:get" && req.type !== "bus-grants:lower") {
+      return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a bus-grants verb: ${(req as ControlRequest).type}` } };
+    }
+    const r = this.remoteConfig();
+    if (!r) return { id: req.id, ok: false, error: { code: "NOT_SIGNED_IN", message: "this machine is not signed in to an account" } };
+    let rt: RemoteRuntime;
+    try {
+      rt = await this.ensureRemoteRuntime();
+    } catch {
+      return { id: req.id, ok: false, error: { code: "WEB_UNREACHABLE", message: "could not reach the account service (WEB_UNREACHABLE)" } };
+    }
+    const base = { licenseApiUrl: r.licenseApiUrl, getToken: rt.maint.getToken, ...(this.opts.fetchFn ? { fetchFn: this.opts.fetchFn } : {}) };
+    let result: SessionBusGrantsResult;
+    if (req.type === "bus-grants:get") {
+      result = await getSessionBusGrants(base);
+    } else {
+      result = await lowerSessionBusGrants({ ...base, patch: { orchestrator: false } });
+    }
+    if (!result.ok) {
+      // The code rides in the message too: the CLI prints only the message, and
+      // a 403, a 429 and an outage call for different next steps.
+      if (result.status === null) {
+        return { id: req.id, ok: false, error: { code: "WEB_UNREACHABLE", message: "could not reach the account service (WEB_UNREACHABLE)" } };
+      }
+      const code = `WEB_${result.status}`;
+      return { id: req.id, ok: false, error: { code, message: `the account service refused the request (${code})` } };
+    }
+    if (req.type === "bus-grants:lower") this.machineDirectory?.kick();
+    return {
+      id: req.id, ok: true, type: req.type, grants: result.grants,
+      reachEnabled: this.agentReachPolicy.isEnabled(), level: this.effectiveReachLevel(),
+    };
+  }
+
+  /** One warn when the grant goes from off to on. Raising
+   *  happens in the app under the owner's account session, so this is the trace
+   *  that a machine was elevated. */
+  private noteGrantTransitions(): void {
+    const self = this.machineDirectory?.current()?.self;
+    if (!self) return;
+    if (this.lastGrants) {
+      if (!this.lastGrants.orchestrator && self.orchestrator) log.warn({ grant: "orchestrator" }, "session bus grant raised");
+    }
+    this.lastGrants = { orchestrator: self.orchestrator };
   }
 
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
@@ -2144,6 +2549,13 @@ export class HostServer {
 
   private async handleControl(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
+      case "memory:request": {
+        try {
+          return { id: req.id, ok: true, type: req.type, result: await this.memory.execute(() => ({ actor: "app" }), req.request) };
+        } catch (error) {
+          return { id: req.id, ok: false, error: memoryFailure(error) };
+        }
+      }
       case "scheduler:request": {
         try {
           return { id: req.id, ok: true, type: req.type, result: await this.schedulerRequest(req.method, req.params) };
@@ -2236,6 +2648,9 @@ export class HostServer {
       case "agent-reach:get":
       case "agent-reach:set":
         return this.handleAgentReachVerb(req);
+      case "bus-grants:get":
+      case "bus-grants:lower":
+        return this.handleBusGrantsVerb(req);
       case "machine:capability-card": {
         try {
           const card = await readCapabilityCard(
@@ -2250,21 +2665,6 @@ export class HostServer {
           };
         }
       }
-      case "session-bus:remote-directory":
-        return this.handleRemoteDirectoryPush(req);
-      // Read-only, and deliberately NOT draining `unservedReads`: the drain
-      // belongs to `replace()`, whose ack is what `_warmMissedPeers` dials on.
-      // A poll that consumed the count would answer the pump's question by
-      // taking away its reason to act on the answer.
-      case "session-bus:directory-status":
-        return {
-          id: req.id,
-          ok: true,
-          type: "session-bus:directory-status",
-          wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
-          unservedReads: this.remoteDirectory.unservedReads(),
-          lastReadAt: this.remoteDirectory.lastReadAt(),
-        };
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -2523,64 +2923,6 @@ export class HostServer {
     return { id: req.id, ok: true, type: "checkout:path", path };
   }
 
-  /** The asking half of the remote directory's fill path: the app's pump
-   *  hands over one cycle of what it learned peeking peer capability cards.
-   *  Exempt from THIS machine's own remote-access switch, like the rest of this
-   *  plane: every row here was offered by the peer that owns it, under
-   *  that peer's own switch, and mirroring one discloses nothing about this
-   *  machine. `clear()` on the refusal branch is what makes losing a relay
-   *  identity take effect immediately rather than riding out the mirror's
-   *  TTL. */
-  private handleRemoteDirectoryPush(
-    req: Extract<ControlRequest, { type: "session-bus:remote-directory" }>,
-  ): ControlResponse {
-    const selfMachineId = this.controlPlaneRegistrationId;
-    if (selfMachineId === null) {
-      // A row offered while this machine has no remote device identity is
-      // un-messageable (SessionBusCoordinator.message -> self() refuses
-      // AGENT_NOT_READY on a null machine id), so mirroring it would hand
-      // agents a directory that lies about what it can reach.
-      this.remoteDirectory.clear("no remote device identity");
-      return {
-        id: req.id,
-        ok: false,
-        error: { code: "NOT_ADDRESSABLE", message: "this machine has no remote device identity yet, so it cannot accept a peer directory" },
-      };
-    }
-    // unservedReads comes off replace()'s own return, not a follow-up
-    // `.unservedReads()` call — replace() drains that counter as part of this
-    // push, so a call made after it would always read back 0.
-    const { accepted, dropped, unservedReads } = this.remoteDirectory.replace(
-      req.machines,
-      req.notConnected,
-      selfMachineId,
-      Date.now(),
-    );
-    // The only record of what the pump actually found. Outcomes, not rows:
-    // a row carries a session title and a repo key, and
-    // `bridge/tests/session-bus-logging.test.ts` scans every emitted line for
-    // either. The per-machine outcome is what distinguishes a peer that said
-    // no from one that never answered.
-    log.debug(
-      "session bus: remote directory push accepted=%d dropped=%d unservedReads=%d notConnected=%d machines=%s",
-      accepted,
-      dropped,
-      unservedReads,
-      req.notConnected,
-      req.machines.map((m) => `${m.machineId}:${m.outcome}`).join(",") || "none",
-    );
-    return {
-      id: req.id,
-      ok: true,
-      type: "session-bus:remote-directory",
-      accepted,
-      dropped,
-      wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
-      unservedReads,
-      lastReadAt: this.remoteDirectory.lastReadAt(),
-    };
-  }
-
   private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {
     const entry = this.cores.get(projectId);
     if (!entry) return;
@@ -2667,6 +3009,10 @@ export class HostServer {
       // core would otherwise banner itself as having no relay coordinate.
       relayUrl = this.requireRemoteConfig().relayUrl;
     }
+    // Re-checked per request: the catalog entry can be dropped while the core lives.
+    const admitted = () => {
+      if (!isSafeProjectId(projectId) || !this.seenProjects.has(projectId)) throw new MemoryError("FORBIDDEN", "Project is no longer admitted on this host.");
+    };
     const core = new ProjectCore({
       folder: projectPath,
       mode,
@@ -2677,9 +3023,6 @@ export class HostServer {
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
-      // Same rule, one layer down: this bit is read only after the switch above
-      // says yes, so a core sees it live too.
-      agentReachEnabled: () => this.agentReachPolicy.isEnabled(),
       // Read live: the tier resolves only once the remote runtime is up, which
       // can be after a core warmed. Deliberately NOT scoped to remote-mode
       // cores — local is the desktop default, so a signed-in Free user opening
@@ -2690,6 +3033,11 @@ export class HostServer {
       // a machine is added to one of its sessions — which is a local core's
       // business as often as a remote one's.
       machineDeviceId: () => this.controlPlaneRegistrationId,
+      // Read live: the requests object is rebuilt on every control plane start,
+      // and a core opened before it exists must still reach the current one.
+      busRequest: (i) => this.busRequests
+        ? this.busRequests.request(i)
+        : Promise.resolve({ ok: false, code: "PEER_UNREACHABLE" }),
       // One coordinator for every project this host has open — see the field's
       // own doc for why the route table and `self()` are keyed off the shared
       // session index rather than this core's own id.
@@ -2701,6 +3049,16 @@ export class HostServer {
       startSession: (sessionId) => this.startLocalSession(sessionId),
       // Binds the catalog key rather than the core's computed id: schedules are stored under the key.
       schedulerForAgent: (identity, method, params) => this.schedulerRequestForAgent({ ...identity, projectId }, method, params),
+      memoryForAgent: (caller, request) => this.memory.execute(() => {
+        admitted();
+        return { ...caller(), actor: "agent", project_id: projectId };
+      }, request, 1),
+      memoryForApp: (request, validate, peerId) => this.memory.execute(() => {
+        validate();
+        if (peerId && !this.controlPlaneRelay?.isPeerAuthorized?.(peerId)) throw new MemoryError("FORBIDDEN", "Native memory authorization has expired.");
+        admitted();
+        return { actor: "app", project_id: projectId };
+      }, request),
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
@@ -2830,6 +3188,7 @@ export class HostServer {
     const r = this.remoteConfig();
     if (!r || !this.remoteRuntime) return;
     const rt = this.remoteRuntime;
+    this.registerBusKeyIfStale();
     void sendHeartbeat({
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
@@ -2840,6 +3199,40 @@ export class HostServer {
     }).then((ok) => {
       if (!ok) log.warn("heartbeat POST failed (non-2xx or network error)", { deviceUuid: r.auth.deviceUuid });
     });
+  }
+
+  /** Publishes the bus key when the directory's view of this machine lacks it
+   *  or holds another. Throttled because a rejected registration would
+   *  otherwise repeat on every directory refresh and heartbeat. */
+  private registerBusKeyIfStale(): void {
+    const r = this.remoteConfig();
+    const directory = this.machineDirectory;
+    const key = this.busKey;
+    if (!r || !this.remoteRuntime || !directory || !key) return;
+    if (directory.current()?.self.busPublicKey === key.publicKey) return;
+    if (this.busKeyRegistering) return;
+    const now = Date.now();
+    if (now - this.lastBusKeyRegisterAt < BUS_KEY_REGISTER_MIN_MS) return;
+    this.lastBusKeyRegisterAt = now;
+    this.busKeyRegistering = true;
+    const rt = this.remoteRuntime;
+    void registerBusKey({
+      licenseApiUrl: r.licenseApiUrl,
+      getToken: rt.maint.getToken,
+      busPublicKey: key.publicKey,
+    })
+      .then((ok) => {
+        if (ok) directory.kick();
+        else log.warn("bus key registration failed", { deviceUuid: r.auth.deviceUuid });
+      })
+      .finally(() => {
+        this.busKeyRegistering = false;
+      });
+  }
+
+  /** Test seam: the machine directory client, null until the control plane starts. */
+  get busMachineDirectory(): MachineDirectory | null {
+    return this.machineDirectory;
   }
 
   get(projectId: string): OpenResult | null {
@@ -2927,12 +3320,6 @@ export class HostServer {
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
     this.repoKeys.forgetProject(projectId);
-    // Step 3 removed `agents/<projectId>/` and the index above no longer
-    // resolves it, but the machine-level route table sits OUTSIDE that tree, so
-    // this is the only thing that reclaims the project's carrier rows. Without
-    // it the next process start hydrates every one of them back, leaving on
-    // disk exactly the kind of trace this method exists to erase.
-    this.sessionBus.forgetProjectRoutes(projectId);
     // The coordinator's in-memory session states are the other half of the
     // same leak: a session loaded before this forget() (a live exchange, or a
     // boot-time resume()) is still cached with its `projectId` pinned to this
@@ -2941,8 +3328,8 @@ export class HostServer {
     // drop above on purpose — see forgetProjectStates's own doc on why it must
     // not re-derive ownership through `projectIdFor`.
     this.sessionBus.forgetProjectStates(projectId);
-    // Last of the bus reclaims, and after BOTH in-memory drops above on
-    // purpose: this is the durable one, and a session state or route still
+    // Last of the bus reclaims, and after the in-memory drops above on
+    // purpose: this is the durable one, and a session state still
     // cached here could otherwise write its rows straight back behind it. What
     // step 3 deleted was `agents/<projectId>/`, which holds only the artifact
     // bytes now — every record the project owned is a row in the machine-level
@@ -3012,6 +3399,17 @@ export class HostServer {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    this.stopBusKeyWatch?.();
+    this.stopBusKeyWatch = null;
+    this.machineDirectory?.stop();
+    this.machineDirectory = null;
+    this.remoteDirectory.setUnservedListener(null);
+    this.directoryRefresher?.stop();
+    this.directoryRefresher = null;
+    this.busRequests?.stop();
+    this.busRequests = null;
+    this.busTransport?.stop();
+    this.busTransport = null;
     await this.controlPlaneRelay?.close();
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
@@ -3035,6 +3433,8 @@ export class HostServer {
     this.cores.clear();
     for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
+    this.releaseMemoryGate?.();
+    this.memory.close();
     // Every core's `TerminalManager` shares this ONE store; close it only
     // once every core has stopped using it, which the await above guarantees.
     closeTerminalHistoryStore();
@@ -3303,6 +3703,8 @@ interface SeenProjectsFileShape {
   projects: Record<string, SeenProject>;
 }
 
+function projectLabel(seen: SeenProject): string { return seen.label ?? basename(seen.path); }
+
 function seenProjectsPath(): string {
   return join(resolveAbDir(), "agents", "projects.json");
 }
@@ -3325,4 +3727,19 @@ export function flushSeenProjects(path: string, map: Map<string, SeenProject>): 
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const data: SeenProjectsFileShape = { version: 1, projects: Object.fromEntries(map) };
   writeFileSync(path, JSON.stringify(data, null, 2));
+}
+
+/** Race [promise] against a timer, answering [fallback] when the timer wins. The
+ *  timer is cleared either way so a settled race keeps nothing alive. */
+async function withTimeout<T, F>(promise: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<F>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

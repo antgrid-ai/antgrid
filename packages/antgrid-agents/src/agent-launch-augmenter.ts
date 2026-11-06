@@ -7,6 +7,7 @@ import type { AgentSpec, LaunchAugmentation } from "./agents/types";
 const log = logger.child({ component: "agent-launch" });
 export type { LaunchAugmentation };
 export interface AugmentOptions {
+  mode?: "terminal" | "chat";
   abDir?: string;
   cursorDir?: string;
   kimiHome?: string;
@@ -14,10 +15,7 @@ export interface AugmentOptions {
   geminiConfigDir?: string;
   hookCommand?: HookCommand;
   mcpCommand?: BridgeCommand;
-  /** `false` skips the MCP profile. Chat spawns pass it: no chat driver
-   *  forwards an MCP channel, and the session directory lists chat sessions
-   *  as receive-only on that basis. */
-  mcp?: false;
+  memoryMcpCommand?: BridgeCommand;
 }
 export function injectsHookAliveProbe(tool: string): boolean {
   return agentSpec(tool)?.hooks?.observation.hookAlive === true;
@@ -41,13 +39,30 @@ export function augmentAgentLaunch(
     }
   }
   let mcp = NO_INJECTION;
-  if (spec.mcp && options.mcp !== false) {
+  if (spec.mcp) {
     try {
       const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
-      if (mcpCommand) mcp = spec.mcp.inject({ abDir, mcpCommand });
+      // Memory in chat is deferred (docs/agent-memory-rfc.md): a chat launch
+      // gets `antgrid` alone and is not a launch that Memory was withheld from.
+      const chat = options.mode === "chat";
+      const memoryMcpCommand = chat ? undefined : options.memoryMcpCommand
+        ?? (options.mcpCommand ? undefined : agentHost().memoryMcpCommand?.());
+      if (mcpCommand) {
+        mcp = spec.mcp.inject({ abDir, mcpCommand, memoryMcpCommand });
+        // Guidance is offered only for a server the agent was actually handed:
+        // a profile that fails soft (unmergeable config, unwritable file)
+        // returns NO_INJECTION and must not leave the agent told about tools
+        // it does not have.
+        if (mcp !== NO_INJECTION && !chat) {
+          mcp = memoryMcpCommand ? { ...mcp, env: { ...mcp.env, ANTGRID_MEMORY_MCP: "1" } } : { ...mcp, memoryWithheld: true };
+        }
+      }
     } catch (err) {
       log.warn("agent MCP augmentation failed for %s: %s", tool, err);
     }
   }
-  return { ...hooks, args: [...hooks.args, ...mcp.args], env: { ...hooks.env, ...mcp.env } };
+  return {
+    ...hooks, args: [...hooks.args, ...mcp.args], env: { ...hooks.env, ...mcp.env },
+    ...(mcp.memoryWithheld ? { memoryWithheld: true as const } : {}),
+  };
 }

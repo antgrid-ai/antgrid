@@ -5,6 +5,7 @@
   "private": true,
   "workspaces": [
     "packages/antgrid-wire",
+    "packages/antgrid-memory",
     "bridge",
     "bridge/integrations",
     "relay",

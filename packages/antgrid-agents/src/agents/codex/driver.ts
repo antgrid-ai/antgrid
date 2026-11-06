@@ -6,11 +6,17 @@ import type { DriverCtx } from "../types";
 // codex app-server rejects the -c hooks.* args that augmentAgentLaunch emits for
 // the interactive TUI (its -c parser errors on hooks.state={...} — "expected a
 // map"). Titles only need the top-level notify=[...] program, which app-server
-// DOES honor, so slice out just that -c pair. See the chat-mode title spike.
-export function codexNotifyOnlyArgs(augArgs: string[]): string[] {
-  const i = augArgs.findIndex((a) => a.startsWith("notify="));
-  if (i < 1) return [];
-  return [augArgs[i - 1], augArgs[i]]; // ["-c", "notify=[...]"]
+// DOES honor. MCP overrides use that same supported top-level config channel.
+export function codexChatAugmentArgs(augArgs: string[]): string[] {
+  const args: string[] = [];
+  for (let i = 0; i < augArgs.length - 1; i++) {
+    if (augArgs[i] !== "-c") continue;
+    const setting = augArgs[++i]!;
+    if (setting.startsWith("notify=") || setting.startsWith("mcp_servers.")) {
+      args.push("-c", setting);
+    }
+  }
+  return args;
 }
 
 // Unified exec (exec_command/write_stdin with persistent background sessions)
@@ -81,7 +87,7 @@ export function createDriver(
           ...(ctx.approvalPolicy === "bypass"
             ? ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"']
             : []),
-          ...codexNotifyOnlyArgs(chatAug.args),
+          ...codexChatAugmentArgs(chatAug.args),
         ],
         env: chatAug.env,
       });

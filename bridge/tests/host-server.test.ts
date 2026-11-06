@@ -8,9 +8,16 @@ import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/ho
 import { computeProjectId } from "../src/project-id";
 import { createMessage } from "../src/protocol";
 import type { RemoteHostConnection } from "../src/remote-host-connection";
-import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { OUTBOX_TICK_MS, type SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadHeld } from "../src/session-bus/held-store";
 import { LOCAL_MACHINE_ID } from "../src/session-bus/constants";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import type { BusServerMessage, MachineEntry } from "antgrid-wire";
+import { generateEphemeralKeypair } from "../src/key-exchange";
+import { BusRequests } from "../src/session-bus/bus-requests";
+import { RelayBusTransport, type BusSendInput, type InboundVerdict, type VerifiedInbound } from "../src/session-bus/relay-transport";
+import { openSeenStore } from "../src/session-bus/seen-store";
+import { sealBus, type InnerHeader } from "../src/session-bus/seal";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
 // because these tests inject `remoteRuntimeFactory`; RemoteHostConnection.connect() is
@@ -39,7 +46,7 @@ function stubRemoteHostConnection(): RemoteHostConnection {
     setBus: () => {},
     connect: () => {},
     close: () => {},
-    attachStream: () => ({ detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true }),
+    attachStream: () => ({ detach: () => {}, sendTo: async () => "sent" as const }),
     sendPushDeliver: () => {},
     accountDisowns: () => false,
   } as unknown as RemoteHostConnection;
@@ -536,15 +543,13 @@ test(
 );
 
 // §6.1: a send between two sessions this HOST holds must not need a
-// relay, a carrier, or a route — `SessionBusCoordinator.dispatch` hands a
+// relay — `SessionBusCoordinator.dispatch` hands a
 // same-machine target straight to `deliverLocal` (host-server.ts), which
 // requires only that the target's project core is loaded here right now.
 // Every case below runs a `HostServer` with no remote config, no
-// `startControlPlane()` call, and a loopback owner it deliberately never
-// declares `capabilities.sessionBusCarrier` for (and then closes) — the
-// literal "desktop disconnected, remote access off" state the design has to
-// survive, since neither one is ever wired to anything that could carry a
-// frame off this machine.
+// `startControlPlane()` call, and a loopback owner it closes straight away —
+// the literal "desktop disconnected, remote access off" state the design has
+// to survive, with nothing wired that could carry a frame off this machine.
 
 // Both sessions below are opened on the SAME bare `HostServer`, so both resolve
 // to this sentinel — which is what lets a send legitimately address "this
@@ -567,19 +572,12 @@ function withRegistration(host: HostServer, deviceId: string): void {
  *  the loopback WS — the same dance the "configured antgrid.yaml name" test
  *  above does — then closes the socket. `session:create` alone never starts a
  *  PTY (machine-level suite's own comment), so the returned session is
- *  registered but not "running", and the closed socket leaves no owner able
- *  to carry a bus frame anywhere.
- *
- *  `carrier: true` instead leaves the socket OPEN and declares
- *  `sessionBusCarrier` — an ordinary desktop, and the only configuration in
- *  which a same-machine send that could not be delivered can be accepted by
- *  something and reported as having left the machine. */
+ *  registered but not "running". */
 async function openLocalSession(
   host: HostServer,
   folder: string,
   name: string,
-  opts: { carrier?: boolean } = {},
-): Promise<{ projectId: string; sessionId: string; owner?: WebSocket; ownerInbox?: unknown[] }> {
+): Promise<{ projectId: string; sessionId: string }> {
   const projectId = computeProjectId(folder);
   const opened = await host.open(projectId, folder, "local");
   if (!opened.connect) throw new Error("expected a loopback connect info");
@@ -595,11 +593,6 @@ async function openLocalSession(
     token: opened.connect.token,
     appPid: 1,
     appVersion: "test",
-    // Off by default, because most cases here are about a machine with nothing
-    // that could carry a frame anywhere. Declaring it is the NORMAL desktop
-    // state and the one configuration a same-machine miss can be reported as a
-    // successful send in — so a case that means to exercise that has to ask.
-    ...(opts.carrier ? { capabilities: { sessionBusCarrier: true } } : {}),
   }));
   await waitFor(() => inbox.some((m) => m.type === "ready"), `${name} loopback ready`);
   const requestId = crypto.randomUUID();
@@ -610,11 +603,8 @@ async function openLocalSession(
   );
   const result = inbox.find((m) => m.type === "session:result" && m.requestId === requestId);
   const sessionId = result.session.id as string;
-  if (!opts.carrier) {
-    ws.close();
-    return { projectId, sessionId };
-  }
-  return { projectId, sessionId, owner: ws, ownerInbox: inbox };
+  ws.close();
+  return { projectId, sessionId };
 }
 
 function busCoordinatorOf(host: HostServer): SessionBusCoordinator {
@@ -640,8 +630,8 @@ test(
     });
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     // Delivered in process, never merely accepted: `sent: true` and `held:
-    // false` are deliverLocal's own outcome — deps.send would find no carrier
-    // here at all and hold it (case below proves that half).
+    // false` are deliverLocal's own outcome — deps.send has no relay transport
+    // here at all and would hold it (case below proves that half).
     expect(res.sent).toBe(true);
     expect(res.held).toBe(false);
 
@@ -695,35 +685,7 @@ test(
 );
 
 test(
-  "a local send never writes an entry into the carrier route table",
-  async () => {
-    host = createHostPolicyFixture({});
-    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
-    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
-
-    const sessionBus = busCoordinatorOf(host);
-    expect(sessionBus.routeFor(sessionA)).toBeNull(); // nothing to untouch yet — the baseline
-    const res = sessionBus.message({
-      sessionId: sessionA,
-      verb: "post",
-      threadId: null,
-      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
-      summary: "hi",
-      parts: [{ kind: "text", text: "hi" }],
-    });
-    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
-    expect(res.sent).toBe(true);
-
-    // deliverLocal never calls noteRoute — the table exists for the carrier
-    // path alone (`send`'s peer/lead branches), so a local exchange leaves it
-    // exactly as empty as it started, not merely free of an error.
-    expect(sessionBus.routeFor(sessionA)).toBeNull();
-  },
-  20_000,
-);
-
-test(
-  "the E6 ack for a local post lands with no route in the table",
+  "a local post is stamped delivered on the spot, with no acknowledgement frame",
   async () => {
     host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
@@ -740,20 +702,19 @@ test(
     });
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     expect(res.sent).toBe(true);
+    expect(res.rung).toBe("delivered");
+    // What lets the agent be told "its mailbox has it" rather than that another
+    // machine stored it.
+    expect(res.local).toBe(true);
+    expect(res.retryUntil).toBeUndefined();
 
-    // onMessage dispatches the receipt back through the very same `dispatch`
-    // a message takes (coordinator.ts: a direct `send` would find no route
-    // for this pair — sessionA's context was never carried in by anyone —
-    // and drop it). The receipt's role is "peer" (roleForContext: its context
-    // is sessionA, not the receiving session sessionB), which is exactly the
-    // role a real carrier route lookup would have been keyed on had this gone
-    // through `send` instead. Proof it still landed is the sender's own log
-    // entry stamped delivered, with that same context never having earned a
-    // route entry at all.
+    // There is no relay and no peer to acknowledge a same-machine delivery, so
+    // the local store write is the witness: the sender's own entry carries the
+    // stamp, and nothing is left in the outbox to retry.
     const entries = sessionBus.messages(sessionA).entries;
     expect(entries).toHaveLength(1);
     expect(entries[0]!.deliveredAt).toBeDefined();
-    expect(sessionBus.routeFor(sessionA)).toBeNull();
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
   },
   20_000,
 );
@@ -773,7 +734,7 @@ test(
     //
     // What must happen instead is a refusal, not a hold: the sentinel this
     // host names itself by buys the local path an address, not a network, and
-    // a frame held for a carrier that may attach later would reach the peer
+    // a frame held until a relay identity arrives would reach the peer
     // stamped `from: local` — an address no reply can be routed back to.
     const res = sessionBus.message({
       sessionId: sessionA,
@@ -794,7 +755,7 @@ test(
 );
 
 test(
-  "a send naming a different machineId goes through deps.send once this machine has a relay identity",
+  "a send naming a different machineId takes the relay arm once this machine has a relay identity",
   async () => {
     host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
@@ -811,11 +772,12 @@ test(
       parts: [{ kind: "text", text: "should not land locally" }],
     });
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
-    // `send` here has no carrier at all — the loopback owner never declared
-    // itself a bus carrier and its socket is closed — so the frame is held,
-    // which is the outcome that proves it took the remote arm.
+    // No relay transport is running in this fixture, so the frame is held with
+    // that reason, which is the outcome that proves it took the remote arm.
     expect(res.sent).toBe(false);
     expect(res.held).toBe(true);
+    expect(res.rung).toBe("held");
+    expect(res.heldReason).toBe("remote-access-off");
     expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
   },
   20_000,
@@ -897,12 +859,85 @@ test(
     // And the hold is a DELAY, not a loss: the retry pump takes the same send
     // decision the first attempt took, so the local arm delivers it the moment
     // the target's project is warm again. A pump that went straight to `send`
-    // would keep offering a local frame to a carrier that has none until the
-    // hold aged out, which is a message lost with every log line green.
+    // would keep offering a local frame to a relay transport that cannot carry
+    // it until the hold aged out, which is a message lost with every log line
+    // green.
     await host.open(projectIdB, folderB, "local");
-    sessionBus.pump();
+    sessionBus.retryNow();
     expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
     expect(loadHeld(abDir!, projectIdA, sessionA).held).toHaveLength(0);
+  },
+  20_000,
+);
+
+test(
+  "a send to a cold local project warms that project on its own and lands without a second push",
+  async () => {
+    host = createHostPolicyFixture({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const folderB = tempFolder();
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
+    await host.stop(projectIdB);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    // Still held on the first attempt: `open()` is async and `deliverLocal` is
+    // not, so warming can only start here, never finish here.
+    expect(res.held).toBe(true);
+
+    // Nothing reopens the project in this test. A human opening it is what the
+    // family above needed, and it is exactly what a machine nobody is sitting
+    // at does not have.
+    await waitFor(
+      () => host!.list().some((p) => p.projectId === projectIdB),
+      "project B warmed by the held delivery",
+    );
+    await waitFor(
+      () => sessionBus.mailbox(sessionB).posts.length === 1,
+      "the held post delivered once project B was warm",
+    );
+  },
+  20_000,
+);
+
+test(
+  "a cold project that is not in the host's catalog is never opened by an inbound send",
+  async () => {
+    // The gate that keeps warming from being a way to spend this machine's
+    // resources on a name the sender chose: `seenProjects` is the same catalog
+    // that bounds every project verb a remote peer may name, and a session
+    // index row alone must not be enough to start a core.
+    host = createHostPolicyFixture({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const folderB = tempFolder();
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
+    await host.stop(projectIdB);
+    (host as unknown as { seenProjects: Map<string, unknown> }).seenProjects.delete(projectIdB);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.held).toBe(true);
+
+    // Several retry ticks, so this is "never opened", not "not opened yet".
+    await new Promise((r) => setTimeout(r, OUTBOX_TICK_MS * 3));
+    expect(host.list().some((p) => p.projectId === projectIdB)).toBe(false);
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
   },
   20_000,
 );
@@ -964,45 +999,256 @@ test("the control-plane bus dispatches only for a peer that holds its own sessio
   expect(dispatched).toEqual(["phone-a#uuid-1"]);
 });
 
-test(
-  "a cold local target is held even with a bus carrier attached, not handed to the desktop",
-  async () => {
-    // The case the rest of this family could not reach. Every other test here
-    // runs an owner that never declares `sessionBusCarrier`, so `deps.send`
-    // finds no carrier and holds for the wrong reason — which means the whole
-    // same-machine-cold-project family was gated only in the configuration
-    // where the failure cannot happen. With a carrier attached, a fall-through
-    // reaches the SENDER's own desktop as a lead-role frame, is accepted, and
-    // is reported `{sent:true, held:false}`; the app then classifies it
-    // inbound-but-uncarried and drops it with nothing anywhere to say so.
-    host = new HostServer({});
-    const a = await openLocalSession(host, tempFolder(), "session-a", { carrier: true });
-    const folderB = tempFolder();
-    const b = await openLocalSession(host, folderB, "session-b");
-    await host.stop(b.projectId);
+// -- bus requests -------------------------------------------------------------
+// `handleBusInbound` and `replayBusResponse` are private on purpose: the
+// transport is their only caller, so these reach them the way it does.
 
-    const sessionBus = busCoordinatorOf(host);
-    const res = sessionBus.message({
-      sessionId: a.sessionId,
-      verb: "post",
-      threadId: null,
-      to: { machineId: LOCAL_MACHINE_ID, projectId: b.projectId, sessionId: b.sessionId },
-      summary: "hi",
-      parts: [{ kind: "text", text: "hi" }],
+const BUS_SELF = randomUUID();
+const BUS_PEER = randomUUID();
+
+interface BusRig {
+  h: HostServer;
+  frames: BusSendInput[];
+  cardCalls: () => number;
+  inbound: (v: VerifiedInbound) => Promise<InboundVerdict>;
+}
+
+function busRig(opts: { remote?: boolean; reach?: boolean } = {}): BusRig {
+  const h = createHostPolicyFixture({});
+  host = h;
+  const frames: BusSendInput[] = [];
+  (h as any).busRequests = new BusRequests({
+    transport: { send: (i) => { frames.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  (h as any).remoteAccessPolicy.setEnabled(opts.remote ?? true);
+  (h as any).agentReachPolicy.setEnabled(opts.reach ?? true);
+  const card = spyOn(h, "handleCapabilityCardRpc");
+  return { h, frames, cardCalls: () => card.mock.calls.length, inbound: (v) => (h as any).handleBusInbound(v) };
+}
+
+function busRequest(method: string, params: unknown = { includeSessions: true }, id = randomUUID()): VerifiedInbound {
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id, role: "agent", kind: "request",
+    sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+  };
+  return { from: BUS_PEER, id, header, role: "agent", body: createMessage("request", { requestId: id, method, params }) };
+}
+
+const answerOf = (v: InboundVerdict): { ok: boolean; result?: any; error?: { code: string } } =>
+  JSON.parse((v as { response: string }).response);
+
+test("a bus capability-card request is answered to the asker only", async () => {
+  const { h, frames, inbound } = busRig();
+  const asker = spyOn(h as any, "answerAsker");
+  const control = spyOn(h as any, "dispatchControlPlaneInbound");
+  const req = busRequest("machine.capability-card");
+
+  const verdict = await inbound(req);
+  expect(verdict.outcome).toBe("applied");
+  const answer = answerOf(verdict);
+  expect(answer.ok).toBe(true);
+  expect(answer.result.sessions).toEqual([]);
+
+  expect(frames).toHaveLength(1);
+  expect(frames[0]).toMatchObject({ to: BUS_PEER, kind: "response", correlationId: req.id });
+  expect(frames[0]!.body).toMatchObject({ type: "response", ok: true });
+  // The control plane answers a phone's peer session; nothing of this reached it.
+  expect(asker).not.toHaveBeenCalled();
+  expect(control).not.toHaveBeenCalled();
+}, 20_000);
+
+test("a request as another machine's BusRequests sends it is served, not refused as malformed", async () => {
+  const { inbound } = busRig();
+  const asked: BusSendInput[] = [];
+  const asker = new BusRequests({
+    transport: { send: (i) => { asked.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  void asker.request({ to: BUS_SELF, method: "machine.capability-card", params: { includeSessions: false }, timeoutMs: 30_000 }).catch(() => {});
+  const frame = asked[0]!;
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id: frame.id, role: "agent", kind: "request",
+    sentAt: frame.sentAt, expiresAt: frame.expiresAt,
+  };
+  // Through JSON, as the sealed body crosses the wire.
+  const body = JSON.parse(JSON.stringify(frame.body));
+  const verdict = await inbound({ from: BUS_PEER, id: frame.id, header, role: "agent", body });
+  asker.stop();
+  expect(verdict.outcome).toBe("applied");
+  expect(answerOf(verdict).ok).toBe(true);
+}, 20_000);
+
+test("a bus request for a method outside the allowlist is refused and answered with nothing", async () => {
+  const { frames, cardCalls, inbound } = busRig();
+  for (const method of ["git.checkout", "sessions.delete", "scheduler.run", "scheduler.list", "state.snapshot", "machine.capability-card.x"]) {
+    expect(await inbound(busRequest(method))).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
+  }
+  const notARequest: VerifiedInbound = { ...busRequest("machine.capability-card"), body: { type: "session-bus:post" } };
+  expect(await inbound(notARequest)).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
+  expect(frames).toEqual([]);
+  expect(cardCalls()).toBe(0);
+});
+
+test("with agent reach off a capability-card request is answered NOT_ALLOWED_AGENT_REACH and the card is never built", async () => {
+  const { h, frames, cardCalls, inbound } = busRig({ reach: false });
+  // A project the catalog holds, so building the card WOULD spawn git for it.
+  const dir = tempFolder();
+  writeFileSync(join(dir, "antgrid.yaml"), "name: reach\n");
+  (h as any).seenProjects.set(computeProjectId(dir), { path: dir, label: "reach", lastActiveAt: Date.now() });
+
+  for (const includeSessions of [false, true]) {
+    const verdict = await inbound(busRequest("machine.capability-card", { includeSessions }));
+    expect(verdict.outcome).toBe("applied");
+    expect(answerOf(verdict)).toMatchObject({ ok: false, error: { code: "NOT_ALLOWED_AGENT_REACH" } });
+  }
+  expect(cardCalls()).toBe(0);
+  expect(frames).toHaveLength(2);
+  expect(frames.every((f) => f.kind === "response" && f.to === BUS_PEER)).toBe(true);
+}, 20_000);
+
+test("the 61st request from one machine inside a minute is answered REQUEST_RATE", async () => {
+  const { frames, inbound } = busRig();
+  for (let i = 0; i < 60; i++) {
+    const v = await inbound(busRequest("machine.capability-card", { includeSessions: false }));
+    expect(answerOf(v).ok).toBe(true);
+  }
+  const over = await inbound(busRequest("machine.capability-card", { includeSessions: false }));
+  expect(over.outcome).toBe("applied");
+  expect(answerOf(over)).toMatchObject({ ok: false, error: { code: "REQUEST_RATE" } });
+  expect(frames).toHaveLength(61);
+}, 30_000);
+
+test("remote access off refuses a bus request before anything else", async () => {
+  const { frames, cardCalls, inbound } = busRig({ remote: false });
+  expect(await inbound(busRequest("machine.capability-card"))).toEqual({ outcome: "refused", code: "REMOTE_ACCESS_OFF" });
+  expect(frames).toEqual([]);
+  expect(cardCalls()).toBe(0);
+});
+
+test("a bus response is handed to the request waiting on it, from the machine that was asked only", async () => {
+  const { h, inbound } = busRig();
+  const sent: BusSendInput[] = [];
+  const requests = new BusRequests({
+    transport: { send: (i) => { sent.push(i); return { sent: true }; } },
+    selfRole: () => "agent",
+  });
+  (h as any).busRequests = requests;
+  const pending = requests.request({ to: BUS_PEER, method: "machine.capability-card", timeoutMs: 30_000 });
+  const id = sent[0]!.id;
+  const reply = (from: string): VerifiedInbound => ({
+    from, id: randomUUID(), role: "agent",
+    header: {
+      v: 1, from, to: BUS_SELF, id: randomUUID(), role: "agent", kind: "response", correlationId: id,
+      sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+    },
+    body: createMessage("response", { requestId: id, ok: true, result: { sessions: [] } }),
+  });
+
+  // Acknowledged either way, so the sender stops resending it.
+  expect(await inbound(reply(randomUUID()))).toEqual({ outcome: "applied" });
+  expect(await inbound(reply(BUS_PEER))).toEqual({ outcome: "applied" });
+  expect(await pending).toEqual({ ok: true, result: { sessions: [] } });
+});
+
+// A duplicate request is answered from the transport's record of the first
+// answer, in-process and after a restart, and the method never runs twice.
+
+function ed25519Pair() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const seed = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
+  const pub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+  return { seed: Buffer.from(seed).toString("base64"), pub: Buffer.from(pub).toString("base64") };
+}
+
+function busPair() {
+  const k = generateEphemeralKeypair();
+  return { privateKey: k.privateKey.toString("base64"), publicKey: k.publicKey.toString("base64") };
+}
+
+test("a duplicate bus request returns the cached response without re-execution, in-process and across a host restart", async () => {
+  const me = { sign: ed25519Pair(), bus: busPair() };
+  const them = { sign: ed25519Pair(), bus: busPair() };
+  const entry: MachineEntry = {
+    deviceId: BUS_PEER, displayName: "them", machineName: null, ed25519Pub: them.sign.pub,
+    busPublicKey: them.bus.publicKey, orchestrator: false,
+  };
+  const directory = {
+    current: () => ({ machines: [entry], allowed: true }) as never,
+    machine: (id: string) => (id === BUS_PEER ? entry : null),
+    busKeyFor: (id: string) => (id === BUS_PEER ? them.bus.publicKey : null),
+    selfOrchestrator: () => false,
+    ensureFresh: async () => true,
+    kick: () => {},
+  };
+
+  const requestId = randomUUID();
+  const header: InnerHeader = {
+    v: 1, from: BUS_PEER, to: BUS_SELF, id: requestId, role: "agent", kind: "request",
+    sentAt: Date.now(), expiresAt: Date.now() + 60_000,
+  };
+  const sealed = sealBus({
+    header,
+    body: JSON.stringify(createMessage("request", { requestId, method: "machine.capability-card", params: { includeSessions: true } })),
+    signSeedB64: them.sign.seed,
+    recipientBusPubB64: me.bus.publicKey,
+  });
+  if (!sealed.ok) throw new Error(sealed.code);
+  const deliver = { type: "bus:deliver", id: requestId, from: BUS_PEER, blob: sealed.blob } as BusServerMessage;
+
+  const waitFor = async (what: string, pred: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!pred()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  // One transport wired as the host wires its own, over the shared abDir.
+  const transportFor = (rig: BusRig, acks: unknown[]) =>
+    new RelayBusTransport({
+      selfDeviceId: () => BUS_SELF,
+      signSeed: () => me.sign.seed,
+      busKey: () => me.bus,
+      directory: directory as never,
+      link: () => ({ sendBus: (f: unknown) => { acks.push(f); return true; }, busLinkState: () => "ready" as const, busNow: () => Date.now() }),
+      remoteAccessEnabled: () => true,
+      seen: openSeenStore(abDir!),
+      onInbound: (v) => rig.inbound(v),
+      onOutcome: () => {},
+      onReplayResponse: (from, id, response, expiresAt) => (rig.h as any).replayBusResponse(from, id, response, expiresAt),
     });
-    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
-    expect(res.sent).toBe(false);
-    expect(res.held).toBe(true);
-    // The carrier is the half that has to be proven, not inferred: a frame the
-    // owner never saw is the difference between held and silently dropped.
-    expect((a.ownerInbox ?? []).some((m: any) => String(m.type).startsWith("session-bus:"))).toBe(false);
 
-    // Still a delay rather than a loss: the retry takes the same decision and
-    // the local arm delivers once that project is warm again.
-    await host.open(b.projectId, folderB, "local");
-    sessionBus.pump();
-    expect(sessionBus.mailbox(b.sessionId).posts).toHaveLength(1);
-    a.owner?.close();
-  },
-  20_000,
-);
+  const first = busRig();
+  const acks1: unknown[] = [];
+  const t1 = transportFor(first, acks1);
+  t1.handleFrame(deliver);
+  await waitFor("an ack", () => acks1.length >= 1);
+  expect(first.cardCalls()).toBe(1);
+  expect(first.frames).toHaveLength(1);
+  const original = JSON.stringify(first.frames[0]!.body);
+
+  // The same delivery again, in the same process.
+  t1.handleFrame(deliver);
+  await waitFor("the repeated ack", () => acks1.length >= 2);
+  expect(first.cardCalls()).toBe(1);
+  expect(first.frames.length).toBeGreaterThanOrEqual(2);
+  expect(first.frames.every((f) => JSON.stringify(f.body) === original)).toBe(true);
+  expect(new Set(first.frames.map((f) => f.id)).size).toBe(1);
+  t1.stop();
+
+  await host!.shutdown();
+  host = null;
+
+  // A new host on the same abDir: nothing in memory, only the seen-store.
+  const second = busRig();
+  const acks2: unknown[] = [];
+  const t2 = transportFor(second, acks2);
+  t2.handleFrame(deliver);
+  await waitFor("an ack after the restart", () => acks2.length >= 1);
+  expect(second.cardCalls()).toBe(0);
+  expect(second.frames).toHaveLength(1);
+  expect(second.frames[0]).toMatchObject({ to: BUS_PEER, kind: "response", correlationId: requestId });
+  expect(JSON.stringify(second.frames[0]!.body)).toBe(original);
+  t2.stop();
+}, 30_000);

@@ -15,6 +15,20 @@ String relativeTime(DateTime when, {DateTime? now}) {
   return _plural(d.inDays ~/ 365, 'year');
 }
 
+/// Terse form for list rows ("now", "5m ago", "3w ago"); [relativeTime] is the
+/// long form. Future timestamps clamp to "now" so a skewed clock never prints
+/// a negative age.
+String compactRelativeTime(DateTime when, {DateTime? now}) {
+  final d = (now ?? DateTime.now()).difference(when);
+  if (d.inSeconds < 60) return 'now';
+  if (d.inMinutes < 60) return '${d.inMinutes}m ago';
+  if (d.inHours < 24) return '${d.inHours}h ago';
+  if (d.inDays < 7) return '${d.inDays}d ago';
+  if (d.inDays < 30) return '${d.inDays ~/ 7}w ago';
+  if (d.inDays < 365) return '${d.inDays ~/ 30}mo ago';
+  return '${d.inDays ~/ 365}y ago';
+}
+
 String _plural(int n, String unit) => '$n $unit${n == 1 ? '' : 's'} ago';
 
 /// Local 24-hour wall-clock label (`14:05`) for same-day timestamps.

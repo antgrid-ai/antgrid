@@ -21,14 +21,15 @@ import {
 } from "../protocol";
 import {
   ARTIFACT_CHUNK_BYTES,
-  BUS_ROUTE_TTL_MS,
+  BUS_REQUEST_DEFAULT_TIMEOUT_MS,
+  BUS_REQUEST_MAX_TIMEOUT_MS,
   LOCAL_MACHINE_ID,
   MAX_PART_CHARS,
   MAX_PARTS,
   MAX_SUMMARY_CHARS,
   MAX_UNEXPECTED_CHARS,
 } from "./constants";
-import { addressesSameSession, isLeadContext, namesMachine } from "./address";
+import { addressesSameSession, namesMachine } from "./address";
 import type { DirectoryReach, SessionDirectory, SessionDirectoryRow } from "./directory";
 import {
   addArtifact,
@@ -41,11 +42,13 @@ import {
   writeArtifactContent,
   type ArtifactRecord,
 } from "./artifact-store";
-import type { SessionBusCoordinator } from "./coordinator";
-import { entriesForThread, lastInboundAt, type LoggedEnvelope } from "./message-log";
+import type { Rung, SessionBusCoordinator } from "./coordinator";
+import type { BusHeldReason } from "./relay-transport";
+import { entriesForThread, type LoggedEnvelope } from "./message-log";
 import { unreadPosts, type MailboxPost } from "./mailbox";
 import { threadById, type ThreadRow } from "./thread-store";
-import { isRefusal, refuse, type SessionBusRefusal } from "./errors";
+import { REMOTE_CODE_PATTERN, SESSION_BUS_ERRORS, isRefusal, refuse, refusalSentence, type SessionBusErrorCode, type SessionBusRefusal } from "./errors";
+import type { BusRequestResult } from "./bus-requests";
 import { selfMachineLabel } from "../machine-label";
 
 // -- request bodies ---------------------------------------------------------
@@ -73,6 +76,24 @@ export const PublishArtifactBodySchema = z
   });
 
 export type PublishArtifactBody = z.infer<typeof PublishArtifactBodySchema>;
+
+/** A request to another of the account's machines. `method` is not checked
+ *  here: the responder owns the allowlist, and a bridge that pre-filtered would
+ *  be a second list to keep in step with it. */
+export const BusRequestBodySchema = z
+  .object({
+    to: z.string().uuid(),
+    method: z.string().min(1).max(64),
+    params: z.unknown().optional(),
+    // Clamped rather than refused: the tool tells agents the bridge bounds it,
+    // and a wait an agent overestimated is still a request worth sending.
+    timeoutMs: z.number().finite()
+      .transform((v) => Math.max(1, Math.min(Math.round(v), BUS_REQUEST_MAX_TIMEOUT_MS)))
+      .optional(),
+  })
+  .strict();
+
+export type BusRequestBody = z.infer<typeof BusRequestBodySchema>;
 
 /** Where a send is aimed. `machineId` is nullable AND optional, and an absent
  *  one means THIS machine: {@link SessionDirectoryRow.machineId} is null in
@@ -170,8 +191,22 @@ export interface SendResultView {
    *  bridge-owned precisely so an agent cannot invent one, which leaves an agent
    *  never told the id unable to reply on the thread it just opened. */
   threadId: string;
-  /** That the frame LEFT this machine, never that it arrived: the other end's
-   *  receipt is the only honest witness. */
+  /** The highest rung the message had reached when the send returned. `held` is
+   *  on this machine only, `relayed` is the relay's own receipt, `delivered` is
+   *  the recipient bridge's signed acknowledgement that it STORED the message
+   *  (never that its agent read or acted on it), and `refused` is terminal.
+   *  Later rungs show on the thread. */
+  rung: Rung;
+  heldReason?: BusHeldReason;
+  refusedCode?: string;
+  /** A session on this machine: `delivered` is its own mailbox taking it. */
+  local?: true;
+  machineLabel?: string;
+  sessionName?: string;
+  /** While `held`, when the message is given up as expired. */
+  retryUntil?: number;
+  /** `rung !== "held"`. Kept for readers that predate `rung`; it is never
+   *  evidence that the message arrived. */
   sent: boolean;
   held: boolean;
   /** Whether this send opened the thread — the event pair-budget.ts counts as
@@ -236,6 +271,9 @@ export interface ThreadEntryView {
    *  `SessionBusThreadEntrySchema` (protocol.ts) carries what the stamp does and
    *  does not attest to. */
   deliveredAt?: number;
+  /** Outbound entries only: the highest rung the message has reached. */
+  delivery?: Rung;
+  refusedCode?: string;
 }
 
 export interface SessionBusApi {
@@ -258,6 +296,14 @@ export interface SessionBusApi {
   post(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
   notify(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
   reply(terminalId: string | undefined, body: ReplyBody): SendResultView | SessionBusRefusal;
+  /** Wait up to [timeoutMs] for a sent message to reach a rung above `held`,
+   *  then report the rung it is on. For the route that answers an agent's send:
+   *  the relay receipt arrives asynchronously, and the send itself stays
+   *  synchronous. */
+  awaitRung(
+    messageId: string,
+    timeoutMs: number,
+  ): Promise<{ rung: Rung; heldReason?: BusHeldReason; refusedCode?: string }>;
   /** Unread posts, and the count of the ones this session will never see.
    *  Reading MARKS READ: what was handed over has been delivered. This is the
    *  AGENT's read — the one an MCP tool call answers. */
@@ -271,6 +317,14 @@ export interface SessionBusApi {
    *  anywhere would report the loss. Whoever adds the next surface picks the
    *  read by asking who is looking, never by which one is closer to hand. */
   inboxPeek(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
+  /** Ask another of the account's machines to do something and wait for its
+   *  answer. The caller still names a session of its own; what the other
+   *  machine allows is decided there, from the role the account's directory
+   *  gives this one. */
+  request(
+    terminalId: string | undefined,
+    body: BusRequestBody,
+  ): Promise<{ ok: true; result: unknown } | SessionBusRefusal>;
   /** One exchange, both directions, with the receipt on each outbound entry. */
   thread(
     terminalId: string | undefined,
@@ -325,17 +379,8 @@ export interface SessionBusApiDeps {
    *  IS the session id for every agent session; a service PTY names none and
    *  resolves to null, which is what makes it expose no session tools. */
   membership: (terminalId: string) => SessionMembership | null;
-  /** Whether this machine's own desktop app — the loopback owner — is attached.
-   *  It carries a remote leg for a context this session OPENED and nothing
-   *  else: an answer on a context this session was contacted on leaves down the
-   *  carrier route the inbound frame recorded, so a send gate that read this
-   *  for both would refuse a reply whose transport is intact. */
-  carrierPresent: () => boolean;
   /** Whether this machine may take part in CROSS-MACHINE messaging at all —
-   *  its remote-access switch, already carrying the `relayEverAttached`
-   *  carve-out `remoteFrameAllowed` applies on the inbound side, so a core that
-   *  has never faced a relay (local, bare, every unit test) answers to no
-   *  switch. Same-machine sends never consult it. */
+   *  its remote-access switch. Same-machine sends never consult it. */
   remoteAccessEnabled: () => boolean;
   /** The same-machine carve-out: starts a session THIS HOST holds, by id.
    *  Absent means the wake never fires and a stopped session is always
@@ -346,6 +391,9 @@ export interface SessionBusApiDeps {
    *  finished — the notify is let through either way and rides the same
    *  "line held across a restart" delivery edge a real restart already uses. */
   startSession?: (sessionId: string) => boolean;
+  /** Sends a request to another machine and resolves with its answer. Absent
+   *  for a bare bus with no host above it. */
+  request?: (i: { to: string; method: string; params?: unknown; timeoutMs: number }) => Promise<BusRequestResult>;
   now?: () => number;
   newId?: () => string;
 }
@@ -422,6 +470,16 @@ function inboxViewOf(post: MailboxPost): InboxPostView {
 }
 
 function threadEntryOf(entry: LoggedEnvelope): ThreadEntryView {
+  const delivery: Rung | undefined =
+    entry.direction !== "out"
+      ? undefined
+      : entry.refusedAt !== undefined
+        ? "refused"
+        : entry.deliveredAt !== undefined
+          ? "delivered"
+          : entry.relayedAt !== undefined
+            ? "relayed"
+            : "held";
   return {
     direction: entry.direction,
     at: entry.at,
@@ -429,6 +487,8 @@ function threadEntryOf(entry: LoggedEnvelope): ThreadEntryView {
     summary: entry.envelope.metadata.summary,
     text: textPartsOf(entry.envelope),
     ...(entry.deliveredAt === undefined ? {} : { deliveredAt: entry.deliveredAt }),
+    ...(delivery === undefined ? {} : { delivery }),
+    ...(entry.refusedCode === undefined ? {} : { refusedCode: entry.refusedCode }),
   };
 }
 
@@ -582,55 +642,23 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     };
 
     const contextId = contextOf(m, thread);
-    // Which way this frame will actually leave, needed HERE because the carrier
-    // rung below is about the loopback socket a lead frame uses and a peer frame
-    // does not — so it has to be known before the coordinator is called.
-    const peerRole = !isLeadContext(m.sessionId, contextId);
     const offMachine = !namesMachine(target.machineId, selfMachineId);
 
-    // AHEAD of the row read, because it is a fact about THIS machine that needs
-    // no row to decide — and because it is itself what fills the mirror a row
-    // would come from. Read after it, an absent carrier would be reachable only
-    // in the window between the app detaching and the mirror aging out, and
-    // every steady-state send would answer "no session with that address": an
-    // agent would re-read the directory, find it empty, and conclude the peer
-    // does not exist rather than that nothing is carrying its messages.
-    //
     // THIS machine's remote-access switch gates the way OUT as well as the way
-    // in, reversing an earlier design where the switch governed only what may
-    // be done TO this machine, not what it may do — but inbound is already
-    // refused by `remoteFrameAllowed`, so leaving the send ungated shipped a
-    // machine that could speak and could not be answered: peers hold a
-    // delivered message from an address they have no row for, and their reply
-    // dies at our own inbound gate. One switch, both directions, is the only
-    // reading under which "remote access is off" describes what the machine
-    // actually does.
+    // in: inbound is refused by the host's own gate, so leaving the send
+    // ungated shipped a machine that could speak and could not be answered —
+    // peers hold a delivered message from an address they have no row for, and
+    // their reply dies at our own inbound gate. One switch, both directions, is
+    // the only reading under which "remote access is off" describes what the
+    // machine actually does.
     //
-    // Ahead of the carrier check because it outranks it as an answer: with the
-    // switch off, whether the desktop app happens to be attached is not the
-    // reason the send failed, and telling a user to reattach an app would send
-    // them after the wrong thing.
+    // Ahead of the row read, because it is a fact about THIS machine that needs
+    // no row to decide.
     if (offMachine && !deps.remoteAccessEnabled()) {
       return refuse(
         "REMOTE_ACCESS_OFF",
         "this machine's remote access is off, so it exchanges messages only with sessions on itself",
       );
-    }
-
-    if (offMachine && !peerRole) {
-      // The desktop app carries every off-machine leg this session OPENED.
-      // Without it the send would answer sent:false with the message held,
-      // which every surface renders as a success. A peer-role frame is
-      // exempt because it does not use that socket: it resolves
-      // `routeFor(contextId)` and leaves on whichever project's stream brought
-      // the context in, so refusing it here would refuse a reply whose
-      // transport is intact.
-      if (!deps.carrierPresent()) {
-        return refuse(
-          "PEER_UNREACHABLE",
-          "this machine's desktop app is not attached, and it is what carries a message to another machine",
-        );
-      }
     }
 
     // The exact-address read, which is why it is not `list()`: a send must not
@@ -656,41 +684,28 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
           "no session with that address is on this machine, or it is in a repository this project does not share",
         );
       }
-      // The fallback that lets a peer finish a sentence it did not start. It
-      // needs EVERY half below and gets none by asking: a `ThreadRow` is minted
-      // only after `handleInbound`'s address check admitted a frame, and
-      // `upsertThread` freezes its context and its peer; a route is noted only
-      // from that same admission hook, and an inbound log entry is written on
-      // that same fold. So this branch can never be an exchange's first frame,
-      // and an agent cannot manufacture it by naming an address.
+      // The fallback that lets a peer finish a sentence it did not start: a
+      // reply on a thread addresses the peer the thread row already records.
+      // The directory has no row for a machine that offers none, and the thread
+      // store is the only record of who is on the other end. It cannot be an
+      // exchange's first frame — a `ThreadRow` is minted only after the inbound
+      // address check admitted a frame, and `upsertThread` freezes its context
+      // and its peer — so an agent cannot manufacture it by naming an address.
       //
-      // What it gives up, because it is the one bound `rowFor` was carrying on
-      // this path: the PEER's half of the repo-key scope. A thread row records
-      // no repo key and nothing puts one on the wire, so a remote peer that
-      // reached this machine across repo keys — which the inbound gate already
-      // permits — can now be answered. That is bounded by the three gates that
-      // admitted it (account trust, `remoteFrameAllowed`, `peerBusReachAllowed`)
-      // and by nothing here. The local target above keeps the key bound, and so
+      // What it gives up is the PEER's half of the repo-key scope, which a
+      // thread row does not record. That is bounded by the gates that admitted
+      // the exchange (account membership, the remote-access switch, agent reach)
+      // and by nothing here; the local target above keeps the key bound, and so
       // does every exchange this branch refuses to open.
       if (!thread) {
         return refuse(
           "PEER_UNREACHABLE",
-          "no row for that address here, and without a threadId there is nothing else to route by; this does not clear by retrying — a machine that offers no row can still be answered on a thread it opened, but it cannot be opened with",
-        );
-      }
-      // The half that bounds it in TIME, and it takes two reads because neither
-      // answers the question alone. A live route says the way home is open; it
-      // does NOT say whose, because `noteRoute` keys by context and a lead
-      // context is one entry shared by every exchange this session opened — so
-      // one correspondent still replying restamps it for a peer that went dark
-      // hours ago. `lastInboundAt` is the peer-scoped half: a frame on THIS
-      // context, from THAT peer, inside `BUS_ROUTE_TTL_MS`. Together they are
-      // what a stale thread row cannot give.
-      const heardFrom = lastInboundAt(deps.coordinator.messages(m.sessionId), contextId, thread.peer);
-      if (!deps.coordinator.routeFor(contextId) || heardFrom === null || now() - heardFrom >= BUS_ROUTE_TTL_MS) {
-        return refuse(
-          "PEER_UNREACHABLE",
-          "that thread's way home has lapsed and no row for its peer is offered here; this does not clear by retrying — it takes a frame from that machine, or a row once it is reachable again",
+          // Says what clears it rather than "retrying will not help": the
+          // directory is refreshed on its own schedule, so a send landing
+          // between two refreshes is refused here and the very next attempt
+          // succeeds unchanged. Told it could not retry, a caller reads an
+          // addressable peer as gone.
+          "no row for that address here, and without a threadId there is nothing else to route by; what clears this is the directory listing that peer again, not the wording of the send — a machine that offers no row can still be answered on a thread it opened, but it cannot be opened with",
         );
       }
     }
@@ -769,6 +784,10 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     // without interrupting.
     reply(terminalId, body) {
       return sendMessage(terminalId, "notify", body);
+    },
+
+    awaitRung(messageId, timeoutMs) {
+      return deps.coordinator.awaitRung(messageId, timeoutMs);
     },
 
     inbox(terminalId) {
@@ -882,7 +901,8 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // taught to refuse. Listing them anyway is the same "renders as sendable,
       // refuses on use" failure the `no-machine-id` rung exists to prevent, one
       // switch further out — so the rows are narrowed to this machine and the
-      // reach report says which fact did it, rather than blaming the carrier.
+      // reach report says which fact did it, rather than blaming a mirror that
+      // is in fact fresh.
       if (!deps.remoteAccessEnabled()) {
         const self = deps.machineId();
         return {
@@ -904,6 +924,28 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // would be wrong in exactly the state that matters: a peer whose rows all
       // expired is still named there while contributing none.
       return { sessions: answer.rows, truncated: answer.truncated, reach: answer.reach, machineId: deps.machineId() };
+    },
+
+    async request(terminalId, body) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      if (!deps.request) return refuse("AGENT_NOT_READY", "this bridge cannot send requests to other machines");
+      if (!deps.remoteAccessEnabled()) {
+        return refuse("REMOTE_ACCESS_OFF", "remote access is off on this machine, so it sends nothing to other machines");
+      }
+      const answer = await deps.request({
+        to: body.to, method: body.method, params: body.params,
+        timeoutMs: body.timeoutMs ?? BUS_REQUEST_DEFAULT_TIMEOUT_MS,
+      });
+      if (answer.ok) return { ok: true, result: answer.result };
+      const known = Object.hasOwn(SESSION_BUS_ERRORS, answer.code);
+      const code: SessionBusErrorCode = known ? (answer.code as SessionBusErrorCode) : "REQUEST_FAILED";
+      const refusal = refuse(code, refusalSentence(answer.code));
+      return {
+        ...refusal,
+        ...(!known && REMOTE_CODE_PATTERN.test(answer.code) ? { remoteCode: answer.code } : {}),
+        ...(answer.held ? { held: answer.held } : {}),
+      };
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

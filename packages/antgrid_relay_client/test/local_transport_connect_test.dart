@@ -96,30 +96,14 @@ void main() {
     },
   );
 
-  group('hello capabilities', () {
-    Future<Map<String, dynamic>> helloFrom({bool sessionBusCarrier = false}) async {
-      final agent = _HelloRecorder();
-      await agent.start();
-      addTearDown(agent.close);
-      final t = LocalTransport(
-        port: agent.port,
-        token: 't',
-        appPid: 1,
-        sessionBusCarrier: sessionBusCarrier,
-      );
-      addTearDown(t.dispose);
-      await t.connect();
-      return agent.hello.future;
-    }
-
-    test('omits capabilities entirely when the caller names none', () async {
-      final hello = await helloFrom();
-      expect(hello.containsKey('capabilities'), isFalse);
-    });
-
-    test('sends sessionBusCarrier when the caller is a bus owner', () async {
-      final hello = await helloFrom(sessionBusCarrier: true);
-      expect(hello['capabilities'], {'sessionBusCarrier': true});
-    });
+  test('hello carries no capabilities', () async {
+    final agent = _HelloRecorder();
+    await agent.start();
+    addTearDown(agent.close);
+    final t = LocalTransport(port: agent.port, token: 't', appPid: 1);
+    addTearDown(t.dispose);
+    await t.connect();
+    final hello = await agent.hello.future;
+    expect(hello.containsKey('capabilities'), isFalse);
   });
 }

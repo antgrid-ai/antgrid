@@ -61,10 +61,47 @@ const MAX_TRACKED_CALLS = 500;
 export const kimiEvents: HandoffEventsFn = async (dir, manifest, sink, signal) => {
   const file = join(dir, manifest.primary);
   const callNames = new Map<string, string>();
+  const rememberCall = (id: string | undefined, name: string) => {
+    if (!id) return;
+    if (callNames.size >= MAX_TRACKED_CALLS) callNames.delete(callNames.keys().next().value!);
+    callNames.set(id, name);
+  };
   await forEachJsonlLine(file, (lineNo, value) => {
     if (!isRec(value)) return;
     const at = `${manifest.primary}:${lineNo}`;
     switch (value.type) {
+      // Kimi folds these and the loop events into one message list, so a message
+      // is recorded one way or the other, never both. A live turn writes only
+      // user-role ones (the prompt's mirror and system reminders), which
+      // turn.prompt already covers; a session Kimi migrated from the Python
+      // kimi-cli writes its whole history this way.
+      case "context.append_message": {
+        const message = value.message;
+        if (!isRec(message)) return;
+        if (message.role === "assistant") {
+          const text = partsText(message.content).trim();
+          if (text) sink({ kind: "assistant", text: capEventText(text), at });
+          for (const call of Array.isArray(message.toolCalls) ? message.toolCalls : []) {
+            if (!isRec(call)) continue;
+            // The migration nests name and arguments under `function`; a live fold does not.
+            const fn = isRec(call.function) ? call.function : call;
+            const name = str(fn.name) ?? "tool";
+            rememberCall(str(call.id), name);
+            sink({ kind: "tool_call", name, input: capEventText(stringify(fn.arguments)), at });
+          }
+        } else if (message.role === "tool") {
+          const id = str(message.toolCallId);
+          const name = id ? callNames.get(id) : undefined;
+          sink({
+            kind: "tool_result",
+            ...(name ? { name } : {}),
+            output: capEventText(partsText(message.content) || stringify(message.content)),
+            ...(message.isError === true ? { isError: true } : {}),
+            at,
+          });
+        }
+        return;
+      }
       case "turn.prompt":
       case "turn.steer": {
         if (!isHumanOrigin(value)) return;
@@ -94,11 +131,7 @@ export const kimiEvents: HandoffEventsFn = async (dir, manifest, sink, signal) =
           if (text) sink({ kind: "assistant", text: capEventText(text), at });
         } else if (event.type === "tool.call") {
           const name = str(event.name) ?? "tool";
-          const id = str(event.toolCallId);
-          if (id) {
-            if (callNames.size >= MAX_TRACKED_CALLS) callNames.delete(callNames.keys().next().value!);
-            callNames.set(id, name);
-          }
+          rememberCall(str(event.toolCallId), name);
           sink({ kind: "tool_call", name, input: capEventText(stringify(event.args)), at });
         } else if (event.type === "tool.result") {
           const result = isRec(event.result) ? event.result : {};

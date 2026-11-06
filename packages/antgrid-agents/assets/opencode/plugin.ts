@@ -1,4 +1,3 @@
-/// <reference path="../../src/opencode-plugin.d.ts" />
 // Antgrid opencode plugin: reports one opencode terminal to the bridge in the
 // vocabulary the bridge's hook routes already speak — the turn's start
 // (/turn-start, /turn-activity) and end (/notify + /handler-event turn_end), the
@@ -6,7 +5,88 @@
 // conversation title (/session-title), and the Handler's triggers. Runs inside
 // opencode's own Bun runtime, so we use fetch (no node). Correlation via the
 // ANTGRID_TERMINAL_ID env.
-import type { Plugin } from "@opencode-ai/plugin";
+import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
+import { MEMORY_AGENT_GUIDANCE } from "../memory-guidance";
+
+// The slice of the V2 plugin host's `session.hook` used here; `@opencode/client`
+// does not declare it, and this installed asset carries no runtime dependency.
+type ContextHook = (
+  name: "context",
+  callback: (input: { readonly sessionID: string; system: Array<{ type: "text"; text: string }> }) => Promise<void>,
+) => Promise<{ dispose(): Promise<void> }>;
+
+// The V2 host loads a package's default definition and owns the subscription's
+// lifetime. Keep routing independent of that host so it can be exercised without
+// starting an agent or making model requests.
+export default {
+  id: "antgrid",
+  async setup(ctx: Pick<OpenCodeClient, "event"> & { session: Pick<OpenCodeClient["session"], "get"> & { hook: ContextHook } }) {
+    const reporter = await AntgridSessionNamer();
+    const stop = new AbortController();
+    const sessions = new Map<string, string | undefined>();
+    const send = (type: string, properties: unknown) => reporter.event?.({ event: { type, properties } });
+    const identify = async (sessionID: string) => {
+      if (sessions.has(sessionID)) return;
+      const info = await ctx.session.get({ sessionID });
+      sessions.set(sessionID, info.parentID);
+      await send("session.created", { info });
+      await send("session.updated", { info });
+    };
+    const receive = async (event: OpenCodeEvent) => {
+      const p: any = "data" in event ? event.data : {};
+      if (p.sessionID && p.sessionID !== "global" && event.type !== "session.created" && event.type !== "session.deleted") {
+        await identify(p.sessionID);
+      }
+      switch (event.type) {
+        case "session.created":
+          sessions.set(p.sessionID, p.parentID);
+          await send("session.created", { info: { ...p, id: p.sessionID } });
+          return send("session.updated", { info: { ...p, id: p.sessionID } });
+        case "session.renamed": return send("session.updated", { info: { ...p, id: p.sessionID, parentID: sessions.get(p.sessionID) } });
+        case "session.deleted":
+          sessions.delete(p.sessionID);
+          return send(event.type, p);
+        case "session.execution.started":
+        case "session.step.started":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "busy" } });
+        case "session.execution.failed":
+          await send("session.error", { sessionID: p.sessionID, error: { name: p.error.type, data: p.error } });
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "session.execution.interrupted":
+        case "session.execution.succeeded":
+          return send("session.status", { sessionID: p.sessionID, status: { type: "idle" } });
+        case "permission.asked": return send(event.type, { ...p, permission: p.action, patterns: p.resources });
+        case "permission.replied": return send(event.type, p);
+        case "form.created": return send("question.asked", {
+          id: p.form.id, sessionID: p.form.sessionID, questions: [{ question: p.form.title }],
+        });
+        case "form.replied":
+        case "form.cancelled": return send("question.replied", { requestID: p.id });
+      }
+    };
+    // Runs before each primary model request, on its critical path. A session
+    // the subscription has not classified yet is looked up first so a subagent
+    // is never mistaken for a root; a failed lookup only costs that request its
+    // guidance.
+    const guidance = await ctx.session.hook("context", async (input) => {
+      input.system = input.system.filter((part) => part.text !== MEMORY_AGENT_GUIDANCE);
+      try { await identify(input.sessionID); } catch { return; }
+      if (await reporter.memoryGuidance(input.sessionID)) input.system.push({ type: "text", text: MEMORY_AGENT_GUIDANCE });
+    });
+    const loop = (async () => {
+      for await (const event of ctx.event.subscribe({ signal: stop.signal })) {
+        if (stop.signal.aborted) break;
+        try { await receive(event); } catch (error) { console.error("Antgrid plugin event failed", error); }
+      }
+    })().catch((error) => { if (!stop.signal.aborted) console.error("Antgrid plugin subscription failed", error); });
+    return async () => {
+      stop.abort();
+      await guidance.dispose();
+      await loop;
+      await reporter.dispose?.();
+    };
+  },
+};
 
 // Posts go out one at a time (see `send`), so a bridge that accepts the
 // connection and then hangs would hold up every post queued behind it; a dead
@@ -21,8 +101,68 @@ const ACTIVITY_INTERVAL_MS = 60_000;
 // Bounds the loopback POST, not the display — the same ceiling the Claude hook
 // clips a question to.
 const MAX_DETAIL_CHARS = 400;
+const MEMORY_BOOTSTRAP_TIMEOUT_MS = 1500;
+const MEMORY_BOOTSTRAP_MAX_BYTES = 1024;
 
 type Post = { path: string; body: Record<string, unknown> };
+
+// Only a parsed 200 is an answer. A timeout, a non-200 or a malformed body says
+// nothing about the user's setting, so it is `undefined` and callers keep what
+// they last knew rather than flipping guidance on a transient fault.
+async function memoryGuidanceStatus(): Promise<boolean | undefined> {
+  // Set only when the launch registered the memory server; without it the
+  // guidance would name tools this session does not have.
+  if (process.env.ANTGRID_MEMORY_MCP !== "1") return false;
+  const portText = process.env.ANTGRID_API_PORT;
+  const terminalId = process.env.ANTGRID_TERMINAL_ID?.trim();
+  const runId = process.env.ANTGRID_RUN_ID?.trim();
+  const port = Number(portText);
+  if (!portText || !/^\d+$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535
+    || !terminalId || terminalId.startsWith("${") || !runId || runId.startsWith("${")) return undefined;
+  try {
+    const url = new URL(`http://127.0.0.1:${port}/memory/bootstrap`);
+    url.searchParams.set("terminalId", terminalId);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId }),
+      redirect: "error",
+      signal: AbortSignal.timeout(MEMORY_BOOTSTRAP_TIMEOUT_MS),
+    });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let text = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > MEMORY_BOOTSTRAP_MAX_BYTES) return undefined;
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    const status: unknown = JSON.parse(text);
+    // This installed asset has no runtime dependencies. Mirror the narrow
+    // bridge schema and refuse extra fields so memory content cannot enter it.
+    if (!status || typeof status !== "object" || Array.isArray(status)) return undefined;
+    const result = status as Record<string, unknown>;
+    if (Object.keys(result).length !== 4 || result.available !== true
+      || typeof result.enabled !== "boolean" || typeof result.paused !== "boolean"
+      || typeof result.project_paused !== "boolean") return undefined;
+    return result.enabled && !result.paused && !result.project_paused;
+  } catch {
+    return undefined;
+  }
+}
 
 function clip(text: unknown): string | undefined {
   if (typeof text !== "string") return undefined;
@@ -40,9 +180,7 @@ function handlerPosts(terminalId: string | undefined, kind: string, extra: Recor
   return terminalId ? [{ path: "/handler-event", body: { terminalId, agent: "opencode", event: kind, ...extra } }] : [];
 }
 
-// opencode's loader calls EVERY export of this module as a plugin and throws on
-// one that is not a function, so nothing but the plugin itself may be exported.
-export const AntgridSessionNamer: Plugin = async () => {
+export async function AntgridSessionNamer(_input?: unknown) {
   // Per opencode instance, and only ever touched synchronously: opencode calls
   // the event handler in publish order but never awaits it, so every decision
   // is made before the first await and only the sends are deferred.
@@ -54,6 +192,30 @@ export const AntgridSessionNamer: Plugin = async () => {
   // session, publishing session.updated, before every prompt into it, so a child
   // is always classified before its first `busy`.
   const children = new Set<string>();
+  // The context hook runs on every model request and sits on its critical
+  // path. Only the first request waits for the bridge; later ones use the last
+  // definitive answer and refresh it behind the request, so a slow or failing
+  // bridge never delays or flickers the guidance. The answer is the user's
+  // setting for this terminal, not per native session, hence one shared value.
+  const GUIDANCE_REFRESH_MS = 30_000;
+  let guidance: { value: boolean; refreshing: boolean; checkedAt: number } | undefined;
+  let firstGuidance: Promise<boolean> | undefined;
+  const guidanceFor = async (): Promise<boolean> => {
+    if (!guidance) {
+      firstGuidance ??= memoryGuidanceStatus().then((status) => {
+        guidance = { value: status ?? false, refreshing: false, checkedAt: Date.now() };
+        return guidance.value;
+      });
+      return firstGuidance;
+    }
+    const known = guidance;
+    if (!known.refreshing && Date.now() - known.checkedAt >= GUIDANCE_REFRESH_MS) {
+      known.refreshing = true;
+      known.checkedAt = Date.now();
+      void memoryGuidanceStatus().then((fresh) => { if (fresh !== undefined) known.value = fresh; }, () => {}).finally(() => { known.refreshing = false; });
+    }
+    return known.value;
+  };
   // Root sessions this plugin has seen go busy and not yet seen go idle.
   const working = new Set<string>();
   // A root session's own error, held until its run actually stops: opencode
@@ -279,6 +441,8 @@ export const AntgridSessionNamer: Plugin = async () => {
   }
 
   return {
+    memoryGuidance: async (sessionID: string): Promise<boolean> =>
+      !!sessionID && !children.has(sessionID) && await guidanceFor(),
     event: async ({ event }: { event: any }) => {
       const port = process.env.ANTGRID_API_PORT;
       if (!port) return;
@@ -300,4 +464,4 @@ export const AntgridSessionNamer: Plugin = async () => {
       return send(port, process.env.ANTGRID_RUN_ID, posts);
     },
   };
-};
+}

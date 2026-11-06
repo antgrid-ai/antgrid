@@ -190,7 +190,7 @@ enum RecentGroupBy { machine, project, status }
 
 final recentGroupByProvider =
     NotifierProvider<ValueController<RecentGroupBy>, RecentGroupBy>(
-      () => ValueController(RecentGroupBy.machine),
+      () => ValueController(RecentGroupBy.project),
     );
 
 /// The Machine / Project / Status toggle chips. Hides itself while there are

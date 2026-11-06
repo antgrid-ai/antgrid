@@ -202,3 +202,51 @@ class AgentReachPolicyNotifier extends AsyncNotifier<AgentReachPolicy> {
     }
   }
 }
+
+/// THIS machine's session-bus grant, read from its own row in the account
+/// inventory and written through the owner's session (the only credential that
+/// may raise it). Null when the machine has no agent row to read (signed
+/// out, a mobile host, or a server that sends no grant); the UI hides the
+/// switch then rather than guessing off.
+final sessionBusGrantsProvider =
+    AsyncNotifierProvider<SessionBusGrantsNotifier, SessionBusGrants?>(
+      SessionBusGrantsNotifier.new,
+    );
+
+class SessionBusGrantsNotifier extends AsyncNotifier<SessionBusGrants?> {
+  String? _rowId;
+
+  @override
+  Future<SessionBusGrants?> build() async {
+    _rowId = null;
+    final uuid = await ref.watch(localDeviceUuidProvider.future);
+    if (uuid == null) return null;
+    final rows = await ref.watch(accountDevicesByBridgeIdProvider.future);
+    final row = rows[uuid];
+    final orchestrator = row?.orchestrator;
+    if (row == null || orchestrator == null) return null;
+    _rowId = row.id;
+    return SessionBusGrants(orchestrator: orchestrator);
+  }
+
+  /// Whether the server took the change. The caller reports a failure itself,
+  /// so a failed first read of the account row never reads as a failed edit.
+  Future<bool> setGrants({required bool orchestrator}) async {
+    final id = _rowId;
+    if (id == null) return false;
+    // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
+    state = const AsyncLoading<SessionBusGrants?>().copyWithPrevious(state);
+    try {
+      final next = await ref
+          .read(devicesApiProvider)
+          .setSessionBusGrants(id, orchestrator: orchestrator);
+      if (ref.mounted) state = AsyncData(next);
+      return true;
+    } catch (e, st) {
+      if (!ref.mounted) return false;
+      // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
+      state = AsyncError<SessionBusGrants?>(e, st).copyWithPrevious(state);
+      return false;
+    }
+  }
+}

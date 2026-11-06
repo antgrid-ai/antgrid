@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { parseTrustedProxies, type Cidr } from "antgrid-wire";
+import { BUS_MAX_TTL_MS, parseTrustedProxies, type Cidr } from "antgrid-wire";
 import { z } from "zod/v4";
 
 export interface RelayConfig {
@@ -20,6 +20,16 @@ export interface RelayConfig {
   replayTtlMs: number;
   pingIntervalMs: number;
   pongTimeoutMs: number;
+  /** Sealed bus queue bounds. The relay holds only ciphertext it cannot open, so these bound memory, not content. */
+  busQueueMessagesPerDevice: number;
+  busQueueBytesPerDevice: number;
+  busQueueMessagesPerSender: number;
+  busQueueBytesPerSender: number;
+  busQueueBytesTotal: number;
+  /** Ceiling on a sender-chosen TTL. */
+  busMaxTtlMs: number;
+  /** Per-agent budget of sealed bytes accepted per minute. */
+  busSendBytesPerMin: number;
   /**
    * IPs/CIDRs of reverse proxies the relay sits behind (comma-separated env).
    * When the direct peer is one of these, the client IP is recovered from
@@ -79,6 +89,13 @@ const RelayEnvironment = z.object({
   REPLAY_TTL_MS: positiveInt("300000"),
   PING_INTERVAL_MS: positiveInt("30000"),
   PONG_TIMEOUT_MS: positiveInt("10000"),
+  BUS_RELAY_QUEUE_MESSAGES: positiveInt("256"),
+  BUS_RELAY_QUEUE_BYTES: positiveInt(String(8 * 1024 * 1024)),
+  BUS_RELAY_QUEUE_MESSAGES_PER_SENDER: positiveInt("512"),
+  BUS_RELAY_QUEUE_BYTES_PER_SENDER: positiveInt(String(16 * 1024 * 1024)),
+  BUS_RELAY_QUEUE_BYTES_TOTAL: positiveInt(String(256 * 1024 * 1024)),
+  BUS_RELAY_MAX_TTL_MS: positiveInt(String(BUS_MAX_TTL_MS)),
+  BUS_SEND_BYTES_PER_MIN: positiveInt(String(16 * 1024 * 1024)),
   TRUSTED_PROXY_IPS: z.string().optional().transform((value, ctx) => {
     try {
       return parseTrustedProxies(value);
@@ -135,6 +152,13 @@ export function loadConfig(): RelayConfig {
     replayTtlMs: env.REPLAY_TTL_MS,
     pingIntervalMs: env.PING_INTERVAL_MS,
     pongTimeoutMs: env.PONG_TIMEOUT_MS,
+    busQueueMessagesPerDevice: env.BUS_RELAY_QUEUE_MESSAGES,
+    busQueueBytesPerDevice: env.BUS_RELAY_QUEUE_BYTES,
+    busQueueMessagesPerSender: env.BUS_RELAY_QUEUE_MESSAGES_PER_SENDER,
+    busQueueBytesPerSender: env.BUS_RELAY_QUEUE_BYTES_PER_SENDER,
+    busQueueBytesTotal: env.BUS_RELAY_QUEUE_BYTES_TOTAL,
+    busMaxTtlMs: env.BUS_RELAY_MAX_TTL_MS,
+    busSendBytesPerMin: env.BUS_SEND_BYTES_PER_MIN,
     trustedProxyIps: env.TRUSTED_PROXY_IPS,
     logLevel: env.LOG_LEVEL,
     licenseApiUrl: env.LICENSE_API_URL,

@@ -874,6 +874,18 @@ class HostController {
     // simplest bound now that the log writes in every build mode.
     rotateLogIfNeeded(logPath);
     final logSink = File(logPath).openWrite(mode: FileMode.append);
+    // An IOSink reports a failed open or write only through `done`, and
+    // nothing else here awaits it; unhandled, a full disk or a locked log
+    // would crash the app on every host spawn. The tee is best-effort.
+    unawaited(
+      logSink.done.catchError((Object error) {
+        AbLog.warn(
+          'HostController',
+          'host.log write failed',
+          fields: {'error': '$error'},
+        );
+      }),
+    );
     logSink.writeln(
       '--- ${DateTime.now().toIso8601String()} host spawned pid=${proc.pid} ---',
     );

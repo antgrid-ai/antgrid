@@ -2,6 +2,7 @@ import { clipboardMessages, CLIPBOARD_MESSAGE_TYPES, TerminalClipboardMessageSch
 export * from "./terminal-clipboard/protocol";
 import * as agentPayloads from "antgrid-agents/payloads";
 import { z } from "zod";
+import { MemoryRequestRecordSchema, MemoryResultSchema } from "antgrid-memory";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
 import {
@@ -1007,13 +1008,20 @@ const DeviceStatsMessage = BaseMessage.extend({
   storageFreeBytes: DeviceStatsBytes,
 });
 
-/** The machine describing its own RAM to attached apps, on each handshake and
- *  then on a timer, so a remote view can show what the host has to spare.
- *  Display only, like device:stats. */
+/** An app asking the machine for its current RAM and CPU load. Answered with
+ *  machine:stats; nothing is sampled until someone asks. */
+const MachineStatsRequestMessage = BaseMessage.extend({
+  type: z.literal("machine:stats:request"),
+});
+
+/** The machine describing its own RAM and CPU load, in answer to
+ *  machine:stats:request, so a remote view can show what the host has to spare
+ *  and that it is still alive. Display only, like device:stats. */
 const MachineStatsMessage = BaseMessage.extend({
   type: z.literal("machine:stats"),
   ramTotalBytes: DeviceStatsBytes,
   ramAvailableBytes: DeviceStatsBytes,
+  cpuPercent: z.number().min(0).max(100).optional(),
 });
 
 // Wire mirror of InstructionItem (handler/backlog.ts) — the live instruction
@@ -1831,6 +1839,10 @@ const SessionEntrySchema = z.object({
   // `default(false)` is the safe read of an older bridge's omission — a row
   // that never shows pending beats one stuck pending forever.
   deleting: z.boolean().default(false),
+  // Memory is decided at launch and a running process cannot gain it, so this
+  // marks a running session that was started while Memory was off. Runtime-only,
+  // like `deleting`: it never reaches sessions.json. Emitted only when true.
+  startedWithoutMemory: z.boolean().optional(),
   tool: z.string().optional(),
   command: z.string().optional(),
   // A current bridge derives this from the registry adapter. False by default
@@ -2006,6 +2018,14 @@ const SessionSetModeMessage = BaseMessage.extend({
   mode: z.enum(["terminal", "chat"]),
 });
 
+// Not CheckoutScoped, for the reason given on SessionSetupMessage below.
+const SessionRestartMessage = BaseMessage.extend({
+  type: z.literal("session:restart"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  reason: z.literal("memory"),
+});
+
 // Skip releases the queued start immediately and lets setup keep running;
 // cancel kills the run; rerun starts a fresh one from a terminal state.
 // Deliberately NOT in CHECKOUT_VARIABLE_MESSAGE_TYPES: every `session:*` verb
@@ -2035,6 +2055,8 @@ const SessionResultMessage = BaseMessage.extend({
   error: z.string().optional(),
   ...CheckoutScoped,
   errorCode: z.string().optional(),
+  // Set only on a session:restart reply with ok:true.
+  restarted: z.boolean().optional(),
   session: SessionEntrySchema.optional(),
 });
 
@@ -2394,8 +2416,8 @@ export const BusEnvelopeSchema = z.object({
 export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
 
 /** Both endpoints on every frame. Nothing shorter is an address: a machine holds
- *  several projects and a project several sessions, and the carrier picks the
- *  relay session to forward on out of `to`. */
+ *  several projects and a project several sessions, and the relay transport
+ *  picks the recipient machine out of `to`. */
 const SessionBusBaseWire = {
   from: SessionMemberKeySchema,
   to: SessionMemberKeySchema,
@@ -2403,10 +2425,9 @@ const SessionBusBaseWire = {
 };
 
 /** The body both verbs carry, since everything after the send decision is
- *  identical for the two. No `seq`: messages are lossy on purpose, and
- *  reliable delivery behind text that changes no state would be
- *  unbounded retry buying nothing. The delivery receipt witnesses arrival without
- *  making it reliable — it is never retried either. */
+ *  identical for the two. No `seq`: ordering is not promised. Delivery between
+ *  machines is at-least-once, with the receiver deduplicating on the message id;
+ *  the contract and what each delivery rung attests to are in bridge/AGENTS.md. */
 export const SessionBusMessageWire = z.object({
   ...SessionBusBaseWire,
   threadId: z.string().min(1).max(200).nullable(),
@@ -2433,20 +2454,6 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** The delivery receipt, keyed by the id of the message it answers — the
- *  only honest witness that a frame arrived, since everything this side of the
- *  relay reports only that it left. It is fire-and-forget: an unacked ack is
- *  never retried. `ok: false` is still a receipt — "this reached me", not "I
- *  liked it" — but it stamps nothing here: the stamp renders as the peer having
- *  taken the frame, so stamping a refusal would tell the sender the opposite of
- *  what the peer said. No `seq`, because messages have none. */
-export const SessionBusAckWire = z.object({
-  ...SessionBusBaseWire,
-  messageId: z.string().min(1).max(200),
-  ok: z.boolean(),
-  error: z.string().max(500).optional(),
-});
-
 /** Two verbs rather than one verb and a flag, and the shape is
  *  identical because everything after the send decision is: a bridge that does
  *  not know a verb REFUSES it, where a bridge that does not know a flag would
@@ -2468,15 +2475,21 @@ const SessionBusFetchResultMessage = BaseMessage.extend({
   type: z.literal("session-bus:fetch:result"),
 }).extend(SessionBusFetchResultWire.shape);
 
-const SessionBusAckMessage = BaseMessage.extend({
-  type: z.literal("session-bus:ack"),
-}).extend(SessionBusAckWire.shape);
-
+/** What a sealed bus delivery may carry. Validated on the receiving bridge,
+ *  where nothing else checks a bus frame's shape: the sealed header proves who
+ *  sent it, not that the body is well formed. */
+export const BusMessageBodySchema = z.discriminatedUnion("type", [
+  SessionBusPostMessage,
+  SessionBusNotifyMessage,
+  SessionBusFetchMessage,
+  SessionBusFetchResultMessage,
+]);
+export type BusMessageBody = z.infer<typeof BusMessageBodySchema>;
 
 // ── Session bus: what the APP reads of its OWN bridge ────────────────────────
-// The five frames above are agent-to-agent traffic the app only CARRIES between
-// two bridges that cannot dial each other. These are the opposite: an app
-// asking the bridge it is attached to about its own sessions, and consuming the
+// The four frames above are agent-to-agent traffic that travels sealed between
+// two bridges over the relay queue; an app never carries them. These are the
+// opposite: an app asking the bridge it is attached to about its own sessions, and consuming the
 // answer. Same plane all the same — `SessionBusApi` is built inside the project
 // core with the machine-level directory injected into it, so machine-scoped
 // STATE never implied machine-scoped transport.
@@ -2520,6 +2533,8 @@ const SessionBusDirectoryRowSchema = z.object({
    *  receive-only vendor is offered saying so, never as a peer that will
    *  silently never answer. */
   canReply: z.boolean(),
+  /** Remote rows only: when the card the row came off was received. */
+  asOf: z.number().optional(),
 });
 
 /** One machine in the reach report. It rides beside the rows and never in them:
@@ -2529,7 +2544,7 @@ const SessionBusDirectoryRowSchema = z.object({
 const SessionBusReachMachineSchema = z.object({
   machineId: z.string().max(200),
   machineLabel: z.string().max(120).optional(),
-  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable"]),
+  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable", "not-asked"]),
   rows: z.number(),
   droppedRows: z.number(),
   truncatedCard: z.number(),
@@ -2542,11 +2557,11 @@ const SessionBusReachMachineSchema = z.object({
 const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   z.object({
     scope: z.literal("machine"),
-    why: z.enum(["no-machine-id", "no-carrier", "remote-access-off"]),
+    why: z.enum(["no-machine-id", "central-offline", "not-refreshed", "remote-access-off"]),
   }),
   z.object({
     scope: z.literal("network"),
-    lastPushAgoMs: z.number(),
+    asOfAgoMs: z.number().nullable(),
     machines: z.array(SessionBusReachMachineSchema),
     staleMachines: z.number(),
     notConnected: z.number(),
@@ -2581,12 +2596,17 @@ const SessionBusThreadEntrySchema = z.object({
   peer: SessionMemberKeySchema,
   summary: z.string().max(MAX_SUMMARY_CHARS),
   text: z.array(z.string()),
-  /** Outbound entries only: when a receipt saying the peer BRIDGE took the
-   *  frame arrived. Never that the peer's agent read it, and never that a
-   *  message from that peer can reach back here. Absent covers silence and a
-   *  refusing receipt alike — a receipt is fire-and-forget and an unacked
-   *  message is never retried. This read is the only surface it is visible on. */
+  /** Outbound entries only: when the peer BRIDGE's signed acknowledgement said
+   *  it stored the message. Never that the peer's agent read it, and never that
+   *  a message from that peer can reach back here. Absent covers every rung
+   *  below it; `delivery` says which one the message has reached. */
   deliveredAt: z.number().optional(),
+  /** Outbound entries only. `held` is on this machine, `relayed` is the relay's
+   *  own receipt, `delivered` is the recipient's signed ack, `refused` is
+   *  terminal. Optional so an app that predates it keeps parsing. */
+  delivery: z.enum(["held", "relayed", "delivered", "refused"]).optional(),
+  /** Why a `refused` message was refused. */
+  refusedCode: z.string().max(64).optional(),
 });
 
 const SessionBusDirectoryMessage = BaseMessage.extend({
@@ -2697,7 +2717,23 @@ const NetwatchEventsMessage = BaseMessage.extend({
   sentAt: z.number().optional(),
 });
 
+export const MemoryRequestMessage = BaseMessage.extend({
+  type: z.literal("memory:request"),
+  requestId: z.string().min(1),
+  request: MemoryRequestRecordSchema,
+});
+
+const MemoryResultMessage = BaseMessage.extend({
+  type: z.literal("memory:result"),
+  requestId: z.string().min(1),
+  ok: z.boolean(),
+  result: z.record(z.string(), z.unknown()).refine((value) => MemoryResultSchema.safeParse(value).success, "Invalid memory result").optional(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
+  MemoryRequestMessage,
+  MemoryResultMessage,
   ...clipboardMessages,
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2739,6 +2775,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   NotificationPushMessage,
   PushRegisterMessage,
   DeviceStatsMessage,
+  MachineStatsRequestMessage,
   MachineStatsMessage,
   HandlerConfigureMessage,
   HandlerInstructMessage,
@@ -2795,6 +2832,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionUnarchiveMessage,
   SessionDeleteMessage,
   SessionSetModeMessage,
+  SessionRestartMessage,
   SessionSetupMessage,
   SessionFocusMessage,
   SessionResultMessage,
@@ -2849,7 +2887,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionBusNotifyMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
-  SessionBusAckMessage,
   SessionBusDirectoryMessage,
   SessionBusDirectoryResultMessage,
   SessionBusInboxMessage,
@@ -2901,6 +2938,7 @@ export type CommandDone = z.infer<typeof CommandDoneMessage>;
 export type NotificationPush = z.infer<typeof NotificationPushMessage>;
 export type PushRegister = z.infer<typeof PushRegisterMessage>;
 export type DeviceStatsMsg = z.infer<typeof DeviceStatsMessage>;
+export type MachineStatsRequestMsg = z.infer<typeof MachineStatsRequestMessage>;
 export type MachineStatsMsg = z.infer<typeof MachineStatsMessage>;
 export type HandlerInstructionItem = z.infer<typeof InstructionItemWire>;
 export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
@@ -2976,6 +3014,7 @@ export type SessionArchive = z.infer<typeof SessionArchiveMessage>;
 export type SessionUnarchive = z.infer<typeof SessionUnarchiveMessage>;
 export type SessionDelete = z.infer<typeof SessionDeleteMessage>;
 export type SessionSetMode = z.infer<typeof SessionSetModeMessage>;
+export type SessionRestart = z.infer<typeof SessionRestartMessage>;
 export type SessionSetup = z.infer<typeof SessionSetupMessage>;
 export type SessionFocus = z.infer<typeof SessionFocusMessage>;
 export type SessionResult = z.infer<typeof SessionResultMessage>;
@@ -3007,6 +3046,8 @@ export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessag
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
 export type RpcRequest = z.infer<typeof RequestMessage>;
+export type MemoryRequest = z.infer<typeof MemoryRequestMessage>;
+export type MemoryResult = z.infer<typeof MemoryResultMessage>;
 export type RpcResponse = z.infer<typeof ResponseMessage>;
 export type AgentItem = z.infer<typeof AgentItemSchema>;
 export type AgentError = z.infer<typeof AgentErrorSchema>;
@@ -3042,7 +3083,6 @@ export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
 export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
-export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
 export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
 export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
 export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
@@ -3069,6 +3109,7 @@ export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
  * Add a type here in the same commit that gives it a secret-bearing field.
  */
 export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "agent:question-resolve",
   "terminal:input",
@@ -3203,6 +3244,7 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
+  "memory:request", "memory:result",
   ...CLIPBOARD_MESSAGE_TYPES,
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:forget", "terminal:resize", "terminal:size", "agent:status",
@@ -3211,7 +3253,7 @@ const KNOWN_TYPES = new Set<string>([
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
   "agent:projects", "agent:tools", "stream-ready", "control:result",
-  "command:run", "command:output", "command:done", "notification:push", "push:register", "device:stats", "machine:stats",
+  "command:run", "command:output", "command:done", "notification:push", "push:register", "device:stats", "machine:stats:request", "machine:stats",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:history:request", "handler:history:page",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
@@ -3231,7 +3273,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:list", "session:list:result",
   "session:create", "session:fork", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
-  "session:delete", "session:set-mode", "session:setup", "session:focus",
+  "session:delete", "session:set-mode", "session:restart", "session:setup", "session:focus",
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
@@ -3251,7 +3293,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result",
   "session-bus:directory", "session-bus:directory:result",
   "session-bus:inbox", "session-bus:inbox:result",
   "session-bus:thread", "session-bus:thread:result",

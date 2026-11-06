@@ -47,7 +47,7 @@ Antgrid does not replace your agent and ships no model of its own.
   how to proceed and when to ask you. Handler
   asks for evidence before moving on and brings questions to you when needed or
   instructed. It doesn't start new sessions or jobs.
-- **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,
+- **Bring your own agent.** Claude Code, Codex, OpenCode 2+, Cursor, GitHub Copilot,
   Antigravity, Kilo, Kimi and Mistral Vibe are wired for notifications and session naming
   — the current set is `AGENTS` in [`packages/antgrid-agents/src/agents/registry.ts`](packages/antgrid-agents/src/agents/registry.ts).
   Any other terminal program still runs; it just gets no integration.
@@ -115,7 +115,7 @@ reporting policy if you find something wrong with them.
 | Component | Path | Stack | Role |
 |---|---|---|---|
 | **Bridge** | `bridge/` | TypeScript / Bun | Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| **Relay** | `relay/` | TypeScript / Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
+| **Relay** | `relay/` | TypeScript / Bun | Central WebSocket control plane for authentication, presence, policy, heartbeat and encrypted push delivery; never accepts a readable application payload and queues sealed agent-to-agent bus messages. |
 | **App** | `app/` | Flutter / Dart + Riverpod | Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | **Web** | `web/` | TypeScript / Bun + Hono + Postgres | Accounts and sign-in, subscriptions, OAuth device flow, Ed25519 JWT minting for the relay's gate. |
 

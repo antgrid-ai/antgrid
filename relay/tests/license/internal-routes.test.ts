@@ -529,3 +529,51 @@ test("revoke: closes every per-machine slot an app holds under the revoked accou
 
   r.stop();
 });
+
+// ============== bus queue purge ==============
+
+const QUEUED_BLOB = { epk: "A".repeat(43) + "=", box: "B".repeat(100) };
+
+function queueMail(r: RelayServer, uid: string, from: string, to: string): void {
+  const res = r.busQueue.enqueue({ uid, from, to, id: crypto.randomUUID(), blob: QUEUED_BLOB, ttlMs: 60_000 });
+  expect(res.result).toBe("queued");
+}
+
+test("revoke: purges mail queued to or from the revoked device, scoped to its account", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  queueMail(r, "user-1", "dev-q", "dev-peer");
+  queueMail(r, "user-1", "dev-peer", "dev-q");
+  queueMail(r, "user-1", "dev-peer", "dev-other");
+  queueMail(r, "user-2", "dev-peer", "dev-q");
+
+  const res = await postInternal(r.server.port!, "/internal/revoke", { deviceId: "dev-q", userId: "user-1" });
+  expect(res.status).toBe(200);
+  expect(r.busQueue.pending("user-1", "dev-q")).toEqual([]);
+  expect(r.busQueue.pending("user-1", "dev-peer")).toEqual([]);
+  expect(r.busQueue.pending("user-1", "dev-other")).toHaveLength(1);
+  expect(r.busQueue.pending("user-2", "dev-q")).toHaveLength(1);
+
+  r.stop();
+});
+
+test("expire: purges every queued entry of the account and no other", async () => {
+  const { jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  queueMail(r, "user-1", "a", "b");
+  queueMail(r, "user-1", "c", "d");
+  queueMail(r, "user-2", "a", "b");
+
+  const res = await postInternal(r.server.port!, "/internal/expire", { userId: "user-1" });
+  expect(res.status).toBe(200);
+  expect(r.busQueue.stats().messages).toBe(1);
+  expect(r.busQueue.pending("user-2", "b")).toHaveLength(1);
+
+  r.stop();
+});
