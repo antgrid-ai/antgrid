@@ -25,8 +25,6 @@ import 'package:antgrid/providers/analytics.dart';
 import 'package:antgrid/providers/auth.dart' show currentUserProvider;
 import 'package:antgrid/providers/support_chat.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
-import 'package:antgrid/providers/collapsed_drawer.dart';
-import 'package:antgrid/providers/drawer_expansion.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/relay_connection.dart'
@@ -39,7 +37,6 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/services/preview_site_data.dart';
-import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter/widgets.dart';
@@ -359,17 +356,6 @@ void main() {
     expect(store.list(), isEmpty);
   });
 
-  test('the collapsed-drawer set keeps real ids and drops the demo', () async {
-    useInMemoryPrefs();
-    final store = await DrawerCollapsedStore.open();
-
-    // One tap on the sample project's row is enough to put its id in here, and
-    // nothing prunes the set afterwards.
-    await store.write(<String>{'real-project', kDemoProjectId});
-
-    expect(store.read(), <String>{'real-project'});
-  });
-
   test('the machine catalog cache drops the demo', () async {
     useInMemoryPrefs();
     final store = await CachedSessionsStore.open();
@@ -466,29 +452,6 @@ void main() {
     // Wired to false, the null-platform wipe classifies as cleared and writes.
     await site.admit([(port: 3000, owner: 'machine.proj')]);
     expect(await PreviewOriginOwnerStore().read(), isNull);
-  });
-
-  test('folding "This machine" in the demo writes nothing', () async {
-    final container = await demoContainer();
-    enterDemoMode(container);
-
-    // The band's fold rides the collapsed set under an id no demo filter knows.
-    container
-        .read(collapsedDrawerIdsProvider.notifier)
-        .toggle(kLocalMachineDrawerId);
-    expect(container.read(localMachineCollapsedProvider), isTrue);
-    expect(
-      container.read(drawerCollapsedStoreProvider).read(),
-      isNot(contains(kLocalMachineDrawerId)),
-    );
-
-    exitDemoMode(container);
-    expect(container.read(localMachineCollapsedProvider), isFalse);
-    // The in-memory set is what a later real gesture persists.
-    expect(
-      container.read(collapsedDrawerIdsProvider),
-      isNot(contains(kLocalMachineDrawerId)),
-    );
   });
 
   test('the branch catalog answers from fixtures, never from a host', () async {

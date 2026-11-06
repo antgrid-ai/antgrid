@@ -14,7 +14,6 @@ import '../util/device_id.dart';
 import '../util/netwatch.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
-import 'drawer_expansion.dart';
 import 'eager_control_planes.dart';
 import 'mobile_connection.dart';
 import 'new_session_picker.dart';
@@ -352,14 +351,12 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
 
 /// Bare deviceUuids whose control-plane socket should stay open right now: the
 /// picker's viewed machine (if any), the focused remote target, every machine
-/// backing >=1 open project, and every expanded remote MACHINE row. The reaper
-/// releases any open control-plane socket NOT in this set. Computed centrally
-/// (not per-tab/per-row) so de-selecting a machine — or collapsing its drawer
-/// row — is observed even though its picker tab / sessions subtree is no longer
-/// rendered.
+/// backing >=1 open project, and the eager and in-scope dial targets. The
+/// reaper releases any open control-plane socket NOT in this set. Computed
+/// centrally (not per-tab/per-row) so de-selecting a machine is observed even
+/// though its picker tab / sessions subtree is no longer rendered.
 final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   ref.watch(projectSessionRegistryProvider); // rebuild on open-set changes
-  final expanded = ref.watch(expandedDrawerIdsProvider);
   final alive = ref
       .read(projectSessionRegistryProvider.notifier)
       .machinesWithOpenProjects();
@@ -427,16 +424,9 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
       alive.add(selectedMachine);
     }
   }
-  // An expanded drawer machine row subscribes to its control-plane advert, so
-  // its socket must stay alive or the reaper would tear it down and the row
-  // would flap reconnecting. Only bare-uuid (machine) ids count — the dotted
-  // project sub-row ids are data-plane sessions, governed by the warm registry.
-  for (final id in expanded) {
-    if (!id.contains('.')) alive.add(id);
-  }
   // Mobile's proactive launch/resume dials (see [kickEagerControlPlaneDials]):
   // eager machines are wanted the moment the app opens, before any selection
-  // or expansion exists to claim them. Without this union the reaper would
+  // exists to claim them. Without this union the reaper would
   // close each eager socket moments after the kick opened it.
   alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
   // Desktop's counterpart: the in-scope machines the sidebar's Needs you and

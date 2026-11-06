@@ -25,9 +25,6 @@ int warmCapForBucket({required bool isLocal, required bool isMobile}) {
   return isLocal ? kWarmCapLocal : kWarmCapRelay;
 }
 
-/// Hover threshold before a cold drawer row triggers prefetch.
-const Duration kHoverPrefetchDelay = Duration(milliseconds: 300);
-
 /// After the app backgrounds, the time we wait before demoting all warm
 /// projects to cold. Mobile-only.
 const Duration kMobileBackgroundDemoteDelay = Duration(seconds: 30);

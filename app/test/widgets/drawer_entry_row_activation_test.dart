@@ -9,7 +9,6 @@ import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -248,7 +247,7 @@ void main() {
     },
   );
 
-  testWidgets('forget remote row drops the machine from the reconnect list', (
+  testWidgets('forget remote machine drops it from the reconnect list', (
     tester,
   ) async {
     useInMemoryPrefs();
@@ -261,16 +260,11 @@ void main() {
       ProviderScope(
         overrides: stores.overrides,
         child: MaterialApp(
-          home: Scaffold(body: DrawerEntryRow(RemoteAgentEntry(recent))),
+          home: Scaffold(
+            body: DrawerRemoveButton(entry: RemoteAgentEntry(recent)),
+          ),
         ),
       ),
-    );
-    await tester.pump();
-    await tester.ensureVisible(find.byType(DrawerEntryRow));
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    addTearDown(gesture.removePointer);
-    await gesture.addPointer(
-      location: tester.getCenter(find.byType(DrawerEntryRow)),
     );
     await tester.pump();
 

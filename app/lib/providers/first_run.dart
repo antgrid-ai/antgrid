@@ -43,8 +43,7 @@ class FirstRunController extends Notifier<FirstRunState> {
     return _store.read();
   }
 
-  // All mutations: update state synchronously, persist fire-and-forget — the
-  // same pattern as CollapsedDrawerIdsNotifier._persist (collapsed_drawer.dart).
+  // All mutations: update state synchronously, persist fire-and-forget.
   void _commit(FirstRunState next) {
     state = next;
     // The single write, so no first-run latch can reach disk from inside the

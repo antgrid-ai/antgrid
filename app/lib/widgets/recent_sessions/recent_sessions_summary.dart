@@ -35,45 +35,6 @@ String workStatusLabel(AgentWorkStatus s) => switch (s) {
   AgentWorkStatus.done => 'Done',
 };
 
-/// `Sessions · N total` and the per-state summary badges on one line.
-///
-/// Phone-width only ([_TopBar] in `new_session_content.dart` picks this over
-/// the tablet/desktop title+chips+badges arrangement below
-/// `kCompactBreakpoint`) — there's no room on a phone for the group-by chips
-/// too, so this keeps the old two-piece layout instead of squeezing a third
-/// element into the row.
-class RecentSessionsSummaryLine extends StatelessWidget {
-  const RecentSessionsSummaryLine({super.key});
-
-  /// Share of the line the badges may claim before they start wrapping. The
-  /// remainder is the title's floor, which is why this is a cap and not a flex:
-  /// two flexible children would split the line evenly and ellipsize the title
-  /// even when a single badge is all there is to show.
-  static const double _badgeShare = 0.6;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) => Row(
-        children: [
-          const Expanded(child: RecentSessionsTitle()),
-          const SizedBox(width: AbTokens.space10),
-          // The badges are a Wrap, and a Wrap sitting directly in a Row is
-          // handed UNBOUNDED main-axis constraints — so it never wraps, and at
-          // four states on a phone it overruns the edge and starves the title.
-          // Bound it here; inside the cap it wraps as intended.
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: constraints.maxWidth * _badgeShare,
-            ),
-            child: const RecentSessionsSummaryBadges(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// `Sessions · N total` on its own — every mount point that places the chips
 /// and badges around it itself (the canvas's fixed top bar on tablet/narrow
 /// desktop, `_SessionsHeader` on a wide mouse desktop), since the arrangement

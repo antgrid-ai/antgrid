@@ -287,58 +287,6 @@ void main() {
     expect(ref.read(newSessionPromptProvider), '');
   });
 
-  testWidgets(
-    'project shortcut clears branch and isolation from another target',
-    (tester) async {
-      late WidgetRef ref;
-
-      await tester.pumpWidget(
-        ProviderScope(
-          child: Consumer(
-            builder: (context, r, _) {
-              ref = r;
-              return const SizedBox.shrink();
-            },
-          ),
-        ),
-      );
-
-      ref
-          .read(selectedTargetProjectProvider.notifier)
-          .set(
-            const PickerProject(
-              id: 'local-a',
-              name: 'A',
-              detail: '/a',
-              isLocal: true,
-            ),
-          );
-      ref
-          .read(newSessionBranchSelectionProvider.notifier)
-          .set(
-            const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'),
-          );
-      ref.read(newSessionIsolatedProvider.notifier).set(true);
-
-      enterNewSessionForRemoteProject(
-        ref.container,
-        machineUuid: 'machine-b',
-        project: const AdvertisedProject(
-          projectId: 'project-b',
-          running: false,
-        ),
-      );
-      await tester.pump();
-
-      expect(
-        ref.read(selectedTargetProjectProvider)?.id,
-        'machine-b.project-b',
-      );
-      expect(ref.read(newSessionBranchSelectionProvider), isNull);
-      expect(ref.read(newSessionIsolatedProvider), isFalse);
-    },
-  );
-
   // A drawer row's `+` activates its own project first, so the focus IS the
   // stated intent; a draft left pointing at the project the user came from must
   // not survive it, or Start creates the session in the wrong folder.

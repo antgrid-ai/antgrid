@@ -125,7 +125,7 @@ class FirstRunState {
 }
 
 /// SharedPreferences-backed persistence for first-run chrome (setup checklist
-/// + remote-access nudge dismissals). Modeled on `DrawerCollapsedStore`:
+/// + remote-access nudge dismissals). Modeled on `DrawerOrderStore`:
 /// opened eagerly in `main()`, injected via a throwing provider override.
 class FirstRunStore {
   static final _key = scopedStorageKey('antgrid.first_run.v1');

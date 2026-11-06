@@ -73,7 +73,7 @@ class SessionLayoutStore {
   /// A store that remembers for this launch and writes nothing.
   ///
   /// The DEFAULT for [sessionLayoutStoreProvider], unlike its siblings
-  /// (`drawerCollapsedStoreProvider` and friends) which throw until `main()`
+  /// (`drawerOrderStoreProvider` and friends) which throw until `main()`
   /// overrides them. Those are read from one place each; this one is read by
   /// every `SessionWorkspaceController`, which every workspace widget reaches
   /// transitively — so a throwing default turns a missing override into a

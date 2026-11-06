@@ -208,20 +208,6 @@ const _appMintedCodes = {
   'E_SEND_FAILED',
 };
 
-/// Copy for a machine whose advert lists no projects, keyed by the tri-state
-/// machine-level `remoteAccessEnabled` flag: `false` is the machine's
-/// remote-access switch (the NOT_ALLOWED verb refusal's copy — one switch, one
-/// wording, and the arm is a literal above so the `!` cannot fire), `true` a
-/// genuinely empty catalog, and `null` (no advert / flag-less older bridge)
-/// the neutral offline copy. Shared by the projects drawer and the New Session
-/// picker so the two surfaces can never describe the same machine two ways.
-String emptyAdvertHint(bool? remoteAccessEnabled) =>
-    switch (remoteAccessEnabled) {
-      false => friendlyErrorCopy('NOT_ALLOWED')!,
-      true => 'No projects on this machine yet',
-      null => 'Machine offline',
-    };
-
 /// A machine's installed-agents lookup, still running and failed. Shared by the
 /// fork dialog and the New Session agent menu, which ask the same question.
 const agentsCheckingCopy = 'Checking installed agents…';

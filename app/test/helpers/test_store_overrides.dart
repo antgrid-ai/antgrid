@@ -11,7 +11,6 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:flutter_riverpod/misc.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
-import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/drawer_order.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/projects.dart';
@@ -22,7 +21,6 @@ import 'package:antgrid/project/project_session_registry.dart'
 import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
-import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/drawer_order_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/storage/pending_forgets_store.dart';
@@ -71,7 +69,6 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     projectStore,
     recentAgentsStore,
     drawerOrderStore,
-    drawerCollapsedStore,
     cachedSessionsStore,
     firstRunStore,
     updateHandoffStore,
@@ -80,7 +77,6 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     ProjectStore.open(),
     RecentAgentsStore.open(),
     DrawerOrderStore.open(),
-    DrawerCollapsedStore.open(),
     CachedSessionsStore.open(),
     FirstRunStore.open(),
     UpdateHandoffStore.open(),
@@ -104,7 +100,6 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
       pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
-      drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       firstRunStoreProvider.overrideWithValue(firstRunStore),
       updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),

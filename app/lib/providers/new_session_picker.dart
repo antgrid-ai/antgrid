@@ -1069,53 +1069,6 @@ void seedNewSessionAgentFromSession(
   ref.read(newSessionCliArgsProvider.notifier).set(session.args ?? '');
 }
 
-/// Enter the New Session page with a specific advertised remote [project]
-/// (under machine [machineUuid]) preselected, so a `+` tapped on a project row
-/// in the drawer lands the user on New Session already targeting THAT project —
-/// they only pick the agent and hit Start. Mirrors the remote branch of
-/// [enterNewSession] but sources the target from the drawer's advert instead of
-/// the current focus (the tapped project need not be focused, or even warm).
-void enterNewSessionForRemoteProject(
-  ProviderContainer ref, {
-  required String machineUuid,
-  required AdvertisedProject project,
-}) {
-  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.newSession);
-
-  final regId = RemoteProject(
-    machineUuid: machineUuid,
-    projectId: project.projectId,
-  ).registrationId;
-  final label = project.label;
-  final target = PickerProject(
-    id: regId,
-    name: (label != null && label.isNotEmpty) ? label : project.projectId,
-    detail: project.path ?? '',
-    isLocal: false,
-    machineUuid: machineUuid,
-    projectId: project.projectId,
-    running: project.running,
-  );
-  // This shortcut can change the target while the composer is unmounted, so
-  // its target listener cannot clear state that belongs only to the old folder.
-  if (ref.read(selectedTargetProjectProvider)?.id != target.id) {
-    ref.read(newSessionBranchSelectionProvider.notifier).set(null);
-    ref.read(newSessionIsolatedProvider.notifier).set(false);
-  }
-  ref.read(selectedSourceIdProvider.notifier).set('machine:$machineUuid');
-  ref.read(selectedTargetProjectProvider.notifier).set(target);
-  seedNewSessionAgentForTarget(ref, target);
-
-  ref
-      .read(navControllerProvider.notifier)
-      .commit(
-        NavLocation(
-          target: ref.read(selectedTargetProvider),
-          surface: WorkbenchSurface.newSession,
-        ),
-      );
-}
-
 /// Enter the New Session page, preselecting the currently-focused project when
 /// one is active (e.g. "New Session" tapped from inside a workspace). Reverse-
 /// looks up [selectedRegistrationIdProvider] in the live picker sources and, on a
@@ -1203,9 +1156,9 @@ void enterNewSession(ProviderContainer ref, {bool retarget = false}) {
   // default (agent:hello).
   if (!hasDraftTarget) {
     final target = ref.read(selectedTargetProjectProvider);
-    // Same rule as enterNewSessionForRemoteProject: this can replace the target
-    // while the composer is unmounted, so its own target listener is not there
-    // to clear the branch and isolation that belonged to the old folder.
+    // This can replace the target while the composer is unmounted, so its own
+    // target listener is not there to clear the branch and isolation that
+    // belonged to the old folder.
     if (target?.id != draftTarget?.id) {
       ref.read(newSessionBranchSelectionProvider.notifier).set(null);
       ref.read(newSessionIsolatedProvider.notifier).set(false);

@@ -30,7 +30,6 @@ import 'providers/analytics.dart';
 import 'providers/app_toaster.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
-import 'providers/collapsed_drawer.dart';
 import 'providers/session_workspace_state.dart';
 import 'providers/demo_mode.dart';
 import 'providers/device_revocation.dart';
@@ -65,7 +64,6 @@ import 'services/push_background_handler.dart';
 import 'services/push_identity.dart';
 import 'providers/update_available.dart';
 import 'storage/cached_sessions_store.dart';
-import 'storage/drawer_collapsed_store.dart';
 import 'storage/session_layout_store.dart';
 import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
@@ -176,7 +174,6 @@ Future<void> main() async {
     projectStore,
     recentAgentsStore,
     drawerOrderStore,
-    drawerCollapsedStore,
     sessionLayoutStore,
     cachedSessionsStore,
     firstRunStore,
@@ -186,14 +183,13 @@ Future<void> main() async {
     ProjectStore.open(),
     RecentAgentsStore.open(),
     DrawerOrderStore.open(),
-    DrawerCollapsedStore.open(),
     SessionLayoutStore.open(),
     CachedSessionsStore.open(),
     FirstRunStore.open(),
     openAppSettingsPrefs(),
     UpdateHandoffStore.open(),
   ).wait;
-  // Opened separately from the record above, which is already at the arity
+  // Opened separately from the record above, which is near the arity
   // `Future.wait` on records supports.
   final (pendingForgetsStore, machineScopeStore, mobileMachineStore) = await (
     PendingForgetsStore.open(),
@@ -242,7 +238,6 @@ Future<void> main() async {
       mobileMachineStoreProvider.overrideWithValue(mobileMachineStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
-      drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       sessionLayoutStoreProvider.overrideWithValue(sessionLayoutStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       firstRunStoreProvider.overrideWithValue(firstRunStore),

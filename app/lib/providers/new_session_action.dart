@@ -24,13 +24,11 @@ import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'analytics.dart';
 import 'app_toaster.dart';
-import 'cached_sessions.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'new_session_picker.dart';
 import 'new_session_start.dart';
 import 'projects.dart';
-import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
 import 'session_opening_prompt.dart';
@@ -612,65 +610,6 @@ Future<String> openRemoteProjectForActivation(
       .set(RemoteProject(machineUuid: machineUuid, projectId: projectId));
   return regId;
 }
-
-/// Lazily prepares a remote project for the DRAWER's per-project expand and
-/// fetches its session list ONCE — WITHOUT changing the focused project (the
-/// drawer is a passive peek, not an activation) and WITHOUT starting the
-/// project. Pairs the machine so the control-plane socket is live, then reads
-/// the persisted session list over the control plane (`sessions.list`) and
-/// writes it through to `cachedSessionsProvider`, which `sessionsForEntryProvider`
-/// renders.
-///
-/// The data plane (and `project:start`/promotion) is reserved for focus/
-/// activation — expanding a row never warms a core or runs a stopped project's
-/// startup terminals. `running` flags read false here (disk carries no runtime
-/// state); the live list is fetched on focus.
-///
-/// `autoDispose` so each expand re-pulls fresh and the in-flight fetch drops on
-/// collapse. Keyed by `regId` ALONE.
-final drawerProjectSessionsProvider = FutureProvider.autoDispose.family<void, String>((
-  ref,
-  regId,
-) async {
-  final machineUuid = baseDeviceUuid(regId);
-  // Needs a compound `<machineUuid>.<projectId>` id. baseDeviceUuid returns the
-  // input unchanged when there is no dot, so a bare id would make the substring
-  // below throw RangeError — fail with a clear message instead.
-  if (machineUuid == regId) {
-    throw StateError(
-      'drawer session peek needs a <machineUuid>.<projectId> id, got "$regId"',
-    );
-  }
-  final projectId = regId.substring(machineUuid.length + 1);
-
-  // 1. The machine must be one we can reach. The control-plane read in step 2
-  // declares its socket wanted (the supervisor dials and handshakes); all this
-  // needs to do is fail early on a machine we hold no coordinates for, without
-  // mistaking a still-loading inventory for an empty one.
-  final recent = ref
-      .read(recentAgentsProvider)
-      .where((r) => baseDeviceUuid(r.agentDeviceId) == machineUuid)
-      .firstOrNull;
-  if (recent == null) {
-    final inventory = await ref.read(accountAgentsProvider.future);
-    if (!inventory.any((a) => a.deviceUuid == machineUuid)) {
-      throw StateError('Remote machine $machineUuid is unavailable');
-    }
-  }
-
-  // 2. Fetch the session list over the CONTROL PLANE — no data-plane socket, no
-  // project:start. An RpcException (NOT_ALLOWED / timeout) surfaces as the
-  // provider's error state, which the drawer renders as a tap-to-retry hint.
-  final cp = await ref.read(controlPlaneClientForProvider(machineUuid).future);
-  if (cp == null) {
-    throw StateError('Machine $machineUuid is offline');
-  }
-  final sessions = await cp.listSessions(projectId);
-
-  // 3. Write through to the cache the drawer renders from
-  // (sessionsForEntryProvider(regId) → cachedSessionsProvider(regId)).
-  await ref.read(cachedSessionsStoreProvider).put(regId, sessions);
-}, retry: noProviderRetry);
 
 /// Waits until [client] reports [projectId] as running, or fails.
 /// Returns true on running; false on a control-plane error or [timeout].
