@@ -9,6 +9,7 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/new_session_start.dart';
+import 'package:antgrid/providers/project_index.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/first_run_store.dart';
@@ -332,6 +333,9 @@ void main() {
             row('uuidA', 'Alpha box', 'Older', 2),
             row('uuidM', 'Mid box', 'Blocked', 1),
           ]),
+          // Grouping by project reads the sidebar's merge; with no machines
+          // known, every copy keeps a bucket of its own.
+          projectGroupByEntryProvider.overrideWithValue(const {}),
         ],
         child: _wrap(const RecentSessionsTab()),
       ),

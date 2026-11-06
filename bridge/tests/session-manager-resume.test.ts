@@ -262,7 +262,7 @@ describe("start() resume wiring", () => {
     expect(second.args).not.toContain("--resume");
     expect(second.args).not.toContain("sess-empty");
     // A second report for the same run changes nothing: no retry loop.
-    sm.noteResumeOutcome(s.id, runId, () => "No conversation found");
+    sm.noteResumeOutcome(s.id, runId, () => "No conversation found with session ID: sess-empty");
     await new Promise((r) => setTimeout(r, 10));
     expect(tm.__spawns.length).toBe(2);
   });
@@ -275,7 +275,8 @@ describe("start() resume wiring", () => {
     sm.setAgentSession(s.id, "sess-styled", "/no/such/file.jsonl");
     sm.start(s.id);
     const esc = String.fromCharCode(27);
-    const styled = esc + "[31mNo conversation" + String.fromCharCode(13, 10) + "  found" + esc + "[0m with session ID";
+    const crlf = String.fromCharCode(13, 10);
+    const styled = esc + "[31mNo conversation" + crlf + "  found" + esc + "[0m with session ID: sess-" + crlf + "styled";
     tm.kill(s.id);
     sm.noteResumeOutcome(s.id, tm.__spawns.at(-1).env.ANTGRID_RUN_ID, () => styled);
     await new Promise((r) => setTimeout(r, 10));
@@ -293,9 +294,24 @@ describe("start() resume wiring", () => {
     const runId = tm.__spawns.at(-1).env.ANTGRID_RUN_ID;
     tm.kill(s.id);
     await sm.delete(s.id);
-    sm.noteResumeOutcome(s.id, runId, () => "No conversation found");
+    sm.noteResumeOutcome(s.id, runId, () => "No conversation found with session ID: sess-gone");
     await new Promise((r) => setTimeout(r, 10));
     expect(tm.__spawns.length).toBe(1);
+  });
+
+  test("a replayed conversation that mentions the phrase keeps its conversation", async () => {
+    const store = newStore();
+    const tm = makeTm();
+    const sm = mk(store, tm);
+    const s = sm.create("Slot", { tool: "claude-code" });
+    sm.setAgentSession(s.id, "sess-replay", "/no/such/file.jsonl");
+    sm.start(s.id);
+    const runId = tm.__spawns.at(-1).env.ANTGRID_RUN_ID;
+    tm.kill(s.id);
+    sm.noteResumeOutcome(s.id, runId, () => "> grep for 'No conversation found with session ID: sess-other'\n  ...");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(tm.__spawns.length).toBe(1);
+    expect(sm.get(s.id)?.agentSessionId).toBe("sess-replay");
   });
 
   test("an unrelated early exit keeps the saved conversation", async () => {

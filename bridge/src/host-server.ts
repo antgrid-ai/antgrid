@@ -2879,7 +2879,8 @@ export class HostServer {
   private noteRepoKey(projectId: string, projectPath: string): void {
     void this.repoKeys
       .note(projectId, projectPath)
-      .then((changed) => { if (changed) this.readvertiseToControlPlane(); });
+      .then((changed) => { if (changed) this.readvertiseToControlPlane(); })
+      .catch((err) => log.warn({ err, projectId }, "host: repo key refresh failed"));
   }
 
   async stop(projectId: string): Promise<void> {

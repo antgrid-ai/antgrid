@@ -153,6 +153,23 @@ void main() {
       expect(groups.single.members, hasLength(2));
     });
 
+    test('a copy probed and found to have no remote keeps out of the origin group', () {
+      final groups = groupProjects([
+        member('mbp', 'p1', 'api', remote: 'github.com/x/api'),
+        const ProjectMember(
+          machineId: kLocalMachineKey,
+          entryId: 'l1',
+          projectId: 'l1',
+          name: 'api',
+          gitRemoteProbed: true,
+        ),
+      ]);
+      expect(groups.map((g) => g.key).toSet(), {
+        'git:github.com/x/api',
+        'name:api',
+      });
+    });
+
     test('a name shared by two different origins is not guessed between', () {
       final groups = groupProjects([
         member('mbp', 'p1', 'api', remote: 'github.com/a/api'),

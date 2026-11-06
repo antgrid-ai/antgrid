@@ -11,24 +11,20 @@ function sampleCpuTimes(): { busy: number; total: number } {
   return { busy, total };
 }
 
-/** Under this much accumulated CPU time (ms, summed over cores) a delta is too
- *  small to be a rate, so the previous figure stands. Every core shares one
- *  sampler and can ask within the same instant. */
-const MIN_CPU_WINDOW_MS = 1000;
+/** Stats are read only when an app asks, which can be hours apart, so a delta
+ *  against the previous request would report the average over that whole gap
+ *  rather than the load now. Each read measures its own short window instead. */
+export const CPU_SAMPLE_WINDOW_MS = 500;
 
-let lastCpu = sampleCpuTimes();
-let lastCpuPercent: number | undefined;
-
-/** Whole-machine busy share since the last usable sample, 0-100. Primed at
- *  import, so the first report averages over the process's lifetime. */
-export function readCpuPercent(): number | undefined {
-  const now = sampleCpuTimes();
-  const total = now.total - lastCpu.total;
-  if (total >= MIN_CPU_WINDOW_MS) {
-    lastCpuPercent = Math.min(100, Math.max(0, Math.round(((now.busy - lastCpu.busy) / total) * 100)));
-    lastCpu = now;
-  }
-  return lastCpuPercent;
+/** Whole-machine busy share over the next [CPU_SAMPLE_WINDOW_MS], 0-100.
+ *  Undefined when the OS reports no per-core times. */
+export async function readCpuPercent(): Promise<number | undefined> {
+  const start = sampleCpuTimes();
+  await Bun.sleep(CPU_SAMPLE_WINDOW_MS);
+  const end = sampleCpuTimes();
+  const total = end.total - start.total;
+  if (!(total > 0)) return undefined;
+  return Math.min(100, Math.max(0, Math.round(((end.busy - start.busy) / total) * 100)));
 }
 
 type MachineStats = { ramTotalBytes: number; ramAvailableBytes: number; cpuPercent?: number };
@@ -46,9 +42,11 @@ export function readMachineStats(): Promise<MachineStats> {
 }
 
 async function readMachineStatsNow(): Promise<MachineStats> {
-  const cpuPercent = readCpuPercent();
   const ramTotalBytes = totalmem();
-  const fromVmStat = process.platform === "darwin" ? await readDarwinAvailable(ramTotalBytes) : null;
+  const [cpuPercent, fromVmStat] = await Promise.all([
+    readCpuPercent(),
+    process.platform === "darwin" ? readDarwinAvailable(ramTotalBytes) : Promise.resolve(null),
+  ]);
   return {
     ramTotalBytes,
     ramAvailableBytes: fromVmStat ?? freemem(),

@@ -5,7 +5,7 @@ import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/machine_directory.dart';
 import 'package:antgrid/providers/mobile_connection.dart';
 import 'package:antgrid/providers/recent_sessions.dart'
-    show MachineAdvertSummary;
+    show MachineAdvertSummary, machineAdvertisedProjectsProvider;
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/mobile_machine_store.dart';
 
@@ -161,6 +161,31 @@ void main() {
       expect(c.read(mobileConnectionProvider).timedOut, isTrue);
       n.retry();
       expect(c.read(mobileConnectionProvider).timedOut, isFalse);
+    });
+
+    test('a timeout the connection then outran no longer counts', () {
+      final c = container();
+      final n = c.read(mobileConnectionProvider.notifier);
+      n.connect('mbp');
+      n.markTimedOut('mbp');
+      expect(c.read(mobileConnectionProvider).timedOut, isTrue);
+      c.read(machineLiveConnectionProvider.notifier).set('mbp', true);
+      c
+          .read(machineAdvertisedProjectsProvider.notifier)
+          .setAdvert('mbp', (projectCount: 1, remoteAccessEnabled: true));
+      expect(c.read(mobileConnectionProvider).timedOut, isFalse);
+      // A later blip is a reconnect in progress, not a failure.
+      c.read(machineLiveConnectionProvider.notifier).set('mbp', false);
+      expect(
+        mobileConnectStatus(
+          machineId: 'mbp',
+          live: false,
+          advert: null,
+          clientFailed: false,
+          timedOut: c.read(mobileConnectionProvider).timedOut,
+        ).phase,
+        MobileConnectPhase.connecting,
+      );
     });
 
     test('the phone dials and shows only the chosen machine', () {

@@ -22,6 +22,7 @@ class ProjectMember {
     required this.projectId,
     required this.name,
     this.gitRemote,
+    this.gitRemoteProbed = false,
   });
 
   /// [kLocalMachineKey] or the bare machine uuid.
@@ -34,6 +35,13 @@ class ProjectMember {
   final String name;
   final String? gitRemote;
 
+  /// Whether the bridge answered for [gitRemote]: with it, a null remote means
+  /// the folder has none, not that nobody has looked yet.
+  final bool gitRemoteProbed;
+
+  /// Probed and has no origin — a folder that is NOT any remote's checkout.
+  bool get knownWithoutRemote => gitRemoteProbed && gitRemote == null;
+
   @override
   bool operator ==(Object other) =>
       other is ProjectMember &&
@@ -41,10 +49,18 @@ class ProjectMember {
       other.entryId == entryId &&
       other.projectId == projectId &&
       other.name == name &&
-      other.gitRemote == gitRemote;
+      other.gitRemote == gitRemote &&
+      other.gitRemoteProbed == gitRemoteProbed;
 
   @override
-  int get hashCode => Object.hash(machineId, entryId, projectId, name, gitRemote);
+  int get hashCode => Object.hash(
+    machineId,
+    entryId,
+    projectId,
+    name,
+    gitRemote,
+    gitRemoteProbed,
+  );
 }
 
 /// One project as the project-first views show it: every machine's copy of
@@ -62,6 +78,16 @@ class ProjectGroup {
   final String key;
   final String name;
   final List<ProjectMember> members;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ProjectGroup &&
+      other.key == key &&
+      other.name == name &&
+      listEquals(other.members, members);
+
+  @override
+  int get hashCode => Object.hash(key, name, Object.hashAll(members));
 }
 
 /// The machine a Recent row lives on, as a machine-directory id.
@@ -100,6 +126,7 @@ List<ProjectMember> collectProjectMembers({
           projectId: p.projectId,
           name: p.displayName,
           gitRemote: localRemotes[p.projectId],
+          gitRemoteProbed: localRemotes.containsKey(p.projectId),
         ),
       );
     }
@@ -117,6 +144,7 @@ List<ProjectMember> collectProjectMembers({
           projectId: p.projectId,
           name: _nonEmpty(p.label) ?? labels[entryId] ?? p.projectId,
           gitRemote: p.gitRemoteProbed ? p.gitRemote : null,
+          gitRemoteProbed: p.gitRemoteProbed,
         ),
       );
     }
@@ -158,12 +186,14 @@ String? _nonEmpty(String? s) => s == null || s.isEmpty ? null : s;
 /// Merge members into one group per repository. Pure.
 ///
 /// A known origin is the identity: two folders with the same remote are the
-/// same project whatever they are called. Without one (no remote, a bridge
-/// predating `gitRemote`, a project not probed yet) the lowercased name is all
-/// there is — and a name that matches exactly ONE origin-keyed group joins it,
-/// so a machine still on an older bridge does not split a project in two. A
-/// name shared by two different origins stays on its own: guessing between
-/// them would put sessions under the wrong repository.
+/// same project whatever they are called. Without one the lowercased name is
+/// all there is. A copy whose remote is merely UNKNOWN (a bridge predating
+/// `gitRemote`, a project not probed yet) joins the one origin-keyed group
+/// sharing its name, so a machine still on an older bridge does not split a
+/// project in two. A copy probed and found to have NO remote never does — it
+/// is not that repository's checkout, only a folder with the same name. A
+/// name shared by two different origins stays on its own too: guessing
+/// between them would put sessions under the wrong repository.
 List<ProjectGroup> groupProjects(List<ProjectMember> members) {
   final byKey = <String, List<ProjectMember>>{};
   final nameOfKey = <String, String>{};
@@ -180,7 +210,7 @@ List<ProjectGroup> groupProjects(List<ProjectMember> members) {
   for (final m in members) {
     if (m.gitRemote != null) continue;
     final lower = m.name.toLowerCase();
-    final candidates = gitKeysByName[lower];
+    final candidates = m.knownWithoutRemote ? null : gitKeysByName[lower];
     final key = candidates != null && candidates.length == 1
         ? candidates.single
         : 'name:$lower';
@@ -386,19 +416,61 @@ String? defaultComposerMachine(ProjectView view) {
   return null;
 }
 
+/// The distinct projects behind cached sessions, with value equality, so
+/// [projectGroupsProvider] rebuilds when a session lands in a project it has
+/// not seen rather than on every cache write.
+@immutable
+class _SessionOrigins {
+  factory _SessionOrigins(List<RecentSessionRow> rows) {
+    final byEntry = <String, RecentOrigin>{};
+    for (final r in rows) {
+      byEntry.putIfAbsent(r.origin.registrationId, () => r.origin);
+    }
+    // Sorted so a session merely moving up the recency order changes nothing.
+    final origins = byEntry.values.toList(growable: false)
+      ..sort((a, b) => a.registrationId.compareTo(b.registrationId));
+    return _SessionOrigins._(origins, [
+      for (final o in origins)
+        (o.registrationId, o.projectId, o.machineUuid, o.projectName),
+    ]);
+  }
+
+  const _SessionOrigins._(this.origins, this._keys);
+
+  final List<RecentOrigin> origins;
+  final List<(String, String, String?, String)> _keys;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _SessionOrigins && listEquals(other._keys, _keys);
+
+  @override
+  int get hashCode => Object.hashAll(_keys);
+}
+
 final projectGroupsProvider = Provider<List<ProjectGroup>>((ref) {
   final demo = ref.watch(demoModeProvider);
   final machineIds = {for (final m in ref.watch(machineDirectoryProvider)) m.id};
-  final sessions = ref.watch(recentSessionsProvider);
+  final origins = ref.watch(recentSessionsProvider.select(_SessionOrigins.new));
   return groupProjects(
     collectProjectMembers(
       locals: demo ? [demoProject()] : ref.watch(projectsProvider),
       catalogs: demo ? const {} : ref.watch(machineCatalogsProvider),
       labels: demo ? const {} : ref.watch(remoteProjectLabelsProvider),
-      sessionOrigins: [for (final r in sessions) r.origin],
+      sessionOrigins: origins.origins,
       machineIds: machineIds,
     ),
   );
+});
+
+/// The group each copy belongs to, by its entryId — for a surface that lists
+/// sessions flat (Recent grouped by project) and must merge them exactly as
+/// the sidebar does.
+final projectGroupByEntryProvider = Provider<Map<String, ProjectGroup>>((ref) {
+  return {
+    for (final g in ref.watch(projectGroupsProvider))
+      for (final m in g.members) m.entryId: g,
+  };
 });
 
 AgentWorkStatus Function(RecentSessionRow) _statusLookup(

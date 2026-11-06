@@ -139,6 +139,13 @@ class MobileConnectionNotifier extends Notifier<MobileConnection> {
           ? state.copyWith(restored: false)
           : state.copyWith(clearMachine: true, restored: false);
     });
+    // A timeout is a verdict on one attempt. Once the supervisor gets through
+    // anyway it is spent, or the next momentary drop would land straight on
+    // Couldn't connect instead of Connecting.
+    ref.listen(machineLiveConnectionProvider, (_, _) => _clearSpentTimeout());
+    ref.listen(machineAdvertisedProjectsProvider, (_, _) {
+      _clearSpentTimeout();
+    });
     return MobileConnection(
       machineId: restore,
       restored: restored,
@@ -175,8 +182,18 @@ class MobileConnectionNotifier extends Notifier<MobileConnection> {
   /// Ignored when [machineId] is no longer the attempt in progress — a timer
   /// started for a machine the user has since left.
   void markTimedOut(String machineId) {
-    if (state.machineId != machineId) return;
+    if (state.machineId != machineId || _connectedTo(machineId)) return;
     state = state.copyWith(timedOut: true);
+  }
+
+  bool _connectedTo(String machineId) =>
+      ref.read(machineLiveConnectionProvider)[machineId] == true &&
+      ref.read(machineAdvertisedProjectsProvider)[machineId] != null;
+
+  void _clearSpentTimeout() {
+    final id = state.machineId;
+    if (!state.timedOut || id == null || !_connectedTo(id)) return;
+    state = state.copyWith(timedOut: false);
   }
 
   void disconnect() => state = state.copyWith(

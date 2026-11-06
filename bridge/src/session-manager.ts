@@ -527,14 +527,23 @@ const FLUSH_DEBOUNCE_MS = 200;
  *  agent refusing to start. */
 const RESUME_REFUSAL_WINDOW_MS = 30_000;
 const RESUME_RESTART_WAIT_MS = 2_000;
-const NO_CONVERSATION_FOUND = /no conversation found/i;
+const NO_CONVERSATION_FOUND = "noconversationfoundwithsessionid";
 
-/** Plain text from raw PTY output: control sequences removed and every run of
- *  whitespace or control characters (a wrap's line break included) collapsed,
- *  so a message the terminal coloured or wrapped still reads as the phrase it
- *  was. */
-function flattenTerminalText(raw: string): string {
-  return stripAnsi(raw).replace(/[\x00-\x20]+/g, " ").trim();
+/** Raw PTY output with control sequences and every whitespace or control
+ *  character removed, lowercased — so a message the terminal coloured or
+ *  wrapped, even mid-id, still compares equal to the text it was. */
+function compactTerminalText(raw: string): string {
+  return stripAnsi(raw).replace(/[\x00-\x20]+/g, "").toLowerCase();
+}
+
+/** True only when the output carries the agent's refusal of THIS conversation
+ *  id. The bare phrase is not enough: a resumed conversation replays its own
+ *  history, and one that merely mentions "no conversation found" must not be
+ *  read as the agent refusing it — that would release the id for good. */
+function isResumeRefusal(rawTail: string, agentSessionId: string): boolean {
+  const text = compactTerminalText(rawTail);
+  const id = compactTerminalText(agentSessionId);
+  return text.includes(`${NO_CONVERSATION_FOUND}:${id}`) || text.includes(`${NO_CONVERSATION_FOUND}${id}`);
 }
 /** close()'s wait for handoff placements, kept inside the seconds a supervisor
  *  gives a shutting-down host. A placement is one rename, or a copy across
@@ -3303,7 +3312,7 @@ export class SessionManager {
     const entry = this.entries.get(id);
     if (!entry || !readOutputTail || this.stopping.has(id) || this.deleting.has(id) || this.closed) return;
     if (Date.now() - launch.at > RESUME_REFUSAL_WINDOW_MS) return;
-    if (!NO_CONVERSATION_FOUND.test(flattenTerminalText(readOutputTail()))) return;
+    if (!entry.agentSessionId || !isResumeRefusal(readOutputTail(), entry.agentSessionId)) return;
     log.warn(`session ${id}: ${entry.tool ?? "agent"} has no conversation ${entry.agentSessionId}; starting a fresh one`);
     entry.agentSessionId = undefined;
     entry.agentTranscriptPath = undefined;

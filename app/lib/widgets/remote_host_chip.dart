@@ -4,6 +4,7 @@ import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_tooltip.dart';
 
 /// Read-only chip shown in the project header when the agent is running on a
 /// remote machine (i.e. `project.isLocalFor(localUuid)` is false).
@@ -52,7 +53,7 @@ class RemoteHostChip extends StatelessWidget {
     final label = hostMachineName.isEmpty ? 'Remote host' : hostMachineName;
     return MouseRegion(
       onEnter: (_) => onRequestStats?.call(),
-      child: Tooltip(
+      child: AbTooltip(
         // The title bar is crowded enough; the figure is a hover-only detail.
         message: [
           'Running on $label',

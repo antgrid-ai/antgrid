@@ -16,6 +16,7 @@ import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/demo_mode.dart';
 import '../../providers/new_session_picker.dart';
+import '../../providers/project_index.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
@@ -182,7 +183,14 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
     };
 
     final groupBy = ref.watch(recentGroupByProvider);
-    final groups = _groupSessions(rows, groupBy, statusFor);
+    final groups = _groupSessions(
+      rows,
+      groupBy,
+      statusFor,
+      groupBy == RecentGroupBy.project
+          ? ref.watch(projectGroupByEntryProvider)
+          : const {},
+    );
 
     return CustomScrollView(
       controller: _scroll,
@@ -229,13 +237,13 @@ List<_SessionGroup> _groupSessions(
   List<RecentSessionRow> rows,
   RecentGroupBy groupBy,
   Map<RecentSessionRow, AgentWorkStatus> statusFor,
+  Map<String, ProjectGroup> projectOf,
 ) {
-  // Machine and status buckets key on a STABLE identity (machineUuid / status
-  // name), never a display string — two machines can share a name. Project
-  // grouping is the deliberate exception: a project's id is a hash of its
-  // folder path, so the same repo on two machines never shares an id and only
-  // its name can unite them. The cost is that two unrelated projects with the
-  // same name merge into one group; rows still name their machine.
+  // Buckets key on a STABLE identity, never a display string — two machines
+  // or projects can share a name. A project's bucket is its sidebar group
+  // ([projectGroupsProvider]), so the same repo on two machines is one group
+  // here exactly when it is one row there; a copy no group knows of keeps a
+  // bucket of its own.
   final buckets = <String, List<RecentSessionRow>>{};
   final labels = <String, String>{};
   for (final row in rows) {
@@ -246,8 +254,9 @@ List<_SessionGroup> _groupSessions(
         key = row.origin.machineUuid ?? 'local';
         label = row.origin.deviceName;
       case RecentGroupBy.project:
-        key = row.origin.projectName.toLowerCase();
-        label = row.origin.projectName;
+        final group = projectOf[row.origin.registrationId];
+        key = group?.key ?? 'entry:${row.origin.registrationId}';
+        label = group?.name ?? row.origin.projectName;
       case RecentGroupBy.status:
         final s = statusFor[row] ?? AgentWorkStatus.done;
         key = s.name;

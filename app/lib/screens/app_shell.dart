@@ -60,6 +60,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   late final AppLifecycleListener _lifecycleListener;
   MobileLifecycleObserver? _mobileLifecycle;
   Future<void>? _eagerKick;
+  bool _eagerKickRequeued = false;
   Timer? _inventoryRefresh;
   DateTime? _lastRemint;
   bool _wasBackgrounded = false;
@@ -138,10 +139,25 @@ class _AppShellState extends ConsumerState<AppShell> {
   /// One kick at a time: cold launch adds the startup resume to the post-frame
   /// kick, and a second concurrent kick would re-invalidate the providers the
   /// first one's dials are still mid-building — restarting them for nothing.
+  ///
+  /// A kick asked for mid-flight still runs once the current one settles: the
+  /// running kick read its targets when it started, so a machine that came
+  /// into scope since would otherwise never be dialed — the scope listener
+  /// fires only on a change, and the reaper never dials. The follow-up skips
+  /// every machine whose connection is already healthy.
   void _kickEagerDials() {
-    _eagerKick ??= kickEagerControlPlaneDials(
-      RefreshRef.of(ref),
-    ).whenComplete(() => _eagerKick = null);
+    if (_eagerKick != null) {
+      _eagerKickRequeued = true;
+      return;
+    }
+    _eagerKick = kickEagerControlPlaneDials(RefreshRef.of(ref)).whenComplete(
+      () {
+        _eagerKick = null;
+        if (!_eagerKickRequeued || !mounted) return;
+        _eagerKickRequeued = false;
+        _kickEagerDials();
+      },
+    );
   }
 
   @override
