@@ -18,7 +18,19 @@ export function pluginDirArg(args: string[]): string | undefined {
   return at >= 0 ? args[at + 1] : undefined;
 }
 
-export function createDriver(ctx: DriverCtx): StructuredDriver {
+/**
+ * The preapproved tool list out of a merged launch augmentation. It rides as one
+ * `--allowedTools=a,b` token (the CLI flag is variadic); the SDK takes the list
+ * as an option instead, so the token is unpacked here. Absent => undefined.
+ */
+export function allowedToolsArg(args: string[]): string[] | undefined {
+  const token = args.find((arg) => arg.startsWith("--allowedTools="));
+  const tools = token?.slice("--allowedTools=".length).split(",").filter(Boolean);
+  return tools?.length ? tools : undefined;
+}
+
+// `spawn` is injectable so tests can observe the options without a real claude.
+export function createDriver(ctx: DriverCtx, spawn: typeof spawnClaude = spawnClaude): StructuredDriver {
   // Bounded tail of the subprocess's stderr: startup failures (bad auth,
   // corrupted install) otherwise vanish silently — the SDK only invokes
   // this callback, it never surfaces stderr any other way.
@@ -37,6 +49,7 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
   const chatAug = ctx.chatAugment();
   const pluginDir = pluginDirArg(chatAug.args);
   const mcpConfig = chatAug.args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
+  const allowedTools = allowedToolsArg(chatAug.args);
   // `claude update` is install-method-sensitive, but this is detection
   // only; the run itself is fail-soft (see the agent:update handler).
   ctx.emitUpdateCheck();
@@ -45,8 +58,9 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
     sendMessage: ctx.send,
     cwd: ctx.projectPath,
     spawn: ({ canUseTool, onElicitation, abort, resume }) =>
-      spawnClaude({ cwd: ctx.projectPath, canUseTool, onElicitation, resume,
+      spawn({ cwd: ctx.projectPath, canUseTool, onElicitation, resume,
         approvalPolicy: ctx.approvalPolicy,
+        ...(allowedTools ? { allowedTools } : {}),
         onStderr: pushStderr, abortController: abort,
         extraArgs: {
           ...(pluginDir ? { "plugin-dir": pluginDir } : {}),

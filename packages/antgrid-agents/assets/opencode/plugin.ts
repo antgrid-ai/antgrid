@@ -6,7 +6,7 @@
 // opencode's own Bun runtime, so we use fetch (no node). Correlation via the
 // ANTGRID_TERMINAL_ID env.
 import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client";
-import { MEMORY_AGENT_GUIDANCE } from "../memory-guidance";
+import { MEMORY_AGENT_GUIDANCE, MEMORY_MCP_SERVER, MEMORY_PREAPPROVED_TOOLS } from "../memory-guidance";
 
 // The slice of the V2 plugin host's `session.hook` used here; `@opencode/client`
 // does not declare it, and this installed asset carries no runtime dependency.
@@ -15,20 +15,40 @@ type ContextHook = (
   callback: (input: { readonly sessionID: string; system: Array<{ type: "text"; text: string }> }) => Promise<void>,
 ) => Promise<{ dispose(): Promise<void> }>;
 
+// The slice of the V2 host's `permission.hook` used here, matching
+// `PermissionEvaluation` in `@opencode/plugin` (`effect` is "allow" | "deny" |
+// "ask"). It is not declared by `@opencode/client`, so every access is guarded
+// and the callback only ever moves `ask` to `allow`.
+type EvaluateInput = { readonly action?: unknown; effect?: unknown };
+type PermissionHook = (
+  name: "evaluate",
+  callback: (input: EvaluateInput) => void | Promise<void>,
+) => Promise<{ dispose(): Promise<void> }> | { dispose(): Promise<void> };
+
+// OpenCode names an MCP tool's permission action `<server>_<tool>`. Matched by
+// exact name so memory_forget and every other tool stay under the user's policy.
+const MEMORY_PREAPPROVED_ACTIONS: ReadonlySet<string> = new Set(
+  MEMORY_PREAPPROVED_TOOLS.map((tool) => `${MEMORY_MCP_SERVER}_${tool}`),
+);
+
 // The V2 host loads a package's default definition and owns the subscription's
 // lifetime. Keep routing independent of that host so it can be exercised without
 // starting an agent or making model requests.
 export default {
   id: "antgrid",
-  async setup(ctx: Pick<OpenCodeClient, "event"> & { session: Pick<OpenCodeClient["session"], "get"> & { hook: ContextHook } }) {
+  async setup(ctx: Pick<OpenCodeClient, "event"> & { session: Pick<OpenCodeClient["session"], "get"> & { hook: ContextHook }; permission?: { hook?: PermissionHook } }) {
     const reporter = await AntgridSessionNamer();
     const stop = new AbortController();
     const sessions = new Map<string, string | undefined>();
-    const send = (type: string, properties: unknown) => reporter.event?.({ event: { type, properties } });
+    // Chat is observed over the native stream by the bridge; posting from here
+    // as well would duplicate its turns and titles. Chat only reads guidance.
+    const chat = process.env.ANTGRID_OPENCODE_CHAT === "1";
+    const send = (type: string, properties: unknown) => chat ? undefined : reporter.event?.({ event: { type, properties } });
     const identify = async (sessionID: string) => {
       if (sessions.has(sessionID)) return;
       const info = await ctx.session.get({ sessionID });
       sessions.set(sessionID, info.parentID);
+      if (chat) return;
       await send("session.created", { info });
       await send("session.updated", { info });
     };
@@ -71,9 +91,23 @@ export default {
     const guidance = await ctx.session.hook("context", async (input) => {
       input.system = input.system.filter((part) => part.text !== MEMORY_AGENT_GUIDANCE);
       try { await identify(input.sessionID); } catch { return; }
+      if (chat && sessions.get(input.sessionID)) return;
       if (await reporter.memoryGuidance(input.sessionID)) input.system.push({ type: "text", text: MEMORY_AGENT_GUIDANCE });
     });
-    const loop = (async () => {
+    // Only `ask` is ever changed; a deny set by config or by another hook (hooks
+    // share one input) survives, as does an allow. Only present on hosts that
+    // expose the hook; others keep their normal prompts.
+    let approval: { dispose(): Promise<void> } | undefined;
+    if (process.env.ANTGRID_MEMORY_MCP === "1" && typeof ctx.permission?.hook === "function") {
+      try {
+        approval = await ctx.permission.hook("evaluate", async (input) => {
+          if (input.effect === "ask" && typeof input.action === "string" && MEMORY_PREAPPROVED_ACTIONS.has(input.action)) {
+            input.effect = "allow";
+          }
+        });
+      } catch (error) { console.error("Antgrid permission hook unavailable", error); }
+    }
+    const loop = chat ? Promise.resolve() : (async () => {
       for await (const event of ctx.event.subscribe({ signal: stop.signal })) {
         if (stop.signal.aborted) break;
         try { await receive(event); } catch (error) { console.error("Antgrid plugin event failed", error); }
@@ -82,6 +116,7 @@ export default {
     return async () => {
       stop.abort();
       await guidance.dispose();
+      await approval?.dispose();
       await loop;
       await reporter.dispose?.();
     };
