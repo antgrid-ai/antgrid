@@ -1,5 +1,7 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -138,13 +140,18 @@ void main() {
 
   Future<AppSettingsService> makeService({
     Map<String, Object> seed = const {},
+    Brightness Function()? platformBrightness,
   }) async {
     useInMemoryPrefs(seed);
     final prefs = await openAppSettingsPrefs();
     final container = ProviderContainer(
       overrides: [
         appSettingsServiceProvider.overrideWith(
-          () => AppSettingsService(prefs, AppSettings.fromPrefs(prefs)),
+          () => AppSettingsService(
+            prefs,
+            AppSettings.fromPrefs(prefs),
+            platformBrightness: platformBrightness,
+          ),
         ),
       ],
     );
@@ -192,17 +199,8 @@ void main() {
   });
 
   group('AppSettings.followSystemBrightness', () {
-    test('defaults to false when no key is set', () async {
+    test('defaults to true when no key is set', () async {
       useInMemoryPrefs();
-      final prefs = await openAppSettingsPrefs();
-
-      final settings = AppSettings.fromPrefs(prefs);
-
-      expect(settings.followSystemBrightness, isFalse);
-    });
-
-    test('round-trips through SharedPreferences', () async {
-      useInMemoryPrefs({'antgrid.follow_system_brightness.v1': true});
       final prefs = await openAppSettingsPrefs();
 
       final settings = AppSettings.fromPrefs(prefs);
@@ -210,22 +208,115 @@ void main() {
       expect(settings.followSystemBrightness, isTrue);
     });
 
+    test('round-trips an explicit opt-out through SharedPreferences', () async {
+      useInMemoryPrefs({'antgrid.follow_system_brightness.v1': false});
+      final prefs = await openAppSettingsPrefs();
+
+      final settings = AppSettings.fromPrefs(prefs);
+
+      expect(settings.followSystemBrightness, isFalse);
+    });
+
     test('setFollowSystemBrightness persists the value', () async {
       final service = await makeService();
 
-      await service.setFollowSystemBrightness(true);
+      await service.setFollowSystemBrightness(false);
 
-      expect(service.state.followSystemBrightness, isTrue);
+      expect(service.state.followSystemBrightness, isFalse);
     });
 
-    test('reset() clears followSystemBrightness back to false', () async {
+    test('reset() restores and persists following on, even when used', () async {
       final service = await makeService(
-        seed: {'antgrid.follow_system_brightness.v1': true},
+        seed: {'antgrid.follow_system_brightness.v1': false},
       );
-      expect(service.state.followSystemBrightness, isTrue);
+      expect(service.state.followSystemBrightness, isFalse);
 
       await service.reset();
+      expect(service.state.followSystemBrightness, isTrue);
 
+      // Written rather than removed, so the next launch's settle on an install
+      // with prior use does not turn it back off.
+      final prefs = await openAppSettingsPrefs();
+      await settleFollowSystemDefault(prefs, hasPriorUse: () => true);
+      expect(AppSettings.fromPrefs(prefs).followSystemBrightness, isTrue);
+    });
+  });
+
+  group('settleFollowSystemDefault', () {
+    Future<bool> settle({
+      Map<String, Object> seed = const {},
+      required bool hasPriorUse,
+    }) async {
+      useInMemoryPrefs(seed);
+      final prefs = await openAppSettingsPrefs();
+      await settleFollowSystemDefault(prefs, hasPriorUse: () => hasPriorUse);
+      return AppSettings.fromPrefs(prefs).followSystemBrightness;
+    }
+
+    test('a fresh install follows the OS', () async {
+      expect(await settle(hasPriorUse: false), isTrue);
+    });
+
+    test('an upgraded install that never chose keeps its preset', () async {
+      expect(await settle(hasPriorUse: true), isFalse);
+    });
+
+    test('an explicit choice is never overwritten', () async {
+      expect(
+        await settle(
+          seed: {'antgrid.follow_system_brightness.v1': true},
+          hasPriorUse: true,
+        ),
+        isTrue,
+      );
+      expect(
+        await settle(
+          seed: {'antgrid.follow_system_brightness.v1': false},
+          hasPriorUse: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('the fresh-install answer latches once prior use appears', () async {
+      useInMemoryPrefs();
+      final prefs = await openAppSettingsPrefs();
+      await settleFollowSystemDefault(prefs, hasPriorUse: () => false);
+      await settleFollowSystemDefault(prefs, hasPriorUse: () => true);
+
+      expect(AppSettings.fromPrefs(prefs).followSystemBrightness, isTrue);
+    });
+  });
+
+  group('theme pick under follow-system', () {
+    // (preset picked, OS brightness, following still on afterwards)
+    for (final (preset, os, stillFollows) in [
+      (AbThemePreset.slate, Brightness.light, false),
+      (AbThemePreset.light, Brightness.dark, false),
+      (AbThemePreset.slate, Brightness.dark, true),
+      (AbThemePreset.light, Brightness.light, true),
+    ]) {
+      test('${preset.name} under OS ${os.name} -> following '
+          '${stillFollows ? 'stays on' : 'switches off'}', () async {
+        final service = await makeService(platformBrightness: () => os);
+
+        await service.setPreset(preset);
+
+        expect(service.state.preset, preset);
+        expect(service.state.followSystemBrightness, stillFollows);
+        final persisted = AppSettings.fromPrefs(await openAppSettingsPrefs());
+        expect(persisted.followSystemBrightness, stillFollows);
+      });
+    }
+
+    test('custom colours under OS light switch following off', () async {
+      final service = await makeService(
+        platformBrightness: () => Brightness.light,
+      );
+
+      await service.setCustomColors(bg: const Color(0xFF202020));
+
+      expect(service.state.preset, AbThemePreset.custom);
       expect(service.state.followSystemBrightness, isFalse);
     });
   });

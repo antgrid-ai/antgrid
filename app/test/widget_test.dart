@@ -85,6 +85,8 @@ void main() {
 
   testWidgets('sign-in brands with the wordmark only', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
     try {
       await tester.pumpWidget(buildApp(width: 400, signedIn: false));
       await tester.pump();
@@ -95,10 +97,11 @@ void main() {
           (w.bytesLoader as SvgAssetLoader).assetName == name;
 
       // The lockup is the sole brand element on sign-in; the tile mark
-      // (launcher/splash identity) must not double-brand the screen.
+      // (launcher/splash identity) must not double-brand the screen. A fresh
+      // install follows the OS, so OS-light gets the ink lockup.
       expect(
         find.byWidgetPredicate(
-          (w) => hasAsset(w, 'assets/logo/antgrid-lockup.svg'),
+          (w) => hasAsset(w, 'assets/logo/antgrid-lockup-light.svg'),
         ),
         findsOneWidget,
       );

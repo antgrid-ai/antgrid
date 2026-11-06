@@ -17,6 +17,7 @@ import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/services/upload_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import 'package:antgrid/widgets/attach_progress.dart';
 import 'package:antgrid/widgets/terminal_attachment_uploader.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
@@ -45,8 +46,14 @@ class _Harness {
   final List<String> inserted = [];
   final List<String> errors = [];
   bool serviceGone = false;
+  final TerminalAttachBoard board = TerminalAttachBoard();
+
+  /// What a view of the terminal shows; held as a mounted view holds it.
+  late final ValueNotifier<AttachProgress?> progress = board.acquire('t');
 
   late final TerminalAttachmentUploader uploader = TerminalAttachmentUploader(
+    board: board,
+    boardKey: () => 't',
     resolveUpload: () => serviceGone ? null : runner,
     insert: inserted.add,
     onError: errors.add,
@@ -100,7 +107,7 @@ void main() {
       expect(calls, 0);
       expect(h.inserted, isEmpty);
       expect(h.errors.single, contains('20 MB'));
-      expect(h.uploader.progress.value, isNull);
+      expect(h.progress.value, isNull);
     });
 
     test('a failed upload reports and inserts nothing', () async {
@@ -116,7 +123,7 @@ void main() {
       expect(h.inserted, isEmpty);
       expect(h.errors.single, contains('a.png'));
       // No dead bar left over the terminal output — the snackbar says it.
-      expect(h.uploader.progress.value, isNull);
+      expect(h.progress.value, isNull);
     });
 
     test('reports OFFLINE when the checkout has no upload service', () async {
@@ -147,6 +154,56 @@ void main() {
       expect(h.inserted, ['"/staged/a.png" ']);
     });
 
+    test(
+      'a view rebuilt mid-upload shows the upload its predecessor started',
+      () async {
+        final gate = Completer<String>();
+        final inserted = <String>[];
+        final board = TerminalAttachBoard();
+        final first = TerminalAttachmentUploader(
+          board: board,
+          resolveUpload: () =>
+              ({required fileName, required bytes, mimeType, onProgress}) =>
+                  gate.future,
+          insert: inserted.add,
+          onError: (_) {},
+          boardKey: () => 'p/main/a',
+        );
+        final firstView = board.acquire('p/main/a');
+
+        final run = first.attach(bytes: Uint8List(1), fileName: 'a.png');
+        expect(firstView.value?.phase, AttachPhase.staging);
+
+        // The reconnect tears the first view down and builds a second.
+        first.dispose();
+        board.release('p/main/a');
+        final secondView = board.acquire('p/main/a');
+        expect(secondView.value?.phase, AttachPhase.staging);
+
+        // The new view's own uploader must not start a second upload over it.
+        final refused = <String>[];
+        await TerminalAttachmentUploader(
+          board: board,
+          resolveUpload: () => _stagesOk,
+          insert: (_) {},
+          onError: refused.add,
+          boardKey: () => 'p/main/a',
+        ).attach(bytes: Uint8List(1), fileName: 'b.png');
+        expect(refused, hasLength(1));
+
+        gate.complete('/staged/a.png');
+        await run;
+        expect(inserted, ['"/staged/a.png" ']);
+        expect(secondView.value?.phase, AttachPhase.done);
+
+        await Future<void>.delayed(
+          TerminalAttachmentUploader.kDoneHold +
+              const Duration(milliseconds: 50),
+        );
+        expect(secondView.value, isNull);
+      },
+    );
+
     test('progress runs staging → sending → done and then clears', () async {
       final gate = Completer<String>();
       void Function(int, int)? tick;
@@ -159,22 +216,22 @@ void main() {
       addTearDown(h.uploader.dispose);
 
       final run = h.uploader.attach(bytes: Uint8List(1), fileName: 'a.png');
-      expect(h.uploader.progress.value?.phase, AttachPhase.staging);
+      expect(h.progress.value?.phase, AttachPhase.staging);
       // Indeterminate: a round trip has no size to report against.
-      expect(h.uploader.progress.value?.fraction, isNull);
+      expect(h.progress.value?.fraction, isNull);
 
       tick!(1, 4);
-      expect(h.uploader.progress.value?.phase, AttachPhase.sending);
-      expect(h.uploader.progress.value?.fraction, 0.25);
+      expect(h.progress.value?.phase, AttachPhase.sending);
+      expect(h.progress.value?.fraction, 0.25);
 
       gate.complete('/staged/a.png');
       await run;
-      expect(h.uploader.progress.value?.phase, AttachPhase.done);
+      expect(h.progress.value?.phase, AttachPhase.done);
 
       await Future<void>.delayed(
         TerminalAttachmentUploader.kDoneHold + const Duration(milliseconds: 50),
       );
-      expect(h.uploader.progress.value, isNull);
+      expect(h.progress.value, isNull);
     });
   });
 

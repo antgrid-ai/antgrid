@@ -192,6 +192,11 @@ Future<void> main() async {
   // Opened separately from the record above, which is already at the arity
   // `Future.wait` on records supports.
   final pendingForgetsStore = await PendingForgetsStore.open();
+  await settleFollowSystemDefault(
+    prefs,
+    hasPriorUse: () =>
+        projectStore.list().isNotEmpty || recentAgentsStore.list().isNotEmpty,
+  );
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
   // Consumed unconditionally, never behind Windows' `--after-update` argument:
@@ -592,22 +597,16 @@ TextScaler composedTextScalerFor({
   return TextScaler.linear(composed.toDouble());
 }
 
-/// Palette actually rendered, after the follow-system-brightness setting.
-/// When enabled: OS-light renders the `light` preset; OS-dark renders the
-/// user's chosen preset — unless that chosen preset IS light, which would
-/// blind in a dark room, so it falls back to the default dark palette.
-/// When disabled the chosen palette passes through untouched.
+/// Palette rendered under [platformBrightness]: [chosen], unless follow-system
+/// substitutes a preset for it (see [renderedPreset]).
 @visibleForTesting
 AbColors effectivePaletteFor({
   required AppSettings settings,
   required AbColors chosen,
   required Brightness platformBrightness,
 }) {
-  if (!settings.followSystemBrightness) return chosen;
-  if (platformBrightness == Brightness.light) {
-    return kPresets[AbThemePreset.light]!;
-  }
-  return settings.preset == AbThemePreset.light ? kDefaultPalette : chosen;
+  final rendered = renderedPreset(settings, platformBrightness);
+  return rendered == settings.preset ? chosen : kPresets[rendered]!;
 }
 
 class AbApp extends ConsumerWidget {
@@ -622,7 +621,17 @@ class AbApp extends ConsumerWidget {
       customPrimary: settings.customPrimary,
       customAccent: settings.customAccent,
     );
-    final theme = buildAbTheme(palette);
+    AbColors paletteUnder(Brightness b) => effectivePaletteFor(
+      settings: settings,
+      chosen: palette,
+      platformBrightness: b,
+    );
+    final lightPalette = paletteUnder(Brightness.light);
+    final darkPalette = paletteUnder(Brightness.dark);
+    final lightTheme = buildAbTheme(lightPalette);
+    final darkTheme = identical(darkPalette, lightPalette)
+        ? lightTheme
+        : buildAbTheme(darkPalette);
     // Sign-in is optional on desktop. Mobile (iOS/Android) requires an account
     // for relay pairing. Splash only while session state is genuinely unknown
     // (cold start with no cached cookie).
@@ -631,35 +640,25 @@ class AbApp extends ConsumerWidget {
       title: 'Antgrid',
       navigatorKey: ref.watch(rootNavigatorKeyProvider),
       debugShowCheckedModeBanner: false,
-      theme: theme,
-      darkTheme: theme,
+      // Follow-system is ThemeMode.system over the two resolved palettes; with
+      // following off both are the chosen one. The swap is instant, like the
+      // OS flip that triggers it, and like a preset pick always was.
+      theme: lightTheme,
+      darkTheme: darkTheme,
+      themeMode: ThemeMode.system,
+      themeAnimationStyle: AnimationStyle.noAnimation,
       builder: (context, child) {
         // The OS-provided MediaQuery, captured BEFORE our copyWith below
         // replaces scaler/animation fields — its textScaler, disableAnimations
         // and platformBrightness are the accessibility inputs we compose with.
         final osMediaQuery = MediaQuery.of(context);
 
-        // Resolved here (not in AbApp.build) so MediaQuery.platformBrightnessOf
-        // re-runs the builder on every OS light/dark flip. MaterialApp's
-        // `theme:` above is only the pre-follow chosen theme; everything
-        // visible renders under the Theme override below, so swapping the
-        // effective theme + bar style here flips the whole app in lockstep.
-        final effectivePalette = effectivePaletteFor(
-          settings: settings,
-          chosen: palette,
-          platformBrightness: MediaQuery.platformBrightnessOf(context),
-        );
-        final effectiveTheme = identical(effectivePalette, palette)
-            ? theme
-            : buildAbTheme(effectivePalette);
-
         // DPI scaling still flows via devicePixelRatio at the engine layer —
         // the textScaler override is unaffected by it.
-        // System bars track the LIVE effective palette: the builder re-runs on
-        // every settings change, so a preset switch restyles bar icons
-        // immediately.
+        // System bars follow the theme MaterialApp resolved above this
+        // builder, so a preset switch or OS flip restyles bar icons at once.
         return AnnotatedRegion<SystemUiOverlayStyle>(
-          value: systemBarStyleFor(effectivePalette),
+          value: systemBarStyleFor(context.antgrid),
           child: MediaQuery(
             data: osMediaQuery.copyWith(
               textScaler: composedTextScalerFor(
@@ -672,22 +671,19 @@ class AbApp extends ConsumerWidget {
               disableAnimations:
                   osMediaQuery.disableAnimations || settings.reduceMotion,
             ),
-            child: Theme(
-              data: effectiveTheme,
-              // Mounted from the builder, not from a screen: the console has to
-              // outlive every route and stay out of the shell's own layout,
-              // which is also what lets it drive navigation from wherever the
-              // app currently is. It renders nothing unless the driver entry
-              // point enabled it.
-              child: AbTextDensity(
-                child: NavConsole(
-                  // Inside the console so a card never covers its command
-                  // field, around the demo frame so its title bar shares the
-                  // app's one stack.
-                  child: AbToastHost(
-                    toaster: ref.watch(appToasterProvider),
-                    child: DemoFrame(child: child!),
-                  ),
+            // Mounted from the builder, not from a screen: the console has to
+            // outlive every route and stay out of the shell's own layout,
+            // which is also what lets it drive navigation from wherever the
+            // app currently is. It renders nothing unless the driver entry
+            // point enabled it.
+            child: AbTextDensity(
+              child: NavConsole(
+                // Inside the console so a card never covers its command
+                // field, around the demo frame so its title bar shares the
+                // app's one stack.
+                child: AbToastHost(
+                  toaster: ref.watch(appToasterProvider),
+                  child: DemoFrame(child: child!),
                 ),
               ),
             ),
