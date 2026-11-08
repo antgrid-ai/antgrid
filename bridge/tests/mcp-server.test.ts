@@ -648,10 +648,10 @@ describe("the session-bus tools", () => {
       const text = (await callSessionBusTool("antgrid_thread", { threadId: "th-1" })).content[0]!.text;
       expect(search).toContain("threadId=th-1");
       expect(text).toContain("Thread th-1 (5 messages, oldest first):");
-      expect(text).toContain("- -> you, 5m ago [delivered 4m ago: stored by the receiving bridge, not read] — asked");
+      expect(text).toContain("- you -> peer/p2/9c11de, 5m ago [delivered 4m ago: stored by the receiving bridge, not read] — asked");
       expect(text).toContain("  what broke?");
-      expect(text).toContain("- <- peer/p2/9c11de, 3m ago — answered");
-      expect(text).toContain("- -> you, 30s ago [held on this machine] — thanks");
+      expect(text).toContain("- peer/p2/9c11de -> you, 3m ago — answered");
+      expect(text).toContain("- you -> peer/p2/9c11de, 30s ago [held on this machine] — thanks");
       expect(text).toContain("[relayed: the relay has it, nothing has read it] — again");
       expect(text).toContain(`[refused REMOTE_ACCESS_OFF: ${refusalSentence("REMOTE_ACCESS_OFF")}] — nope`);
     });
