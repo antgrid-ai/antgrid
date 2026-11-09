@@ -378,7 +378,29 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Memory unavailable'), findsOneWidget);
     expect(find.textContaining('Remote access is off on Laptop'), findsOneWidget);
+    expect(find.widgetWithText(AbButton, 'Retry'), findsOneWidget);
+    expect(find.text('Reconnect and retry'), findsNothing);
   }, variant: phones);
+
+  testWidgets('a record opened on a phone says when its machine drops', (
+    tester,
+  ) async {
+    final (rig, _) = await _mount(
+      tester,
+      recents: [_recent('m1', 'Laptop', _t0)],
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('A retained finding'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Back to Memory'), findsOneWidget);
+    const banner =
+        "Laptop is offline. Changes can't be saved until it reconnects.";
+    expect(find.text(banner), findsNothing);
+
+    rig.setConnected('m1', false);
+    await tester.pumpAndSettle();
+    expect(find.text(banner), findsOneWidget);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   testWidgets('turning Memory on for a remote machine sends settings there and '
       'then offers the restart review', (tester) async {

@@ -136,6 +136,13 @@ class AbMenu extends StatelessWidget {
     // First non-divider item gets `autofocus: true` so keyboard users
     // land on an interactive row immediately when the menu opens.
     var didAutofocus = false;
+    // A tick marks the picked row in a choice menu; without the gutter the
+    // other labels sit left of it and read as a different list.
+    final iconGutter = items.any(
+      (e) =>
+          (e is AbMenuItem && e.icon != null) ||
+          (e is AbMenuSubmenu && e.icon != null),
+    );
     // `width` is the intended/target width — under the route's loose
     // viewport constraints the menu lays out exactly `width` wide, but
     // on narrow displays (split-screen, foldables) it shrinks to fit
@@ -204,6 +211,7 @@ class AbMenu extends StatelessWidget {
                             open: _openSubmenu,
                             expanded: identical(entry, _activeSubmenu),
                             autofocus: autofocus,
+                            iconGutter: iconGutter,
                           );
                         },
                       )
@@ -219,6 +227,7 @@ class AbMenu extends StatelessWidget {
                             key: entry.key,
                             item: entry,
                             autofocus: autofocus,
+                            iconGutter: iconGutter,
                           );
                         },
                       ),
@@ -922,6 +931,7 @@ class _SubmenuTile extends StatefulWidget {
     required this.expanded,
     required this.autofocus,
     this.focusNode,
+    this.iconGutter = false,
   });
 
   final AbMenuSubmenu entry;
@@ -929,6 +939,7 @@ class _SubmenuTile extends StatefulWidget {
   final bool expanded;
   final bool autofocus;
   final FocusNode? focusNode;
+  final bool iconGutter;
 
   @override
   State<_SubmenuTile> createState() => _SubmenuTileState();
@@ -975,6 +986,7 @@ class _SubmenuTileState extends State<_SubmenuTile> {
               icon: widget.entry.icon,
               onTap: () => _open(true),
             ),
+            iconGutter: widget.iconGutter,
             trailing: AbIcon(
               AbIcons.chevronRight,
               size: _menuRowIconSize,
@@ -1367,11 +1379,15 @@ class _MenuItemTile extends StatefulWidget {
     this.autofocus = false,
     this.focusNode,
     this.trailing,
+    this.iconGutter = false,
   });
   final AbMenuItem item;
   final bool autofocus;
   final FocusNode? focusNode;
   final Widget? trailing;
+
+  /// Holds an iconless row's label in line with siblings that have an icon.
+  final bool iconGutter;
 
   @override
   State<_MenuItemTile> createState() => _MenuItemTileState();
@@ -1456,7 +1472,9 @@ class _MenuItemTileState extends State<_MenuItemTile> {
                 Padding(
                   padding: const EdgeInsets.only(right: _menuRowIconGap),
                   child: AbIcon(i.icon!, size: _menuRowIconSize, color: iconFg),
-                ),
+                )
+              else if (widget.iconGutter)
+                const SizedBox(width: _menuRowIconSize + _menuRowIconGap),
               Expanded(
                 child: Text(
                   i.label,

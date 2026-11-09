@@ -1,3 +1,5 @@
+import 'dart:async' show TimeoutException;
+
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
@@ -444,7 +446,11 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   Future<void> _openRecord(String id) async {
     await Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
-        pageBuilder: (_, _, _) => MemoryRecordDetails(target: _target, id: id),
+        pageBuilder: (_, _, _) => MemoryRecordDetails(
+          target: _target,
+          id: id,
+          machineName: widget.machineName,
+        ),
       ),
     );
     if (mounted) invalidateMemoryViews(ref, _target);
@@ -552,7 +558,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     return [
       if (offline)
         AbInlineBanner(
-          text: "$name is offline. Changes can't be saved until it reconnects.",
+          text: memoryOfflineBannerCopy(name),
           color: muted,
         ),
       if (_exporting)
@@ -586,10 +592,23 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
           final Widget body;
           if (status == null) {
             final error = statusAsync.error;
+            final code = error == null ? '' : memoryErrorCode(error);
             final offline =
                 widget.machineName != null &&
+                (!widget.connected || code == 'NOT_CONNECTED');
+            // A machine that answered with a refusal is reachable, so offering
+            // to reconnect would point at the wrong fix.
+            final unreachable =
+                _target.machineId != null &&
                 (!widget.connected ||
-                    (error != null && memoryErrorCode(error) == 'NOT_CONNECTED'));
+                    error is TimeoutException ||
+                    const {
+                      'NOT_CONNECTED',
+                      'E_TIMEOUT',
+                      'TIMEOUT',
+                      'TRANSPORT',
+                      'TRANSPORT_ERROR',
+                    }.contains(code));
             body = statusAsync.isLoading
                 ? const Center(child: AbLoading())
                 : AbEmptyState.error(
@@ -600,9 +619,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
                         ? 'Open Antgrid on that computer, then reconnect to see its memories.'
                         : memoryErrorCopy(error!, machine: widget.machineName),
                     action: AbButton(
-                      label: _target.machineId != null
-                          ? 'Reconnect and retry'
-                          : 'Retry',
+                      label: unreachable ? 'Reconnect and retry' : 'Retry',
                       onTap: () =>
                           detached('Memory', 'reconnect failed', _retry),
                     ),

@@ -14,6 +14,10 @@ String memoryErrorCode(Object error) => switch (error) {
   _ => '',
 };
 
+/// Shown over a remote machine's memories while it is disconnected.
+String memoryOfflineBannerCopy(String machine) =>
+    "$machine is offline. Changes can't be saved until it reconnects.";
+
 /// Never shows a [MemoryException] message: the backend words it with
 /// "record", "revision" and "operation key", none of which the app uses. Every
 /// code maps to app copy instead.
