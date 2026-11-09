@@ -79,7 +79,7 @@ bun run --filter antgrid-bridge typecheck
 directory outside the checkout to verify external Bun and Node asset loading.
 
 OpenCode requires **2.0.0 or later** in both terminal and chat mode. Unsupported
-versions fail before the session starts with an `opencode upgrade` instruction.
+versions fail before the session starts with an `opencode upgrade --major` instruction.
 Chat uses the native V2 client and API; terminals use `--standalone` so each
 process retains its own Antgrid MCP identity. Native config, plugins, instructions,
 permissions, providers and credentials remain owned by OpenCode.

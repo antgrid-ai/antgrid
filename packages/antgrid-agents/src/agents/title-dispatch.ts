@@ -13,7 +13,8 @@ const log = logger.child({ component: "title-resolver" });
  * in — BY_HOOK_NAME maps it back to the registry key. It is optional on the
  * wire, and an agent with no `resolveTitle` returns null rather than being an
  * unhandled case: opencode supplies its title inline in the post, and
- * cursor-agent has no on-disk session file to read one from.
+ * cursor-agent has no title reader (its transcripts under
+ * ~/.cursor/projects/<cwd-slug>/agent-transcripts/ are not read for one).
  *
  * Never throws: title resolution is advisory, and its callers fire it
  * unawaited.

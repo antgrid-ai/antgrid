@@ -1198,7 +1198,7 @@ describe("update specs", () => {
   const expected: PerAgent<{ npmPackage: string; command: string; updateArgs: string[]; readState: boolean } | null> = {
     "claude-code": { npmPackage: "@anthropic-ai/claude-code", command: "claude", updateArgs: ["update"], readState: false },
     codex: { npmPackage: "@openai/codex", command: "codex", updateArgs: ["update"], readState: true },
-    opencode: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"], readState: false },
+    opencode: { npmPackage: "@opencode/cli", command: "opencode", updateArgs: ["upgrade"], readState: false },
     // IDE-bound, no self-updater: a request fails soft rather than throwing.
     "cursor-agent": null,
     "github-copilot": null,
@@ -1221,7 +1221,9 @@ describe("update specs", () => {
       if (spec && "check" in spec) throw new Error("Expected a CLI updater");
       expect(spec?.npmPackage).toBe(want.npmPackage);
       expect(spec?.command).toBe(want.command);
-      expect(spec?.updateArgs).toEqual(want.updateArgs);
+      const args = spec?.updateArgs;
+      // A version-aware updater is pinned at the current major line.
+      expect(typeof args === "function" ? args("2.2.6") : args).toEqual(want.updateArgs);
       expect(typeof spec?.readState).toBe(want.readState ? "function" : "undefined");
     });
   }

@@ -7,7 +7,7 @@ import type { OpenCodeEvent } from "@opencode/client";
 import { normalizeMessage, OpencodeV2Events } from "../src/agents/opencode/v2-events";
 import { connectOpencode } from "../src/agents/opencode/spawn";
 import { prepareOpencodeTerminal } from "../src/agents/opencode/terminal";
-import { requireOpencodeV2 } from "../src/agents/opencode/version";
+import { opencodeUpgradeArgs, requireOpencodeV2 } from "../src/agents/opencode/version";
 import { createAgentRunScope } from "../src/run-scope";
 import { withAgentHost, type AgentHostServices, type AgentLogger } from "../src/host";
 import { readOpencodeV2Messages } from "../src/agents/opencode/v2-store";
@@ -113,6 +113,20 @@ test("V2 client preserves native defaults, paginates history and reverts without
 
 test.each(["1.19.5", "2.0.0-beta.1", "invalid", undefined])("both modes reject unsupported version %s", (version) => {
   expect(() => requireOpencodeV2(version)).toThrow("OpenCode 2.0.0 or later is required");
+});
+
+// opencode 1.19.x: a bare `upgrade` installs the newest 1.x and only prints
+// "OpenCode 2 is available. Upgrade with `opencode upgrade --major`".
+test("the refusal names the upgrade that actually reaches OpenCode 2", () => {
+  expect(() => requireOpencodeV2("1.19.0")).toThrow("Run opencode upgrade --major and retry.");
+});
+
+// 2.2.6's `upgrade` takes only `[target]` and `--method`, and 2.x rejects an
+// unknown flag, so `--major` is for the 1.x line alone.
+test("the in-app update takes a 1.x install to OpenCode 2 and keeps 2.x on its own updater", () => {
+  expect(opencodeUpgradeArgs("1.19.0")).toEqual(["upgrade", "--major"]);
+  expect(opencodeUpgradeArgs("2.2.6")).toEqual(["upgrade"]);
+  expect(opencodeUpgradeArgs(null)).toEqual(["upgrade"]);
 });
 
 test("an owned server exit fails an active V2 event subscription", async () => {
