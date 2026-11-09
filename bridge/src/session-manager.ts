@@ -642,7 +642,7 @@ export class SessionManager {
    *  A terminal run is marked at spawn, a chat run when its driver computes the
    *  augmentation (`noteChatRunMemory`). Cleared with the run (`unbindRun`),
    *  never persisted. */
-  private terminalRunsWithoutMemory = new Set<string>();
+  private runsWithoutMemory = new Set<string>();
   private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
   private readonly scheduleOwnedCheckouts = new Set<string>();
   private readonly setupSettlements = new Map<string, Promise<void>>();
@@ -689,17 +689,21 @@ export class SessionManager {
    */
   noteChatRunMemory(id: string, runId: string, withheld: boolean): void {
     if (!this.isLiveRun(id, runId) || this.entries.get(id)?.mode !== "chat") return;
-    const had = this.terminalRunsWithoutMemory.has(id);
-    if (withheld === had) return;
-    if (withheld) this.terminalRunsWithoutMemory.add(id);
-    else this.terminalRunsWithoutMemory.delete(id);
-    this.notifyObservers();
+    if (this.markRunMemory(id, withheld)) this.notifyObservers();
+  }
+
+  /** Returns whether the mark moved. */
+  private markRunMemory(id: string, withheld: boolean): boolean {
+    if (withheld === this.runsWithoutMemory.has(id)) return false;
+    if (withheld) this.runsWithoutMemory.add(id);
+    else this.runsWithoutMemory.delete(id);
+    return true;
   }
 
   private unbindRun(id: string): void {
     this.terminalRunIds.delete(id);
     this.terminalRunAgents.delete(id);
-    this.terminalRunsWithoutMemory.delete(id);
+    this.runsWithoutMemory.delete(id);
   }
 
   acceptsHookRun(id: string, runId?: string): boolean {
@@ -2862,8 +2866,7 @@ export class SessionManager {
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
       const runtimeSpec = (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name);
-      if (launch.memoryWithheld) this.terminalRunsWithoutMemory.add(id);
-      else this.terminalRunsWithoutMemory.delete(id);
+      this.markRunMemory(id, launch.memoryWithheld === true);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2939,7 +2942,7 @@ export class SessionManager {
           this.terminalPreparing.delete(id);
           // toWire withholds startedWithoutMemory until preparation settles. Nothing
           // persisted changed, so this skips the flush changed() would add.
-          if (this.terminalRunsWithoutMemory.has(id)) this.notifyObservers();
+          if (this.runsWithoutMemory.has(id)) this.notifyObservers();
         });
         this.terminalPreparing.set(id, pending);
         return pending;
@@ -3237,7 +3240,7 @@ export class SessionManager {
   /** Not while preparing: a spawned run whose readiness is still pending would
    *  be flagged and then refused by restartForMemory as a no-op. */
   private launchedWithoutMemory(e: PersistedEntry): boolean {
-    return this.isRunning(e) && !this.terminalPreparing.has(e.id) && this.terminalRunsWithoutMemory.has(e.id);
+    return this.isRunning(e) && !this.terminalPreparing.has(e.id) && this.runsWithoutMemory.has(e.id);
   }
 
   /** A scheduled run in progress is excluded: restartForMemory would refuse it. */
@@ -3249,7 +3252,7 @@ export class SessionManager {
    *  session's wire form. Ordered like {@link list}. */
   listStartedWithoutMemory(): SessionEntry[] {
     const out: SessionEntry[] = [];
-    for (const id of this.terminalRunsWithoutMemory) {
+    for (const id of this.runsWithoutMemory) {
       const e = this.entries.get(id);
       if (e && !e.archived && this.startedWithoutMemory(e)) out.push(this.toWire(e));
     }

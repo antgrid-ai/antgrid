@@ -1,6 +1,6 @@
 import { resolveHookCommand } from "../../host";
 import { z } from "zod";
-import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema, memoryGuidanceFor } from "../../memory-guidance";
+import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema, memoryGuidanceFor, memoryRegistered } from "../../memory-guidance";
 import type { HookStdoutProfile } from "../hook-posts";
 import {
   computeCommandHookHash,
@@ -138,7 +138,7 @@ export const observation = { notifications: true, titles: true, handler: true, t
 
 export const stdout: HookStdoutProfile = {
   events: ["session-start"],
-  when: (env) => env.ANTGRID_MEMORY_MCP === "1",
+  when: memoryRegistered,
   request: ({ port, terminalId, runId }) => ({
     port,
     path: "/memory/bootstrap",

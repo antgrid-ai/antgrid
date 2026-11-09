@@ -608,7 +608,7 @@ describe("restartForMemory", () => {
       await (c.sessions as any).stopAndAwait(s.id);
 
       expect(c.sessions.listStartedWithoutMemory()).toEqual([]);
-      expect((c.sessions as any).terminalRunsWithoutMemory.has(s.id)).toBe(false);
+      expect((c.sessions as any).runsWithoutMemory.has(s.id)).toBe(false);
       c.sessions.flushNow();
     });
   });

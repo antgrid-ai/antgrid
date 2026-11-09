@@ -34,20 +34,17 @@ function writeOpencodeConfig(abDir: string): string | null {
 
 export function inject({ abDir, mode, memoryRegistered }: HookInjectCtx): LaunchAugmentation {
   if (process.env.OPENCODE_CONFIG) return NO_INJECTION;
-  if (mode === "chat") {
-    // Chat observes the native stream directly, so the plugin loads only to
-    // carry Memory's guidance and pre-approval and runs in a non-reporting
-    // mode. With Memory off nothing is injected at all.
-    if (!memoryRegistered) return NO_INJECTION;
-    const cfgPath = writeOpencodeConfig(abDir);
-    // NO_OBSERVATION: the chat plugin posts no titles or turn events, so the
-    // profile's terminal observation must not be claimed for it.
-    return cfgPath
-      ? { args: [], env: { OPENCODE_CONFIG: cfgPath, ANTGRID_OPENCODE_CHAT: "1" }, observation: NO_OBSERVATION }
-      : NO_INJECTION;
-  }
+  // Chat observes the native stream directly, so the plugin loads only to
+  // carry Memory's guidance and pre-approval and runs in a non-reporting mode.
+  // With Memory off nothing is injected at all.
+  if (mode === "chat" && !memoryRegistered) return NO_INJECTION;
   const cfgPath = writeOpencodeConfig(abDir);
-  return cfgPath ? { args: [], env: { OPENCODE_CONFIG: cfgPath } } : NO_INJECTION;
+  if (!cfgPath) return NO_INJECTION;
+  // NO_OBSERVATION: the chat plugin posts no titles or turn events, so the
+  // profile's terminal observation must not be claimed for it.
+  return mode === "chat"
+    ? { args: [], env: { OPENCODE_CONFIG: cfgPath, ANTGRID_OPENCODE_CHAT: "1" }, observation: NO_OBSERVATION }
+    : { args: [], env: { OPENCODE_CONFIG: cfgPath } };
 }
 
 // Empty on purpose: the injected plugin runs inside opencode's own Bun runtime

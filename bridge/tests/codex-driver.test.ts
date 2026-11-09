@@ -973,12 +973,11 @@ describe("CodexDriver memory guidance", () => {
     return { start: () => driver.start(opts.resumeId), requests };
   }
 
-  it("memory off sends no config/read, no inject and no developerInstructions", async () => {
-    const { start, requests } = run({ guidance: async () => undefined, resumeId: "r1" });
+  it("memory off sends no config/read and no developerInstructions", async () => {
+    const { start, requests } = run({ guidance: async () => undefined });
     await start();
     expect(requests.some((r) => r.method === "config/read")).toBe(false);
-    expect(requests.some((r) => r.method === "thread/inject_items")).toBe(false);
-    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBeUndefined();
+    expect(requests.find((r) => r.method === "thread/start")?.params).toEqual({ cwd: "/x" });
   });
 
   it("a thread without a provider adds no round trips", async () => {
@@ -1041,35 +1040,33 @@ describe("CodexDriver memory guidance", () => {
 });
 
 describe("createDriver memory guidance", () => {
-  async function started(env: Record<string, string>, bootstrap: any, bootstrapCalls: { n: number }) {
+  async function started(memoryGuidance: (() => Promise<string | undefined>) | undefined, order: string[] = []) {
     const { ep, requests } = makeFakeEndpoint({
       onRequest: (m) => (m === "thread/start" ? { thread: { id: "th1" } } : {}),
     });
     const driver = createDriver({
       sessionId: "s1", projectPath: "/x", approvalPolicy: "default", send: () => {},
       onAgentSession: () => {}, emitUpdateCheck: () => {},
-      chatAugment: () => ({ args: [], env }),
-      memoryBootstrap: async () => { bootstrapCalls.n++; return bootstrap; },
-    } as any, () => ({ endpoint: ep, failureDiagnosis: Promise.resolve(null), kill: async () => {} }));
+      chatAugment: () => { order.push("augment"); return { args: [], env: {} }; },
+      memoryGuidance: memoryGuidance && (() => { order.push("guidance"); return memoryGuidance(); }),
+    } as any, () => { order.push("spawn"); return { endpoint: ep, failureDiagnosis: Promise.resolve(null), kill: async () => {} }; });
     await driver.start();
     return requests;
   }
-  const on = { available: true, enabled: true, paused: false, project_paused: false };
 
-  it("memory not registered: no bootstrap call, no config/read", async () => {
-    const calls = { n: 0 };
-    const requests = await started({}, on, calls);
-    expect(calls.n).toBe(0);
-    expect(requests.some((r) => r.method === "config/read")).toBe(false);
+  it("asks for guidance after the augmentation and before the spawn", async () => {
+    const order: string[] = [];
+    await started(async () => undefined, order);
+    expect(order).toEqual(["augment", "guidance", "spawn"]);
   });
 
-  it("registered and enabled: guidance is sent", async () => {
-    const requests = await started({ ANTGRID_MEMORY_MCP: "1" }, on, { n: 0 });
+  it("sends the context's guidance", async () => {
+    const requests = await started(async () => MEMORY_AGENT_GUIDANCE);
     expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBe(MEMORY_AGENT_GUIDANCE);
   });
 
-  it("registered but paused: no guidance and no config/read", async () => {
-    const requests = await started({ ANTGRID_MEMORY_MCP: "1" }, { ...on, paused: true }, { n: 0 });
+  it("without a guidance provider: no config/read", async () => {
+    const requests = await started(undefined);
     expect(requests.some((r) => r.method === "config/read")).toBe(false);
     expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBeUndefined();
   });

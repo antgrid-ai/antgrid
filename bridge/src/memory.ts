@@ -5,7 +5,9 @@ import {
   MEMORY_DATABASE, MEMORY_OFF, MemoryError, MemoryRequestSchema, MemoryService, readMemoryEnabled, type MemoryContext,
 } from "antgrid-memory";
 import type { SchedulerCallerDeps } from "./scheduler-caller";
+import { memoryBootstrapFrom, memoryGuidanceFor } from "antgrid-agents/memory-guidance";
 import { formatZodIssues } from "./config";
+import { withTimeout } from "./with-timeout";
 import type { WorkStatus } from "./protocol";
 
 export type MemoryCaller = Pick<MemoryContext, "session_id" | "checkout_id" | "agent_id" | "run_id">;
@@ -37,6 +39,23 @@ export function resolveMemoryCaller(deps: MemoryCallerDeps, terminalId?: string,
   // and runtime are both checked, unlike the general-purpose terminal lookup.
   if (!agentId || !session.checkoutId || !deps.checkoutExists(session.checkoutId)) throw refuse();
   return { session_id: session.id, checkout_id: session.checkoutId, agent_id: agentId, run_id: runId };
+}
+
+/** Memory guidance for a chat run, or `undefined` when Memory is off, paused or
+ *  cannot answer in time: a slow or failing store must delay a chat spawn by at
+ *  most the timeout and never fail it. Only settings flags reach the guidance
+ *  decision, never stored content. */
+export async function chatMemoryGuidance(
+  memoryForAgent: MemoryForAgent,
+  caller: () => MemoryCaller,
+  timeoutMs = 1500,
+): Promise<string | undefined> {
+  try {
+    const status = await withTimeout(memoryForAgent(caller, { op: "status" }), timeoutMs, undefined);
+    return memoryGuidanceFor(status ? memoryBootstrapFrom(status) : undefined);
+  } catch {
+    return undefined;
+  }
 }
 
 export function memoryFailure(error: unknown): { code: string; message: string } {

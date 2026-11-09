@@ -161,29 +161,23 @@ describe("augmentAgentLaunch", () => {
   });
 
   test("opencode chat with Memory on loads the plugin in its non-reporting mode", () => {
-    const release = setMemoryLaunchGate(() => true);
-    try {
-      const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
-        abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
-      }));
-      expect(launch.args).toEqual([]);
-      expect(launch.env.ANTGRID_OPENCODE_CHAT).toBe("1");
-      expect(launch.env.ANTGRID_MEMORY_MCP).toBe("1");
-      expect(JSON.parse(readFileSync(launch.env.OPENCODE_CONFIG, "utf8")).plugins[0]).toMatch(/^file:\/\/.*opencode$/);
-      expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp["antgrid-memory"]).toBeDefined();
-      expect(launch.observation).toEqual(NO_OBSERVATION);
-    } finally { release(); }
+    const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
+      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
+    }));
+    expect(launch.args).toEqual([]);
+    expect(launch.env.ANTGRID_OPENCODE_CHAT).toBe("1");
+    expect(launch.env.ANTGRID_MEMORY_MCP).toBe("1");
+    expect(JSON.parse(readFileSync(launch.env.OPENCODE_CONFIG, "utf8")).plugins[0]).toMatch(/^file:\/\/.*opencode$/);
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp["antgrid-memory"]).toBeDefined();
+    expect(launch.observation).toEqual(NO_OBSERVATION);
   });
 
   test("opencode chat with Memory on still yields to a user-set OPENCODE_CONFIG", () => {
-    const release = setMemoryLaunchGate(() => true);
-    try {
-      const launch = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () => augmentAgentLaunch("opencode", {
-        abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
-      }));
-      expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
-      expect(launch.env.ANTGRID_OPENCODE_CHAT).toBeUndefined();
-    } finally { release(); }
+    const launch = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () => augmentAgentLaunch("opencode", {
+      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
+    }));
+    expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
+    expect(launch.env.ANTGRID_OPENCODE_CHAT).toBeUndefined();
   });
 
   test("unknown tool has no injection", () => {

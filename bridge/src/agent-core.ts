@@ -33,7 +33,7 @@ import {
 } from "./keystrokes";
 import { transcriptInterruptFor } from "antgrid-agents/builtins";
 import { authoredText } from "antgrid-agents/handoff";
-import { memoryBootstrapFrom, type MemoryBootstrap } from "antgrid-agents/memory-guidance";
+import { memoryRegistered } from "antgrid-agents/memory-guidance";
 import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
@@ -68,7 +68,7 @@ import { resolveSchedulerCaller, type SchedulerCallerDeps } from "./scheduler-ca
 import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MemoryError } from "antgrid-memory";
 import { MemoryRequestMessage } from "./protocol";
-import { memoryFailure, resolveMemoryCaller, type MemoryCaller, type MemoryCallerDeps, type MemoryForAgent, type MemoryForApp } from "./memory";
+import { chatMemoryGuidance, memoryFailure, resolveMemoryCaller, type MemoryCallerDeps, type MemoryForAgent, type MemoryForApp } from "./memory";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -253,10 +253,11 @@ export function buildChatSpawnAugment(
   apiPort: number | null,
   abDir?: string,
   runId?: string,
-): { args: string[]; env: Record<string, string>; memoryWithheld: boolean } {
+): { args: string[]; env: Record<string, string>; memoryWithheld: boolean; memoryRegistered: boolean } {
   const aug = augmentAgentLaunch(tool, { abDir, mode: "chat" });
   return {
     memoryWithheld: aug.memoryWithheld === true,
+    memoryRegistered: memoryRegistered(aug.env),
     args: aug.args,
     env: {
       ...aug.env,
@@ -265,28 +266,6 @@ export function buildChatSpawnAugment(
       ...(apiPort != null ? { ANTGRID_API_PORT: String(apiPort) } : {}),
     },
   };
-}
-
-/** The settings flags guidance is gated on, or `undefined` when Memory cannot
- *  answer in time: a slow or failing store must delay a chat spawn by at most
- *  the timeout and never fail it. */
-export async function chatMemoryBootstrap(
-  memoryForAgent: MemoryForAgent,
-  caller: () => MemoryCaller,
-  timeoutMs = 1500,
-): Promise<MemoryBootstrap | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const status = await Promise.race([
-      memoryForAgent(caller, { op: "status" }),
-      new Promise<undefined>((resolve) => { timer = setTimeout(resolve, timeoutMs) as unknown as typeof timer; }),
-    ]);
-    return status ? memoryBootstrapFrom(status) : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export interface BusSessionSpec {
@@ -4599,6 +4578,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
         const hookRunId = sessions?.hookRunId(sessionId);
+        const memoryForAgent = opts.memoryForAgent;
+        let chatMemoryRegistered = false;
         return agentRuntime.createDriver(tool, {
           scope: run!.scope,
           sessionId,
@@ -4608,11 +4589,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           approvalPolicy,
           chatAugment: () => {
             const aug = buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir, hookRunId);
+            chatMemoryRegistered = aug.memoryRegistered;
             if (hookRunId) sessions?.noteChatRunMemory(sessionId, hookRunId, aug.memoryWithheld);
             return aug;
           },
-          memoryBootstrap: hookRunId && opts.memoryForAgent
-            ? () => chatMemoryBootstrap(opts.memoryForAgent!, () => resolveMemoryCaller(memoryCallerDeps, sessionId, hookRunId))
+          // Gated here, not in each driver, so no driver can offer guidance for
+          // a server its launch was not handed.
+          memoryGuidance: hookRunId && memoryForAgent
+            ? async () => chatMemoryRegistered
+              ? chatMemoryGuidance(memoryForAgent, () => resolveMemoryCaller(memoryCallerDeps, sessionId, hookRunId))
+              : undefined
             : undefined,
           onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {

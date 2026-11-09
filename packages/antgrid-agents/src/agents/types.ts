@@ -178,10 +178,11 @@ export interface DriverCtx {
   projectId: string;
   approvalPolicy: ApprovalPolicy;
   chatAugment: () => { args: string[]; env: Record<string, string> };
-  /** Memory settings flags for this session, `undefined` when unavailable or
-   *  slow. Same gate as the hook path, so a driver that injects guidance itself
-   *  honours a pause the way terminal agents do. */
-  memoryBootstrap?: () => Promise<import("../memory-guidance").MemoryBootstrap | undefined>;
+  /** Memory guidance for this run, `undefined` unless the last `chatAugment`
+   *  registered the Memory server and Memory is on, unpaused and answers in
+   *  time. Same gate as the hook path, so a driver that injects guidance itself
+   *  honours a pause the way terminal agents do. Call after `chatAugment`. */
+  memoryGuidance?: () => Promise<string | undefined>;
   /** Persist the agent-native resume id for this slot (overwrite-latest). */
   onAgentSession: (agentSessionId: string) => void;
   /** Report that the provider stopped serving this session (limit or outage) so

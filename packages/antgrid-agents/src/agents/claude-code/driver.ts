@@ -24,9 +24,14 @@ export function pluginDirArg(args: string[]): string | undefined {
  * as an option instead, so the token is unpacked here. Absent => undefined.
  */
 export function allowedToolsArg(args: string[]): string[] | undefined {
-  const token = args.find((arg) => arg.startsWith("--allowedTools="));
-  const tools = token?.slice("--allowedTools=".length).split(",").filter(Boolean);
+  const tools = joinedFlagValue(args, "--allowedTools")?.split(",").filter(Boolean);
   return tools?.length ? tools : undefined;
+}
+
+/** The value of a `--flag=value` token, the form the augmentation uses for flags
+ *  whose separated form would swallow the user's next word. */
+function joinedFlagValue(args: string[], flag: string): string | undefined {
+  return args.find((arg) => arg.startsWith(`${flag}=`))?.slice(flag.length + 1);
 }
 
 // `spawn` is injectable so tests can observe the options without a real claude.
@@ -48,7 +53,7 @@ export function createDriver(ctx: DriverCtx, spawn: typeof spawnClaude = spawnCl
   };
   const chatAug = ctx.chatAugment();
   const pluginDir = pluginDirArg(chatAug.args);
-  const mcpConfig = chatAug.args.find((arg) => arg.startsWith("--mcp-config="))?.slice("--mcp-config=".length);
+  const mcpConfig = joinedFlagValue(chatAug.args, "--mcp-config");
   const allowedTools = allowedToolsArg(chatAug.args);
   // `claude update` is install-method-sensitive, but this is detection
   // only; the run itself is fail-soft (see the agent:update handler).

@@ -35,6 +35,7 @@ test("reports the Memory server as withheld while the launch gate is closed", ()
   try {
     const aug = buildChatSpawnAugment("claude-code", "slot-1", 8790, abDir);
     expect(aug.memoryWithheld).toBe(true);
+    expect(aug.memoryRegistered).toBe(false);
     expect(aug.env.ANTGRID_MEMORY_MCP).toBeUndefined();
   } finally {
     restore();
@@ -47,6 +48,7 @@ test("reports the Memory server as registered when the launch gate is open", () 
   try {
     const aug = buildChatSpawnAugment("claude-code", "slot-1", 8790, abDir);
     expect(aug.memoryWithheld).toBe(false);
+    expect(aug.memoryRegistered).toBe(true);
     expect(aug.env.ANTGRID_MEMORY_MCP).toBe("1");
   } finally {
     restore();

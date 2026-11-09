@@ -2,7 +2,6 @@ import { CodexDriver, type CodexEndpoint } from "./chat-backend";
 import { spawnCodex } from "./spawn";
 import type { StructuredDriver } from "../../structured/structured-driver";
 import type { DriverCtx } from "../types";
-import { memoryGuidanceFor } from "../../memory-guidance";
 
 // codex app-server rejects the -c hooks.* args that augmentAgentLaunch emits for
 // the interactive TUI (its -c parser errors on hooks.state={...} — "expected a
@@ -51,9 +50,8 @@ export function createDriver(
     onClose: (handler) => { registrations.push((ep) => ep.onClose(handler)); },
     dispose: () => { closed = true; spawned?.endpoint.dispose(); },
   };
-  // Assigned when start() computes the chat augmentation, after the driver is
-  // built; the provider is only consulted from inside start().
-  let memoryRegistered = false;
+  // Assigned in start(), after the driver is built; only read from inside it.
+  let guidance: Promise<string | undefined> | undefined;
   const driver = new CodexDriver({
     onAgentSession: ctx.onAgentSession,
     sessionId: ctx.sessionId,
@@ -65,7 +63,7 @@ export function createDriver(
     // and let the original error surface instead of hanging startChat.
     diagnoseStartFailure: () =>
       spawned ? Promise.race([spawned.failureDiagnosis, Bun.sleep(1_500).then(() => null)]) : Promise.resolve(null),
-    memoryGuidance: async () => (memoryRegistered ? memoryGuidanceFor(await ctx.memoryBootstrap?.()) : undefined),
+    memoryGuidance: () => guidance ?? Promise.resolve(undefined),
   });
   // Tie the spawned process lifetime to the driver's dispose. dispose
   // resolves only once codex has fully exited (spawned.kill awaits
@@ -85,7 +83,8 @@ export function createDriver(
     if (signal?.aborted) return Promise.reject(signal.reason);
     return starting ??= (async () => {
       const chatAug = ctx.chatAugment();
-      memoryRegistered = chatAug.env.ANTGRID_MEMORY_MCP === "1";
+      // Started before the spawn so Memory's status read overlaps codex startup.
+      guidance = ctx.memoryGuidance?.();
       spawned = spawn({
         cwd: ctx.projectPath,
         args: [

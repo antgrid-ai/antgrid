@@ -216,9 +216,14 @@ test("a stalled bootstrap response cannot block the model request indefinitely",
 
 // The input mirrors `PermissionEvaluation` from `@opencode/plugin`, which no
 // installed package declares; `effect` is the field the host reads back.
-type Evaluate = (input: { action: string; effect: string }) => Promise<void>;
-async function setupWith(extra: object, get = async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: undefined as string | undefined })) {
-  process.env.ANTGRID_MEMORY_MCP = "1";
+type Evaluate = (input: { action: string; effect: string }) => void | Promise<void>;
+async function setupWith(
+  extra: object,
+  get = async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: undefined as string | undefined }),
+  memoryRegistered = true,
+) {
+  if (memoryRegistered) process.env.ANTGRID_MEMORY_MCP = "1";
+  else delete process.env.ANTGRID_MEMORY_MCP;
   let subscribed = 0;
   let context: ((input: Context) => Promise<void>) | undefined;
   disposers.push(await plugin.setup({
@@ -282,16 +287,8 @@ test("the evaluate hook never touches a deny", async () => {
 
 test("the evaluate hook is not registered without the registered-server flag", async () => {
   let registered = false;
-  await setupWith({ permission: { hook: async () => { registered = true; return { dispose: async () => {} }; } } });
-  expect(registered).toBe(true);
-  registered = false;
-  delete process.env.ANTGRID_MEMORY_MCP;
-  let context: unknown;
-  disposers.push(await plugin.setup({
-    event: { subscribe: async function* () {} },
-    session: { get: async () => ({}), hook: async (_n: string, cb: unknown) => { context = cb; return { dispose: async () => {} }; } },
-    permission: { hook: async () => { registered = true; return { dispose: async () => {} }; } },
-  } as unknown as Parameters<typeof plugin.setup>[0]));
+  const { context } = await setupWith(
+    { permission: { hook: async () => { registered = true; return { dispose: async () => {} }; } } }, undefined, false);
   expect(context).toBeDefined();
   expect(registered).toBe(false);
 });

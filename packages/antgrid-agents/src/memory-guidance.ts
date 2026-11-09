@@ -25,6 +25,14 @@ export function memoryBootstrapFrom(status: Readonly<Record<string, unknown>>): 
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Set in a launch's env when its MCP profile really registered the Memory
+ *  server; hook scripts in the agent's process read it. */
+export const MEMORY_MCP_ENV = "ANTGRID_MEMORY_MCP";
+
+export function memoryRegistered(env: Readonly<Record<string, string | undefined>>): boolean {
+  return env[MEMORY_MCP_ENV] === "1";
+}
+
 /** The guidance text when Memory is on and unpaused; otherwise nothing. */
 export function memoryGuidanceFor(bootstrap: MemoryBootstrap | undefined): string | undefined {
   return bootstrap?.enabled && !bootstrap.paused && !bootstrap.project_paused ? MEMORY_AGENT_GUIDANCE : undefined;

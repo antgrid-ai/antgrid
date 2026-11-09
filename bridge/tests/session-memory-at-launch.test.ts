@@ -127,7 +127,7 @@ describe("startedWithoutMemory", () => {
     h.sessions.noteExited(id, h.runIds[0]);
     expect(h.wire(id)?.running).toBe(false);
     expect(h.wire(id)?.startedWithoutMemory).toBeUndefined();
-    expect((h.sessions as any).terminalRunsWithoutMemory.has(id)).toBe(false);
+    expect((h.sessions as any).runsWithoutMemory.has(id)).toBe(false);
   });
 
   it("is not cleared by a stale exit that arrives after a same-slot relaunch", async () => {

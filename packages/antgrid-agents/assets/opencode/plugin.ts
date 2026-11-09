@@ -48,7 +48,6 @@ export default {
       if (sessions.has(sessionID)) return;
       const info = await ctx.session.get({ sessionID });
       sessions.set(sessionID, info.parentID);
-      if (chat) return;
       await send("session.created", { info });
       await send("session.updated", { info });
     };
@@ -91,7 +90,7 @@ export default {
     const guidance = await ctx.session.hook("context", async (input) => {
       input.system = input.system.filter((part) => part.text !== MEMORY_AGENT_GUIDANCE);
       try { await identify(input.sessionID); } catch { return; }
-      if (chat && sessions.get(input.sessionID)) return;
+      if (sessions.get(input.sessionID)) return;
       if (await reporter.memoryGuidance(input.sessionID)) input.system.push({ type: "text", text: MEMORY_AGENT_GUIDANCE });
     });
     // Only `ask` is ever changed; a deny set by config or by another hook (hooks
@@ -100,7 +99,7 @@ export default {
     let approval: { dispose(): Promise<void> } | undefined;
     if (process.env.ANTGRID_MEMORY_MCP === "1" && typeof ctx.permission?.hook === "function") {
       try {
-        approval = await ctx.permission.hook("evaluate", async (input) => {
+        approval = await ctx.permission.hook("evaluate", (input) => {
           if (input.effect === "ask" && typeof input.action === "string" && MEMORY_PREAPPROVED_ACTIONS.has(input.action)) {
             input.effect = "allow";
           }
