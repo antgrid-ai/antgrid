@@ -1,6 +1,6 @@
 // The drawer's entries to Memory: a revealed lightbulb on local and
-// advertised-remote project rows plus a Memory nav row, all absent under the
-// sample project.
+// advertised-remote project rows plus a Memory nav row, which the sample
+// project keeps for its own memories.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/memory.dart';
@@ -225,7 +226,7 @@ void main() {
     expect(view.target, MemoryTarget.machine(machineId: _machineUuid));
   });
 
-  desktopTest('the sample project has no lightbulb and there is no nav row', (
+  desktopTest('the sample project offers its memories, without a count', (
     tester,
   ) async {
     final container = await pump(tester);
@@ -236,8 +237,14 @@ void main() {
     expect(find.text(sample), findsOneWidget);
     await hoverRow(tester, find.text(sample));
     expect(find.byTooltip('New session'), findsOneWidget);
-    expect(find.byType(MemoryProjectButton), findsNothing);
-    expect(find.text('Memory'), findsNothing);
+    expect(find.byType(MemoryProjectButton), findsOneWidget);
+    expect(find.text('Memory'), findsOneWidget);
+    // The machine total is the real host's, not the sample's.
+    expect(find.text('7'), findsNothing);
+
+    await tester.tap(find.byType(MemoryProjectButton));
+    await tester.pumpAndSettle();
+    expect(container.read(memoryViewProvider).projectId, kDemoProjectId);
   });
 
   desktopTest('the Memory nav row carries the machine total', (tester) async {

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 
+import '../../demo/demo_identity.dart' show kDemoRefusalCode, kDemoRefusalText;
 import '../../launcher/host_control_client.dart';
 import '../../models/memory.dart';
 import '../ab_status_helpers.dart';
@@ -67,8 +68,8 @@ String memoryErrorCopy(
           : "$machine isn't connected. Open Antgrid on that computer, then reconnect.";
     case 'NO_MACHINE':
       return 'Open Memory from a connected machine.';
-    case 'DEMO':
-      return 'Memory is unavailable in the sample project.';
+    case kDemoRefusalCode:
+      return kDemoRefusalText;
     case 'DISABLED':
       return 'Memory is off on ${machine ?? 'this machine'}.';
     case 'FORBIDDEN':

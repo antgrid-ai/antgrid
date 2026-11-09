@@ -1,25 +1,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../demo/demo_scheduler.dart';
-import '../demo/fixtures/demo_scheduler_fixtures.dart';
+import '../demo/demo_identity.dart' show kDemoMachineName;
 import '../launcher/host_control_client.dart';
 import '../models/scheduler.dart';
 import '../utils/platform_utils.dart';
 import 'account_machines.dart';
-import 'agent_catalog.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'scheduler_timezone.dart';
-
-/// Agent display names for scheduler rows and the editor. The sample is canned
-/// data with no bridge to advertise names, and the catalog is persisted, so the
-/// sample's names must not be merged into it.
-final schedulerAgentLabelsProvider = Provider<Map<String, String>>((ref) {
-  if (ref.watch(demoModeProvider)) return kDemoSchedulerAgentLabels;
-  return {
-    for (final e in ref.watch(agentCatalogProvider).entries) e.key: e.value.label,
-  };
-});
 
 /// Rebuilt whenever the flag flips, so every entry into the sample starts from
 /// the seed and nothing made inside it survives leaving.
@@ -33,7 +22,7 @@ final demoSchedulerBackendProvider = Provider<DemoSchedulerBackend>((ref) {
 
 final schedulerMachinesProvider = Provider<Map<String, String>>((ref) {
   if (ref.watch(demoModeProvider)) {
-    return const {kLocalMachineKey: kDemoSchedulerMachineName};
+    return const {kLocalMachineKey: kDemoMachineName};
   }
   return ref.watch(accountMachinesProvider);
 });

@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:antgrid/demo/demo_identity.dart' show kDemoEntryLabel;
+import 'package:antgrid/demo/demo_identity.dart'
+    show kDemoEntryLabel, kDemoMachineName;
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_inline_banner.dart';
@@ -120,6 +121,10 @@ Future<(_Rig, _Context)> _mount(
   Map<String, MemoryRequest> handlers = const {},
   Size size = const Size(390, 844),
   bool demo = false,
+
+  /// False leaves this machine's Memory unanswered here, so a step into the
+  /// sample reaches the sample's own store.
+  bool answerLocal = true,
   Future<List<InventoryAgent>>? pendingAccounts,
 }) async {
   tester.view.physicalSize = size;
@@ -183,9 +188,10 @@ Future<(_Rig, _Context)> _mount(
           MemoryTarget.machine(machineId: id),
         ).overrideWithValue(recorder(id, handlers[id] ?? _healthy)),
       ],
-      memoryRequestProvider(
-        const MemoryTarget.machine(),
-      ).overrideWithValue(recorder('local', handlers['local'] ?? _healthy)),
+      if (answerLocal && !demo)
+        memoryRequestProvider(
+          const MemoryTarget.machine(),
+        ).overrideWithValue(recorder('local', handlers['local'] ?? _healthy)),
     ],
   );
   addTearDown(container.dispose);
@@ -334,18 +340,37 @@ void main() {
     expect(_screen(tester).initialProjectId, 'p1');
   }, variant: phones);
 
-  testWidgets('the sample project shows a placeholder and builds no inventory', (
+  testWidgets('the sample project shows its own memories on its own machine', (
     tester,
   ) async {
     final (rig, _) = await _mount(tester, demo: true);
     await tester.pumpAndSettle();
     expect(
-      find.text('Memory is unavailable in the sample project'),
+      find.textContaining('Coupon codes are case-insensitive'),
       findsOneWidget,
     );
-    expect(find.byType(MemoryScreen), findsNothing);
+    expect(find.widgetWithText(AbButton, kDemoMachineName), findsOneWidget);
+    expect(find.textContaining('unavailable'), findsNothing);
     expect(rig.container.exists(accountAgentsProvider), isFalse);
     expect(rig.requests, isEmpty);
+  }, variant: phones);
+
+  testWidgets('the no-machine sample button opens the sample on Memory', (
+    tester,
+  ) async {
+    final (rig, _) = await _mount(tester, answerLocal: false);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(kDemoEntryLabel));
+    await tester.pumpAndSettle();
+    expect(rig.container.read(demoModeProvider), isTrue);
+    expect(
+      rig.container.read(workbenchSurfaceProvider),
+      WorkbenchSurface.memory,
+    );
+    expect(
+      find.textContaining('Coupon codes are case-insensitive'),
+      findsOneWidget,
+    );
   }, variant: phones);
 
   testWidgets('an offline machine that never answers reads as offline', (

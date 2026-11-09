@@ -261,13 +261,12 @@ class _NavActions extends ConsumerWidget {
       closeDrawerIfOverlay(context);
     }
 
-    final offersMemory = !ref.watch(demoModeProvider);
     final pick = ref.watch(machinePickProvider);
     // The count is the local host's and the drawer never dials, so it is
-    // shown only while the selected machine is local, and never builds the
-    // machine inventory.
+    // shown only while the selected machine is local, never over the sample's
+    // canned memories, and never builds the machine inventory.
     final showsCount =
-        offersMemory &&
+        !ref.watch(demoModeProvider) &&
         !isMobilePlatform &&
         (pick == null || pick == kLocalMachineKey);
     final memoryCount = showsCount
@@ -336,24 +335,22 @@ class _NavActions extends ConsumerWidget {
               selected: surface == WorkbenchSurface.scheduler,
               onTap: openScheduler,
             ),
-            if (offersMemory) ...[
-              const SizedBox(height: AbTokens.space4),
-              navigationRow(
-                label: 'Memory',
-                icon: AbIcons.lightbulb,
-                selected: surface == WorkbenchSurface.memory,
-                onTap: openMemory,
-                trailing: memoryCount != null && memoryCount > 0
-                    ? Text(
-                        '$memoryCount',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontSm,
-                          color: context.antgrid.textMuted,
-                        ),
-                      )
-                    : null,
-              ),
-            ],
+            const SizedBox(height: AbTokens.space4),
+            navigationRow(
+              label: 'Memory',
+              icon: AbIcons.lightbulb,
+              selected: surface == WorkbenchSurface.memory,
+              onTap: openMemory,
+              trailing: memoryCount != null && memoryCount > 0
+                  ? Text(
+                      '$memoryCount',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: context.antgrid.textMuted,
+                      ),
+                    )
+                  : null,
+            ),
           ],
         ),
       ),

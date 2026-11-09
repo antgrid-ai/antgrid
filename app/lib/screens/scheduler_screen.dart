@@ -33,6 +33,7 @@ import '../demo/demo_identity.dart';
 import '../providers/account_machines.dart';
 import '../providers/demo_mode.dart';
 import '../providers/scheduler.dart';
+import '../providers/agent_catalog.dart' show agentLabelsProvider;
 import '../providers/scheduler_drafts.dart';
 import '../providers/scheduler_timezone.dart';
 import '../providers/sessions.dart';
@@ -855,7 +856,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   }
 
   String _agentLabel(String agentId) =>
-      ref.read(schedulerAgentLabelsProvider)[agentId] ?? agentId;
+      ref.read(agentLabelsProvider)[agentId] ?? agentId;
 
   Widget _identity(SchedulerSnapshot snapshot, AgentSchedule s, bool muted) {
     final p = context.antgrid;

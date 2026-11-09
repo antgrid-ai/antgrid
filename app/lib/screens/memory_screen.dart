@@ -7,7 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
-import '../demo/demo_identity.dart' show kDemoEntryLabel;
+import '../demo/demo_identity.dart' show kDemoEntryLabel, kDemoMachineName;
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -82,16 +82,7 @@ class MemorySurface extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (ref.watch(demoModeProvider)) {
-      return _MemoryPlaceholder(
-        onOpenDrawer: onOpenDrawer,
-        body: const AbEmptyState(
-          icon: AbIcons.lightbulb,
-          title: 'Memory is unavailable in the sample project',
-          subtitle: 'Leave the sample to manage memories on your machines.',
-        ),
-      );
-    }
+    final demo = ref.watch(demoModeProvider);
     final view = ref.watch(memoryViewProvider);
     final target = ref.watch(memoryTargetProvider);
     if (target == null) {
@@ -106,12 +97,14 @@ class MemorySurface extends ConsumerWidget {
                     'Memory lives on your computer, in the Antgrid desktop app. Connect it to read, edit and export what your agents saved.',
                 action: AbButton(
                   label: kDemoEntryLabel,
-                  onTap: () => enterDemoMode(ref.container),
+                  onTap: () => enterDemoMemory(ref.container),
                 ),
               ),
       );
     }
-    final machines = ref.watch(accountMachinesProvider);
+    final machines = demo
+        ? const {kLocalMachineKey: kDemoMachineName}
+        : ref.watch(accountMachinesProvider);
     final id = target.machineId ?? kLocalMachineKey;
     final name =
         machines[id] ??
@@ -157,13 +150,14 @@ class MemorySurface extends ConsumerWidget {
                       .set(MemoryView.selected());
                 },
               );
-        // A new open remounts, and so does a change of followed machine.
-        // MemoryView compares by identity, so the record changes on every
-        // new open as well as on a change of machine.
+        // A new open remounts, and so does a change of followed machine or a
+        // step into or out of the sample. MemoryView compares by identity, so
+        // the record changes on every new open as well.
         return MemoryScreen(
-          key: ValueKey((view, target.machineId)),
+          key: ValueKey((view, target.machineId, demo)),
           target: target,
-          machineName: target.machineId == null ? null : name,
+          // The sample is named so its copy never claims to be this device.
+          machineName: target.machineId == null && !demo ? null : name,
           connected: connected,
           machineSelector: selector,
           initialProjectId: view.projectId,

@@ -50,8 +50,10 @@ void main() {
     expect(container.read(memoryViewProvider).target, isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets('the sample project hides the entry', (tester) async {
+  testWidgets('the sample project keeps the entry, for its own memories', (
+    tester,
+  ) async {
     await _pump(tester, demo: true);
-    expect(find.text('Manage machine memory'), findsNothing);
+    expect(find.text('Manage machine memory'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }

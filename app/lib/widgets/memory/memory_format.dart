@@ -1,14 +1,10 @@
-import '../../models/agent_descriptor.dart';
 import '../../models/memory.dart';
 import '../../util/relative_time.dart';
 
-String memoryAgentName(
-  MemoryRecord record,
-  Map<String, AgentDescriptor> catalog,
-) {
+String memoryAgentName(MemoryRecord record, Map<String, String> labels) {
   if (record.byApp) return 'you';
   final id = record.agentId;
-  return catalog[id]?.label ?? id ?? 'an agent';
+  return labels[id] ?? id ?? 'an agent';
 }
 
 String memoryMetaLine({

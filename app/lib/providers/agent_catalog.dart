@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart' show kDemoAgentLabels;
 import '../models/agent_descriptor.dart';
 import '../storage/agent_catalog_store.dart';
+import 'demo_mode.dart';
 
 /// Swappable store so tests can inject an in-memory instance.
 final agentCatalogStoreProvider = Provider<AgentCatalogStore>(
@@ -136,4 +138,15 @@ final judgeCapableToolsProvider = Provider<List<String>>((ref) {
     for (final d in catalog.values)
       if (d.judgeCapable) d.tool,
   ]..sort();
+});
+
+
+/// Agent display names for surfaces that show the sample's canned rows (the
+/// Scheduler and Memory). The sample has no bridge to advertise names, and the
+/// catalog is persisted, so the sample's names must not be merged into it.
+final agentLabelsProvider = Provider<Map<String, String>>((ref) {
+  if (ref.watch(demoModeProvider)) return kDemoAgentLabels;
+  return {
+    for (final e in ref.watch(agentCatalogProvider).entries) e.key: e.value.label,
+  };
 });

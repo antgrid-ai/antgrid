@@ -15,7 +15,6 @@ import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_scrollbar.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../design/widgets/ab_tooltip.dart';
-import '../../models/agent_descriptor.dart';
 import '../../models/memory.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/memory.dart';
@@ -185,7 +184,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     final projects =
         ref.watch(memoryProjectsProvider(widget.target)).value ??
         MemoryProjects.empty;
-    final catalog = ref.watch(agentCatalogProvider);
+    final labels = ref.watch(agentLabelsProvider);
     return detail.when(
       // A refresh must not swap the body for a spinner: that would dispose an
       // open editor.
@@ -218,7 +217,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
           data,
           project: project,
           removed: removed,
-          catalog: catalog,
+          labels: labels,
           canSave: canSave,
         );
         if (!widget.compact) return body;
@@ -246,7 +245,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     MemoryDetail data, {
     required String project,
     required bool removed,
-    required Map<String, AgentDescriptor> catalog,
+    required Map<String, String> labels,
     required bool canSave,
   }) {
     final p = context.antgrid;
@@ -256,7 +255,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
         ? MemoryTagSize.detailCompact
         : MemoryTagSize.detail;
     final lifecycle = memoryLifecycleLabel(record);
-    final agent = memoryAgentName(record, catalog);
+    final agent = memoryAgentName(record, labels);
 
     final tags = Padding(
       padding: const EdgeInsets.only(bottom: AbTokens.space16),
@@ -394,7 +393,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
                               Text(
                                 memoryEarlierWhen(
                                   earlier,
-                                  agent: memoryAgentName(earlier, catalog),
+                                  agent: memoryAgentName(earlier, labels),
                                 ),
                                 style: AbTokens.sansStyle(
                                   fontSize: AbTokens.fontSm,

@@ -1,4 +1,5 @@
-import 'package:antgrid/models/agent_descriptor.dart';
+import 'package:antgrid/demo/demo_identity.dart'
+    show kDemoRefusalCode, kDemoRefusalText;
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/widgets/memory/memory_error.dart';
 import 'package:antgrid/widgets/memory/memory_format.dart';
@@ -31,20 +32,8 @@ void main() {
     expect(memoryAgentName(rec(source: {'actor': 'agent'}), {}), 'an agent');
   });
 
-  test('memoryAgentName uses the catalog label', () {
-    final catalog = <String, AgentDescriptor>{
-      'codex': const AgentDescriptor(
-        tool: 'codex',
-        label: 'Codex',
-        chatCapable: false,
-        judgeCapable: false,
-        handlerTerminal: false,
-        handlerChat: false,
-        terminalApprovalPolicies: [],
-        chatApprovalPolicies: [],
-      ),
-    };
-    expect(memoryAgentName(rec(), catalog), 'Codex');
+  test('memoryAgentName uses the agent label', () {
+    expect(memoryAgentName(rec(), {'codex': 'Codex'}), 'Codex');
   });
 
   test('memoryMetaLine', () {
@@ -130,7 +119,7 @@ void main() {
         'UNAVAILABLE': "Memory storage couldn't be opened. Saved memories stay on disk.",
         'NOT_CONNECTED': "This machine isn't connected. Connect it to see its memories.",
         'NO_MACHINE': 'Open Memory from a connected machine.',
-        'DEMO': 'Memory is unavailable in the sample project.',
+        kDemoRefusalCode: kDemoRefusalText,
         'DISABLED': 'Memory is off on this machine.',
         'FORBIDDEN': "This device isn't allowed to do that on this machine.",
         'WHATEVER': 'Something went wrong with Memory. Try again.',

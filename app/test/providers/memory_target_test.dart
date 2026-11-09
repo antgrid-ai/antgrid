@@ -75,11 +75,11 @@ void main() {
     expect(c.read(memoryTargetProvider), _remote);
   });
 
-  test('demo yields no target, even for an explicit remote view', () {
+  test('the sample answers as its own machine, even over a remote view', () {
     final c = _container();
     c.read(memoryViewProvider.notifier).set(MemoryView(_remote));
     c.read(demoModeProvider.notifier).set(true);
-    expect(c.read(memoryTargetProvider), isNull);
+    expect(c.read(memoryTargetProvider), const MemoryTarget.machine());
   });
 
   test('an empty machine list yields no target', () {

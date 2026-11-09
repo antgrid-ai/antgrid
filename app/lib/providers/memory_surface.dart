@@ -26,8 +26,8 @@ final memoryViewProvider =
 /// Null means there is no machine to show.
 final memoryTargetProvider = Provider<MemoryTarget?>((ref) {
   // Before the explicit target, so a stale remote view cannot pin a real
-  // machine inside the sample project.
-  if (ref.watch(demoModeProvider)) return null;
+  // machine inside the sample project, whose memories answer as local.
+  if (ref.watch(demoModeProvider)) return const MemoryTarget.machine();
   // A project's lightbulb names its machine, which wins over the shared pick.
   final explicit = ref.watch(memoryViewProvider.select((v) => v.target));
   if (explicit != null) return explicit;

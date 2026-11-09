@@ -96,6 +96,15 @@ void enterDemoScheduler(ProviderContainer ref) {
       .commit(const NavLocation(surface: WorkbenchSurface.scheduler));
 }
 
+/// Enters the sample on Memory, for the same reason as [enterDemoScheduler].
+void enterDemoMemory(ProviderContainer ref) {
+  enterDemoMode(ref);
+  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.memory);
+  ref
+      .read(navControllerProvider.notifier)
+      .commit(const NavLocation(surface: WorkbenchSurface.memory));
+}
+
 /// Leaves the demo and drops everything it built.
 ///
 /// Mirrors `ProjectsController.cancelActiveAgent`: clear the focus, then evict —

@@ -136,7 +136,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     if (!first.hasValue) return const Center(child: AbLoading());
     if (widget.visible.isEmpty && total == 0) return _empty();
 
-    final catalog = ref.watch(agentCatalogProvider);
+    final labels = ref.watch(agentLabelsProvider);
     final list = ListView.builder(
       controller: _scroll,
       itemCount: widget.visible.length + 1,
@@ -147,7 +147,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
           record: record,
           projectLabel: widget.projects.labelFor(record.projectId),
           projectRemoved: widget.projects.isRemoved(record.projectId),
-          agentLabel: memoryAgentName(record, catalog),
+          agentLabel: memoryAgentName(record, labels),
           selected: record.id == widget.selectedId,
           onTap: () => widget.onSelect(record.id),
           compact: widget.compact,
