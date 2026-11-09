@@ -31,17 +31,12 @@ final memoryRequestProvider = Provider.autoDispose
           );
         }
         if (target.machineId case final machineId?) {
-          final ControlPlaneClient? client;
+          ControlPlaneClient? client;
           try {
             client = await container
                 .read(controlPlaneClientForProvider(machineId).future)
                 .timeout(_kMemoryDialWait);
-          } catch (_) {
-            throw const MemoryException(
-              'NOT_CONNECTED',
-              'Connect this machine to inspect its memories.',
-            );
-          }
+          } catch (_) {}
           if (client == null || !client.transport.isEstablished) {
             throw const MemoryException(
               'NOT_CONNECTED',

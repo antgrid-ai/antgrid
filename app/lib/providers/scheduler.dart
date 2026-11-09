@@ -38,10 +38,9 @@ final schedulerMachinesProvider = Provider<Map<String, String>>((ref) {
   return ref.watch(accountMachinesProvider);
 });
 
-final schedulerTargetProvider = Provider<String?>((ref) {
-  if (ref.watch(demoModeProvider)) return null;
-  return ref.watch(machineTargetProvider);
-});
+final schedulerTargetProvider = Provider<String?>(
+  (ref) => ref.watch(machineTargetProvider),
+);
 
 final schedulerConnectedProvider = Provider<bool>((ref) {
   // The sample has no connection to wait for, and every action is gated on this.

@@ -138,16 +138,10 @@ class MemoryHeader extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                if (machine case final machine?) ...[
-                  const SizedBox(width: AbTokens.space8),
-                  Expanded(
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: machine,
-                    ),
-                  ),
-                ] else
-                  const Spacer(),
+                const SizedBox(width: AbTokens.space8),
+                Expanded(
+                  child: Align(alignment: Alignment.centerLeft, child: machine),
+                ),
                 ?settings,
                 ?more,
               ],

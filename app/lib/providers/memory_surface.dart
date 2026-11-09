@@ -28,7 +28,7 @@ final memoryTargetProvider = Provider<MemoryTarget?>((ref) {
   // Before the explicit target, so a stale remote view cannot pin a real
   // machine inside the sample project.
   if (ref.watch(demoModeProvider)) return null;
-  // An explicit target must not build the account inventory or recents.
+  // A project's lightbulb names its machine, which wins over the shared pick.
   final explicit = ref.watch(memoryViewProvider.select((v) => v.target));
   if (explicit != null) return explicit;
   if (ref.watch(accountMachinesProvider).isEmpty) return null;

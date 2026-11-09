@@ -148,9 +148,7 @@ class MemorySurface extends ConsumerWidget {
                 connected: connected,
                 wide: wide,
                 onPicked: (picked) {
-                  // The selection outlives the demo, so a pick made there
-                  // would retarget the real surfaces on exit.
-                  if (ref.read(demoModeProvider) || picked == id) return;
+                  if (picked == id) return;
                   ref.read(machinePickProvider.notifier).set(picked);
                   ref
                       .read(memoryViewProvider.notifier)
@@ -158,17 +156,16 @@ class MemorySurface extends ConsumerWidget {
                 },
               );
         // A new open remounts, and so does a change of followed machine.
-        return KeyedSubtree(
-          key: ObjectKey(view),
-          child: MemoryScreen(
-            key: ValueKey(target.machineId),
-            target: target,
-            machineName: target.machineId == null ? null : name,
-            connected: connected,
-            machineSelector: selector,
-            initialProjectId: view.projectId,
-            onOpenDrawer: onOpenDrawer,
-          ),
+        // MemoryView compares by identity, so the record changes on every
+        // new open as well as on a change of machine.
+        return MemoryScreen(
+          key: ValueKey((view, target.machineId)),
+          target: target,
+          machineName: target.machineId == null ? null : name,
+          connected: connected,
+          machineSelector: selector,
+          initialProjectId: view.projectId,
+          onOpenDrawer: onOpenDrawer,
         );
       },
     );

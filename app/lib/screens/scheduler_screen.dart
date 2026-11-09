@@ -264,7 +264,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   String get _machineName {
     final machines = ref.read(schedulerMachinesProvider);
-    return machines[ref.read(schedulerTargetProvider) ?? 'local'] ??
+    return machines[ref.read(schedulerTargetProvider) ?? kLocalMachineKey] ??
         'this machine';
   }
 
@@ -292,7 +292,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     });
     final snapshot = _snapshot;
     ref.watch(schedulerDraftsProvider.select((drafts) => drafts.length));
-    final machineName = machines[machine ?? 'local'] ?? 'this machine';
+    final machineName = machines[machine ?? kLocalMachineKey] ?? 'this machine';
     final noMachine = machines.isEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -304,7 +304,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
               _header(
                 wide: wide,
                 machines: machines,
-                machine: machine ?? 'local',
+                machine: machine ?? kLocalMachineKey,
                 machineName: machineName,
                 connected: connected,
                 onNew: _newScheduleTap(snapshot, machine, localTimezone),
@@ -402,10 +402,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                   : _editing
                   ? ScheduleEditor(
                       key: ValueKey(
-                        '${machine ?? 'local'}:${_editedSchedule?.id ?? 'new'}',
+                        '${machine ?? kLocalMachineKey}:${_editedSchedule?.id ?? 'new'}',
                       ),
                       snapshot: snapshot,
-                      machineId: machine ?? 'local',
+                      machineId: machine ?? kLocalMachineKey,
                       schedule: _editedSchedule,
                       request: ref.watch(schedulerRequestProvider),
                       writable: _writable,
@@ -435,7 +435,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     AsyncValue<String?> localTimezone,
   ) {
     final hasDraft = ref.read(schedulerDraftsProvider).containsKey((
-      machine: machine ?? 'local',
+      machine: machine ?? kLocalMachineKey,
       scheduleId: null,
     ));
     final ready =
@@ -587,7 +587,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   Widget _schedules(SchedulerSnapshot snapshot, bool wide) {
     final drafts = ref.read(schedulerDraftsProvider);
-    final machine = ref.read(schedulerTargetProvider) ?? 'local';
+    final machine = ref.read(schedulerTargetProvider) ?? kLocalMachineKey;
     final deletedDrafts = drafts.entries.where(
       (entry) =>
           entry.key.machine == machine &&
@@ -799,7 +799,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   bool _hasDraft(AgentSchedule s) =>
       ref.read(schedulerDraftsProvider).containsKey((
-        machine: ref.read(schedulerTargetProvider) ?? 'local',
+        machine: ref.read(schedulerTargetProvider) ?? kLocalMachineKey,
         scheduleId: s.id,
       ));
 

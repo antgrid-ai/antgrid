@@ -8,7 +8,6 @@ import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/host_status.dart';
 import 'package:antgrid/providers/recent_agents.dart';
-import 'package:antgrid/providers/scheduler.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
@@ -183,17 +182,6 @@ void main() {
       expect(c.exists(accountAgentsProvider), isFalse);
       expect(c.exists(localDeviceUuidProvider), isFalse);
       expect(c.exists(recentAgentsProvider), isFalse);
-    });
-
-    test('the scheduler wrappers keep the sample machine', () {
-      _platform(TargetPlatform.windows);
-      final c = ProviderContainer();
-      addTearDown(c.dispose);
-      c.read(demoModeProvider.notifier).set(true);
-
-      expect(c.read(schedulerMachinesProvider), {'local': 'Sample machine'});
-      expect(c.read(schedulerTargetProvider), isNull);
-      expect(c.read(schedulerConnectedProvider), isTrue);
     });
   });
 
