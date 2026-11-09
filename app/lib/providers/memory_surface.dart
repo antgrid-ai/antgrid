@@ -1,13 +1,18 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/memory.dart';
+import 'account_machines.dart';
+import 'demo_mode.dart';
 import 'value_controller.dart';
 
 /// What the Memory surface shows. Deliberately not value-equal: each open is a
 /// new instance, so reopening the same project resets a filter changed since.
 class MemoryView {
-  MemoryView(this.target, {this.projectId});
-  final MemoryTarget target;
+  MemoryView(MemoryTarget this.target, {this.projectId});
+  MemoryView.selected() : target = null, projectId = null;
+
+  /// Null follows the machine selector.
+  final MemoryTarget? target;
   final String? projectId;
 }
 
@@ -15,5 +20,17 @@ class MemoryView {
 /// settings that open Memory cannot reach the screen the surface mounts.
 final memoryViewProvider =
     NotifierProvider<ValueController<MemoryView>, MemoryView>(
-      () => ValueController(MemoryView(const MemoryTarget.machine())),
+      () => ValueController(MemoryView.selected()),
     );
+
+/// Null means there is no machine to show.
+final memoryTargetProvider = Provider<MemoryTarget?>((ref) {
+  // Before the explicit target, so a stale remote view cannot pin a real
+  // machine inside the sample project, whose memories answer as local.
+  if (ref.watch(demoModeProvider)) return const MemoryTarget.machine();
+  // A project's lightbulb names its machine, which wins over the shared pick.
+  final explicit = ref.watch(memoryViewProvider.select((v) => v.target));
+  if (explicit != null) return explicit;
+  if (ref.watch(accountMachinesProvider).isEmpty) return null;
+  return MemoryTarget.machine(machineId: ref.watch(machineTargetProvider));
+});

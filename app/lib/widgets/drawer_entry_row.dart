@@ -624,11 +624,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // row instead (see `_AdvertisedProjectRow`).
     final offersNewSession = actions && entry.machineUuid == null;
     // Read ahead of `actions` for the same subscription-lifetime reason as
-    // above. The sample project has no memory store behind it.
+    // above. The sample's memories are canned, so it has no count to peek.
     final demo = ref.watch(demoModeProvider);
-    final offersMemory = offersNewSession && !demo;
     // Selected down to this row's count, and only for rows that can ever show
-    // one (stable per row, unlike [offersMemory], which follows hover): a
+    // one (stable per row, unlike [offersNewSession], which follows hover): a
     // summary reload must not rebuild every demo and remote row.
     final memoryCount = !demo && entry.machineUuid == null && entry is! RemoteAgentEntry
         ? ref.watch(
@@ -668,10 +667,8 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // Actions outermost, and whatever ends up last carries the cell: the rail
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
-      if (offersMemory) {
-        cells.add(_memoryButton(entry, memoryCount));
-      }
       if (offersNewSession) {
+        cells.add(_memoryButton(entry, memoryCount));
         final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
         cells.add(offersRemove ? plus : AbRowTrailingCell(child: plus));
       }
@@ -698,10 +695,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // machine part, so it is not one.
     if (entry is RemoteAgentEntry && entry.id.indexOf('.') > 0) {
       return MemoryProjectButton(
-        target: MemoryTarget.machine(
-          machineId: baseDeviceUuid(entry.id),
-          label: entry.subtitle,
-        ),
+        target: MemoryTarget.machine(machineId: baseDeviceUuid(entry.id)),
         projectId: baseProjectId(entry.id),
         projectName: entry.displayName,
       );

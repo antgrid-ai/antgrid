@@ -1,3 +1,5 @@
+import 'dart:async' show TimeoutException;
+
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
@@ -5,7 +7,9 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
+import '../demo/demo_identity.dart' show kDemoEntryLabel, kDemoMachineName;
 import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_adaptive_sheet.dart';
 import '../design/widgets/ab_button.dart';
@@ -17,16 +21,20 @@ import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/memory.dart';
+import '../providers/account_machines.dart';
 import '../providers/control_plane.dart'
     show RefreshRef, retryMachineControlPlane;
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
+import '../providers/demo_mode.dart';
 import '../providers/memory.dart';
 import '../providers/memory_surface.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/memory_service.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import '../widgets/file_download.dart';
+import '../widgets/machine_selector_button.dart';
 import '../widgets/memory/memory_detail_pane.dart';
 import '../widgets/memory/memory_error.dart';
 import '../widgets/memory/memory_format.dart';
@@ -40,17 +48,23 @@ import '../widgets/memory/memory_restart_sheet.dart';
 import '../widgets/memory/memory_settings_dialog.dart';
 import '../widgets/memory/memory_toolbar.dart';
 
-/// [projectId] presets the Project filter, which is how a project's own entry
-/// opens the one machine-wide screen.
+/// A null [target] follows the machine selector. [projectId] presets the
+/// Project filter, which is how a project's own entry opens the one
+/// machine-wide screen.
 void openMemoryScreen(
   BuildContext context,
-  MemoryTarget target, {
+  MemoryTarget? target, {
   String? projectId,
 }) {
+  assert(projectId == null || target != null);
   final container = ProviderScope.containerOf(context, listen: false);
   container
       .read(memoryViewProvider.notifier)
-      .set(MemoryView(target, projectId: projectId));
+      .set(
+        target == null
+            ? MemoryView.selected()
+            : MemoryView(target, projectId: projectId),
+      );
   container
       .read(workbenchSurfaceProvider.notifier)
       .set(WorkbenchSurface.memory);
@@ -68,24 +82,131 @@ class MemorySurface extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final demo = ref.watch(demoModeProvider);
     final view = ref.watch(memoryViewProvider);
-    return MemoryScreen(
-      key: ObjectKey(view),
-      target: view.target,
-      initialProjectId: view.projectId,
-      onOpenDrawer: onOpenDrawer,
+    final target = ref.watch(memoryTargetProvider);
+    if (target == null) {
+      return _MemoryPlaceholder(
+        onOpenDrawer: onOpenDrawer,
+        body: ref.watch(machinesSettlingProvider)
+            ? const Center(child: AbLoading())
+            : AbEmptyState(
+                icon: AbIcons.lightbulb,
+                title: 'Connect a machine to manage memories',
+                subtitle:
+                    'Memory lives on your computer, in the Antgrid desktop app. Connect it to read, edit and export what your agents saved.',
+                action: AbButton(
+                  label: kDemoEntryLabel,
+                  onTap: () => enterDemoMemory(ref.container),
+                ),
+              ),
+      );
+    }
+    final machines = demo
+        ? const {kLocalMachineKey: kDemoMachineName}
+        : ref.watch(accountMachinesProvider);
+    final id = target.machineId ?? kLocalMachineKey;
+    final name =
+        machines[id] ??
+        (target.machineId == null ? kLocalMachineName : 'Remote machine');
+    // The offline copy and reconnect handling are remote-only; a local host
+    // that is down already surfaces through the status error.
+    final connected =
+        target.machineId == null ||
+        ref.watch(machineConnectedProvider(target.machineId));
+    if (view.target == null && isMobilePlatform && target.machineId != null) {
+      final pick = ref.watch(machinePickProvider);
+      if (pick == null || !machines.containsKey(pick)) {
+        // A machine reached for the first time is upserted as the newest
+        // recent, which would otherwise retarget this open screen.
+        final container = ProviderScope.containerOf(context, listen: false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (container.read(demoModeProvider)) return;
+          final now = container.read(machinePickProvider);
+          if (now != null &&
+              container.read(accountMachinesProvider).containsKey(now)) {
+            return;
+          }
+          container.read(machinePickProvider.notifier).set(target.machineId);
+        });
+      }
+    }
+    return LayoutBuilder(
+      builder: (context, c) {
+        final wide = c.maxWidth >= kMediumBreakpoint;
+        final selector = machines.isEmpty
+            ? null
+            : MachineSelectorButton(
+                machines: machines,
+                currentId: id,
+                name: name,
+                connected: connected,
+                wide: wide,
+                onPicked: (picked) {
+                  if (picked == id) return;
+                  ref.read(machinePickProvider.notifier).set(picked);
+                  ref
+                      .read(memoryViewProvider.notifier)
+                      .set(MemoryView.selected());
+                },
+              );
+        // A new open remounts, and so does a change of followed machine or a
+        // step into or out of the sample. MemoryView compares by identity, so
+        // the record changes on every new open as well.
+        return MemoryScreen(
+          key: ValueKey((view, target.machineId, demo)),
+          target: target,
+          // The sample is named so its copy never claims to be this device.
+          machineName: target.machineId == null && !demo ? null : name,
+          connected: connected,
+          machineSelector: selector,
+          initialProjectId: view.projectId,
+          onOpenDrawer: onOpenDrawer,
+        );
+      },
     );
   }
+}
+
+/// The surface's header over a message, for when there is no machine to show.
+class _MemoryPlaceholder extends StatelessWidget {
+  const _MemoryPlaceholder({this.onOpenDrawer, required this.body});
+  final VoidCallback? onOpenDrawer;
+  final Widget body;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: context.antgrid.bgDeepest,
+    child: LayoutBuilder(
+      builder: (context, c) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          c.maxWidth >= kMediumBreakpoint
+              ? const MemoryHeader()
+              : MemoryHeader.compact(onOpenDrawer: onOpenDrawer),
+          Expanded(child: body),
+        ],
+      ),
+    ),
+  );
 }
 
 class MemoryScreen extends ConsumerStatefulWidget {
   const MemoryScreen({
     super.key,
     required this.target,
+    this.machineName,
+    this.connected = true,
+    this.machineSelector,
     this.initialProjectId,
     this.onOpenDrawer,
   });
   final MemoryTarget target;
+
+  /// Null names the local machine, which keeps the machine-less copy.
+  final String? machineName;
+  final bool connected;
+  final Widget? machineSelector;
   final String? initialProjectId;
 
   /// The compact header's way to the drawer when the drawer is an overlay,
@@ -101,6 +222,8 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   int _pages = 1;
   String? _selectedId;
   bool _pinned = false;
+  bool _exporting = false;
+  bool _offlineShown = false;
 
   // Forgotten ids never return, so the reload that lags a forget cannot
   // resurrect the row as the default selection.
@@ -143,6 +266,33 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
 
   @override
   MemoryTarget get mutationTarget => _target;
+
+  @override
+  String? get mutationMachineName => widget.machineName;
+
+  @override
+  void didUpdateWidget(MemoryScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.connected ||
+        !widget.connected ||
+        _target.machineId == null) {
+      return;
+    }
+    // Post-frame: invalidating a provider during build is an error.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final statusAsync = ref.read(memoryStatusProvider(_target));
+      if (statusAsync.hasError) {
+        detached('Memory', 'reconnect failed', _retry);
+      } else if (_offlineShown) {
+        _offlineShown = false;
+        ref.invalidate(memoryStatusProvider(_target));
+        ref.invalidate(memoryProjectsProvider(_target));
+        if (statusAsync.value case final status?) _invalidatePages(status);
+      }
+      // memoryDetailProvider is left alone: an open edit may be sitting on it.
+    });
+  }
 
   /// Every filter change goes through here so paging, pinning and the detail
   /// pane's identity reset together.
@@ -207,7 +357,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     await sendMutation({
       'op': 'settings',
       'enabled': true,
-    }, onError: (e) => setState(() => _offError = memoryErrorCopy(e, mutation: true)));
+    }, onError: (e) => setState(() => _offError = memoryErrorCopy(e, mutation: true, machine: widget.machineName)));
   }
 
   Future<void> _reviewSessions(List<MemorySessionWithoutMemory> rows) async {
@@ -224,6 +374,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     final request = ref.read(memoryRequestProvider(_target));
     setState(() {
       busy = true;
+      _exporting = true;
       mutationError = null;
     });
     try {
@@ -241,12 +392,21 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
         mimeType: 'application/json',
         bytes: bytes,
       );
-      if (mounted) showAbToast(context, 'Memories exported');
     } catch (error) {
       if (!mounted) return;
-      setState(() => mutationError = memoryErrorCopy(error));
+      setState(
+        () => mutationError = memoryErrorCopy(
+          error,
+          machine: widget.machineName,
+        ),
+      );
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          _exporting = false;
+        });
+      }
     }
   }
 
@@ -273,13 +433,18 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   Future<void> _openSettings() => showMemorySettings(
     context,
     target: _target,
+    machineName: widget.machineName,
     onExportAll: () => _export(),
   );
 
   Future<void> _openRecord(String id) async {
     await Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
-        pageBuilder: (_, _, _) => MemoryRecordDetails(target: _target, id: id),
+        pageBuilder: (_, _, _) => MemoryRecordDetails(
+          target: _target,
+          id: id,
+          machineName: widget.machineName,
+        ),
       ),
     );
     if (mounted) invalidateMemoryViews(ref, _target);
@@ -379,10 +544,32 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     ],
   );
 
+  List<Widget> _banners(MemoryStatus? status) {
+    final name = widget.machineName;
+    final offline = status != null && !widget.connected && name != null;
+    if (offline) _offlineShown = true;
+    final muted = context.antgrid.textMuted;
+    return [
+      if (offline)
+        AbInlineBanner(
+          text: memoryOfflineBannerCopy(name),
+          color: muted,
+        ),
+      if (_exporting)
+        AbInlineBanner(
+          text: name == null
+              ? 'Exporting memories…'
+              : 'Exporting memories from $name…',
+          color: muted,
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final statusAsync = ref.watch(memoryStatusProvider(_target));
     final status = statusAsync.value;
+    final banners = _banners(status);
     // The Scaffold is the Material ancestor the search field needs; the
     // surface's host provides the safe area.
     return Scaffold(
@@ -391,19 +578,42 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= kMediumBreakpoint;
           Widget bareHeader() => wide
-              ? MemoryHeader(target: _target)
-              : MemoryHeader.compact(onOpenDrawer: widget.onOpenDrawer);
+              ? MemoryHeader(machine: widget.machineSelector)
+              : MemoryHeader.compact(
+                  onOpenDrawer: widget.onOpenDrawer,
+                  machine: widget.machineSelector,
+                );
           final Widget body;
           if (status == null) {
+            final error = statusAsync.error;
+            final code = error == null ? '' : memoryErrorCode(error);
+            final offline =
+                widget.machineName != null &&
+                (!widget.connected || code == 'NOT_CONNECTED');
+            // A machine that answered with a refusal is reachable, so offering
+            // to reconnect would point at the wrong fix.
+            final unreachable =
+                _target.machineId != null &&
+                (!widget.connected ||
+                    error is TimeoutException ||
+                    const {
+                      'NOT_CONNECTED',
+                      'E_TIMEOUT',
+                      'TIMEOUT',
+                      'TRANSPORT',
+                      'TRANSPORT_ERROR',
+                    }.contains(code));
             body = statusAsync.isLoading
                 ? const Center(child: AbLoading())
                 : AbEmptyState.error(
-                    title: 'Memory unavailable',
-                    subtitle: memoryErrorCopy(statusAsync.error!),
+                    title: offline
+                        ? '${widget.machineName} is offline'
+                        : 'Memory unavailable',
+                    subtitle: offline
+                        ? 'Open Antgrid on that computer, then reconnect to see its memories.'
+                        : memoryErrorCopy(error!, machine: widget.machineName),
                     action: AbButton(
-                      label: _target.machineId != null
-                          ? 'Reconnect and retry'
-                          : 'Retry',
+                      label: unreachable ? 'Reconnect and retry' : 'Retry',
                       onTap: () =>
                           detached('Memory', 'reconnect failed', _retry),
                     ),
@@ -426,20 +636,25 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
             );
           } else if (!status.enabled) {
             body = MemoryOffState(
+              machineName: widget.machineName,
               busy: busy,
               error: _offError,
               onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
             );
           } else {
-            return _full(status, wide: wide);
+            return _full(status, wide: wide, banners: banners);
           }
-          return _frame(header: bareHeader(), body: body);
+          return _frame(header: bareHeader(), above: banners, body: body);
         },
       ),
     );
   }
 
-  Widget _full(MemoryStatus status, {required bool wide}) {
+  Widget _full(
+    MemoryStatus status, {
+    required bool wide,
+    required List<Widget> banners,
+  }) {
     final colors = context.antgrid;
     final projects =
         ref.watch(memoryProjectsProvider(_target)).value ?? MemoryProjects.empty;
@@ -525,10 +740,13 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       return _frame(
         header: MemoryHeader.compact(
           onOpenDrawer: widget.onOpenDrawer,
+          machine: widget.machineSelector,
           onSettings: () =>
               detached('Memory', 'settings failed', _openSettings),
+          onMore: (anchor) =>
+              detached('Memory', 'menu failed', () => _openMore(anchor)),
         ),
-        above: [problems, toolbar],
+        above: [...banners, problems, toolbar],
         body: listPane,
       );
     }
@@ -599,7 +817,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
         },
         child: _frame(
           header: MemoryHeader(
-            target: _target,
+            machine: widget.machineSelector,
             status: status,
             projectPaused: projectPaused,
             onSettings: () =>
@@ -607,7 +825,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
             onMore: (anchor) =>
                 detached('Memory', 'menu failed', () => _openMore(anchor)),
           ),
-          above: [problems, toolbar],
+          above: [...banners, problems, toolbar],
           body: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [

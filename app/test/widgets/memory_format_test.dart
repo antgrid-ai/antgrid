@@ -1,7 +1,9 @@
-import 'package:antgrid/models/agent_descriptor.dart';
+import 'package:antgrid/demo/demo_identity.dart'
+    show kDemoRefusalCode, kDemoRefusalText;
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/widgets/memory/memory_error.dart';
 import 'package:antgrid/widgets/memory/memory_format.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart' show RpcException;
 import 'package:flutter_test/flutter_test.dart';
 
 MemoryRecord rec({
@@ -30,20 +32,8 @@ void main() {
     expect(memoryAgentName(rec(source: {'actor': 'agent'}), {}), 'an agent');
   });
 
-  test('memoryAgentName uses the catalog label', () {
-    final catalog = <String, AgentDescriptor>{
-      'codex': const AgentDescriptor(
-        tool: 'codex',
-        label: 'Codex',
-        chatCapable: false,
-        judgeCapable: false,
-        handlerTerminal: false,
-        handlerChat: false,
-        terminalApprovalPolicies: [],
-        chatApprovalPolicies: [],
-      ),
-    };
-    expect(memoryAgentName(rec(), catalog), 'Codex');
+  test('memoryAgentName uses the agent label', () {
+    expect(memoryAgentName(rec(), {'codex': 'Codex'}), 'Codex');
   });
 
   test('memoryMetaLine', () {
@@ -129,7 +119,7 @@ void main() {
         'UNAVAILABLE': "Memory storage couldn't be opened. Saved memories stay on disk.",
         'NOT_CONNECTED': "This machine isn't connected. Connect it to see its memories.",
         'NO_MACHINE': 'Open Memory from a connected machine.',
-        'DEMO': 'Memory is unavailable in the sample project.',
+        kDemoRefusalCode: kDemoRefusalText,
         'DISABLED': 'Memory is off on this machine.',
         'FORBIDDEN': "This device isn't allowed to do that on this machine.",
         'WHATEVER': 'Something went wrong with Memory. Try again.',
@@ -138,6 +128,21 @@ void main() {
         expect(copy(code), text, reason: code);
         expect(copy(code), isNot(contains('record')), reason: code);
       });
+    });
+
+    test('a named machine replaces "this machine" in the three machine codes', () {
+      String named(String code) =>
+          memoryErrorCopy(MemoryException(code, backend), machine: 'Laptop');
+      expect(
+        named('NOT_CONNECTED'),
+        "Laptop isn't connected. Open Antgrid on that computer, then reconnect.",
+      );
+      expect(named('DISABLED'), 'Memory is off on Laptop.');
+      expect(
+        named('FORBIDDEN'),
+        "Remote access is off on Laptop, or this device isn't allowed there. Turn on remote access in Antgrid on that computer, from the Remote chip in the title bar.",
+      );
+      expect(named('BUSY'), copy('BUSY'));
     });
 
     test('INVALID_ARGUMENT on a mutation', () {
@@ -153,6 +158,10 @@ void main() {
         copy('UNKNOWN_OUTCOME'),
       );
       expect(copy('TIMEOUT'), 'Something went wrong with Memory. Try again.');
+      expect(
+        memoryErrorCopy(RpcException('E_TIMEOUT', 'x'), mutation: true),
+        copy('UNKNOWN_OUTCOME'),
+      );
     });
 
     test('non-memory errors keep the shared fallback', () {

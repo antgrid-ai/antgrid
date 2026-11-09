@@ -9,6 +9,9 @@ import 'memory_error.dart';
 mixin MemoryMutation<T extends ConsumerStatefulWidget> on ConsumerState<T> {
   MemoryTarget get mutationTarget;
 
+  /// Null for the local machine, whose copy says "this machine".
+  String? get mutationMachineName => null;
+
   bool busy = false;
   String? mutationError;
 
@@ -32,7 +35,13 @@ mixin MemoryMutation<T extends ConsumerStatefulWidget> on ConsumerState<T> {
         if (onError != null) {
           onError(error);
         } else {
-          setState(() => mutationError = memoryErrorCopy(error, mutation: true));
+          setState(
+            () => mutationError = memoryErrorCopy(
+              error,
+              mutation: true,
+              machine: mutationMachineName,
+            ),
+          );
         }
       }
       return false;
