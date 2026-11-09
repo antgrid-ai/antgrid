@@ -14,6 +14,7 @@ import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/design/widgets/ab_tooltip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/scheduler.dart';
@@ -226,7 +227,7 @@ ProviderContainer containerFor(Host host, {Host? remote}) {
         'remote': 'Laptop',
       }),
       schedulerTargetProvider.overrideWith(
-        (ref) => switch (ref.watch(schedulerMachineProvider)) {
+        (ref) => switch (ref.watch(machinePickProvider)) {
           'remote' => 'remote',
           _ => null,
         },

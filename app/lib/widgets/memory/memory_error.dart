@@ -17,7 +17,13 @@ String memoryErrorCode(Object error) => switch (error) {
 /// Never shows a [MemoryException] message: the backend words it with
 /// "record", "revision" and "operation key", none of which the app uses. Every
 /// code maps to app copy instead.
-String memoryErrorCopy(Object error, {bool mutation = false}) {
+///
+/// [machine] names a remote machine; null keeps the "this machine" wording.
+String memoryErrorCopy(
+  Object error, {
+  bool mutation = false,
+  String? machine,
+}) {
   final code = memoryErrorCode(error);
   if (code == 'UNKNOWN_OUTCOME' ||
       (mutation &&
@@ -50,15 +56,19 @@ String memoryErrorCopy(Object error, {bool mutation = false}) {
     case 'UNAVAILABLE':
       return "Memory storage couldn't be opened. Saved memories stay on disk.";
     case 'NOT_CONNECTED':
-      return "This machine isn't connected. Connect it to see its memories.";
+      return machine == null
+          ? "This machine isn't connected. Connect it to see its memories."
+          : "$machine isn't connected. Open Antgrid on that computer, then reconnect.";
     case 'NO_MACHINE':
       return 'Open Memory from a connected machine.';
     case 'DEMO':
       return 'Memory is unavailable in the sample project.';
     case 'DISABLED':
-      return 'Memory is off on this machine.';
+      return 'Memory is off on ${machine ?? 'this machine'}.';
     case 'FORBIDDEN':
-      return "This device isn't allowed to do that on this machine.";
+      return machine == null
+          ? "This device isn't allowed to do that on this machine."
+          : "Remote access is off on $machine, or this device isn't allowed there. Turn on remote access in Antgrid on that computer, from the Remote chip in the title bar.";
   }
   if (error is MemoryException) {
     return 'Something went wrong with Memory. Try again.';

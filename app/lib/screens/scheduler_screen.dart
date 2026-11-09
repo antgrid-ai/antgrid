@@ -30,6 +30,7 @@ import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../demo/demo_identity.dart';
+import '../providers/account_machines.dart';
 import '../providers/demo_mode.dart';
 import '../providers/scheduler.dart';
 import '../providers/scheduler_drafts.dart';
@@ -622,7 +623,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     // The selection outlives the demo: a 'local' pick made in the sample would
     // leave a phone's real Scheduler target null after exit.
     if (!mounted || picked == null || ref.read(demoModeProvider)) return;
-    ref.read(schedulerMachineProvider.notifier).set(picked);
+    ref.read(machinePickProvider.notifier).set(picked);
   }
 
   Widget _schedules(SchedulerSnapshot snapshot, bool wide) {

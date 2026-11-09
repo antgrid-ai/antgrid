@@ -140,6 +140,21 @@ void main() {
       });
     });
 
+    test('a named machine replaces "this machine" in the three machine codes', () {
+      String named(String code) =>
+          memoryErrorCopy(MemoryException(code, backend), machine: 'Laptop');
+      expect(
+        named('NOT_CONNECTED'),
+        "Laptop isn't connected. Open Antgrid on that computer, then reconnect.",
+      );
+      expect(named('DISABLED'), 'Memory is off on Laptop.');
+      expect(
+        named('FORBIDDEN'),
+        "Remote access is off on Laptop, or this device isn't allowed there. Turn on remote access in Antgrid on that computer, from the Remote chip in the title bar.",
+      );
+      expect(named('BUSY'), copy('BUSY'));
+    });
+
     test('INVALID_ARGUMENT on a mutation', () {
       expect(
         copy('INVALID_ARGUMENT', mutation: true),

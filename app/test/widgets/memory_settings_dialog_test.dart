@@ -35,7 +35,12 @@ Fake _fake({
   };
 
 /// Mounts the dialog body directly, which is what the sheet hosts.
-Future<void> _mount(WidgetTester tester, Fake fake, {Size? size}) async {
+Future<void> _mount(
+  WidgetTester tester,
+  Fake fake, {
+  Size? size,
+  String? machineName,
+}) async {
   tester.view.physicalSize = size ?? const Size(1280, 820);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -53,6 +58,7 @@ Future<void> _mount(WidgetTester tester, Fake fake, {Size? size}) async {
               child: MemorySettingsDialog(
                 target: _machine,
                 onExportAll: () async {},
+                machineName: machineName,
               ),
             ),
           ),
@@ -154,6 +160,67 @@ void main() {
     await tester.tap(find.text('Turn off'));
     await tester.pumpAndSettle();
     expect(_settings(fake).single, {'op': 'settings', 'enabled': false});
+  });
+
+  testWidgets('a local dialog says "this machine" in the footer and confirm', (
+    tester,
+  ) async {
+    final fake = _fake();
+    await _mount(tester, fake);
+    expect(
+      find.text(
+        "Memories stay on this machine. Agents treat them as notes, not instructions: your repository's own docs always win.",
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Turn off Memory'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Agents stop saving and recalling memories. Everything saved stays on this machine, and you can turn Memory back on here.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a named machine appears in the footer and confirm', (
+    tester,
+  ) async {
+    final fake = _fake();
+    await _mount(tester, fake, machineName: 'Laptop');
+    expect(
+      find.text(
+        "Memories stay on Laptop. Agents treat them as notes, not instructions: your repository's own docs always win.",
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Turn off Memory'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Agents stop saving and recalling memories. Everything saved stays on Laptop, and you can turn Memory back on here.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a FORBIDDEN settings mutation names the remote machine', (
+    tester,
+  ) async {
+    final fake = _fake()
+      ..hook = (request) {
+        if (request['op'] == 'settings') {
+          throw const MemoryException('FORBIDDEN', 'denied');
+        }
+        return null;
+      };
+    await _mount(tester, fake, machineName: 'Laptop');
+    await tester.tap(find.byType(AbSwitch).first);
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Remote access is off on Laptop'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a long project list scrolls and keeps the footer in view', (

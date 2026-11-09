@@ -24,10 +24,15 @@ Future<void> showMemorySettings(
   BuildContext context, {
   required MemoryTarget target,
   required Future<void> Function() onExportAll,
+  String? machineName,
 }) => showAbAdaptiveSheet<void>(
   context,
   maxWidth: 560,
-  child: MemorySettingsDialog(target: target, onExportAll: onExportAll),
+  child: MemorySettingsDialog(
+    target: target,
+    onExportAll: onExportAll,
+    machineName: machineName,
+  ),
 );
 
 class MemorySettingsDialog extends ConsumerStatefulWidget {
@@ -35,10 +40,14 @@ class MemorySettingsDialog extends ConsumerStatefulWidget {
     super.key,
     required this.target,
     required this.onExportAll,
+    this.machineName,
   });
 
   final MemoryTarget target;
   final Future<void> Function() onExportAll;
+
+  /// Null for the local machine.
+  final String? machineName;
 
   @override
   ConsumerState<MemorySettingsDialog> createState() =>
@@ -53,6 +62,11 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
   MemoryTarget get mutationTarget => widget.target;
 
   @override
+  String? get mutationMachineName => widget.machineName;
+
+  String get _machine => widget.machineName ?? 'this machine';
+
+  @override
   void dispose() {
     _scroll.dispose();
     super.dispose();
@@ -63,7 +77,7 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
       context: context,
       title: 'Turn off Memory?',
       body:
-          'Agents stop saving and recalling memories. Everything saved stays on this machine, and you can turn Memory back on here.',
+          'Agents stop saving and recalling memories. Everything saved stays on $_machine, and you can turn Memory back on here.',
       confirmLabel: 'Turn off',
       destructive: true,
     );
@@ -228,7 +242,7 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
         ),
         const SizedBox(height: AbTokens.space16),
         Text(
-          "Memories stay on this machine. Agents treat them as notes, not instructions: your repository's own docs always win.",
+          "Memories stay on $_machine. Agents treat them as notes, not instructions: your repository's own docs always win.",
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontMd,
             color: colors.textSecondary,
