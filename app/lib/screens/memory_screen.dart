@@ -113,12 +113,12 @@ class MemorySurface extends ConsumerWidget {
     final id = target.machineId ?? kLocalMachineKey;
     final name =
         machines[id] ??
-        (target.machineId == null ? 'Local machine' : 'Remote machine');
+        (target.machineId == null ? kLocalMachineName : 'Remote machine');
     // The offline copy and reconnect handling are remote-only; a local host
     // that is down already surfaces through the status error.
-    final connected = target.machineId == null
-        ? true
-        : ref.watch(machineConnectedProvider(target.machineId));
+    final connected =
+        target.machineId == null ||
+        ref.watch(machineConnectedProvider(target.machineId));
     if (view.target == null && isMobilePlatform && target.machineId != null) {
       final pick = ref.watch(machinePickProvider);
       if (pick == null || !machines.containsKey(pick)) {

@@ -14,6 +14,7 @@ import 'supervisor_status.dart';
 import 'value_controller.dart';
 
 const kLocalMachineKey = 'local';
+const kLocalMachineName = 'Local machine';
 
 /// Shared so a phone's machine-wide surfaces open the machine last chosen.
 /// Written by the machine selectors and by the phone default latch, never by a
@@ -27,7 +28,7 @@ final accountMachinesProvider = Provider<Map<String, String>>((ref) {
   // gate has to come before anything reads it.
   if (ref.watch(demoModeProvider)) return const {};
   final machines = <String, String>{
-    if (!isMobilePlatform) kLocalMachineKey: 'Local machine',
+    if (!isMobilePlatform) kLocalMachineKey: kLocalMachineName,
   };
   final recents = ref.watch(recentAgentsProvider);
   final inventory = ref.watch(accountAgentsProvider).value;

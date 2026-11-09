@@ -29,6 +29,8 @@ String memoryErrorCopy(
       (mutation &&
           (error is TimeoutException ||
               code == 'TIMEOUT' ||
+              // A remote request that timed out was already sent.
+              code == 'E_TIMEOUT' ||
               code == 'TRANSPORT' ||
               code == 'TRANSPORT_ERROR'))) {
     return 'Outcome unknown. The change may have been saved. Reconnect and check the memory before trying again.';

@@ -2,6 +2,7 @@ import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/widgets/memory/memory_error.dart';
 import 'package:antgrid/widgets/memory/memory_format.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart' show RpcException;
 import 'package:flutter_test/flutter_test.dart';
 
 MemoryRecord rec({
@@ -168,6 +169,10 @@ void main() {
         copy('UNKNOWN_OUTCOME'),
       );
       expect(copy('TIMEOUT'), 'Something went wrong with Memory. Try again.');
+      expect(
+        memoryErrorCopy(RpcException('E_TIMEOUT', 'x'), mutation: true),
+        copy('UNKNOWN_OUTCOME'),
+      );
     });
 
     test('non-memory errors keep the shared fallback', () {
