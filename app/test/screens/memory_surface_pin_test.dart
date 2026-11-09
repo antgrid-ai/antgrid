@@ -1,10 +1,13 @@
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session_registry.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/memory.dart';
+import 'package:antgrid/providers/memory_surface.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/memory_screen.dart';
@@ -13,8 +16,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-const remote = MemoryTarget.machine(machineId: 'remote', label: 'Remote');
-const otherRemote = MemoryTarget.machine(machineId: 'other', label: 'Other');
+const remote = MemoryTarget.machine(machineId: 'remote');
+const otherRemote = MemoryTarget.machine(machineId: 'other');
 const local = MemoryTarget.machine();
 
 final _record = <String, dynamic>{
@@ -87,6 +90,13 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
         () => ValueController(WorkbenchSurface.workspace),
       ),
       eagerControlPlanesEnabledProvider.overrideWithValue(false),
+      accountMachinesProvider.overrideWithValue(const {
+        'remote': 'Remote',
+        'other': 'Other',
+      }),
+      machinesSettlingProvider.overrideWithValue(false),
+      machineConnectedProvider('remote').overrideWithValue(true),
+      machineConnectedProvider('other').overrideWithValue(true),
       for (final target in [remote, otherRemote, local])
         memoryRequestProvider(target).overrideWithValue(_request),
     ],
@@ -154,6 +164,22 @@ void main() {
       tester.widget<MemoryScreen>(find.byType(MemoryScreen)).target,
       otherRemote,
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('picking a machine in the selector retargets and moves the pin', (
+    tester,
+  ) async {
+    final h = await _mount(tester);
+    openMemoryScreen(h.context, remote);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(AbButton, 'Remote'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Other'));
+    await tester.pumpAndSettle();
+    expect(h.container.read(controlPlaneAliveTargetsProvider), {'other'});
+    expect(h.container.read(machinePickProvider), 'other');
+    expect(h.container.read(memoryViewProvider).target, isNull);
     expect(tester.takeException(), isNull);
   });
 

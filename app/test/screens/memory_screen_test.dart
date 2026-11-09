@@ -5,6 +5,7 @@ import 'package:antgrid/design/widgets/ab_search_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/memory.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -177,6 +178,10 @@ Future<void> mount(
       overrides: [
         memoryRequestProvider(_machine).overrideWithValue(fake.call),
         agentCatalogProvider.overrideWith(_Catalog.new),
+        if (viaOpen) ...[
+          accountMachinesProvider.overrideWithValue(const {}),
+          machinesSettlingProvider.overrideWithValue(false),
+        ],
       ],
       child: MaterialApp(
         theme: buildAbTheme(),

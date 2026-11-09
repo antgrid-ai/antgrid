@@ -118,7 +118,8 @@ void main() {
       seen.where((r) => r['op'] == 'export').every((r) => r['project_id'] == 'p1'),
       isTrue,
     );
-    expect(find.text('Memories exported'), findsOneWidget);
+    expect(find.text('Saved antgrid-memory-p1.json'), findsOneWidget);
+    expect(find.text('Memories exported'), findsNothing);
     await tester.pumpAndSettle(const Duration(seconds: 5));
   }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 

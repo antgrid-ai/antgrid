@@ -7,19 +7,16 @@ import 'session_target.dart';
 
 @immutable
 class MemoryTarget {
-  const MemoryTarget.machine({this.machineId, this.label = 'This machine'});
+  const MemoryTarget.machine({this.machineId});
 
   /// Null is this desktop's local host.
   final String? machineId;
-  final String label;
 
   @override
   bool operator ==(Object other) =>
-      other is MemoryTarget &&
-      other.machineId == machineId &&
-      other.label == label;
+      other is MemoryTarget && other.machineId == machineId;
   @override
-  int get hashCode => Object.hash(machineId, label);
+  int get hashCode => machineId.hashCode;
 }
 
 enum MemoryVersions { current, earlier }

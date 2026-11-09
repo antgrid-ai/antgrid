@@ -16,7 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/toast_host.dart';
 
-const _remote = MemoryTarget.machine(machineId: 'm', label: 'Remote');
+const _remote = MemoryTarget.machine(machineId: 'm');
 
 Map<String, dynamic> _status({String search = 'ready'}) => {
   'available': true,

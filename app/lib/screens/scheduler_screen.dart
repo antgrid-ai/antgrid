@@ -40,6 +40,7 @@ import '../providers/ui_attention_providers.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/drawer_entry_row.dart' show activateDrawerEntryById;
+import '../widgets/machine_selector_button.dart';
 import '../widgets/scheduler/schedule_editor.dart';
 import '../widgets/scheduler/scheduler_format.dart';
 import '../widgets/scheduler/scheduler_lanes.dart';
@@ -481,39 +482,15 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         _runScheduleId = null;
       }),
     );
-    void openMachineMenu(BuildContext anchor) => detached(
-      'Scheduler',
-      'machine menu failed',
-      () => _machineMenu(anchor, machines, machine),
-    );
     final machineButton = machines.isEmpty
         ? null
-        : ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: AbTokens.space24 * (wide ? 10 : 6),
-            ),
-            child: Builder(
-              builder: (anchor) => Semantics(
-                label: 'Machine: $machineName, change',
-                button: true,
-                excludeSemantics: true,
-                onTap: () => openMachineMenu(anchor),
-                child: AbButton(
-                  label: machineName,
-                  wrapLabel: true,
-                  maxLines: 1,
-                  leading: AbStatusDot(
-                    tone: connected ? AbStatusTone.success : AbStatusTone.muted,
-                  ),
-                  trailing: AbIcon(
-                    AbIcons.chevronDown,
-                    size: AbTokens.fontSm,
-                    color: p.textMuted,
-                  ),
-                  onTap: () => openMachineMenu(anchor),
-                ),
-              ),
-            ),
+        : MachineSelectorButton(
+            machines: machines,
+            currentId: machine,
+            name: machineName,
+            connected: connected,
+            wide: wide,
+            onPicked: _pickMachine,
           );
     final refresh = AbIconButton(
       icon: AbIcons.refresh,
@@ -601,29 +578,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     );
   }
 
-  Future<void> _machineMenu(
-    BuildContext anchor,
-    Map<String, String> machines,
-    String current,
-  ) async {
-    final rect = abMenuAnchorRect(anchor);
-    if (rect == null) return;
-    final picked = await showAbMenu<String>(
-      context: anchor,
-      anchorRect: rect,
-      entries: [
-        for (final entry in machines.entries)
-          AbMenuItem(
-            label: entry.value,
-            value: entry.key,
-            icon: entry.key == current ? AbIcons.check : null,
-          ),
-      ],
-    );
+  void _pickMachine(String id) {
     // The selection outlives the demo: a 'local' pick made in the sample would
     // leave a phone's real Scheduler target null after exit.
-    if (!mounted || picked == null || ref.read(demoModeProvider)) return;
-    ref.read(machinePickProvider.notifier).set(picked);
+    if (!mounted || ref.read(demoModeProvider)) return;
+    ref.read(machinePickProvider.notifier).set(id);
   }
 
   Widget _schedules(SchedulerSnapshot snapshot, bool wide) {

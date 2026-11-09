@@ -187,6 +187,17 @@ void main() {
     });
   });
 
+  group('MemoryTarget', () {
+    test('equality and hashCode follow the machine id only', () {
+      const a = MemoryTarget.machine(machineId: 'a');
+      const b = MemoryTarget.machine(machineId: 'a');
+      expect(a, b);
+      expect(a.hashCode, b.hashCode);
+      expect(a, isNot(const MemoryTarget.machine(machineId: 'b')));
+      expect(const MemoryTarget.machine(), const MemoryTarget.machine());
+    });
+  });
+
   group('MemoryProjects', () {
     final projects = MemoryProjects.fromJson({
       'memories': 5,

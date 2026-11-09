@@ -221,13 +221,7 @@ void main() {
     await tester.pumpAndSettle();
     final view = container.read(memoryViewProvider);
     expect(view.projectId, _remoteProjectId);
-    expect(view.target.machineId, _machineUuid);
-    expect(view.target.label, isNotEmpty);
-    expect(view.target.label, isNot('This machine'));
-    expect(
-      view.target,
-      MemoryTarget.machine(machineId: _machineUuid, label: view.target.label),
-    );
+    expect(view.target, MemoryTarget.machine(machineId: _machineUuid));
   });
 
   desktopTest('the sample project has no lightbulb and there is no nav row', (
@@ -309,7 +303,7 @@ void main() {
     await tester.tap(find.text('Memory'));
     await tester.pumpAndSettle();
     expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
-    expect(container.read(memoryViewProvider).target.machineId, isNull);
+    expect(container.read(memoryViewProvider).target?.machineId, isNull);
     expect(key.currentState!.isDrawerOpen, isFalse);
   });
 

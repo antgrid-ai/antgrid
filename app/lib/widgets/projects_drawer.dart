@@ -655,12 +655,7 @@ class _EntryWithSessions extends ConsumerWidget {
         entryRowWrapped,
         if (expanded)
           machineUuid != null
-              ? _MachineProjects(
-                  machineUuid: machineUuid,
-                  machineLabel: entry.displayName.trim().isEmpty
-                      ? 'Remote machine'
-                      : entry.displayName,
-                )
+              ? _MachineProjects(machineUuid: machineUuid)
               : SessionsList(projectId: entry.id),
       ],
     );
@@ -708,11 +703,7 @@ Widget _machineHint(
 /// empty (switch off vs genuinely no projects) and is rendered as such.
 class _MachineProjects extends ConsumerWidget {
   final String machineUuid;
-  final String machineLabel;
-  const _MachineProjects({
-    required this.machineUuid,
-    required this.machineLabel,
-  });
+  const _MachineProjects({required this.machineUuid});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -753,7 +744,6 @@ class _MachineProjects extends ConsumerWidget {
               _AdvertisedProjectRow(
                 key: ValueKey(p.projectId),
                 machineUuid: machineUuid,
-                machineLabel: machineLabel,
                 project: p,
               ),
           ],
@@ -770,12 +760,10 @@ class _MachineProjects extends ConsumerWidget {
 /// bare-uuid ids).
 class _AdvertisedProjectRow extends ConsumerStatefulWidget {
   final String machineUuid;
-  final String machineLabel;
   final AdvertisedProject project;
   const _AdvertisedProjectRow({
     super.key,
     required this.machineUuid,
-    required this.machineLabel,
     required this.project,
   });
 
@@ -842,10 +830,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // every other row's trailing glyph.
             final memory = revealed && !demo
                 ? MemoryProjectButton(
-                    target: MemoryTarget.machine(
-                      machineId: widget.machineUuid,
-                      label: widget.machineLabel,
-                    ),
+                    target: MemoryTarget.machine(machineId: widget.machineUuid),
                     projectId: widget.project.projectId,
                     projectName: name,
                   )

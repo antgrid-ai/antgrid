@@ -14,7 +14,7 @@ import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
 import 'eager_control_planes.dart';
-import 'memory_surface.dart' show memoryViewProvider;
+import 'memory_surface.dart' show memoryTargetProvider;
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -372,7 +372,7 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   final surfaceMachine = switch (surface) {
     WorkbenchSurface.scheduler => ref.watch(schedulerTargetProvider),
     WorkbenchSurface.memory => ref.watch(
-      memoryViewProvider.select((v) => v.target.machineId),
+      memoryTargetProvider.select((t) => t?.machineId),
     ),
     _ => null,
   };

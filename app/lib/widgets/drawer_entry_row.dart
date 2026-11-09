@@ -698,10 +698,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // machine part, so it is not one.
     if (entry is RemoteAgentEntry && entry.id.indexOf('.') > 0) {
       return MemoryProjectButton(
-        target: MemoryTarget.machine(
-          machineId: baseDeviceUuid(entry.id),
-          label: entry.subtitle,
-        ),
+        target: MemoryTarget.machine(machineId: baseDeviceUuid(entry.id)),
         projectId: baseProjectId(entry.id),
         projectName: entry.displayName,
       );
