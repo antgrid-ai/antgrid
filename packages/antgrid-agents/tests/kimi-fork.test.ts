@@ -55,6 +55,46 @@ test("Kimi preserves approval bypass on the resumed fork and refuses opening pro
   await expect(prepareKimiTerminal({ ...req, initialPrompt: "hello" }, async () => { throw new Error("must not execute"); })).rejects.toThrow("after the Kimi fork");
 });
 
+test("Kimi's native fork never inherits the bridge's own Antgrid terminal id", async () => {
+  // `kimi fork` fires SessionStart for the new session, and the injected
+  // identity hook posts whenever ANTGRID_TERMINAL_ID is set.
+  const root = mkdtempSync(join(tmpdir(), "kimi-env-"));
+  const logger: AgentLogger = { child: () => logger, debug() {}, info() {}, warn() {}, error() {} };
+  const host: AgentHostServices = { logger, stateDirectory: () => root, hookCommand: () => ({ binary: "bridge", preargs: [] }),
+    killChildTree: async () => {}, stripInheritedCertOverrides: (env) => env };
+  const previous = process.env.ANTGRID_TERMINAL_ID;
+  process.env.ANTGRID_TERMINAL_ID = "bridge-own-terminal";
+  try {
+    const record = join(root, "env.json");
+    writeFileSync(join(root, "kimi.js"), [
+      `const fs = require("fs");`,
+      `if (process.argv[2] === "fork") {`,
+      `  fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ terminal: process.env.ANTGRID_TERMINAL_ID ?? null }));`,
+      `  process.stdout.write('Forked to session_child ("Fork: a title") in 9ms\\n');`,
+      `} else process.stdout.write('[{"id":"session_source"}]');`,
+    ].join("\n"));
+    let command: string;
+    if (process.platform === "win32") {
+      command = join(root, "kimi.cmd");
+      writeFileSync(command, `@"${process.execPath}" "%~dp0kimi.js" %*\r\n`);
+    } else {
+      command = join(root, "kimi");
+      writeFileSync(command, `#!/bin/sh\nexec "${process.execPath}" "${join(root, "kimi.js")}" "$@"\n`, { mode: 0o755 });
+    }
+    const scope = createAgentRunScope({ runId: "test", isCurrent: () => true, emit() {} });
+    const launch = await withAgentHost(host, () => prepareKimiTerminal({
+      configured: { command, name: "kimi" }, conversation: { kind: "fork", sourceSessionId: "session_source" },
+      cwd: root, storeDir: root, approvalPolicy: "default", signal: scope.signal, scope,
+    }));
+    expect((await launch.createNativeFork!()).nativeId).toBe("session_child");
+    expect(JSON.parse(readFileSync(record, "utf8"))).toEqual({ terminal: null });
+  } finally {
+    if (previous === undefined) delete process.env.ANTGRID_TERMINAL_ID;
+    else process.env.ANTGRID_TERMINAL_ID = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test.skipIf(process.platform !== "win32")("Kimi's session lookup reaches an npm .cmd install verbatim, whatever the workspace path holds", async () => {
   const root = mkdtempSync(join(tmpdir(), "kimi-npm-"));
   const logger: AgentLogger = { child: () => logger, debug() {}, info() {}, warn() {}, error() {} };
