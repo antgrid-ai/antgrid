@@ -122,6 +122,24 @@ jobs:
 
       - uses: ./.github/actions/setup-android
 
+      # Native-asset build hooks (ghostty_vte's prebuilt libs, PDFium) download
+      # from GitHub release assets on every run, and a 504 there fails the run:
+      # ghostty's fallback is a source build that needs zig, which the runner
+      # lacks. Both hooks reuse a file already in their shared output dir —
+      # ghostty re-verifies it against its manifest hash, PDFium's path names
+      # its release — so a stale entry cannot be served. Caches are scoped per
+      # ref and this workflow never runs on development, so a feature PR's
+      # first run still downloads; main and PRs into main share main's entry.
+      # The source-build checkout is excluded: it only exists after a failed
+      # download, and a failed job saves nothing anyway.
+      - name: Cache native-asset downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            app/.dart_tool/hooks_runner/shared
+            !app/.dart_tool/hooks_runner/shared/**/native_prebuilt/sources
+          key: native-assets-${{ runner.os }}-${{ hashFiles('app/pubspec.lock') }}
+
       # The native terminal qualification test runs the bridge's authoritative
       # frame serializer and reapplies its output through Ghostty. Flutter's pub
       # resolution does not install the serializer's Bun workspace dependencies.
