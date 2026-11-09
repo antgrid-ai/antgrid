@@ -15,7 +15,6 @@ import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/memory.dart';
-import 'package:antgrid/providers/memory_surface.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/scheduler.dart';
