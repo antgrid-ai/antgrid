@@ -3,16 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/memory.dart';
-import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'control_plane.dart';
 import 'demo_mode.dart';
 import 'host_status.dart' show hostStatusProvider;
-
-/// An offline machine otherwise parks the screen on the dial's 90 s worst
-/// case. 20 s covers one handshake attempt; the supervisor keeps dialling and
-/// the screen retries once the machine connects.
-const _kMemoryDialWait = Duration(seconds: 20);
 
 typedef MemoryRequest =
     Future<Map<String, dynamic>> Function(Map<String, dynamic> request);
@@ -31,13 +25,11 @@ final memoryRequestProvider = Provider.autoDispose
           );
         }
         if (target.machineId case final machineId?) {
-          ControlPlaneClient? client;
-          try {
-            client = await container
-                .read(controlPlaneClientForProvider(machineId).future)
-                .timeout(_kMemoryDialWait);
-          } catch (_) {}
-          if (client == null || !client.transport.isEstablished) {
+          final client = await connectedControlPlaneClient(
+            container,
+            machineId,
+          );
+          if (client == null) {
             throw const MemoryException(
               'NOT_CONNECTED',
               'Connect this machine to inspect its memories.',

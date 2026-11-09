@@ -83,10 +83,8 @@ final schedulerRequestProvider = Provider<SchedulerRequest>((ref) {
         client.close();
       }
     }
-    final client = await container.read(
-      controlPlaneClientForProvider(target).future,
-    );
-    if (client == null || !client.transport.isEstablished) {
+    final client = await connectedControlPlaneClient(container, target);
+    if (client == null) {
       throw StateError('Machine unavailable. Connect it to manage schedules.');
     }
     return client.schedulerRequest(method, params);

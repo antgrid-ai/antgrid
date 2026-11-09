@@ -4,6 +4,7 @@ import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/account_machines.dart';
+import 'package:antgrid/providers/agent_coordinates.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/host_status.dart';
@@ -78,18 +79,33 @@ void main() {
   group('desktop', () {
     setUp(() => _platform(TargetPlatform.windows));
 
-    test('local comes first and account names beat recent names', () async {
-      final c = _container(
-        recents: [_recent('m1', 'Recent name', 1, host: 'Recent host')],
-        accounts: [_account('m1', 'Display', machine: 'Account name')],
-      );
+    test('local comes first and machines are named as the drawer names them', () async {
+      final recents = [
+        _recent('m1', 'Recent name', 1, host: 'Recent host'),
+        _recent('m2', 'Recent label', 2, host: '  '),
+      ];
+      final accounts = [
+        _account('m1', 'Display', machine: 'Account name'),
+        _account('m2', 'Display 2', machine: 'Account 2'),
+        _account('m3', 'Display 3'),
+      ];
+      final c = _container(recents: recents, accounts: accounts);
       await _settled(c);
       final machines = c.read(accountMachinesProvider);
       expect(machines.keys.first, kLocalMachineKey);
       expect(machines, {
         kLocalMachineKey: 'Local machine',
-        'm1': 'Account name',
+        'm1': 'Recent host',
+        'm2': 'Recent label',
+        'm3': 'Display 3',
       });
+      for (final id in ['m1', 'm2', 'm3']) {
+        expect(
+          machines[id],
+          resolveMachineDisplay(base: id, inventory: accounts, recents: recents)!
+              .name,
+        );
+      }
     });
 
     test('compound recent ids collapse to the machine uuid', () async {

@@ -5,6 +5,7 @@ import '../launcher/host_controller.dart' show HostPhase;
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import 'account_agents.dart';
+import 'agent_coordinates.dart' show resolveMachineDisplay;
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'host_status.dart';
@@ -28,12 +29,20 @@ final accountMachinesProvider = Provider<Map<String, String>>((ref) {
   final machines = <String, String>{
     if (!isMobilePlatform) kLocalMachineKey: 'Local machine',
   };
-  for (final recent in ref.watch(recentAgentsProvider)) {
-    machines[baseDeviceUuid(recent.agentDeviceId)] =
-        recent.hostMachineName ?? recent.agentLabel;
-  }
-  for (final machine in ref.watch(accountAgentsProvider).value ?? const []) {
-    machines[machine.deviceUuid] = machine.machineName ?? machine.displayName;
+  final recents = ref.watch(recentAgentsProvider);
+  final inventory = ref.watch(accountAgentsProvider).value;
+  final ids = {
+    for (final recent in recents) baseDeviceUuid(recent.agentDeviceId),
+    for (final machine in inventory ?? const []) machine.deviceUuid,
+  };
+  for (final id in ids) {
+    // The drawer's resolver, so a machine reads the same in both places.
+    final display = resolveMachineDisplay(
+      base: id,
+      inventory: inventory,
+      recents: recents,
+    );
+    if (display != null) machines[id] = display.name;
   }
   // This desktop's own agent comes back from /account/agents as a phantom
   // remote of itself.

@@ -240,6 +240,27 @@ void invalidateControlPlaneProviders(RefreshRef ref, String uuid) {
 /// the refreshed set).
 const _kRefreshDialWait = Duration(seconds: 8);
 
+/// An offline machine otherwise parks a request on the dial's 90 s worst case.
+/// 20 s covers one handshake attempt; the supervisor keeps dialling, and the
+/// surfaces retry once the machine connects.
+const kMachineRequestDialWait = Duration(seconds: 20);
+
+/// Null when the machine is not connected within [kMachineRequestDialWait],
+/// whatever the dial's failure.
+Future<ControlPlaneClient?> connectedControlPlaneClient(
+  ProviderContainer container,
+  String uuid,
+) async {
+  try {
+    final client = await container
+        .read(controlPlaneClientForProvider(uuid).future)
+        .timeout(kMachineRequestDialWait);
+    return client != null && client.transport.isEstablished ? client : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Refresh machine inventory, then force a fresh control-plane attempt for the
 /// requested machines. This is the manual "device may have come online" path:
 /// an earlier offline attempt can leave the transport/client providers in an
