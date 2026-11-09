@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import plugin from "../assets/opencode/plugin";
 import { MEMORY_AGENT_GUIDANCE } from "../assets/memory-guidance";
 
-const keys = ["ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID", "ANTGRID_MEMORY_MCP"] as const;
+const keys = ["ANTGRID_OPENCODE_CHAT", "ANTGRID_API_PORT", "ANTGRID_TERMINAL_ID", "ANTGRID_RUN_ID", "ANTGRID_MEMORY_MCP"] as const;
 let saved: Record<string, string | undefined>;
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 const disposers: Array<() => Promise<void>> = [];
@@ -212,4 +212,88 @@ test("a stalled bootstrap response cannot block the model request indefinitely",
   const started = Date.now();
   expect(await transform()).toEqual(["Existing system guidance"]);
   expect(Date.now() - started).toBeLessThan(3000);
+});
+
+// The input mirrors `PermissionEvaluation` from `@opencode/plugin`, which no
+// installed package declares; `effect` is the field the host reads back.
+type Evaluate = (input: { action: string; effect: string }) => void | Promise<void>;
+async function setupWith(
+  extra: object,
+  get = async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: undefined as string | undefined }),
+  memoryRegistered = true,
+) {
+  if (memoryRegistered) process.env.ANTGRID_MEMORY_MCP = "1";
+  else delete process.env.ANTGRID_MEMORY_MCP;
+  let subscribed = 0;
+  let context: ((input: Context) => Promise<void>) | undefined;
+  disposers.push(await plugin.setup({
+    event: { subscribe: async function* () { subscribed++; } },
+    session: { get, hook: async (_n: string, cb: (input: Context) => Promise<void>) => { context = cb; return { dispose: async () => {} }; } },
+    ...extra,
+  } as unknown as Parameters<typeof plugin.setup>[0]));
+  return { subscribed: () => subscribed, context: context! };
+}
+
+test("chat mode never subscribes and reports nothing, but still serves guidance for root sessions", async () => {
+  process.env.ANTGRID_OPENCODE_CHAT = "1";
+  const paths: string[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    paths.push(new URL(request.url).pathname);
+    return Response.json(enabled);
+  } });
+  servers.push(server);
+  process.env.ANTGRID_API_PORT = String(server.port);
+  process.env.ANTGRID_TERMINAL_ID = "slot";
+  process.env.ANTGRID_RUN_ID = "run";
+  const parents: Record<string, string> = { child: "root" };
+  const { subscribed, context } = await setupWith({}, async ({ sessionID }) => ({ id: sessionID, parentID: parents[sessionID] }));
+  const run = async (sessionID: string) => {
+    const input: Context = { sessionID, system: [] };
+    await context(input);
+    return input.system.map((part) => part.text);
+  };
+  expect(await run("root")).toEqual([MEMORY_AGENT_GUIDANCE]);
+  expect(await run("child")).toEqual([]);
+  await settle();
+  expect(subscribed()).toBe(0);
+  expect(paths).toEqual(["/memory/bootstrap"]);
+});
+
+const evaluate = async (hook: Evaluate | undefined, action: string, effect: string) => {
+  const input = { action, effect };
+  await hook!(input);
+  return input.effect;
+};
+async function withPermission() {
+  let hook: Evaluate | undefined;
+  await setupWith({ permission: { hook: async (name: string, cb: Evaluate) => { expect(name).toBe("evaluate"); hook = cb; return { dispose: async () => {} }; } } });
+  return hook;
+}
+
+test("the evaluate hook turns ask into allow for exactly the three memory actions", async () => {
+  const hook = await withPermission();
+  for (const tool of ["memory_search", "memory_get", "memory_save"]) {
+    expect(await evaluate(hook, `antgrid-memory_${tool}`, "ask")).toBe("allow");
+  }
+  expect(await evaluate(hook, "antgrid-memory_memory_forget", "ask")).toBe("ask");
+  expect(await evaluate(hook, "other_memory_save", "ask")).toBe("ask");
+  expect(await evaluate(hook, "bash", "ask")).toBe("ask");
+});
+
+test("the evaluate hook never touches a deny", async () => {
+  const hook = await withPermission();
+  expect(await evaluate(hook, "antgrid-memory_memory_save", "deny")).toBe("deny");
+});
+
+test("the evaluate hook is not registered without the registered-server flag", async () => {
+  let registered = false;
+  const { context } = await setupWith(
+    { permission: { hook: async () => { registered = true; return { dispose: async () => {} }; } } }, undefined, false);
+  expect(context).toBeDefined();
+  expect(registered).toBe(false);
+});
+
+test("a host without a permission hook still loads", async () => {
+  const { context } = await setupWith({});
+  expect(typeof context).toBe("function");
 });

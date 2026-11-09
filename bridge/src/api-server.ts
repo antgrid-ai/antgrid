@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { writeFileSync, unlinkSync, readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
-import { MemoryBootstrapSchema } from "antgrid-agents/memory-guidance";
+import { memoryBootstrapFrom } from "antgrid-agents/memory-guidance";
 import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 import { memoryFailure } from "./memory";
@@ -698,7 +698,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (req.method !== "POST") return json({ error: { code: "INVALID_ARGUMENT", message: "Memory requires POST." } }, 405);
         if (req.headers.get("host") !== `127.0.0.1:${server.port}`
           || !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
-          return json({ error: { code: "NOT_A_SESSION", message: "Memory requires a live Antgrid terminal session." } }, 403);
+          return json({ error: { code: "NOT_A_SESSION", message: "Memory requires a live Antgrid session." } }, 403);
         }
         if (!ctx.memory) return json({ error: { code: "UNAVAILABLE", message: "Memory is unavailable in this process." } }, 503);
         let raw: unknown;
@@ -714,12 +714,9 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           if (op === "bootstrap") {
             // Hook output may enter provider instructions. Only local settings,
             // never stored content or service error details, cross this boundary.
-            const bootstrap = MemoryBootstrapSchema.safeParse({
-              available: result.available, enabled: result.enabled,
-              paused: result.paused, project_paused: result.project_paused,
-            });
-            if (!bootstrap.success) return json({ error: { code: "UNAVAILABLE", message: "Memory guidance is unavailable." } }, 503);
-            return json(bootstrap.data);
+            const bootstrap = memoryBootstrapFrom(result);
+            if (!bootstrap) return json({ error: { code: "UNAVAILABLE", message: "Memory guidance is unavailable." } }, 503);
+            return json(bootstrap);
           }
           return json(result);
         } catch (error) {

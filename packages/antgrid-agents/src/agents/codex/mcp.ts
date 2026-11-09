@@ -1,4 +1,5 @@
 import { toPosixPath } from "../launch-inject";
+import { MEMORY_MCP_SERVER, MEMORY_PREAPPROVED_TOOLS } from "../../memory-guidance";
 import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
@@ -23,6 +24,12 @@ export function inject(ctx: McpInjectCtx): LaunchAugmentation {
       "-c", `mcp_servers.${name}.command=${JSON.stringify(toPosixPath(command.binary))}`,
       "-c", `mcp_servers.${name}.args=${JSON.stringify(command.preargs.map(toPosixPath))}`,
       "-c", `mcp_servers.${name}.env_vars=${JSON.stringify(MCP_ENV_VARS)}`,
+      // Only for the entry that has a transport: a per-tool key alone would
+      // create a transport-less table and Codex would refuse to load its config.
+      // Per tool, never `default_tools_approval_mode`, which would cover forget.
+      ...(name === MEMORY_MCP_SERVER
+        ? MEMORY_PREAPPROVED_TOOLS.flatMap(tool => ["-c", `mcp_servers.${name}.tools.${tool}.approval_mode="approve"`])
+        : []),
     ]),
     env: {},
   };

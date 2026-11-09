@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { atomicWriteFile } from "../../atomic-file";
 import { logger } from "../../host";
 import { bundledPluginPath } from "../../plugin-root";
-import { NO_INJECTION } from "../launch-inject";
+import { NO_INJECTION, NO_OBSERVATION } from "../launch-inject";
 import type { HookPost } from "../hook-posts";
 import type { HookInjectCtx, LaunchAugmentation } from "../types";
 
@@ -32,13 +32,19 @@ function writeOpencodeConfig(abDir: string): string | null {
   }
 }
 
-export function inject({ abDir, mode }: HookInjectCtx): LaunchAugmentation {
-  // Chat observes the native stream directly; duplicate plugin posts would
-  // race its structured lifecycle events.
-  if (mode === "chat") return NO_INJECTION;
+export function inject({ abDir, mode, memoryRegistered }: HookInjectCtx): LaunchAugmentation {
   if (process.env.OPENCODE_CONFIG) return NO_INJECTION;
+  // Chat observes the native stream directly, so the plugin loads only to
+  // carry Memory's guidance and pre-approval and runs in a non-reporting mode.
+  // With Memory off nothing is injected at all.
+  if (mode === "chat" && !memoryRegistered) return NO_INJECTION;
   const cfgPath = writeOpencodeConfig(abDir);
-  return cfgPath ? { args: [], env: { OPENCODE_CONFIG: cfgPath } } : NO_INJECTION;
+  if (!cfgPath) return NO_INJECTION;
+  // NO_OBSERVATION: the chat plugin posts no titles or turn events, so the
+  // profile's terminal observation must not be claimed for it.
+  return mode === "chat"
+    ? { args: [], env: { OPENCODE_CONFIG: cfgPath, ANTGRID_OPENCODE_CHAT: "1" }, observation: NO_OBSERVATION }
+    : { args: [], env: { OPENCODE_CONFIG: cfgPath } };
 }
 
 // Empty on purpose: the injected plugin runs inside opencode's own Bun runtime

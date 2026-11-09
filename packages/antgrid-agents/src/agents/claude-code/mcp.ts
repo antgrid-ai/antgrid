@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { materializeJson, NO_INJECTION } from "../launch-inject";
+import { MEMORY_MCP_SERVER, MEMORY_PREAPPROVED_TOOLS } from "../../memory-guidance";
 import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
@@ -41,5 +42,11 @@ function materializeClaudeMcpConfig(ctx: McpInjectCtx): string | null {
 // separated form would hand the user's first word to us as a config path.
 export function inject(ctx: McpInjectCtx): LaunchAugmentation {
   const configPath = materializeClaudeMcpConfig(ctx);
-  return configPath ? { args: [`--mcp-config=${configPath}`], env: {} } : NO_INJECTION;
+  if (!configPath) return NO_INJECTION;
+  // One `=` token for the same variadic-flag reason as above. Emitted only for a
+  // registered memory server; forget is not listed, so it keeps prompting.
+  const preapproved = ctx.memoryMcpCommand
+    ? [`--allowedTools=${MEMORY_PREAPPROVED_TOOLS.map(tool => `mcp__${MEMORY_MCP_SERVER}__${tool}`).join(",")}`]
+    : [];
+  return { args: [`--mcp-config=${configPath}`, ...preapproved], env: {} };
 }

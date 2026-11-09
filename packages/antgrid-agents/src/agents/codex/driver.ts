@@ -50,6 +50,8 @@ export function createDriver(
     onClose: (handler) => { registrations.push((ep) => ep.onClose(handler)); },
     dispose: () => { closed = true; spawned?.endpoint.dispose(); },
   };
+  // Assigned in start(), after the driver is built; only read from inside it.
+  let guidance: Promise<string | undefined> | undefined;
   const driver = new CodexDriver({
     onAgentSession: ctx.onAgentSession,
     sessionId: ctx.sessionId,
@@ -61,6 +63,7 @@ export function createDriver(
     // and let the original error surface instead of hanging startChat.
     diagnoseStartFailure: () =>
       spawned ? Promise.race([spawned.failureDiagnosis, Bun.sleep(1_500).then(() => null)]) : Promise.resolve(null),
+    memoryGuidance: () => guidance ?? Promise.resolve(undefined),
   });
   // Tie the spawned process lifetime to the driver's dispose. dispose
   // resolves only once codex has fully exited (spawned.kill awaits
@@ -80,6 +83,8 @@ export function createDriver(
     if (signal?.aborted) return Promise.reject(signal.reason);
     return starting ??= (async () => {
       const chatAug = ctx.chatAugment();
+      // Started before the spawn so Memory's status read overlaps codex startup.
+      guidance = ctx.memoryGuidance?.();
       spawned = spawn({
         cwd: ctx.projectPath,
         args: [

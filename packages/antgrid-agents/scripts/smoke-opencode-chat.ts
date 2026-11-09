@@ -100,6 +100,18 @@ const augmentation = withAgentHost(host, () => augmentAgentLaunch("opencode", {
   memoryMcpCommand: { binary: process.execPath, preargs: [mcpFile] },
 }));
 assert.equal(augmentation.env.ANTGRID_MEMORY_MCP, "1");
+// This script exercises the terminal-mode plugin only. The chat-mode plugin
+// (no posts besides /memory/bootstrap, no subscription) and the evaluate hook
+// pre-approving antgrid-memory_memory_save under an `ask` rule need a separate
+// live check; here only the chat launch's flag is pinned.
+const chatAugmentation = withAgentHost(host, () => augmentAgentLaunch("opencode", {
+  mode: "chat",
+  abDir: root,
+  mcpCommand: { binary: process.execPath, preargs: [mcpFile] },
+  memoryMcpCommand: { binary: process.execPath, preargs: [mcpFile] },
+}));
+assert.equal(chatAugmentation.env.ANTGRID_OPENCODE_CHAT, "1");
+assert.equal(chatAugmentation.env.ANTGRID_MEMORY_MCP, "1");
 const env = { ...augmentation.env,
   XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
   XDG_STATE_HOME: join(root, "state"), XDG_CACHE_HOME: join(root, "cache"),

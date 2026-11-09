@@ -54,6 +54,7 @@ export interface SpawnClaudeOpts {
   extraArgs?: Record<string, string | null>;
   extraEnv?: Record<string, string>;
   approvalPolicy?: ApprovalPolicy;
+  allowedTools?: string[];
 }
 
 export interface SpawnedClaude {
@@ -143,6 +144,10 @@ export function spawnClaude(opts: SpawnClaudeOpts, sdkQuery: typeof query = quer
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.extraArgs ? { extraArgs: opts.extraArgs } : {}),
+      // Allow rules, not canUseTool: the user's deny rules still outrank them. The SDK
+      // warns (CLAUDE_SDK_CAN_USE_TOOL_SHADOWED) that canUseTool is skipped for these
+      // tools on every query; that is the intent, not a misconfiguration.
+      ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
     },
   }) as unknown as ClaudeQueryLike;
   return { query: q, controller };

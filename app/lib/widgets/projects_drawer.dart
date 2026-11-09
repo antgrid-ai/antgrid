@@ -254,16 +254,9 @@ class _NavActions extends ConsumerWidget {
       closeDrawerIfOverlay(context);
     }
 
-    // Close first: [openMemoryScreen] pushes synchronously, and closing pops the
-    // topmost route, so closing second would pop the Memory screen just pushed
-    // whenever the drawer is a real [Scaffold.drawer].
     void openMemory() {
+      openMemoryScreen(context, const MemoryTarget.machine());
       closeDrawerIfOverlay(context);
-      detached(
-        'Memory',
-        'open failed',
-        () => openMemoryScreen(context, const MemoryTarget.machine()),
-      );
     }
 
     final offersMemory = !isMobilePlatform && !ref.watch(demoModeProvider);
@@ -338,7 +331,7 @@ class _NavActions extends ConsumerWidget {
               navigationRow(
                 label: 'Memory',
                 icon: AbIcons.lightbulb,
-                selected: false,
+                selected: surface == WorkbenchSurface.memory,
                 onTap: openMemory,
                 trailing: memoryCount != null && memoryCount > 0
                     ? Text(

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { buildClaudeEnv as buildEnv, createPersistentPromptStream, resolveClaudeBinary, spawnClaude, nativeClaudeArgs } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
+import { allowedToolsArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
 import { withAgentHost } from "antgrid-agents/host";
 import { agentHostServices } from "../src/agent-host";
 const buildClaudeEnv: typeof buildEnv = (base) => withAgentHost(agentHostServices, () => buildEnv(base));
@@ -108,5 +109,24 @@ describe("spawnClaude forwarding", () => {
     expect(captured.env.ANTGRID_API_PORT).toBe("8790");
     expect(captured.settingSources).toEqual(["user", "project", "local"]);
     expect(captured.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+  });
+  it("passes allowedTools to the SDK only when given", () => {
+    const run = (allowedTools?: string[]) => {
+      let captured: any;
+      const stub: any = { async *[Symbol.asyncIterator]() {} };
+      withAgentHost(agentHostServices, () => spawnClaude({
+        cwd: "/tmp/proj", allowedTools,
+        canUseTool: (async () => ({ behavior: "allow", updatedInput: {} })) as any,
+        onStderr: () => {}, abortController: new AbortController(),
+      }, ((o: any) => { captured = o.options; return stub; }) as any));
+      return captured;
+    };
+    expect(run(["mcp__m__a", "mcp__m__b"]).allowedTools).toEqual(["mcp__m__a", "mcp__m__b"]);
+    expect("allowedTools" in run()).toBe(false);
+  });
+  it("unpacks the --allowedTools= augmentation token", () => {
+    expect(allowedToolsArg(["--mcp-config=c.json", "--allowedTools=mcp__m__a,mcp__m__b"])).toEqual(["mcp__m__a", "mcp__m__b"]);
+    expect(allowedToolsArg(["--mcp-config=c.json"])).toBeUndefined();
+    expect(allowedToolsArg(["--allowedTools="])).toBeUndefined();
   });
 });

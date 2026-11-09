@@ -37,6 +37,7 @@ import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest, SessionEntry } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
+import { withTimeout } from "./with-timeout";
 import { removeHandoff } from "./handoff/handoff-dir";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
@@ -3727,19 +3728,4 @@ export function flushSeenProjects(path: string, map: Map<string, SeenProject>): 
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const data: SeenProjectsFileShape = { version: 1, projects: Object.fromEntries(map) };
   writeFileSync(path, JSON.stringify(data, null, 2));
-}
-
-/** Race [promise] against a timer, answering [fallback] when the timer wins. The
- *  timer is cleared either way so a settled race keeps nothing alive. */
-async function withTimeout<T, F>(promise: Promise<T>, ms: number, fallback: F): Promise<T | F> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<F>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), ms);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
 }

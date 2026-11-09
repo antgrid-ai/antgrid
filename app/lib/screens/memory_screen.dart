@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
@@ -21,8 +19,11 @@ import '../design/widgets/ab_toast.dart';
 import '../models/memory.dart';
 import '../providers/control_plane.dart'
     show RefreshRef, retryMachineControlPlane;
+import '../navigation/nav_controller.dart';
+import '../navigation/nav_location.dart';
 import '../providers/memory.dart';
-import '../providers/memory_route_targets.dart';
+import '../providers/memory_surface.dart';
+import '../providers/ui_attention_providers.dart';
 import '../services/memory_service.dart';
 import '../util/detached.dart';
 import '../widgets/file_download.dart';
@@ -41,36 +42,55 @@ import '../widgets/memory/memory_toolbar.dart';
 
 /// [projectId] presets the Project filter, which is how a project's own entry
 /// opens the one machine-wide screen.
-Future<void> openMemoryScreen(
+void openMemoryScreen(
   BuildContext context,
   MemoryTarget target, {
   String? projectId,
-}) async {
-  final route = PageRouteBuilder<void>(
-    pageBuilder: (_, _, _) =>
-        MemoryScreen(target: target, initialProjectId: projectId),
-  );
+}) {
   final container = ProviderScope.containerOf(context, listen: false);
-  final machineId = target.machineId;
-  final release = machineId == null
-      ? null
-      : container.read(memoryRouteTargetsProvider.notifier).retain(machineId);
-  try {
-    // push's future only yields the pop result; it can outlive a disposed
-    // Navigator. completed covers both teardown and the dismissal animation.
-    unawaited(Navigator.of(context).push<void>(route));
-    await route.completed;
-  } finally {
-    release?.call();
-    // Edits and settings made in here move the drawer's counts.
-    container.invalidate(memoryDrawerSummaryProvider);
+  container
+      .read(memoryViewProvider.notifier)
+      .set(MemoryView(target, projectId: projectId));
+  container
+      .read(workbenchSurfaceProvider.notifier)
+      .set(WorkbenchSurface.memory);
+  container
+      .read(navControllerProvider.notifier)
+      .commit(const NavLocation(surface: WorkbenchSurface.memory));
+}
+
+/// The Memory workbench surface, beside the drawer like the Scheduler.
+class MemorySurface extends ConsumerWidget {
+  const MemorySurface({super.key, this.onOpenDrawer});
+
+  /// Set only where the drawer is an overlay; see [MemoryScreen.onOpenDrawer].
+  final VoidCallback? onOpenDrawer;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final view = ref.watch(memoryViewProvider);
+    return MemoryScreen(
+      key: ObjectKey(view),
+      target: view.target,
+      initialProjectId: view.projectId,
+      onOpenDrawer: onOpenDrawer,
+    );
   }
 }
 
 class MemoryScreen extends ConsumerStatefulWidget {
-  const MemoryScreen({super.key, required this.target, this.initialProjectId});
+  const MemoryScreen({
+    super.key,
+    required this.target,
+    this.initialProjectId,
+    this.onOpenDrawer,
+  });
   final MemoryTarget target;
   final String? initialProjectId;
+
+  /// The compact header's way to the drawer when the drawer is an overlay,
+  /// because the surface itself has no back.
+  final VoidCallback? onOpenDrawer;
   @override
   ConsumerState<MemoryScreen> createState() => _MemoryScreenState();
 }
@@ -201,8 +221,6 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
 
   Future<void> _export({String? projectId}) async {
     if (busy) return;
-    final route = ModalRoute.of(context);
-    bool isActive() => mounted && (route?.isActive ?? true);
     final request = ref.read(memoryRequestProvider(_target));
     setState(() {
       busy = true;
@@ -211,10 +229,10 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     try {
       final bytes = await collectMemoryExport(
         request,
-        isActive: isActive,
+        isActive: () => mounted,
         projectId: projectId,
       );
-      if (!mounted || route?.isActive == false || bytes == null) return;
+      if (!mounted || bytes == null) return;
       await downloadFileBytes(
         context,
         name: projectId == null
@@ -225,7 +243,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       );
       if (mounted) showAbToast(context, 'Memories exported');
     } catch (error) {
-      if (!mounted || route?.isActive == false) return;
+      if (!mounted) return;
       setState(() => mutationError = memoryErrorCopy(error));
     } finally {
       if (mounted) setState(() => busy = false);
@@ -365,68 +383,63 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   Widget build(BuildContext context) {
     final statusAsync = ref.watch(memoryStatusProvider(_target));
     final status = statusAsync.value;
+    // The Scaffold is the Material ancestor the search field needs; the
+    // surface's host provides the safe area.
     return Scaffold(
       backgroundColor: context.antgrid.bgDeepest,
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final wide = constraints.maxWidth >= kMediumBreakpoint;
-            void close() => Navigator.of(context).pop();
-            Widget bareHeader() => wide
-                ? MemoryHeader(target: _target, onClose: close)
-                : MemoryHeader.compact(onBack: close);
-            final Widget body;
-            if (status == null) {
-              body = statusAsync.isLoading
-                  ? const Center(child: AbLoading())
-                  : AbEmptyState.error(
-                      title: 'Memory unavailable',
-                      subtitle: memoryErrorCopy(statusAsync.error!),
-                      action: AbButton(
-                        label: _target.machineId != null
-                            ? 'Reconnect and retry'
-                            : 'Retry',
-                        onTap: () =>
-                            detached('Memory', 'reconnect failed', _retry),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final wide = constraints.maxWidth >= kMediumBreakpoint;
+          Widget bareHeader() => wide
+              ? MemoryHeader(target: _target)
+              : MemoryHeader.compact(onOpenDrawer: widget.onOpenDrawer);
+          final Widget body;
+          if (status == null) {
+            body = statusAsync.isLoading
+                ? const Center(child: AbLoading())
+                : AbEmptyState.error(
+                    title: 'Memory unavailable',
+                    subtitle: memoryErrorCopy(statusAsync.error!),
+                    action: AbButton(
+                      label: _target.machineId != null
+                          ? 'Reconnect and retry'
+                          : 'Retry',
+                      onTap: () =>
+                          detached('Memory', 'reconnect failed', _retry),
+                    ),
+                  );
+          } else if (!status.available) {
+            body = AbEmptyState.error(
+              title: 'Memory unavailable',
+              subtitle:
+                  "Memory storage couldn't be opened. Saved memories stay on disk.",
+              action: AbButton(
+                label: 'Retry store recovery',
+                onTap: busy
+                    ? null
+                    : () => detached(
+                        'Memory',
+                        'recovery failed',
+                        () => _repair(announce: false),
                       ),
-                    );
-            } else if (!status.available) {
-              body = AbEmptyState.error(
-                title: 'Memory unavailable',
-                subtitle:
-                    "Memory storage couldn't be opened. Saved memories stay on disk.",
-                action: AbButton(
-                  label: 'Retry store recovery',
-                  onTap: busy
-                      ? null
-                      : () => detached(
-                          'Memory',
-                          'recovery failed',
-                          () => _repair(announce: false),
-                        ),
-                ),
-              );
-            } else if (!status.enabled) {
-              body = MemoryOffState(
-                busy: busy,
-                error: _offError,
-                onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
-              );
-            } else {
-              return _full(status, wide: wide, close: close);
-            }
-            return _frame(header: bareHeader(), body: body);
-          },
-        ),
+              ),
+            );
+          } else if (!status.enabled) {
+            body = MemoryOffState(
+              busy: busy,
+              error: _offError,
+              onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
+            );
+          } else {
+            return _full(status, wide: wide);
+          }
+          return _frame(header: bareHeader(), body: body);
+        },
       ),
     );
   }
 
-  Widget _full(
-    MemoryStatus status, {
-    required bool wide,
-    required VoidCallback close,
-  }) {
+  Widget _full(MemoryStatus status, {required bool wide}) {
     final colors = context.antgrid;
     final projects =
         ref.watch(memoryProjectsProvider(_target)).value ?? MemoryProjects.empty;
@@ -511,7 +524,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     if (!wide) {
       return _frame(
         header: MemoryHeader.compact(
-          onBack: close,
+          onOpenDrawer: widget.onOpenDrawer,
           onSettings: () =>
               detached('Memory', 'settings failed', _openSettings),
         ),
@@ -589,7 +602,6 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
             target: _target,
             status: status,
             projectPaused: projectPaused,
-            onClose: close,
             onSettings: () =>
                 detached('Memory', 'settings failed', _openSettings),
             onMore: (anchor) =>

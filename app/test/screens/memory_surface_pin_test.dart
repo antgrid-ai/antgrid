@@ -64,8 +64,8 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   // The substituted test font makes the compact picker labels wider than their
-  // box, and AbButton only ellipsizes with wrapLabel. This file pins route
-  // lifetime, not geometry.
+  // box, and AbButton only ellipsizes with wrapLabel. This file pins machine
+  // demand, not geometry.
   final onError = FlutterError.onError;
   FlutterError.onError = (details) {
     if (details.exception.toString().contains('overflowed')) return;
@@ -98,11 +98,16 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
       container: container,
       child: MaterialApp(
         theme: buildAbTheme(),
-        home: Builder(
-          builder: (value) {
-            context = value;
-            return const SizedBox.shrink();
-          },
+        home: Scaffold(
+          body: Consumer(
+            builder: (value, ref, _) {
+              context = value;
+              return ref.watch(workbenchSurfaceProvider) ==
+                      WorkbenchSurface.memory
+                  ? const MemorySurface()
+                  : const SizedBox.shrink();
+            },
+          ),
         ),
       ),
     ),
@@ -112,11 +117,11 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
 }
 
 void main() {
-  testWidgets('remote Memory pins a collapsed machine until its route ends', (
+  testWidgets('remote Memory pins a collapsed machine while it is the surface', (
     tester,
   ) async {
     final h = await _mount(tester);
-    final done = openMemoryScreen(h.context, remote);
+    openMemoryScreen(h.context, remote);
     expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
     await tester.pumpAndSettle();
 
@@ -129,90 +134,63 @@ void main() {
     await tester.pumpAndSettle();
     expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
 
-    Navigator.of(h.context).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
+    h.container
+        .read(workbenchSurfaceProvider.notifier)
+        .set(WorkbenchSurface.workspace);
     await tester.pumpAndSettle();
-    await done;
+    expect(find.byType(MemoryScreen), findsNothing);
     expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('overlapping Memory routes release only their own demand', (
-    tester,
-  ) async {
+  testWidgets('opening another machine moves the pin to it', (tester) async {
     final h = await _mount(tester);
-    final first = openMemoryScreen(h.context, remote);
+    openMemoryScreen(h.context, remote);
     await tester.pumpAndSettle();
-    final second = openMemoryScreen(h.context, remote);
+    openMemoryScreen(h.context, otherRemote);
     await tester.pumpAndSettle();
-    final third = openMemoryScreen(h.context, otherRemote);
-    await tester.pumpAndSettle();
-    expect(h.container.read(controlPlaneAliveTargetsProvider), {
-      'remote',
-      'other',
-    });
-
-    Navigator.of(h.context).pop();
-    await tester.pumpAndSettle();
-    await third;
-    expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
-    Navigator.of(h.context).pop();
-    await tester.pumpAndSettle();
-    await second;
-    expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
-    Navigator.of(h.context).pop();
-    await tester.pumpAndSettle();
-    await first;
-    expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
+    expect(h.container.read(controlPlaneAliveTargetsProvider), {'other'});
+    expect(
+      tester.widget<MemoryScreen>(find.byType(MemoryScreen)).target,
+      otherRemote,
+    );
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a remote project entry adds machine demand like the machine', (
+  testWidgets('a remote project entry pins the machine and presets the filter', (
     tester,
   ) async {
     final h = await _mount(tester);
-    final done = openMemoryScreen(h.context, remote, projectId: 'antgrid');
+    openMemoryScreen(h.context, remote, projectId: 'antgrid');
     expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
+    expect(h.container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
     await tester.pumpAndSettle();
-    Navigator.of(h.context).pop();
+    expect(
+      tester.widget<MemoryScreen>(find.byType(MemoryScreen)).initialProjectId,
+      'antgrid',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('reopening the same project mounts a fresh screen', (
+    tester,
+  ) async {
+    final h = await _mount(tester);
+    openMemoryScreen(h.context, local, projectId: 'antgrid');
     await tester.pumpAndSettle();
-    await done;
-    expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
+    final first = tester.state(find.byType(MemoryScreen));
+    openMemoryScreen(h.context, local, projectId: 'antgrid');
+    await tester.pumpAndSettle();
+    expect(tester.state(find.byType(MemoryScreen)), isNot(same(first)));
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('local Memory does not add machine demand', (tester) async {
     final h = await _mount(tester);
-    for (final target in [local]) {
-      final done = openMemoryScreen(h.context, target);
-      await tester.pumpAndSettle();
-      expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
-      Navigator.of(h.context).pop();
-      await tester.pumpAndSettle();
-      await done;
-    }
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('Navigator disposal releases Memory demand without a pop', (
-    tester,
-  ) async {
-    final h = await _mount(tester);
-    final done = openMemoryScreen(h.context, remote);
+    openMemoryScreen(h.context, local);
     await tester.pumpAndSettle();
-    expect(h.container.read(controlPlaneAliveTargetsProvider), {'remote'});
-
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: h.container,
-        child: const SizedBox.shrink(),
-      ),
-    );
-    await tester.pumpAndSettle();
+    expect(find.byType(MemoryScreen), findsOneWidget);
     expect(h.container.read(controlPlaneAliveTargetsProvider), isEmpty);
-    await done;
     expect(tester.takeException(), isNull);
   });
 }
