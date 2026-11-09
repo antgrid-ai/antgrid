@@ -28,6 +28,8 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
+import '../providers/account_machines.dart'
+    show kLocalMachineKey, machinePickProvider;
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/memory.dart';
@@ -255,12 +257,20 @@ class _NavActions extends ConsumerWidget {
     }
 
     void openMemory() {
-      openMemoryScreen(context, const MemoryTarget.machine());
+      openMemoryScreen(context, null);
       closeDrawerIfOverlay(context);
     }
 
-    final offersMemory = !isMobilePlatform && !ref.watch(demoModeProvider);
-    final memoryCount = offersMemory
+    final offersMemory = !ref.watch(demoModeProvider);
+    final pick = ref.watch(machinePickProvider);
+    // The count is the local host's and the drawer never dials, so it is
+    // shown only while the selected machine is local, and never builds the
+    // machine inventory.
+    final showsCount =
+        offersMemory &&
+        !isMobilePlatform &&
+        (pick == null || pick == kLocalMachineKey);
+    final memoryCount = showsCount
         ? ref.watch(
             memoryDrawerSummaryProvider.select((s) => s.value?.memories),
           )

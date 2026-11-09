@@ -16,6 +16,7 @@ import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/memory/memory_project_button.dart';
 import 'package:antgrid/providers/account_agents.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
@@ -303,8 +304,40 @@ void main() {
     await tester.tap(find.text('Memory'));
     await tester.pumpAndSettle();
     expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
-    expect(container.read(memoryViewProvider).target?.machineId, isNull);
+    expect(container.read(memoryViewProvider).target, isNull);
     expect(key.currentState!.isDrawerOpen, isFalse);
+  });
+
+  testWidgets('on a phone the Memory row opens the selected machine '
+      'without a count or a summary request', (tester) async {
+    // A phone has no local host, so it never lists a local project, whose row
+    // would read the summary for its own count.
+    await stores.projectStore.remove(_localId);
+    final container = await pump(tester);
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+    await tester.tap(find.text('Memory'));
+    await tester.pumpAndSettle();
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    expect(container.read(memoryViewProvider).target, isNull);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+  }, variant: TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}));
+
+  desktopTest('a remote machine pick hides the local count', (tester) async {
+    final container = await pump(tester);
+    expect(find.text('7'), findsOneWidget);
+    container.read(machinePickProvider.notifier).set(_machineUuid);
+    await tester.pumpAndSettle();
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+  });
+
+  desktopTest('picking the local machine keeps the count', (tester) async {
+    final container = await pump(tester);
+    container.read(machinePickProvider.notifier).set(kLocalMachineKey);
+    await tester.pumpAndSettle();
+    expect(find.text('7'), findsOneWidget);
   });
 
   test('the drawer count never reaches the host unless it is up now', () async {

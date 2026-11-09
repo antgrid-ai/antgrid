@@ -126,6 +126,11 @@ Future<void> shareFileContent(BuildContext context, FileContent content) async {
   );
 }
 
+/// Replaces the share sheet under test: `SharePlus.instance` binds its platform
+/// once per isolate, and the channel path writes a temp file through path_provider.
+@visibleForTesting
+Future<ShareResult> Function(ShareParams params)? debugShareOverride;
+
 Future<void> _shareBytes(
   BuildContext context, {
   required String name,
@@ -134,7 +139,7 @@ Future<void> _shareBytes(
 }) async {
   final box = context.findRenderObject() as RenderBox?;
   try {
-    await SharePlus.instance.share(
+    await (debugShareOverride ?? SharePlus.instance.share)(
       ShareParams(
         files: [XFile.fromData(bytes, name: name, mimeType: mimeType)],
         fileNameOverrides: [name],

@@ -16,8 +16,7 @@ import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
-import '../models/memory.dart';
-import '../utils/platform_utils.dart';
+import '../providers/demo_mode.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
 import '../providers/auth.dart';
@@ -422,16 +421,13 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.privacy,
                     body: [
-                      if (!isMobilePlatform) ...[
+                      if (!ref.watch(demoModeProvider)) ...[
                         const SizedBox(height: AbTokens.space8),
                         Align(
                           alignment: Alignment.centerLeft,
                           child: AbButton(
                             label: 'Manage machine memory',
-                            onTap: () => openMemoryScreen(
-                              context,
-                              const MemoryTarget.machine(),
-                            ),
+                            onTap: () => openMemoryScreen(context, null),
                           ),
                         ),
                       ],
