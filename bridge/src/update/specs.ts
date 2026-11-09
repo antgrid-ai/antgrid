@@ -12,7 +12,7 @@ import { AGENTS } from "../agent-runtime";
 import type { AgentUpdate } from "antgrid-agents/contracts";
 import { createAgentRunScope } from "antgrid-agents/contracts";
 import { agentRuntime } from "../agent-runtime";
-import { createUpdateChecker, fetchNpmLatest } from "./version";
+import { createUpdateChecker, fetchNpmLatest, parseAgentVersion } from "./version";
 
 export { runAgentUpdate, parseAgentVersion, fetchNpmLatest } from "./version";
 
@@ -71,8 +71,11 @@ export async function execToolUpdate(
     try { return await runOperation(spec.apply); }
     finally { agentRuntime.invalidateDiscovery(); }
   }
+  const args = typeof spec.updateArgs === "function"
+    ? spec.updateArgs(parseAgentVersion(await execToolVersion(spec, path)))
+    : spec.updateArgs;
   const launch = resolveToolLaunchPath(spec.command, path);
-  const proc = Bun.spawn([launch, ...spec.updateArgs], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([launch, ...args], { stdout: "pipe", stderr: "pipe" });
   const [out, err, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

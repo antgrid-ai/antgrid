@@ -66,8 +66,10 @@ export interface CliAgentUpdate {
    *  Not always the registry key: claude-code's binary is `claude`. */
   command: string;
   /** argv for the CLI's own self-updater (codex/claude `update`, opencode
-   *  `upgrade` — the divergence this field exists to record). */
-  updateArgs: string[];
+   *  `upgrade` — the divergence this field exists to record). A function gets
+   *  the installed version (null when unreadable), for a CLI whose updater
+   *  takes different arguments across its own major versions. */
+  updateArgs: string[] | ((installed: string | null) => string[]);
   /** Reads this agent's updater state. Absent = no such file, and detection
    *  runs npm-only with app-side dismissal. */
   readState?: () => AgentUpdateState | null;
