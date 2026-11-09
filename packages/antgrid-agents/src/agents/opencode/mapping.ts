@@ -70,11 +70,14 @@ export function mapTokens(tokens: any): AgentUsageBreakdown {
   };
 }
 
-// opencode NamedError: { name, data:{ message? } } (or a bare string).
+// opencode NamedError: { name, data:{ message? } } (or a bare string). An
+// OpenCode 2 error arrives with its `type` as the name (v2-events `failure`).
 const ERROR_BY_NAME: Record<string, ErrorClass> = {
   ProviderAuthError: { category: "auth", retryable: false },
   MessageAbortedError: { category: "aborted", retryable: false },
   MessageOutputLengthError: { category: "context_overflow", retryable: false },
+  "provider.auth": { category: "auth", retryable: false },
+  aborted: { category: "aborted", retryable: false },
 };
 
 export function mapOpencodeError(err: any): AgentError {

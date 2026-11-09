@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import type { OpenCodeEvent } from "@opencode/client";
 import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError, toolKind } from "../src/agents/opencode/mapping";
+import { OpencodeV2Events } from "../src/agents/opencode/v2-events";
 
 describe("opencode-mapping", () => {
   it("maps a text part to a message item with role", () => {
@@ -92,5 +94,19 @@ describe("opencode-mapping", () => {
   it("maps a named opencode error to a category", () => {
     expect(mapOpencodeError({ name: "MessageOutputLengthError", data: { message: "too long" } }).category).toBe("context_overflow");
     expect(mapOpencodeError("boom").category).toBe("unknown");
+  });
+
+  // OpenCode 2.2.6 reports a provider's 401 as `{ type: "provider.auth", ... }`.
+  // As "unknown" it would park the turn as transient and nudge a turn that only
+  // a new credential can fix.
+  it("classifies an OpenCode 2 execution failure by its error type", () => {
+    const failed = (error: object) => new OpencodeV2Events().normalize({
+      type: "session.execution.failed", id: "evt_fixture", created: 1, data: { sessionID: "ses_fixture", error },
+    } as unknown as OpenCodeEvent)[0]!.properties.error;
+    const auth = failed({ type: "provider.auth", message: "Invalid API key provided", status: 401,
+      response: { body: "{\"error\":{\"code\":\"invalid_api_key\"}}" } });
+    expect(mapOpencodeError(auth)).toMatchObject({ category: "auth", message: "Invalid API key provided" });
+    expect(mapOpencodeError(failed({ type: "aborted", message: "Aborted" })).category).toBe("aborted");
+    expect(mapOpencodeError(failed({ type: "provider.transport", message: "socket hang up" })).category).toBe("unknown");
   });
 });
