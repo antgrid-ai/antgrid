@@ -38,7 +38,7 @@ test("OpenCode resume rejects an unsupported runtime and can retry after upgradi
     });
     const options = { sessionId: "same-session", tool: "opencode", resumeId: "ses_existing" };
     try {
-      await expect(manager.startChat(options)).rejects.toThrow("OpenCode 2.0.0 or later is required (found 1.19.5). Run opencode upgrade and retry.");
+      await expect(manager.startChat(options)).rejects.toThrow("OpenCode 2.0.0 or later is required (found 1.19.5). Run opencode upgrade --major and retry.");
       expect(sessions).toEqual([]);
       expect(kills).toBe(1);
       expect(await manager.startChat(options)).toBe("ready");

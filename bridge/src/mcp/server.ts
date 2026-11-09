@@ -537,8 +537,8 @@ function inboxLine(post: any): string {
  *  "delivered" means the other machine's store has it, never that its agent read
  *  or acted on it. */
 function threadEntryLine(entry: any, now: number): string {
-  const who = entry.direction === "out" ? "you" : memberAddress(entry.peer);
-  const arrow = entry.direction === "out" ? "->" : "<-";
+  const peer = memberAddress(entry.peer);
+  const route = entry.direction === "out" ? `you -> ${peer}` : `${peer} -> you`;
   let stamp = "";
   if (entry.direction === "out") {
     switch (entry.delivery) {
@@ -559,7 +559,7 @@ function threadEntryLine(entry: any, now: number): string {
         stamp = " [held on this machine]";
     }
   }
-  const lines = [`- ${arrow} ${who}, ${seconds(now - entry.at)} ago${stamp} — ${entry.summary}`];
+  const lines = [`- ${route}, ${seconds(now - entry.at)} ago${stamp} — ${entry.summary}`];
   for (const text of entry.text ?? []) lines.push(`  ${text}`);
   return lines.join("\n");
 }

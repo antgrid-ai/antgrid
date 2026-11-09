@@ -23,7 +23,8 @@ import 'package:antgrid/providers/host_status.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/providers/control_plane.dart';
-import 'package:antgrid/screens/memory_screen.dart';
+import 'package:antgrid/providers/memory_surface.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
@@ -188,7 +189,7 @@ void main() {
   desktopTest('a local row opens the screen filtered to its project', (
     tester,
   ) async {
-    await pump(tester);
+    final container = await pump(tester);
     await expandMachine(tester);
     expect(find.byTooltip('$_localName memories (3)'), findsNothing);
     await hoverRow(tester, find.text(_localName));
@@ -199,15 +200,16 @@ void main() {
     expect(action, findsOneWidget);
     await tester.tap(action);
     await tester.pumpAndSettle();
-    final screen = tester.widget<MemoryScreen>(find.byType(MemoryScreen));
-    expect(screen.target, const MemoryTarget.machine());
-    expect(screen.initialProjectId, _localId);
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    final view = container.read(memoryViewProvider);
+    expect(view.target, const MemoryTarget.machine());
+    expect(view.projectId, _localId);
   });
 
   desktopTest('an advertised remote row opens its machine, by project id', (
     tester,
   ) async {
-    await pump(tester);
+    final container = await pump(tester);
     await expandMachine(tester);
     await hoverRow(tester, find.text(_remoteName));
     final action = find.descendant(
@@ -217,14 +219,14 @@ void main() {
     expect(action, findsOneWidget);
     await tester.tap(action);
     await tester.pumpAndSettle();
-    final screen = tester.widget<MemoryScreen>(find.byType(MemoryScreen));
-    expect(screen.initialProjectId, _remoteProjectId);
-    expect(screen.target.machineId, _machineUuid);
-    expect(screen.target.label, isNotEmpty);
-    expect(screen.target.label, isNot('This machine'));
+    final view = container.read(memoryViewProvider);
+    expect(view.projectId, _remoteProjectId);
+    expect(view.target.machineId, _machineUuid);
+    expect(view.target.label, isNotEmpty);
+    expect(view.target.label, isNot('This machine'));
     expect(
-      screen.target,
-      MemoryTarget.machine(machineId: _machineUuid, label: screen.target.label),
+      view.target,
+      MemoryTarget.machine(machineId: _machineUuid, label: view.target.label),
     );
   });
 
@@ -292,7 +294,7 @@ void main() {
     tester,
   ) async {
     final key = GlobalKey<ScaffoldState>();
-    await pump(
+    final container = await pump(
       tester,
       size: const Size(500, 900),
       home: Scaffold(
@@ -306,10 +308,8 @@ void main() {
     expect(key.currentState!.isDrawerOpen, isTrue);
     await tester.tap(find.text('Memory'));
     await tester.pumpAndSettle();
-    // flutter test's substitute font is about twice as wide as the real sans, so
-    // the compact toolbar's pickers overflow here; layout is covered elsewhere.
-    tester.takeException();
-    expect(find.byType(MemoryScreen), findsOneWidget);
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    expect(container.read(memoryViewProvider).target.machineId, isNull);
     expect(key.currentState!.isDrawerOpen, isFalse);
   });
 

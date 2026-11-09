@@ -381,6 +381,12 @@ const CODEX_MCP_INJECTION: string[] = [
   `mcp_servers.antgrid-memory.args=["memory-mcp"]`,
   "-c",
   `mcp_servers.antgrid-memory.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_search.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_get.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_save.approval_mode="approve"`,
 ];
 
 describe("codex hook trust", () => {
@@ -424,6 +430,7 @@ describe("launch augmentation", () => {
       // One token because the flag is variadic — the separated form eats the
       // session's own args, which are folded in right after it.
       `--mcp-config=${join(abDir, "mcp", "claude.json")}`,
+      "--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save",
     ]);
     expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
@@ -1191,7 +1198,7 @@ describe("update specs", () => {
   const expected: PerAgent<{ npmPackage: string; command: string; updateArgs: string[]; readState: boolean } | null> = {
     "claude-code": { npmPackage: "@anthropic-ai/claude-code", command: "claude", updateArgs: ["update"], readState: false },
     codex: { npmPackage: "@openai/codex", command: "codex", updateArgs: ["update"], readState: true },
-    opencode: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"], readState: false },
+    opencode: { npmPackage: "@opencode/cli", command: "opencode", updateArgs: ["upgrade"], readState: false },
     // IDE-bound, no self-updater: a request fails soft rather than throwing.
     "cursor-agent": null,
     "github-copilot": null,
@@ -1214,7 +1221,9 @@ describe("update specs", () => {
       if (spec && "check" in spec) throw new Error("Expected a CLI updater");
       expect(spec?.npmPackage).toBe(want.npmPackage);
       expect(spec?.command).toBe(want.command);
-      expect(spec?.updateArgs).toEqual(want.updateArgs);
+      const args = spec?.updateArgs;
+      // A version-aware updater is pinned at the current major line.
+      expect(typeof args === "function" ? args("2.2.6") : args).toEqual(want.updateArgs);
       expect(typeof spec?.readState).toBe(want.readState ? "function" : "undefined");
     });
   }

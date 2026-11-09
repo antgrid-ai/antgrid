@@ -52,4 +52,3 @@ transport reply is an unknown outcome; reuse the original operation key.
 
 Run `bun run --filter antgrid-memory test` and
 `bun run --filter antgrid-memory typecheck` from the repository root.
-The [RFC](../../docs/agent-memory-rfc.md) is the behavior contract.

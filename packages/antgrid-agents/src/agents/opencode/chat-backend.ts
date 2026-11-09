@@ -595,7 +595,7 @@ export class OpencodeDriver extends ChatSession {
 
   // A terminal error means opencode's own unbounded retry loop gave up, so this
   // park is NOT self-resuming — the engine's timer has to nudge. mapOpencodeError
-  // recognizes only three names, so everything outside them is the transient
+  // recognizes only a few names, so everything outside them is the transient
   // bucket: auth and context_overflow are the failures a wait cannot fix, and
   // they keep the ordinary judge-and-escalate path.
   private reportTerminalFailure(raw: any, category: string): void {

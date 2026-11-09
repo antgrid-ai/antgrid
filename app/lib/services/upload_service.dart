@@ -49,6 +49,11 @@ String uploadErrorText(Object error, String fileName) {
         return 'Too many uploads in progress — try again in a moment';
       case 'INVALID_NAME':
         return '"$fileName" has an unsupported file name';
+      // The message is the staged path: re-attaching re-uploads into the same
+      // dead terminal, so the user is handed the path to type instead.
+      case 'NOT_TYPED':
+        return '"$fileName" was uploaded to ${error.message}, but the '
+            'terminal could not take its path';
       default:
         return 'Upload of "$fileName" failed: '
             '${error.message.isEmpty ? error.code : error.message}';

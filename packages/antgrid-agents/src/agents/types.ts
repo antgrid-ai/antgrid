@@ -66,8 +66,10 @@ export interface CliAgentUpdate {
    *  Not always the registry key: claude-code's binary is `claude`. */
   command: string;
   /** argv for the CLI's own self-updater (codex/claude `update`, opencode
-   *  `upgrade` — the divergence this field exists to record). */
-  updateArgs: string[];
+   *  `upgrade` — the divergence this field exists to record). A function gets
+   *  the installed version (null when unreadable), for a CLI whose updater
+   *  takes different arguments across its own major versions. */
+  updateArgs: string[] | ((installed: string | null) => string[]);
   /** Reads this agent's updater state. Absent = no such file, and detection
    *  runs npm-only with app-side dismissal. */
   readState?: () => AgentUpdateState | null;
@@ -131,6 +133,9 @@ export interface HookInjectCtx {
    *  writes into. Test seam, same role as `cursorDir`. */
   geminiConfigDir?: string;
   hookCommand: HookCommand;
+  /** True only when the MCP profile (run first) really registered the memory
+   *  server for this launch. */
+  memoryRegistered?: boolean;
 }
 
 /** Inputs to an MCP profile's `inject`, one per spawn. `mcpCommand` is the
@@ -175,6 +180,11 @@ export interface DriverCtx {
   projectId: string;
   approvalPolicy: ApprovalPolicy;
   chatAugment: () => { args: string[]; env: Record<string, string> };
+  /** Memory guidance for this run, `undefined` unless the last `chatAugment`
+   *  registered the Memory server and Memory is on, unpaused and answers in
+   *  time. Same gate as the hook path, so a driver that injects guidance itself
+   *  honours a pause the way terminal agents do. Call after `chatAugment`. */
+  memoryGuidance?: () => Promise<string | undefined>;
   /** Persist the agent-native resume id for this slot (overwrite-latest). */
   onAgentSession: (agentSessionId: string) => void;
   /** Report that the provider stopped serving this session (limit or outage) so

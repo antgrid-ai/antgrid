@@ -1779,3 +1779,28 @@ describe("ClaudeDriver background tasks", () => {
     expect((lastItemFrame(sent, `tool:tu${CAP}`).item.content as any[])[0].data).toBe("recovered");
   });
 });
+
+describe("createDriver memory preapproval", () => {
+  async function spawnedWith(args: string[]) {
+    const { createDriver } = await import("../../packages/antgrid-agents/src/agents/claude-code/driver");
+    const seen: any[] = [];
+    const fake = makeFakeQuery();
+    const driver = createDriver({
+      sessionId: "s1", projectPath: "/x", approvalPolicy: "default", send: () => {},
+      onAgentSession: () => {}, emitUpdateCheck: () => {},
+      chatAugment: () => ({ args, env: {} }),
+    } as any, ((o: any) => { seen.push(o); return { query: fake.q, controller: { push: () => {}, end: () => {}, isEnded: () => false } }; }) as any);
+    await driver.start();
+    return seen[0];
+  }
+
+  it("forwards the allowedTools token to spawnClaude", async () => {
+    const o = await spawnedWith(["--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get"]);
+    expect(o.allowedTools).toEqual(["mcp__antgrid-memory__memory_search", "mcp__antgrid-memory__memory_get"]);
+  });
+
+  it("omits allowedTools when the augmentation carries no token", async () => {
+    const o = await spawnedWith([]);
+    expect("allowedTools" in o).toBe(false);
+  });
+});

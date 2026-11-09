@@ -413,9 +413,9 @@ class SessionEntry {
   /// would be a row stuck pending with nothing left alive to clear it.
   final bool deleting;
 
-  /// True while this session is a running terminal that was launched before
-  /// Memory was turned on, so its agent was never offered the Memory server and
-  /// a restart is the only way to give it one. The bridge decides it at launch
+  /// True while this session's running terminal or chat was launched before
+  /// Memory was turned on, so its agent was never offered the Memory server
+  /// and a restart is the only way to give it one. The bridge decides it at launch
   /// and omits it otherwise; absence reads as false.
   ///
   /// Transient live state like [deleting]: never persisted, and

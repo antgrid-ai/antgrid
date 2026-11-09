@@ -54,9 +54,9 @@ export function runProjectIntegrationSetup(ctx: {
   // (ensureGlobalCursorHooks) wires these same entries into the USER tier
   // (~/.cursor/hooks.json) on every bridge-managed spawn; this installer writes
   // the PROJECT tier for runs started outside the bridge. hooks.json files are
-  // the only channel: --plugin-dir cannot carry hooks (plugin hooks are
-  // discovery-only in current cursor-agent builds — nothing feeds them to the
-  // hook executor). Cursor MERGES tiers, so with both installed a bridge spawn
+  // the only channel: --plugin-dir cannot carry the hook that matters (plugin
+  // hooks reach the hook executor, but the TUI fires `stop` only when the user
+  // or project tier defines one). Cursor MERGES tiers, so with both installed a bridge spawn
   // fires both entries — collapsed by the /notify dedup window in api-server.ts,
   // so the phone still gets one notification. The merge/dedupe logic itself is
   // shared via agents/cursor-agent/global-hooks.ts so a fix only has to happen once.

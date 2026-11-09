@@ -57,21 +57,21 @@ class MemoryHeader extends StatelessWidget {
     this.projectPaused = false,
     this.onSettings,
     this.onMore,
-    required this.onClose,
   }) : onBack = null,
+       onOpenDrawer = null,
        backTooltip = 'Back',
        compact = false;
 
   const MemoryHeader.compact({
     super.key,
-    required VoidCallback this.onBack,
+    this.onBack,
+    this.onOpenDrawer,
     this.backTooltip = 'Back',
     this.onSettings,
   }) : target = null,
        status = null,
        projectPaused = false,
        onMore = null,
-       onClose = null,
        compact = true;
 
   final MemoryTarget? target;
@@ -81,8 +81,8 @@ class MemoryHeader extends StatelessWidget {
 
   /// Receives the ⋯ button's own context so the menu can anchor to it.
   final ValueChanged<BuildContext>? onMore;
-  final VoidCallback? onClose;
   final VoidCallback? onBack;
+  final VoidCallback? onOpenDrawer;
   final String backTooltip;
   final bool compact;
 
@@ -96,10 +96,19 @@ class MemoryHeader extends StatelessWidget {
             tooltip: 'Memory settings',
             onTap: onSettings,
           );
+    final lead = onBack != null
+        ? AbIconButton(icon: AbIcons.back, tooltip: backTooltip, onTap: onBack)
+        : onOpenDrawer != null
+        ? AbIconButton(
+            icon: AbIcons.menu,
+            tooltip: 'Open drawer',
+            onTap: onOpenDrawer,
+          )
+        : null;
     return Container(
       height: AbTokens.rowHeightLg,
       padding: EdgeInsets.only(
-        left: compact ? AbTokens.space8 : AbTokens.space16,
+        left: compact && lead != null ? AbTokens.space8 : AbTokens.space16,
         right: AbTokens.space8,
       ),
       decoration: BoxDecoration(
@@ -108,12 +117,10 @@ class MemoryHeader extends StatelessWidget {
       child: compact
           ? Row(
               children: [
-                AbIconButton(
-                  icon: AbIcons.back,
-                  tooltip: backTooltip,
-                  onTap: onBack,
-                ),
-                const SizedBox(width: AbTokens.space4),
+                if (lead != null) ...[
+                  lead,
+                  const SizedBox(width: AbTokens.space4),
+                ],
                 Text(
                   'Memory',
                   style: AbTokens.sansStyle(
@@ -160,11 +167,6 @@ class MemoryHeader extends StatelessWidget {
                       onTap: () => onMore(anchor),
                     ),
                   ),
-                AbIconButton(
-                  icon: AbIcons.close,
-                  tooltip: 'Close',
-                  onTap: onClose,
-                ),
               ],
             ),
     );

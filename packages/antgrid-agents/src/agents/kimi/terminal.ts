@@ -55,7 +55,11 @@ async function runKimiCli(args: string[], request: TerminalLaunchRequest): Promi
   request.signal.throwIfAborted();
   const host = agentHost();
   const command = request.tool ? "kimi" : request.configured.command;
-  const launch = toolSpawnArgs(command, args, process.env);
+  // `kimi fork` fires SessionStart for the new session, and the injected
+  // identity hook posts whenever this is set: a bridge running inside an
+  // Antgrid terminal would bind the fork's id and title to that terminal.
+  const { ANTGRID_TERMINAL_ID: _terminal, ...env } = process.env;
+  const launch = toolSpawnArgs(command, args, env);
   const proc = Bun.spawn(launch.cmd, {
     cwd: request.cwd,
     env: launch.env,

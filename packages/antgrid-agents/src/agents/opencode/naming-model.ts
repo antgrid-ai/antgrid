@@ -3,14 +3,77 @@ import { join } from "node:path";
 import type { NamingModelProbe } from "../types";
 
 /**
- * The model opencode itself would title a session with, so a naming call asks
+ * The model OpenCode 2 itself would title a session with, so a naming call asks
  * for one this user's providers can actually serve.
  *
  * opencode reaches many providers, so no fixed `provider/model` string is right
  * for every install: an account with no `openai` provider has no `openai/…`
  * model at all, and a ChatGPT sign-in serves only that account's Codex catalog.
- * This ports opencode 1.19.5's own title path (`SessionPrompt` title →
- * `Provider.getSmallModel` → `Provider.defaultModel`) over what its CLI prints:
+ * This ports OpenCode 2.2.6's `SessionContext.selectTitle` for a call with no
+ * session of its own:
+ *
+ *   1. the `title` agent's model (a legacy `small_model` is translated into it),
+ *      when the install knows that model;
+ *   2. the first model, in catalog order, of the small families `Model.small`
+ *      ranks for the default model's provider.
+ *
+ * Undefined means "no --model", which leaves `opencode run` on its default
+ * model, as OpenCode's own last fallback does; so does any probe failure.
+ *
+ * Every probe runs `--standalone`. Without it, a 2.x command that needs a server
+ * starts the user's shared background service, which outlives the probe and
+ * inherits the naming spawn's `OPENCODE_DB=:memory:`: every later session the
+ * user opens through that service would be written to memory and lost.
+ */
+export async function resolveOpencodeNamingModel(probe: NamingModelProbe): Promise<string | undefined> {
+  const [agentsText, defaultText, modelsText] = await Promise.all([
+    probe.run(["api", "--standalone", "agent.list"]),
+    probe.run(["api", "--standalone", "model.default"]),
+    probe.run(["api", "--standalone", "model.list"]),
+  ]);
+  const agents = rec(parseJson(agentsText)).data;
+  const models = rec(parseJson(modelsText)).data;
+  if (!Array.isArray(agents) || !Array.isArray(models)) return undefined;
+  const title = agents.map(rec).find((agent) => agent.id === "title");
+  // No title agent, no generated title in OpenCode either.
+  if (!title) return undefined;
+  const listed = models.map(rec);
+
+  const configured = rec(title.model);
+  const providerID = str(configured.providerID);
+  const id = str(configured.id);
+  if (providerID && id) {
+    const model = listed.find((entry) => entry.providerID === providerID && entry.id === id);
+    if (!model) return undefined;
+    const variant = str(configured.variant);
+    if (!variant) return `${providerID}/${id}`;
+    // `run --model p/m#v` fails the whole run ("Variant unavailable") on a
+    // variant the model does not list.
+    const variants = Array.isArray(model.variants) ? model.variants.map(rec) : [];
+    return variants.some((entry) => entry.id === variant) ? `${providerID}/${id}#${variant}` : undefined;
+  }
+
+  const provider = str(rec(rec(parseJson(defaultText)).data).providerID);
+  if (!provider) return undefined;
+  const text = (kinds: unknown) => Array.isArray(kinds) && kinds.some((kind) => typeof kind === "string" && kind.startsWith("text"));
+  const candidates = listed.filter((model) => model.providerID === provider && model.status === "active"
+    && text(rec(model.capabilities).input) && text(rec(model.capabilities).output));
+  for (const family of V2_SMALL_FAMILIES) {
+    const small = str(candidates.find((model) => model.family === family)?.id);
+    if (small) return `${provider}/${small}`;
+  }
+  return undefined;
+}
+
+const V2_SMALL_FAMILIES = ["gpt-luna", "gemini-flash-lite", "gemini-flash", "claude-haiku"];
+
+/**
+ * The model an opencode-1.x-family CLI would title a session with. Kilo 7.8.x
+ * keeps opencode 1.19.5's title path, probe commands and output shapes, so this
+ * is that port; OpenCode 2 itself resolves through `resolveOpencodeNamingModel`.
+ *
+ * Ports opencode 1.19.5's `SessionPrompt` title → `Provider.getSmallModel` →
+ * `Provider.defaultModel` over what its CLI prints:
  *
  *   1. the `title` agent's configured model;
  *   2. `small_model` from config, when the provider lists it;
@@ -32,7 +95,7 @@ import type { NamingModelProbe } from "../types";
  * `kilo/naming-model.ts`); a fork that keeps the probe commands and output
  * shapes reuses everything else.
  */
-export async function resolveOpencodeNamingModel(
+export async function resolveOpencodeV1FamilyNamingModel(
   probe: NamingModelProbe, rules: SmallModelRules = {},
 ): Promise<string | undefined> {
   const [configText, pathsText, modelsText] = await Promise.all([

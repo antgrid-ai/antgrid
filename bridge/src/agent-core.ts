@@ -33,6 +33,7 @@ import {
 } from "./keystrokes";
 import { transcriptInterruptFor } from "antgrid-agents/builtins";
 import { authoredText } from "antgrid-agents/handoff";
+import { memoryRegistered } from "antgrid-agents/memory-guidance";
 import { createInterruptConfirmer, type InterruptConfirmDeps } from "./interrupt-confirm";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
@@ -67,7 +68,7 @@ import { resolveSchedulerCaller, type SchedulerCallerDeps } from "./scheduler-ca
 import { SchedulerRefusal, type SchedulerForAgent } from "./scheduler/agent";
 import { MemoryError } from "antgrid-memory";
 import { MemoryRequestMessage } from "./protocol";
-import { memoryFailure, resolveMemoryCaller, type MemoryForAgent, type MemoryForApp } from "./memory";
+import { chatMemoryGuidance, memoryFailure, resolveMemoryCaller, type MemoryCallerDeps, type MemoryForAgent, type MemoryForApp } from "./memory";
 import { MessageBus, clientKeyOf, type Channel, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -252,9 +253,11 @@ export function buildChatSpawnAugment(
   apiPort: number | null,
   abDir?: string,
   runId?: string,
-): { args: string[]; env: Record<string, string> } {
+): { args: string[]; env: Record<string, string>; memoryWithheld: boolean; memoryRegistered: boolean } {
   const aug = augmentAgentLaunch(tool, { abDir, mode: "chat" });
   return {
+    memoryWithheld: aug.memoryWithheld === true,
+    memoryRegistered: memoryRegistered(aug.env),
     args: aug.args,
     env: {
       ...aug.env,
@@ -839,6 +842,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // TerminalManager's late-bound getApiPort getter can read `apiServer.port`
   // once the server has started (it starts after the manager is constructed).
   let apiServer: ApiServerHandle | null = null;
+  const sessionCallerDeps: Pick<SchedulerCallerDeps, "session" | "isLiveRun" | "runAgent"> = {
+    session: (id) => sessions?.get(id),
+    isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
+    runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
+  };
+  const memoryCallerDeps: MemoryCallerDeps = {
+    ...sessionCallerDeps,
+    checkoutExists: (id) => {
+      const runtime = checkoutRuntimes.runtime(id);
+      return runtime !== undefined && !runtime.disposed && sessions?.isCheckoutDeleting(id) !== true;
+    },
+  };
   const connState: ConnState = createConnState();
   let configWatchStarted = false;
   const fileWatchers = new Map<string, FileWatcher>();
@@ -4563,6 +4578,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
         const hookRunId = sessions?.hookRunId(sessionId);
+        const memoryForAgent = opts.memoryForAgent;
+        let chatMemoryRegistered = false;
         return agentRuntime.createDriver(tool, {
           scope: run!.scope,
           sessionId,
@@ -4570,7 +4587,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           projectPath: sessionRuntime.checkout.path,
           projectId: project.id,
           approvalPolicy,
-          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir, hookRunId),
+          chatAugment: () => {
+            const aug = buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir, hookRunId);
+            chatMemoryRegistered = aug.memoryRegistered;
+            if (hookRunId) sessions?.noteChatRunMemory(sessionId, hookRunId, aug.memoryWithheld);
+            return aug;
+          },
+          // Gated here, not in each driver, so no driver can offer guidance for
+          // a server its launch was not handed.
+          memoryGuidance: hookRunId && memoryForAgent
+            ? async () => chatMemoryRegistered
+              ? chatMemoryGuidance(memoryForAgent, () => resolveMemoryCaller(memoryCallerDeps, sessionId, hookRunId))
+              : undefined
+            : undefined,
           onAgentSession: run?.onAgentSession ?? ((agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId)),
           onLifecycle: (evt) => {
             if (run && !run.isCurrent()) return;
@@ -5149,12 +5178,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  const sessionCallerDeps: Pick<SchedulerCallerDeps, "session" | "isLiveRun" | "runAgent"> = {
-    session: (id) => sessions?.get(id),
-    isLiveRun: (id, runId) => sessions?.isLiveRun(id, runId) ?? false,
-    runAgent: (id, runId) => sessions?.liveRunAgent(id, runId),
-  };
-
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
     acceptsHookRun: (terminalId, runId) => {
@@ -5182,13 +5205,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     sessionBus: sessionBusApi,
     memory: async ({ terminalId, runId, request }) => {
-      const caller = () => resolveMemoryCaller({
-        ...sessionCallerDeps,
-        checkoutExists: (id) => {
-          const runtime = checkoutRuntimes.runtime(id);
-          return runtime !== undefined && !runtime.disposed && sessions?.isCheckoutDeleting(id) !== true;
-        },
-      }, terminalId, runId);
+      const caller = () => resolveMemoryCaller(memoryCallerDeps, terminalId, runId);
       caller();
       if (!opts.memoryForAgent) throw new MemoryError("UNAVAILABLE", "Memory is unavailable in this process.");
       return opts.memoryForAgent(caller, request);

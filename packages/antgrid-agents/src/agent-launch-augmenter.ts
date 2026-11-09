@@ -3,6 +3,7 @@ import type { HookCommand, BridgeCommand } from "./hook-command";
 import { agentSpec } from "./agents/registry";
 import { NO_INJECTION, NO_OBSERVATION } from "./agents/launch-inject";
 import type { AgentSpec, LaunchAugmentation } from "./agents/types";
+import { MEMORY_MCP_ENV } from "./memory-guidance";
 
 const log = logger.child({ component: "agent-launch" });
 export type { LaunchAugmentation };
@@ -29,23 +30,12 @@ export function augmentAgentLaunch(
   const spec = get(tool);
   if (!spec?.hooks && !spec?.mcp) return NO_INJECTION;
   const abDir = options.abDir ?? resolveAbDir();
-  let hooks = NO_INJECTION;
-  if (spec.hooks) {
-    try {
-      const result = spec.hooks.inject({ ...options, abDir, hookCommand: options.hookCommand ?? resolveHookCommand() });
-      hooks = { ...result, observation: result.observation ?? (result.notificationsInjected === false ? NO_OBSERVATION : spec.hooks.observation) };
-    } catch (err) {
-      log.warn("agent hook augmentation failed for %s: %s", tool, err);
-    }
-  }
   let mcp = NO_INJECTION;
+  let memoryRegistered = false;
   if (spec.mcp) {
     try {
       const mcpCommand = options.mcpCommand ?? agentHost().mcpCommand?.();
-      // Memory in chat is deferred (docs/agent-memory-rfc.md): a chat launch
-      // gets `antgrid` alone and is not a launch that Memory was withheld from.
-      const chat = options.mode === "chat";
-      const memoryMcpCommand = chat ? undefined : options.memoryMcpCommand
+      const memoryMcpCommand = options.memoryMcpCommand
         ?? (options.mcpCommand ? undefined : agentHost().memoryMcpCommand?.());
       if (mcpCommand) {
         mcp = spec.mcp.inject({ abDir, mcpCommand, memoryMcpCommand });
@@ -53,12 +43,23 @@ export function augmentAgentLaunch(
         // a profile that fails soft (unmergeable config, unwritable file)
         // returns NO_INJECTION and must not leave the agent told about tools
         // it does not have.
-        if (mcp !== NO_INJECTION && !chat) {
-          mcp = memoryMcpCommand ? { ...mcp, env: { ...mcp.env, ANTGRID_MEMORY_MCP: "1" } } : { ...mcp, memoryWithheld: true };
+        if (mcp !== NO_INJECTION) {
+          memoryRegistered = memoryMcpCommand !== undefined;
+          mcp = memoryRegistered ? { ...mcp, env: { ...mcp.env, [MEMORY_MCP_ENV]: "1" } } : { ...mcp, memoryWithheld: true };
         }
       }
     } catch (err) {
       log.warn("agent MCP augmentation failed for %s: %s", tool, err);
+    }
+  }
+  // MCP runs first so a hook profile can tell whether Memory was registered.
+  let hooks = NO_INJECTION;
+  if (spec.hooks) {
+    try {
+      const result = spec.hooks.inject({ ...options, abDir, hookCommand: options.hookCommand ?? resolveHookCommand(), memoryRegistered });
+      hooks = { ...result, observation: result.observation ?? (result.notificationsInjected === false ? NO_OBSERVATION : spec.hooks.observation) };
+    } catch (err) {
+      log.warn("agent hook augmentation failed for %s: %s", tool, err);
     }
   }
   return {

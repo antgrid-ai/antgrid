@@ -19,6 +19,7 @@ import '../utils/platform_utils.dart';
 import '../widgets/new_session/new_session_content.dart';
 import '../widgets/projects_drawer.dart';
 import 'app_settings_screen.dart';
+import 'memory_screen.dart' show MemorySurface;
 import 'scheduler_screen.dart';
 
 // ── Screen ───────────────────────────────────────────────────────────────────
@@ -175,7 +176,12 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     final width = MediaQuery.sizeOf(context).width;
     final isMobile = width < kCompactBreakpoint;
     final surface = ref.watch(workbenchSurfaceProvider);
-    final surfaceChild = _surfaceChild(surface);
+    // Only at phone width and on touch tablets can the drawer be closed, so
+    // only there does a surface need its own way to reopen it.
+    final surfaceChild = _surfaceChild(
+      surface,
+      overlayDrawer: isMobile || isMobilePlatform,
+    );
 
     // Phone width, any platform (including a narrow mouse-desktop window,
     // which has no room for a docked rail either): a real swipeable
@@ -352,7 +358,10 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     );
   }
 
-  Widget? _surfaceChild(WorkbenchSurface surface) {
+  Widget? _surfaceChild(
+    WorkbenchSurface surface, {
+    required bool overlayDrawer,
+  }) {
     void close() {
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -379,6 +388,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     return switch (surface) {
       WorkbenchSurface.scheduler => SchedulerScreen(
         onOpenDrawer: _toggleDrawer,
+      ),
+      WorkbenchSurface.memory => MemorySurface(
+        onOpenDrawer: overlayDrawer ? _toggleDrawer : null,
       ),
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
       WorkbenchSurface.remoteDevices ||

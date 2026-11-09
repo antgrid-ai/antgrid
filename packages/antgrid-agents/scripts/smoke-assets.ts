@@ -1,5 +1,6 @@
 import { materializeAgentAssets } from "../src/plugin-root";
-import { MEMORY_AGENT_GUIDANCE } from "../src/memory-guidance";
+import { isDeepStrictEqual } from "node:util";
+import * as memoryGuidance from "../assets/memory-guidance";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -7,7 +8,9 @@ const directory = process.argv[2];
 if (!directory) throw new Error("Pass an isolated asset directory");
 const root = materializeAgentAssets(directory);
 const guidance = await import(pathToFileURL(join(root, "memory-guidance.ts")).href);
-if (guidance.MEMORY_AGENT_GUIDANCE !== MEMORY_AGENT_GUIDANCE) throw new Error("Materialized memory guidance differs from compiled hooks");
+for (const [name, value] of Object.entries(memoryGuidance)) {
+  if (!isDeepStrictEqual(guidance[name], value)) throw new Error(`Materialized ${name} differs from compiled hooks`);
+}
 const plugin = await import(pathToFileURL(join(root, "opencode/plugin.ts")).href);
 if (plugin.default?.id !== "antgrid" || typeof plugin.default.setup !== "function") throw new Error("V2 plugin definition missing");
 const hooks: string[] = [];

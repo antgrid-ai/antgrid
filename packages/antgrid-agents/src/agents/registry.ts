@@ -45,6 +45,7 @@ import { claudeFork } from "./claude-code/fork";
 import { codexFork } from "./codex/fork";
 import { opencodeFork } from "./opencode/fork";
 import { resolveOpencodeNamingModel } from "./opencode/naming-model";
+import { opencodeUpgradeArgs } from "./opencode/version";
 import { resolveKiloNamingModel } from "./kilo/naming-model";
 import { cursorAgentFork } from "./cursor-agent/fork";
 import { copilotFork } from "./github-copilot/fork";
@@ -352,7 +353,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       injectConfig("OPENCODE_TUI_CONFIG", abDir, "opencode-tui.json", {
         attention: { enabled: true },
       }),
-    update: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"] },
+    update: { npmPackage: "@opencode/cli", command: "opencode", updateArgs: opencodeUpgradeArgs },
   },
   "cursor-agent": {
     bin: "cursor-agent",

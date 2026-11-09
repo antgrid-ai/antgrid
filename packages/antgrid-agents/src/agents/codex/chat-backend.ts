@@ -44,6 +44,10 @@ export interface CodexDriverOpts {
   // user-facing explanation from the process's captured stderr. The callback
   // must settle promptly (the caller bounds it; see agent-core's factory).
   diagnoseStartFailure?: () => Promise<string | null>;
+  // Memory guidance for this thread, or undefined when Memory is off, paused or
+  // unavailable. Lazy because the augmentation that decides it is computed only
+  // when the driver starts, after this object is constructed.
+  memoryGuidance?: () => Promise<string | undefined>;
 }
 
 export class CodexDriver extends ChatSession {
@@ -104,6 +108,7 @@ export class CodexDriver extends ChatSession {
   private stoppedExecs = new Set<string>();
 
   private readonly diagnoseStartFailure?: () => Promise<string | null>;
+  private readonly memoryGuidance?: () => Promise<string | undefined>;
 
   constructor(opts: CodexDriverOpts) {
     super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage, onAgentSession: opts.onAgentSession });
@@ -111,6 +116,7 @@ export class CodexDriver extends ChatSession {
     this.cwd = opts.cwd;
     this.selModel = opts.model;
     this.diagnoseStartFailure = opts.diagnoseStartFailure;
+    this.memoryGuidance = opts.memoryGuidance;
     this.registerHandlers();
   }
 
@@ -141,23 +147,59 @@ export class CodexDriver extends ChatSession {
       clientInfo: { name: "antgrid-bridge", version: "0.1.0" },
       capabilities: { experimentalApi: true },
     });
+    const guidance = await this.memoryGuidance?.();
+    const developerInstructions = guidance ? await this.developerInstructionsWith(guidance) : undefined;
+    const instructions = developerInstructions ? { developerInstructions } : {};
     if (resumeId) {
       try {
-        const res = (await this.ep.request("thread/resume", { threadId: resumeId })) as any;
+        const res = (await this.ep.request("thread/resume", { threadId: resumeId, ...instructions })) as any;
         this.threadId = res?.thread?.id ?? resumeId;
         this.seedFromThreadResponse(res);
         this.emitTranscriptReplay(codexResumeReplay(this.sessionId, res?.thread));
+        if (guidance) await this.injectGuidance(guidance);
         void this.discoverCapabilities();
         return this.threadId;
       } catch (err) {
         throw new Error(`Could not resume Codex thread ${resumeId}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
     }
-    const res = (await this.ep.request("thread/start", { cwd: this.cwd, ...(this.selModel ? { model: this.selModel } : {}) })) as any;
+    const res = (await this.ep.request("thread/start", {
+      cwd: this.cwd,
+      ...(this.selModel ? { model: this.selModel } : {}),
+      ...instructions,
+    })) as any;
     this.threadId = res?.thread?.id ?? "";
     this.seedFromThreadResponse(res);
     void this.discoverCapabilities();
     return this.threadId;
+  }
+
+  // developerInstructions REPLACES the configured value, so the user's own are
+  // read back and kept. When they cannot be read, sending nothing is safer than
+  // silently overwriting them.
+  private async developerInstructionsWith(guidance: string): Promise<string | undefined> {
+    try {
+      const res = (await this.ep.request("config/read", { cwd: this.cwd })) as any;
+      const user = res?.config?.developer_instructions;
+      return typeof user === "string" && user.trim() ? `${user}\n\n${guidance}` : guidance;
+    } catch (err) {
+      log.warn({ err }, "codex config/read failed; starting without memory guidance");
+      return undefined;
+    }
+  }
+
+  // A resumed thread restores its reference context, so the override above
+  // reaches the model only after the next compaction. One developer item makes
+  // the guidance visible to the first resumed turn.
+  private async injectGuidance(guidance: string): Promise<void> {
+    try {
+      await this.ep.request("thread/inject_items", {
+        threadId: this.threadId,
+        items: [{ type: "message", role: "developer", content: [{ type: "input_text", text: guidance }] }],
+      });
+    } catch (err) {
+      log.warn({ err }, "codex thread/inject_items failed; resumed thread keeps config guidance only");
+    }
   }
 
   // On-demand re-derivation of this thread's completed-turn transcript, for a
