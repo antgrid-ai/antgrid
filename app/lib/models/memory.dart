@@ -22,7 +22,37 @@ class MemoryTarget {
 enum MemoryVersions { current, earlier }
 
 const kMemoryPageSize = 50;
+const kMemoryTitleMaxBytes = 256;
+const kMemoryDescriptionMaxBytes = 512;
+const kMemoryContentMaxBytes = 16 * 1024;
+const kMemoryRecordMaxBytes = 64 * 1024;
 const kMemoryKindOrder = ['preference', 'note', 'observation', 'task_state'];
+
+String? memoryOptionalText(String? value) {
+  final text = value?.trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
+String? memorySaveValidation(Map<String, dynamic> save) {
+  if ((save['content'] as String).trim().isEmpty) {
+    return 'Memory must contain text.';
+  }
+  for (final (field, label, limit) in [
+    ('title', 'Title', kMemoryTitleMaxBytes),
+    ('description', 'Description', kMemoryDescriptionMaxBytes),
+    ('content', 'Memory', kMemoryContentMaxBytes),
+    ('applicability', 'Applies when', 1024),
+  ]) {
+    final text = save[field] as String?;
+    if (text != null && utf8.encode(text).length > limit) {
+      return '$label exceeds $limit UTF-8 bytes.';
+    }
+  }
+  if (utf8.encode(jsonEncode(save)).length > kMemoryRecordMaxBytes) {
+    return 'Memory and its metadata exceed $kMemoryRecordMaxBytes UTF-8 bytes.';
+  }
+  return null;
+}
 
 String memoryKindLabel(String memoryType) => switch (memoryType) {
   'preference' => 'Preference',
@@ -214,16 +244,13 @@ bool _exportId(Object? value) =>
     value is String && value.isNotEmpty && value.length <= 256;
 
 bool _exportRecord(Map<String, dynamic> record, Object? owner) {
-  const optionalIds = {
-    'task_id',
-    'checkout_id',
-    'supersedes',
-    'superseded_by',
-  };
+  const optionalIds = {'task_id', 'checkout_id', 'supersedes', 'superseded_by'};
   const fields = {
     'id',
     'owner_id',
     'content',
+    'title',
+    'description',
     'memory_type',
     'scope',
     'applicability',
@@ -237,10 +264,23 @@ bool _exportRecord(Map<String, dynamic> record, Object? owner) {
   };
   final source = record['source'];
   final evidence = record['evidence'];
+  // Expiry is derived on read, so its longer label must not invalidate a
+  // task record that met the byte limit when saved as active.
+  final recordAtSave =
+      record['memory_type'] == 'task_state' &&
+          record['scope'] == 'task' &&
+          record['lifecycle'] == 'expired'
+      ? {...record, 'lifecycle': 'active'}
+      : record;
   if (!record.keys.every(fields.contains) ||
       !_exportId(record['id']) ||
       record['owner_id'] != owner ||
-      record['content'] is! String ||
+      !_exportText(record['content'], kMemoryContentMaxBytes) ||
+      (record.containsKey('title') &&
+          !_exportText(record['title'], kMemoryTitleMaxBytes)) ||
+      (record.containsKey('description') &&
+          !_exportText(record['description'], kMemoryDescriptionMaxBytes)) ||
+      utf8.encode(jsonEncode(recordAtSave)).length > kMemoryRecordMaxBytes ||
       !const {
         'preference',
         'task_state',
@@ -277,6 +317,9 @@ bool _exportRecord(Map<String, dynamic> record, Object? owner) {
         (key) => !source.containsKey(key) || _exportId(source[key]),
       );
 }
+
+bool _exportText(Object? value, int limit) =>
+    value is String && utf8.encode(value).length <= limit;
 
 class MemoryFailure {
   MemoryFailure.fromJson(Map<String, dynamic> json)
@@ -363,9 +406,7 @@ class MemoryStatus {
         final List rows => [
           for (final row in rows)
             if (row is Map)
-              ?MemorySessionWithoutMemory.fromJson(
-                row.cast<String, dynamic>(),
-              ),
+              ?MemorySessionWithoutMemory.fromJson(row.cast<String, dynamic>()),
         ],
         _ => const [],
       },
@@ -394,6 +435,8 @@ class MemoryRecord {
   MemoryRecord.fromJson(Map<String, dynamic> json)
     : id = json['id'] as String,
       content = json['content'] as String,
+      title = memoryOptionalText(json['title'] as String?),
+      description = memoryOptionalText(json['description'] as String?),
       memoryType = json['memory_type'] as String,
       scope = json['scope'] as String,
       applicability = json['applicability'] as String? ?? '',
@@ -411,6 +454,8 @@ class MemoryRecord {
 
   final String id;
   final String content;
+  final String? title;
+  final String? description;
   final String memoryType;
   final String scope;
   final String applicability;
@@ -425,6 +470,8 @@ class MemoryRecord {
   final DateTime? createdAt;
   final DateTime? updatedAt;
   final bool excerpted;
+
+  String get displayTitle => title ?? content;
 
   bool get isCurrent => lifecycle == 'active';
   bool get isTaskScope => scope == 'task';
@@ -447,8 +494,12 @@ class MemoryRecord {
     required String content,
     required String applicability,
     required List<String> evidence,
+    String? title,
+    String? description,
   }) => {
     'content': content,
+    'title': ?memoryOptionalText(title),
+    'description': ?memoryOptionalText(description),
     'memory_type': memoryType,
     'scope': scope,
     'applicability': applicability,

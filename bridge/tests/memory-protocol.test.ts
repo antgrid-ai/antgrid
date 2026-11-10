@@ -28,6 +28,24 @@ test("memory results carry project rows and status failures", () => {
   expect(parseMessage(JSON.stringify(response))).toEqual(response);
 });
 
+test("project and machine transports preserve memory metadata and share UTF-8 save limits", () => {
+  const save = { title: "🧭".repeat(64), description: "🔎".repeat(128), content: "文".repeat(5461) + "a", memory_type: "note", scope: "project" };
+  const request = createMessage("memory:request", { requestId: "metadata", request: { op: "save", operation_key: "metadata-operation", save } });
+  expect(parseMessage(JSON.stringify(request))).toEqual(request);
+  expect(parseMessageFast(JSON.stringify(request))).toEqual(request);
+  expect(ControlRequestSchema.safeParse({ id: "machine", type: "memory:request", request: request.request }).success).toBe(true);
+  for (const extra of [{ title: save.title + "a" }, { description: save.description + "a" }, { content: save.content + "a" }]) {
+    const invalid = { ...request.request, save: { ...save, ...extra } };
+    expect(AbMessageSchema.safeParse({ ...request, request: invalid }).success).toBe(false);
+    expect(ControlRequestSchema.safeParse({ id: "machine", type: "memory:request", request: invalid }).success).toBe(false);
+  }
+  const response = createMessage("memory:result", { requestId: "metadata", ok: true, result: { record: {
+    ...save, id: "record", owner_id: "owner", project_id: "project", evidence: [], source: { actor: "app" },
+    created_at: 0, updated_at: 0, lifecycle: "active",
+  } } });
+  expect(parseMessage(JSON.stringify(response))).toEqual(response);
+});
+
 test("memory payloads never enter body-capture diagnostics", () => {
   armBodyCapture(true, 1000);
   try {

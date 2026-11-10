@@ -83,8 +83,7 @@ class DemoMemoryBackend {
     return _status();
   }
 
-  bool _current(Map<String, dynamic> record) =>
-      record['superseded_by'] == null;
+  bool _current(Map<String, dynamic> record) => record['superseded_by'] == null;
 
   Map<String, dynamic> _projects() {
     final current = _records.values.where(_current).length;
@@ -124,7 +123,8 @@ class DemoMemoryBackend {
             )
             .toList()
           ..sort(
-            (a, b) => (b['created_at'] as int).compareTo(a['created_at'] as int),
+            (a, b) =>
+                (b['created_at'] as int).compareTo(a['created_at'] as int),
           );
     final offset = request['offset'] as int? ?? 0;
     final page = rows.skip(offset).take(limit);
@@ -141,9 +141,9 @@ class DemoMemoryBackend {
   /// newest first rather than ranked.
   Map<String, dynamic> _search(Map<String, dynamic> request) {
     final terms = [
-      for (final m in RegExp(r'"([^"]*)"|([^\s"]+)').allMatches(
-        request['query'] as String,
-      ))
+      for (final m in RegExp(
+        r'"([^"]*)"|([^\s"]+)',
+      ).allMatches(request['query'] as String))
         if (m.group(1) case final phrase?)
           _words(phrase)
         else
@@ -153,7 +153,10 @@ class DemoMemoryBackend {
       request,
       limit: request['limit'] as int? ?? kMemoryPageSize,
       matches: (r) {
-        final words = _words('${r['content']} ${r['applicability'] ?? ''}');
+        final words = _words(
+          '${r['title'] ?? ''} ${r['description'] ?? ''} '
+          '${r['content']} ${r['applicability'] ?? ''}',
+        );
         return terms.any((term) => _containsRun(words, term));
       },
     );
@@ -224,6 +227,8 @@ class DemoMemoryBackend {
       'id': id,
       'owner_id': kDemoMemoryOwnerId,
       'content': save['content'],
+      'title': ?memoryOptionalText(save['title'] as String?),
+      'description': ?memoryOptionalText(save['description'] as String?),
       'memory_type': save['memory_type'],
       'scope': save['scope'],
       'project_id': replaced?['project_id'] ?? kDemoProjectId,
