@@ -491,12 +491,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(MemoryEditForm), findsOneWidget);
     await tester.enterText(
-      find
-          .descendant(
-            of: find.byType(MemoryEditForm),
-            matching: find.byType(EditableText),
-          )
-          .first,
+      find.byKey(const Key('memory-edit-content')),
       'MY TYPED FIX',
     );
     await tester.pump();

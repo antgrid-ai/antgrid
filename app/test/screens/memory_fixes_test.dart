@@ -102,7 +102,10 @@ void main() {
     expect(gets, 1);
     await tester.tap(find.text('Edit'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(EditableText).first, 'MY TYPED FIX');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-content')),
+      'MY TYPED FIX',
+    );
     await tester.pump();
     statusCtrl.add(const Connected());
     await tester.pump();
@@ -240,7 +243,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Edit'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(EditableText).first, 'A better memory');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-content')),
+      'A better memory',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();

@@ -17,6 +17,8 @@ const _target = MemoryTarget.machine();
 Map<String, dynamic> _record({
   String id = 'mem_7f3a91c2',
   String content = 'Delete app/build/windows after a failed CMake configure.',
+  String? title,
+  String? description,
   String memoryType = 'observation',
   String scope = 'project',
   String applicability = 'Windows desktop builds',
@@ -30,6 +32,8 @@ Map<String, dynamic> _record({
 }) => {
   'id': id,
   'content': content,
+  'title': ?title,
+  'description': ?description,
   'memory_type': memoryType,
   'scope': scope,
   'project_id': 'antgrid',
@@ -132,9 +136,7 @@ void main() {
           );
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          memoryRequestProvider(_target).overrideWithValue(request),
-        ],
+        overrides: [memoryRequestProvider(_target).overrideWithValue(request)],
         child: MaterialApp(
           theme: buildAbTheme(),
           builder: abToastHostBuilder,
@@ -290,12 +292,9 @@ void main() {
     final h = await pumpPane(tester);
     await tapButton(tester, 'Forget');
     await tapButton(tester, 'Forget');
-    expect(
-      h.calls.where((c) => c['op'] == 'forget'),
-      [
-        {'op': 'forget', 'id': 'mem_7f3a91c2'},
-      ],
-    );
+    expect(h.calls.where((c) => c['op'] == 'forget'), [
+      {'op': 'forget', 'id': 'mem_7f3a91c2'},
+    ]);
     expect(find.text('Memory forgotten'), findsOneWidget);
     expect(h.forgotten, 1);
     await tester.pump(const Duration(seconds: 3));
@@ -418,8 +417,10 @@ void main() {
       find.text('Files or doc sections that back this memory up.'),
       findsOneWidget,
     );
-    final fields = find.byType(EditableText);
-    await tester.enterText(fields.at(2), 'docs/new.md');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-source')),
+      'docs/new.md',
+    );
     await tester.pumpAndSettle();
     expect(tapOf(tester, 'Add'), isNotNull);
     await tapButton(tester, 'Add');
@@ -441,7 +442,10 @@ void main() {
     );
     await tapButton(tester, 'Edit');
     expect(tapOf(tester, 'Save changes'), isNull);
-    await tester.enterText(find.byType(EditableText).first, 'Fixed text');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-content')),
+      'Fixed text',
+    );
     await tester.pumpAndSettle();
     await tapButton(tester, 'Save changes');
     final save = h.calls.singleWhere((c) => c['op'] == 'save');
@@ -481,7 +485,10 @@ void main() {
   });
 
   group('layout', () {
-    final long = List.filled(60, 'A very long sentence about builds.').join(' ');
+    final long = List.filled(
+      60,
+      'A very long sentence about builds.',
+    ).join(' ');
     final earlier = [
       for (var i = 0; i < 20; i++) _record(id: 'e$i', content: '$long $i'),
     ];
