@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { MEMORY_SERVER_INSTRUCTIONS } from "antgrid-agents/memory-guidance";
 import { MemoryService, type MemoryContext } from "antgrid-memory";
 import { resolveMemoryMcpCommand } from "../src/hook-command";
 
@@ -60,7 +61,7 @@ try {
   let client = await connect();
   const names = (await client.listTools()).tools.map(tool => tool.name).sort();
   assert(JSON.stringify(names) === JSON.stringify(["memory_forget", "memory_get", "memory_save", "memory_search"]), "Separate memory tool table");
-  assert(client.getInstructions()?.includes("automatically save"), "Automatic save instructions");
+  assert(client.getInstructions() === MEMORY_SERVER_INSTRUCTIONS, "Compiled server ships the current Memory instructions");
   const finding = { content: "Smoke persistence sentinel for unicode61 mémoire", memory_type: "observation", scope: "project", applicability: "Observed in an isolated non-Git qualification fixture." };
   const saved = await call(client, "memory_save", finding);
   const duplicate = await call(client, "memory_save", finding);

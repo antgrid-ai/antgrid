@@ -1,6 +1,6 @@
 import { resolveHookCommand } from "../../host";
 import { z } from "zod";
-import { MEMORY_AGENT_GUIDANCE, MemoryBootstrapSchema, memoryGuidanceFor, memoryRegistered } from "../../memory-guidance";
+import { MEMORY_AGENT_GUIDANCE, memorySessionStartOutput } from "../../memory-guidance";
 import type { HookStdoutProfile } from "../hook-posts";
 import {
   computeCommandHookHash,
@@ -136,27 +136,7 @@ export const provisionalTurnStart = true;
 export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start", "/memory/bootstrap"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: true } as const;
 
-export const stdout: HookStdoutProfile = {
-  events: ["session-start"],
-  when: memoryRegistered,
-  request: ({ port, terminalId, runId }) => ({
-    port,
-    path: "/memory/bootstrap",
-    query: { terminalId },
-    body: { runId },
-  }),
-  formatResponse(response) {
-    const parsed = MemoryBootstrapSchema.safeParse(response);
-    const additionalContext = memoryGuidanceFor(parsed.success ? parsed.data : undefined);
-    return additionalContext ? { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } } : null;
-  },
-  outputSchema: z.strictObject({
-    hookSpecificOutput: z.strictObject({
-      hookEventName: z.literal("SessionStart"),
-      additionalContext: z.literal(MEMORY_AGENT_GUIDANCE),
-    }),
-  }),
-};
+export const stdout: HookStdoutProfile = memorySessionStartOutput(MEMORY_AGENT_GUIDANCE);
 
 export async function toPosts(
   invocation: HookInvocation,

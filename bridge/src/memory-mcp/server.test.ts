@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMemoryMcpServer, MEMORY_INSTRUCTIONS } from "./server";
+import { MEMORY_SERVER_INSTRUCTIONS } from "antgrid-agents/memory-guidance";
+import { createMemoryMcpServer } from "./server";
 import { MemoryMcpClient } from "./client";
 import { searchResponse } from "../../../packages/antgrid-memory/src/search";
 import type { MemoryRecord } from "antgrid-memory";
@@ -18,10 +19,10 @@ test("memory MCP advertises only its four tools and static guidance", async () =
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(["memory_search", "memory_get", "memory_save", "memory_forget"]);
-    expect(client.getInstructions()).toBe(MEMORY_INSTRUCTIONS);
+    expect(client.getInstructions()).toBe(MEMORY_SERVER_INSTRUCTIONS);
     const save = (await client.listTools()).tools.find(tool => tool.name === "memory_save")!;
     expect((save.inputSchema.properties as { scope: { enum: string[] } }).scope.enum).toEqual(["project", "task"]);
-    expect(MEMORY_INSTRUCTIONS).not.toMatch(/use user scope/i);
+    expect(MEMORY_SERVER_INSTRUCTIONS).not.toMatch(/use user scope/i);
     const result = await client.callTool({ name: "memory_get", arguments: { id: "expired", history: true } });
     expect(result.isError).toBe(true);
     expect(calls).toEqual([{ op: "get", body: { id: "expired", history: true } }]);
