@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { MEMORY_AGENT_GUIDANCE } from "antgrid-agents/memory-guidance";
+import { MEMORY_AGENT_GUIDANCE, MEMORY_SESSION_NOTICE } from "antgrid-agents/memory-guidance";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
 
 const enabled = { available: true, enabled: true, paused: false, project_paused: false };
@@ -98,8 +98,48 @@ describe("Codex static memory guidance", () => {
     expect(h.outputs).toEqual([]);
   });
 
-  test.each(["claude", "cursor", "copilot", "opencode", "unknown"])("other provider %s has no stdout request", async (agent) => {
+  test.each(["cursor", "copilot", "opencode", "unknown"])("other provider %s has no stdout request", async (agent) => {
     const h = harness({ agent, response: enabled });
+    await h.run();
+    expect(h.requests).toEqual([]);
+    expect(h.outputs).toEqual([]);
+  });
+});
+
+// Claude Code already shows the memory server's instructions, so its hook says
+// only that Memory is on now; startup, resume, clear and compaction all fire it.
+describe("Claude Code memory notice", () => {
+  test.each(["startup", "resume", "clear", "compact"])("%s gets the notice while Memory is on", async (source) => {
+    const h = harness({ agent: "claude", source, response: enabled });
+    await h.run();
+    expect(h.requests).toEqual([{
+      port: 43123, path: "/memory/bootstrap", query: { terminalId: "trusted-session" }, body: { runId: "trusted-run" },
+    }]);
+    expect(h.outputs.map((output) => JSON.parse(output))).toEqual([
+      { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: MEMORY_SESSION_NOTICE } },
+    ]);
+    expect(h.outputs[0]).not.toContain("native-session");
+  });
+
+  test.each([
+    { ...enabled, enabled: false }, { ...enabled, paused: true }, { ...enabled, project_paused: true },
+    null, { error: { code: "UNAVAILABLE", message: "offline" } },
+  ])("off, paused or unanswered Memory adds nothing %#", async (response) => {
+    const h = harness({ agent: "claude", response });
+    await h.run();
+    expect(h.requests).toHaveLength(1);
+    expect(h.outputs).toEqual([]);
+  });
+
+  test("a launch without the memory server never asks", async () => {
+    const h = harness({ agent: "claude", response: enabled, env: { ANTGRID_MEMORY_MCP: undefined } });
+    await h.run();
+    expect(h.requests).toEqual([]);
+    expect(h.outputs).toEqual([]);
+  });
+
+  test.each(["stop", "user-prompt", "notification"])("%s has no bootstrap request", async (event) => {
+    const h = harness({ agent: "claude", event, response: enabled });
     await h.run();
     expect(h.requests).toEqual([]);
     expect(h.outputs).toEqual([]);
