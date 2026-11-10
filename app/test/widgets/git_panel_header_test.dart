@@ -673,6 +673,13 @@ void main() {
 
     // Conflicts lead the tree, so a.dart is below the fold of this short list.
     await tester.tap(find.text('c0.dart'));
+    transport.emit('git:diff-content', {
+      'projectId': 'p',
+      'path': 'c0.dart',
+      'diff': '',
+      'additions': 0,
+      'deletions': 0,
+    });
     await tester.pumpAndSettle();
 
     expect(find.byTooltip('Back to changed files'), findsOneWidget);
@@ -831,6 +838,9 @@ void main() {
       of: find.text('a.dart'),
       matching: find.byType(AbSwipeActions),
     );
-    expect(tester.getSize(row).height, greaterThanOrEqualTo(AbTokens.rowHeightLg));
+    expect(
+      tester.getSize(row).height,
+      greaterThanOrEqualTo(AbTokens.rowHeightLg),
+    );
   });
 }
