@@ -1,8 +1,10 @@
 import 'package:flutter/widgets.dart';
 
+import 'pulse_builder.dart';
+
 /// Repeats a 0.45 → 1.0 opacity pulse so a glyph can convey "running" without
-/// fully disappearing. 900ms cycle, easeInOut.
-class PulsingOpacity extends StatefulWidget {
+/// fully disappearing. 900ms in each direction, easeInOut.
+class PulsingOpacity extends StatelessWidget {
   final Widget child;
 
   /// Bottom of a matching size pulse, painted on top of the fade; null for the
@@ -21,59 +23,18 @@ class PulsingOpacity extends StatefulWidget {
   const PulsingOpacity({super.key, required this.child, this.minScale});
 
   @override
-  State<PulsingOpacity> createState() => _PulsingOpacityState();
-}
-
-class _PulsingOpacityState extends State<PulsingOpacity>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    );
-  }
-
-  // Started here (not initState) so the reduce-motion flag is readable, and
-  // because didChangeDependencies re-fires on MediaQuery change — a live
-  // reduce-motion flip stops/restarts the pulse without extra plumbing.
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _ctrl.stop();
-      // Pin at full opacity (and full size) — the glyph itself already conveys
-      // "running".
-      _ctrl.value = 1.0;
-    } else if (!_ctrl.isAnimating) {
-      _ctrl.repeat(reverse: true);
-    }
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
-      builder: (context, child) {
-        final t = Curves.easeInOut.transform(_ctrl.value);
-        final faded = Opacity(opacity: 0.45 + 0.55 * t, child: child);
-        final minScale = widget.minScale;
+    return PulseBuilder(
+      builder: (context, value, child) {
+        final faded = Opacity(opacity: 0.45 + 0.55 * value, child: child);
+        final minScale = this.minScale;
         if (minScale == null) return faded;
         return Transform.scale(
-          scale: minScale + (1 - minScale) * t,
+          scale: minScale + (1 - minScale) * value,
           child: faded,
         );
       },
-      child: widget.child,
+      child: child,
     );
   }
 }
