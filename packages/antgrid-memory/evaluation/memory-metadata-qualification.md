@@ -25,6 +25,10 @@ are local build artifacts under `app/build/memory-metadata-*.png`. A pre-existin
 correction action-bar overflow at 320 pixels remains outside this change; the
 metadata list itself passed the 320-pixel widget check.
 
+Review captures from that isolated preview: [desktop list and details](screenshots/memory-metadata-desktop.png)
+and [correction editor](screenshots/memory-metadata-editor.png). Both use synthetic
+records rather than a user's stored memories.
+
 The focused bridge suite passed 109 tests across eight files:
 
 ```sh
