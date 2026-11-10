@@ -32,6 +32,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/pump_until.dart';
+
 class _FixedRecents extends RecentAgentsNotifier {
   _FixedRecents(this.seed);
   final List<RecentAgent> seed;
@@ -156,6 +158,8 @@ Future<(_Rig, _Context)> _mount(
     return inner(request);
   };
   final container = ProviderContainer(
+    // These cases exercise error copy and explicit reconnection, not backoff.
+    retry: (_, _) => null,
     overrides: [
       projectSessionRegistryProvider.overrideWith(
         () => ProjectSessionRegistryController(registry),
@@ -379,7 +383,10 @@ void main() {
       connected: {'m1': false},
       handlers: {'m1': (_) async => throw TimeoutException('dial')},
     );
-    await tester.pumpAndSettle();
+    await tester.pumpUntil(
+      () => find.text('Laptop is offline').evaluate().isNotEmpty,
+      reason: 'the offline machine message',
+    );
     expect(find.text('Laptop is offline'), findsOneWidget);
     expect(find.text('Reconnect and retry'), findsOneWidget);
   }, variant: phones);
@@ -395,7 +402,10 @@ void main() {
             throw const MemoryException('FORBIDDEN', 'not allowed'),
       },
     );
-    await tester.pumpAndSettle();
+    await tester.pumpUntil(
+      () => find.text('Memory unavailable').evaluate().isNotEmpty,
+      reason: 'the remote-access error',
+    );
     expect(find.text('Memory unavailable'), findsOneWidget);
     expect(
       find.textContaining('Remote access is off on Laptop'),
@@ -530,7 +540,10 @@ void main() {
         },
       },
     );
-    await tester.pumpAndSettle();
+    await tester.pumpUntil(
+      () => find.text('Laptop is offline').evaluate().isNotEmpty,
+      reason: 'the offline status before reconnection',
+    );
     expect(find.text('Laptop is offline'), findsOneWidget);
     final before = rig.count('m1', 'status');
 

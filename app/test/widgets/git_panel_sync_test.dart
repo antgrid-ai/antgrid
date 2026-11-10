@@ -165,19 +165,20 @@ void main() {
     await finishSync(tester, op: 'pull');
   });
 
-  testWidgets('both stay mounted but dead on a branch level with its upstream', (
-    tester,
-  ) async {
-    await pump(tester, sync: syncState());
-    // Mounted: a control that vanishes at zero moves its neighbour under a
-    // finger already travelling toward it.
-    expect(find.byTooltip('Push'), findsOneWidget);
-    expect(find.byTooltip('Pull'), findsOneWidget);
-    await tester.tap(find.byTooltip('Push'), warnIfMissed: false);
-    await tester.tap(find.byTooltip('Pull'), warnIfMissed: false);
-    await tester.pump();
-    expect(sentOfType('git:sync'), isNull);
-  });
+  testWidgets(
+    'both stay mounted but dead on a branch level with its upstream',
+    (tester) async {
+      await pump(tester, sync: syncState());
+      // Mounted: a control that vanishes at zero moves its neighbour under a
+      // finger already travelling toward it.
+      expect(find.byTooltip('Push'), findsOneWidget);
+      expect(find.byTooltip('Pull'), findsOneWidget);
+      await tester.tap(find.byTooltip('Push'), warnIfMissed: false);
+      await tester.tap(find.byTooltip('Pull'), warnIfMissed: false);
+      await tester.pump();
+      expect(sentOfType('git:sync'), isNull);
+    },
+  );
 
   testWidgets('a branch with no upstream offers Publish instead of Push', (
     tester,
@@ -227,6 +228,7 @@ void main() {
       'command': 'git push',
       'stderr': '! [rejected] main -> main (non-fast-forward)',
     });
+    await tester.idle();
     await tester.pump();
 
     expect(find.textContaining('Push failed'), findsOneWidget);
@@ -253,6 +255,7 @@ void main() {
       'error': 'HEAD is detached — check out a branch first',
       'failureKind': 'detached',
     });
+    await tester.idle();
     await tester.pump();
     // Settled by the frame above — the result IS what ends the op.
 
@@ -277,6 +280,7 @@ void main() {
         'error': 'refused',
         'failureKind': kind,
       });
+      await tester.idle();
       await tester.pump();
       expect(find.textContaining('Pull failed'), findsOneWidget, reason: kind);
 
@@ -300,6 +304,7 @@ void main() {
       'error': 'rejected',
       'failureKind': 'rejected',
     });
+    await tester.idle();
     await tester.pump();
     expect(find.text('Ask agent to fix'), findsOneWidget);
 
@@ -314,6 +319,7 @@ void main() {
       'summary': 'Pushed main to origin/main',
     });
     transport.emit('git:sync-state', syncState());
+    await tester.idle();
     await tester.pump();
 
     expect(find.text('Ask agent to fix'), findsNothing);

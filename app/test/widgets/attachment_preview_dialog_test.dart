@@ -84,6 +84,7 @@ void main() {
       ),
     );
     focused.openPreview('/other/unrelated.png');
+    await tester.idle();
     await tester.pump();
     expect(viewer().fileContent, same(content));
     expect(viewer().isLoading, isFalse);
@@ -141,6 +142,7 @@ void main() {
           content: content,
         ),
       );
+      await tester.idle();
       await tester.pump();
       return service;
     }
@@ -156,10 +158,7 @@ void main() {
     ) async {
       await open(tester, screen: const Size(1400, 900), content: content);
       expect(find.text('notes.json'), findsOneWidget);
-      expect(
-        find.text(r'JSON · 2.0 KB · C:\Users\me\Docs'),
-        findsOneWidget,
-      );
+      expect(find.text(r'JSON · 2.0 KB · C:\Users\me\Docs'), findsOneWidget);
       expect(find.byTooltip('Copy path'), findsOneWidget);
       expect(find.byTooltip('Close'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());

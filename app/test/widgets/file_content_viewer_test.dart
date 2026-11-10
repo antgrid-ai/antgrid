@@ -10,6 +10,8 @@ import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:re_editor/re_editor.dart';
 
+import '../helpers/pump_until.dart';
+
 void main() {
   Widget buildTestWidget({
     FileContent? fileContent,
@@ -181,7 +183,10 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(AbLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
 
       // Parked mid-file, so an upward auto-scroll has somewhere to go —
       // at offset zero this test could not fail.
@@ -211,7 +216,10 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(AbLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
 
       final rect = tester.getRect(find.byType(CodeEditor));
       final pointer = TestPointer(1, PointerDeviceKind.mouse);

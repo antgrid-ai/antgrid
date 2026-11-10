@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/pump_until.dart';
 import '../helpers/toast_host.dart';
 
 const _remote = MemoryTarget.machine(machineId: 'm');
@@ -146,6 +147,8 @@ void main() {
     final fake = FakeAgentTransport()
       ..requestHandler = (method, params) => _answer(params);
     final container = ProviderContainer(
+      // The next dial must come from the reconnect action, not backoff.
+      retry: (_, _) => null,
       overrides: [
         supervisorStatusProvider('m').overrideWith((ref) => Stream.value(null)),
         controlPlaneClientForProvider('m').overrideWith((ref) async {
@@ -165,7 +168,10 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pumpUntil(
+      () => find.text('Reconnect and retry').evaluate().isNotEmpty,
+      reason: 'the reconnect action after a failed dial',
+    );
     expect(dials, 1);
     await tester.tap(find.text('Reconnect and retry'));
     await tester.pumpAndSettle();
@@ -187,19 +193,22 @@ void main() {
               'm',
             ).overrideWith((ref) async => null),
           ],
+          // Surface the intentional offline failure without provider backoff.
+          retry: (_, _) => null,
           child: MaterialApp(
             theme: buildAbTheme(),
             home: const MemoryScreen(target: _remote),
           ),
         ),
       );
-      await tester.pumpAndSettle();
-      expect(
-        find.text(
-          "This machine isn't connected. Connect it to see its memories.",
-        ),
-        findsOneWidget,
+      final offline = find.text(
+        "This machine isn't connected. Connect it to see its memories.",
       );
+      await tester.pumpUntil(
+        () => offline.evaluate().isNotEmpty,
+        reason: 'the disconnected machine message',
+      );
+      expect(offline, findsOneWidget);
       expect(find.text('Reconnect and retry'), findsOneWidget);
       expect(
         find.textContaining("Memory storage couldn't be opened"),
