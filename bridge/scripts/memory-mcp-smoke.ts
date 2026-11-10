@@ -62,10 +62,18 @@ try {
   const names = (await client.listTools()).tools.map(tool => tool.name).sort();
   assert(JSON.stringify(names) === JSON.stringify(["memory_forget", "memory_get", "memory_save", "memory_search"]), "Separate memory tool table");
   assert(client.getInstructions() === MEMORY_SERVER_INSTRUCTIONS, "Compiled server ships the current Memory instructions");
-  const finding = { content: "Smoke persistence sentinel for unicode61 mémoire", memory_type: "observation", scope: "project", applicability: "Observed in an isolated non-Git qualification fixture." };
+  const prefix = "Smoke persistence sentinel for unicode61 mémoire ";
+  const remaining = 16 * 1024 - Buffer.byteLength(prefix);
+  const finding = {
+    title: "Archive smoke label", description: "Concise retrieval metadata for an isolated qualification finding.",
+    content: prefix + "文".repeat(Math.floor(remaining / 3)) + "a".repeat(remaining % 3),
+    memory_type: "observation", scope: "project", applicability: "Observed in an isolated non-Git qualification fixture.",
+  };
   const saved = await call(client, "memory_save", finding);
   const duplicate = await call(client, "memory_save", finding);
   assert(saved.id === duplicate.id && duplicate.outcome === "already_present", "Exact duplicate suppression");
+  const oversized = await client.callTool({ name: "memory_save", arguments: { ...finding, content: finding.content + "a" } });
+  assert(oversized.isError, "Compiled client enforces the shared UTF-8 body limit");
   await client.close();
   memory.close();
   memory = new MemoryService({ directory });
@@ -73,14 +81,23 @@ try {
   client = await connect();
   const found = await call(client, "memory_search", { query: '"persistence sentinel" mémoire' });
   assert((found.results as { id: string }[]).some(record => record.id === saved.id), "Compiled FTS5 and persistence");
-  const corrected = await call(client, "memory_save", { ...finding, content: "Corrected smoke persistence sentinel", supersedes: saved.id });
+  const labeled = await call(client, "memory_search", { query: '"Archive smoke label"' });
+  assert((labeled.results as Record<string, unknown>[]).some(record => record.id === saved.id && record.title === finding.title && record.description === finding.description), "Metadata is searchable and preserved in results");
+  const restored = (await call(client, "memory_get", { id: saved.id })).record as Record<string, unknown>;
+  assert(restored.content === finding.content && restored.title === finding.title && restored.description === finding.description, "Full 16 KiB body and metadata survive restart");
+  const corrected = await call(client, "memory_save", { ...finding, title: "Corrected archive label", description: "Updated qualification finding.", content: "Corrected smoke persistence sentinel", supersedes: saved.id });
   assert(corrected.id !== saved.id, "Correction creates a revision");
-  await call(client, "memory_forget", { id: corrected.id });
+  const revision = (await call(client, "memory_get", { id: corrected.id })).record as Record<string, unknown>;
+  assert(revision.title === "Corrected archive label" && revision.description === "Updated qualification finding.", "Correction replaces metadata");
+  const cleared = await call(client, "memory_save", { content: "Smoke persistence sentinel with cleared labels", memory_type: finding.memory_type, scope: finding.scope, supersedes: corrected.id });
+  const unlabeled = (await call(client, "memory_get", { id: cleared.id })).record as Record<string, unknown>;
+  assert(unlabeled.title === undefined && unlabeled.description === undefined, "Omitted correction metadata clears the prior labels");
+  await call(client, "memory_forget", { id: cleared.id });
   const replay = await memory.execute(agent, { op: "save", operation_key: duplicate.operation_key, save: finding }).then(() => false, () => true);
   assert(replay, "Forgotten duplicate operation stays suppressed");
   const empty = await call(client, "memory_search", { query: "sentinel" });
   assert((empty.results as unknown[]).length === 0, "Forgotten history leaves FTS5");
-  console.log(JSON.stringify({ platform: process.platform, runtime: Bun.version, sqlite_fts5: "passed", memory_mcp: "passed", restart: "passed", duplicate_correction_forget_replay: "passed" }));
+  console.log(JSON.stringify({ platform: process.platform, runtime: Bun.version, sqlite_fts5: "passed", memory_mcp: "passed", restart: "passed", duplicate_correction_forget_replay: "passed", metadata_body_limits: "passed", correction_metadata: "passed" }));
 } finally {
   await Promise.allSettled(clients.map(client => client.close()));
   server.stop(true);

@@ -37,6 +37,34 @@ test("validation and terminal refusals never cause blind retries", async () => {
   expect(ops).toEqual(["prepare"]);
 });
 
+test("metadata and a 16 KiB body survive preparation and retry unchanged", async () => {
+  const save = { ...finding, title: "🧭".repeat(64), description: "🔎".repeat(128), content: "文".repeat(5461) + "a" };
+  const calls: { op: string; body: Record<string, unknown> }[] = [];
+  let saves = 0;
+  const client = new MemoryMcpClient({ operationKey: () => "metadata-key", sleep: async () => {}, request: async (op, body) => {
+    calls.push({ op, body });
+    if (op === "prepare") return { state: "pending" };
+    if (++saves === 1) throw new Error("response lost after commit");
+    return { id: "metadata-memory", outcome: "saved" };
+  } });
+  expect(await client.call("memory_save", save)).toMatchObject({ id: "metadata-memory" });
+  expect(calls.map(call => call.op)).toEqual(["prepare", "save", "save"]);
+  for (const call of calls) expect(call.body).toEqual({ operation_key: "metadata-key", save: { ...save, evidence: [], restrict_to_checkout: false } });
+});
+
+test("UTF-8 metadata and body limits are enforced before preparation", async () => {
+  const calls: string[] = [];
+  const client = new MemoryMcpClient({ request: async op => { calls.push(op); return {}; } });
+  for (const oversize of [
+    { title: "🧭".repeat(64) + "a" },
+    { description: "🔎".repeat(128) + "a" },
+    { content: "文".repeat(5461) + "ab" },
+  ]) {
+    expect(await client.call("memory_save", { ...finding, ...oversize })).toMatchObject({ error: { code: "INVALID_ARGUMENT" } });
+  }
+  expect(calls).toEqual([]);
+});
+
 test("save attempts stop at three and report unknown commit outcome", async () => {
   let attempts = 0;
   const client = new MemoryMcpClient({ operationKey: () => "pending-key", sleep: async () => {}, request: async op => {
@@ -111,9 +139,10 @@ test("credential-shaped values are redacted before durable preparation and trans
     sent.push(JSON.stringify(body));
     return op === "prepare" ? { state: "pending" } : { id: "safe", outcome: "saved" };
   } });
-  await client.call("memory_save", { ...finding, content: "The fixture password=do-not-retain was rejected", evidence: ["https://user:password@example.test/source"] });
+  await client.call("memory_save", { ...finding, title: "Failure with access_token=private-title", description: "Rejected password=private-description", content: "The fixture password=do-not-retain was rejected", evidence: ["https://user:password@example.test/source"] });
   expect(sent).toHaveLength(2);
   expect(sent.every(body => body.includes("[REDACTED]") && !body.includes("do-not-retain") && !body.includes("user:password"))).toBe(true);
+  expect(sent.every(body => !body.includes("private-title") && !body.includes("private-description"))).toBe(true);
 });
 
 test("a forgotten prepared operation is never dispatched", async () => {

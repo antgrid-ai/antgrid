@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const LIMITS = { content: 4096, applicability: 1024, record: 16384, query: 1024, response: 8192, excerpt: 512, exportPage: 256 * 1024, exportRecords: 64, exportCursor: 2048, page: 50 } as const;
+export const LIMITS = { title: 256, description: 512, content: 16384, applicability: 1024, evidence: 16384, record: 65536, query: 1024, response: 8192, excerpt: 512, describedExcerpt: 256, exportPage: 256 * 1024, exportRecords: 64, exportCursor: 2048, page: 50 } as const;
 export const TASK_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 export const bytes = (value: unknown): number => Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value), "utf8");
 
@@ -19,10 +19,12 @@ export const MemoryVersionsSchema = z.enum(["current", "earlier", "all"]);
 export const MemoryScopeSchema = z.enum(["project", "task"]);
 export const MemorySaveSchema = z.object({
   content: boundedText("content", LIMITS.content, true),
+  title: boundedText("title", LIMITS.title).optional(),
+  description: boundedText("description", LIMITS.description).optional(),
   memory_type: MemoryTypeSchema,
   scope: MemoryScopeSchema,
   applicability: boundedText("applicability", LIMITS.applicability).optional(),
-  evidence: z.array(boundedText("evidence reference", LIMITS.record, true)).max(8).default([]),
+  evidence: z.array(boundedText("evidence reference", LIMITS.evidence, true)).max(8).default([]),
   restrict_to_checkout: z.boolean().default(false),
   supersedes: id.optional(),
 }).strict().superRefine((value, ctx) => {
@@ -80,6 +82,7 @@ export const MemorySourceSchema = z.object({
 });
 export const MemoryRecordSchema = z.object({
   id, owner_id: id, content: z.string(), memory_type: MemoryTypeSchema, scope: MemoryScopeSchema,
+  title: boundedText("title", LIMITS.title).optional(), description: boundedText("description", LIMITS.description).optional(),
   project_id: id, task_id: id.optional(), checkout_id: id.optional(),
   applicability: z.string().optional(), evidence: z.array(z.string()), source: MemorySourceSchema,
   supersedes: id.optional(), superseded_by: id.optional(), created_at: z.number(), updated_at: z.number(),
@@ -87,7 +90,7 @@ export const MemoryRecordSchema = z.object({
 });
 export type MemoryRecord = z.infer<typeof MemoryRecordSchema>;
 export const MemorySearchHitSchema = MemoryRecordSchema.pick({
-  id: true, content: true, memory_type: true, scope: true, project_id: true, task_id: true,
+  id: true, content: true, title: true, description: true, memory_type: true, scope: true, project_id: true, task_id: true,
   checkout_id: true, applicability: true, source: true, lifecycle: true,
 }).extend({ excerpted: z.boolean() });
 export type MemorySearchHit = z.infer<typeof MemorySearchHitSchema>;
@@ -133,5 +136,10 @@ function redact(text: string): string {
 }
 export function redactSave(raw: unknown): MemorySave {
   const save = MemorySaveSchema.parse(raw);
-  return { ...save, content: redact(save.content), ...(save.applicability === undefined ? {} : { applicability: redact(save.applicability) }), evidence: save.evidence.map(redact) };
+  // Absent metadata must not change legacy operation hashes, including on recovery.
+  const { title, description, ...legacy } = save;
+  return { ...legacy, content: redact(save.content), ...(save.applicability === undefined ? {} : { applicability: redact(save.applicability) }), evidence: save.evidence.map(redact),
+    ...(title?.trim() ? { title: redact(title.trim()) } : {}),
+    ...(description?.trim() ? { description: redact(description.trim()) } : {}),
+  };
 }

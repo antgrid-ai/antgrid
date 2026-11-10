@@ -43,94 +43,117 @@ Future<List<MemoryRecord>> _list(
 
 void main() {
   group('DemoMemoryBackend', () {
-    test('shows current memories, with one replaced version kept as earlier', () async {
-      final backend = DemoMemoryBackend();
-      final current = await _list(backend);
-      final earlier = await _list(
-        backend,
-        filter: const MemoryFilter(versions: MemoryVersions.earlier),
-      );
-      expect(current.map((r) => r.memoryType).toSet(), {
-        'preference',
-        'note',
-        'observation',
-        'task_state',
-      });
-      expect(current.every((r) => r.isCurrent), isTrue);
-      expect(earlier.single.lifecycle, 'superseded');
-
-      final projects = MemoryProjects.fromJson(
-        await backend.request({'op': 'projects'}),
-      );
-      expect(projects.memories, current.length);
-      expect(projects.labelFor(kDemoProjectId), kDemoDisplayName);
-
-      final status = MemoryStatus.fromJson(
-        await backend.request({'op': 'status'}),
-      );
-      expect(status.enabled, isTrue);
-      expect(status.needsAttention, isFalse);
-    });
-
-    test('an edit replaces the memory and keeps the old text as history', () async {
-      final backend = DemoMemoryBackend();
-      final target = (await _list(backend)).first;
-      final save = {
-        'op': 'save',
-        'operation_key': 'k1',
-        'save': target.correction(
-          content: 'Edited',
-          applicability: '',
-          evidence: const [],
-        ),
-      };
-      final saved = await backend.request(save);
-      // A retried save with the same key must not write twice.
-      expect((await backend.request(save))['id'], saved['id']);
-
-      final detail = MemoryDetail.fromJson(
-        await backend.request({'op': 'get', 'id': saved['id'], 'earlier': true}),
-      );
-      expect(detail.record.content, 'Edited');
-      expect(detail.record.byApp, isTrue);
-      expect(detail.earlier.first.id, target.id);
-      expect((await _list(backend)).map((r) => r.id), isNot(contains(target.id)));
-    });
-
-    test('forgetting a corrected memory takes its earlier versions too', () async {
-      final backend = DemoMemoryBackend();
-      final corrected = (await _list(
-        backend,
-      )).firstWhere((r) => r.supersedes != null);
-      await backend.request({'op': 'forget', 'id': corrected.id});
-      expect(
-        await _list(
+    test(
+      'shows current memories, with one replaced version kept as earlier',
+      () async {
+        final backend = DemoMemoryBackend();
+        final current = await _list(backend);
+        final earlier = await _list(
           backend,
           filter: const MemoryFilter(versions: MemoryVersions.earlier),
-        ),
-        isEmpty,
-      );
-      expect(
-        () => backend.request({'op': 'get', 'id': corrected.supersedes}),
-        throwsA(
-          isA<MemoryException>().having((e) => e.code, 'code', 'NOT_FOUND'),
-        ),
-      );
-    });
+        );
+        expect(current.map((r) => r.memoryType).toSet(), {
+          'preference',
+          'note',
+          'observation',
+          'task_state',
+        });
+        expect(current.every((r) => r.isCurrent), isTrue);
+        expect(earlier.single.lifecycle, 'superseded');
 
-    test('search matches any term, and a quoted phrase only in order', () async {
-      final backend = DemoMemoryBackend();
-      Future<int> hits(String query) async =>
-          (await _list(backend, filter: MemoryFilter(query: query))).length;
-      expect(await hits('coupon'), 1);
-      expect(await hits('coupon cents'), 2);
-      expect(await hits('"integer cents"'), 1);
-      expect(await hits('"cents integer"'), 0);
-      // Unquoted punctuation separates words, as the real query builder does.
-      expect(await hits('cents-integer'), await hits('cents integer'));
-      // Whole words, as the real index splits them: no match inside a word.
-      expect(await hits('coup'), 0);
-    });
+        final projects = MemoryProjects.fromJson(
+          await backend.request({'op': 'projects'}),
+        );
+        expect(projects.memories, current.length);
+        expect(projects.labelFor(kDemoProjectId), kDemoDisplayName);
+
+        final status = MemoryStatus.fromJson(
+          await backend.request({'op': 'status'}),
+        );
+        expect(status.enabled, isTrue);
+        expect(status.needsAttention, isFalse);
+      },
+    );
+
+    test(
+      'an edit replaces the memory and keeps the old text as history',
+      () async {
+        final backend = DemoMemoryBackend();
+        final target = (await _list(backend)).first;
+        final save = {
+          'op': 'save',
+          'operation_key': 'k1',
+          'save': target.correction(
+            title: 'Cart arithmetic',
+            description: 'Shared rounding rules.',
+            content: 'Edited',
+            applicability: '',
+            evidence: const [],
+          ),
+        };
+        final saved = await backend.request(save);
+        // A retried save with the same key must not write twice.
+        expect((await backend.request(save))['id'], saved['id']);
+
+        final detail = MemoryDetail.fromJson(
+          await backend.request({
+            'op': 'get',
+            'id': saved['id'],
+            'earlier': true,
+          }),
+        );
+        expect(detail.record.content, 'Edited');
+        expect(detail.record.title, 'Cart arithmetic');
+        expect(detail.record.description, 'Shared rounding rules.');
+        expect(detail.record.byApp, isTrue);
+        expect(detail.earlier.first.id, target.id);
+        expect(
+          (await _list(backend)).map((r) => r.id),
+          isNot(contains(target.id)),
+        );
+      },
+    );
+
+    test(
+      'forgetting a corrected memory takes its earlier versions too',
+      () async {
+        final backend = DemoMemoryBackend();
+        final corrected = (await _list(
+          backend,
+        )).firstWhere((r) => r.supersedes != null);
+        await backend.request({'op': 'forget', 'id': corrected.id});
+        expect(
+          await _list(
+            backend,
+            filter: const MemoryFilter(versions: MemoryVersions.earlier),
+          ),
+          isEmpty,
+        );
+        expect(
+          () => backend.request({'op': 'get', 'id': corrected.supersedes}),
+          throwsA(
+            isA<MemoryException>().having((e) => e.code, 'code', 'NOT_FOUND'),
+          ),
+        );
+      },
+    );
+
+    test(
+      'search matches any term, and a quoted phrase only in order',
+      () async {
+        final backend = DemoMemoryBackend();
+        Future<int> hits(String query) async =>
+            (await _list(backend, filter: MemoryFilter(query: query))).length;
+        expect(await hits('coupon'), 1);
+        expect(await hits('coupon cents'), 2);
+        expect(await hits('"integer cents"'), 1);
+        expect(await hits('"cents integer"'), 0);
+        // Unquoted punctuation separates words, as the real query builder does.
+        expect(await hits('cents-integer'), await hits('cents integer'));
+        // Whole words, as the real index splits them: no match inside a word.
+        expect(await hits('coup'), 0);
+      },
+    );
 
     test('export passes the real export page check', () async {
       final backend = DemoMemoryBackend();
@@ -167,28 +190,34 @@ void main() {
     });
   });
 
-  test('the sample answers Memory and starts from the seed on each entry', () async {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-    container.read(demoModeProvider.notifier).set(true);
-    final request = container.read(
-      memoryRequestProvider(const MemoryTarget.machine()),
-    );
-    final first = (await _list(container.read(demoMemoryBackendProvider)))
-        .first;
-    await request({'op': 'forget', 'id': first.id});
-    expect(
-      (await request(const MemoryFilter().request(0)))['results'],
-      isNot(contains(predicate<Map>((r) => r['id'] == first.id))),
-    );
+  test(
+    'the sample answers Memory and starts from the seed on each entry',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      container.read(demoModeProvider.notifier).set(true);
+      final request = container.read(
+        memoryRequestProvider(const MemoryTarget.machine()),
+      );
+      final first = (await _list(
+        container.read(demoMemoryBackendProvider),
+      )).first;
+      await request({'op': 'forget', 'id': first.id});
+      expect(
+        (await request(const MemoryFilter().request(0)))['results'],
+        isNot(contains(predicate<Map>((r) => r['id'] == first.id))),
+      );
 
-    container.read(demoModeProvider.notifier).set(false);
-    container.read(demoModeProvider.notifier).set(true);
-    expect(
-      (await _list(container.read(demoMemoryBackendProvider))).map((r) => r.id),
-      contains(first.id),
-    );
-  });
+      container.read(demoModeProvider.notifier).set(false);
+      container.read(demoModeProvider.notifier).set(true);
+      expect(
+        (await _list(
+          container.read(demoMemoryBackendProvider),
+        )).map((r) => r.id),
+        contains(first.id),
+      );
+    },
+  );
 
   testWidgets('entering from Memory lands on the sample memories', (
     tester,

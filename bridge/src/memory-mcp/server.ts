@@ -19,11 +19,13 @@ export const MEMORY_TOOLS = [
   },
   {
     name: "memory_save",
-    description: "Save one finding for later sessions. Search first; do not save a finding that is already stored, even reworded. Write it to stand alone: what is true, when it holds and how you know. To correct a memory, read its latest version with memory_get, then save the corrected finding with supersedes set to that version's id; a finding that holds under different conditions is a separate memory, not a correction. A reply with an id means it is stored. If the outcome is unknown, Antgrid finishes or drops the save itself: do not save the same finding again, and search for it later if it matters. Never include credentials or personal data.",
+    description: "Save one finding for later sessions. Search first; do not save a finding that is already stored, even reworded. Supply a concise title and description, and write the content to stand alone: what is true, when it holds and how you know. To correct a memory, read its latest version with memory_get, then save the corrected finding with supersedes set to that version's id. Submit updated title and description with the correction; omitting either clears that field. A finding that holds under different conditions is a separate memory, not a correction. A reply with an id means it is stored. If the outcome is unknown, Antgrid finishes or drops the save itself: do not save the same finding again, and search for it later if it matters. Never include credentials or personal data.",
     inputSchema: {
       type: "object",
       properties: {
-        content: string("The finding, written so it makes sense without this conversation. At most 4 KiB UTF-8."),
+        title: string("A concise label for the finding. Optional; at most 256 bytes UTF-8. On a correction, omitting this clears the previous title."),
+        description: string("A concise summary that helps another session decide whether to read the finding. Optional; at most 512 bytes UTF-8. On a correction, omitting this clears the previous description."),
+        content: string("The finding, written so it makes sense without this conversation. Keep it concise; at most 16 KiB UTF-8."),
         memory_type: {
           type: "string", enum: ["preference", "task_state", "observation", "note"],
           description: "note: a fact, fix or decision about the project. observation: something you saw happen, with the conditions you saw it under. preference: a default the user stated, or a pattern they repeated across distinct tasks; one request in one task is a note, not a preference. task_state: progress on this task, such as open questions, approaches tried and the next step; needs task scope and drops out of recall after 30 days without an update.",

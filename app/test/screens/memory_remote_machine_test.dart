@@ -146,10 +146,7 @@ Future<(_Rig, _Context)> _mount(
     onEvict: (_) async {},
   );
   late final _Rig rig;
-  final ids = {
-    ...connected.keys,
-    for (final r in recents) r.agentDeviceId,
-  };
+  final ids = {...connected.keys, for (final r in recents) r.agentDeviceId};
   final connectedProviders = {
     for (final id in ids)
       id: _Connected(() => ValueController(connected[id] ?? true)),
@@ -380,9 +377,7 @@ void main() {
       tester,
       recents: [_recent('m1', 'Laptop', _t0)],
       connected: {'m1': false},
-      handlers: {
-        'm1': (_) async => throw TimeoutException('dial'),
-      },
+      handlers: {'m1': (_) async => throw TimeoutException('dial')},
     );
     await tester.pumpAndSettle();
     expect(find.text('Laptop is offline'), findsOneWidget);
@@ -402,7 +397,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Memory unavailable'), findsOneWidget);
-    expect(find.textContaining('Remote access is off on Laptop'), findsOneWidget);
+    expect(
+      find.textContaining('Remote access is off on Laptop'),
+      findsOneWidget,
+    );
     expect(find.widgetWithText(AbButton, 'Retry'), findsOneWidget);
     expect(find.text('Reconnect and retry'), findsNothing);
   }, variant: phones);
@@ -483,12 +481,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(MemoryEditForm), findsOneWidget);
     await tester.enterText(
-      find
-          .descendant(
-            of: find.byType(MemoryEditForm),
-            matching: find.byType(EditableText),
-          )
-          .first,
+      find.byKey(const Key('memory-edit-content')),
       'MY TYPED FIX',
     );
     await tester.pump();
@@ -496,7 +489,9 @@ void main() {
     rig.setConnected('m1', false);
     await tester.pumpAndSettle();
     expect(
-      find.text("Laptop is offline. Changes can't be saved until it reconnects."),
+      find.text(
+        "Laptop is offline. Changes can't be saved until it reconnects.",
+      ),
       findsOneWidget,
     );
     final statuses = rig.count('m1', 'status');

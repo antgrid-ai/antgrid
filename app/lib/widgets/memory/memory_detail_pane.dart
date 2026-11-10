@@ -295,10 +295,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         tags,
-        SelectableText(
-          record.content,
-          style: AbTokens.sansStyle(fontSize: AbTokens.fontLg, height: 1.6),
-        ),
+        _recordText(record),
         const MemorySectionLabel('Applies when', top: _sectionTop),
         Text(
           memoryAppliesText(record, project: project),
@@ -382,13 +379,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              SelectableText(
-                                earlier.content,
-                                style: AbTokens.sansStyle(
-                                  fontSize: AbTokens.fontMd,
-                                  color: p.textSecondary,
-                                ),
-                              ),
+                              _recordText(earlier, earlier: true),
                               const SizedBox(height: AbTokens.space2),
                               Text(
                                 memoryEarlierWhen(
@@ -436,6 +427,40 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       ],
     );
   }
+
+  Widget _recordText(MemoryRecord record, {bool earlier = false}) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (record.title case final title?) ...[
+        SelectableText(
+          title,
+          style: AbTokens.sansStyle(
+            fontSize: earlier ? AbTokens.fontMd : AbTokens.fontLg,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: AbTokens.space8),
+      ],
+      if (record.description case final description?) ...[
+        SelectableText(
+          description,
+          style: AbTokens.sansStyle(
+            fontSize: earlier ? AbTokens.fontSm : AbTokens.fontBody,
+            color: context.antgrid.textSecondary,
+          ),
+        ),
+        const SizedBox(height: AbTokens.space8),
+      ],
+      SelectableText(
+        record.content,
+        style: AbTokens.sansStyle(
+          fontSize: earlier ? AbTokens.fontMd : AbTokens.fontLg,
+          height: 1.6,
+          color: earlier ? context.antgrid.textSecondary : null,
+        ),
+      ),
+    ],
+  );
 
   Widget _tech(String label, String value) => Padding(
     padding: const EdgeInsets.only(bottom: AbTokens.space6),
@@ -572,7 +597,11 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     );
   }
 
-  Widget _bar(BuildContext context, MemoryRecord record, {required bool canSave}) {
+  Widget _bar(
+    BuildContext context,
+    MemoryRecord record, {
+    required bool canSave,
+  }) {
     final p = context.antgrid;
     final Widget content;
     if (_confirming) {

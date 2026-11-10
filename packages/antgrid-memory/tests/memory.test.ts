@@ -179,7 +179,7 @@ describe("atomic persistence, duplicates and correction history", () => {
     const verify = new Database(path);
     expect(verify.query("PRAGMA user_version").get()).toEqual({ user_version: 0 });
     expect(verify.query("SELECT owner_id FROM profile").get()).toEqual({ owner_id: app.owner_id });
-    verify.exec("PRAGMA user_version=1");
+    verify.exec("PRAGMA user_version=2");
     verify.close();
     service = new MemoryService({ directory, now: () => now });
   });
@@ -379,13 +379,13 @@ describe("search, response limits and export", () => {
     expect(windows.id).not.toBe(linux.id);
   });
   test("UTF-8 fields and serialized record byte limits reject, never truncate", async () => {
-    await rejects(save({ content: "🌱".repeat(1025) }), "INVALID_ARGUMENT");
+    await rejects(save({ content: "🌱".repeat(4097) }), "INVALID_ARGUMENT");
     await rejects(save({ applicability: "é".repeat(513) }), "INVALID_ARGUMENT");
     await rejects(save({ evidence: Array(9).fill("source") }), "INVALID_ARGUMENT");
-    await rejects(save({ evidence: ["\"".repeat(9000)] }), "INVALID_ARGUMENT");
+    await rejects(save({ evidence: Array(4).fill("\"".repeat(9000)) }), "INVALID_ARGUMENT");
     await rejects(call(agent, { op: "search", query: "é".repeat(513) }), "INVALID_ARGUMENT");
-    const boundary = await save({ content: "🌱".repeat(1024) });
-    expect(bytes((await record(boundary.id)).content)).toBe(4096);
+    const boundary = await save({ content: "🌱".repeat(4096) });
+    expect(bytes((await record(boundary.id)).content)).toBe(16384);
   });
   test("response preserves conditions, marks excerpts and bounds JSON including MCP escapes", async () => {
     for (let i = 0; i < 10; i++) await save({ content: `quoted ${i} ` + '\"🌱'.repeat(500), applicability: `condition ${i} ` + "x".repeat(900) });

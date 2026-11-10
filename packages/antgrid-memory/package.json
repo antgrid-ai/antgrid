@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
-  "scripts": { "test": "bun test", "typecheck": "tsc --noEmit" },
+  "scripts": { "test": "bun test", "typecheck": "tsc --noEmit", "evaluate:search": "bun run evaluation/run.ts", "evaluate:public": "bun run evaluation/public/run.ts", "evaluate:technical": "bun run evaluation/public/run-technical.ts" },
   "dependencies": { "zod": "^4.3.6" },
   "devDependencies": { "@types/bun": "^1.2.4", "typescript": "^5.7.3" }
 }

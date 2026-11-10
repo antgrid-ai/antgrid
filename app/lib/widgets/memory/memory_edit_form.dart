@@ -66,6 +66,10 @@ class MemoryEditForm extends ConsumerStatefulWidget {
 }
 
 class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
+  late final _title = TextEditingController(text: widget.record.title);
+  late final _description = TextEditingController(
+    text: widget.record.description,
+  );
   late final _content = TextEditingController(text: widget.record.content);
   late final _applicability = TextEditingController(
     text: widget.record.applicability,
@@ -77,10 +81,22 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   String? _pendingPayload;
   String? _operationKey;
 
+  Map<String, dynamic> get _save => widget.record.correction(
+    title: _title.text,
+    description: _description.text,
+    content: _content.text.trim(),
+    applicability: _applicability.text.trim(),
+    evidence: List.of(_sources),
+  );
+
+  String? get _validationError => memorySaveValidation(_save);
+
   bool get _canSave {
-    if (_busy || _content.text.trim().isEmpty) return false;
+    if (_busy || _validationError != null) return false;
     final record = widget.record;
-    return _content.text.trim() != record.content ||
+    return memoryOptionalText(_title.text) != record.title ||
+        memoryOptionalText(_description.text) != record.description ||
+        _content.text.trim() != record.content ||
         _applicability.text.trim() != record.applicability ||
         !listEquals(_sources, record.evidence);
   }
@@ -88,6 +104,8 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   @override
   void initState() {
     super.initState();
+    _title.addListener(_changed);
+    _description.addListener(_changed);
     _content.addListener(_changed);
     _applicability.addListener(_changed);
     _sourceInput.addListener(_changed);
@@ -95,6 +113,8 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
 
   @override
   void dispose() {
+    _title.dispose();
+    _description.dispose();
     _content.dispose();
     _applicability.dispose();
     _sourceInput.dispose();
@@ -126,11 +146,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   Future<void> save() async {
     if (!_canSave) return;
     final request = ref.read(memoryRequestProvider(widget.target));
-    final save = widget.record.correction(
-      content: _content.text.trim(),
-      applicability: _applicability.text.trim(),
-      evidence: List.of(_sources),
-    );
+    final save = _save;
     // A retry of the same payload must reuse its key, or a save whose reply was
     // lost would be written twice.
     final payload = jsonEncode(save);
@@ -233,12 +249,33 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_error case final error?) ...[
+          if ((_validationError ?? _error) case final error?) ...[
             AbInlineBanner(text: error, color: p.error),
             const SizedBox(height: AbTokens.space12),
           ],
+          const MemorySectionLabel('Title (optional)'),
+          AbTextField(
+            key: const Key('memory-edit-title'),
+            controller: _title,
+            hintText: 'A short name for this finding',
+            showClearButton: true,
+            enabled: !_busy,
+          ),
+          const SizedBox(height: AbTokens.space16),
+          const MemorySectionLabel('Description (optional)'),
+          AbTextField(
+            key: const Key('memory-edit-description'),
+            controller: _description,
+            hintText: 'When this finding is useful',
+            minLines: 2,
+            maxLines: 4,
+            showClearButton: true,
+            enabled: !_busy,
+          ),
+          const SizedBox(height: AbTokens.space16),
           const MemorySectionLabel('Memory'),
           AbTextField(
+            key: const Key('memory-edit-content'),
             controller: _content,
             minLines: 4,
             maxLines: 12,
@@ -248,6 +285,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
           const SizedBox(height: AbTokens.space16),
           const MemorySectionLabel('Applies when'),
           AbTextField(
+            key: const Key('memory-edit-applicability'),
             controller: _applicability,
             hintText: 'For example: Windows builds only',
             enabled: !_busy,
@@ -270,6 +308,7 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
                   label: 'Add a source',
                   textField: true,
                   child: AbTextField(
+                    key: const Key('memory-edit-source'),
                     controller: _sourceInput,
                     hintText: 'path/to/file.ts or docs/page.md#section',
                     enabled: !_busy && !_atLimit,
@@ -292,7 +331,10 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
             style: muted,
           ),
           const SizedBox(height: AbTokens.space16),
-          Text('Saving keeps the current text as an earlier version.', style: muted),
+          Text(
+            'Saving keeps the current text as an earlier version.',
+            style: muted,
+          ),
           if (!widget.compact) ...[
             const SizedBox(height: AbTokens.space16),
             actions(expand: false),

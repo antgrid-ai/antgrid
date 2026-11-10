@@ -44,30 +44,47 @@ class MemoryListRow extends StatelessWidget {
       selected: selected,
       child: AbListRow(
         title: Text(
-          record.content,
+          record.displayTitle,
           style: AbTokens.sansStyle(
             fontSize: compact ? AbTokens.fontBody : AbTokens.fontMd,
             height: 1.45,
           ),
         ),
         titleMaxLines: compact ? 3 : 2,
-        subtitle: Wrap(
-          spacing: AbTokens.space8,
-          runSpacing: AbTokens.space4,
-          crossAxisAlignment: WrapCrossAlignment.center,
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              memoryMetaLine(
-                project: projectLabel,
-                agent: agentLabel,
-                created: record.createdAt,
+            if (record.description case final description?) ...[
+              Text(
+                description,
+                maxLines: compact ? 3 : 2,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: colors.textSecondary,
+                ),
               ),
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: colors.textMuted,
-              ),
+              const SizedBox(height: AbTokens.space4),
+            ],
+            Wrap(
+              spacing: AbTokens.space8,
+              runSpacing: AbTokens.space4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  memoryMetaLine(
+                    project: projectLabel,
+                    agent: agentLabel,
+                    created: record.createdAt,
+                  ),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: colors.textMuted,
+                  ),
+                ),
+                if (tag != null) MemoryTag(label: tag),
+              ],
             ),
-            if (tag != null) MemoryTag(label: tag),
           ],
         ),
         subtitleMaxLines: 2,
