@@ -135,23 +135,44 @@ class DemoMemoryBackend {
     };
   }
 
-  /// Every term must appear; a quoted phrase is one term.
+  /// Selects what the real store's query selects: any word may match, a quoted
+  /// phrase must match as consecutive words, and words are runs of letters and
+  /// digits, so an unquoted `integer-cents` is two separate words. Results stay
+  /// newest first rather than ranked.
   Map<String, dynamic> _search(Map<String, dynamic> request) {
     final terms = [
-      for (final m in RegExp(r'"([^"]+)"|(\S+)').allMatches(
+      for (final m in RegExp(r'"([^"]*)"|([^\s"]+)').allMatches(
         request['query'] as String,
       ))
-        (m.group(1) ?? m.group(2)!).toLowerCase(),
-    ];
+        if (m.group(1) case final phrase?)
+          _words(phrase)
+        else
+          for (final word in _words(m.group(2)!)) [word],
+    ].where((t) => t.isNotEmpty).toList();
     return _page(
       request,
       limit: request['limit'] as int? ?? kMemoryPageSize,
       matches: (r) {
-        final text = '${r['content']} ${r['applicability'] ?? ''}'
-            .toLowerCase();
-        return terms.every(text.contains);
+        final words = _words('${r['content']} ${r['applicability'] ?? ''}');
+        return terms.any((term) => _containsRun(words, term));
       },
     );
+  }
+
+  static List<String> _words(String text) => [
+    for (final m in RegExp(r'[\p{L}\p{N}]+', unicode: true).allMatches(text))
+      m.group(0)!.toLowerCase(),
+  ];
+
+  static bool _containsRun(List<String> words, List<String> run) {
+    for (var i = 0; i + run.length <= words.length; i++) {
+      var j = 0;
+      while (j < run.length && words[i + j] == run[j]) {
+        j++;
+      }
+      if (j == run.length) return true;
+    }
+    return false;
   }
 
   Map<String, dynamic> _require(String id) =>

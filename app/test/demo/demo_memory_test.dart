@@ -118,13 +118,18 @@ void main() {
       );
     });
 
-    test('search needs every term, and a quoted phrase is one term', () async {
+    test('search matches any term, and a quoted phrase only in order', () async {
       final backend = DemoMemoryBackend();
       Future<int> hits(String query) async =>
           (await _list(backend, filter: MemoryFilter(query: query))).length;
       expect(await hits('coupon'), 1);
-      expect(await hits('coupon cents'), 0);
+      expect(await hits('coupon cents'), 2);
       expect(await hits('"integer cents"'), 1);
+      expect(await hits('"cents integer"'), 0);
+      // Unquoted punctuation separates words, as the real query builder does.
+      expect(await hits('cents-integer'), await hits('cents integer'));
+      // Whole words, as the real index splits them: no match inside a word.
+      expect(await hits('coup'), 0);
     });
 
     test('export passes the real export page check', () async {
