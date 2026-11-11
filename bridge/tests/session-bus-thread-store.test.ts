@@ -13,7 +13,7 @@ import {
   type ThreadRow,
   type ThreadState,
 } from "../src/session-bus/thread-store";
-import { MAILBOX_TTL_MS, MAX_THREADS_PER_SESSION } from "../src/session-bus/constants";
+import { THREAD_TTL_MS, MAX_THREADS_PER_SESSION } from "../src/session-bus/constants";
 import type { SessionMemberKey } from "../src/protocol";
 
 const PEER: SessionMemberKey = { machineId: "m2", projectId: "p2", sessionId: "s2" };
@@ -87,12 +87,12 @@ test("a thread both sides stopped writing to ages out", () => {
   // §4.2's "a thread is garbage once both sides stop writing", on the mailbox's
   // own clock: `lastAt` is what says when that was.
   let s = upsertThread(emptyThreads(), row({ threadId: "th-stale", lastAt: T0 }));
-  s = upsertThread(s, row({ threadId: "th-live", lastAt: T0 + MAILBOX_TTL_MS }));
+  s = upsertThread(s, row({ threadId: "th-live", lastAt: T0 + THREAD_TTL_MS }));
 
-  const kept = expireThreads(s, T0 + MAILBOX_TTL_MS + 1);
+  const kept = expireThreads(s, T0 + THREAD_TTL_MS + 1);
 
   expect(kept.threads.map((t) => t.threadId)).toEqual(["th-live"]);
-  expect(expireThreads(kept, T0 + MAILBOX_TTL_MS + 1)).toBe(kept);
+  expect(expireThreads(kept, T0 + THREAD_TTL_MS + 1)).toBe(kept);
 });
 
 test("threads survive a restart, per session", () => {
@@ -106,7 +106,7 @@ test("threads survive a restart, per session", () => {
     expect(threadById(loadThreads(abDir, "p1", "s2", T0 + 1), "th-b")?.contextId).toBe("ctx-b");
     // And a session reloaded after a long silence does not come back holding
     // what the TTL already retired.
-    expect(loadThreads(abDir, "p1", "s1", T0 + MAILBOX_TTL_MS + 1).threads).toEqual([]);
+    expect(loadThreads(abDir, "p1", "s1", T0 + THREAD_TTL_MS + 1).threads).toEqual([]);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

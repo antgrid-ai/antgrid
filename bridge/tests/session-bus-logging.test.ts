@@ -16,7 +16,7 @@ import { computeProjectId } from "../src/project-id";
 import { createMessage, SessionMemberRefSchema } from "../src/protocol";
 import { BUS_MESSAGE_TTL_MS, LOCAL_MACHINE_ID } from "../src/session-bus/constants";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
-import { loadMailbox } from "../src/session-bus/mailbox";
+import { loadMessageLog } from "../src/session-bus/message-log";
 import { SessionBusDeliveryQueue } from "../src/session-bus/delivery-queue";
 import { lineKey } from "../src/line-key";
 import { selfMachineLabel } from "../src/machine-label";
@@ -274,7 +274,7 @@ test(
 
     const res = busCoordinatorOf(host).message({
       sessionId: sender,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: target.projectId, sessionId: target.sessionId },
       summary: "a summary",
@@ -285,11 +285,11 @@ test(
     // The round trip, not the in-memory copy: the failure this guards against is
     // a row that is folded, acked and rendered and then vanishes on the next
     // cold load of that session.
-    const reloaded = loadMailbox(abDir!, target.projectId, target.sessionId);
-    expect(reloaded.posts).toHaveLength(1);
+    const reloaded = loadMessageLog(abDir!, target.projectId, target.sessionId);
+    expect(reloaded.entries).toHaveLength(1);
     // `from` on the row is the frame's ADDRESS and carries no labels; the
     // stamped ref rides the envelope, which is what the delivery wrapper reads.
-    expect(reloaded.posts[0]!.envelope.metadata.peer.machineLabel).toBe(label);
+    expect(reloaded.entries[0]!.envelope.metadata.peer.machineLabel).toBe(label);
   },
   30_000,
 );
@@ -389,7 +389,7 @@ test("a held message that expires without ever leaving is named, and named witho
     captureAtEveryLevel();
     const res = coordinator.message({
       sessionId: "s-sender",
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: "m2", projectId: "p2", sessionId: "s-target" },
       summary: secretSummary,
@@ -528,7 +528,7 @@ test("the relay transport and the outbox log nothing of the body, the keys or th
     captureAtEveryLevel();
     // Outbound: sealed and offered, then offered again while the link is down.
     const res = coordinator.message({
-      sessionId: "s-sender", verb: "post", threadId: null,
+      sessionId: "s-sender", verb: "notify", threadId: null,
       to: { machineId: them.id, projectId: "p2", sessionId: "s-target" },
       summary, parts: [{ kind: "text", text: body }],
     });
@@ -592,7 +592,7 @@ test("handleBusInbound logs nothing of the body on any verdict", async () => {
   const target = await openLocalSession(host, tempFolder("target-project"), "target");
   const body = sentinel("INBB", 600);
   const summary = sentinel("INBS", 40);
-  const frame = (to: string, over: Record<string, unknown> = {}) => createMessage("session-bus:post", {
+  const frame = (to: string, over: Record<string, unknown> = {}) => createMessage("session-bus:notify", {
     from: { machineId: remoteMachine, projectId: "p-remote", sessionId: "s-remote" },
     to: { machineId: selfMachine, projectId: target.projectId, sessionId: to },
     contextId: "s-remote",
@@ -614,7 +614,7 @@ test("handleBusInbound logs nothing of the body on any verdict", async () => {
   const verdicts = [];
   verdicts.push(await handle(frame(target.sessionId)));
   (host as any).remoteAccessPolicy.setEnabled(true);
-  verdicts.push(await handle({ type: "session-bus:post", junk: body }));
+  verdicts.push(await handle({ type: "session-bus:notify", junk: body }));
   verdicts.push(await handle(frame("s-nobody")));
   verdicts.push(await handle(frame(target.sessionId)));
   (host as any).agentReachPolicy.setEnabled(false);

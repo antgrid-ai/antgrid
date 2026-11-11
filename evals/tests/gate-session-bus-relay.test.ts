@@ -1,3 +1,4 @@
+import { loadMessageLog } from "../../bridge/src/session-bus/message-log";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +9,7 @@ import {
   authorityGrants, busCall, localVerb, lowerGrants, persistedSessions, setAgentReach, untilAsync,
 } from "../support/session-bus";
 import { createMessage } from "../../bridge/src/protocol";
-import { NO_PROGRESS_EXCHANGES } from "../../bridge/src/session-bus/constants";
+import { MAX_NOTIFIES_PER_PAIR_HOUR } from "../../bridge/src/session-bus/constants";
 import { CentralTestClient } from "../helpers/central-test-client";
 import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
 import {
@@ -222,26 +223,21 @@ describe("gate: session bus relay, two bridges", () => {
     }, timeoutMs, what);
   }
 
-  async function mailbox(m: RelayBusMachine, sessionId: string): Promise<any> {
-    const res = await busCall(m.abDir, "inbox", { terminalId: sessionId });
-    expect(res.status).toBe(200);
-    return res.body;
+  async function received(m: RelayBusMachine, sessionId: string): Promise<any[]> {
+    return loadMessageLog(m.abDir, m.projectId, sessionId).entries
+      .filter((entry) => entry.direction === "in")
+      .map((entry) => ({ summary: entry.envelope.metadata.summary, from: entry.peer }));
   }
 
-  /** Reading marks read, so every poll's posts are accumulated: a duplicate
-   *  delivery shows up as a second element rather than being lost. */
-  async function awaitPosts(m: RelayBusMachine, sessionId: string, timeoutMs = CROSS_TIMEOUT_MS): Promise<any[]> {
-    const posts: any[] = [];
-    await untilAsync(async () => {
-      const res = await busCall(m.abDir, "inbox", { terminalId: sessionId });
-      if (res.status === 200) posts.push(...(res.body.posts ?? []));
-      return posts.length > 0 ? true : undefined;
-    }, timeoutMs, `a post in session ${sessionId}'s mailbox on machine ${m.name}`);
-    return posts;
+  async function awaitNotifications(m: RelayBusMachine, sessionId: string, timeoutMs = CROSS_TIMEOUT_MS): Promise<any[]> {
+    return untilAsync(async () => {
+      const entries = await received(m, sessionId);
+      return entries.length > 0 ? entries : undefined;
+    }, timeoutMs, `a notification in session ${sessionId}'s history`);
   }
 
-  async function post(m: RelayBusMachine, from: string, body: object) {
-    return busCall(m.abDir, "post", { terminalId: from, body });
+  async function notify(m: RelayBusMachine, from: string, body: object) {
+    return busCall(m.abDir, "notify", { terminalId: from, body });
   }
 
   /** The row a send needs in A's mirror arrives by A's own refresh over the
@@ -280,15 +276,15 @@ describe("gate: session bus relay, two bridges", () => {
     expect((refused.sessions ?? []).some((r: any) => r.machineId === b.machineId)).toBe(false);
   }, ROW_TIMEOUT_MS + DIRECTORY_TIMEOUT_MS);
 
-  test("a post crosses A to B and A's thread shows it delivered", async () => {
+  test("a notification crosses A to B and A's thread shows it delivered", async () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "crosses", text: "hello across" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "crosses", text: "hello across" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
     expect(sent.body.ok).toBe(true);
-    const posts = await awaitPosts(b, sb);
+    const posts = await awaitNotifications(b, sb);
     expect(posts).toHaveLength(1);
     expect(posts[0].summary).toBe("crosses");
     expect(posts[0].from.machineId).toBe(a.machineId);
@@ -296,25 +292,25 @@ describe("gate: session bus relay, two bridges", () => {
     expect(entry.peer.machineId).toBe(b.machineId);
   }, ROW_TIMEOUT_MS);
 
-  test("a post to a killed machine is held or relayed, lands exactly once after restart, and A shows delivered", async () => {
+  test("a notification to a killed machine is held or relayed, lands exactly once after restart, and A shows delivered", async () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
     // The session list flushes behind the verb; a kill before it lands loses the
-    // session the post is addressed to.
+    // session the notification is addressed to.
     await untilAsync(async () => (persistedSessions(b.abDir, b.projectId).some((s) => s.id === sb) ? true : undefined), 15_000, "B to persist its session");
     await b.kill();
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "while down", text: "queued for B" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "while down", text: "queued for B" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
     expect(["relayed", "held"]).toContain(sent.body.rung);
     await b.restart();
     // The flush can land while B is still hydrating its sessions.
-    const posts = await awaitPosts(b, sb, 90_000);
+    const posts = await awaitNotifications(b, sb, 90_000);
     expect(posts).toHaveLength(1);
     expect(posts[0].summary).toBe("while down");
     await awaitOut(a, sa, sent.body.threadId, "A's entry to read delivered", (e) => e.delivery === "delivered", 90_000);
-    expect((await mailbox(b, sb)).posts).toHaveLength(0);
+    expect((await received(b, sb))).toHaveLength(1);
   }, ROW_TIMEOUT_MS);
 
   test("a dropped ack with both bridges running redelivers, applies once, and A flips to delivered", async () => {
@@ -323,14 +319,13 @@ describe("gate: session bus relay, two bridges", () => {
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
     relay.dropNextBusAck();
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "ack lost", text: "once only" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "ack lost", text: "once only" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
-    const posts = await awaitPosts(b, sb);
+    const posts = await awaitNotifications(b, sb);
     expect(posts).toHaveLength(1);
     await awaitOut(a, sa, sent.body.threadId, "A's entry to read delivered after the redelivery", (e) => e.delivery === "delivered", 120_000);
-    const again = await mailbox(b, sb);
-    expect(again.posts).toHaveLength(0);
-    expect(again.dropped).toBe(0);
+    const again = await received(b, sb);
+    expect(again).toHaveLength(1);
   }, ROW_TIMEOUT_MS);
 
   test("remote access off on A refuses the send up front", async () => {
@@ -339,7 +334,7 @@ describe("gate: session bus relay, two bridges", () => {
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
     await setMobileAccess(a.abDir, false);
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "nope", text: "nope" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "nope", text: "nope" });
     expect(sent.status).toBe(403);
     expect(sent.body.code).toBe("REMOTE_ACCESS_OFF");
   }, ROW_TIMEOUT_MS);
@@ -350,11 +345,11 @@ describe("gate: session bus relay, two bridges", () => {
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
     await setMobileAccess(b.abDir, false);
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "refused", text: "refused" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "refused", text: "refused" });
     expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
     const entry = await awaitOut(a, sa, sent.body.threadId, "A's entry to read refused", (e) => e.delivery === "refused");
     expect(entry.refusedCode).toBe("REMOTE_ACCESS_OFF");
-    expect((await mailbox(b, sb)).posts).toHaveLength(0);
+    expect((await received(b, sb))).toHaveLength(0);
   }, ROW_TIMEOUT_MS);
 
   test("B replies on the thread and A receives it", async () => {
@@ -362,10 +357,10 @@ describe("gate: session bus relay, two bridges", () => {
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
-    const sent = await post(a, sa, { to: addressOf(b, sb), summary: "question", text: "which one?" });
+    const sent = await notify(a, sa, { to: addressOf(b, sb), summary: "question", text: "which one?" });
     const threadId = sent.body.threadId as string;
-    await awaitPosts(b, sb);
-    const replied = await busCall(b.abDir, "reply", {
+    await awaitNotifications(b, sb);
+    const replied = await busCall(b.abDir, "notify", {
       terminalId: sb,
       body: { threadId, summary: "answer", text: "the second" },
     });
@@ -378,21 +373,21 @@ describe("gate: session bus relay, two bridges", () => {
     expect(inbound.peer.machineId).toBe(b.machineId);
   }, ROW_TIMEOUT_MS);
 
-  test("the pair budget crosses the relay and halts with NO_PROGRESS", async () => {
+  test("the pair budget crosses the relay and enforces the notify ceiling", async () => {
     const { a, b } = await boot();
     const sa = await startSinkSession(a, "alpha");
     const sb = await startSinkSession(b, "beta");
     await seedPeerRow(a, sa, b, sb);
-    const opener = await post(a, sa, { to: addressOf(b, sb), summary: "round 0", text: "round 0" });
+    const opener = await notify(a, sa, { to: addressOf(b, sb), summary: "round 0", text: "round 0" });
     expect(opener.status).toBe(200);
     const threadId = opener.body.threadId as string;
-    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i++) {
-      const sent = await post(a, sa, { threadId, summary: `round ${i}`, text: `round ${i}` });
+    for (let i = 1; i < MAX_NOTIFIES_PER_PAIR_HOUR; i++) {
+      const sent = await notify(a, sa, { threadId, summary: `round ${i}`, text: `round ${i}` });
       expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
     }
-    const halted = await post(a, sa, { to: addressOf(b, sb), summary: "round again", text: "round again" });
+    const halted = await notify(a, sa, { to: addressOf(b, sb), summary: "round again", text: "round again" });
     expect(halted.status).toBe(429);
-    expect(halted.body.code).toBe("NO_PROGRESS");
+    expect(halted.body.code).toBe("NOTIFY_RATE");
   }, ROW_TIMEOUT_MS);
 });
 
@@ -464,6 +459,29 @@ describe("gate: session bus relay, orchestration", () => {
       "B to list the driven session as running");
     expect(listed.body.result.sessions.find((r: any) => r.id === sessionId).name).toBe("driven");
   }, ROW_TIMEOUT_MS + GRANT_TIMEOUT_MS * 2);
+
+  test("notify starts a stopped eligible remote session and delivers its message", async () => {
+    const e = await boot();
+    await reachControl(e, e.sa);
+    const created = await request(e.a, e.sa, e.b, "session.create", { projectId: e.b.projectId, name: "wake target" });
+    expect(created.status).toBe(200);
+    const sessionId = created.body.result.session.id as string;
+    await untilAsync(async () => {
+      const listed = await busCall(e.a.abDir, "sessions", { terminalId: e.sa });
+      return listed.body.sessions?.some((row: any) => row.sessionId === sessionId && row.activity === "stopped") ? true : undefined;
+    }, DIRECTORY_TIMEOUT_MS, "the stopped target in A's directory");
+    const sent = await busCall(e.a.abDir, "notify", {
+      terminalId: e.sa,
+      body: { to: { machineId: e.b.machineId, projectId: e.b.projectId, sessionId }, summary: "wake and deliver", text: "automatic remote notification" },
+    });
+    expect(`${sent.status} ${JSON.stringify(sent.body)}`).toMatch(/^200 /);
+    await requestUntil(e.a, e.sa, e.b, "sessions.list", { projectId: e.b.projectId }, (res) =>
+      res.body?.result?.sessions?.some((row: any) => row.id === sessionId && row.running), "the notified target to be running");
+    await untilAsync(async () => {
+      const history = await busCall(e.b.abDir, "thread", { terminalId: sessionId, query: { threadId: sent.body.threadId } });
+      return history.body.entries?.some((entry: any) => entry.direction === "in" && entry.summary === "wake and deliver") ? true : undefined;
+    }, CROSS_TIMEOUT_MS, "the notification to reach the woken target");
+  }, ROW_TIMEOUT_MS + DIRECTORY_TIMEOUT_MS + GRANT_TIMEOUT_MS);
 
   test("a new agent device drives a reachable machine without any grant being raised", async () => {
     const e = await boot();

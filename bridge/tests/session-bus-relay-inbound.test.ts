@@ -112,7 +112,7 @@ function frameTo(to: { projectId: string; sessionId: string }, over: { contextId
   const from = { machineId: over.fromMachine ?? REMOTE_MACHINE, projectId: "p-remote", sessionId: "s-remote" };
   const contextId = over.contextId ?? "s-remote";
   const target = { machineId: SELF_MACHINE, ...to };
-  return createMessage("session-bus:post", {
+  return createMessage("session-bus:notify", {
     from,
     to: target,
     contextId,
@@ -156,7 +156,7 @@ test("remote access off refuses everything, before looking at the body", async (
 
   const verdict = await handle(h, verified(frameTo(a)));
   expect(verdict).toEqual({ outcome: "refused", code: "REMOTE_ACCESS_OFF" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(0);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(0);
 }, 20_000);
 
 test("reach off refuses a message that opens a context, and still admits an answer on a lead context", async () => {
@@ -165,13 +165,13 @@ test("reach off refuses a message that opens a context, and still admits an answ
 
   const opening = await handle(h, verified(frameTo(a, { contextId: "s-remote" })));
   expect(opening).toEqual({ outcome: "refused", code: "NOT_ALLOWED_AGENT_REACH" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(0);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(0);
 
   // A lead context is named after the session that opened it, so what arrives on
   // it is an answer to this machine's own session.
   const answer = await handle(h, verified(frameTo(a, { contextId: a.sessionId })));
   expect(answer).toEqual({ outcome: "applied" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(1);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(1);
 }, 20_000);
 
 test("a session this machine does not have is refused UNKNOWN_PEER once the index is hydrated", async () => {
@@ -190,7 +190,7 @@ test("a cold project is warmed and the message is applied", async () => {
   const verdict = await handle(h, verified(frameTo(b)));
   expect(verdict).toEqual({ outcome: "applied" });
   expect(h.list().some((p) => p.projectId === b.projectId)).toBe(true);
-  expect(busOf(h).mailbox(b.sessionId).posts).toHaveLength(1);
+  expect(busOf(h).messages(b.sessionId).entries).toHaveLength(1);
 }, 30_000);
 
 test("a delivery that lands before the index hydrates waits, and is applied after, never refused", async () => {
@@ -210,7 +210,7 @@ test("a delivery that lands before the index hydrates waits, and is applied afte
   index.didHydrate = true;
   release();
   expect(await pending).toEqual({ outcome: "applied" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(1);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(1);
 }, 20_000);
 
 test("an index that never hydrates defers rather than refusing", async () => {
@@ -220,21 +220,23 @@ test("an index that never hydrates defers rather than refusing", async () => {
 
   const verdict = await handle(h, verified(frameTo(a)));
   expect(verdict).toEqual({ outcome: "defer" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(0);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(0);
 }, 20_000);
 
 test("a body that is not a bus message, or that disagrees with the signed header, is refused", async () => {
   const { h, a } = await readyHost();
 
-  expect(await handle(h, verified({ type: "session-bus:post" }))).toEqual({ outcome: "refused", code: "MALFORMED" });
+  expect(await handle(h, verified({ type: "session-bus:notify" }))).toEqual({ outcome: "refused", code: "MALFORMED" });
   expect(await handle(h, verified("not an object"))).toEqual({ outcome: "refused", code: "MALFORMED" });
+
+  expect(await handle(h, verified({ ...frameTo(a), type: "session-bus:post" }))).toEqual({ outcome: "refused", code: "MALFORMED" });
 
   // The body names a different sender than the header the sender signed.
   const forged = frameTo(a, { fromMachine: randomUUID() });
   expect(await handle(h, verified(forged))).toEqual({ outcome: "refused", code: "HEADER_MISMATCH" });
 
   // And a body addressed to some other machine.
-  const misaddressed = createMessage("session-bus:post", {
+  const misaddressed = createMessage("session-bus:notify", {
     ...(frameTo(a) as any),
     to: { machineId: randomUUID(), projectId: a.projectId, sessionId: a.sessionId },
   });
@@ -244,7 +246,7 @@ test("a body that is not a bus message, or that disagrees with the signed header
   const request = verified(frameTo(a));
   request.header = { ...request.header, kind: "request" };
   expect(await handle(h, request)).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
-  expect(busOf(h).mailbox(a.sessionId).posts).toHaveLength(0);
+  expect(busOf(h).messages(a.sessionId).entries).toHaveLength(0);
 }, 20_000);
 
 // -- duplicate delivery through the transport --------------------------------
@@ -320,7 +322,7 @@ test("a duplicate delivery is applied once and charges the pair budget once", as
     onOutcome: (_id, _to, o) => outcomes.push(o),
   });
   try {
-    const body = createMessage("session-bus:post", {
+    const body = createMessage("session-bus:notify", {
       from: { machineId: them.id, projectId: "p-remote", sessionId: "s-remote" },
       to: { machineId: me.id, projectId: "p-local", sessionId: SESSION },
       contextId: "s-remote",

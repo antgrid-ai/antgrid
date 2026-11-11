@@ -51,7 +51,7 @@ const ENVELOPE = {
 // puts on the wire.
 const SAMPLES: { msg: AbMessage; wire: { safeParse: (v: unknown) => { success: boolean } } }[] = [
   {
-    msg: createMessage("session-bus:post", {
+    msg: createMessage("session-bus:notify", {
       from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", threadId: null, envelope: ENVELOPE,
     }),
     wire: SessionBusMessageWire,
@@ -201,7 +201,7 @@ describe("session-bus coordinator across a transport", () => {
   function post(): string {
     const res = lead.message({
       sessionId: LEAD_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: PEER_REF,
       summary: "run the suite",
@@ -211,13 +211,13 @@ describe("session-bus coordinator across a transport", () => {
     return res.messageId;
   }
 
-  test("a post is delivered and raised as an event, and nothing is sent back by the coordinator", () => {
+  test("a notify is delivered and raised as an event, and nothing is sent back by the coordinator", () => {
     const messageId = post();
     const sent = drain();
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.type).toBe("session-bus:post");
+    expect(sent[0]!.type).toBe("session-bus:notify");
     expect((sent[0] as { to: SessionMemberKey }).to).toEqual(PEER_KEY);
-    expect(peerEvents.map((e) => e.kind)).toEqual(["post"]);
+    expect(peerEvents.map((e) => e.kind)).toEqual(["notify"]);
 
     // The receipt is the transport's to send, signed by the recipient's
     // machine; a coordinator that answered a fold itself would be a second,
@@ -244,7 +244,7 @@ describe("session-bus coordinator across a transport", () => {
     // there was no way to tell a fresh exchange from a continuing one.
     const first = lead.message({
       sessionId: LEAD_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: PEER_REF,
       summary: "run the suite",
@@ -280,7 +280,7 @@ describe("session-bus coordinator across a transport", () => {
   test("an answer on a thread carries what this session last said on it", () => {
     const first = lead.message({
       sessionId: LEAD_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: PEER_REF,
       summary: "run the suite",
@@ -313,7 +313,7 @@ describe("session-bus coordinator across a transport", () => {
   test("a frame naming a session this bridge does not hold is dropped", () => {
     // Reported as DROPPED, not merely "a bus frame": the host refuses on this
     // answer, so a frame naming somebody else's session is never acknowledged.
-    const stray = createMessage("session-bus:post", {
+    const stray = createMessage("session-bus:notify", {
       from: LEAD_KEY,
       to: { machineId: "m-peer", projectId: "p-peer", sessionId: "s-nobody" },
       contextId: "ctx-x", threadId: null, envelope: ENVELOPE,
@@ -337,7 +337,7 @@ describe("session-bus coordinator across a transport", () => {
   test("a session this bridge does not hold is refused rather than given an address", () => {
     const res = lead.message({
       sessionId: "s-not-here",
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: PEER_REF,
       summary: "x",
@@ -355,7 +355,7 @@ describe("session-bus coordinator across a transport", () => {
 
     const res = peer.message({
       sessionId: PEER_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
@@ -369,7 +369,7 @@ describe("session-bus coordinator across a transport", () => {
     now += BUS_RETRY_BASE_MS;
     peer.pump();
     expect(carried).toHaveLength(1);
-    expect(carried[0]!.type).toBe("session-bus:post");
+    expect(carried[0]!.type).toBe("session-bus:notify");
 
     carried.length = 0;
     peer.pump();
@@ -379,7 +379,7 @@ describe("session-bus coordinator across a transport", () => {
   test("an acknowledged message is released and is not offered again", () => {
     transportUp = false;
     const res = peer.message({
-      sessionId: PEER_REF.sessionId, verb: "post", threadId: null, to: LEAD_REF,
+      sessionId: PEER_REF.sessionId, verb: "notify", threadId: null, to: LEAD_REF,
       contextId: LEAD_REF.sessionId, summary: "a finding", parts: [{ kind: "text", text: "red" }],
     });
     if (!("ok" in res) || !res.ok) throw new Error("refused");
@@ -398,7 +398,7 @@ describe("session-bus coordinator across a transport", () => {
     transportUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
@@ -424,14 +424,14 @@ describe("session-bus coordinator across a transport", () => {
     resumed.stop();
 
     expect(carried).toHaveLength(1);
-    expect(carried[0]!.type).toBe("session-bus:post");
+    expect(carried[0]!.type).toBe("session-bus:notify");
   });
 
   test("a held message stops being worth delivering once its life has lapsed", () => {
     transportUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
@@ -444,8 +444,14 @@ describe("session-bus coordinator across a transport", () => {
     peer.pump();
     // The lossiness a message plane asks for, spent where it costs least: a note
     // about a conversation this old arrives as noise, not as news.
-    expect(carried.filter((f) => f.type === "session-bus:post")).toEqual([]);
+    expect(carried.filter((f) => f.type === "session-bus:notify")).toEqual([]);
     const out = peer.messages(PEER_REF.sessionId).entries.find((e) => e.direction === "out");
     expect(out?.refusedCode).toBe("EXPIRED");
   });
+});
+
+test("legacy posts and app mailbox reads are unsupported", () => {
+  for (const type of ["session-bus:post", "session-bus:inbox", "session-bus:inbox:result", "session-bus:thread", "session-bus:thread:result", "session-bus:arrived"]) {
+    expect(parseMessageFast(JSON.stringify({ type }))).toBeNull();
+  }
 });

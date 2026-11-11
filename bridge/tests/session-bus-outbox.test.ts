@@ -67,7 +67,7 @@ function build(over: { send?: SessionBusSend; deliverLocal?: (frame: AbMessage) 
 
 function post(c: SessionBusCoordinator, to: SessionMemberRef = REMOTE, text = "hello") {
   const res = c.message({
-    sessionId: SELF.sessionId, verb: "post", threadId: null, to, summary: text, parts: [{ kind: "text", text }],
+    sessionId: SELF.sessionId, verb: "notify", threadId: null, to, summary: text, parts: [{ kind: "text", text }],
   });
   if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
   return res;

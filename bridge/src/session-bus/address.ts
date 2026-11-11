@@ -5,21 +5,6 @@
 import type { SessionMemberKey } from "../protocol";
 import { LOCAL_MACHINE_ID } from "./constants";
 
-/**
- * Whether [machineId] names the machine answering as [selfMachineId].
- *
- * [LOCAL_MACHINE_ID] names it too, under whatever network name it later
- * acquires. A bridge with no relay identity stamps its own frames with the
- * sentinel, and those frames are PERSISTED — a mailbox row, a thread row, the
- * log's peer — so on plain equality a pair that exchanged before the control
- * plane came up would stop matching the moment it did, and two sessions in one
- * process would become permanently unreachable to each other over a name only
- * one of them ever saw change.
- *
- * This only ever widens what THIS machine answers for. A frame still has to
- * name a session the bridge actually holds, so the sentinel buys a sender no
- * reach it did not already have.
- */
 export function namesMachine(machineId: string, selfMachineId: string): boolean {
   return machineId === selfMachineId || machineId === LOCAL_MACHINE_ID;
 }

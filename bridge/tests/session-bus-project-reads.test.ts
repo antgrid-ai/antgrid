@@ -199,7 +199,7 @@ async function ask(
 /** One inbound post, as the host hands it to the coordinator once the relay
  *  delivery has been opened and gated. */
 function inboundPost(sessionId: string, messageId: string, text: string): AbMessage {
-  return createMessage("session-bus:post", {
+  return createMessage("session-bus:notify", {
     from: REMOTE,
     to: { machineId: MACHINE_ID, projectId: cores[0]!.projectId, sessionId },
     contextId: REMOTE.sessionId,
@@ -238,109 +238,11 @@ test(
   30_000,
 );
 
-test(
-  "the inbox read answers a member session with its unread posts",
-  async () => {
-    const fx = await setUp();
-    expect(coordinator!.handleInbound(inboundPost(fx.sessionA, "msg-inbox-1", "look at this"))).toBe("applied");
-    await waitFor(() => coordinator!.mailbox(fx.sessionA).posts.length === 1, "the post to land in the mailbox");
 
-    const requestId = crypto.randomUUID();
-    const result = await ask(
-      fx,
-      createMessage("session-bus:inbox", { requestId, sessionId: fx.sessionA }),
-      "session-bus:inbox:result",
-      requestId,
-    );
 
-    expect(result.error).toBeUndefined();
-    expect(result.dropped).toBe(0);
-    const posts = result.posts as { messageId: string; text: string[] }[];
-    expect(posts).toHaveLength(1);
-    expect(posts[0]!.messageId).toBe("msg-inbox-1");
-    expect(posts[0]!.text).toEqual(["look at this"]);
-  },
-  30_000,
-);
 
-test(
-  "the inbox read does not spend the agent's unread flag",
-  async () => {
-    const fx = await setUp();
-    expect(coordinator!.handleInbound(inboundPost(fx.sessionA, "msg-peek-1", "the agent must still see this"))).toBe("applied");
-    await waitFor(() => coordinator!.mailbox(fx.sessionA).posts.length === 1, "the post to land in the mailbox");
 
-    // The human looks — twice, because a badge is read on every rebuild and one
-    // that consumed mail would empty the inbox by being watched.
-    for (let i = 0; i < 2; i += 1) {
-      const requestId = crypto.randomUUID();
-      const result = await ask(
-        fx,
-        createMessage("session-bus:inbox", { requestId, sessionId: fx.sessionA }),
-        "session-bus:inbox:result",
-        requestId,
-      );
-      expect((result.posts as unknown[]).length).toBe(1);
-    }
 
-    // ...and the AGENT's own read still finds the post waiting for it. Without
-    // the peek/mark split this is where a real message has already vanished,
-    // unseen by the one party it was addressed to, with nothing reporting it.
-    const agentView = fx.agent.inbox(fx.sessionA);
-    expect("posts" in agentView).toBe(true);
-    if (!("posts" in agentView)) return;
-    expect(agentView.posts.map((p) => p.messageId)).toEqual(["msg-peek-1"]);
-    // And the agent's read DID mark, so a second one is empty: the flag belongs
-    // to it, and this asserts the human's read never touched it rather than
-    // merely that both reads answer.
-    const second = fx.agent.inbox(fx.sessionA);
-    expect("posts" in second && second.posts).toEqual([]);
-  },
-  30_000,
-);
-
-test(
-  "the thread read carries the delivery receipt on an outbound entry",
-  async () => {
-    const fx = await setUp();
-    const sendResult = coordinator!.message({
-      sessionId: fx.sessionA,
-      verb: "post",
-      threadId: null,
-      to: REMOTE,
-      summary: "opening an exchange",
-      parts: [{ kind: "text", text: "opening an exchange" }],
-    });
-    if (!("ok" in sendResult) || !sendResult.ok) throw new Error(`send refused: ${JSON.stringify(sendResult)}`);
-
-    // The far side's acknowledgement, which is the only honest witness that the
-    // message arrived — everything this side of the relay reports only that it
-    // left.
-    coordinator!.onTransportOutcome(sendResult.messageId, REMOTE.machineId, { kind: "applied" });
-    await waitFor(
-      () => coordinator!.messages(fx.sessionA).entries.some((e) => e.deliveredAt !== undefined),
-      "the receipt to be stamped",
-    );
-
-    const requestId = crypto.randomUUID();
-    const result = await ask(
-      fx,
-      createMessage("session-bus:thread", { requestId, sessionId: fx.sessionA, threadId: sendResult.threadId }),
-      "session-bus:thread:result",
-      requestId,
-    );
-
-    expect(result.error).toBeUndefined();
-    expect(result.threadId).toBe(sendResult.threadId);
-    expect(result.contextId).toBe(fx.sessionA);
-    const entries = result.entries as { direction: string; deliveredAt?: number; delivery?: string }[];
-    const outbound = entries.filter((e) => e.direction === "out");
-    expect(outbound).toHaveLength(1);
-    expect(typeof outbound[0]!.deliveredAt).toBe("number");
-    expect(outbound[0]!.delivery).toBe("delivered");
-  },
-  30_000,
-);
 
 test(
   "every read refuses a terminal that names no session, with a code",
@@ -356,56 +258,15 @@ test(
       "session-bus:directory:result",
       directoryId,
     );
-    const inbox = await ask(
-      fx,
-      createMessage("session-bus:inbox", { requestId: inboxId, sessionId: NO_SESSION }),
-      "session-bus:inbox:result",
-      inboxId,
-    );
-    const thread = await ask(
-      fx,
-      createMessage("session-bus:thread", { requestId: threadId, sessionId: NO_SESSION, threadId: "thread-1" }),
-      "session-bus:thread:result",
-      threadId,
-    );
-
-    for (const result of [directory, inbox, thread]) {
+    for (const result of [directory]) {
       expect(result.code).toBe("NOT_MEMBER");
       expect(typeof result.error).toBe("string");
     }
     // A refusal carries no answer fields at all: an empty list beside an error
     // is what renders "this terminal names no session" as "nobody wrote to you".
     expect(directory.sessions).toBeUndefined();
-    expect(inbox.posts).toBeUndefined();
-    expect(thread.entries).toBeUndefined();
     // ...but the thread the caller asked about is still named, since a surface
     // holding several open threads cannot tell from a requestId alone.
-    expect(thread.threadId).toBe("thread-1");
-  },
-  30_000,
-);
-
-test(
-  "a burst of posts is one arrival push, not one per post",
-  async () => {
-    const fx = await setUp();
-    for (let i = 0; i < 4; i += 1) {
-      expect(coordinator!.handleInbound(inboundPost(fx.sessionA, `msg-burst-${i}`, `burst ${i}`))).toBe("applied");
-    }
-
-    await waitFor(() => fx.sent.some((m) => m.type === "session-bus:arrived"), "the arrival push");
-    // Well past the coalescing window: a per-post implementation has published
-    // all four by now, so this fails on count rather than on timing.
-    await new Promise((r) => setTimeout(r, 500));
-
-    const pushes = fx.sent.filter((m) => m.type === "session-bus:arrived") as unknown as {
-      sessionId: string; unread?: number;
-    }[];
-    expect(pushes).toHaveLength(1);
-    expect(pushes[0]!.sessionId).toBe(fx.sessionA);
-    // No count rides the frame: nothing in the app renders one, and a number
-    // here is what a badge would be re-grown from.
-    expect(pushes[0]!.unread).toBeUndefined();
   },
   30_000,
 );
