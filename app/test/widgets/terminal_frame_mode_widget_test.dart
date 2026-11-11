@@ -2059,6 +2059,7 @@ void main() {
                 tab: tab,
                 terminalService: h.service,
                 readImage: () => clipboard.future,
+                readFiles: () async => [],
               ),
             ),
             terminalState: Stream.value(_stateWith()),

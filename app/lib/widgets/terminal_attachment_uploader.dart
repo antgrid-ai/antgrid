@@ -27,6 +27,24 @@ typedef UploadRunner =
 class TerminalAttachBoard {
   final Map<String, _Entry> _entries = {};
 
+  bool _reserve(String key, Object owner) {
+    final entry = _entries[key];
+    final progress = entry?.progress.value;
+    if (entry?.owner != null ||
+        (progress != null && progress.phase != AttachPhase.done)) {
+      return false;
+    }
+    acquire(key);
+    _entries[key]!.owner = owner;
+    return true;
+  }
+
+  void _releaseReservation(String key, Object owner) {
+    if (!identical(_entries[key]?.owner, owner)) return;
+    _entries[key]!.owner = null;
+    release(key);
+  }
+
   ValueNotifier<AttachProgress?> acquire(String key) {
     final entry = _entries.putIfAbsent(key, _Entry.new);
     entry.holders++;
@@ -48,6 +66,7 @@ class TerminalAttachBoard {
 final class _Entry {
   final ValueNotifier<AttachProgress?> progress = ValueNotifier(null);
   int holders = 0;
+  Object? owner;
 }
 
 final terminalAttachBoardProvider = Provider<TerminalAttachBoard>(
@@ -59,7 +78,7 @@ final terminalAttachBoardProvider = Provider<TerminalAttachBoard>(
 /// attach button, an image paste, a file drop) so they cannot diverge on the
 /// busy state, the size cap, or the inserted text.
 ///
-/// Never throws and never returns a path: every outcome leaves through
+/// [attach] never throws or returns a path: every outcome leaves through
 /// [insert], [onError] or the [board], so a `void` callback can fire it
 /// through `detached(...)` with nothing left to handle.
 class TerminalAttachmentUploader {
@@ -96,7 +115,29 @@ class TerminalAttachmentUploader {
   bool _disposed = false;
   bool _disposeRequested = false;
   int _holders = 0;
+  String? _batchKey;
+  bool _attaching = false;
   ({Timer timer, String key, VoidCallback clear})? _pendingClear;
+
+  /// Reserves the terminal even while a batch is reading its next file. The
+  /// board also excludes attachments started by a replacement view.
+  Future<void> exclusive(Future<void> Function() operation) =>
+      keepAliveDuring(() async {
+        final key = boardKey();
+        if (_batchKey != null || !board._reserve(key, this)) {
+          onError(
+            uploadErrorText(const UploadException('BUSY', ''), 'clipboard'),
+          );
+          return;
+        }
+        _batchKey = key;
+        try {
+          await operation();
+        } finally {
+          _batchKey = null;
+          board._releaseReservation(key, this);
+        }
+      });
 
   /// A native picker can outlive the terminal view during reconnection.
   Future<void> keepAliveDuring(Future<void> Function() operation) async {
@@ -125,15 +166,14 @@ class TerminalAttachmentUploader {
       return;
     }
     final key = boardKey();
+    final inBatch = _batchKey == key;
+    if (_attaching || (!inBatch && !board._reserve(key, this))) {
+      onError(uploadErrorText(const UploadException('BUSY', ''), fileName));
+      return;
+    }
+    _attaching = true;
     final progress = board.acquire(key);
     try {
-      // The board, not this uploader, is what says busy: the view that
-      // started an upload may be gone, and its successor's uploader with it.
-      final shown = progress.value;
-      if (shown != null && shown.phase != AttachPhase.done) {
-        onError(uploadErrorText(const UploadException('BUSY', ''), fileName));
-        return;
-      }
       final run = resolveUpload();
       if (run == null) {
         onError(
@@ -180,6 +220,8 @@ class TerminalAttachmentUploader {
       }
     } finally {
       board.release(key);
+      _attaching = false;
+      if (!inBatch) board._releaseReservation(key, this);
     }
   }
 

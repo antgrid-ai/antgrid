@@ -3,6 +3,9 @@
 // NOTHING for Alt+<printable>, and an over-eager paste interception swallows the
 // chord an agent CLI binds for itself (Claude Code's paste-image is ctrl+v
 // everywhere except Windows/WSL, where it is alt+v).
+import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:antgrid/design/theme_presets.dart';
@@ -24,9 +27,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/toast_host.dart';
 
 const int _esc = 0x1B;
 const int _ctrlV = 0x16;
@@ -71,6 +76,7 @@ Widget _wrap(
     ),
   ],
   child: MaterialApp(
+    builder: abToastHostBuilder,
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),
@@ -112,6 +118,8 @@ void main() {
     String tabType = 'service',
     ProjectSessionMode mode = ProjectSessionMode.local,
     Future<ClipboardImage?> Function()? readImage,
+    Future<List<Uri>> Function()? readFiles,
+    ValueNotifier<TerminalTab?>? shownTab,
     void Function(FakeAgentTransport transport)? onTransport,
   }) async {
     final written = <int>[];
@@ -192,19 +200,23 @@ void main() {
       },
     );
 
+    Widget pane(TerminalTab current) => TerminalViewWrapper(
+      tab: current,
+      terminalService: service,
+      readImage: readImage ?? () async => null,
+      readFiles: readFiles ?? () async => [],
+    );
     await tester.pumpWidget(
       _wrap(
         SizedBox(
           width: 600,
           height: 400,
-          child: TerminalViewWrapper(
-            tab: tab,
-            terminalService: service,
-            // Always injected: super_native_extensions installs a mock message
-            // context under FLUTTER_TEST with no ClipboardReader handler, so a
-            // real read answers neither "image" nor "no image" — it throws.
-            readImage: readImage ?? () async => null,
-          ),
+          child: shownTab == null
+              ? pane(tab)
+              : ValueListenableBuilder<TerminalTab?>(
+                  valueListenable: shownTab,
+                  builder: (_, current, _) => pane(current ?? tab),
+                ),
         ),
         prefs: prefs,
         session: service.session,
@@ -340,6 +352,64 @@ void main() {
     },
   );
 
+  for (final mode in ProjectSessionMode.values) {
+    _platformTestWidgets(
+      'Windows: $mode multiline clipboard paste follows the guest paste mode',
+      TargetPlatform.windows,
+      (tester) async {
+        final lines = List.generate(
+          40,
+          (i) =>
+              'Line $i: preserve this entire paragraph, including Unicode €.',
+        );
+        final clipboard = '${lines.join('\r\n')}\r\n';
+        final body = lines.join('\r');
+        expect(utf8.encode(body).length, greaterThan(1024));
+        final written = await pumpTerminal(
+          tester,
+          't-paste-$mode',
+          mode: mode,
+          clipboardText: clipboard,
+        );
+        final engine = tester
+            .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView))
+            .controller;
+        engine.appendOutputBytes(utf8.encode('\x1b[?2004h'));
+        await chord(tester, [
+          LogicalKeyboardKey.controlLeft,
+        ], LogicalKeyboardKey.keyV);
+        expect(utf8.decode(written), '\x1b[200~$body\x1b[201~');
+
+        written.clear();
+        engine.appendOutputBytes(utf8.encode('\x1b[?2004l'));
+        await chord(tester, [
+          LogicalKeyboardKey.controlLeft,
+        ], LogicalKeyboardKey.keyV);
+        expect(utf8.decode(written), body);
+      },
+    );
+  }
+
+  _platformTestWidgets(
+    'Windows: clipboard text cannot close bracketed paste early',
+    TargetPlatform.windows,
+    (tester) async {
+      final written = await pumpTerminal(
+        tester,
+        't-paste-delimiter',
+        clipboardText: 'before\x1b[201~\r\nafter',
+      );
+      final engine = tester
+          .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView))
+          .controller;
+      engine.appendOutputBytes(utf8.encode('\x1b[?2004h'));
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
+      expect(utf8.decode(written), '\x1b[200~before[201~\rafter\x1b[201~');
+    },
+  );
+
   _platformTestWidgets(
     'Ctrl+C in a plain shell still reaches the PTY as ^C',
     TargetPlatform.windows,
@@ -435,8 +505,181 @@ void main() {
       // The image displaced the text paste entirely, and the chord was still
       // consumed — no `hi`, and no ^V.
       expect(written, isEmpty);
+      await tester.pump(const Duration(milliseconds: 1300));
     },
   );
+
+  Future<void> flushUntil(WidgetTester tester, bool Function() ready) async {
+    final clock = Stopwatch()..start();
+    while (!ready() && clock.elapsed < const Duration(seconds: 5)) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    expect(ready(), isTrue, reason: 'asynchronous file upload did not settle');
+  }
+
+  for (final platform in [TargetPlatform.windows, TargetPlatform.macOS]) {
+    _platformTestWidgets(
+      '$platform: text paste works while a remote attachment is uploading',
+      platform,
+      (tester) async {
+        var containsImage = true;
+        late FakeAgentTransport transport;
+        final written = await pumpTerminal(
+          tester,
+          'upload-and-text',
+          mode: ProjectSessionMode.relay,
+          clipboardText: 'describe this image',
+          readImage: () async => containsImage ? anImage() : null,
+          onTransport: (t) => transport = t,
+        );
+        final modifier = platform == TargetPlatform.macOS
+            ? LogicalKeyboardKey.metaLeft
+            : LogicalKeyboardKey.controlLeft;
+        await chord(tester, [modifier], LogicalKeyboardKey.keyV);
+        await flushUntil(tester, () => transport.uploadCalls.isNotEmpty);
+        expect(written, isEmpty);
+
+        containsImage = false;
+        await chord(tester, [modifier], LogicalKeyboardKey.keyV);
+        expect(utf8.decode(written), 'describe this image');
+        expect(
+          find.text('Too many uploads in progress — try again in a moment'),
+          findsNothing,
+        );
+        expect(transport.uploadCalls, hasLength(1));
+        expect(
+          transport.sent.where((m) => m['type'] == 'terminal:input'),
+          isEmpty,
+        );
+
+        containsImage = true;
+        await chord(tester, [modifier], LogicalKeyboardKey.keyV);
+        expect(transport.uploadCalls, hasLength(1));
+        expect(
+          find.text('Too many uploads in progress — try again in a moment'),
+          findsOneWidget,
+        );
+        expect(utf8.decode(written), 'describe this image');
+
+        transport.uploadCalls.single.complete(
+          const UploadStreamResult(
+            ok: true,
+            uploadId: 'image',
+            path: '/remote/pasted.png',
+          ),
+        );
+        await tester.pump();
+        expect(
+          transport.sent
+              .where((m) => m['type'] == 'terminal:input')
+              .single['data'],
+          '"/remote/pasted.png" ',
+        );
+        await tester.pump(const Duration(milliseconds: 1300));
+      },
+    );
+
+    _platformTestWidgets(
+      '$platform: copied files upload once in order to the original terminal',
+      platform,
+      (tester) async {
+        final directory = Directory.systemTemp.createTempSync('paste-keys-');
+        addTearDown(() => directory.deleteSync(recursive: true));
+        final image = File('${directory.path}/copied image.jpg')
+          ..writeAsBytesSync([255, 216, 42]);
+        final text = File('${directory.path}/notes.txt')
+          ..writeAsBytesSync([65, 66]);
+        final files = Completer<List<Uri>>();
+        final shownTab = ValueNotifier<TerminalTab?>(null);
+        addTearDown(shownTab.dispose);
+        var reads = 0;
+        var imageReads = 0;
+        late FakeAgentTransport transport;
+        final written = await pumpTerminal(
+          tester,
+          'original',
+          mode: ProjectSessionMode.relay,
+          clipboardText: image.path,
+          readFiles: () {
+            reads++;
+            return files.future;
+          },
+          readImage: () async {
+            imageReads++;
+            return anImage();
+          },
+          shownTab: shownTab,
+          onTransport: (t) => transport = t,
+        );
+        final modifier = platform == TargetPlatform.macOS
+            ? LogicalKeyboardKey.metaLeft
+            : LogicalKeyboardKey.controlLeft;
+        await chord(tester, [modifier], LogicalKeyboardKey.keyV);
+        await chord(tester, [modifier], LogicalKeyboardKey.keyV);
+        expect(
+          reads,
+          2,
+          reason: 'each paste detects whether the clipboard is an attachment',
+        );
+        files.complete([image.uri, text.uri]);
+        await flushUntil(tester, () => transport.uploadCalls.length == 1);
+        expect(transport.uploadCalls.single.bytes, [255, 216, 42]);
+        expect(transport.uploadCalls.single.fileName, 'copied image.jpg');
+
+        final other = TerminalTab(
+          terminalId: 'other',
+          name: 'other',
+          type: 'service',
+        );
+        addTearDown(other.ghostty.dispose);
+        shownTab.value = other;
+        await tester.pump();
+        transport.uploadCalls.first.complete(
+          const UploadStreamResult(
+            ok: true,
+            uploadId: 'first',
+            path: '/remote/copied image.jpg',
+          ),
+        );
+        await flushUntil(tester, () => transport.uploadCalls.length == 2);
+        expect(transport.uploadCalls.last.bytes, [65, 66]);
+        expect(transport.uploadCalls.last.fileName, 'notes.txt');
+        transport.uploadCalls.last.complete(
+          const UploadStreamResult(
+            ok: true,
+            uploadId: 'second',
+            path: '/remote/notes.txt',
+          ),
+        );
+        await flushUntil(
+          tester,
+          () =>
+              transport.sent
+                  .where((m) => m['type'] == 'terminal:input')
+                  .length ==
+              2,
+        );
+        final inputs = transport.sent.where(
+          (m) => m['type'] == 'terminal:input',
+        );
+        expect(inputs.map((m) => m['terminalId']), ['original', 'original']);
+        expect(inputs.map((m) => m['data']), [
+          '"/remote/copied image.jpg" ',
+          '"/remote/notes.txt" ',
+        ]);
+        expect(transport.uploadCalls.map((u) => u.checkoutId), [
+          'main',
+          'main',
+        ]);
+        expect(imageReads, 0);
+        expect(written, isEmpty);
+        await tester.pump(const Duration(milliseconds: 1300));
+      },
+    );
+  }
 
   _platformTestWidgets(
     'relay: a text-only clipboard still pastes text',
@@ -459,6 +702,36 @@ void main() {
   );
 
   _platformTestWidgets(
+    'relay: a failed file probe consumes paste and allows a later retry',
+    TargetPlatform.windows,
+    (tester) async {
+      var reads = 0;
+      final written = await pumpTerminal(
+        tester,
+        'failed-file-read',
+        mode: ProjectSessionMode.relay,
+        clipboardText: 'text fallback',
+        readFiles: () async {
+          if (reads++ == 0) throw StateError('clipboard owner disappeared');
+          return [];
+        },
+      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
+      expect(written, isEmpty);
+      expect(
+        find.text('Could not read files from the clipboard'),
+        findsOneWidget,
+      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
+      expect(utf8.decode(written), 'text fallback');
+    },
+  );
+
+  _platformTestWidgets(
     'local: an image on the clipboard is left to the agent CLI',
     TargetPlatform.windows,
     (tester) async {
@@ -470,6 +743,8 @@ void main() {
         tester,
         't-local-image',
         clipboardText: 'hi',
+        readFiles: () async =>
+            throw StateError('local paste must not probe files'),
         readImage: () async {
           probed = true;
           return anImage();
