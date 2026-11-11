@@ -344,7 +344,13 @@ final newSessionDetectedToolsProvider =
       final target = sessionTargetOf(ref.watch(selectedTargetProjectProvider));
       final AsyncValue<Map<String, String?>?> tools;
       if (target != null) {
-        tools = ref.watch(detectedToolsForProvider(target));
+        tools = !target.isLocal && !ref.watch(demoModeProvider)
+            ? ref.watch(
+                remoteDetectedToolsProvider(
+                  baseDeviceUuid(target.registrationId),
+                ),
+              )
+            : ref.watch(detectedToolsForProvider(target));
       } else {
         final source = ref.watch(visiblePickerSourceProvider);
         tools = source?.isLocal == true
@@ -454,13 +460,17 @@ final detectedToolsForProvider =
       // Tools are per-MACHINE, so key the control-plane state by the bare
       // deviceUuid rather than by the compound registration id.
       final machineUuid = baseDeviceUuid(target.registrationId);
-      final tools = ref.watch(remoteDetectedToolsProvider(machineUuid));
+      final plane = ref.watch(controlPlaneStateProvider(machineUuid));
       // Ahead of the value: Riverpod keeps the last advert beside an error, and
       // an unreachable machine's old list is not what it has installed now.
-      if (tools.hasError) {
-        Error.throwWithStackTrace(tools.error!, tools.stackTrace!);
+      if (plane.hasError) {
+        Error.throwWithStackTrace(plane.error!, plane.stackTrace!);
       }
-      return tools.value;
+      // Handoff owns a bounded wait for the first advert; onboarding instead
+      // uses remoteDetectedToolsProvider so a missing advert offers Retry.
+      final state = plane.value;
+      if (plane.isLoading || state == null || !state.toolsReceived) return null;
+      return {for (final t in state.tools) t.tool: t.label};
     });
 
 /// [sourceTool] labelled for the fork dialog to show before [handoffTargetsFor]

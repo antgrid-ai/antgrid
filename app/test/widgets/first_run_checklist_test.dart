@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -363,6 +364,53 @@ void main() {
     expect(find.textContaining('SETUP'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final textScale in [1.0, 1.5]) {
+    testWidgets('short mobile checklist scrolls at text scale $textScale', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      useInMemoryPrefs();
+      final store = await FirstRunStore.open();
+      await tester.pumpWidget(
+        _wrap(
+          MediaQuery(
+            data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+            child: const Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: 390,
+                height: 180,
+                child: RecentSessionsTab(),
+              ),
+            ),
+          ),
+          overrides: [
+            firstRunStoreProvider.overrideWithValue(store),
+            recentSessionsProvider.overrideWith((_) => const []),
+            pickerSourcesProvider.overrideWithValue(const <PickerSource>[]),
+            accountAgentsProvider.overrideWith((_) async => const []),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      final scrollable = find.descendant(
+        of: find.byType(RecentSessionsTab),
+        matching: find.byType(Scrollable),
+      );
+      await tester.scrollUntilVisible(
+        find.text(kDemoEntryLabel),
+        100,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(kDemoEntryLabel).hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 
   testWidgets('mobile checklist renders in the empty Recent slot for a '
       'no-machine account', (tester) async {

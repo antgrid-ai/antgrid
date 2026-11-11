@@ -70,6 +70,7 @@ void main() {
     detectedToolsForProvider.overrideWith(
       (ref, target) async => const <String, String?>{},
     ),
+    localDetectedToolsProvider.overrideWith((_) async => {}),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
     if (surface != null)
       workbenchSurfaceProvider.overrideWith(() => ValueController(surface)),

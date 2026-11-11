@@ -356,6 +356,7 @@ class MobileFirstRunChecklist extends ConsumerWidget {
               // is never a dead end while the checklist is open.
               AbButton(
                 label: kDemoEntryLabel,
+                wrapLabel: true,
                 onTap: () => enterDemoMode(ref.container),
               ),
             ],

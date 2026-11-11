@@ -137,6 +137,45 @@ void main() {
     expect(seen, everyElement(isNull));
   });
 
+  test('a selected remote project keeps missing adverts retryable', () async {
+    final plane = StreamController<ControlPlaneState>();
+    addTearDown(() => unawaited(plane.close()));
+    final container = ProviderContainer(
+      overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
+        controlPlaneStateProvider('a').overrideWith((_) => plane.stream),
+        supervisorStatusProvider(
+          'a',
+        ).overrideWith((_) => Stream.value(const Connected())),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(newSessionDetectedToolsProvider, (_, _) {});
+    container.read(selectedTargetProjectProvider.notifier).set(_remote('a'));
+    const advert = ControlPlaneState(
+      toolsReceived: true,
+      tools: [AdvertisedTool(tool: 'codex', label: 'Codex')],
+    );
+    plane.add(advert);
+    await pumpEventQueue();
+    expect(container.read(newSessionDetectedToolsProvider).value, {
+      'codex': 'Codex',
+    });
+
+    plane.add(const ControlPlaneState());
+    await pumpEventQueue();
+    final tools = container.read(newSessionDetectedToolsProvider);
+    expect(tools.hasError, isTrue);
+    expect(tools.isLoading, isFalse);
+    expect(tools.value, isNull);
+
+    plane.add(advert);
+    await pumpEventQueue();
+    expect(container.read(newSessionDetectedToolsProvider).value, {
+      'codex': 'Codex',
+    });
+  });
+
   // Riverpod keeps the last map beside an error; a machine that dropped off
   // is no longer vouching for it.
   test('a machine that drops off stops offering its last list', () async {

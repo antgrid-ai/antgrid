@@ -735,20 +735,25 @@ void main() {
 
     await tester.pumpWidget(
       _host(
-        overrides: _baseOverrides(
-          target: project,
-          worktreeSupported: true,
-          currentBranch: 'Revoke1',
-          sources: const [
-            PickerSource(
-              id: 'machine:M',
-              label: machine,
-              isLocal: false,
-              projects: [project],
-              machineUuid: 'M',
-            ),
-          ],
-        ),
+        overrides: [
+          ..._baseOverrides(
+            target: project,
+            worktreeSupported: true,
+            currentBranch: 'Revoke1',
+            sources: const [
+              PickerSource(
+                id: 'machine:M',
+                label: machine,
+                isLocal: false,
+                projects: [project],
+                machineUuid: 'M',
+              ),
+            ],
+          ),
+          remoteDetectedToolsProvider('M').overrideWithValue(
+            const AsyncData(_installed),
+          ),
+        ],
         // The canvas pads the composer; without it the row under test is
         // wider than the phone it is meant to reproduce.
         wrap: (composer) =>
